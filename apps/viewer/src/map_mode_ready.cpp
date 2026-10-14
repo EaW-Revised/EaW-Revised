@@ -5,6 +5,7 @@
 #include "map_mode_internal.hpp"
 #include "eawr/presentation/camera/overview.hpp"
 #include "render_profile_viewport.hpp"
+#include "settings_store.hpp"
 #include "viewer_path.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
@@ -23,6 +24,8 @@ bool MapMode::State::fail_ready(std::string message) {
 
         state.failure = std::move(message);
         state.status = "failed";
+        // #1923: a battle that cannot start never leaves its loading screen over the window.
+        if (state.loading) state.loading->dismiss();
         UtilityFunctions::printerr(String::utf8(state.failure.c_str()));
         state.release_particles();
         static_cast<void>(state.write_report());
@@ -42,7 +45,8 @@ bool MapMode::ready(Node3D& host) {
         const PackedStringArray arguments = OS::get_singleton()->get_cmdline_user_args();
         for (int64_t index = 0; index < arguments.size(); ++index) {
             const String argument = arguments[index];
-            if (argument == "--eawr-skirmish-setup" || argument == "--eawr-setup-test") continue;
+            if (argument == "--eawr-skirmish-setup" || argument == "--eawr-setup-test"
+                || argument == "--eawr-front-end" || argument == "--eawr-front-end-test") continue;
             const bool has_value = index + 1 < arguments.size();
             {
                 // --eawr-live-* (#80): the live tactical session.
@@ -371,12 +375,39 @@ bool MapMode::ready(Node3D& host) {
         }
     }
     if (state.options.populate) state.populate = *state.options.populate;
+    if (state.options.attract) {
+        // MAT-08, MAT-09: a demo map starts at once, spectated, with every unit drawn.
+        state.live_options.fixture = "attract";
+        state.live_options.attract_ai = state.options.attract->ai;
+        state.live_options.begin_barrier = false;
+        state.live_options.reveal = true;
+        state.live_options.verify = false;
+        state.live_options.deploy_overlay = false;
+    }
     if (state.options.setup) {
         state.live_options.fixture = "skirmish";
         state.live_options.skirmish = *state.options.setup;
-        state.live_options.player = 1;
+        state.live_options.lan = state.options.lan;
+        state.live_options.player = state.options.lan ? state.options.lan->local_player() : 1U;
+        if (state.options.lan) { state.live_options.begin_barrier = false; state.live_options.reveal = false; }
+    }
+    if (state.options.borrowed_battle && state.options.borrowed_feed) {
+        state.live_options.fixture = "replay";
+        state.live_options.borrowed_battle = state.options.borrowed_battle;
+        state.live_options.borrowed_feed = state.options.borrowed_feed;
+        state.live_options.player = state.options.borrowed_player;
+        state.live_options.begin_barrier = false;
+    }
+    // #2927: a player's view paces the battle at the saved tactical speed unless a flag chose one.
+    // Pacing is presentation state (TP-02), so the replay and the hashes do not change with it.
+    if (const auto* saved = ActiveSettings::get(); saved != nullptr && !state.live_options.speed_step_given) {
+        state.live_options.speed_step = static_cast<std::uint32_t>(presentation::ui::session_values(*saved).speed_step);
     }
 
+    if (!state.options.replay_input.empty()) {
+        state.live_options.fixture = "replay";
+        state.live_options.replay_input = state.options.replay_input;
+    }
     if (!fog_argument_error.empty()) return state.fail_ready(fog_argument_error);
     if (state.live_options.fixture != "skirmish" && (state.live_options.skirmish.map
         || state.live_options.skirmish.slots || state.live_options.skirmish.seed)) {
@@ -406,6 +437,7 @@ bool MapMode::ready(Node3D& host) {
         !hud_error.empty()) {
         return state.fail_ready(hud_error);
     }
+    if (state.options.attract) state.hud_options.reset(); // MAT-19: no HUD or overlay
     if (state.live_options.fixture.empty()
         && (state.live_options.player || !state.live_options.orders.empty() || !state.live_options.capture_ticks.empty()
             || !state.live_options.follow_groups.empty()
@@ -604,6 +636,12 @@ bool MapMode::ready(Node3D& host) {
         const data::Profile profile = state.profile == "remake" ? data::Profile::remake
             : state.profile == "foc" ? data::Profile::foc : data::Profile::eaw;
         if (auto loaded = data::load_catalog(*state.filesystem, profile)) {
+            // Map mode also runs on partial synthetic trees, so a failed registry does not stop it, but it is
+            // never silent (R-10, R-13, C-06).
+            if (!loaded.value().health.clean()) {
+                UtilityFunctions::printerr(String::utf8((std::string(loaded.value().health.failed() ? "EAWR catalog load FAILED: " : "EAWR catalog load: ")
+                    + data::describe_load_health(loaded.value().health)).c_str()));
+            }
             catalog = assets::object_type_catalog(loaded.value().catalog);
             state.catalog = std::make_shared<const data::Catalog>(std::move(loaded.value().catalog));
         } else {

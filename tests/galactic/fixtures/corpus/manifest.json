@@ -1,0 +1,8 @@
+{
+  "cases": [
+    "quiet-minimal",
+    "fiscal-boundary",
+    "coop-orders",
+    "partitioned-orders"
+  ]
+}

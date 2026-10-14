@@ -1,5 +1,7 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/campaign/standalone_replay.hpp"
 #include "live_session_view.hpp"
+#include "skirmish_prepare.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 
 #include "shutdown_trace.hpp"
@@ -44,57 +46,12 @@ namespace tactical = sim::tactical;
 using namespace live_session_detail;
 
 namespace {
-// How far a driven frame's presentation tick may sit from a capture tick it shows.
-// The mounted FoC view's unit tables (the M2 types), or nothing with `failure` set.
-[[nodiscard]] std::optional<units::UnitTables> load_tables(const vfs::Vfs& filesystem, const data::Catalog& catalog,
-                                                           std::string& failure, const std::string& space_map,
-                                                           const std::set<std::string>& additional_types = {}) {
-    core::load_profile::Scope load_scope(core::load_profile::Phase::unit_tables);
-    scene::VfsAssetCache cache(filesystem);
-    units::LoadInput input;
-    input.catalog = &catalog;
-    input.filesystem = &filesystem;
-    input.space_map = space_map;
-    input.model = cache.access().model;
-    if (!additional_types.empty()) {
-        for (const auto type : units::pinned_m2_types()) input.types.emplace_back(type);
-        input.types.insert(input.types.end(), additional_types.begin(), additional_types.end());
-        for (const auto type : units::pinned_m2_obstacles()) input.obstacles.emplace_back(type);
-    }
-    auto tables = units::load_unit_tables(input);
-    if (!tables) {
-        failure = "live session unit tables: " + core::format_diagnostic(tables.error());
-        return std::nullopt;
-    }
-    return std::move(tables).value();
-}
-
-[[nodiscard]] std::set<std::string> missing_start_types(const skirmish::Fixture& fixture,
-                                                       const skirmish::StartInputs& inputs,
-                                                       const units::UnitTables& tables) {
+// MAT-08: the table types a demo map's placed forces name that the tables do not hold yet.
+[[nodiscard]] std::set<std::string> missing_placed_types(const skirmish::StartInputs& inputs,
+                                                         const units::UnitTables& tables) {
     std::set<std::string> missing;
-    const auto need = [&](const std::string& type) {
-        // RG-04: skip gated starting types before their unsupported data is loaded.
-        if (!skirmish::roster_disabled_types().contains(skirmish::type_id(type)) && !tables.find(type)) missing.insert(type);
-    };
-    for (const auto& slot : fixture.slots) {
-        for (const auto& type : slot.fleet) need(type);
-        for (const auto& forces : inputs.faction_forces) {
-            if (lower_path(forces.faction) != lower_path(slot.faction)) continue;
-            for (const auto& type : forces.space_skirmish_default_forces) need(type);
-        }
-        const std::string station = "team_" + std::string(slot.team < 10 ? "0" : "")
-            + std::to_string(slot.team) + "_space_station";
-        for (const auto& placement : inputs.placements) {
-            if (!placement.marker || lower_path(placement.type) != station) continue;
-            for (const auto& candidate : placement.marker_for) {
-                std::string affiliations = candidate.affiliation;
-                std::replace(affiliations.begin(), affiliations.end(), ',', ' ');
-                std::istringstream names(affiliations);
-                std::string faction;
-                while (names >> faction) if (lower_path(faction) == lower_path(slot.faction)) need(candidate.type);
-            }
-        }
+    for (const auto& type : skirmish::placed_force_types(inputs.placements)) {
+        if (!tables.find(type)) missing.insert(type);
     }
     return missing;
 }
@@ -102,6 +59,7 @@ namespace {
 
 bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string& failure) {
     skirmish::Fixture fixture = skirmish::m2_fixture();
+    const bool attract = options_.fixture == "attract";
     if (options_.fixture == "skirmish") {
         auto selected = skirmish::fixture_from_options(options_.skirmish, filesystem, catalog);
         if (!selected) {
@@ -109,31 +67,42 @@ bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog
             return false;
         }
         fixture = std::move(selected).value();
+    } else if (attract) {
+        // MAT-08, MAT-09: the demo map's own forces; no lobby, no victory condition.
+        skirmish::PlacedForces forces;
+        forces.ai = options_.attract_ai;
+        auto selected = skirmish::placed_fixture(*options_.skirmish.map, std::move(forces),
+                                                 options_.skirmish.seed.value_or(0U), filesystem, catalog);
+        if (!selected) {
+            failure = "live attract options: " + core::format_diagnostic(selected.error());
+            return false;
+        }
+        fixture = std::move(selected).value();
     }
-    auto tables = load_tables(filesystem, catalog, failure, fixture.map);
-    if (!tables) return false;
-    auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *tables);
-    if (!inputs) {
-        failure = "live session start inputs: " + core::format_diagnostic(inputs.error());
-        return false;
-    }
+    std::optional<PreparedSkirmish> prepared;
     if (options_.fixture == "skirmish") {
-        // SC-01: the existing loader follows the selected types' craft, hangar,
-        // hardpoint and projectile references. Keep its pinned inputs unchanged
-        // when every selected type is already loaded (including the M2 default).
-        const auto missing = missing_start_types(fixture, inputs.value(), *tables);
+        auto result = prepare_skirmish(fixture, filesystem, catalog);
+        if (!result) { failure = result.error().message; return false; }
+        prepared.emplace(std::move(result).value());
+    }
+    auto tables = prepared ? std::optional<units::UnitTables>(std::move(prepared->tables))
+        : load_start_tables(filesystem, catalog, failure, fixture.map);
+    if (!tables) return false;
+    auto inputs = prepared ? core::Result<skirmish::StartInputs>::success(std::move(prepared->inputs))
+        : skirmish::read_start_inputs(fixture, filesystem, catalog, *tables);
+    if (!inputs) { failure = "live session start inputs: " + core::format_diagnostic(inputs.error()); return false; }
+    inputs.value().tables = &*tables;
+    if (attract) {
+        const auto missing = missing_placed_types(inputs.value(), *tables);
         if (!missing.empty()) {
-            auto extended = load_tables(filesystem, catalog, failure, fixture.map, missing);
+            auto extended = load_start_tables(filesystem, catalog, failure, fixture.map, missing);
             if (!extended) return false;
-            tables = std::move(extended);
-            inputs.value().tables = &*tables;
+            tables = std::move(extended); inputs.value().tables = &*tables;
         }
     }
-    auto start = skirmish::build_start(fixture, inputs.value());
-    if (!start) {
-        failure = "live session start: " + core::format_diagnostic(start.error());
-        return false;
-    }
+    auto start = prepared ? core::Result<skirmish::SkirmishStart>::success(std::move(prepared->start))
+        : skirmish::build_start(fixture, inputs.value());
+    if (!start) { failure = "live session start: " + core::format_diagnostic(start.error()); return false; }
     // #76: the ability table's human players are the start's human lobby players, as the victory rules'.
     std::vector<tactical::PlayerId> humans;
     for (const skirmish::StartPlayer& player : start.value().players) {
@@ -156,11 +125,20 @@ bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog
             return false;
         }
         content.value().fog = fog.value();
+        content.value().map_box = skirmish::map_box(inputs.value());
     }
     if (options_.ai.value_or(true)) {
         // #79: the retail freestore of each AI player, from the mounted FoC scripts.
         core::load_profile::Scope lua_scope(core::load_profile::Phase::lua);
-        auto ai = platform::live_ai(start.value(), inputs.value(), *tables, filesystem);
+        std::map<tactical::PlayerId, std::string> factions;
+        for (const auto& player : start.value().players) factions.emplace(player.player.player_id, player.faction);
+        auto scoring = BattleScoring::create(filesystem, catalog, *tables, std::move(factions), fixture.map);
+        if (!scoring) {
+            failure = "authoritative scoring: " + core::format_diagnostic(scoring.error());
+            return false;
+        }
+        scoring_ = std::move(scoring).value();
+        auto ai = platform::live_ai(start.value(), inputs.value(), *tables, filesystem, scoring_);
         if (!ai) {
             failure = "live session AI scripts: " + core::format_diagnostic(ai.error());
             return false;
@@ -169,8 +147,17 @@ bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog
         ai_players_ = std::move(ai.value().players);
     }
     start_ = std::move(start).value();
-    setup_ = skirmish::recording_setup(fixture, *start_);
-    setup_->queue_identities = true; // PU-17/63: new live recordings name clicked queue entries.
+    if (attract) {
+        // MAT-08, MAT-17: a demo battle is not a recorded skirmish. Its players hold no lobby slots
+        // and it has no victory condition, which the skirmish recording metadata (SKSU) refuses, so
+        // the setup carries the match identity alone and the session is never recorded as a match.
+        setup_ = start_->setup;
+        setup_->match_identity = start_->identity;
+    } else {
+        setup_ = skirmish::recording_setup(fixture, *start_);
+    }
+    if (options_.lan && !attract) *setup_ = lan_recording_setup(fixture, *start_);
+    setup_->queue_identities = true; // PU-17/63.
     content_ = std::move(content).value();
     victory_ = skirmish::victory_rules(*start_, tables.value());
     // #530: the skirmish economy (credits, the station build queues and hyperspace arrival).
@@ -190,7 +177,10 @@ bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog
 
     const auto human = std::find_if(start_->players.begin(), start_->players.end(),
         [](const skirmish::StartPlayer& player) { return player.human; });
-    player_ = options_.player.value_or(human != start_->players.end() ? human->player.player_id : 1U);
+    // MAT-10: a demo map has no local player; the view is only a spectator of its first player.
+    const auto first = start_->players.empty() ? 1U : start_->players.front().player.player_id;
+    player_ = options_.player.value_or(human != start_->players.end() ? human->player.player_id
+                                                                      : (attract ? first : 1U));
     if (std::none_of(start_->players.begin(), start_->players.end(),
             [&](const skirmish::StartPlayer& player) { return player.player.player_id == player_; })) {
         failure = "--eawr-live-player " + std::to_string(player_) + " is not a player of the start";
@@ -208,18 +198,21 @@ bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog
         const auto owner = std::find_if(start_->players.begin(), start_->players.end(),
             [&](const skirmish::StartPlayer& player) { return player.player.player_id == unit.state.owner; });
         if (owner != start_->players.end() && owner->colour) ship.team_colour = owner->colour->rgb;
-        if (unit.role == skirmish::UnitRole::map_object) {
+        if (unit.role == skirmish::UnitRole::placed) {
+            // MAT-08: a demo map's force is the map's own record, owned by the session now.
+            session_records_.push_back(unit.record);
+            ship.colour_record = unit.record;
+        } else if (unit.role == skirmish::UnitRole::map_object) {
             // The map draws this record's object; the session owns it now. Its team colour
             // stays the one the map's owner gives it.
             session_records_.push_back(unit.record);
             ship.colour_record = unit.record;
-            const auto obstacle = std::find_if(tables_->obstacles.begin(), tables_->obstacles.end(),
-                [&](const units::ObstacleType& type) { return type.id == unit.type; });
-            // FW-24: hazards remain simulated, but an environment prop without
-            // either fog behavior draws independently of sensor contact.
-            if (obstacle != tables_->obstacles.end() && obstacle->xml_type == "SpaceProp"
-                && !space::map_prop_fog_bound(obstacle->footprint.hazard.behavior,
-                                              obstacle->footprint.hazard.space_behavior)) {
+            // FW-24: map placements of any XML type without either fog behavior
+            // draw independently of sensor contact, including placed derelict hulls.
+            auto object = catalog.resolve(unit.type, data::Category::game_object);
+            if (!object) { failure = core::format_diagnostic(object.error()); return false; }
+            if (!space::map_prop_fog_bound(tag_text(object.value(), "Behavior"),
+                                           tag_text(object.value(), "SpaceBehavior"))) {
                 unfogged_map_props_.push_back(unit.state.entity_id);
             }
         }
@@ -231,12 +224,70 @@ bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog
     return true;
 }
 
+bool LiveSessionView::prepare_borrowed(std::string& failure) {
+    return prepare_native(*options_.borrowed_battle, failure);
+}
+
+bool LiveSessionView::prepare_native(const PreparedBattle& battle, std::string& failure) {
+    const auto& setup = battle.replay.setup;
+    if (units::content_identity(battle.tables) != setup.content_identity) {
+        failure = "campaign battle presentation: prepared unit tables differ from the native setup";
+        return false;
+    }
+    const auto local = options_.player.value_or(setup.players.empty() ? 1U : setup.players.front().player_id);
+    if (std::none_of(setup.players.begin(), setup.players.end(),
+            [&](const tactical::Player& player) { return player.player_id == local; })) {
+        failure = "campaign battle presentation: local player is absent from the native setup";
+        return false;
+    }
+    std::map<tactical::TypeId, std::string> names;
+    for (const units::UnitType& type : battle.tables.units) names.emplace(skirmish::type_id(type.id), type.id);
+    // Native start metadata also names map objects that are outside the unit tables.
+    if (battle.start) for (const auto& unit : battle.start->units) names.emplace(unit.state.type_id, unit.type);
+    for (const auto& unit : setup.units) {
+        const auto name = names.find(unit.type_id);
+        if (name == names.end()) {
+            failure = "campaign battle presentation: unit " + std::to_string(unit.entity_id) + " has no prepared type";
+            return false;
+        }
+        SpacePopulation::Options::PlacedShip ship;
+        ship.object_id = name->second;
+        ship.position = {to_float(unit.position.x), to_float(unit.position.y), to_float(unit.position.z)};
+        auto transform = sim::math::to_matrix(unit.rotation, unit.position);
+        ship.yaw_degrees = transform ? static_cast<float>(space::instance_yaw_degrees(transform.value())) : 0.0F;
+        ship.live_entity = unit.entity_id;
+        if (battle.start) {
+            const auto owner = std::find_if(battle.start->players.begin(), battle.start->players.end(),
+                [&](const auto& player) { return player.player.player_id == unit.owner; });
+            if (owner != battle.start->players.end() && owner->colour) ship.team_colour = owner->colour->rgb;
+        }
+        ship_of_entity_.emplace(unit.entity_id, placed_ships_.size());
+        owner_of_entity_.emplace(unit.entity_id, unit.owner);
+        placed_ships_.push_back(std::move(ship));
+    }
+    for (const auto& player : setup.players) team_of_player_[player.player_id] = player.team_id;
+    player_ = local;
+    setup_ = setup;
+    replay_ = battle.replay;
+    tables_ = battle.tables;
+    content_ = battle.content;
+    victory_ = battle.victory;
+    economy_ = battle.economy;
+    start_ = battle.start;
+    return true;
+}
+
 bool LiveSessionView::prepare_replay(const vfs::Vfs& filesystem, const data::Catalog& catalog,
     const std::string_view map_path, std::string& failure) {
-    auto tables = load_tables(filesystem, catalog, failure, {});
-    if (!tables) return false;
+    // Campaign maps need not declare a skirmish lobby capacity. The native child
+    // already prepared their actors and rules; presentation must not rebuild them.
+    if (options_.borrowed_battle) return prepare_borrowed(failure);
+    std::optional<units::UnitTables> tables;
     auto replay = [&]() -> std::optional<tactical::TacticalReplay> {
+        if (options_.borrowed_battle) return options_.borrowed_battle->replay;
         if (options_.fixture == "melee") {
+            tables = load_start_tables(filesystem, catalog, failure, {});
+            if (!tables) return std::nullopt;
             // #601: the melee benchmark's fight, built here exactly as path_bench --melee builds it.
             auto inputs = skirmish::read_start_inputs(skirmish::m2_fixture(), filesystem, catalog, *tables);
             if (!inputs) {
@@ -270,12 +321,24 @@ bool LiveSessionView::prepare_replay(const vfs::Vfs& filesystem, const data::Cat
         return std::move(parsed).value();
     }();
     if (!replay) return false;
+    if (replay->setup.native_scene) {
+        auto native = campaign::load_standalone_space_replay(*replay, filesystem, catalog);
+        if (!native) { failure = "--eawr-live-replay: " + core::format_diagnostic(native.error()); return false; }
+        PreparedBattle battle{std::move(*replay), std::move(native.value().content),
+            std::move(native.value().victory), std::move(native.value().economy),
+            std::move(native.value().tables), std::move(native.value().start)};
+        colorization_enabled_ = false;
+        return prepare_native(battle, failure);
+    }
+    if (!tables) tables = load_start_tables(filesystem, catalog, failure, {});
+    if (!tables) return false;
+    if (options_.borrowed_battle) tables = options_.borrowed_battle->tables;
     const tactical::TacticalSetup& setup = replay->setup;
     const std::string replay_map = setup.skirmish ? setup.skirmish->map : std::string(map_path);
     if (units::content_identity(*tables) != replay.value().setup.content_identity) {
         // WHZ-01: live recordings include the selected map's authored hazard
         // profiles. Pinned fixtures retain the narrower M2 closure above.
-        auto selected = load_tables(filesystem, catalog, failure, replay_map);
+        auto selected = load_start_tables(filesystem, catalog, failure, replay_map);
         if (!selected) return false;
         tables = std::move(selected);
     }
@@ -288,15 +351,27 @@ bool LiveSessionView::prepare_replay(const vfs::Vfs& filesystem, const data::Cat
         if (!selected) { failure = core::format_diagnostic(selected.error()); return false; }
         auto inputs = skirmish::read_start_inputs(selected.value(), filesystem, catalog, *tables);
         if (!inputs) { failure = core::format_diagnostic(inputs.error()); return false; }
-        auto recorded = skirmish::replay_fixture(selected.value(), inputs.value(), replay->setup);
+        auto recorded = skirmish::replay_fixture(selected.value(), inputs.value(), replay->setup, false);
         if (!recorded) { failure = core::format_diagnostic(recorded.error()); return false; }
         inputs = skirmish::read_start_inputs(recorded.value(), filesystem, catalog, *tables);
         if (!inputs) { failure = core::format_diagnostic(inputs.error()); return false; }
         const auto missing = missing_start_types(recorded.value(), inputs.value(), *tables);
         if (!missing.empty()) {
-            auto extended = load_tables(filesystem, catalog, failure, replay_map, missing);
+            auto extended = load_start_tables(filesystem, catalog, failure, replay_map, missing);
             if (!extended) return false;
             tables = std::move(extended);
+        }
+    }
+    if (setup.match_identity) {
+        skirmish::FixtureOptions options;
+        options.map = replay_map;
+        auto selected = skirmish::fixture_from_options(options, filesystem, catalog);
+        if (!selected) { failure = core::format_diagnostic(selected.error()); return false; }
+        auto inputs = skirmish::read_start_inputs(selected.value(), filesystem, catalog, *tables);
+        if (!inputs) { failure = core::format_diagnostic(inputs.error()); return false; }
+        if (auto valid = skirmish::validate_replay_identity(setup, inputs.value()); !valid) {
+            failure = core::format_diagnostic(valid.error());
+            return false;
         }
     }
     if (units::content_identity(*tables) != replay.value().setup.content_identity) {
@@ -329,6 +404,7 @@ bool LiveSessionView::prepare_replay(const vfs::Vfs& filesystem, const data::Cat
                     return false;
                 }
                 content.value().fog = fog.value();
+                content.value().map_box = skirmish::map_box(inputs.value());
             }
             for (const skirmish::LobbySlot& slot : skirmish::m2_fixture().slots) {
                 if (slot.slot >= 1U && slot.slot - 1U < inputs.value().lobby_colours.size()) {
@@ -379,6 +455,7 @@ bool LiveSessionView::prepare_replay(const vfs::Vfs& filesystem, const data::Cat
                 auto fog = skirmish::fog_rules(inputs.value());
                 if (!fog) { failure = core::format_diagnostic(fog.error()); return false; }
                 content.value().fog = fog.value();
+                content.value().map_box = skirmish::map_box(inputs.value());
             }
         }
         auto start = skirmish::build_start(replay_fixture, inputs.value());
@@ -457,16 +534,44 @@ bool LiveSessionView::prepare_replay(const vfs::Vfs& filesystem, const data::Cat
                 if (recorded != start_->players.end() && recorded->colour) ship.team_colour = recorded->colour->rgb;
             }
         }
+        // Map records represented by replay actors belong to the live snapshot, just
+        // as in prepare_skirmish. Leaving their static art admitted draws a second,
+        // differently tinted model at the same position and makes the visible tint
+        // depend on mesh/material draw ordering.
+        if (start_) {
+            const auto authored = std::find_if(start_->units.begin(), start_->units.end(),
+                [&](const skirmish::StartUnit& entry) { return entry.state.entity_id == unit.entity_id; });
+            if (authored != start_->units.end()
+                && (authored->role == skirmish::UnitRole::placed || authored->role == skirmish::UnitRole::map_object)) {
+                session_records_.push_back(authored->record);
+                ship.colour_record = authored->record;
+                if (authored->role == skirmish::UnitRole::map_object) {
+                    auto object = catalog.resolve(authored->type, data::Category::game_object);
+                    if (!object) { failure = core::format_diagnostic(object.error()); return false; }
+                    if (!space::map_prop_fog_bound(tag_text(object.value(), "Behavior"),
+                                                   tag_text(object.value(), "SpaceBehavior"))) {
+                        unfogged_map_props_.push_back(unit.entity_id);
+                    }
+                }
+            }
+        }
         ship_of_entity_.emplace(unit.entity_id, placed_ships_.size());
         owner_of_entity_.emplace(unit.entity_id, unit.owner);
         placed_ships_.push_back(std::move(ship));
     }
+    std::sort(unfogged_map_props_.begin(), unfogged_map_props_.end());
     setup_ = setup;
     victory_ = setup.skirmish && start_ ? skirmish::victory_rules(*start_, *tables)
         : skirmish::victory_rules(setup, *tables, humans, options_.skirmish.victory_condition.value_or(selected_victory));
     replay_ = std::move(replay).value();
     content_ = std::move(content).value();
     tables_ = std::move(*tables);
+    if (options_.borrowed_battle) {
+        content_ = options_.borrowed_battle->content;
+        victory_ = options_.borrowed_battle->victory;
+        economy_ = options_.borrowed_battle->economy;
+        start_ = options_.borrowed_battle->start;
+    }
     return true;
 }
 
@@ -480,8 +585,11 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
     if (const auto neutral = ui::faction_colour(minimap_settings, "Neutral")) {
         neutral_fog_colour_ = std::array<float, 3>{neutral->r / 255.0F, neutral->g / 255.0F, neutral->b / 255.0F};
     }
+    faction_colours_ = minimap_settings;
+    // #3076: FoC enables unit colorization for the skirmish game mode only; a campaign battle runs without it.
+    colorization_enabled_ = !options_.borrowed_battle;
     const skirmish::Fixture& fixture = skirmish::m2_fixture();
-    if ((options_.fixture == "replay") != !options_.replay_input.empty()) {
+    if (!options_.borrowed_battle && (options_.fixture == "replay") != !options_.replay_input.empty()) {
         failure = "--eawr-live-replay goes with --eawr-live-session replay, which needs it";
         return false;
     }
@@ -489,7 +597,9 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
         failure = "--eawr-live-session " + options_.fixture + " runs on " + fixture.map;
         return false;
     }
-    if (options_.fixture != "skirmish" && (options_.skirmish.map || options_.skirmish.slots || options_.skirmish.seed)) {
+    const bool demo = options_.fixture == "attract";
+    if (options_.fixture != "skirmish" && !demo
+        && (options_.skirmish.map || options_.skirmish.slots || options_.skirmish.seed)) {
         failure = "--eawr-skirmish-* options require --eawr-live-session skirmish";
         return false;
     }
@@ -497,7 +607,11 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
         failure = "--eawr-skirmish-victory requires a skirmish start or replay";
         return false;
     }
-    if (options_.fixture == "skirmish") {
+    if (demo && options_.skirmish.slots) {
+        failure = "a demo map's start has no lobby slots";
+        return false;
+    }
+    if (options_.fixture == "skirmish" || demo) {
         if (options_.skirmish.map && *options_.skirmish.map != lower_path(map_path)) {
             failure = "--eawr-map and --eawr-skirmish-map must select the same map";
             return false;
@@ -508,7 +622,7 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
         failure = "--eawr-live-melee and --eawr-live-melee-seed go with --eawr-live-session melee";
         return false;
     }
-    if (options_.fixture != "m2" && options_.fixture != "skirmish" && options_.ai.has_value()) {
+    if (options_.fixture != "m2" && options_.fixture != "skirmish" && !demo && options_.ai.has_value()) {
         ai_flag_ignored_ = true;
         godot::UtilityFunctions::printerr(godot::String(
             ("--eawr-live-ai has no effect with --eawr-live-session " + options_.fixture + "; it only runs the AI"
@@ -518,12 +632,28 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
                                                                       : prepare_m2(filesystem, catalog, failure))) {
         return false;
     }
+    if (!colorization_enabled_) {
+        // #3076: a type's own nonzero No_Colorization_Color wins over its owner faction's.
+        const auto read_type = [&](const std::string& id) {
+            if (type_no_colorization_.contains(id)) return;
+            const auto colour = ui::minimap_type_looks(id, &catalog).no_colorization;
+            if (colour && *colour != data::ui::Rgba8{0, 0, 0, 0}) type_no_colorization_.emplace(id, std::array<std::uint8_t, 3>{colour->r, colour->g, colour->b});
+        };
+        for (const auto& type : tables_->units) read_type(type.id);
+        for (auto& ship : placed_ships_) {
+            read_type(ship.object_id);
+            const auto owner = owner_of_entity_.find(ship.live_entity);
+            if (owner != owner_of_entity_.end()) ship.team_colour = model_colour(owner->second, ship.object_id);
+        }
+    }
     // #427: a type with a DEFEND ability composes its SHIELD sub-object as its shield shell.
     std::map<tactical::PlayerId, std::string> scoring_factions;
     for (const auto& player : setup_->players) scoring_factions.emplace(player.player_id, player_faction(player.player_id));
-    auto scoring = BattleScoring::create(filesystem, catalog, *tables_, std::move(scoring_factions), std::string(map_path));
-    if (scoring) scoring_ = std::move(scoring).value();
-    else scoring_failure_ = core::format_diagnostic(scoring.error());
+    if (!scoring_) {
+        auto scoring = BattleScoring::create(filesystem, catalog, *tables_, std::move(scoring_factions), std::string(map_path));
+        if (scoring) scoring_ = std::move(scoring).value();
+        else scoring_failure_ = core::format_diagnostic(scoring.error());
+    }
     if (!scoring_failure_.empty()) godot::UtilityFunctions::printerr(godot::String(scoring_failure_.c_str()));
     // #76 AB-31 (UA-06): a type with SPOILER_LOCK plays its DEPLOY clip when the ability switches
     // on and UNDEPLOY when it switches off. Retail draws among several variants; the X-wing has one.
@@ -575,6 +705,19 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
     prepare_sfoil_clips();
     prepare_clips(filesystem, catalog);
     prepare_launch_slots(filesystem, catalog);
+    // HCB-12: one reusable authored model per issuer, never a selectable unit.
+    if (setup_) for (const auto& rule : setup_->beacon_rules) {
+        const auto type = std::find_if(catalog.definitions().begin(), catalog.definitions().end(),
+            [&](const auto& value) { return value.category == data::Category::game_object && skirmish::type_id(value.id) == rule.type; });
+        if (type == catalog.definitions().end()) { failure = "beacon type is absent from the presentation catalog"; return false; }
+        SpacePopulation::Options::PlacedShip ship;
+        ship.object_id = type->id;
+        ship.live_entity = std::numeric_limits<sim::EntityId>::max() / 16U + rule.player;
+        ship.beacon_model = true;
+        ship.team_colour = model_colour(rule.player, ship.object_id);
+        beacon_ships_.emplace(rule.player, placed_ships_.size());
+        placed_ships_.push_back(std::move(ship));
+    }
     // BP-22: purchased reinforcements need the same shell as starting ships, including
     // heroes with DEFEND in their second slot. Include their newly prepared arrival slots.
     for (SpacePopulation::Options::PlacedShip& ship : placed_ships_) {
@@ -582,6 +725,9 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
         ship.defend_shell = type != nullptr && !ship.placement_preview
             && std::any_of(type->abilities.begin(), type->abilities.end(),
                            [](const units::Ability& ability) { return ability.type == "DEFEND"; });
+        ship.stealth_shell = type != nullptr && !ship.placement_preview
+            && std::any_of(type->abilities.begin(), type->abilities.end(),
+                           [](const units::Ability& ability) { return ability.type == "STEALTH"; });
     }
     // #614: a squadron a hangar launches later flies in a launch slot, which the first pass
     // did not see; without the clips the slot's craft never plays DEPLOY or UNDEPLOY.
@@ -650,6 +796,12 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
     return true;
 }
 
+std::shared_ptr<const LiveSessionView::PreparedBattle> LiveSessionView::prepared_battle() const {
+    if (!setup_ || !content_ || !tables_) return {};
+    return std::make_shared<const PreparedBattle>(PreparedBattle{
+        {*setup_, 0, {}}, *content_, victory_, economy_, *tables_, start_});
+}
+
 bool LiveSessionView::start(std::string& failure) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::session);
     if (!setup_ || !content_) {
@@ -658,6 +810,7 @@ bool LiveSessionView::start(std::string& failure) {
     }
     platform::LiveSession::Options session_options;
     session_options.workers = options_.workers.value_or(platform::LiveSession::game_worker_count());
+    session_options.measure_phases = trace_frames_;
     session_options.pacing = options_.real_time ? platform::LiveSession::Pacing::real_time
                                                 : platform::LiveSession::Pacing::driven;
     session_options.target_rate = time_.target_rate(); // #459 TM-01
@@ -677,9 +830,29 @@ bool LiveSessionView::start(std::string& failure) {
     std::sort(session_options.base_attack_types.begin(), session_options.base_attack_types.end());
     // UI-07: the local player's one scheduler, taken on the simulation thread right before
     // each step with its own keys. The session starts at tick 0.
-    scheduler_ = std::make_unique<ui::CommandScheduler>(player_, 0, 0);
-    order_input_ = std::make_unique<ui::OrderInput>(*scheduler_);
+    // LAN assigns its agreed future tick after this handoff. A stalled admission
+    // visit must not close the producer's current epoch (FD-01 phase order stays).
+    std::function<std::uint64_t()> intent_epoch;
+    if (options_.lan) intent_epoch = [this] { return session_ ? session_->completed_tick() : 0U; };
+    scheduler_ = std::make_shared<ui::CommandScheduler>(player_, 0, 0, std::move(intent_epoch));
+    if (options_.lan) options_.lan->set_input_epoch_provider([scheduler = std::weak_ptr(scheduler_)] {
+        const auto producer = scheduler.lock();
+        return producer ? producer->pending_intent_epoch() : std::nullopt;
+    });
+    if (options_.lan) options_.lan->set_submission_observer([scheduler = std::weak_ptr(scheduler_)]
+        (const std::uint64_t sequence, const std::uint64_t tick) {
+        if (const auto producer = scheduler.lock()) producer->note_execution(sequence, tick);
+    });
+    if (options_.lan) options_.lan->set_discard_observer([scheduler = std::weak_ptr(scheduler_)](std::uint64_t sequence) {
+        if (const auto producer = scheduler.lock()) producer->present_result(sequence);
+    });
+    if (options_.lan_acceptance && options_.lan) scheduler_->set_issue_observer(
+        [lan = options_.lan](std::uint64_t sequence, std::uint64_t epoch) { lan->note_issue(sequence, epoch); });
+    if (options_.lan) input_sink_ = std::make_unique<LanCommandSink>(*scheduler_, options_.lan,
+        [this](const core::Diagnostic& error) { recovery_input_feedback_ = error.message; });
+    order_input_ = std::make_unique<ui::OrderInput>(input_sink_ ? *input_sink_ : *scheduler_);
     session_options.scripts = ai_scripts_;
+    if (options_.lan) session_options.step_driver = options_.lan->driver(*setup_);
     // #494: the local player's fog cells ride along with each tick for the fog in the world.
     if (content_->fog) session_options.fog_player = player_;
     session_options.command_source = [scheduler = scheduler_.get(), fault = options_.fault_tick,
@@ -699,14 +872,20 @@ bool LiveSessionView::start(std::string& failure) {
         commands.insert(commands.end(), std::make_move_iterator(taken.begin()), std::make_move_iterator(taken.end()));
         return commands;
     };
+    if (options_.borrowed_feed) {
+        session_ = options_.borrowed_feed;
+        session_->configure_notifications(std::move(session_options.base_attack_types));
+        session_->command_source(std::move(session_options.command_source));
+        return true;
+    }
     auto live = platform::LiveSession::start(*setup_, content_->sensors, content_->durability, content_->motion,
                                              content_->combat, session_options, victory_, content_->fog, content_->abilities,
-                                             economy_);
+                                             economy_, content_->map_box);
     if (!live) {
         failure = "live session: " + core::format_diagnostic(live.error());
         return false;
     }
-    session_ = std::move(live).value();
+    session_ = std::make_shared<platform::StandaloneTacticalFeed>(std::move(live).value());
     // The debug hook: each order as its unit's owner would give it, at its tick.
     for (const ScheduledOrder& order : options_.orders) {
         const auto owner = owner_of_entity_.find(order.unit);
@@ -722,7 +901,10 @@ bool LiveSessionView::start(std::string& failure) {
         if (order.kind == tactical::OrderKind::ability) {
             tactical::AbilityPayload ability{order.ability, order.action};
             ability.target = order.target; // #561: none unless the order names one
-            if (order.ability == tactical::AbilityKind::weaken_enemy && order.action == tactical::AbilityAction::activate)
+            if ((order.ability == tactical::AbilityKind::fow_reveal_ping
+                || order.ability == tactical::AbilityKind::weaken_enemy || order.ability == tactical::AbilityKind::buzz_droids
+                    || order.ability == tactical::AbilityKind::corrupt_systems)
+                && order.action == tactical::AbilityAction::activate)
                 ability.position = order.point;
             live_order.payload = ability;
         }
@@ -730,7 +912,7 @@ bool LiveSessionView::start(std::string& failure) {
             live_order.payload = tactical::AttackMovePayload{order.point, order.target};
         }
         if (order.kind == tactical::OrderKind::guard) live_order.payload = tactical::GuardPayload{order.point, order.target};
-        session_->submit(std::move(live_order));
+        if (!session_->try_submit(std::move(live_order))) return false;
     }
     return true;
 }

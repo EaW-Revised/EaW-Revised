@@ -195,4 +195,16 @@ void BattleInput::update_hover() {
     }
 }
 
+std::optional<ui::BattleUnit> BattleInput::encyclopedia_unit() const {
+    // WSU-10/16: units_ and icon_units are the current observer-filtered
+    // pick publications. Never look up an unseen enemy in the raw snapshot.
+    if (!pointer_ || !host_ || !host_->get_viewport()
+        || host_->get_viewport()->gui_get_hovered_control()) return std::nullopt;
+    if (hovered_icon_) {
+        for (const auto& unit : world_ui_->icon_units()) if (unit.entity == *hovered_icon_) return unit;
+    }
+    if (hovered_ && *hovered_ < units_.size()) return units_[*hovered_];
+    return std::nullopt;
+}
+
 } // namespace eawr::presentation::godot_backend

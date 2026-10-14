@@ -209,10 +209,13 @@ int main(const int argc, char** argv) {
         std::cerr << eawr::core::format_diagnostic(filesystem.error()) << '\n';
         return 1;
     }
-    auto loaded = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+    auto loaded = eawr::data::load_catalog_strict(filesystem.value(), eawr::data::Profile::foc);
     if (!loaded) {
         std::cerr << eawr::core::format_diagnostic(loaded.error()) << '\n';
         return 1;
+    }
+    if (!loaded.value().health.clean()) {
+        std::cerr << "unit_scan: catalog load: " << eawr::data::describe_load_health(loaded.value().health) << '\n';
     }
     eawr::scene::VfsAssetCache cache(filesystem.value());
     const auto access = cache.access();

@@ -1,0 +1,11 @@
+{
+  "name": "synthetic-small",
+  "seed": 7,
+  "planets": 12,
+  "players": 2,
+  "fleets_per_player": 2,
+  "members_per_fleet": 3,
+  "coop_seat": false,
+  "debug_commands": false,
+  "fiscal_cycle_seconds": 45.0
+}

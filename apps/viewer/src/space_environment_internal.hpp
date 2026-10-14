@@ -267,6 +267,8 @@ public:
                              const assets::ObjectTypeCatalog& catalog, bool catalog_loaded,
                              const std::string& catalog_failure);
     [[nodiscard]] std::optional<int> process(double delta);
+    // Why ready() returned false (empty otherwise): the cause the report also carries.
+    [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The player closed the window: stops the live session, releases the scene and writes the
     // report as a finished run does (status "space_environment_closed"). Idempotent; the run
     // ends by the engine's own quit, so no process() follows.
@@ -275,6 +277,8 @@ public:
     void camera_focus(bool focused);
     void camera_pointer_left();
     void camera_viewport(float width, float height);
+    // The attract's locked view moves its eye and look-at (SpaceEnvironment::set_attract_pose).
+    void set_attract_pose(const std::array<float, 3>& eye, const std::array<float, 3>& target);
     // #82: see SpaceEnvironment::live_camera_frame and the rest.
     [[nodiscard]] std::optional<tactical::TacticalFrame> drawn_frame() const;
     [[nodiscard]] std::optional<tactical::TacticalFrame> effects_frame() const;
@@ -282,6 +286,8 @@ public:
     void focus(float source_x, float source_y);
     [[nodiscard]] std::optional<presentation::camera::SourceTargetBounds> camera_bounds() const;
     void overview_key();
+    void movie(bool on, const std::array<float, 3>& target);
+    [[nodiscard]] bool movie() const noexcept { return movie_; }
     [[nodiscard]] std::string overview_level() const;
     // #888 perf trace: the last frame's snapshot build and submit.
     [[nodiscard]] double submit_ms() const noexcept { return submit_ms_; }
@@ -372,9 +378,17 @@ private:
     std::unique_ptr<GodotRenderer> renderer_;
     FixedCamera camera_;
     std::unique_ptr<viewer::MapCameraBridge> bridge_;
+    // MAT-10: the attract's saved frame; the camera never changes but for the window's size.
+    bool locked_view_{};
+    // The attract's frame before the view's own adjustments (window size, eye and look-at).
+    tactical::TacticalFrame locked_frame_{};
+    bool attract_pose_pending_{};
     // #82: FoC's tactical overview over an interactive space map camera, and the clock its wheel
     // clicks are timed on. Absent for a locked (capture) camera and the camera self-tests.
     std::optional<tactical::TacticalOverview> overview_;
+    bool movie_{};
+    double movie_seconds_{};
+    std::array<float, 3> movie_target_{};
     std::string overview_status_{"unavailable"};
     std::chrono::steady_clock::time_point overview_clock_{std::chrono::steady_clock::now()};
     std::string camera_source_{"default"};

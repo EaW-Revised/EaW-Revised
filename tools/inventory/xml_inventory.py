@@ -16,10 +16,12 @@ if __package__ in (None, ""):
     from common import TOOL_VERSION, ascii_fold, canonical_path, manifest_id, sha256, source_hashes, write_json
     from corpus import Corpus, CorpusError, Source
     from schema_index import SchemaError, build_schema_index
+    from engine_tags import EngineTags
 else:
     from .common import TOOL_VERSION, ascii_fold, canonical_path, manifest_id, sha256, source_hashes, write_json
     from .corpus import Corpus, CorpusError, Source
     from .schema_index import SchemaError, build_schema_index
+    from .engine_tags import EngineTags
 
 
 class XmlInventoryError(RuntimeError): pass
@@ -51,8 +53,9 @@ class Occurrence:
 
 
 class SchemaLookup:
-    def __init__(self, value: dict[str, Any]):
+    def __init__(self, value: dict[str, Any], engine_tags: EngineTags | None = None):
         self.value = value; self.revision = value["revision"]
+        self.engine_tags = engine_tags
         self.types: dict[str, str] = {}
         for row in value["types"]:
             self.types.setdefault(ascii_fold(row["name"]), row["name"])
@@ -68,7 +71,10 @@ class SchemaLookup:
     def status(self, profile: str, object_type: str, tag: str) -> tuple[str, str | None, list[str]]:
         candidates = [r for r in self.tags.get((ascii_fold(object_type), ascii_fold(tag)), [])
                       if r["game"] == "eaw" or profile != "eaw"]
-        if not candidates: return "unknown", None, []
+        if not candidates:
+            if self.engine_tags is not None and self.engine_tags.recognizes(profile, object_type, tag):
+                return "known-engine", None, ["foc"]
+            return "unknown", None, []
         candidates.sort(key=lambda r: (not r["deprecated"], r["game"], r["schema_ref"]))
         selected = candidates[0]
         status = "deprecated" if any(r["deprecated"] for r in candidates) else "known"
@@ -177,7 +183,8 @@ def site_key(value: dict[str, Any]) -> tuple[Any, ...]:
 
 def generate(game_root: Path, mod_root: Path | Sequence[Path],
              schema_root: Path, out: Path) -> dict[str, Any]:
-    schema_value = build_schema_index(schema_root); schema = SchemaLookup(schema_value)
+    engine_tags = EngineTags.load()
+    schema_value = build_schema_index(schema_root); schema = SchemaLookup(schema_value, engine_tags)
     corpus = Corpus(game_root, mod_root); rows: list[dict[str, Any]] = []; unresolved: list[dict[str, Any]] = []
     profile_manifests: list[dict[str, Any]] = []
     for profile in ("eaw", "foc", "remake"):
@@ -239,7 +246,9 @@ def generate(game_root: Path, mod_root: Path | Sequence[Path],
                                 "schema_files": schema_value["files"], "schema_revision": schema.revision,
                                 "schema_version": 1, "tool": "xml_inventory",
                                 "tool_sources": source_hashes(Path(__file__).resolve().parent,
-                                                              ["common.py", "corpus.py", "schema_index.py", "xml_inventory.py"]),
+                                                              ["common.py", "corpus.py", "schema_index.py", "xml_inventory.py", "engine_tags.py"]),
+                                "engine_tags_sha256": sha256(json.dumps(engine_tags.value, sort_keys=True,
+                                                                        separators=(",", ":")).encode("utf-8")),
                                 "tool_version": TOOL_VERSION}
     manifest["manifest_id"] = manifest_id(manifest)
     tags = {"manifest_id": manifest["manifest_id"], "rows": rows, "schema_revision": schema.revision, "schema_version": 1}

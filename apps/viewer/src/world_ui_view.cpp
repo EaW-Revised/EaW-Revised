@@ -48,6 +48,21 @@ WorldUiView::~WorldUiView() {
 }
 
 void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
+    draw_waypoints(frame, canvas_item);
+    if (!frame.visible) {
+        if (auto* rendering = RenderingServer::get_singleton()) {
+            for (const RID& circle : circles_) rendering->instance_set_visible(circle, false);
+        }
+        circles_drawn_ = health_bars_ = shield_bars_ = reticles_drawn_ = grid_icons_ = 0;
+        bar_rows_.clear();
+        icon_rows_.clear();
+        flag_rows_.clear();
+        icons_.clear();
+        ability_rows_.clear();
+        group_rows_.clear();
+        reticle_rects_.clear();
+        return;
+    }
     if (frame.units == nullptr || frame.selection == nullptr || frame.live == nullptr || !frame.project) return;
     place_circles(frame);
     // The UI reference scale (layout.hpp UI-L1): screen height over 768 at 4:3 and wider.
@@ -69,6 +84,101 @@ void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
     }
     draw_reticles(frame, canvas_item);
     draw_icons(frame, canvas_item, ui_scale);
+}
+
+void WorldUiView::follow_waypoint_lighting(const GodotRenderer& renderer) {
+    if (waypoint_renderer_ && renderer.lighting()) waypoint_renderer_->set_lighting(*renderer.lighting());
+}
+
+void WorldUiView::draw_waypoints(const Frame& frame, const RID canvas_item) {
+    waypoint_paths_ = waypoint_flags_ = waypoint_lines_ = waypoint_loops_ = 0;
+    waypoint_stubs_omitted_ = 0;
+    std::vector<sim::RenderInstance> flags;
+    const auto* snapshot = frame.live ? frame.live->battle_frame().latest.get() : nullptr;
+    const bool shown = frame.visible && frame.waypoints && frame.selection && frame.project && snapshot;
+    const double waypoint_phase = waypoint_clock_.sample(shown,
+        frame.live ? frame.live->presented_tick() : 0.0, waypoint_velocity_, waypoint_dash_ + waypoint_gap_);
+    if (shown && waypoint_renderer_ && !waypoint_assets_.empty()) {
+        if (frame.camera) {
+            const auto& camera = *frame.camera;
+            waypoint_renderer_->set_camera({camera.width, camera.height, camera.vertical_fov_degrees,
+                camera.near_plane, camera.far_plane, camera.eye, camera.target, camera.up});
+        }
+        std::set<sim::EntityId> selected;
+        for (const auto id : frame.selection->units()) {
+            const auto member = frame.live->squadron_of().find(id);
+            selected.insert(member == frame.live->squadron_of().end() ? id : member->second);
+        }
+        const auto source = [](const sim::math::Vec3& point) {
+            return ui::Vec3f{to_float(point.x), to_float(point.y), to_float(point.z)};
+        };
+        for (const auto& instance : snapshot->instances()) {
+            if (instance.owner != frame.live->local_player() || !selected.contains(instance.entity_id)
+                || instance.waypoint_points.empty()) continue;
+            const auto unit = frame.live->unit_frame(instance.entity_id);
+            if (!unit) continue;
+            std::vector<ui::Vec3f> points;
+            points.push_back({static_cast<float>(unit->position[0]), static_cast<float>(unit->position[1]),
+                static_cast<float>(unit->position[2])});
+            std::optional<std::size_t> repeat;
+            for (const auto& point : instance.waypoint_points) {
+                if (point.repeat && !repeat) repeat = points.size();
+                points.push_back(source(point.position));
+                // OF-05: flag authored destinations once, independently of line-only vertices.
+                const auto transform = ui::waypoint_flag_transform(point.position);
+                for (const auto asset : waypoint_assets_)
+                    flags.push_back({static_cast<sim::EntityId>(flags.size() + 1), asset, transform});
+                ++waypoint_flags_;
+            }
+            if (repeat) {
+                points.push_back(points[*repeat]);
+                ++waypoint_loops_;
+                // OF-05: omit the centroid stub when it lies within four units of the closing edge.
+                const auto& a = points[points.size() - 2];
+                const auto& b = points.back();
+                const float dx = b[0] - a[0], dy = b[1] - a[1];
+                const float length = std::hypot(dx, dy);
+                if (length > 0.0F && std::abs((points[0][0] - a[0]) * dy - (points[0][1] - a[1]) * dx) / length < 4.0F) {
+                    points.erase(points.begin());
+                    ++waypoint_stubs_omitted_;
+                }
+            }
+            ++waypoint_paths_;
+            double phase = waypoint_phase;
+            // Retail walks from the tail so dash phase remains continuous across all edges.
+            for (std::size_t end = points.size() - 1; end > 0; --end) {
+                const auto& a = points[end];
+                const auto& b = points[end - 1];
+                const float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+                const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+                const auto line = [&](const double start, const double finish) {
+                    if (length <= 0.0) return;
+                    const auto project = [&](const double at) { return frame.project(ui::Vec3f{
+                        a[0] + dx * static_cast<float>(at / length), a[1] + dy * static_cast<float>(at / length),
+                        a[2] + dz * static_cast<float>(at / length)}); };
+                    const auto from = project(start), to = project(finish);
+                    if (from && to) {
+                        RenderingServer::get_singleton()->canvas_item_add_line(canvas_item,
+                            Vector2((*from)[0], (*from)[1]), Vector2((*to)[0], (*to)[1]), waypoint_colour_, 1.0F);
+                        ++waypoint_lines_;
+                    }
+                };
+                const double period = waypoint_dash_ + waypoint_gap_;
+                if (repeat) {
+                    if (waypoint_dash_ > 0.0F && waypoint_gap_ > 0.0F) {
+                        const double offset = std::fmod(phase, period);
+                        for (double start = -offset; start < length; start += period)
+                            if (start + waypoint_dash_ > 0.0) line(std::max(0.0, start), std::min(length, start + waypoint_dash_));
+                    }
+                } else line(0.0, length);
+                phase += length;
+            }
+        }
+    }
+    max_waypoint_paths_ = std::max(max_waypoint_paths_, waypoint_paths_);
+    max_waypoint_flags_ = std::max(max_waypoint_flags_, waypoint_flags_);
+    if (waypoint_renderer_)
+        waypoint_renderer_->submit(std::make_shared<const sim::RenderSnapshot>(snapshot ? snapshot->completed_tick() : 0, std::move(flags)));
 }
 
 } // namespace eawr::presentation::godot_backend

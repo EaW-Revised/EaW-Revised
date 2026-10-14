@@ -4,6 +4,7 @@
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg?logo=cplusplus)](docs/build.md)
 [![Godot 4.7.2](https://img.shields.io/badge/Godot-4.7.2-478CBF.svg?logo=godotengine&logoColor=white)](apps/viewer/README.md)
+[![Ideas board](https://img.shields.io/badge/ideas-suggest%20%26%20vote-8250DF.svg?logo=github)](https://github.com/EaW-Revised/EaW-Revised/discussions/categories/ideas)
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-support%20the%20project-FF5E5B.svg?logo=ko-fi&logoColor=white)](https://ko-fi.com/mister_fordo)
 
 An open-source, standalone engine reimplementation that runs **Empire at War: Forces of
@@ -23,6 +24,11 @@ stronger foundation for larger battles, modern hardware and the modding communit
 
 The project is in early development and is **not yet a playable replacement** for the
 original game.
+
+Have an idea or a question? Head to the
+[Discussions tab](https://github.com/EaW-Revised/EaW-Revised/discussions): suggest features
+and upvote others on the [Ideas board](https://github.com/EaW-Revised/EaW-Revised/discussions/categories/ideas),
+or ask in [Q&A](https://github.com/EaW-Revised/EaW-Revised/discussions/categories/q-a).
 
 > **Not affiliated.** EaW Revised is an independent, non-commercial fan project, not
 > affiliated with or endorsed by the makers or publishers of the original game. This
@@ -258,7 +264,20 @@ third_party/   Vendored EnTT, Lua 5.0.2 and pugixml (THIRD_PARTY_NOTICES.md)
 cmake/         Shared CMake modules
 ```
 
+## Ideas and feedback
+
+Missing a feature, or have a wish for the project? Post it on the
+[Ideas board](https://github.com/EaW-Revised/EaW-Revised/discussions/categories/ideas) and
+upvote the ideas you want most; the most upvoted ideas are reviewed first. Search before
+posting, describe the original game in your own words, and see [docs/ideas.md](docs/ideas.md)
+for how ideas are triaged. Questions go to
+[Q&A](https://github.com/EaW-Revised/EaW-Revised/discussions/categories/q-a), bugs to
+[Issues](https://github.com/EaW-Revised/EaW-Revised/issues/new/choose).
+
 ## Contributing
+
+Browse the [XML tag coverage report](docs/tag-coverage/report/README.md) for implemented
+and remaining tags by area, or the [documentation index](docs/README.md) for other guides.
 
 Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first: it
 covers the clean-room rules (never paste decompiler output, binary addresses, original

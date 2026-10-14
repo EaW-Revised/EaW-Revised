@@ -3,7 +3,7 @@
 namespace sim_headless::scenario_detail {
 
 core::Result<void> write_rows(const tactical::TacticalSession& session, const Labels& labels, const UnitIds& unit_ids,
-    const std::vector<Traced>& traced, std::ostringstream& trace, const std::uint64_t tick) {
+    const std::vector<Traced>& traced, std::ostringstream& trace, const std::uint64_t tick, const bool installed_replay_audit) {
         const auto units = session.units();
         const auto snapshot = session.snapshot();
         for (const auto& object : traced) {
@@ -35,6 +35,26 @@ core::Result<void> write_rows(const tactical::TacticalSession& session, const La
             }
             trace << tick << ',' << object.label << ",alive," << (alive ? 1 : 0) << '\n';
             if (!alive) continue;
+            if (installed_replay_audit) {
+                if (const auto roll = session.roll_degrees(id)) {
+                    trace << tick << ',' << object.label << ",bank.roll," << roll->raw() << '\n';
+                }
+                const auto instances = snapshot->instances();
+                const auto published = std::find_if(instances.begin(), instances.end(),
+                    [&](const auto& instance) { return instance.entity_id == id; });
+                if (published != instances.end()) {
+                    for (const auto& ability : published->abilities) {
+                        trace << tick << ',' << object.label << ",ability." << tactical::to_string(ability.kind)
+                              << ".active," << (ability.active ? 1 : 0) << '\n';
+                    }
+                }
+                std::uint64_t charged = 0;
+                for (const auto& event : snapshot->combat_events()) {
+                    charged += event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == id
+                        && (event.outcome & tactical::fired_charged_shot) != 0;
+                }
+                trace << tick << ',' << object.label << ",charged.shots," << charged << '\n';
+            }
             const auto matrix = math::to_matrix(found->rotation, found->position);
             if (!matrix) return core::Result<void>::failure(matrix.error());
             const auto& m = matrix.value().rows;
@@ -130,8 +150,12 @@ void write_combat_rows(const tactical::TacticalSession& session, const Labels& l
 void trace_header(ScenarioRun& run, const Scenario& scenario, const std::string& bytes, const std::string& build_sha256) {
     std::ostringstream header;
     header << "{\n"
-           << "  \"format\": \"eawr-trace\",\n"
-           << "  \"format_version\": 1,\n"
+           << "  \"format\": \"" << (scenario.installed_replay_audit ? "eawr-installed-replay-audit" : "eawr-trace") << "\",\n"
+           << "  \"format_version\": 1,\n";
+    if (scenario.installed_replay_audit) {
+        header << "  \"fixed_fractional_bits\": " << Fixed::fractional_bits << ",\n";
+    }
+    header
            << "  \"source\": \"remake\",\n"
            << "  \"content_identity\": \"" << pins_identity(scenario.content) << "\",\n"
            << "  \"tick_seconds\": {\"numerator\": " << tactical::tick_numerator

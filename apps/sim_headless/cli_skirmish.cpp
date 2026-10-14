@@ -16,9 +16,12 @@ namespace sim_headless::cli {
     auto filesystem = eawr::vfs::Vfs::mount(specs);
     if (!filesystem) return LoadResult::failure(filesystem.error());
     loaded->filesystem.emplace(std::move(filesystem).value());
-    auto catalog = eawr::data::load_catalog(*loaded->filesystem,
+    auto catalog = eawr::data::load_catalog_strict(*loaded->filesystem,
         options.mod_root.empty() ? eawr::data::Profile::foc : eawr::data::Profile::remake);
     if (!catalog) return LoadResult::failure(catalog.error());
+    if (!catalog.value().health.clean()) {
+        std::cerr << "sim_headless: catalog load: " << eawr::data::describe_load_health(catalog.value().health) << '\n';
+    }
     loaded->catalog.emplace(std::move(catalog).value());
     eawr::scene::VfsAssetCache cache(*loaded->filesystem);
     const auto access = cache.access();
@@ -103,7 +106,7 @@ int run_skirmish(const Options& options) {
     }
     if (!options.replay_out_path.empty()) {
         eawr::sim::tactical::TacticalReplay replay;
-        replay.setup = start.value().setup;
+        replay.setup = skirmish::recording_setup(fixture, start.value());
         replay.final_tick_count = options.ticks;
         auto bytes = eawr::sim::tactical::write_replay(replay);
         if (!bytes) return fail(bytes.error());

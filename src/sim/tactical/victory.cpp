@@ -69,6 +69,7 @@ core::Result<void> validate_victory(const VictoryRules& rules, const std::span<c
     if (rules.countdown_frames > max_ticks) {
         return invalid("countdown exceeds the tactical tick limit");
     }
+    if (!strictly_ascending(rules.campaign_leaders)) return invalid("campaign leader identities must strictly increase");
     return core::Result<void>::success();
 }
 
@@ -159,6 +160,9 @@ std::string_view to_string(const VictoryCondition condition) noexcept {
     case VictoryCondition::all_enemy_units_destroyed:
         return "all_enemy_units_destroyed";
     case VictoryCondition::intentional_quit: return "intentional_quit";
+    case VictoryCondition::enemy_leader_destroyed: return "enemy_leader_destroyed";
+    case VictoryCondition::campaign_station_destroyed: return "campaign_station_destroyed";
+    case VictoryCondition::enemies_retreated: return "enemies_retreated";
     }
     return "unknown";
 }

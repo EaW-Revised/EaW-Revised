@@ -9,6 +9,7 @@
 #include "land_look.hpp"
 #include "battle_input.hpp"
 #include "live_session_view.hpp"
+#include "loading_screen.hpp"
 #include "shutdown_trace.hpp"
 #include "live_fog_view.hpp"
 #include "overview_fade_view.hpp"

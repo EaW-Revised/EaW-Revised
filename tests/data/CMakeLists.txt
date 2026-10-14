@@ -1,4 +1,4 @@
-add_executable(data_tests main.cpp tag_trace_tests.cpp xml_catalog_tests.cpp xml_inheritance_tests.cpp xml_override_tests.cpp xml_schema_tests.cpp)
+add_executable(data_tests main.cpp retail_values_tests.cpp tag_trace_tests.cpp xml_catalog_tests.cpp xml_inheritance_tests.cpp xml_override_tests.cpp xml_schema_tests.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(data_tests PRIVATE eawr::data eawr::vfs Threads::Threads)
 target_compile_features(data_tests PRIVATE cxx_std_20)
@@ -28,5 +28,7 @@ eawr_add_python_contract(python_data_acceptance_xml_acceptance_evaluator tests.d
 add_test(NAME xml_scanner_acceptance_contract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/acceptance/test_p0_05_acceptance.py"
             --xml-scan "$<TARGET_FILE:xml_scan>")
+
+add_subdirectory(galactic)
 
 eawr_label_tests()

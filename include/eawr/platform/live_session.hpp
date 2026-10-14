@@ -4,6 +4,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/combat.hpp"
+#include "eawr/sim/tactical/content.hpp"
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/fog_cells.hpp"
 #include "eawr/sim/tactical/motion.hpp"
@@ -172,6 +173,29 @@ private:
     std::optional<std::uint64_t> dropped_through_;
 };
 
+// A caller-owned admission driver on the simulation thread. The platform retains
+// snapshots, scripts, fog and event publication; a driver may hold a due tick.
+struct LiveStepContext {
+    bool advance_allowed{true};
+    std::function<std::uint64_t()> completed_tick;
+    std::function<std::string()> state_hash;
+    std::function<std::vector<std::uint8_t>()> canonical_state;
+    std::function<core::Result<void>(std::span<const sim::tactical::PlayerCommand>)> install;
+    std::function<std::shared_ptr<const sim::tactical::TacticalSnapshot>()> snapshot;
+    std::function<core::Result<void>()> step;
+    std::function<std::vector<sim::tactical::DepartureControl>()> departures{};
+    // Executed input after step(), including engine-side AI and script commands.
+    std::function<core::Result<std::vector<std::uint8_t>>()> canonical_input{};
+    // Agreed pacing changes are applied by the admission driver at their tick.
+    // This changes wall cadence only; the logical step remains 1/30 second.
+    std::function<void(std::uint32_t)> set_target_rate{};
+    // Simulation-owner-only: fresh local content/scripts, no replay presentation events.
+    std::function<core::Result<std::shared_ptr<LiveStepContext>>()> rebuild{};
+    std::function<core::Result<void>()> activate{};
+};
+using LiveStepDriver = std::function<core::Result<bool>(
+    LiveStepContext&, std::span<const sim::tactical::PlayerCommand>, std::uint64_t now_ms)>;
+
 class LiveSession final {
 public:
     // TM-02: target rates clamp to 1..1000 and use whole millisecond intervals.
@@ -183,7 +207,12 @@ public:
     [[nodiscard]] std::optional<bool> reinforcement_point(sim::tactical::PlayerId player,
         sim::tactical::TypeId type, const sim::math::Vec3& point, std::optional<sim::math::Fixed> facing_yaw = {}) const;
     // WHE-40: counts retain the logical purchase identity after deployment.
-    [[nodiscard]] sim::tactical::ProductionCounts production_counts(sim::tactical::PlayerId player,
+    struct ProductionView {
+        sim::tactical::ProductionCounts counts;
+        std::shared_ptr<const sim::tactical::TacticalSnapshot> snapshot;
+    };
+    // Counts and ledger are read under one session lock, at the same completed tick.
+    [[nodiscard]] ProductionView production_view(sim::tactical::PlayerId player,
         sim::tactical::TypeId type) const;
     enum class Pacing : std::uint8_t {
         // The simulation thread keeps one tick due every wall-clock interval of the target rate
@@ -222,11 +251,14 @@ public:
         // Scripts beside the world (#79): the world steps inside their scripted session, whose
         // commands join the replay; the tick hashes stay the world's.
         std::shared_ptr<const LiveScripts> scripts{};
+        LiveStepDriver step_driver{};
         // #494: the player whose fog cells each kept tick carries (fog_at()); none keeps no fog history.
         std::optional<sim::tactical::PlayerId> fog_player{};
         // WBF-05/10: publish tick zero while presentation finishes loading. This
         // gate is installed before the simulation thread starts, avoiding a first-tick race.
         bool initially_paused{};
+        // Development perf trace only: named executor wall times, never canonical state.
+        bool measure_phases{};
     };
 
     // The pool size of the game build: the hardware threads minus the Godot main and render
@@ -242,6 +274,7 @@ public:
     // space-abilities.md AB-50 for the command bar); the snapshots carry each instance's
     // AbilityStatus list.
     // `economy` is the skirmish's economy (#530); without it nothing is bought.
+    // `map_box` is the space map's box, the fighter grids' low corner (WDF-05).
     [[nodiscard]] static core::Result<std::unique_ptr<LiveSession>> start(
         const sim::tactical::TacticalSetup& setup,
         std::span<const sim::tactical::SensorProfile> sensors,
@@ -252,15 +285,21 @@ public:
         const sim::tactical::VictoryRules& victory = sim::tactical::VictoryRules{},
         const std::optional<sim::tactical::FogRules>& fog = std::nullopt,
         const sim::tactical::AbilityTable& abilities = sim::tactical::AbilityTable{},
-        const sim::tactical::EconomyRules& economy = sim::tactical::EconomyRules{});
+        const sim::tactical::EconomyRules& economy = sim::tactical::EconomyRules{},
+        const sim::tactical::MapBox& map_box = sim::tactical::MapBox{});
+    // The same with the content as one value (TacticalSession::create).
+    [[nodiscard]] static core::Result<std::unique_ptr<LiveSession>> start(
+        const sim::tactical::TacticalSetup& setup, const sim::tactical::TacticalContent& content, Options options);
 
     ~LiveSession();
     LiveSession(const LiveSession&) = delete;
     LiveSession& operator=(const LiveSession&) = delete;
 
     // Thread-safe. Queues the order for the simulation thread, which submits it before its
-    // next step. A rejected order is reported by rejected_orders(), not here.
-    void submit(LiveOrder order);
+    // next step. Recovery staging refuses admission immediately; later simulation
+    // refusals are reported by rejected_orders().
+    core::Result<void> submit(LiveOrder order);
+    [[nodiscard]] std::optional<core::Diagnostic> submission_notice() const;
     // Driven pacing: lets the simulation thread step until `tick` has completed.
     void advance_to(std::uint64_t tick);
     // #459 time controls (docs/behaviour/tactical-time-controls.md). Thread-safe; they change
@@ -329,6 +368,9 @@ private:
     const sim::tactical::VictoryRules& victory = sim::tactical::VictoryRules{},
     const std::optional<sim::tactical::FogRules>& fog = std::nullopt,
     const sim::tactical::AbilityTable& abilities = sim::tactical::AbilityTable{},
-    const sim::tactical::EconomyRules& economy = sim::tactical::EconomyRules{});
+    const sim::tactical::EconomyRules& economy = sim::tactical::EconomyRules{},
+    const sim::tactical::MapBox& map_box = sim::tactical::MapBox{});
+[[nodiscard]] core::Result<std::vector<std::string>> headless_tick_hashes(
+    const sim::tactical::TacticalReplay& replay, const sim::tactical::TacticalContent& content);
 
 } // namespace eawr::platform

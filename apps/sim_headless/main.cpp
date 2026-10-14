@@ -1,3 +1,4 @@
+#include "cli_galactic.hpp"
 #include "cli_internal.hpp"
 
 using namespace sim_headless::cli;
@@ -5,7 +6,11 @@ using namespace sim_headless::cli;
 int main(const int argc, const char* const argv[]) {
     if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--help")) {
         print_help(std::cout);
+        print_galactic_help(std::cout);
         return 0;
+    }
+    if (is_galactic_invocation(argc, argv)) {
+        return run_galactic(argc, argv);
     }
     const auto options = parse_options(argc, argv);
     if (!options) {

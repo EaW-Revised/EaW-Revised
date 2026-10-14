@@ -556,6 +556,33 @@ void test_walk_births(){
         "linked birth velocity remains world-oriented and retained segment starts use the current host");
 }
 
+void test_inherited_birth_motion(){
+    // PS-51: delayed initial and inclusive catch-up births can have zero residual age.
+    for(const auto translater:{0U,26U}){
+        auto emitter=base_emitter();emitter.translater_id=translater;
+        emitter.start_delay=1;emitter.spawn_interval=0.25F;emitter.stop_time=0;
+        emitter.lifetime=10;emitter.velocity.point={2,0,0};
+        emitter.inherit_emitter_motion=true;emitter.inherited_velocity_scale=0.5F;
+        auto cpu=system_with(emitter);cpu.set_origin({});cpu.set_origin({10,0,0});
+        expect(cpu.advance(1).spawned==1,"delay equality admits one zero-residual birth");
+        expect(cpu.particles().size()==1,"delayed newborn exists before inspecting total motion");
+        const auto& first=cpu.particles().front();
+        expect(close(first.motion_velocity.x,7)&&close(first.velocity.x,2)&&
+            close(first.position.x,10)&&close(first.previous_position.x,10),
+            "newborn total motion includes scaled inheritance without moving its anchor or intrinsic velocity");
+        cpu.set_origin({20,0,0});
+        expect(cpu.advance(1).spawned==4,"moving catch-up admits four historical births");
+        for(std::size_t i=1;i<cpu.particles().size();++i){
+            const auto& particle=cpu.particles()[i];
+            const float residual=2-particle.spawn_time;
+            const float origin=translater==26?20:10+10*(particle.spawn_time-1);
+            expect(close(particle.position.x,origin+7*residual)&&
+                close(particle.motion_velocity.x,7)&&close(particle.velocity.x,2),
+                "scheduled frame and residual motion include inheritance exactly once, including endpoint birth");
+        }
+    }
+}
+
 void test_mesh_birth_frames(){
     // PS-10/PS-15: every nozzle retains its mesh-bone offset at historical births.
     for(const float scale:{0.25F,0.5F,1.0F}){
@@ -692,6 +719,92 @@ void test_walk_color(){
     }),"colour clamp endpoints stay within the byte range");
 }
 
+void test_mixed_emitter_elapsed_clock(){
+    // PS-15/27/42: a world kite and linked ring on one moving proxy must
+    // consume the same elapsed pose time, including fractions and catch-up.
+    auto kite=base_emitter();kite.translater_id=27;kite.inherit_emitter_motion=true;
+    kite.inherited_velocity_scale=1;kite.spawn_interval=1.0F/33;kite.stop_time=0;
+    kite.lifetime=0.1F;
+    auto ring=kite;ring.translater_id=26;ring.inherit_emitter_motion=false;
+    ring.spawn_interval=1.0F/24;ring.lifetime=0.5F;
+    particles::SystemDefinition definition;definition.emitters={kite,ring};
+    particles::CpuSystem cpu(definition,17,128);
+    cpu.set_origin({100,0,0});
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    // The old render-only following path leaves the world anchor behind.
+    cpu.set_origin({135,0,0});cpu.follow_emitter();
+    expect(cpu.particles().size()==2,"mixed clock fixture has both emitters");
+    expect(close(cpu.particles()[0].position.x,100)&&close(cpu.particles()[1].position.x,135),
+        "render-only follow separates world and linked anchors at a half tick");
+    static_cast<void>(cpu.advance(1.0F/60));
+    float origin=135;
+    for(const float delta:{1.0F/60,1.0F/120,1.0F/40,0.1F}){
+        origin+=2100*delta;cpu.set_origin({origin,0,0});
+        static_cast<void>(cpu.advance(delta));
+        std::size_t worlds{},links{};
+        for(const auto& particle:cpu.particles()){
+            expect(close(particle.position.x,origin,0.001F),
+                "elapsed pose time keeps existing and residual births at a common head");
+            if(particle.emitter_index==0)++worlds;else ++links;
+        }
+        expect(worlds>0&&links>0,"mixed elapsed fixture retains both continuous emitters");
+    }
+    const auto age=cpu.presentation_time();const auto count=cpu.particles().size();
+    static_cast<void>(cpu.advance(0));cpu.follow_emitter();
+    expect(cpu.presentation_time()==age&&cpu.particles().size()==count,
+        "paused mixed emitters neither age nor emit");
+    cpu.detach();static_cast<void>(cpu.advance(0.6F));
+    expect(cpu.particles().empty()&&cpu.finished(),"elapsed mixed effect drains after detach");
+}
+
+void test_cached_color_tracks(){
+    // PS-53: independent byte expectations distinguish both cache truncations
+    // and the i/32 build grid from the age*31 lookup grid.
+    auto emitter=base_emitter();emitter.lifetime=1;emitter.bursting=true;
+    emitter.particles_per_interval=1;emitter.stop_time=1;
+    emitter.red=emitter.alpha={particles::Interpolation::linear,{{0,0},{1,1}}};
+    emitter.green={particles::Interpolation::linear,{{0,1},{1,0}}};
+    emitter.blue={particles::Interpolation::smooth,{{0,0},{1,1}}};
+    const auto sample=[&](const float age){
+        auto cpu=system_with(emitter);
+        static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+        static_cast<void>(cpu.advance(age));
+        expect(cpu.particles().size()==1,"cached colour fixture retains its single birth");
+        return cpu.particles().front().color;
+    };
+    auto color=sample(0.01F);
+    expect(color.x==0&&color.y==1&&color.z==0&&color.w==0,
+        "first cache interval holds the authored starting RGBA bytes");
+    color=sample(0.5F);
+    expect(close(color.x,123.0F/255)&&close(color.y,131.0F/255)&&close(color.w,123.0F/255),
+        "mid-age interpolates already truncated cache bytes then truncates again");
+    color=sample(0.99F);
+    expect(close(color.x,244.0F/255)&&close(color.y,9.0F/255),
+        "late colour approaches the 31/32 cache sample rather than the authored endpoint");
+    color=sample(0.25F);
+    expect(close(color.z,34.0F/255),"legacy smooth colour uses cosine weights before cache truncation");
+    emitter.red={particles::Interpolation::step,{{0,0},{0.5F,1},{1,1}}};
+    color=sample(0.525F);
+    expect(close(color.x,70.0F/255),"cached step colour interpolates across the adjacent byte samples");
+    for(const auto interpolation:{particles::Interpolation::linear,particles::Interpolation::smooth,
+            particles::Interpolation::step}){
+        emitter.alpha={interpolation,{{0,1},{0.37F,1},{1,1}}};
+        for(int age=0;age<1000;++age){
+            expect(sample(static_cast<float>(age)/1000).w==1,
+                "held alpha stays exactly 255 across a non-dyadic interior key at every sampled age");
+        }
+    }
+    emitter.red=constant(128.0F/255);emitter.alpha=constant(0);
+    emitter.color_variance={0.2F,0,0,0.1F};emitter.modifier_ids={53};
+    auto cpu=system_with(emitter,29);
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    expect(cpu.particles().size()==1,"colour variation fixture admits its birth");
+    const auto& particle=cpu.particles().front();
+    expect(close(particle.color.x,(128.0F+particle.color_offset.x)/255)
+        &&close(particle.color.w,std::max(0.0F,particle.color_offset.w)/255),
+        "sampled variation and alpha clamping follow cached byte evaluation");
+}
+
 void test_walk_shapes(){
     constexpr float turn=6.283185307179586F;
     auto emitter=base_emitter();emitter.position.shape=particles::Shape::sphere;
@@ -782,7 +895,7 @@ void test_modifier_families(){
     emitter=base_emitter();emitter.position.point={2,0,0};emitter.modifier_ids={11};emitter.inward_acceleration=-3;emitter.wind_response=0.5F;cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.x,-3),"ordinary attract acceleration modifier");
     emitter=base_emitter();emitter.modifier_ids={54};emitter.wind_response=0.5F;cpu=system_with(emitter);cpu.set_wind({4,0,0});static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.x,2),"wind acceleration modifier");
 
-    emitter=base_emitter();emitter.lifetime=2;emitter.modifier_ids={7,18,49};emitter.size={particles::Interpolation::linear,{{0,2},{1,6}}};emitter.uv_index={particles::Interpolation::step,{{0,0},{0.4F,3},{1,3}}};emitter.texture_size=4;emitter.rotation_rate=constant(2);emitter.red={particles::Interpolation::linear,{{0,0},{1,1}}};cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));const auto& p=cpu.particles().front();expect(close(p.size,4),"linear/keyed size modifier");expect(close(p.texcoords.x,0.5F)&&close(p.texcoords.y,0.5F),"constant/keyed UV modifier");expect(close(p.rotation,0),"two-turn rotation wraps to bin zero");expect(close(p.color.x,127.0F/255),"legacy keyed colour truncates to an integer byte");
+    emitter=base_emitter();emitter.lifetime=2;emitter.modifier_ids={7,18,49};emitter.size={particles::Interpolation::linear,{{0,2},{1,6}}};emitter.uv_index={particles::Interpolation::step,{{0,0},{0.4F,3},{1,3}}};emitter.texture_size=4;emitter.rotation_rate=constant(2);emitter.red={particles::Interpolation::linear,{{0,0},{1,1}}};cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));const auto& p=cpu.particles().front();expect(close(p.size,4),"linear/keyed size modifier");expect(close(p.texcoords.x,0.5F)&&close(p.texcoords.y,0.5F),"constant/keyed UV modifier");expect(close(p.rotation,0),"two-turn rotation wraps to bin zero");expect(close(p.color.x,123.0F/255),"PS-53 legacy keyed colour evaluates the byte cache");
 
     {   // Retail spread: a factor 1 + U(-v, v) around the halved key, so sizes
         // exceed the key; the former (1 + v/2) normalisation never did.
@@ -1518,11 +1631,14 @@ void test_independent_emitter_capacity() {
 int main(const int argc,char** argv){
     test_walk_trails();
     test_walk_births();
+    test_inherited_birth_motion();
     test_mesh_birth_frames();
     test_walk_rotation();
     test_walk_color();
+    test_cached_color_tracks();
     test_walk_shapes();
     test_walk_motion();
+    test_mixed_emitter_elapsed_clock();
     test_independent_emitter_capacity();
     if(argc==3&&std::string(argv[1])=="--inspect-alo"){
         std::ifstream input(argv[2],std::ios::binary);std::vector<char> raw((std::istreambuf_iterator<char>(input)),{});Bytes bytes(raw.size());

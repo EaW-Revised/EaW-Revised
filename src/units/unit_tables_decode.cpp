@@ -154,6 +154,9 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         unit.valid_target = flag(*object, "Is_Valid_Target", false).value_or(true);
         unit.special_weapon = has_behavior(*object, "SPECIAL_WEAPON");
         unit.star_base = has_behavior(*object, "DUMMY_STAR_BASE");
+        unit.unit_ai = has_behavior(*object, "UNIT_AI"); // WTA-29
+        unit.targeting = has_behavior(*object, "TARGETING"); // EX-31
+        unit.consume_after_special_fire = has_behavior(*object, "DUMMY_DESTROY_AFTER_SPECIAL_WEAPON_FIRED");
         // WAD-38: the target marker is content, without a hull or locomotor.
         // Its collision model remains an ordinary projectile recipient.
         if (iequals(unit.id, "Dummy_Barrage_Target") && has_behavior(*object, "MARKER")) {
@@ -205,6 +208,7 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         unit.score_combat_power = object->fixed("AI_Combat_Power", report_, false);
         unit.named_hero = flag(*object, "Is_Named_Hero", false).value_or(false);
         unit.generic_hero = flag(*object, "Is_Generic_Hero", false).value_or(false);
+        unit.special_weapon_in_space = flag(*object, "Is_Special_Weapon_In_Space", false).value_or(false);
         unit.display_contained_hero_bars = flag(*object, "Display_Contained_Hero_Grab_Bars", false).value_or(false);
         unit.redirect_damage_to_teammates = flag(*object, "Redirect_Damage_To_Teammates", false).value_or(false);
         unit.death_projectiles = tokens(object->text("Death_Projectiles"));
@@ -217,6 +221,7 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         unit.tactical_sale = has_behavior(*object, "TACTICAL_SELL");
         if (unit.tactical_sale) unit.tactical_sell_percentage = object->fixed("Tactical_Sell_Percentage", report_, false);
         unit.tactical_respawn_seconds = object->fixed("Tactical_Respawn_Time_In_Secs", report_, false);
+        unit.build_tab_space_units = flag(*object, "Build_Tab_Space_Units", false).value_or(false); // MAT-15
         // WBP-50/51, WAD-14: admission is opt-in on each effective object type.
         unit.living_projectile_collision = flag(*object, "Collidable_By_Projectile_Living", false).value_or(false);
         unit.influences_capture = flag(*object, "Influences_Capture_Point", false).value_or(true);
@@ -247,6 +252,7 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         if (hero_company) load_company(*object, unit);
         if (iequals(unit.xml_type, "UpgradeObject") || has_behavior(*object, "DUMMY_UPGRADE") || hero_company || carried_hero) mask_flags(*object, unit);
         else if (unit.kind == UnitKind::squadron) load_squadron(*object, unit);
+        else if (unit.special_weapon && !unit.star_base) load_planetary_weapon(*object, unit);
         else load_body(*object, unit);
         if (!hero_company) load_abilities(*object, unit);
         load_production(*object, unit);
@@ -260,7 +266,9 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
                     "Tactical_Build_Attachment_Bone_Name");
             }
         }
-        unit.lua_script = object->text("Lua_Script");
+        // SOS-01/19: a squadron creates a runtime team container. Its object
+        // attachment comes from that resolved container, not the purchase type.
+        if (unit.kind != UnitKind::squadron) unit.lua_script = object->text("Lua_Script");
         object->note_duplicates(report_);
         tables_.units.push_back(std::move(unit));
     }
@@ -418,6 +426,13 @@ void Loader::load_projectile(const std::string& id) {
         projectile.max_rate_of_turn = object->fixed("Max_Rate_Of_Turn", report_, false);
         projectile.max_flight_distance = object->fixed("Projectile_Max_Flight_Distance", report_, !spawned_only);
         projectile.category = object->text("Projectile_Category");
+        // WFP-01: REVEAL is an object behaviour, including on a stationary projectile.
+        const auto behaviours = tokens(object->text("Behavior"));
+        if (std::any_of(behaviours.begin(), behaviours.end(), [](const auto& value) { return iequals(value, "REVEAL"); })) {
+            projectile.reveal_range = object->fixed("Space_FOW_Reveal_Range", report_, true);
+            projectile.dense_reveal_multiplier = object->fixed("Dense_FOW_Reveal_Range_Multiplier", report_, false)
+                .value_or(Fixed::from_raw(Fixed::scale / 2));
+        }
         // RFL-01..08: retain authored endpoints; unsupported rocket constructions
         // remain a combat-conversion error, never silently become straight missiles.
         projectile.max_lifetime = object->fixed("Projectile_Max_Lifetime", report_, false);
@@ -435,7 +450,7 @@ void Loader::load_projectile(const std::string& id) {
         projectile.disables_engines_when_power_drained =
             flag(*object, "Projectile_Disables_Engines_When_Power_Drained", false).value_or(false);
         if (projectile.disables_engines_when_power_drained) {
-            projectile.disable_engines_duration = object->fixed("Projectile_Disable_Engines_Duration", report_, true);
+            projectile.disable_engines_duration = object->fixed("Projectile_Disable_Engines_Duration", report_, false);
         }
         projectile.does_hitpoint_damage = flag(*object, "Projectile_Does_Hitpoint_Damage", true).value_or(false);
         projectile.energy_per_shot = object->fixed("Projectile_Energy_Per_Shot", report_, false);

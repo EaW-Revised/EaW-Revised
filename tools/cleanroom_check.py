@@ -38,6 +38,8 @@ ALLOWED_TOKENS = {
     "alDefault", "alMissingShader",
     # Lua receiver types the game's own scripts spell (GameScoring.lua, GalacticFreeStore.lua).
     "GameObjectWrapper", "GameObjectTypeWrapper", "PlayerWrapper",
+    # Engine-created global table that the stock pool reset (pgbase.lua Flush_G) names (L-17).
+    "LuaWrapperMetaTable",
     # XML tag and value names of the FoC data (docs/tag-coverage/statuses.json).
     "MovementClass", "MovementClassType", "UnitCollisionClass",
 }

@@ -1,4 +1,5 @@
 #include "tactical_hud_internal.hpp"
+#include "eawr/presentation/ui/world_encyclopedia.hpp"
 
 namespace eawr::presentation::godot_backend {
 using tactical_hud_detail::text;
@@ -20,6 +21,38 @@ namespace tactical_hud_detail {
 }
 
 } // namespace tactical_hud_detail
+
+void TacticalHud::set_world_hover(const std::optional<std::pair<std::uint64_t, std::string>>& hovered) {
+    State& state = *state_;
+    if (!state.cards) return;
+    if (hovered == state.world_hover && state.ability_hover_type.empty()) return;
+    state.ability_hover_type.clear();
+    state.world_hover = hovered;
+    const bool admitted = hovered && model::world_encyclopedia_admitted(hovered->second, state.objects);
+    state.cards->set_external_hover(admitted ? hovered->first : 0,
+        admitted ? std::optional(state.encyclopedia_type(hovered->second)) : std::nullopt);
+}
+
+void TacticalHud::set_ability_hover(const std::string& type, const std::uint32_t ability,
+                                  const std::size_t component) {
+    State& state = *state_;
+    if (!state.cards) return;
+    if (type == state.ability_hover_type && ability == state.ability_hover_kind
+        && component == state.ability_hover_component) return;
+    state.world_hover.reset();
+    state.ability_hover_type = type;
+    state.ability_hover_kind = ability;
+    state.ability_hover_component = component;
+    auto content = model::ability_card_looks(type, ability, state.objects, state.text_database ? &*state.text_database : nullptr);
+    state.cards->set_external_hover((std::uint64_t{1} << 62U) + component,
+        content.name.empty() ? std::nullopt : std::optional(std::move(content)));
+}
+
+const model::UnitCardLooks& TacticalHud::State::encyclopedia_type(const std::string& type) {
+    if (const auto found = encyclopedia_types.find(type); found != encyclopedia_types.end()) return found->second;
+    return encyclopedia_types.emplace(type, model::unit_card_looks(type, objects,
+        text_database ? &*text_database : nullptr)).first->second;
+}
 
 const std::pair<std::string, String>& TacticalHud::State::card_type(const std::string& type) {
     const auto found = card_types.find(type);

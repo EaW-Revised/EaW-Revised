@@ -28,7 +28,7 @@ render_mode unshaded, fog_disabled, blend_add, depth_draw_never, depth_test_defa
 uniform sampler2D BaseTexture : filter_linear_mipmap, repeat_enable;
 uniform vec3 eawr_color = vec3(1.0);
 uniform vec2 eawr_uv_scroll_rate = vec2(0.0);
-uniform float eawr_time = 0.0;
+uniform float eawr_effect_time = 0.0;
 uniform vec4 eawr_light_scale = vec4(1.0);
 // WR-14/37: object light scale also reaches attached additive model surfaces.
 instance uniform vec3 eawr_unit_light_scale = vec3(1.0);
@@ -43,7 +43,7 @@ vec3 eawr_stored_albedo(vec3 stored_rgb) {
 
 void vertex() {
     // Unwrapped; the sampler's repeat addressing wraps it per sample.
-    eawr_scrolled_uv = UV + eawr_time * eawr_uv_scroll_rate;
+    eawr_scrolled_uv = UV + eawr_effect_time * eawr_uv_scroll_rate;
     eawr_vertex_color = clamp(eawr_color * eawr_light_scale.rgb * eawr_unit_light_scale * eawr_light_scale.a, 0.0, 1.0);
 }
 
@@ -56,10 +56,8 @@ void fragment() {
 
 inline constexpr std::array<float, 4> default_color{1.0F, 1.0F, 1.0F, 0.0F};
 inline constexpr std::array<float, 4> default_uv_scroll_rate{0.0F, 0.0F, 0.0F, 0.0F};
-// legacy-meshadditive-inputs-v1: the renderer has no presentation clock, so
-// TIME is fixed at 0 s and a fixed capture is deterministic. Not the retail
-// clock (gate TIME-01).
-inline constexpr float fixed_time = 0.0F;
+// A-12: the populated scene supplies its held/live effect clock. Standalone
+// uploads without a scene clock retain the zero-time default.
 
 [[nodiscard]] inline std::string_view shader(const RenderPass pass) noexcept {
     return pass == RenderPass::transparent ? shader_source : std::string_view{};
@@ -69,7 +67,7 @@ inline constexpr float fixed_time = 0.0F;
     for (const std::string_view name : {std::string_view("Color"), std::string_view("UVScrollRate")}) {
         if (auto problem = bindings::vector_problem(material, name)) return problem;
     }
-    return std::nullopt;
+    return bindings::scalar_problem(material, "eawr_effect_time");
 }
 
 [[nodiscard]] inline std::vector<Uniform> uniforms(const MaterialDescription& material) {
@@ -78,7 +76,7 @@ inline constexpr float fixed_time = 0.0F;
     return {
         {"eawr_color", std::array<float, 3>{color[0], color[1], color[2]}},
         {"eawr_uv_scroll_rate", std::array<float, 2>{rate[0], rate[1]}},
-        {"eawr_time", fixed_time},
+        {"eawr_effect_time", bindings::scalar_or(material, "eawr_effect_time", 0.0F)},
     };
 }
 

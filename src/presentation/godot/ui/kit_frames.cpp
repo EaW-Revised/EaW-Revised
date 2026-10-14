@@ -17,6 +17,11 @@ void EawrUiFrame::set_small(const bool small) {
     queue_redraw();
 }
 
+void EawrUiFrame::set_rim_only(const bool rim_only) {
+    rim_only_ = rim_only;
+    queue_redraw();
+}
+
 void draw_small_frame(Control& control, const Rect2& rect, const bool background) {
     if (background) draw_piece(control, icon(control, "Small_Frame_Background"), rect);
     const Ref<Texture2D> top_left = icon(control, "Small_Frame_Top_Left");
@@ -46,7 +51,7 @@ void draw_small_frame(Control& control, const Rect2& rect, const bool background
 void EawrUiFrame::_draw() {
     const Rect2 rect(Vector2(), get_size());
     if (small_) {
-        draw_small_frame(*this, rect, true);
+        draw_small_frame(*this, rect, !rim_only_);
         return;
     }
     // The background has its own rim, so it stretches over the rect (tiled, the

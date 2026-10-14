@@ -127,4 +127,9 @@ struct TextCell final {
 [[nodiscard]] TextCell gdi_text_cell(const FontCache& cache, const ResolvedFont& resolved,
                                      std::int32_t glyph_height) noexcept;
 
+// The first baseline, in pixels from the top of the layout, of one line laid
+// out in `cell` and centred in a band of `box_height` starting at `box_top`.
+// This is the rule the kit's text uses; the galactic command bar shares it.
+[[nodiscard]] double centred_cell_baseline(double box_top, double box_height, TextCell cell) noexcept;
+
 } // namespace eawr::presentation::ui

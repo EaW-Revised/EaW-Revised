@@ -73,12 +73,14 @@ void test_reinforce_ship();
 void test_reinforced_carrier();
 void test_arrival_hits();
 void test_arrival_services();
+void test_arrival_widens_drop_area();
 void test_pending_victory_reinforcement();
 [[nodiscard]] tactical::MotionTable arrival_lane_motion();
 void test_arrival_lane_sweep();
 void test_arrival_tracking_frames();
 void test_reinforce_refusals();
 void test_arrival_placement();
+void test_vertical_arrival_blocker();
 
 
 } // namespace economy_test_support

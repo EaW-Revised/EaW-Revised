@@ -51,6 +51,11 @@ The S fight at seed 601 lasts about 4200 ticks (140 s): the fighters are gone by
 - Retail: `Invoke-FocMapCapture.ps1 -MapId coruscant-space -StagingProbe melee -NoFog
   -DebugBuild -DebugCommands FPS` stages size S from the capture mod's scoring script and shows
   the debug build's FPS readout in the stills (original capture).
+  Add `-GcInputRoot <out>/private` (the `private` directory under the `--out` that
+  `tools/performance/melee_staging.py` wrote from a native melee replay; the output root itself
+  is refused) to stage the benchmark's own roster, positions and orders in the retail
+  executable, and `-BattleObserver` to run a bounded timer under the same queue lease
+  ([results](#retail-and-remake-same-host-and-fixture-2026-10-12)).
 - CTest `path_bench_melee_workers`: size S, the first 600 ticks, hash-identical at 1, 2, 4 and 8
   workers (skipped without the game data).
 - Viewer profile: `path_bench --profile-attach <pid of the viewer> --profile-seconds <n>` samples the
@@ -425,14 +430,27 @@ nothing and draws nothing again is left alone. `RegistryWorkCounts` holds the pe
 budget: one step and one stream build per effect and emitter, one upload per drawn stream, no hash
 in the live battle, at most 64 tasks a batch (`test_batch_work_counts`).
 
-**Pool size.** `ParticleWorkers::default_count`: a quarter of the hardware threads, at least 1 (the
-main thread alone) and at most 4, the main thread included (`--eawr-live-particle-workers n` sets
+**Pool size.** `ParticleWorkers::default_count`: a quarter of the hardware threads below eight of
+them (so the main thread alone), half of them from eight up, at least 1 and at most 4, the main
+thread included; hosts under eight threads keep their earlier participant count and were not
+re-measured (`--eawr-live-particle-workers n` sets
 it). The simulation's pool already takes all but two hardware threads
 (`LiveSession::game_worker_count`), so every particle worker shares a core with a simulation worker
-when a frame overlaps a tick. Kept small, it does not slow the tick: the real-time S runs below take
+when a frame overlaps a tick. The 2026-10-14 melee-S worker-count comparison at the same source
+and settings measured 2.621 ms particle time with two workers, 2.302 ms with four, and 2.274 ms
+with eight. Four retains the existing cap while capturing most of that improvement. Three
+paired steady runs with the updated pool and emitter-local stream selections measured particle
+time 2.649 to 2.339 ms and whole-frame time 14.024 to 13.739 ms. Simulation tick time increased
+1.529 to 1.560 ms: the selected policy trades that 0.030 ms (1.97%) tick cost for the frame gain.
+The 0.5 ms steady particle target remains open. An instrumented same-pool comparison found no
+convincing timing gain from stream selections alone; they retain linear candidate work instead
+of scanning the complete system for each emitter.
+
+The historical real-time S runs below take
 2.79 ms a tick with the pool and 2.75 without on the rig, 1.78 and 1.80 on the laptop. A larger pool buys
-nothing: 4 workers on the rig (8 threads, default 2) leave M's busiest frames at 45.3 ms against
-44.0.
+nothing in that older M workload: 4 workers on the rig (8 threads, then default 2) leave its
+busiest frames at 45.3 ms against 44.0. Those measurements predate retained worker upload
+preparation and describe the older pool policy.
 
 The same benchmark as above (1280x720, lit, HUD on, revealed, one tick per frame, the tactical
 camera following both fleets), 2026-09-30, on the integration head with particle worker-pool simulation. *Before* is that
@@ -528,7 +546,9 @@ projectile trails/hits. No simulation or replay pins change.
 The optional trace columns distinguish packing (`particle_conversion_ms`), RenderingServer
 submission (`particle_submission_ms`), submitted drawable streams (`particle_streams`, including
 empty calls), nonempty uploads and surface replacements. Submitted streams exclude nondrawable
-plans and are distinct from all streams built by the registries. Replacements count surface
+plans. Packing time sums per-emitter preparation on all presentation workers after their
+barrier; `particle_ms` separately measures the caller's elapsed particle phase, including its wait.
+Submitted streams are distinct from all streams built by the registries. Replacements count surface
 creation, not internal engine or driver staging allocations. The measurements are one pair,
 not a performance guarantee across fleets or hardware. Ignored receipts:
 `out/perf-particles/latest-performance.json`, `latest-pair-lease.json`, `rebased-performance.json`
@@ -665,6 +685,115 @@ exercises retail below 30 rendered FPS, so retail pacing there and exact staging
 unverified (legacy EAWR-1262). No simulation change follows from this measurement. Ignored receipts:
 `out/perf-particles/retail-pacing.json`, `retail-report.md` and `retail-stills-adopted/` beside it.
 
+## Retail and remake, same host and fixture (2026-10-12)
+
+The remake's melee-S seed 601 was staged in the **retail** executable and measured next to the
+remake on the same host: the rig's GTX 970, 1280x720, vsync off, fog off, one rig-queue pair of
+runs (retail first). Method, aggregates and caveats only; raw captures, stills and host receipts
+stay in ignored `out/`.
+
+**Method**
+
+- *Fixture.* `path_bench --melee s --seed 601` (or the viewer's `--eawr-live-replay-out`) writes the
+  remake's own replay of tick 0: the 22 ships, 20 squadrons with their 103 craft, and 24 attack and
+  attack-move orders. `tools/performance/melee_staging.py` exports it to a private Lua input
+  (`<out>/private`, passed as `-GcInputRoot`) for the capture mod's staging route. Retail spawns each unit at the replay's position, teleports it
+  there, waits for the staged fight to start, then issues the same orders through the public Lua
+  object API.
+- *Retail.* The retail executable (not the debug build), windowed 1280x720, the host's FoC profile
+  at preset `Default_3`, AA 4, vsync off, fog off, AI suspended. The existing identity-gated
+  frame timer and its installed runtime measured two consecutive 15 s arms (loop marker only, then
+  boundary phases) from about +44 s to +74 s of the staged fight. No new dependency. The timer's
+  per-arm checks (thread identity, ordering, no dropped records) passed and all its hooks were
+  restored. Every retail figure below is what
+  `python tools/performance/melee_parity_analyze.py retail <capture dir>` prints for that
+  capture (its `phases` field for the phase arm), rounded to the digits shown.
+- *Remake.* The viewer built from this branch's base (main at 4fa32947 plus these tools; the
+  simulation, skirmish and combat code has not changed on main since), one tick per frame
+  (`--eawr-live-step 1`), the default 6 simulation workers, HUD and audio off, the fleet follow
+  camera (as [above](#viewer)), 2400 ticks, the viewer's retail render profile (no AA) at its lit
+  look. Every remake figure is what
+  `python tools/performance/melee_parity_analyze.py viewer <perf trace csv>` prints for the
+  tick window named in its row, rounded to the digits shown.
+- *Pacing of the measurement.* Retail runs in real time; the remake's frames wait for their tick
+  and run as fast as they can, so it simulates 3 to 4 times faster than real time here.
+
+**What retail did**
+
+| Retail, GTX 970, fight about +44 to +74 s | Mean / p50 / p95 / p99 ms | Rate |
+|---|---:|---:|
+| Render entry to render entry (rendered frames) | 4.90 / 4.00 / 10.83 / 13.66 | 204.3 frames/s |
+| Present accounting (second arm, same frames) | 4.90 / 4.37 / 10.63 / 12.86 | 204.2 frames/s |
+| Loop iteration (first arm; includes unrendered iterations) | 4.75 / 4.17 / 9.56 / 10.96 | 210.3 /s |
+| Logical advance | 33.81 / 33.90 / 35.06 / 36.08 (max 36.8) | 29.58 updates/s |
+
+445 consecutive logical advances (no skipped or doubled frame) in 15.1 s. Phase arm (the
+analysis tool's `phases` field), per logical frame: the simulation block (advance wait to
+end-of-frame check, the sum of its phases' means) costs 3.82 ms (object-manager sync 3.22, the
+rest 0.6), and per rendered frame the render and UI block costs 3.64 ms and the particle and
+scene block 0.18 ms.
+
+**What the remake did on the same host**
+
+| Remake, GTX 970, tick window | Frame ms mean / p50 / p95 / p99 | Tick ms (mean) | Render CPU / GPU ms | Units alive (first to last) |
+|---|---|---:|---|---|
+| 1 to 300 (first contact) | 13.1 / 11.7 / 29.2 / 50.6 | 3.26 | 2.1 / 2.4 | 145 to 120 |
+| 1320 to 1770 | 8.86 / 8.53 / 9.50 / 19.9 | 1.95 | 1.5 / 1.9 | 65 to 57 |
+| 1770 to 2220 | 8.38 / 8.11 / 10.31 / 11.1 | 1.86 | 1.6 / 1.8 | 57 to 53 |
+| 1 to 2400 (whole run) | 9.78 / 8.80 / 12.77 / 31.98 (worst 128.79) | 2.27 | 1.7 / 2.0 | 145 to 48 |
+
+The mean frame breaks down (the tool's 1320 to 2220 window, 8.62 ms) into the engine's own render, present and process
+time outside the viewer's script 2.7 ms and the viewer's main thread 5.9 ms, of which the particle
+systems take 2.5 ms (effects 1.0, emitters 1.0, death debris 0.6) and the wait for the tick 2.0 ms
+(live-session frame total 2.6 ms). The GPU takes 1.85 ms of a frame.
+
+**Comparison (observed unless marked)**
+
+- **Simulation pacing, observed:** retail holds 29.6 logical updates a second with no skipped frame
+  while rendering 204 frames a second. This sample renders far above 30, so it says nothing
+  about retail below 30 rendered frames a second; the debug-build stills
+  ([above](#foc-baseline-the-debug-build-1280x720)) remain the only data there and cannot be
+  transferred to retail. Reaching that regime needs a deliberate load or setting change on the
+  host and is left for an owner decision. **Unobserved.**
+- **Frame time, observed:** the remake's frame is 1.7 to 1.9 times retail's (8.4 to 8.9 ms against
+  4.5 to 4.9 ms mean; about 115 against about 204 frames a second). Both are far above the 30 Hz
+  tick rate. The remake figure includes about 2.0 ms waiting for the tick; in real-time play the
+  simulation runs ahead on its own thread, so the frame would be near 6.7 ms (about 150 frames a
+  second): **inferred, not measured.** The remake's first-contact frames are 13.1 ms mean (p99 50.6) over ticks 1 to 300 and 11.9 ms
+  (p99 34.1) over ticks 300 to 600; retail was not sampled that early.
+- **Simulation cost, observed:** the remake's tick is cheaper than retail's logical frame on this
+  host (1.9 ms mean at ticks 1320 to 2220 on 6 workers against retail's 3.8 ms simulation block),
+  but the placement, unit counts and fight state at the sampled moments are not identical
+  (below), so this is a same-host observation, not an isolated engine comparison.
+- **Top remake frame costs**, from the viewer's own trace columns: the main thread's particle
+  systems 2.5 ms (29 % of the frame; retail's whole particle-and-scene phase is 0.18 ms per
+  rendered frame, with its draw work inside the 3.64 ms render and UI block), the engine render
+  and present outside the script 2.7 ms against a GPU time of 1.85 ms, and the wait for the tick
+  2.0 ms (measurement pacing). The particle cost is the open item of the particle follow-up
+  (legacy EAWR-1261).
+
+**Disclosures**
+
+- *Identity.* Retail here is the retail executable (the image the 2026-10-04 timer run used); the
+  older stills are the debug build. The two retail runs on this rig (10-04 and this one) agree on
+  the shape: 29.2 and 29.6 logical updates a second, 199 and 204 rendered frames a second.
+- *Staging differences.* Retail places units by spawn and teleport with the engine's collision-free
+  adjustment (the staging line recorded a worst deviation of 290 units from the replay's
+  positions) and does not apply the replay's rotations or per-craft formation; the remake starts
+  from the exact replay state. Retail's orders are issued by script after the fleets settle; the
+  remake's are tick-0 commands. The sampled moments therefore differ: retail's second arm ends at
+  +74 s of the fight with 5 ships and 5 squadrons left on the Rebel side and 5 and 6 on the
+  Empire side; the remake's unit count (which includes craft) is 53 at tick 2220. Fight
+  progression parity is **unverified**.
+- *Environment and settings.* Retail had the HUD, AA 4 and its own lighting; the remake's HUD was
+  off, with no AA and the lit look. Cameras differ (retail centred on the map origin; the remake
+  follows both fleets).
+- *Single sample.* One pair of runs: two 15 s retail arms, 2400 remake frames. No variance across
+  runs is claimed.
+- *First retail attempt.* A first attempt ended in capture state `attached` rather than
+  `measured` (the end-of-run thread check failed for a run-script reason), so the analysis tool
+  refuses it and none of its numbers are used here. The second attempt passed all checks.
+
 ## Ranked fixes
 
 Expected gains are estimates from the profiles' shares, not measured; every fix keeps the state
@@ -684,10 +813,53 @@ hashes (each is a faster way to the same result, or work moved off the critical 
 
 - The retail S melee is decided faster and more one-sidedly than the remake's (above). **Unverified**
   as a sim difference: the staging's placement and FoC's own targeting after the orders differ.
-  Retail frame times and staging parity remain a separate baseline follow-up (legacy EAWR-1262).
+  A same-host retail run [now exists](#retail-and-remake-same-host-and-fixture-2026-10-12);
+  its fight progression against the remake's remains unverified.
 - FoC lowers its logical frame rate with the rendered one when it cannot render 30 frames a second
   (the debug build's readout on the rig: LFPS equal to RFPS below 30), so its battle slows down
   instead of skipping frames. The remake runs the simulation on its own thread at 30 Hz whatever
   the frame rate. Whether retail does the same as the debug build is **unverified**; the retail
-  pacing baseline follow-up tracks that question (legacy EAWR-1262).
+  pacing baseline follow-up tracks that question (legacy EAWR-1262): the same-host run
+  [above](#retail-and-remake-same-host-and-fixture-2026-10-12) kept 29.6 Hz at 204 rendered
+  frames a second and never reached the regime below 30.
 - The viewer reuses same-size particle surfaces ([measurements](#particle-surface-reuse-2026-10-04)); emitter bone placement, projectile stream preparation and death-clone proxy posing retain serial work. Remaining preparation cost stays on the performance follow-up (legacy EAWR-1261).
+
+
+### Particle registry fine timings (legacy EAWR-3193)
+
+`--eawr-particle-stream-reference` (developer switch, same trace) turns the per-emitter
+particle buckets off so each stream build scans every particle of its instance, the pre-bucketing
+reference; the streams are equal either way and only the work counts differ.
+
+Add `--eawr-particle-fine-timings` to `--eawr-perf-trace` to record costs
+for each owner (`emitter`, `effects`, `debris`):
+`spawn_cpu_ms` (CPU planning, instance and stream allocation),
+`spawn_backend_ms` (ordered backend resource creation), `scalar_step_ms` and
+`scalar_build_ms` (including historical scalar catch-up), `batch_step_cpu_ms` and
+`batch_build_cpu_ms` (sums across worker slots), `executor_ms` (caller elapsed),
+`executor_wait_dispatch_ms` (executor elapsed less tasks executed by the caller),
+and `commit_ms` (ordered uploads and visibility).
+Wait/dispatch includes queue and barrier overhead; it is not an exclusive OS wait
+counter. Worker CPU sums overlap executor elapsed and cannot be added to it or to
+owner elapsed. Owner elapsed also includes preparation and lifecycle bookkeeping.
+Without the fine-timing flag, these counters stay zero and do not read the clock,
+even when coarse frame/particle CSV tracing is enabled.
+
+
+### Debris backend prewarm (legacy EAWR-3193)
+
+Scene population follows the ready props' authored attached-fire and explosion
+references and warms their particle backend textures and shader programs. At most
+32 hidden emitters retain at most 8 MiB of estimated unique texture storage; their
+meshes have no surfaces and their instances are detached from the scenario, so
+geometry payload and scene participation are zero. Runtime instances keep their
+usual creation order, seed, clock and lifetime. Refused or oversized plans use the
+ordinary creation path. Scene release frees the warm holds.
+
+The breakoff report includes `prewarm_ms`, `warm_emitters`, `warm_texture_bytes`
+and `backend_live_rids`. Texture charges enter the process-wide GPU ledger and
+texture budget on actual RID allocation and leave on its final release. Warm and
+runtime references to one backend texture are charged once. Device counters include
+driver shader/material overhead beyond the reported texture estimate. Compare
+battle-ready time and sampled device peak as well as the tick-412 particle spike;
+prewarm moves cold creation into loading, it does not eliminate that work.

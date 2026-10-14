@@ -1,10 +1,12 @@
 #include "frame_timer.hpp"
 #include "startup_trace.hpp"
+#include "gpu_memory_trace.hpp"
 #include "battle_content.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
 #include "eawr/presentation/camera/overview.hpp"
 #include "render_profile_viewport.hpp"
+#include "settings_store.hpp"
 #include "viewer_path.hpp"
 #include "eawr/presentation/particles/map_attachment_owner.hpp"
 
@@ -19,7 +21,7 @@
 namespace eawr::presentation::godot_backend {
 
 bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
-    const assets::ObjectTypeCatalog& catalog, const std::string& catalog_failure) {
+    const assets::ObjectTypeCatalog& placement_catalog, const std::string& catalog_failure) {
     State& state = *this;
 
         if (state.effect_animation_idle()) {
@@ -57,8 +59,8 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 return state.fail_ready("--eawr-populate takes no --eawr-space-control");
             }
             std::string environment_failure;
-            const auto environment = SpacePopulation::environment(map, state.environment_choice, environment_failure);
-            if (!environment) return state.fail_ready(environment_failure);
+            const auto space_lighting = SpacePopulation::environment(map, state.environment_choice, environment_failure);
+            if (!space_lighting) return state.fail_ready(environment_failure);
             if (!state.space_hardpoint_states.empty() && !state.space_place_object) {
                 return state.fail_ready("--eawr-space-hardpoint-state requires --eawr-space-place-object");
             }
@@ -76,6 +78,9 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 if (!state.catalog) return state.fail_ready("--eawr-live-session requires the XML catalog, which did not load");
                 state.live_options.real_time = state.options.interactive;
                 state.live_options.warmup_frames = state.options.warmup_frames;
+                // #1923: the loading screen covers the preparation below (BLD-10); the map is read.
+                state.open_loading_screen(host, map);
+                state.load_report(presentation::ui::load_stage_map, 1, 1);
                 if (state.live_options.audio_pace && !state.live_options.real_time) {
                     // #474: see the Options::audio_pace comment (live_session_view.hpp). A frame at
                     // this rate covers exactly one tick's worth of real time, so BattleAudio's
@@ -90,9 +95,19 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 if (!state.live_session->prepare(*state.filesystem, *state.catalog, state.options.map_path, live_failure)) {
                     return state.fail_ready(live_failure);
                 }
-                if (!space_camera_source && state.live_session->start_data()) {
-                    auto config = eawr::viewer::skirmish_camera_config(
-                        map, *state.live_session->start_data(), state.live_session->local_player());
+                state.load_report(presentation::ui::load_stage_session, 1, 1);
+                if (state.options.attract) {
+                    // MAT-10: the map's saved camera, locked; a map without one keeps the default view.
+                    state.attract_camera = skirmish::attract_camera(map);
+                    if (state.attract_camera) state.attract_motion.emplace(*state.attract_camera);
+                } else if (!space_camera_source && state.live_session->start_data()) {
+                    const auto& camera_setup = state.live_options.borrowed_battle
+                        ? state.live_options.borrowed_battle->replay.setup : state.live_session->start_data()->setup;
+                    const bool native_camera = state.live_options.borrowed_battle || camera_setup.native_scene.has_value();
+                    auto config = native_camera
+                        ? eawr::viewer::campaign_camera_config(map, camera_setup, state.live_session->local_player())
+                        : eawr::viewer::skirmish_camera_config(
+                            map, *state.live_session->start_data(), state.live_session->local_player());
                     if (!config) return state.fail_ready(core::format_diagnostic(config.error()));
                     space_camera_source = state.load_map_camera(camera::Mode::space, live_failure, &config.value());
                     if (!space_camera_source) return state.fail_ready(live_failure);
@@ -108,6 +123,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 if (auto detail = state.debris_props->set_particle_detail(state.live_options.particle_detail); !detail)
                     return state.fail_ready(core::format_diagnostic(detail.error()));
                 state.live_session->attach_debris(*state.debris_props);
+                state.load_report(presentation::ui::load_stage_effects, 1, 5);
                 // #456: so do the model projectiles' slots.
                 state.battle_effects = std::make_unique<BattleEffects>(host, *state.filesystem, *state.catalog);
                 state.battle_effects->set_workers(state.particle_workers.get());
@@ -116,11 +132,17 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 state.battle_effects->collect_axis_diagnostics(!state.options.report_path.empty());
                 state.battle_effects->prepare(*state.live_session->tables(), *state.live_session->combat());
                 state.live_session->attach_projectile_models(*state.battle_effects);
+                state.load_report(presentation::ui::load_stage_effects, 2, 5);
                 state.space_place_at = state.live_session->placed_ships();
                 session_records = state.live_session->session_records();
-                state.battle = std::make_unique<BattleInput>(host);
-                state.battle->prepare(*state.filesystem, *state.catalog, *state.live_session);
-                state.battle->set_move_feedback([&state](const sim::math::Vec3& point,
+                // MAT-10, WGUI-76: a demo battle takes no selection or orders, so it has no battle input.
+                if (!state.options.attract) {
+                    state.battle = std::make_unique<BattleInput>(host);
+                    state.battle->prepare(*state.filesystem, *state.catalog, *state.live_session,
+                                          state.options.shaders);
+                }
+                state.load_report(presentation::ui::load_stage_effects, 3, 5);
+                if (state.battle) state.battle->set_move_feedback([&state](const sim::math::Vec3& point,
                     const ui::OrderMode mode, const bool double_click, const std::uint64_t tick) {
                     if (state.battle_effects) state.battle_effects->move_feedback(point, mode, double_click, tick);
                     if (state.hud && state.hud->minimap()) {
@@ -136,21 +158,38 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 // #494: the local player's fog of war in the world.
                 state.live_fog = std::make_unique<LiveFogView>(host);
                 state.live_fog->prepare(*state.filesystem, state.live_options.reveal, state.live_options.deploy_overlay);
+                state.load_report(presentation::ui::load_stage_effects, 4, 5);
                 // #76: the command bar's ability buttons read and switch the simulated abilities;
                 // --eawr-live-ability-demo keeps the stand-in's staged states to look at.
-                if (!state.live_session->options().ability_demo) {
+                if (state.battle && !state.live_session->options().ability_demo) {
                     state.battle->set_abilities(&state.live_session->abilities(), &state.live_session->abilities());
                 }
                 // #84: sound by default in the interactive view, muted in a capture run.
-                const bool audible = state.audio_argument.empty() ? state.options.interactive : state.audio_argument == "on";
-                state.battle_audio = std::make_unique<BattleAudio>(host, *state.filesystem, *state.catalog,
-                                                                   BattleAudio::Options{.muted = !audible});
+                // MAT-18: a demo battle starts no 3D sound event, queues no speech, announcement or
+                // GUI event and starts no tactical music, and mutes no bus; the menu's music and UI
+                // sounds, which are the front end's, are not touched.
+                const bool audible = state.audio_argument.empty() ? state.options.interactive
+                                                                  : state.audio_argument == "on";
+                // #2927: the saved volumes, when a player's view has them; FoC's 0.75 otherwise.
+                BattleAudio::Options audio_options{.muted = !audible && !state.options.attract.has_value(),
+                                                   .attract_silent = state.options.attract.has_value()};
+                if (const auto* saved = ActiveSettings::get()) {
+                    const presentation::ui::SessionValues values = presentation::ui::session_values(*saved);
+                    audio_options.levels.master = values.master_gain;
+                    audio_options.levels.sfx = values.sfx_gain;
+                    audio_options.levels.speech = values.speech_gain;
+                    audio_options.levels.music = values.music_gain;
+                }
+                state.battle_audio = std::make_unique<BattleAudio>(host, state.filesystem, *state.catalog,
+                                                                   audio_options);
                 state.battle_audio->prepare(*state.live_session->tables(), *state.live_session->combat(),
-                                            state.live_session->local_faction());
+                                            state.live_session->local_faction(), state.live_session->audio_preload_types());
+                state.load_report(presentation::ui::load_stage_effects, 5, 5);
                 // #394: the live units' own emitters (engines, destroyed hardpoints' damage), which
                 // the static attached plan cannot run on moving units.
                 if (state.options.map_effects) {
                     state.unit_emitters = std::make_unique<UnitEmitters>(host, *state.filesystem);
+                    state.unit_emitters->collect_axis_diagnostics(!state.options.report_path.empty());
                     state.unit_emitters->set_workers(state.particle_workers.get());
                     if (auto detail = state.unit_emitters->set_particle_detail(state.live_options.particle_detail); !detail)
                         return state.fail_ready(core::format_diagnostic(detail.error()));
@@ -161,10 +200,10 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 .catalog = state.catalog ? &*state.catalog : nullptr,
                 .policy = state.policy,
                 .shadows = state.shadows,
-                .environment = *environment,
+                .environment = *space_lighting,
                 .environment_source = state.environment_choice,
                 .animation_frames = state.options.particle_frames,
-                .live_clock = state.options.interactive,
+                .live_clock = state.options.interactive || (state.live_session != nullptr && !state.options.attract),
                 .idle_offset = state.idle_offset.value_or(0U),
                 .team_colour = [](const scene::Placement& placement) { return placement.team_colour; },
                 .reject_upload_for_test = state.space_populate_reject_upload_test,
@@ -180,6 +219,12 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                           return state.sync_space_attached(*host, population);
                       })
                     : std::function<bool(SpacePopulation&)>{},
+                // BLD-10: the scene stage of the loading screen's bar is the placements composed.
+                .progress = live ? std::function<void(std::size_t, std::size_t)>(
+                                       [&state](const std::size_t done, const std::size_t total) {
+                                           state.load_report(presentation::ui::load_stage_scene, done, total);
+                                       })
+                                 : std::function<void(std::size_t, std::size_t)>{},
             });
         } else if (state.space_place_object || !state.space_hardpoint_states.empty()) {
             return state.fail_ready("--eawr-space-place-object requires --eawr-populate");
@@ -232,6 +277,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
             .clock_hold_ticks = state.options.particle_frames,
             .clock_offset = state.idle_offset.value_or(0U),
             .camera = state.space_camera,
+            .saved_camera = state.attract_camera,
             .control = state.space_control,
             .map_camera = std::move(space_camera_source),
             .camera_selftest = state.map_camera_selftest,
@@ -263,8 +309,8 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                     result.instances = population->instances();
                     result.tick = [population, live_session, map_state](GodotRenderer& renderer, const std::uint32_t sample) {
                         population->trace_frames(map_state->perf_trace.has_value());
-                        if (live_session) population->defer_unit_sample(sample);
-                        else population->pose_units(renderer, sample);
+                        if (!live_session) population->pose_units(renderer, sample);
+                        else if (map_state->options.attract) population->defer_unit_sample(sample);
                     };
                     result.release = [population, live_session, effects, debris, emitters, sound, fog](GodotRenderer& renderer) {
                         if (live_session) live_session->finish();
@@ -285,11 +331,14 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                         if (debris) debris->write_report(output);
                         if (emitters) emitters->write_report(output);
                         startup_trace.write(output);
+                        gpu_memory_trace.write(output);
                         if (map_state->battle && map_state->space) map_state->battle->write_report(output, *map_state->space);
                     };
                     if (live_session) {
+                        if (!map_state->options.attract) result.render_clock = &live_session->render_clock();
                         // The session starts once its units are composed (#80).
                         std::string live_failure;
+                        live_session->trace_frames(map_state->perf_trace.has_value());
                         if (!live_session->start(live_failure)) {
                             population->release(context.renderer);
                             return core::Result<SpacePopulateResult>::failure(
@@ -301,6 +350,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                                        map_state](GodotRenderer& renderer, const double delta,
                                                   const FixedCamera& camera) {
                             live_session->trace_frames(map_state->perf_trace.has_value());
+                            population->trace_frames(map_state->perf_trace.has_value());
                             map_state->fog_ms = 0.0;
                             map_state->audio_ms = 0.0;
                             auto update = live_session->frame(*population, renderer, delta);
@@ -337,6 +387,10 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                             map_state->particle_ms = 0.0;
                             map_state->emitter_frame_ms = map_state->effects_frame_ms = map_state->debris_frame_ms = 0.0;
                             GodotParticleBackend::begin_frame_measurement(map_state->perf_trace.has_value());
+                            const bool fine_particles=map_state->perf_trace.has_value()&&PerfTrace::fine_particle_timings();
+                            if (emitters) emitters->measure_particles(fine_particles);
+                            if (effects) effects->measure_particles(fine_particles);
+                            if (debris) debris->measure_particles(fine_particles);
                             if (emitters) emitters->measure_preparation(map_state->perf_trace.has_value());
                             if (effects) effects->measure_preparation(map_state->perf_trace.has_value());
                             if (!update || update.value().error || !battle.latest) return update;
@@ -350,6 +404,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                             core::load_profile::Scope startup_particles(core::load_profile::Phase::particles);
                             auto particle_start = ParticleClock::now();
                             FrameTimer emitter_timer(map_state->perf_trace ? &map_state->emitter_frame_ms : nullptr);
+                            if (map_state->battle) map_state->battle->follow_waypoint_lighting(renderer);
                             if (emitters) emitters->follow_lighting(renderer);
                             // #394: the units' engine and damage emitters, at the poses just drawn.
                             if (emitters && !emitters->frame(*population, battle.reached,
@@ -445,11 +500,10 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
             .effects = attached_effects ? SpaceEffectsHook{
                 .tick = [&state](const FixedCamera& camera, const std::uint32_t tick) {
                     if (!state.particles || !state.particles->has_work()) return true;
-                    // Sample n is n/30 s. A capture takes one per frame and
-                    // holds after its particle frames; the live view takes
-                    // those its real-time tick is due, not one per rendered
-                    // frame (#186).
-                    const std::uint32_t last = state.options.interactive
+                    // Sample n is n/30 s. Tactical ticks come from FD-74
+                    // admission; standalone captures retain their held sample.
+                    const bool admitted = state.live_session && !state.options.attract;
+                    const std::uint32_t last = state.options.interactive || admitted
                         ? tick : std::min(tick, state.options.particle_frames - 1U);
                     const auto view = particles::camera_frame_from_render(camera.eye, camera.target, camera.up);
                     for (std::uint32_t due = particles::map_owner_samples_due(state.particles->frames(), last);
@@ -470,7 +524,8 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                     if (!state.particles) return;
                     output << "  \"map_particles\": {\"enabled\": true, \"advanced_frames\": "
                         << state.particles->frames() << ", \"clock\": "
-                        << json(state.options.interactive ? "live" : "held") << ", \"attached_records\": "
+                        << json(state.live_session && !state.options.attract ? "admitted"
+                            : state.options.interactive ? "live" : "held") << ", \"attached_records\": "
                         << state.attached_plan.records.size()
                         << ", \"aggregate_capacity\": " << state.attached_plan.aggregate_capacity
                         << ", \"allocated_capacity\": " << state.attached_plan.allocated_capacity
@@ -491,18 +546,36 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 },
             } : SpaceEffectsHook{},
             .write_hud_report = [&state](std::ostream& output) {
+                if (state.loading) output << "  \"loading_screen\": " << state.loading->report_json() << ",\n";
+                else if (!state.loading_failure.empty())
+                    output << "  \"loading_screen\": {\"shown\": false, \"failure\": " << json(state.loading_failure) << "},\n";
                 if (state.hud) output << "  \"hud\": " << state.hud->report_json() << ",\n";
                 output << "  \"perf_overlay\": " << state.perf_report_json() << ",\n";
                 if (state.live_session) output << "  \"overview_ui\": " << state.overview_report_json() << ",\n";
             },
         });
+        if (live) state.load_report(presentation::ui::load_stage_interface, 0, 1);
         if (!state.build_hud(host, map.context_name)) return state.fail_ready(state.failure);
-        const bool ready = state.space->ready(host, map, *state.filesystem, catalog, static_cast<bool>(state.catalog), catalog_failure);
+        if (live) state.load_report(presentation::ui::load_stage_interface, 1, 1);
+        const bool ready = state.space->ready(host, map, *state.filesystem, placement_catalog, static_cast<bool>(state.catalog), catalog_failure);
         if (ready && state.live_session) {
             state.live_session->loading_complete();
             if (state.live_session->phase() == LiveSessionView::Phase::ready && state.battle_audio)
                 state.battle_audio->loading_complete();
+            // BLD-11: the bar is full and Begin shows; a driven run that began itself just clears it.
+            state.load_progress.complete();
+            if (state.loading) {
+                if (state.live_session->phase() == LiveSessionView::Phase::ready) state.loading->show_ready();
+                else state.loading->dismiss();
+            }
             state.sync_battle_hud();
+        } else if (!ready && state.loading) {
+            state.loading->dismiss();
+        }
+        if (!ready && state.failure.empty()) {
+            // The view's own cause (the report carries it too), so the caller can say why.
+            state.failure = state.space->failure();
+            if (!state.failure.empty()) godot::UtilityFunctions::printerr(godot::String::utf8(state.failure.c_str()));
         }
         startup_trace.ready();
         return ready;

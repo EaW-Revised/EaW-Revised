@@ -148,6 +148,35 @@ void test_income() {
     const auto before = ledger(*world, human)->credits;
     step_to(*world, 310);
     expect(ledger(*world, human)->credits == before, "PU-05: no station, no income");
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto economy = rules(); economy.income.front().bonuses.front().hardpoint = 0;
+        tactical::DurabilityProfile station; station.type_id = station_type; station.max_hull = units(1000);
+        station.hardpoints = {{tactical::HardpointRole::other, true, units(50)},
+            {tactical::HardpointRole::other, true, units(500)}};
+        tactical::DurabilityTable health; health.profiles = {station};
+        auto created = tactical::TacticalSession::create(setup(), sensors, health, motion(), std::nullopt, {}, {}, {}, economy);
+        expect(static_cast<bool>(created), "WHD-05: dock income fixture creates"); if (!created) continue;
+        auto& dock = created.value();
+        expect(static_cast<bool>(dock.submit({{2, human, 0}, {human_station}, tactical::DamagePayload{units(50), 0}})),
+            "WHD-05: supply dock loss submits");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        auto previous = ledger(dock, human)->credits;
+        for (unsigned frame = 0; frame < 7; ++frame) {
+            const auto stepped = dock.step(executor);
+            expect(static_cast<bool>(stepped), "WHD-05: dock income tick succeeds"); if (!stepped) break;
+            hashes.push_back(stepped.value().state_sha256);
+            const auto current = ledger(dock, human)->credits;
+            if (frame == 1) expect(current.raw() - previous.raw() == economy.income.front().per_frame.raw()
+                + economy.income.front().bonuses.front().per_frame.raw(), "WHD-05: standing dock adds its bonus");
+            if (frame >= 5) expect(current.raw() - previous.raw() == economy.income.front().per_frame.raw(),
+                "WHD-05: destroyed dock ends only its bonus, base station income continues");
+            previous = current;
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "WHD-05: supply dock hashes equal at 1/2/4/8 workers");
+    }
 }
 
 // PC-02, PU-15, PU-16.

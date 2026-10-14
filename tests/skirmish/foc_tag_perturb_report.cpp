@@ -30,7 +30,10 @@ namespace foc_tag_perturb_test_support {
              << ", \"max_height_delta\": " << json_number(delta.height) << "}";
         first = false;
     }
-    json << "}, \"ticks_run\": " << result.ticks_run << ", \"workers_check\": "
+    json << "}, \"campaigns\": " << result.campaigns_json
+         << ", \"hash_changed\": " << (result.hash_changed ? "true" : "false")
+         << ", \"facts_changed\": " << (result.facts_changed ? "true" : "false")
+         << ", \"ticks_run\": " << result.ticks_run << ", \"workers_check\": "
          << (result.workers_check.empty() ? std::string("null") : json_string(result.workers_check))
          << ", \"seconds\": " << json_number(result.seconds) << "}";
     return json.str();

@@ -186,13 +186,13 @@ void GraphSaver::expand(::std::uint32_t index) {
             add(closure.p, kind_prototype);
             if (!ttistable(&closure.g)) fail("a function environment is not a table");
             reference_of(&closure.g);
-            for (int index = 0; index < closure.nupvalues; ++index) add(closure.upvals[index], kind_upvalue);
+            for (int upvalue_index = 0; upvalue_index < closure.nupvalues; ++upvalue_index) add(closure.upvals[upvalue_index], kind_upvalue);
             return;
         }
         case kind_c_function: {
             const CClosure& closure = static_cast<const Closure*>(entry.object)->c;
             if (functions_.find(closure.f) == nullptr) fail("a C function has no stable name");
-            for (int index = 0; index < closure.nupvalues; ++index) reference_of(&closure.upvalue[index]);
+            for (int upvalue_index = 0; upvalue_index < closure.nupvalues; ++upvalue_index) reference_of(&closure.upvalue[upvalue_index]);
             return;
         }
         case kind_userdata: {
@@ -674,6 +674,106 @@ void GraphValidator::collect_anchored() {
 using namespace persist_internal;
 
 ::std::uint64_t measure_logical_bytes(const Sandbox::Impl& sandbox) { return LogicalSizer(sandbox).run(); }
+
+namespace {
+class OwnershipCensus {
+public:
+    OwnershipCensus(const Sandbox::Impl& sandbox, ::std::uint32_t kind) : sandbox_(sandbox), kind_(kind) {}
+    HandleCensus run() {
+        // Every host alias is interned on entry (also after restoration).
+        // An instance with no such userdata cannot own this kind. This reads
+        // the cache only for an absence proof; its entries are never roots.
+        bool present = false;
+        for (int i = 0; i < sizenode(sandbox_.handles); ++i) {
+            ++out_.entries;
+            const auto* value = gval(gnode(sandbox_.handles, i));
+            if (ttisuserdata(value) && handle_payload(value).kind == kind_) { present = true; break; }
+        }
+        if (!present) return ::std::move(out_);
+        visit(registry(sandbox_.state));
+        add(sandbox_.state, LUA_TTHREAD);
+        while (!pending_.empty()) {
+            const auto [object, type] = pending_.back();
+            pending_.pop_back();
+            expand(object, type);
+        }
+        ::std::sort(out_.handles.begin(), out_.handles.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        out_.handles.erase(::std::unique(out_.handles.begin(), out_.handles.end(),
+            [](const auto& a, const auto& b) { return a.id == b.id; }), out_.handles.end());
+        return ::std::move(out_);
+    }
+private:
+    void add(const void* object, int type) {
+        if (seen_.insert(object).second) {
+            ++out_.objects;
+            pending_.emplace_back(object, type);
+        }
+    }
+    void visit(const TObject* value) {
+        ++out_.edges;
+        if (iscollectable(value)) add(gcvalue(value), ttype(value));
+    }
+    void expand(const void* object, int type) {
+        switch (type) {
+        case LUA_TTABLE: {
+            const auto* table = static_cast<const Table*>(object);
+            // WGA-471: dead anchored containers must not retain their handles.
+            if (table == sandbox_.handles || table == sandbox_.anchors || table == sandbox_.sizes) return;
+            if (table->metatable != hvalue(defaultmeta(sandbox_.state))) add(table->metatable, LUA_TTABLE);
+            for (int i = 0; i < table->sizearray; ++i) {
+                ++out_.entries;
+                if (!ttisnil(&table->array[i])) visit(&table->array[i]);
+            }
+            for (int i = 0; i < sizenode(table); ++i) {
+                ++out_.entries;
+                const Node* node = gnode(table, i);
+                if (ttisnil(gval(node))) continue;
+                visit(gkey(node)); visit(gval(node));
+            }
+            return;
+        }
+        case LUA_TFUNCTION: {
+            const auto* closure = static_cast<const Closure*>(object);
+            if (closure->c.isC) {
+                for (int i = 0; i < closure->c.nupvalues; ++i) visit(&closure->c.upvalue[i]);
+            } else {
+                visit(&closure->l.g);
+                for (int i = 0; i < closure->l.nupvalues; ++i) add(closure->l.upvals[i], upvalue_type);
+            }
+            return;
+        }
+        case LUA_TUSERDATA: {
+            const auto* data = static_cast<const Udata*>(object);
+            if (data->uv.metatable == sandbox_.handle_metatable && data->uv.len == sizeof(HandlePayload)) {
+                const auto* handle = reinterpret_cast<const HandlePayload*>(data + 1);
+                if (handle->kind == kind_) out_.handles.push_back({handle->kind, handle->id});
+            }
+            if (data->uv.metatable != hvalue(defaultmeta(sandbox_.state))) add(data->uv.metatable, LUA_TTABLE);
+            return;
+        }
+        case LUA_TTHREAD: {
+            const auto* thread = static_cast<const lua_State*>(object);
+            visit(gt(thread));
+            for (const TObject* slot = thread->stack; slot < thread->top; ++slot) { ++out_.entries; visit(slot); }
+            return;
+        }
+        case upvalue_type:
+            visit(static_cast<const UpVal*>(object)->v);
+            return;
+        default:
+            return;
+        }
+    }
+    static constexpr int upvalue_type = -1;
+    const Sandbox::Impl& sandbox_;
+    ::std::uint32_t kind_;
+    HandleCensus out_;
+    ::std::unordered_set<const void*> seen_;
+    ::std::vector<::std::pair<const void*, int>> pending_;
+};
+}
+
+HandleCensus Sandbox::handle_census(::std::uint32_t kind) const { return OwnershipCensus(*impl_, kind).run(); }
 
 } // namespace eawr::script::EAWR_SFLUA_NAMESPACE
 

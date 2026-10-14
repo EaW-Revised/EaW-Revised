@@ -6,6 +6,65 @@
 
 namespace unit_tables_test_support {
 
+void foc_space_healing(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    input.types = {"Rebel_Defense_Satellite_Repair", "Empire_Defense_Satellite_Repair", "Corellian_Corvette"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WSH-01: installed repair satellites load"); if (!loaded) return;
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<tactical::PlayerId>{1});
+    auto combat = eawr::units::combat_table(loaded.value());
+    const auto health = eawr::units::durability_table(loaded.value());
+    const auto motion = eawr::units::motion_table(loaded.value());
+    expect(abilities && combat && health && motion, "installed healer profiles bind");
+    if (!abilities || !combat || !health || !motion) return;
+    for (auto& profile : combat.value().profiles) if (!profile.planetary_weapon) profile.weapons.clear();
+    const auto ship = eawr::assets::object_type_crc("Corellian_Corvette");
+    const auto* ship_health = health.value().find(ship);
+    expect(ship_health != nullptr, "installed corvette health profile binds"); if (!ship_health) return;
+    const auto point_to_damage = std::find_if(ship_health->hardpoints.begin(), ship_health->hardpoints.end(),
+        [](const auto& point) { return point.destroyable; });
+    const auto damaged_point = point_to_damage == ship_health->hardpoints.end() ? tactical::hull_target
+        : static_cast<std::uint32_t>(point_to_damage - ship_health->hardpoints.begin());
+    // Damage commands traverse shields first; leave a live, visibly damaged healing pool.
+    const auto maximum = damaged_point == tactical::hull_target ? ship_health->max_hull : point_to_damage->max_health;
+    const auto damage = Fixed::from_raw(ship_health->max_shields.raw() + maximum.raw() / 2);
+    for (const auto* name : {"Rebel_Defense_Satellite_Repair", "Empire_Defense_Satellite_Repair"}) {
+        const auto satellite = eawr::assets::object_type_crc(name);
+        const auto* profile = abilities.value().find(satellite);
+        expect(profile && !profile->special.empty(), "inherited satellite healer binds"); if (!profile || profile->special.empty()) continue;
+        const auto& heal = profile->special.front();
+        expect(heal.kind == tactical::SpecialAbilityKind::force_healing && heal.heal_range == Fixed::from_integer(550).value()
+            && heal.heal_percent == Fixed::from_decimal("0.1").value() && heal.heal_interval_frames == 60
+            && heal.single_target_heal && heal.heal_sfx == "Unit_Force_Healing_Pulse"
+            && heal.heal_particle == "Shield_Sparks_Medium" && heal.heal_target_bones.size() == 3
+            && heal.heal_lightning == "Repair_Facility_Effect", "stock healer cadence, amount, range and presentation data apply");
+        tactical::TacticalSetup setup; setup.seed = 2275;
+        setup.players = {{1, 1, 1, tactical::player_flag_commandable}};
+        setup.units = {{1, satellite, 1, point(0, 0, 0), eawr::sim::math::identity_quat(), {}},
+            {2, ship, 1, point(raw(200), 0, 0), eawr::sim::math::identity_quat(), {}}};
+        auto session = tactical::TacticalSession::create(setup, {}, health.value(), motion.value(), std::nullopt, combat.value(), {}, abilities.value());
+        if (!session) std::cerr << "installed satellite session: " << session.error().message << '\n';
+        expect(static_cast<bool>(session), "installed satellite session creates"); if (!session) continue;
+        expect(static_cast<bool>(session.value().submit({{2, 1, 0}, {2},
+            tactical::DamagePayload{damage, damaged_point}})), "installed ship damage submits");
+        const eawr::platform::ThreadWorkerAdapter executor(2);
+        bool saw_pulse = false; Fixed damaged{};
+        for (unsigned tick = 0; tick < 125; ++tick) {
+            const auto stepped = session.value().step(executor);
+            expect(static_cast<bool>(stepped), "installed healer advances"); if (!stepped) break;
+            if (tick == 2) damaged = tactical::healing_fraction(*ship_health, *session.value().durability_state(2));
+            for (const auto& event : stepped.value().snapshot->combat_events())
+                saw_pulse = saw_pulse || (event.kind == tactical::CombatEventKind::heal_pulse && event.target == 2);
+        }
+        const auto healed = tactical::healing_fraction(*ship_health, *session.value().durability_state(2));
+        expect(damaged.raw() < Fixed::scale && saw_pulse && healed > damaged,
+            "installed damaged corvette near stock repair satellite heals");
+        std::cout << "stock-healing," << name << ',' << saw_pulse << ',' << damaged.raw() << ','
+            << healed.raw() << '\n';
+    }
+}
+
 void foc_active_projectile_defence(eawr::units::LoadInput input) {
     namespace tactical = eawr::sim::tactical;
     using Kind = tactical::AbilityKind;
@@ -37,6 +96,25 @@ void foc_active_projectile_defence(eawr::units::LoadInput input) {
     const auto* jam_abilities = abilities.value().find(jammer);
     if (!shield_abilities || !jam_abilities) { expect(false, "installed defence ability owners bind"); return; }
     const auto shield_slot = tactical::ability_slot(*shield_abilities, Kind::missile_shield);
+    const auto well_slot = tactical::ability_slot(*shield_abilities, Kind::interdict);
+    expect(well_slot && shield_slot, "WIN/WMS: both installed Interdictor abilities bind");
+    if (well_slot && shield_slot) {
+        expect(shield_abilities->abilities[*well_slot].disable_movement
+            && shield_abilities->abilities[*shield_slot].disable_movement,
+            "WIN-01/WMS-01: both deployment locks read Disable_Movement");
+        expect(shield_abilities->abilities[*well_slot].expiration_frames == 0
+            && shield_abilities->abilities[*shield_slot].expiration_frames == 0,
+            "WIN-01/WMS-01: installed deployments have no duration");
+        expect(!shield_abilities->gravity_well_hardpoints.empty(), "WIN-02: installed gravity-well indices bind");
+        expect(eawr::skirmish::roster_ability_reason("Interdictor_Cruiser", "INTERDICT").empty()
+            && eawr::skirmish::roster_ability_reason("Interdictor_Cruiser", "MISSILE_SHIELD").empty(),
+            "RG-03: both Interdictor buttons are admitted");
+        auto unlocked = loaded.value();
+        for (auto& unit : unlocked.units) if (unit.id == "Interdictor_Cruiser")
+            for (auto& ability : unit.abilities) ability.disable_movement = false;
+        expect(eawr::units::content_identity(unlocked) != eawr::units::content_identity(loaded.value()),
+            "WIN/WMS: consumed deployment locks bind multiplayer content identity");
+    }
     const auto jam_slot = tactical::ability_slot(*jam_abilities, Kind::sensor_jamming);
     expect(shield_slot && jam_slot, "WPJ-17/WHE-32: installed shield and jammer are activatable");
     if (!shield_slot || !jam_slot) return;
@@ -53,7 +131,7 @@ void foc_active_projectile_defence(eawr::units::LoadInput input) {
     if (torpedo == bomber->weapons.end()) { expect(false, "installed defence torpedo exists"); return; }
     for (auto& profile : combat.value().profiles) {
         if (profile.type_id == shooter) profile.weapons = {*torpedo};
-        else profile.weapons.clear();
+        else if (!profile.planetary_weapon) profile.weapons.clear();
         if (profile.type_id == shield || profile.type_id == jammer) {
             profile.collision.reset(); profile.meshes.clear(); profile.mesh_bounds.reset();
         }
@@ -136,6 +214,251 @@ void foc_active_projectile_defence(eawr::units::LoadInput input) {
     }
 }
 
+// WST-01 to WST-11: the installed Vengeance's cloak loads with its authored numbers, an installed A-wing
+// (Target_Stealth_Units) detects it inside its reveal range, and the session is equal at 1, 2, 4 and 8 workers.
+void foc_stealth(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    using Kind = tactical::AbilityKind;
+    input.types = {"Vengeance_Frigate", "A-Wing", "Nebulon_B_Frigate"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WST-01: installed stealth types load");
+    if (!loaded) return;
+    const auto combat = eawr::units::combat_table(loaded.value());
+    const auto health = eawr::units::durability_table(loaded.value());
+    const auto movement = eawr::units::motion_table(loaded.value());
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<tactical::PlayerId>{1, 2});
+    expect(combat && health && movement && abilities, "WST-01: installed stealth profiles bind");
+    if (!combat || !health || !movement || !abilities) return;
+    const auto vengeance = eawr::assets::object_type_crc("Vengeance_Frigate");
+    const auto awing = eawr::assets::object_type_crc("A-Wing");
+    const auto frigate = eawr::assets::object_type_crc("Nebulon_B_Frigate");
+    const auto* owner = abilities.value().find(vengeance);
+    const auto slot = owner ? tactical::ability_slot(*owner, Kind::stealth) : std::nullopt;
+    expect(owner && slot, "WST-01: the installed Vengeance has the STEALTH slot");
+    if (!owner || !slot) return;
+    expect(owner->abilities[*slot].expiration_frames == 1800 && owner->abilities[*slot].recharge_frames == 450,
+        "WST-02/03: installed 60 s cloak, 15 s recharge");
+    const auto handler = std::find_if(owner->special.begin(), owner->special.end(), [](const auto& entry) {
+        return entry.kind == tactical::SpecialAbilityKind::stealth;
+    });
+    expect(handler != owner->special.end() && handler->stealth_transition == Fixed::from_raw(Fixed::scale / 2)
+        && handler->stealth_colour == std::array<std::uint8_t, 4>{255, 255, 255, 255},
+        "WST-12: installed transition 0.5 s and white tint are read");
+    const auto* detector = combat.value().find(awing);
+    const auto* cloaked = combat.value().find(vengeance);
+    expect(detector && detector->target_stealth && detector->stealth_detection_range == Fixed::from_raw(raw(600))
+        && cloaked && !cloaked->target_stealth && cloaked->stealth_detection_range.raw() == 0,
+        "WST-07/08: the installed A-wing targets stealth within its 600 reveal range; the Vengeance does not");
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        tactical::TacticalSetup setup;
+        setup.seed = 1887; setup.players = {{1, 1, 1, tactical::player_flag_commandable},
+            {2, 2, 2, tactical::player_flag_commandable}};
+        setup.units = {{1, vengeance, 1, {}, eawr::sim::math::identity_quat(), {}},
+            {2, frigate, 2, point(raw(1500), 0, 0), eawr::sim::math::identity_quat(), {}}};
+        std::vector<tactical::SensorProfile> sensors;
+        for (const auto type : {vengeance, awing, frigate}) sensors.push_back({type, Fixed::from_raw(raw(2000))});
+        std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+        auto created = tactical::TacticalSession::create(setup, sensors, health.value(), movement.value(),
+            std::nullopt, combat.value(), {}, abilities.value());
+        expect(static_cast<bool>(created), "WST: installed stealth session creates");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        expect(static_cast<bool>(session.submit({{40, 1, 0}, {1}, tactical::AbilityPayload{Kind::stealth,
+            tactical::AbilityAction::activate}})), "WST-02: the Vengeance cloaks");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        bool hidden = false, revealed = false;
+        for (std::size_t frame = 0; frame < 400; ++frame) {
+            if (frame == 150) expect(static_cast<bool>(session.stage_spawn({3, awing, 2, point(raw(400), 0, 0),
+                eawr::sim::math::identity_quat(), {}})), "WST-08: an A-wing arrives within 600");
+            const auto step = session.step(executor);
+            expect(static_cast<bool>(step), "WST: installed stealth tick succeeds");
+            if (!step) break;
+            hashes.push_back(step.value().state_sha256);
+            for (const auto& instance : step.value().snapshot->instances()) {
+                if (instance.entity_id != 1) continue;
+                hidden = hidden || (frame < 100 && instance.stealth_invisible);
+                revealed = revealed || (hidden && instance.stealth_on && !instance.stealth_invisible);
+            }
+        }
+        expect(hidden && revealed, "WST-08/09: hidden without a detector, revealed once an A-wing is within 600");
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "WST: installed stealth equal at 1/2/4/8 workers");
+    }
+}
+
+// WLD-01 to WLD-12: the installed Crusader's point defence loads with its authored numbers, and shoots down a
+// bomber's torpedo identically at 1, 2, 4 and 8 workers.
+void foc_laser_defence(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    using Kind = tactical::AbilityKind;
+    input.types = {"Y-Wing", "Nebulon_B_Frigate", "Crusader_Gunship"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WLD-01: installed laser defence types load");
+    if (!loaded) return;
+    auto combat = eawr::units::combat_table(loaded.value());
+    const auto health = eawr::units::durability_table(loaded.value());
+    const auto movement = eawr::units::motion_table(loaded.value());
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<tactical::PlayerId>{1, 2});
+    expect(combat && health && movement && abilities, "WLD-01: installed laser defence profiles bind");
+    if (!combat || !health || !movement || !abilities) return;
+    const auto shooter = eawr::assets::object_type_crc("Y-Wing");
+    const auto victim = eawr::assets::object_type_crc("Nebulon_B_Frigate");
+    const auto crusader = eawr::assets::object_type_crc("Crusader_Gunship");
+    const auto* owner = abilities.value().find(crusader);
+    const auto slot = owner ? tactical::ability_slot(*owner, Kind::laser_defense) : std::nullopt;
+    expect(owner && slot, "WLD-01: the installed Crusader has the LASER_DEFENSE slot");
+    if (!owner || !slot) return;
+    const auto& ability = owner->abilities[*slot];
+    expect(ability.expiration_frames == 1050 && ability.recharge_frames == 1800 && ability.recharge_at_activation,
+        "WLD-02/WLD-06: installed 35 s run, 60 s recharge from the switch-on");
+    const auto handler = std::find_if(owner->special.begin(), owner->special.end(), [](const auto& entry) {
+        return entry.kind == tactical::SpecialAbilityKind::laser_defense;
+    });
+    expect(handler != owner->special.end(), "WLD-01: the installed Crusader has the nested handler");
+    if (handler == owner->special.end()) return;
+    expect(handler->defence_radius == Fixed::from_raw(raw(500)) && handler->defence_min_travel == Fixed::from_raw(raw(100))
+        && handler->defence_look_frames == 15 && handler->defence_duration_frames == 1050
+        && handler->defence_categories == (tactical::defence_category_missile | tactical::defence_category_rocket
+            | tactical::defence_category_mptl_rocket),
+        "WLD-02 to WLD-04/WLD-08: installed reach, minimum flight, look cadence, run and categories apply");
+    expect(!handler->defence_zap_sfx.empty() && !handler->defence_beam_texture.empty() && !handler->defence_bones.empty()
+        && handler->defence_beam_frames > 0, "WLD-12: installed beam texture, bones, frames and zap sound are read");
+    const auto* bomber = combat.value().find(shooter);
+    if (!bomber) { expect(false, "WLD-05: installed bomber profile exists"); return; }
+    const auto torpedo = std::find_if(bomber->weapons.begin(), bomber->weapons.end(), [](const auto& weapon) {
+        return weapon.shot && weapon.shot->homing && weapon.shot->turn_rate.raw() > 0;
+    });
+    if (torpedo == bomber->weapons.end()) { expect(false, "WLD-05: installed torpedo exists"); return; }
+    for (auto& profile : combat.value().profiles) {
+        if (profile.type_id == shooter) profile.weapons = {*torpedo};
+        else if (!profile.planetary_weapon) profile.weapons.clear();
+    }
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        tactical::TacticalSetup setup;
+        setup.seed = 1876; setup.players = {{1, 1, 1, tactical::player_flag_commandable},
+            {2, 2, 2, tactical::player_flag_commandable}};
+        setup.units = {{1, victim, 2, point(raw(900), 0, 0), eawr::sim::math::identity_quat(), {}},
+            {2, crusader, 2, point(raw(450), raw(60), 0), eawr::sim::math::identity_quat(), {}},
+            {3, shooter, 1, {}, eawr::sim::math::identity_quat(), {}}};
+        std::vector<tactical::SensorProfile> sensors;
+        for (const auto type : {shooter, victim, crusader}) sensors.push_back({type, Fixed::from_raw(raw(2000))});
+        std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+        auto created = tactical::TacticalSession::create(setup, sensors, health.value(), movement.value(),
+            std::nullopt, combat.value(), {}, abilities.value());
+        expect(static_cast<bool>(created), "WLD-05: installed laser defence session creates");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        expect(static_cast<bool>(session.submit({{0, 1, 0}, {3}, tactical::AttackPayload{1}})), "WLD-05: the bomber attacks");
+        expect(static_cast<bool>(session.submit({{0, 2, 0}, {2}, tactical::AbilityPayload{Kind::laser_defense,
+            tactical::AbilityAction::activate}})), "WLD-02: the Crusader switches its laser defence on");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        std::size_t fired = 0, zapped = 0;
+        for (std::size_t frame = 0; frame < 300; ++frame) {
+            const auto step = session.step(executor);
+            expect(static_cast<bool>(step), "WLD-05: installed laser defence tick succeeds");
+            if (!step) break;
+            hashes.push_back(step.value().state_sha256);
+            for (const auto& event : step.value().snapshot->combat_events()) {
+                fired += event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 3;
+                zapped += event.kind == tactical::CombatEventKind::point_defence_zap && event.shooter == 2;
+            }
+        }
+        expect(fired > 0 && zapped > 0, "WLD-05: the installed Crusader shoots down the bomber's torpedoes");
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "WLD-12: installed laser defence equal at 1/2/4/8 workers");
+        std::cout << "laser-defence," << workers << ',' << fired << ',' << zapped << '\n';
+    }
+}
+
+// WRB-01 to WRB-06: the installed Underworld carriers load their Redirect_Blaster handlers, and the three
+// armour upgrades enable them per level, for the right types, from the right stations.
+void foc_redirect_blaster(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    input.types = {"Starviper_Fighter", "Crusader_Gunship", "Kedalbe_Battleship", "Y-Wing",
+        "US_Magnetically_Sealed_Armor_L1_Upgrade", "US_Magnetically_Sealed_Armor_L2_Upgrade",
+        "US_Magnetically_Sealed_Armor_L3_Upgrade", "Skirmish_Underworld_Star_Base_5"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WRB-01: installed redirect blaster types load");
+    if (!loaded) return;
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<tactical::PlayerId>{1, 2});
+    auto combat = eawr::units::combat_table(loaded.value());
+    expect(abilities && combat, "WRB-01: installed redirect blaster profiles bind");
+    if (!abilities || !combat) return;
+    const struct { const char* type; std::vector<std::pair<const char*, std::int64_t>> levels; } carriers[]{
+        {"Starviper_Fighter", {{"US_Magnetically_Sealed_Armor_Bonus_L1", 250}, {"US_Magnetically_Sealed_Armor_Bonus_L2", 300},
+                               {"US_Magnetically_Sealed_Armor_Bonus_L3", 300}}},
+        {"Crusader_Gunship", {{"US_Magnetically_Sealed_Armor_Bonus_L2", 300}, {"US_Magnetically_Sealed_Armor_Bonus_L3", 300}}},
+        {"Kedalbe_Battleship", {{"US_Magnetically_Sealed_Armor_Bonus_L3", 300}}},
+    };
+    for (const auto& carrier : carriers) {
+        const auto* profile = abilities.value().find(eawr::assets::object_type_crc(carrier.type));
+        expect(profile != nullptr, std::string("WRB-01: ") + carrier.type + " has an ability profile");
+        if (profile == nullptr) continue;
+        std::vector<const tactical::SpecialAbilityProfile*> handlers;
+        for (const auto& special : profile->special) {
+            if (special.kind == tactical::SpecialAbilityKind::redirect_blaster) handlers.push_back(&special);
+        }
+        expect(handlers.size() == carrier.levels.size(), std::string("WRB-01: ") + carrier.type + " has its authored levels");
+        for (std::size_t index = 0; index < handlers.size() && index < carrier.levels.size(); ++index) {
+            const auto& handler = *handlers[index];
+            const auto permille = carrier.levels[index].second;
+            expect(handler.name == carrier.levels[index].first
+                && std::llabs(handler.block_chance.raw() * 1000 - permille * Fixed::scale) < 1000
+                && handler.redirect_chance.raw() == 0 && handler.reaction_arc == Fixed::from_raw(raw(360))
+                && handler.max_redirect_angle == Fixed::from_raw(raw(30)) && handler.initially_enabled == std::optional<bool>(false)
+                && !handler.turn_to_face_unblockable && handler.filter.applicable_categories != 0
+                && !handler.redirect_activate_sfx.empty(), std::string("WRB-04: ") + carrier.type + " level "
+                + std::to_string(index + 1) + " applies its authored numbers");
+        }
+    }
+    // WRB-06: a laser-like shot of the Y-Wing is deflectable, its torpedo is not.
+    const auto* bomber = combat.value().find(eawr::assets::object_type_crc("Y-Wing"));
+    expect(bomber != nullptr, "WRB-06: the Y-Wing has a combat profile");
+    if (bomber != nullptr) {
+        bool blockable = false, refused = false;
+        for (const auto& weapon : bomber->weapons) {
+            if (!weapon.shot) continue;
+            (weapon.shot->redirect_blockable ? blockable : refused) = true;
+            if (weapon.shot->homing) expect(!weapon.shot->redirect_blockable, "WRB-06: a homing torpedo is never deflected");
+        }
+        expect(blockable && refused, "WRB-06: the Y-Wing has both a deflectable laser and a refused torpedo");
+    }
+    // WRB-05: the upgrade objects' Enable_Ability rows, and their place in the Underworld menus.
+    auto rules = eawr::skirmish::economy_rules({}, {}, loaded.value());
+    expect(static_cast<bool>(rules), "WRB-05: installed upgrade rules build");
+    if (!rules) return;
+    const struct { const char* upgrade; const char* ability; std::vector<const char*> types; } upgrades[]{
+        {"US_Magnetically_Sealed_Armor_L1_Upgrade", "us_magnetically_sealed_armor_bonus_l1", {"Starviper_Fighter"}},
+        {"US_Magnetically_Sealed_Armor_L2_Upgrade", "us_magnetically_sealed_armor_bonus_l2", {"Starviper_Fighter", "Crusader_Gunship"}},
+        {"US_Magnetically_Sealed_Armor_L3_Upgrade", "us_magnetically_sealed_armor_bonus_l3",
+            {"Starviper_Fighter", "Crusader_Gunship", "Kedalbe_Battleship"}},
+    };
+    const auto faction = eawr::skirmish::faction_id("Underworld");
+    const auto* menu = rules.value().menu(eawr::skirmish::type_id("Skirmish_Underworld_Star_Base_5"), faction);
+    for (const auto& entry : upgrades) {
+        const auto type = eawr::skirmish::type_id(entry.upgrade);
+        const auto* profile = rules.value().upgrade(type);
+        expect(profile != nullptr && profile->ability_enables.size() == 1, std::string("WRB-05: ") + entry.upgrade + " has its Enable_Ability");
+        if (profile == nullptr || profile->ability_enables.size() != 1) continue;
+        const auto& rule = profile->ability_enables.front();
+        std::vector<tactical::TypeId> expected;
+        for (const auto* name : entry.types) expected.push_back(eawr::assets::object_type_crc(name));
+        std::sort(expected.begin(), expected.end());
+        expect(rule.ability_name == entry.ability && rule.applicable == expected && rule.all_allies,
+            std::string("WRB-05: ") + entry.upgrade + " names its level's handler for its types, for all allies");
+        const auto* option = menu != nullptr ? menu->find(type) : nullptr;
+        expect(option != nullptr && option->available && option->kind == tactical::BuildKind::upgrade,
+            std::string("WRB-05: ") + entry.upgrade + " is purchasable at a level-5 Underworld station");
+    }
+}
+
 // WPJ-17: the installed sensor satellite is a real always-on missile-shield source.
 void foc_passive_projectile_defence(eawr::units::LoadInput input) {
     namespace tactical = eawr::sim::tactical;
@@ -169,7 +492,7 @@ void foc_passive_projectile_defence(eawr::units::LoadInput input) {
             auto table = combat.value();
             for (auto& profile : table.profiles) {
                 if (profile.type_id == shooter) profile.weapons = {*torpedo};
-                else profile.weapons.clear();
+                else if (!profile.planetary_weapon) profile.weapons.clear();
                 if (!defended) profile.passive_missile_shield_radius = {};
             }
             tactical::TacticalSetup setup;
@@ -256,10 +579,12 @@ void foc_bomber_torpedo_volley(eawr::units::LoadInput input) {
             && weapon->min_recharge_hundredths == 800 && weapon->max_recharge_hundredths == 800
             && weapon->shot && weapon->shot->homing && weapon->fire_a == weapon->fire_b,
             "WWP-31/33: two same-muzzle torpedoes, four-frame gap, eight-second recharge");
+        // R-01: the stock cutoff is 3.0 s; the eight-second torpedo is above it.
+        expect(!weapon->ai_opportunity_forced, "R-01: a slow torpedo hardpoint is not forced for an AI owner");
         auto isolated = combat.value();
         for (auto& row : isolated.profiles) {
             if (row.type_id == shooter) row.weapons = {*weapon};
-            else row.weapons.clear();
+            else if (!row.planetary_weapon) row.weapons.clear();
         }
         std::vector<std::string> reference;
         for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
@@ -334,7 +659,7 @@ void foc_diamond_boron_cluster(eawr::units::LoadInput input) {
         for (const bool blast : {false, true}) {
             auto isolated = combat.value();
             for (auto& unit : isolated.profiles) {
-                if (unit.type_id != shooter) unit.weapons.clear();
+                if (unit.type_id != shooter && !unit.planetary_weapon) unit.weapons.clear();
                 else if (!blast) for (auto& weapon : unit.weapons) {
                     if (weapon.shot) weapon.shot->blast.damage = Fixed{};
                 }
@@ -413,7 +738,7 @@ void foc_barrage_buttons(eawr::units::LoadInput input) {
             && ability.fixed_inaccuracy == Fixed::from_raw(raw(320))
             && ability.target_z_offset == Fixed::from_raw(raw(-150)), "WAD-38: stock timers and modifiers are complete");
         auto combat = content.value().combat;
-        for (auto& row : combat.profiles) if (row.type_id != shooter) row.weapons.clear();
+        for (auto& row : combat.profiles) if (row.type_id != shooter && !row.planetary_weapon) row.weapons.clear();
         std::vector<std::string> reference;
         for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
             tactical::TacticalSetup setup;
@@ -595,7 +920,7 @@ void foc_resource_container(eawr::units::LoadInput input) {
             "WNO-30/32: installed detonation retains typed damage/radius/immunity/delay");
     }
     auto death_combat = combat.value();
-    for (auto& profile : death_combat.profiles) profile.weapons.clear();
+    for (auto& profile : death_combat.profiles) if (!profile.planetary_weapon) profile.weapons.clear();
     tactical::TacticalSetup death_setup;
     death_setup.seed = 1774;
     death_setup.players = {{1, 1, eawr::assets::object_type_crc("Empire"), tactical::player_flag_commandable},
@@ -746,6 +1071,132 @@ void foc_resource_container(eawr::units::LoadInput input) {
     }
 }
 
+// #1873, WNO-09/10: automatic fire never picks the NotOpportunityTarget container through a
+// priority set. Every stock shooter with a set idles, guards and attack-moves next to one without
+// firing; a parent without a set (R-09) fires at it; an explicit attack still destroys it.
+void foc_container_not_opportunity(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    const std::vector<std::string> shooters{"TIE_Fighter_Squadron", "TIE_Bomber_Squadron", "TIE_Interceptor_Squadron",
+        "Tartan_Patrol_Cruiser", "Acclamator_Assault_Ship", "Victory_Destroyer", "Broadside_Class_Cruiser", "Star_Destroyer",
+        "Rebel_X-Wing_Squadron", "Y-Wing_Squadron", "Corellian_Corvette", "Nebulon_B_Frigate", "Calamari_Cruiser",
+        "StarViper_Squadron", "Crusader_Gunship", "Interceptor4_Frigate", "Vengeance_Frigate", "IG-2000", "Slave_I",
+        "Skirmish_Empire_Star_Base_1", "Skirmish_Rebel_Star_Base_1", "Skirmish_Underworld_Star_Base_1",
+        "Empire_Defense_Satellite_Missile"};
+    input.types = shooters;
+    input.obstacles = {"Orbital_Resource_Container"};
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "#1873: shooter and container tables load");
+    if (!loaded) return;
+    const auto combat = eawr::units::combat_table(loaded.value());
+    const auto durability = eawr::units::durability_table(loaded.value());
+    const auto motion = eawr::units::motion_table(loaded.value());
+    expect(combat && durability && motion, "#1873: shooter and container tables bind");
+    if (!combat || !durability || !motion) return;
+    const auto target = eawr::assets::object_type_crc("Orbital_Resource_Container");
+    const std::set<std::string> explicit_kills{"TIE_Fighter_Squadron", "Tartan_Patrol_Cruiser", "Corellian_Corvette",
+        "Rebel_X-Wing_Squadron", "Crusader_Gunship", "StarViper_Squadron"};
+    // R-09 (AU-06..09): these parents author no priority set, so every candidate scores 1.0 and
+    // the container is an ordinary automatic target for them, as in FoC (owner's Slave I report).
+    const std::set<std::string> setless_fire{"Slave_I", "IG-2000", "Skirmish_Empire_Star_Base_1",
+        "Empire_Defense_Satellite_Missile"};
+    enum class Order { idle, guard, attack_move, attack };
+    for (const auto& name : shooters) {
+        const auto* team = loaded.value().find(name);
+        expect(team != nullptr, "#1873: the shooter type loads: " + name);
+        if (team == nullptr) continue;
+        const auto shooter = eawr::assets::object_type_crc(name);
+        for (const auto order : {Order::idle, Order::guard, Order::attack_move, Order::attack}) {
+            const char* order_name = order == Order::idle ? "idle" : order == Order::guard ? "guard"
+                : order == Order::attack_move ? "attack-move" : "attack";
+            tactical::TacticalSetup setup;
+            setup.seed = 1873;
+            setup.players = {{1, 1, eawr::assets::object_type_crc("Empire"), tactical::player_flag_commandable},
+                {7, 7, eawr::assets::object_type_crc("Hutts"), 0}};
+            setup.units = {{1, shooter, 1, Vec3{}, eawr::sim::math::identity_quat(), {}},
+                {2, target, 7, point(raw(300), 0, 0), eawr::sim::math::identity_quat(), {}}};
+            if (!team->members.empty()) setup.squadrons = {{1, {}}};
+            std::vector<tactical::SensorProfile> sensors{{shooter, Fixed::from_raw(raw(4000))}};
+            for (const auto& member : team->members) {
+                const auto craft_type = eawr::assets::object_type_crc(member.craft);
+                sensors.push_back({craft_type, Fixed::from_raw(raw(4000))});
+                const auto craft_id = static_cast<eawr::sim::EntityId>(setup.units.size() + 1);
+                setup.units.push_back({craft_id, craft_type, 1, Vec3{}, eawr::sim::math::identity_quat(), {}});
+                setup.squadrons.front().members.push_back(craft_id);
+            }
+            std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+            sensors.erase(std::unique(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) {
+                return a.type_id == b.type_id;
+            }), sensors.end());
+            auto session = tactical::TacticalSession::create(setup, sensors, durability.value(), motion.value(),
+                std::nullopt, combat.value());
+            expect(static_cast<bool>(session), "#1873: container world starts: " + name);
+            if (!session) continue;
+            const bool mobile = motion.value().find(shooter) != nullptr || !team->members.empty();
+            if (order == Order::guard && mobile) {
+                expect(static_cast<bool>(session.value().submit({{0, 1, 0}, {1}, tactical::GuardPayload{point(raw(200), raw(100), 0)}})),
+                    "#1873: guard order submits: " + name);
+            } else if (order == Order::attack_move && mobile) {
+                expect(static_cast<bool>(session.value().submit({{0, 1, 0}, {1}, tactical::AttackMovePayload{point(raw(900), raw(150), 0)}})),
+                    "#1873: attack-move order submits: " + name);
+            } else if (order == Order::attack) {
+                expect(static_cast<bool>(session.value().submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})),
+                    "#1873: explicit attack submits: " + name);
+            } else if (order != Order::idle) {
+                continue; // a station takes no move-type order
+            }
+            std::size_t shots = 0;
+            std::size_t hits = 0;
+            std::set<eawr::sim::EntityId> sources;
+            eawr::sim::InlineExecutor executor;
+            for (std::uint64_t tick = 0; tick < 450; ++tick) {
+                auto result = session.value().step(executor);
+                expect(static_cast<bool>(result), "#1873: container world steps: " + name);
+                if (!result) break;
+                for (const auto& event : result.value().snapshot->combat_events()) {
+                    if (event.target != 2 || event.shooter == 2) continue;
+                    if (event.kind == tactical::CombatEventKind::weapon_fired) {
+                        ++shots;
+                        sources.insert(event.shooter);
+                    }
+                    hits += event.kind == tactical::CombatEventKind::projectile_hit ? 1U : 0U;
+                }
+            }
+            const auto remaining = session.value().durability_state(2);
+            std::cout << "container-opportunity," << name << ',' << order_name << ',' << shots << ',' << hits << ','
+                      << (remaining ? remaining->hull.raw() : 0) << '\n';
+            if (order == Order::attack) {
+                // WNO-10: an explicit object order still fires on the container and destroys it.
+                if (explicit_kills.contains(name)) {
+                    expect(shots > 0 && hits > 0 && !remaining, "WNO-10: an explicit attack destroys the container: " + name);
+                }
+                continue;
+            }
+            // R-09 (AU-06..09): a parent without a priority set scores every candidate alike;
+            // only the set's property exclusion keeps the container out of automatic fire.
+            bool setless = team->members.empty() && team->targeting_priority_set.empty();
+            for (const auto& member : team->members) {
+                const auto* craft = loaded.value().find(member.craft);
+                setless = setless || craft == nullptr || craft->targeting_priority_set.empty();
+            }
+            if (setless) {
+                if (order == Order::idle && setless_fire.contains(name)) {
+                    expect(shots > 0, "R-09: a parent without a priority set fires at the container on its own: " + name);
+                }
+                if (order == Order::idle && name == "Slave_I") {
+                    // WNO-29..32, WAD-09: the Rebel-immune 3000 x 400 payload kills the Empire
+                    // Slave I that shot the container from 300 away (150 shield, 1500 hull).
+                    expect(!remaining && !session.value().durability_state(1),
+                        "WNO-31: the container's death payload destroys its nearby non-Rebel shooter: Slave_I");
+                }
+                continue;
+            }
+            expect(!setless_fire.contains(name), "R-09: the set-less list names only set-less shooters: " + name);
+            expect(shots == 0 && hits == 0 && remaining && remaining->hull == durability.value().find(target)->max_hull,
+                std::string("WNO-09/10: no automatic fire at the container: ") + name + ' ' + order_name);
+        }
+    }
+}
+
 void foc_living_collision(eawr::units::LoadInput input) {
     input.types = {"Y-Wing_Squadron", "Darth_Vader_TIE_Fighter_Squadron", "StarViper_Squadron",
         "RS_Increased_Supplies_L1_Upgrade", "UL_Extort_Cash_L1_Upgrade"};
@@ -842,9 +1293,59 @@ void foc_gunboat_pole(eawr::units::LoadInput input) {
     expect(!pole_shot, "HP_Corellian_Gunship_04's 45-degree cone height does not reach its pole");
 }
 
+// WWP-47/48: the X-wing's four wingtip muzzle bones in firing order, and its shot's travel, its
+// Targeting_Max_Attack_Distance (450) rather than the laser's Projectile_Max_Flight_Distance (500).
+void foc_fighter_muzzles(eawr::units::LoadInput input) {
+    input.types = {"X-Wing", "TIE_Fighter"};
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WWP-47: the stock fighters load");
+    if (!loaded) return;
+    const auto* xwing = loaded.value().find("X-Wing");
+    expect(xwing != nullptr && xwing->muzzle_bones.size() == 4,
+        "WWP-47: the X-wing has the four consecutive wingtip muzzle bones MuzzleA_00 to _03");
+    if (xwing != nullptr && xwing->muzzle_bones.size() == 4) {
+        for (std::size_t index = 0; index < 4; ++index) {
+            expect(xwing->muzzle_bones[index].position.has_value(), "WWP-47: each X-wing muzzle bone has a bind position");
+        }
+    }
+    const auto combat = eawr::units::combat_table(loaded.value());
+    expect(static_cast<bool>(combat), "WWP-47: the stock fighters bind combat");
+    if (!combat) return;
+    const auto* profile = combat.value().find(eawr::assets::object_type_crc("X-Wing"));
+    expect(profile != nullptr && !profile->weapons.empty() && profile->weapons.back().hardpoint == eawr::sim::tactical::object_weapon
+            && profile->weapons.back().muzzles.size() == 4 && profile->weapons.back().shot
+            && profile->weapons.back().shot->max_travel == Fixed::from_raw(raw(450)),
+        "WWP-47/48: the X-wing's own weapon fires from four muzzles and travels its attack distance");
+}
+
 // W-09: load the stock types affected by an omitted Fires_Forward. Keep StarViper
 // movement out of this contract so the test observes its cone before it turns.
 void foc_object_weapon_defaults(eawr::units::LoadInput input) {
+    {
+        auto turret_input = input;
+        turret_input.types = {"Empire_Defense_Satellite_Laser", "Rebel_Defense_Satellite_Laser", "Underworld_Defense_Satellite_Plasma"};
+        turret_input.obstacles.clear();
+        const auto loaded = eawr::units::load_unit_tables(turret_input);
+        expect(static_cast<bool>(loaded), "UA-05: installed satellite turret profiles load");
+        if (loaded) {
+            const auto combat = eawr::units::combat_table(loaded.value());
+            expect(static_cast<bool>(combat), "UA-05: installed satellite mechanics bind");
+            for (const auto& name : turret_input.types) {
+                const auto* unit = loaded.value().find(name);
+                expect(unit && unit->object_turret && unit->object_turret->turret.bone == "B_Turret"
+                    && unit->object_turret->turret.position && unit->object_turret->barrel.bone.empty(),
+                    "UA-05: satellite binds its turret bone without a barrel");
+                const auto* profile = combat ? combat.value().find(eawr::assets::object_type_crc(name)) : nullptr;
+                expect(profile && profile->weapons.size() == 1 && profile->weapons.front().object_turret_required
+                    && profile->weapons.front().object_turret
+                    && profile->weapons.front().object_turret->speed == Fixed::from_raw(7 * Fixed::scale / 2)
+                    && profile->weapons.front().object_turret->yaw_extent == Fixed::from_raw(360 * Fixed::scale)
+                    && profile->weapons.front().object_turret->pitch_extent == Fixed::from_raw(90 * Fixed::scale)
+                    && profile->weapons.front().object_turret_rest_delay == Fixed::from_raw(2 * Fixed::scale),
+                    "UA-05: stock satellite uses authored rate/extents and the two-second idle-delay default");
+            }
+        }
+    }
     const std::vector<std::tuple<std::string, int, int>> rows{
         {"Starviper_Fighter", 45, 45}, {"Broadside_Class_Cruiser", 30, 40},
         {"Marauder_Missile_Cruiser", 30, 40}, {"Broadside_Underworld", 30, 40},
@@ -886,7 +1387,9 @@ void foc_object_weapon_defaults(eawr::units::LoadInput input) {
     for (const auto& [position, should_fire] : {
              std::pair{point(raw(-300), 0, 0), false},
              std::pair{point(raw(300), raw(250), 0), true},
-             std::pair{point(raw(300), raw(300), 0), true},
+             // The cone opens at the muzzle bone (WWP-53), which sits off the unit origin: stay clear of the
+             // exact 45-degree boundary the origin would give.
+             std::pair{point(raw(300), raw(270), 0), true},
              std::pair{point(raw(250), raw(300), 0), false},
              std::pair{point(raw(300), 0, raw(250)), true},
              std::pair{point(raw(250), 0, raw(300)), false}}) {
@@ -1166,8 +1669,9 @@ void foc_hazard_maps(eawr::units::LoadInput input) {
                 expect(hazard.asteroid_field, "WHZ-01: small junk participates through its effective flag");
             }
             if (type == "Space_Junk_Large_NO_Collision") {
-                expect(!hazard.asteroid_field && obstacle->space_layer.empty(),
-                    "WHZ-01: noncolliding junk remains authored scenery");
+                expect(!hazard.asteroid_field && !obstacle->footprint.space_obstacle
+                    && obstacle->space_layer == "StaticObject",
+                    "WHZ-01/ML-24: noncolliding junk inherits its layer without obstacle participation");
             }
         }
         if (counts != std::array<unsigned, 4>{fields, solids, nebulas, storms}) {
@@ -1213,7 +1717,698 @@ void foc_hazard_maps(eawr::units::LoadInput input) {
     }
 }
 
-void foc_fleet() {
+// WLS-01..05: the installed named handler binds its admission, service and presentation fields.
+void foc_leech_shields(eawr::units::LoadInput input) {
+    namespace t = eawr::sim::tactical;
+    input.types = {"Kedalbe_Battleship"}; input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WLS-01: installed Keldabe loads");
+    if (!loaded) return;
+    const auto table = eawr::units::ability_table(loaded.value(), std::vector<t::PlayerId>{1});
+    expect(static_cast<bool>(table), "WLS-01: Keldabe ordinary/nested abilities bind");
+    if (!table) return;
+    const auto* profile = table.value().find(eawr::assets::object_type_crc("Kedalbe_Battleship"));
+    const auto slot = profile ? t::ability_slot(*profile, t::AbilityKind::leech_shields) : std::nullopt;
+    expect(slot.has_value(), "WLS-01: black-market authorship does not gate skirmish");
+    if (!slot) return;
+    const auto& ability = profile->abilities[*slot];
+    expect(ability.expiration_frames == 750 && ability.recharge_frames == 1650 && ability.recharge_at_activation
+        && ability.supports_autofire, "WLS-03: installed duration, activation recharge and autofire flag");
+    const auto owner = std::find_if(loaded.value().units.begin(), loaded.value().units.end(), [](const auto& unit) {
+        return unit.id == "Kedalbe_Battleship";
+    });
+    expect(ability.requires_hardpoint && ability.required_hardpoints.size() == 1 && owner != loaded.value().units.end()
+        && ability.required_hardpoints.front() < owner->hardpoints.size()
+        && owner->hardpoints[ability.required_hardpoints.front()].id == "HP_KEDALBE_SHIELD_LEECH_00",
+        "WHD-01: stock leech resolves its SPECIAL dependency");
+    const auto handler = std::find_if(profile->special.begin(), profile->special.end(), [](const auto& nested) {
+        return nested.kind == t::SpecialAbilityKind::leech_shields;
+    });
+    expect(handler != profile->special.end(), "WLS-01: named handler resolves");
+    if (handler == profile->special.end()) return;
+    expect(handler->style == t::SpecialActivationStyle::user_input && handler->initially_enabled != false
+        && handler->filter.applicable_categories != 0, "WLS-01: installed target handler is enabled and filtered");
+    expect(handler->beam_min_range == Fixed::from_raw(raw(10)) && handler->beam_max_range == Fixed::from_raw(raw(2000))
+        && handler->damage_per_frame == Fixed::from_raw((raw(100) + 15) / 30)
+        && handler->leech_damage_bonus == Fixed::from_raw(raw(3)), "WLS-01/02: installed ranges, shield drain and damage contribution");
+    expect(handler->leech_beam_frames == 10 && handler->leech_texture == "tractor_beam00.tga"
+        && handler->leech_effect == "Leech_Effect", "WLS-05: authored beam and target effect bind");
+}
+
+// WLU-01/04/08: the installed A-wing binds LURE's pulse, its listed types and the damage share; the
+// squadron's own entry adds no profile (AB-15).
+void foc_lure(eawr::units::LoadInput input) {
+    namespace t = eawr::sim::tactical;
+    input.types = {"A_Wing_Squadron"}; input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WLU-01: installed A-wing squadron loads");
+    if (!loaded) return;
+    const auto table = eawr::units::ability_table(loaded.value(), std::vector<t::PlayerId>{1});
+    expect(static_cast<bool>(table) && static_cast<bool>(t::validate_abilities(table.value())), "WLU-01: A-wing LURE binds and validates");
+    if (!table) return;
+    const auto* team = table.value().find(eawr::assets::object_type_crc("A_Wing_Squadron"));
+    expect(team == nullptr || !t::ability_slot(*team, t::AbilityKind::lure), "WLU-01: the squadron entry is not a team ability");
+    const auto* profile = table.value().find(eawr::assets::object_type_crc("A-Wing"));
+    const auto slot = profile ? t::ability_slot(*profile, t::AbilityKind::lure) : std::nullopt;
+    expect(slot.has_value(), "WLU-01: the A-wing craft holds LURE");
+    if (!slot) return;
+    const auto& ability = profile->abilities[*slot];
+    expect(ability.expiration_frames == 480 && ability.recharge_frames == 1350 && !ability.supports_autofire,
+        "WLU-02: installed 16 s limit and 45 s recharge, no autofire");
+    expect(ability.modifiers.take_damage == Fixed::from_decimal("0.7").value() && ability.modifiers.cause_damage == Fixed::from_raw(raw(1)),
+        "WLU-08: the installed damage share is 0.7");
+    expect(ability.lure && ability.lure->radius == Fixed::from_raw(raw(350)) && ability.lure->pulse_frames == 15
+        && ability.lure->max_pulses == 40 && ability.lure->particle == "Lure_Ability_Particle",
+        "WLU-03/09: installed radius, pulse period and count, particle");
+    if (!ability.lure) return;
+    const auto& types = ability.lure->target_types;
+    for (const auto* name : {"TIE_Fighter", "TIE_Fighter_Squadron", "TIE_Interceptor", "Rebel_X-Wing_Squadron", "A_Wing_Squadron",
+             "StarViper_Squadron", "Skipray_Squadron", "Pirate_Fighter_Squadron", "Z95_Headhunter_Rebel_Squadron"}) {
+        expect(std::binary_search(types.begin(), types.end(), eawr::assets::object_type_crc(name)),
+            std::string("WLU-04: installed target types list ") + name);
+    }
+    expect(!std::binary_search(types.begin(), types.end(), eawr::assets::object_type_crc("TIE_Bomber_Squadron"))
+        && types.size() == 23, "WLU-04: bombers are not listed; the 23 authored names are kept");
+}
+
+// WAB-80: only the installed Interceptor IV's missile hardpoint carries the salvo multiplier.
+void foc_full_salvo(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    input.types = {"Interceptor4_Frigate"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WAB-80: the installed Interceptor IV loads");
+    if (!loaded) return;
+    const auto combat = eawr::units::combat_table(loaded.value());
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<tactical::PlayerId>{1, 2});
+    expect(combat && abilities, "WAB-80: the Interceptor IV profiles bind");
+    if (!combat || !abilities) return;
+    const auto type = eawr::assets::object_type_crc("Interceptor4_Frigate");
+    const auto* ability = abilities.value().find(type);
+    const auto slot = ability ? tactical::ability_slot(*ability, tactical::AbilityKind::full_salvo) : std::nullopt;
+    expect(slot.has_value(), "WAB-80: the Interceptor IV's FULL_SALVO is modelled");
+    if (!slot) return;
+    const auto& salvo = ability->abilities[*slot];
+    expect(salvo.expiration_frames == 210 && salvo.recharge_frames == 1350 && salvo.modifiers == tactical::AbilityModifiers{},
+        "WAB-80: seven seconds on, 45 s recharge, no unit-level multiplier");
+    const auto* profile = combat.value().find(type);
+    expect(profile != nullptr, "WAB-80: the Interceptor IV has a combat profile");
+    if (!profile) return;
+    const auto* source = loaded.value().find("Interceptor4_Frigate");
+    std::size_t boosted = 0;
+    for (const auto& weapon : profile->weapons) {
+        if (weapon.full_salvo_delay.raw() == Fixed::from_raw(raw(1)).raw()) continue;
+        ++boosted;
+        const bool is_missile = source && weapon.hardpoint < source->hardpoints.size()
+            && source->hardpoints[weapon.hardpoint].id == "HP_Interceptor_Frigate_00";
+        expect(is_missile && weapon.full_salvo_delay == eawr::sim::math::Fixed::from_decimal("0.18").value()
+            && weapon.pulse_count == 6 && weapon.pulse_delay_frames == 15,
+            "WAB-80: only the missile hardpoint scales, by 0.18");
+    }
+    expect(boosted == 1, "WAB-80: exactly one Interceptor IV hardpoint carries the multiplier");
+}
+
+// WSD-01, WSD-06, WSD-09: the installed Vengeance and Krayt bind SELF_DESTRUCT (3.5 s, 10 s) with their blast objects
+// (900 / 500 and 1500 / 700, enemy-only area damage); only the Krayt runs the object script and supports autofire.
+void foc_self_destruct(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    input.types = {"Vengeance_Frigate", "Krayt_Class_Destroyer"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WSD-01: the installed Vengeance and Krayt load");
+    if (!loaded) return;
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<tactical::PlayerId>{1, 2});
+    expect(static_cast<bool>(abilities), "WSD-01: the SELF_DESTRUCT profiles bind");
+    if (!abilities) return;
+    struct Expected { const char* unit; const char* blast; std::int64_t damage, radius; bool krayt; };
+    for (const auto& want : {Expected{"Vengeance_Frigate", "Vengeance_Self_Destruct_Blast", 900, 500, false},
+                             Expected{"Krayt_Class_Destroyer", "Krayt_Self_Destruct_Blast", 1500, 700, true}}) {
+        const auto* ability = abilities.value().find(eawr::assets::object_type_crc(want.unit));
+        const auto slot = ability ? tactical::ability_slot(*ability, tactical::AbilityKind::self_destruct) : std::nullopt;
+        expect(slot.has_value(), std::string("WSD-01: ") + want.unit + " models SELF_DESTRUCT");
+        if (!slot) continue;
+        const auto& self_destruct = ability->abilities[*slot];
+        expect(self_destruct.expiration_frames == 105 && self_destruct.recharge_frames == 300
+                && self_destruct.modifiers == tactical::AbilityModifiers{},
+            std::string("WSD-03: ") + want.unit + " counts down 3.5 s and recharges 10 s after a cancel");
+        expect(self_destruct.supports_autofire == want.krayt, std::string("WSD-09: ") + want.unit + " autofire follows its data");
+        expect(ability->self_destruct_script == want.krayt, std::string("WSD-09: ") + want.unit + " runs the Krayt script only on the Krayt");
+        const auto& spawned = self_destruct.spawned;
+        expect(spawned.has_value() && spawned->type == eawr::assets::object_type_crc(want.blast)
+                && spawned->countdown_frames == 0 && spawned->damage.raw() == 0
+                && spawned->blast.damage == Fixed::from_raw(raw(want.damage)) && spawned->blast.radius == Fixed::from_raw(raw(want.radius))
+                && !spawned->blast.dropoff && spawned->blast.max_delay.raw() == 0
+                && spawned->shield_damage && spawned->hitpoint_damage,
+            std::string("WSD-06: ") + want.unit + "'s blast object binds with its area damage and radius");
+    }
+}
+
+void foc_peacebringer_blast(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    input.types = {"The_Peacebringer"}; input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WHE-35: installed Peacebringer loads");
+    if (!loaded) return;
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<tactical::PlayerId>{1});
+    const auto combat = eawr::units::combat_table(loaded.value());
+    expect(abilities && combat, "WHE-35: Peacebringer abilities and SPECIAL weapons bind");
+    if (!abilities || !combat) return;
+    const auto id = eawr::assets::object_type_crc("The_Peacebringer");
+    const auto* profile = abilities.value().find(id);
+    const auto slot = profile ? tactical::ability_slot(*profile, tactical::AbilityKind::blast) : std::nullopt;
+    expect(slot.has_value(), "WHE-35: named BLAST is exposed");
+    if (!slot) return;
+    const auto& ability = profile->abilities[*slot];
+    expect(ability.gui_activated_ability_name == "Peacebringer_Blast" && ability.recharge_frames == 2700
+        && ability.recharge_at_activation && ability.charged_blast && ability.charged_blast->charge_frames == 150
+        && ability.charged_blast->damage_multiplier == Fixed::from_raw(raw(5)),
+        "WHE-35/36: installed BLAST binds five-second charge, multiplier five and ninety-second recharge");
+    if (ability.charged_blast) expect(ability.charged_blast->charging_effect.empty()
+        && ability.charged_blast->charged_effect.empty() && ability.charged_blast->activate_sfx == "Unit_Underworld_Plasma_Fire",
+        "WHE-36: stock empty phase effects stay empty and activation audio retains its authored cue");
+    const auto* guns = combat.value().find(id);
+    std::size_t specials{}, overrides{};
+    if (guns) for (const auto& gun : guns->weapons) if (gun.special) {
+        ++specials;
+        expect(gun.shot && gun.shot->damage == Fixed::from_raw(raw(gun.charged_shot ? 400 : 600)),
+            "WAD-31: ordinary damage SPECIAL is 400 and ordinary ion SPECIAL is 600");
+        if (gun.charged_shot) {
+            ++overrides;
+            expect(gun.charged_shot->damage == Fixed::from_raw(raw(600))
+                && gun.charged_shot->blast.damage == Fixed::from_raw(raw(400))
+                && gun.charged_shot->blast.radius == Fixed::from_raw(raw(250)),
+                "WAD-35/36: charged damage profile retains direct 600 and area 400/radius 250 before instance scaling");
+        }
+    }
+    expect(specials == 2 && overrides == 1, "WAD-35: ion SPECIAL retains its ordinary projectile while damage SPECIAL has an override");
+    expect(ability.requires_hardpoint && ability.required_hardpoints.size() == 2,
+        "WHD-01: stock Merciless BLAST depends on both SPECIAL points as alternatives");
+    const auto health = eawr::units::durability_table(loaded.value());
+    expect(static_cast<bool>(health), "WHD-01: installed Merciless durability binds");
+    if (!health) return;
+    const auto* hull = health.value().find(id);
+    expect(hull != nullptr, "WHD-01: installed Merciless hull has a durability profile");
+    if (!hull) return;
+    for (const bool loss_first : {false, true}) {
+        tactical::TacticalSetup setup;
+        setup.seed = 2462;
+        setup.players = {{1, 1, 1, tactical::player_flag_commandable}};
+        setup.units = {{1, id, 1, {}, eawr::sim::math::identity_quat(), {}}};
+        auto created = tactical::TacticalSession::create(setup, {}, health.value(), {}, {}, combat.value(), {}, abilities.value());
+        expect(static_cast<bool>(created), "WHD-01: installed Merciless loss session creates");
+        if (!created) continue;
+        auto& world = created.value();
+        std::uint64_t sequence{};
+        const auto activate = [&]() {
+            expect(static_cast<bool>(world.submit({{0, 1, sequence++}, {1},
+                tactical::AbilityPayload{tactical::AbilityKind::blast, tactical::AbilityAction::activate}})),
+                "WHD-01: installed Merciless BLAST submits");
+        };
+        if (!loss_first) activate();
+        for (const auto index : ability.required_hardpoints) {
+            expect(index < hull->hardpoints.size(), "WHD-01: stock dependency index addresses durability");
+            if (index >= hull->hardpoints.size()) continue;
+            const auto damage = Fixed::from_raw(hull->max_shields.raw() + hull->hardpoints[index].max_health.raw());
+            expect(static_cast<bool>(world.submit({{0, 1, sequence++}, {1}, tactical::DamagePayload{damage, index}})),
+                "WHD-01: installed Merciless SPECIAL loss submits");
+        }
+        if (loss_first) activate();
+        const auto step = world.step(eawr::sim::InlineExecutor{});
+        expect(static_cast<bool>(step), "WHD-01: installed Merciless loss tick succeeds");
+        if (!step) continue;
+        const auto state = world.ability_state(1);
+        expect(state && state->charged_blast.has_value() == !loss_first,
+            "WHD-01/03: stock destruction before activation refuses; destruction after activation preserves charge");
+        const auto instances = step.value().snapshot->instances();
+        const auto ship = std::find_if(instances.begin(), instances.end(), [](const auto& instance) { return instance.entity_id == 1; });
+        expect(ship != instances.end() && !ship->abilities[*slot].ready,
+            "WHD-01: installed Merciless HUD greys after both SPECIAL points die");
+        expect(std::any_of(step.value().snapshot->events().begin(), step.value().snapshot->events().end(), [](const auto& event) {
+            return event.kind == tactical::EventKind::order_rejected && event.reason == tactical::RejectReason::ability_unavailable;
+        }) == loss_first, "WHD-01: installed Merciless command refusal follows same-tick command order");
+    }
+    // WHE-37, WST-01 (legacy #946): the Peacebringer's STEALTH binds through its own Stealth_Peacebringer
+    // handler, with no purchase gate in a skirmish, and cloaks on command.
+    const auto stealth = tactical::ability_slot(*profile, tactical::AbilityKind::stealth);
+    expect(stealth.has_value(), "WHE-37: the installed Peacebringer has the STEALTH slot");
+    if (!stealth) return;
+    const auto& cloak = profile->abilities[*stealth];
+    expect(cloak.gui_activated_ability_name == "Stealth_Peacebringer" && cloak.expiration_frames == 5400
+        && cloak.recharge_frames == 300, "WHE-37/WST-02/03: installed 180 s cloak, 10 s recharge");
+    expect(std::any_of(profile->special.begin(), profile->special.end(), [](const auto& entry) {
+        return entry.kind == tactical::SpecialAbilityKind::stealth && entry.name == "Stealth_Peacebringer"
+            && entry.stealth_colour == std::array<std::uint8_t, 4>{255, 255, 255, 255};
+    }), "WST-12: the installed Stealth_Peacebringer handler and its white tint are read");
+    tactical::TacticalSetup setup;
+    setup.seed = 946;
+    setup.players = {{1, 1, 1, tactical::player_flag_commandable}};
+    setup.units = {{1, id, 1, {}, eawr::sim::math::identity_quat(), {}}};
+    auto created = tactical::TacticalSession::create(setup, {}, health.value(), {}, {}, combat.value(), {}, abilities.value());
+    expect(static_cast<bool>(created), "WHE-37: installed Peacebringer stealth session creates");
+    if (!created) return;
+    auto& world = created.value();
+    expect(static_cast<bool>(world.submit({{0, 1, 0}, {1},
+        tactical::AbilityPayload{tactical::AbilityKind::stealth, tactical::AbilityAction::activate}})),
+        "WHE-37: installed Peacebringer STEALTH submits");
+    const auto step = world.step(eawr::sim::InlineExecutor{});
+    expect(static_cast<bool>(step), "WHE-37: installed Peacebringer stealth tick succeeds");
+    if (!step) return;
+    const auto instances = step.value().snapshot->instances();
+    const auto ship = std::find_if(instances.begin(), instances.end(), [](const auto& instance) { return instance.entity_id == 1; });
+    expect(ship != instances.end() && ship->stealth_on, "WHE-37/WST-02: the installed Peacebringer cloaks in a skirmish");
+}
+
+// W-07/WAD-37: preserve the authored cone through ordinary and charged SPECIAL attempts.
+// With motion omitted the target stays off the bow; with motion it must turn into the cone.
+void foc_asymmetric_release_geometry(eawr::units::LoadInput input) {
+    namespace t = eawr::sim::tactical;
+    namespace m = eawr::sim::math;
+    input.types = {"Krayt_Class_Destroyer", "The_Peacebringer", "Acclamator_Assault_Ship", "Nebulon_B_Frigate"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "W-07: installed asymmetric carriers load");
+    if (!loaded) return;
+    auto combat = eawr::units::combat_table(loaded.value());
+    auto health = eawr::units::durability_table(loaded.value());
+    const auto motion = eawr::units::motion_table(loaded.value());
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<t::PlayerId>{1});
+    expect(combat && health && motion && abilities, "W-07: installed cone test tables bind");
+    if (!combat || !health || !motion || !abilities) return;
+    for (auto& profile : health.value().profiles) profile.scenario_invulnerable = true;
+    const auto target = eawr::assets::object_type_crc("Nebulon_B_Frigate");
+    const auto number = [](const Fixed value) { return static_cast<double>(value.raw()) / Fixed::scale; };
+    const auto bearing = [&](const Vec3& delta) {
+        return std::atan2(number(delta.y), number(delta.x)) * 180 / std::acos(-1.0);
+    };
+    for (const std::string name : {"Krayt_Class_Destroyer", "The_Peacebringer", "Acclamator_Assault_Ship"}) {
+        const auto shooter = eawr::assets::object_type_crc(name);
+        auto isolated = combat.value();
+        const auto* unit = loaded.value().find(name);
+        expect(unit != nullptr, "W-07: cone carrier exists");
+        if (!unit) continue;
+        for (auto& profile : isolated.profiles) {
+            if (profile.type_id != shooter) {
+                if (!profile.planetary_weapon) profile.weapons.clear();
+            }
+            else std::erase_if(profile.weapons, [&](const auto& gun) {
+                return name == "Acclamator_Assault_Ship" ? gun.hardpoint >= unit->hardpoints.size()
+                    || unit->hardpoints[gun.hardpoint].id != "HP_Acclamator_Weapon_FC" : !gun.special;
+            });
+        }
+        const auto* source = isolated.find(shooter);
+        expect(source && source->weapons.size() == (name == "Acclamator_Assault_Ship" ? 1U : 2U),
+            "W-07: isolated authored asymmetric weapons");
+        if (!source || source->weapons.empty()) continue;
+        for (const auto& gun : source->weapons) {
+            expect(gun.fire_axes.has_value(), "W-07: stock cone retains its bone frame");
+            expect(gun.cone_width == Fixed::from_raw(raw(name == "Acclamator_Assault_Ship" ? 130 : 40))
+                && gun.cone_height == Fixed::from_raw(raw(name == "Acclamator_Assault_Ship" ? 90 : 180)),
+                "W-07: width and height retain their authored order");
+            if (gun.fire_axes) expect((*gun.fire_axes)[0].x > Fixed::from_decimal("0.999").value(),
+                "W-07: stock asymmetric fire bone points along the bow");
+        }
+        for (const auto& [angle, position] : {
+            std::pair{0, point(raw(1000), 0, 0)}, std::pair{30, point(raw(866), raw(500), 0)},
+            std::pair{60, point(raw(500), raw(866), 0)}, std::pair{90, point(0, raw(1000), 0)}}) {
+            for (const bool turning : {false, true}) {
+                if (turning && (angle != 90 || name == "Acclamator_Assault_Ship")) continue;
+                // Idle opportunity acquisition, player attack/BLAST, and orders from the AI seat.
+                for (const int mode : {0, 1, 2, 3}) {
+                    if ((mode == 2 && name != "The_Peacebringer") || (turning && mode == 0)) continue;
+                    t::TacticalSetup setup;
+                    setup.seed = 2418;
+                    setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+                    const auto& muzzle = source->weapons.front().fire_a;
+                    const Vec3 target_position{Fixed::from_raw(position.x.raw() + muzzle.x.raw()),
+                        Fixed::from_raw(position.y.raw() + muzzle.y.raw()), position.z};
+                    const t::PlayerId owner = mode == 3 ? 2U : 1U;
+                    setup.units = {{1, shooter, owner, Vec3{}, m::identity_quat(), {}},
+                        {2, target, owner == 1 ? 2U : 1U, target_position, m::identity_quat(), {}}};
+                    std::vector<t::SensorProfile> sensors{{shooter, Fixed::from_raw(raw(3000))},
+                        {target, Fixed::from_raw(raw(3000))}};
+                    std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+                    auto created = t::TacticalSession::create(setup, sensors, health.value(),
+                        turning ? motion.value() : t::MotionTable{}, {}, isolated, {}, abilities.value());
+                    expect(static_cast<bool>(created), "W-07: stock cone session creates");
+                    if (!created) {
+                        std::cerr << eawr::core::format_diagnostic(created.error()) << '\n';
+                        continue;
+                    }
+                    auto& session = created.value();
+                    if (mode != 0) expect(static_cast<bool>(session.submit({{0, owner, 0}, {1}, t::AttackPayload{2}})),
+                        "W-07: stock cone receives player attack");
+                    if (mode == 2 || (mode == 3 && name == "The_Peacebringer"))
+                        expect(static_cast<bool>(session.submit({{0, owner, 1}, {1},
+                        t::AbilityPayload{t::AbilityKind::blast, t::AbilityAction::activate}})),
+                        "WAD-37: cone carrier receives BLAST");
+                    const eawr::sim::InlineExecutor executor;
+                    bool fired = false, charged = false, banked_release = false;
+                    std::map<std::uint64_t, double> projectile_bearings;
+                    std::size_t direction_changes{};
+                    for (int tick = 0; tick < 600; ++tick) {
+                        auto step = session.step(executor);
+                        expect(static_cast<bool>(step), "W-07: stock cone step succeeds");
+                        if (!step) break;
+                        const auto& snapshot = *step.value().snapshot;
+                        if (name != "Acclamator_Assault_Ship") for (const auto& projectile : snapshot.projectiles()) {
+                            if (projectile.shooter != 1) continue;
+                            expect(!projectile.homing, "WAD-37: Krayt SPECIAL is a direct projectile");
+                            const auto direction = bearing(projectile.step);
+                            const auto [first, inserted] = projectile_bearings.emplace(projectile.id, direction);
+                            if (!inserted && std::abs(direction - first->second) > 0.01) ++direction_changes;
+                        }
+                        for (const auto& event : snapshot.combat_events()) {
+                            if (event.kind != t::CombatEventKind::weapon_fired || event.shooter != 1) continue;
+                            fired = true;
+                            charged = charged || (event.outcome & t::fired_charged_shot) != 0;
+                            const auto instance = std::find_if(snapshot.instances().begin(), snapshot.instances().end(),
+                                [](const auto& value) { return value.entity_id == 1; });
+                            const auto gun = std::find_if(source->weapons.begin(), source->weapons.end(),
+                                [&](const auto& value) { return value.hardpoint == event.weapon; });
+                            expect(instance != snapshot.instances().end() && gun != source->weapons.end(),
+                                "W-07: release retains its source pose and weapon");
+                            if (instance == snapshot.instances().end() || gun == source->weapons.end() || !gun->fire_axes) continue;
+                            // WWP-73/74, BK-05: release and cone use the drawn, banked bone frame.
+                            const auto& release_transform = instance->fixed_transform;
+                            const auto& rows = release_transform.rows;
+                            const Vec3 target_delta{Fixed::from_raw(target_position.x.raw() - rows[0][3].raw()),
+                                Fixed::from_raw(target_position.y.raw() - rows[1][3].raw()),
+                                Fixed::from_raw(target_position.z.raw() - rows[2][3].raw())};
+                            const Vec3 hull_target{
+                                m::dot(Vec3{rows[0][0], rows[1][0], rows[2][0]}, target_delta).value(),
+                                m::dot(Vec3{rows[0][1], rows[1][1], rows[2][1]}, target_delta).value(), {}};
+                            const auto display_muzzle = m::transform_point(instance->fixed_transform, gun->fire_a).value();
+                            const Vec3 display_offset{Fixed::from_raw(display_muzzle.x.raw() - event.origin.x.raw()),
+                                Fixed::from_raw(display_muzzle.y.raw() - event.origin.y.raw()),
+                                Fixed::from_raw(display_muzzle.z.raw() - event.origin.z.raw())};
+                            const auto offset_from = [&](const Vec3& local) {
+                                const auto world = m::transform_point(release_transform, local).value();
+                                return m::length(Vec3{Fixed::from_raw(world.x.raw() - event.origin.x.raw()),
+                                    Fixed::from_raw(world.y.raw() - event.origin.y.raw()),
+                                    Fixed::from_raw(world.z.raw() - event.origin.z.raw())}).value();
+                            };
+                            const auto offset = gun->has_fire_b ? std::min(offset_from(gun->fire_a), offset_from(gun->fire_b))
+                                : offset_from(gun->fire_a);
+                            expect(offset.raw() <= 64, "WWP-73: release lies on a drawn fire bone within Q24 rounding");
+                            const auto bank = session.roll_degrees(1).value_or(Fixed{});
+                            if (std::abs(number(bank)) > 12.3) banked_release = true;
+                            const Vec3 ray{Fixed::from_raw(event.aim.x.raw() - event.origin.x.raw()),
+                                Fixed::from_raw(event.aim.y.raw() - event.origin.y.raw()),
+                                Fixed::from_raw(event.aim.z.raw() - event.origin.z.raw())};
+                            const auto component = [&](const std::size_t axis) {
+                                return m::dot(Vec3{rows[0][axis], rows[1][axis], rows[2][axis]}, ray).value();
+                            };
+                            const Vec3 local{component(0), component(1), component(2)};
+                            const auto& axes = *gun->fire_axes;
+                            const auto x = m::dot(axes[0], local).value();
+                            const auto y = m::dot(axes[1], local).value();
+                            const auto z = m::dot(axes[2], local).value();
+                            const auto yaw = bearing(Vec3{x, y, z});
+                            const auto pitch = std::atan2(number(z), std::hypot(number(x), number(y))) * 180 / std::acos(-1.0);
+                            expect(std::abs(yaw) <= number(gun->cone_width) / 2 + 0.5
+                                && std::abs(pitch) <= number(gun->cone_height) / 2 + 0.5,
+                                "W-07: release remains inside authored half angles (scatter tolerance)");
+                            std::cout << "CONE_RELEASE " << name << " initial=" << angle << " mode=" << mode
+                                << " turning=" << turning << " tick=" << event.tick << " weapon=" << event.weapon
+                                << " hull_yaw=" << bearing(Vec3{rows[0][0], rows[1][0], rows[2][0]})
+                                << " hull_target_yaw=" << bearing(hull_target)
+                                << " bone_yaw=" << yaw << " bone_pitch=" << pitch << " bolt_yaw=" << bearing(ray)
+                                << " bank=" << std::atan2(number(instance->fixed_transform.rows[2][1]),
+                                    number(instance->fixed_transform.rows[2][2])) * 180 / std::acos(-1.0)
+                                << " display_muzzle_offset=" << number(m::length(display_offset).value())
+                                << " display_offset_xyz=" << number(display_offset.x) << ','
+                                    << number(display_offset.y) << ',' << number(display_offset.z)
+                                << " charged=" << ((event.outcome & t::fired_charged_shot) != 0) << '\n';
+                            for (const auto& projectile : snapshot.projectiles()) {
+                                if (projectile.shooter != 1 || projectile.weapon != event.weapon) continue;
+                                std::cout << "CONE_PROJECTILE id=" << projectile.id << " homing=" << projectile.homing
+                                    << " turn_rate=" << number(projectile.turn_rate) << " step_yaw=" << bearing(projectile.step) << '\n';
+                            }
+                        }
+                    }
+                    const bool expected = mode != 0 || name == "Acclamator_Assault_Ship";
+                    if (turning) expect(banked_release, "WWP-73: stock turn releases at about 12.5 degrees bank");
+                    expect(fired == (expected && (turning || angle == 0 || (name == "Acclamator_Assault_Ship" && angle <= 60))),
+                        "W-07: stock off-bow firing requires its authored cone or a ship turn");
+                    if ((mode == 2 || (mode == 3 && name == "The_Peacebringer")) && fired)
+                        expect(charged, "WAD-37: successful BLAST case includes charged release");
+                    expect(direction_changes == 0, "WAD-37: unopposed SPECIAL does not turn after release");
+                    std::cout << "CONE_CASE " << name << " initial=" << angle << " mode=" << mode
+                        << " turning=" << turning << " fired=" << fired << " direction_changes=" << direction_changes << '\n';
+                }
+            }
+        }
+    }
+}
+
+void foc_special_without_blast(eawr::units::LoadInput input) {
+    namespace t = eawr::sim::tactical;
+    input.types = {"Krayt_Class_Destroyer", "Skirmish_Underworld_Star_Base_3",
+        "Skirmish_Underworld_Star_Base_4", "Skirmish_Underworld_Star_Base_5"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WAD-31/33/39: installed SPECIAL carriers load without BLAST");
+    if (!loaded) return;
+    const auto combat = eawr::units::combat_table(loaded.value());
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<t::PlayerId>{1});
+    const auto health = eawr::units::durability_table(loaded.value());
+    expect(combat && abilities && health, "WAD-31/32: installed SPECIAL profiles bind");
+    if (!combat || !abilities || !health) return;
+    for (std::size_t index = 0; index < input.types.size(); ++index) {
+        const auto& name = input.types[index];
+        const auto id = eawr::assets::object_type_crc(name);
+        const auto* gun_profile = combat.value().find(id);
+        const auto* ability_profile = abilities.value().find(id);
+        const auto* durability = health.value().find(id);
+        expect(gun_profile && durability, "WAD-31: combat and durability present: " + name);
+        expect(!ability_profile || !t::ability_slot(*ability_profile, t::AbilityKind::blast),
+            "WAD-32/33: SPECIAL does not fabricate BLAST: " + name);
+        expect(eawr::skirmish::roster_disabled_reason(name).empty(), "RG-02: reviewed SPECIAL carrier admitted: " + name);
+        if (!gun_profile || !durability) continue;
+        std::size_t specials{}, manual{};
+        for (const auto& gun : gun_profile->weapons) if (gun.special) {
+            ++specials;
+            expect(gun.shot.has_value(), "WAD-31: installed SPECIAL has its authored projectile: " + name);
+            if (!gun.shot) continue;
+            expect(gun.hardpoint < durability->hardpoints.size()
+                && durability->hardpoints[gun.hardpoint].role == t::HardpointRole::weapon,
+                "WAD-31: SPECIAL remains an ordinary durability weapon: " + name);
+            if (index == 0) {
+                expect(!gun.requires_manual_target && !gun.opportunity_when_idle && !gun.opportunity_when_targeting
+                    && gun.min_recharge_hundredths == 1000 && gun.max_recharge_hundredths == 1000
+                    && gun.pulse_count == 1 && gun.range == Fixed::from_raw(raw(2200)),
+                    "WAD-33/37: Krayt SPECIAL retains assigned-target gates and ten-second recharge");
+                expect(gun.shot->damage == Fixed::from_raw(raw(gun.charged_shot ? 400 : 600))
+                    && gun.shot->blast.damage == Fixed::from_raw(raw(gun.charged_shot ? 300 : 0))
+                    && gun.shot->blast.radius == Fixed::from_raw(raw(gun.charged_shot ? 200 : 0))
+                    && gun.shot->appearance_delay_frames == (gun.charged_shot ? 30U : 0U),
+                    "WAD-33/35/37: Krayt binds ordinary direct/area damage and appearance, without charged selection");
+            } else if (gun.requires_manual_target) {
+                ++manual;
+                expect(gun.manual_turret_required && gun.manual_turret && gun.manual_cooldown_frames == 3600
+                    && gun.min_recharge_hundredths == 100 && gun.max_recharge_hundredths == 100
+                    && gun.shot->appearance_delay_frames == 15
+                    && gun.shot->damage == Fixed::from_raw(raw(6000))
+                    && gun.shot->blast.damage == Fixed::from_raw(raw(1000))
+                    && gun.shot->blast.radius == Fixed::from_raw(raw(300)),
+                    "WAD-39/40: inherited manual cannon keeps turret, player clock and authored projectile: " + name);
+            } else {
+                expect(gun.min_recharge_hundredths == 300 && gun.max_recharge_hundredths == 400
+                    && gun.pulse_count == 5 && gun.pulse_delay_frames == 18
+                    && gun.shot->damage == Fixed::from_raw(raw(75)) && gun.shot->blast.damage.raw() == 0
+                    && !gun.charged_shot,
+                    "WAD-31/32: station plasma batteries use ordinary authored bursts, without BLAST/manual input: " + name);
+            }
+        }
+        expect(specials == (index == 0 ? 2U : index) && manual == (index == 0 ? 0U : 1U),
+            "WAD-31/39: expected ordinary/manual SPECIAL inventory: " + name);
+    }
+}
+
+void foc_corrupt_systems(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    input.types = {"IG-2000"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WHE-33: installed IG-2000 loads");
+    if (!loaded) return;
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<tactical::PlayerId>{1});
+    expect(static_cast<bool>(abilities), "WHE-33: IG-2000's named handler binds");
+    if (!abilities) return;
+    const auto* profile = abilities.value().find(eawr::assets::object_type_crc("IG-2000"));
+    const auto slot = profile ? tactical::ability_slot(*profile, tactical::AbilityKind::corrupt_systems) : std::nullopt;
+    expect(slot.has_value(), "WHE-33: IG-2000's corrupt systems is exposed");
+    if (!slot) return;
+    const auto& ability = profile->abilities[*slot];
+    expect(ability.recharge_frames == 1800 && ability.effective_radius == Fixed::from_raw(raw(400))
+        && ability.gui_activated_ability_name == "IG2000_Corrupt_Systems", "WHE-33: XML supplies area radius and sixty-second recharge");
+    const auto handler = std::find_if(profile->special.begin(), profile->special.end(), [](const auto& special) {
+        return special.kind == tactical::SpecialAbilityKind::corrupt_systems;
+    });
+    expect(handler != profile->special.end(), "WHE-33: nested handler exists");
+    if (handler == profile->special.end()) return;
+    expect(handler->corrupt_min_range == Fixed::from_raw(raw(20)) && handler->corrupt_max_range == Fixed::from_raw(raw(350))
+        && handler->corrupt_duration_frames == 360 && handler->corrupt_drain_per_frame == Fixed::from_raw(raw(2))
+        && handler->corrupt_inaccuracy == Fixed::from_raw(raw(500)), "WHE-33/34/66: nested XML supplies ranges, duration, drain and inaccuracy");
+    expect(handler->corrupt_target_particle == "Corrupt_Systems_Effect" && handler->corrupt_owner_particle == "Corrupt_Systems_Flare_Effect"
+        && handler->corrupt_activate_sfx == "Unit_IG88_Corrupt_Systems", "WHE-33: authored particles and activation sound bind");
+}
+
+void foc_planetary_sources(const eawr::units::UnitTables& tables, eawr::units::LoadInput input) {
+    // The pinned M2 closure has Rebel/Empire producers. Load all three use
+    // objects explicitly without expanding that fixture's roster or identity.
+    input.types = {"RS_Ion_Cannon_Use_Upgrade", "ES_Hypervelocity_Gun_Use_Upgrade", "US_Plasma_Cannon_Use_Upgrade"};
+    input.obstacles.clear();
+    const auto upgrades = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(upgrades), "WSW-07/08: three-faction use-upgrade closure loads");
+    if (!upgrades) return;
+    for (const auto& [name, consumed] : {
+        std::pair{"RS_Ion_Cannon_Use_Upgrade", true}, std::pair{"ES_Hypervelocity_Gun_Use_Upgrade", true},
+        std::pair{"US_Plasma_Cannon_Use_Upgrade", false}}) {
+        const auto* upgrade = upgrades.value().find(name);
+        expect(upgrade && upgrade->consume_after_special_fire == consumed && upgrade->special_unlocks.size() == 1
+            && upgrade->special_unlocks.front().enable && !upgrade->special_unlocks.front().all_allies,
+            "WSW-07/08: installed unlock and faction-specific consumption metadata: " + std::string(name));
+    }
+    const auto combat = eawr::units::combat_table(tables);
+    const auto health = eawr::units::durability_table(tables);
+    const auto motion = eawr::units::motion_table(tables);
+    expect(combat && health && motion, "WSW-01: installed source content binds");
+    if (!combat || !health || !motion) return;
+    for (const auto* name : {"Skirmish_Rebel_Star_Base_1", "Skirmish_Empire_Star_Base_1"}) {
+        const auto* station = health.value().find(eawr::assets::object_type_crc(name));
+        expect(station && std::any_of(station->hardpoints.begin(), station->hardpoints.end(),
+            [](const auto& point) { return point.allows_special_weapon_use; }),
+            "WSW-48: installed station binds its required special-weapon hardpoint: " + std::string(name));
+    }
+    for (const auto& [name, index, action, recharge, count, delay] : {
+        std::tuple{"Ground_Ion_Cannon", 0U, 1U, 900U, 3U, 15U},
+        std::tuple{"Ground_Empire_Hypervelocity_Gun", 1U, 0U, 1350U, 10U, 3U}}) {
+        const auto type = eawr::assets::object_type_crc(name);
+        const auto* unit = tables.find(name);
+        const auto* profile = combat.value().find(type);
+        expect(unit && unit->planetary_weapon && unit->model_path.empty() && !unit->hull
+            && !health.value().find(type) && !motion.value().find(type) && !motion.value().footprint(type),
+            "WSW-01/02: active planetary source loads without ship/model/locomotor: " + std::string(name));
+        expect(profile && profile->planetary_weapon && profile->planetary_weapon->index == index
+            && profile->planetary_weapon->target_action == action && profile->planetary_weapon->recharge_frames == recharge
+            && profile->planetary_weapon->pulse_delay_frames == delay && profile->weapons.size() == 1
+            && profile->weapons.front().pulse_count == count && profile->weapons.front().shot,
+            "WSW-14/19/21: active source firing content matches authored data: " + std::string(name));
+    }
+    expect(!tables.find("Space_Mode_Ground_Rebel_Ion_Cannon") && !tables.find("Space_Mode_Ground_Empire_Hypervelocity_Gun"),
+        "WSW-02: commented-out source types are absent");
+}
+
+// WCC-18: the installed Nebulon-B's default set (Frigate) lists no hardpoints, so every hardpoint type
+// ranks unlisted and its best hardpoint is the nearest destroyable one; its hardpoints carry their types.
+void foc_hardpoint_ranks(eawr::units::LoadInput input) {
+    input.types = {"Nebulon_B_Frigate"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WCC-18: the installed Nebulon-B loads");
+    if (!loaded) return;
+    const auto combat = eawr::units::combat_table(loaded.value());
+    expect(static_cast<bool>(combat), "WCC-18: the installed Nebulon-B binds");
+    if (!combat) return;
+    const auto* frigate = combat.value().find(eawr::assets::object_type_crc("Nebulon_B_Frigate"));
+    expect(frigate && frigate->priority_set && *frigate->priority_set < combat.value().priority_sets.size(),
+        "WCC-18: the Nebulon-B has its default priority set");
+    if (!frigate || !frigate->priority_set || *frigate->priority_set >= combat.value().priority_sets.size()) return;
+    const auto& set = combat.value().priority_sets[*frigate->priority_set];
+    expect(!set.hardpoint_ranks.empty() && std::all_of(set.hardpoint_ranks.begin(), set.hardpoint_ranks.end(),
+        [](const auto& rank) { return rank == eawr::units::unlisted_priority; }),
+        "WCC-18: the Frigate set lists and excludes no hardpoint type");
+    expect(set.hardpoint_ranks.size() > static_cast<std::size_t>(eawr::units::HardpointType::weapon_special),
+        "WCC-18: every hardpoint type has a rank");
+    expect(std::any_of(frigate->hardpoints.begin(), frigate->hardpoints.end(), [](const auto& hardpoint) {
+        return hardpoint.type == static_cast<std::uint8_t>(eawr::units::HardpointType::engine);
+    }), "WCC-18: the Nebulon-B's engine hardpoint carries its type");
+}
+
+// WMV-42/44: installed no-layer group, including a self-represented Falcon.
+void foc_formation_deceleration(eawr::units::LoadInput input) {
+    namespace t = eawr::sim::tactical;
+    input.types = {"Millennium_Falcon", "X-Wing", "Slave_I", "Nebulon_B_Frigate", "Corellian_Corvette"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WMV-44: stock formation types load");
+    if (!loaded) return;
+    const auto motion = eawr::units::motion_table(loaded.value());
+    expect(static_cast<bool>(motion), "WMV-44: stock formation profiles bind");
+    if (!motion) return;
+    const auto falcon = eawr::assets::object_type_crc("Millennium_Falcon");
+    const auto* profile = motion.value().squadrons.find_squadron(falcon);
+    const auto* craft = motion.value().squadrons.find_craft(falcon);
+    expect(profile && craft && profile->formation_deceleration == Fixed::from_decimal("0.36").value(),
+        "WMV-44: standalone Falcon retains its own scaled 0.3 deceleration");
+    if (!profile || !craft) return;
+    const auto number = [](Fixed value) { return static_cast<double>(value.raw()) / Fixed::scale; };
+    for (const bool ships : {false, true}) {
+        t::TacticalReplay replay;
+        replay.setup.players = {{1, 1, 1, t::player_flag_commandable}};
+        const std::vector<std::string> names = ships ? std::vector<std::string>{"Corellian_Corvette", "Nebulon_B_Frigate"}
+                                                   : std::vector<std::string>{"Millennium_Falcon", "X-Wing", "Slave_I"};
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            replay.setup.units.push_back({static_cast<eawr::sim::EntityId>(i + 1),
+                eawr::assets::object_type_crc(names[i]), 1,
+                point(raw(i == 0 ? -200 : i == 1 ? 0 : -350), raw(i == 0 ? -60 : i == 1 ? 60 : 120), 0),
+                t::yaw_rotation(Fixed{}).value(), {}});
+        }
+        replay.commands.push_back({{0, 1, 0}, ships ? std::vector<eawr::sim::EntityId>{1, 2}
+                                                  : std::vector<eawr::sim::EntityId>{1, 2, 3},
+            t::MovePayload{point(raw(2000), 0, 0)}});
+        replay.final_tick_count = 180;
+        std::array<std::vector<Vec3>, 2> positions;
+        for (const bool legacy : {true, false}) {
+            auto table = motion.value();
+            // The old routine had no deceleration ceilings. A nonbinding ceiling reproduces
+            // its algebra for this finite trace without changing ordinary craft thrust.
+            if (legacy) for (auto& member : table.squadrons.squadrons)
+                member.formation_deceleration = Fixed::from_raw(raw(1000));
+            auto session = t::TacticalSession::from_replay(replay, {}, {}, table);
+            expect(static_cast<bool>(session), "WMV-44: stock group session creates");
+            if (!session) return;
+            const eawr::platform::ThreadWorkerAdapter executor(1);
+            bool grouped = false;
+            for (unsigned tick = 0; tick < 180; ++tick) {
+                const auto stepped = session.value().step(executor);
+                expect(static_cast<bool>(stepped), "WMV-44: stock group step succeeds");
+                if (!stepped) return;
+                const auto unit = session.value().units().front();
+                positions[legacy ? 0 : 1].push_back(unit.position);
+                if (!ships && tick == 0) {
+                    const auto first = session.value().squadron_state(1);
+                    const auto second = session.value().squadron_state(2);
+                    const auto third = session.value().squadron_state(3);
+                    grouped = first && second && first->lane && second->lane
+                        && first->lane->formation == second->lane->formation && third && third->lane
+                        && first->lane->formation == third->lane->formation;
+                }
+                if (tick % 10 == 0) {
+                    std::cout << "FORMATION_TRACE " << (ships ? "layered-ships" : "standalone-Falcon")
+                        << ' ' << (legacy ? "before-nonbinding" : "after") << " tick=" << tick + 1
+                        << " x=" << number(unit.position.x) << " y=" << number(unit.position.y);
+                    const auto mind = session.value().squadron_state(1);
+                    if (mind && mind->lane) {
+                        const auto& lane = *mind->lane;
+                        const double dx = number(unit.position.x) - number(lane.origin.x);
+                        const double dy = number(unit.position.y) - number(lane.origin.y);
+                        std::cout << " ahead=" << dx * number(lane.direction.x) + dy * number(lane.direction.y) - number(lane.ahead)
+                            << " side_error=" << number(lane.aside) - (dy * number(lane.direction.x) - dx * number(lane.direction.y));
+                    }
+                    std::cout << '\n';
+                }
+            }
+            if (!ships) expect(grouped, "WMV-44: standalone members entered the group path");
+        }
+        if (ships) expect(positions[0] == positions[1], "WMV-44: layered ordinary ship move is unchanged");
+        else std::cout << "FORMATION_TRACE_NOTE stock Falcon reachability checked; the correction ceiling did not bind "
+            "in this 180-tick group move. Binding limits are checked by the synthetic contracts.\n";
+    }
+}
+
+void foc_fleet(const bool formation_only) {
     const auto root = environment("EAWR_EAW_GAME_ROOT");
     if (!root) {
         std::cout << "FoC fleet: skipped (set EAWR_EAW_GAME_ROOT)\n";
@@ -1233,24 +2428,46 @@ void foc_fleet() {
     auto catalog = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
     expect(static_cast<bool>(catalog), "FoC catalog loads");
     if (!catalog) return;
+    // #793 (R-10, R-13, C-06): the installed FoC profile loads with no failed registry and no failed include.
+    expect(catalog.value().health.registry_invalid == 0 && catalog.value().health.include_failed == 0 &&
+               !catalog.value().health.failed(),
+           ("FoC catalog load health: " + eawr::data::describe_load_health(catalog.value().health)).c_str());
     eawr::scene::VfsAssetCache cache(filesystem.value());
     const auto access = cache.access();
     eawr::units::LoadInput input;
     input.catalog = &catalog.value().catalog;
     input.filesystem = &filesystem.value();
     input.model = access.model;
+    if (formation_only) {
+        foc_formation_deceleration(input);
+        return;
+    }
     foc_bomber_torpedo_volley(input);
     foc_passive_projectile_defence(input);
     foc_active_projectile_defence(input);
+    foc_space_healing(input);
+    foc_stealth(input);
+    foc_laser_defence(input);
+    foc_redirect_blaster(input);
     foc_super_capitals(input);
     foc_hazard_maps(input);
     foc_mass_drivers(input);
     foc_diamond_boron_cluster(input);
     foc_barrage_buttons(input);
+    foc_full_salvo(input);
+    foc_self_destruct(input);
+    foc_corrupt_systems(input);
+    foc_peacebringer_blast(input);
+    foc_asymmetric_release_geometry(input);
+    foc_special_without_blast(input);
+    foc_leech_shields(input);
+    foc_lure(input);
+    foc_hardpoint_ranks(input);
     auto loaded = eawr::units::load_unit_tables(input);
     expect(static_cast<bool>(loaded), "FoC unit tables load");
     if (!loaded) return;
     const auto& tables = loaded.value();
+    foc_planetary_sources(tables, input);
     // WWP-72: only the Nebulon-B in the pinned ship/craft roster has nonzero aim height.
     // Live map structures are checked separately by the resource-container fixture.
     for (const auto& id : eawr::units::pinned_m2_types()) {
@@ -1316,6 +2533,33 @@ void foc_fleet() {
     const auto ion_combat = eawr::units::combat_table(tables);
     expect(static_cast<bool>(ion_combat), "ion production combat table loads");
     if (ion_combat) {
+        for (const auto* name : {"Nebulon_B_Frigate", "Corellian_Corvette", "Skirmish_Empire_Star_Base_1", "TIE_Fighter_Squadron"}) {
+            const auto* type = tables.find(name);
+            expect(type && type->unit_ai && std::binary_search(ion_combat.value().unit_ai_types.begin(),
+                ion_combat.value().unit_ai_types.end(), eawr::assets::object_type_crc(name)),
+                std::string("WTA-29: installed UNIT_AI admission includes ship, station and runtime team: ") + name);
+        }
+        const auto team_id = eawr::assets::object_type_crc("TIE_Fighter_Squadron");
+        const auto& companies = ion_combat.value().retaliation_team_types;
+        const auto company = std::find_if(companies.begin(), companies.end(),
+            [team_id](const auto& row) { return row.type_id == team_id; });
+        const auto* purchase = tables.find("TIE_Fighter_Squadron");
+        expect(purchase && company != companies.end() && company->category_bits == purchase->category_bits
+            && !ion_combat.value().find(team_id)
+            && ion_combat.value().find_target_type(team_id) == &*company,
+            "WTA-29: company category metadata is bound without an active team combat profile");
+        for (const auto& priorities : ion_combat.value().priority_sets) {
+            expect(std::any_of(priorities.rows.begin(), priorities.rows.end(),
+                [team_id](const auto& row) { return row.type_id == team_id; }),
+                "WTA-29: normalized company attackers have resolved priority rows");
+        }
+        auto changed = tables;
+        const auto admitted = std::find_if(changed.units.begin(), changed.units.end(), [](const auto& unit) { return unit.unit_ai; });
+        if (admitted != changed.units.end()) {
+            admitted->unit_ai = false;
+            expect(eawr::units::content_identity(changed) != eawr::units::content_identity(tables),
+                "WTA-29: unit-AI behavior contributes to bound content identity");
+        }
         for (const auto* faction : {"Rebel", "Empire"}) for (unsigned level = 3; level <= 5; ++level) {
             const auto name = std::string("Skirmish_") + faction + "_Star_Base_" + std::to_string(level);
             const auto* station = ion_combat.value().find(eawr::assets::object_type_crc(name));
@@ -1558,7 +2802,7 @@ void foc_fleet() {
         expect((item.production.upgrade_object || item.kind == UnitKind::squadron || item.category_bits != 0) && (item.property_bits & 0x100) == 0,
                "fleet type has categories and is an opportunity target: " + item.id);
     }
-    expect(tables.constants.scalars.size() == 49, "combat, hazard and multiplayer tech scalars");
+    expect(tables.constants.scalars.size() == 55, "combat, hazard and multiplayer tech scalars");
     for (const auto& [tag, expected] : {
             std::pair{std::string_view{"Asteroid_Field_Damage"}, Fixed::from_raw(raw(20))},
             std::pair{std::string_view{"Asteroid_Field_Damage_Rate"}, Fixed::from_decimal("0.20").value()}}) {
@@ -1573,6 +2817,10 @@ void foc_fleet() {
     expect(motion && motion.value().profiles.size() >= 5 && motion.value().rules.arc_degrees == Fixed::from_raw(raw(15)) &&
                motion.value().rules.expansion_distance == Fixed::from_raw(raw(300)),
            "FoC motion table: five ships, 15 degree arcs, 300 unit expansion distance");
+    // OR-06, OR-14: the stock gameconstants.xml authors 10 frames and 750 units.
+    expect(motion && motion.value().rules.reevaluation_frames == 10
+               && motion.value().rules.guard_range == Fixed::from_raw(raw(750)) && motion.value().rules.max_waypoints == 6,
+           "FoC motion rules: MovementReevaluationFrameCount 10, Space_Guard_Range 750");
     // #599 (space-fighters FO-11): the group move's lane steer reads FormationMinimumSideError
     // and FormationMaximumSideError.
     expect(motion && motion.value().squadrons.side_error_max == Fixed::from_raw(raw(30))
@@ -1736,10 +2984,11 @@ void foc_fleet() {
                 "Rogue_2_XWing", "Rogue_4_XWing", "Rogue_7_XWing", "Rogue_10_XWing", "Rogue_11_XWing"}) {
             const auto* hero = table.find(eawr::assets::object_type_crc(id));
             const auto kind = std::string_view(id) == "Millennium_Falcon" ? AbilityKind::invulnerability : AbilityKind::power_to_weapons;
-            const auto slot = hero ? eawr::sim::tactical::ability_slot(*hero, kind) : std::nullopt;
-            expect(slot.has_value(), std::string("WHE-22: loaded hero damage mode: ") + id);
-            if (!slot) continue;
-            const auto& mode = hero->abilities[*slot];
+            const auto slot = hero ? eawr::sim::tactical::ability_slot(*hero, kind).value_or(hero->abilities.size()) : 0;
+            const bool bound = hero && slot < hero->abilities.size();
+            expect(bound, std::string("WHE-22: loaded hero damage mode: ") + id);
+            if (!bound) continue;
+            const auto& mode = hero->abilities[slot];
             if (kind == AbilityKind::invulnerability) {
                 expect(mode.expiration_frames == 180 && mode.recharge_frames == 1800 && mode.modifiers.take_damage == Fixed{},
                     "WHE-22: Falcon zero take damage, six seconds, sixty-second recharge");
@@ -1755,32 +3004,196 @@ void foc_fleet() {
                 std::tuple{"Accuser_Star_Destroyer", 1100, "0.98", 600U},
                 std::tuple{"Admonitor_Star_Destroyer", 800, "0.9", 750U}}) {
             const auto* hero = table.find(eawr::assets::object_type_crc(id));
-            const auto slot = hero ? eawr::sim::tactical::ability_slot(*hero, AbilityKind::tractor_beam) : std::nullopt;
-            expect(slot.has_value(), std::string("WHE-27: stock tractor is bound: ") + id);
-            if (!slot) continue;
+            const auto slot = hero ? eawr::sim::tactical::ability_slot(*hero, AbilityKind::tractor_beam).value_or(hero->abilities.size()) : 0;
+            const bool bound = hero && slot < hero->abilities.size();
+            expect(bound, std::string("WHE-27: stock tractor is bound: ") + id);
+            if (!bound) continue;
             const auto nested = std::find_if(hero->special.begin(), hero->special.end(), [](const auto& value) {
                 return value.kind == eawr::sim::tactical::SpecialAbilityKind::tractor_beam;
             });
             expect(nested != hero->special.end() && nested->beam_max_range == Fixed::from_raw(raw(range))
-                && nested->target_speed_decrease == decimal(decrease) && hero->abilities[*slot].recharge_frames == recharge,
+                && nested->target_speed_decrease == decimal(decrease) && hero->abilities[slot].recharge_frames == recharge,
                 "WHE-27/60: stock tractor range, reduction and recharge stay distinct");
         }
         const auto* accuser = table.find(eawr::assets::object_type_crc("Accuser_Star_Destroyer"));
-        const auto energy = accuser ? eawr::sim::tactical::ability_slot(*accuser, AbilityKind::energy_weapon) : std::nullopt;
-        expect(energy.has_value(), "WHE-26: Accuser energy weapon is bound");
-        if (energy) {
+        const auto energy = accuser ? eawr::sim::tactical::ability_slot(*accuser, AbilityKind::energy_weapon).value_or(accuser->abilities.size()) : 0;
+        const bool energy_bound = accuser && energy < accuser->abilities.size();
+        expect(energy_bound, "WHE-26: Accuser energy weapon is bound");
+        if (energy_bound) {
             const auto nested = std::find_if(accuser->special.begin(), accuser->special.end(), [](const auto& value) {
                 return value.kind == eawr::sim::tactical::SpecialAbilityKind::energy_weapon;
             });
             expect(nested != accuser->special.end() && nested->beam_max_range == Fixed::from_raw(raw(800))
-                && nested->damage_per_frame == Fixed::from_raw(raw(50)) && accuser->abilities[*energy].expiration_frames == 150
-                && accuser->abilities[*energy].recharge_frames == 3600 && nested->beam_owner_bone == "HP_trac_bone",
+                && nested->damage_per_frame == Fixed::from_raw(raw(50)) && accuser->abilities[energy].expiration_frames == 150
+                && accuser->abilities[energy].recharge_frames == 3600 && nested->beam_owner_bone == "HP_trac_bone",
                 "WHE-26/59: stock beam damage per frame, duration, recharge and owner attachment bind from XML");
         }
         const auto* slave = table.find(eawr::assets::object_type_crc("Slave_I"));
+        auto ring_input = input;
+        ring_input.types = {"MC30_Frigate", "TIE_Scout_Squadron"};
+        ring_input.obstacles.clear();
+        const auto ring_loaded = eawr::units::load_unit_tables(ring_input);
+        expect(static_cast<bool>(ring_loaded), "WCB/WFP: stock MC30 and scout closure loads");
+        if (ring_loaded) {
+            const auto built = eawr::units::ability_table(ring_loaded.value(), humans);
+            expect(static_cast<bool>(built), "WCB/WFP: stock ability profiles bind");
+            if (built) {
+                const auto* mc30 = built.value().find(eawr::assets::object_type_crc("MC30_Frigate"));
+                const auto slot = mc30 ? eawr::sim::tactical::ability_slot(*mc30, AbilityKind::cluster_bomb) : std::nullopt;
+                expect(slot && mc30->abilities[*slot].spawned, "WCB-01: MC30 has a cluster button");
+                if (slot && mc30->abilities[*slot].spawned) {
+                    const auto& ability = mc30->abilities[*slot];
+                    const auto& spawn = *ability.spawned;
+                    expect(ability.recharge_frames == 1500 && ability.supports_autofire && spawn.ring_count == 12
+                        && spawn.countdown_frames == 45 && spawn.speed == Fixed::from_raw(raw(12))
+                        && spawn.max_travel == Fixed::from_raw(raw(500)) && spawn.blast.damage == Fixed::from_raw(raw(150))
+                        && spawn.blast.radius == Fixed::from_raw(raw(150)), "WCB-01: stock ring, flight, countdown and recharge bind");
+                    expect(mc30->mc30_script, "FS-29: stock Lua_Script attaches the MC30 self-trigger");
+                    const auto health = eawr::units::durability_table(ring_loaded.value());
+                    const auto combat = eawr::units::combat_table(ring_loaded.value());
+                    expect(health && combat, "WCB-02: stock bomb combat tables bind");
+                    if (health && combat) {
+                        eawr::sim::tactical::TacticalSetup initial;
+                        initial.players = {{1, 1, 1, eawr::sim::tactical::player_flag_commandable},
+                            {2, 2, 2, eawr::sim::tactical::player_flag_commandable}};
+                        initial.units = {{1, mc30->type_id, 1, {}, eawr::sim::math::identity_quat(), {}},
+                            {2, mc30->type_id, 2, {Fixed::from_raw(raw(10000)), {}, {}}, eawr::sim::math::identity_quat(), {}}};
+                        // FS-29/FD-47: no activation command; an AI MC30 consumes the preceding stock sample.
+                        auto ai_initial = initial;
+                        ai_initial.units[0].entity_id = 30;
+                        ai_initial.units[0].owner = 2;
+                        ai_initial.units[1].entity_id = 31;
+                        ai_initial.units[1].owner = 1;
+                        ai_initial.units[1].position = {Fixed::from_raw(raw(300)), {}, {}};
+                        auto ai_session = eawr::sim::tactical::TacticalSession::create(ai_initial, {}, health.value(), {}, {}, combat.value(), {}, built.value());
+                        expect(static_cast<bool>(ai_session), "FS-29: installed AI MC30 session creates");
+                        if (ai_session) {
+                            const eawr::platform::ThreadWorkerAdapter ai_executor(4);
+                            for (unsigned frame = 0; frame <= 31; ++frame) {
+                                const auto step = ai_session.value().step(ai_executor);
+                                expect(static_cast<bool>(step), "FS-29: installed self-trigger step succeeds");
+                                if (!step) break;
+                                if (frame == 0 || frame == 30) expect(ai_session.value().projectiles().empty(),
+                                    "FC-57: installed first empty update and equality skip do not fire");
+                                if (frame == 31) expect(ai_session.value().projectiles().size() == 12
+                                    && ai_session.value().ability_state(30)->slots[*slot].ready_tick == 1531,
+                                    "FD-47: AI stock MC30 directly launches twelve bombs and starts recharge");
+                            }
+                        }
+                        auto session = eawr::sim::tactical::TacticalSession::create(initial, {}, health.value(), {}, {}, combat.value(), {}, built.value());
+                        expect(static_cast<bool>(session), "WCB-02: stock bomb session creates");
+                        if (session) {
+                            expect(static_cast<bool>(session.value().submit({{0, 1, 1}, {1},
+                                eawr::sim::tactical::AbilityPayload{AbilityKind::cluster_bomb, eawr::sim::tactical::AbilityAction::activate}})),
+                                "WCB-02: stock ring activates");
+                            std::set<std::uint64_t> detonated;
+                            const eawr::platform::ThreadWorkerAdapter executor(4);
+                            for (unsigned tick = 0; tick < 48; ++tick) {
+                                const auto step = session.value().step(executor);
+                                expect(static_cast<bool>(step), "WCB-02: stock flight succeeds");
+                                if (!step) break;
+                                if (tick == 0) expect(session.value().projectiles().size() == 12, "WCB-02: twelve stock bombs launch");
+                                for (const auto& event : step.value().snapshot->combat_events())
+                                    if (event.kind == eawr::sim::tactical::CombatEventKind::projectile_expired && event.shooter == 1)
+                                        detonated.insert(event.target);
+                            }
+                            expect(detonated.size() == 12 && session.value().projectiles().empty(),
+                                "WCB-02: all twelve stock projectiles detonate, including travel expiry");
+                        }
+                    }
+                }
+                const auto* scout = built.value().find(eawr::assets::object_type_crc("TIE_Scout"));
+                const auto ping = scout ? eawr::sim::tactical::ability_slot(*scout, AbilityKind::fow_reveal_ping) : std::nullopt;
+                expect(ping && scout->abilities[*ping].spawned, "WFP-01: scout craft has the acting ping slot (AB-15)");
+                if (ping && scout->abilities[*ping].spawned) {
+                    const auto& ability = scout->abilities[*ping];
+                    expect(ability.recharge_frames == 900 && ability.spawned->reveal_range == Fixed::from_raw(raw(1000))
+                        && ability.spawned->speed.raw() == 0 && ability.spawned->max_travel.raw() == 0
+                        && ability.spawned->dense_reveal_multiplier == Fixed::from_raw(raw(1)), "WFP-01: projectile radius replaces decal distance");
+                    expect(!ability.spawned->lifetime, "WFP-03: stock ping has no injected or authored lifetime");
+                    const auto health = eawr::units::durability_table(ring_loaded.value());
+                    const auto combat = eawr::units::combat_table(ring_loaded.value());
+                    expect(health && combat, "WFP-03: stock ping combat tables bind");
+                    if (health && combat) {
+                        namespace tactical = eawr::sim::tactical;
+                        const eawr::sim::math::Vec3 click{Fixed::from_raw(raw(3000)), {}, {}};
+                        tactical::TacticalSetup initial;
+                        initial.players = {{1, 1, 1, tactical::player_flag_commandable},
+                            {2, 2, 2, tactical::player_flag_commandable}};
+                        initial.units = {{1, scout->type_id, 1, {}, eawr::sim::math::identity_quat(), {}}};
+                        tactical::FogRules fog;
+                        fog.map_left = Fixed::from_raw(raw(-2000)); fog.map_top = Fixed::from_raw(raw(2000));
+                        fog.cell_size = Fixed::from_raw(raw(100)); fog.cells_wide = 80; fog.cells_tall = 40;
+                        // Fast ordinary regrowth isolates the stock object's lifetime from FC-15 cadence.
+                        fog.service_period = 1; fog.ramp_down_step = 238;
+                        std::vector<std::string> reference;
+                        for (const auto workers : {1U, 2U, 4U, 8U}) {
+                            auto session = tactical::TacticalSession::create(initial, {}, health.value(), {}, fog,
+                                combat.value(), {}, built.value());
+                            expect(static_cast<bool>(session), "WFP-03: loaded stock ping session creates");
+                            if (!session) continue;
+                            expect(static_cast<bool>(session.value().submit({{0, 1, 1}, {1},
+                                tactical::AbilityPayload{AbilityKind::fow_reveal_ping, tactical::AbilityAction::activate,
+                                    eawr::sim::invalid_entity_id, tactical::no_hardpoint, click}})), "WFP-03: loaded stock ping activates");
+                            const eawr::platform::ThreadWorkerAdapter executor(workers);
+                            std::vector<std::string> hashes;
+                            for (unsigned tick = 0; tick < 200; ++tick) {
+                                const auto step = session.value().step(executor);
+                                expect(static_cast<bool>(step), "WFP-03: loaded stock ping steps");
+                                if (!step) break;
+                                hashes.push_back(step.value().state_sha256);
+                                if (tick == 0) expect(session.value().projectiles().size() == 1
+                                    && session.value().fog_cells()->revealed(0, click)
+                                    && !session.value().fog_cells()->revealed(1, click),
+                                    "WFP-01/03: stock spawn reveals only for owner");
+                                if (tick >= 1) expect(session.value().projectiles().empty(),
+                                    "WFP-03: stock ping ends on first flight and never returns");
+                                if (tick >= 8) expect(!session.value().fog_cells()->revealed(0, click),
+                                    "WFP-03: ordinary fog regrows after stock ping expires");
+                            }
+                            if (reference.empty()) reference = hashes;
+                            else expect(hashes == reference, "WFP-03: loaded stock expiry equals on 1/2/4/8 workers");
+                        }
+                    }
+                }
+            }
+        }
         const auto bomb = slave ? eawr::sim::tactical::ability_slot(*slave, AbilityKind::harmonic_bomb) : std::nullopt;
         expect(bomb && slave->abilities[*bomb].spawned && slave->abilities[*bomb].spawned->countdown_frames == 45
             && slave->abilities[*bomb].recharge_frames == 600, "stock harmonic bomb binds the authored countdown and recharge");
+        // WAB-70..74: the StarViper squadron's team container holds BUZZ_DROIDS with the nested
+        // data of its team type and the Buzz_Droids object's own speed and valid targets. The pinned
+        // M2 roster has no Underworld units, so the squadron loads on its own.
+        auto viper_input = input;
+        viper_input.types = {"StarViper_Squadron"};
+        viper_input.obstacles.clear();
+        const auto viper_loaded = eawr::units::load_unit_tables(viper_input);
+        expect(static_cast<bool>(viper_loaded), "WAB-70: the StarViper squadron's tables load");
+        std::optional<eawr::sim::tactical::AbilityTable> viper_abilities;
+        if (viper_loaded) {
+            if (auto built = eawr::units::ability_table(viper_loaded.value(), humans)) viper_abilities = std::move(built).value();
+        }
+        expect(viper_abilities.has_value(), "WAB-70: the StarViper squadron's ability table builds");
+        const auto* viper = viper_abilities ? viper_abilities->find(eawr::assets::object_type_crc("StarViper_Squadron")) : nullptr;
+        const auto buzz = viper ? eawr::sim::tactical::ability_slot(*viper, AbilityKind::buzz_droids) : std::nullopt;
+        expect(buzz.has_value(), "WAB-70: the StarViper squadron's team holds buzz droids");
+        if (buzz) {
+            const auto& ability = viper->abilities[*buzz];
+            const auto per_frame = [](const std::int64_t per_second) {
+                return Fixed::from_raw((raw(per_second) + 15) / 30);
+            };
+            expect(ability.team && ability.recharge_frames == 1800 && ability.buzz
+                && ability.buzz->droid_type == eawr::assets::object_type_crc("Buzz_Droids")
+                && ability.buzz->min_range == Fixed::from_raw(raw(5)) && ability.buzz->max_range == Fixed::from_raw(raw(400))
+                && ability.buzz->chase_radius == Fixed::from_raw(raw(300)) && ability.buzz->damage_radius == Fixed::from_raw(raw(175))
+                && ability.buzz->enemy_damage == per_frame(23) && ability.buzz->own_damage == per_frame(3)
+                && ability.buzz->activation_frames == 30 && ability.buzz->victim_categories != 0
+                && ability.buzz->speed.raw() - decimal("4.2").raw() <= 2 && decimal("4.2").raw() - ability.buzz->speed.raw() <= 2,
+                "WAB-70..74: stock buzz-droid reach, radii, damage, arming, speed and recharge bind from XML");
+        }
+        const auto* viper_craft = viper_abilities ? viper_abilities->find(eawr::assets::object_type_crc("Starviper_Fighter")) : nullptr;
+        expect(viper_craft == nullptr || !eawr::sim::tactical::ability_slot(*viper_craft, AbilityKind::buzz_droids),
+            "WAB-70: the StarViper craft carry no buzz-droid slot of their own (AB-60)");
         const auto* antilles = table.find(eawr::assets::object_type_crc("Sundered_Heart"));
         const auto weak = antilles ? eawr::sim::tactical::ability_slot(*antilles, AbilityKind::weaken_enemy) : std::nullopt;
         expect(weak && antilles->abilities[*weak].spawned && antilles->abilities[*weak].spawned->weaken.on_detonation
@@ -1917,7 +3330,8 @@ void foc_fleet() {
     expect(std::none_of(tables.unresolved.begin(), tables.unresolved.end(), [](const auto& row) {
         return row.owner == "UL_Extort_Cash_L1_Upgrade" || row.owner == "UL_Extort_Cash_L2_Upgrade";
     }), "upgrade objects never pass through the required ship-body fields");
-    std::ifstream pinned(EAWR_UNIT_PINNED_REPLAY, std::ios::binary);
+    const auto pin_path = environment("EAWR_UNIT_PINNED_REPLAY").value_or(EAWR_UNIT_PINNED_REPLAY);
+    std::ifstream pinned(pin_path, std::ios::binary);
     const std::vector<std::uint8_t> pinned_bytes((std::istreambuf_iterator<char>(pinned)), std::istreambuf_iterator<char>());
     const auto replay_pin = eawr::sim::tactical::parse_replay(pinned_bytes);
     expect(replay_pin && replay_pin.value().setup.content_identity == identity,
@@ -1975,8 +3389,10 @@ void foc_fleet() {
     expect(bones > 0 && worst < 1.0e-4, "Q24 bone composition matches the double reference");
     foc_gunboat_pole(input);
     foc_object_weapon_defaults(input);
+    foc_fighter_muzzles(input);
     foc_living_collision(input);
     foc_resource_container(input);
+    foc_container_not_opportunity(input);
 }
 
 } // namespace unit_tables_test_support

@@ -22,8 +22,24 @@ const CraftProfile* SquadronTable::find_craft(const TypeId type_id) const noexce
 const SquadronProfile* SquadronTable::find_squadron(const TypeId type_id) const noexcept {
     return find_by_type(squadrons, type_id);
 }
-const SpawnerProfile* SquadronTable::find_spawner(const TypeId type_id) const noexcept {
+const SpawnerProfile* SquadronTable::find_spawner(const TypeId type_id, const PlayerId owner) const noexcept {
+    if (const auto found = campaign_spawners.find({type_id, owner}); found != campaign_spawners.end()) return &found->second;
     return find_by_type(spawners, type_id);
+}
+
+core::Result<Fixed> formation_member_deceleration(const SquadronProfile& profile,
+    const Fixed team_base_max_speed, const Fixed speed_factor) {
+    Calc calc;
+    Fixed result = profile.formation_deceleration;
+    if (profile.formation_type_max_speed.raw() > 0) {
+        // WMV-44: only the base speed is constrained by the live roster; modifiers belong
+        // to this formation member itself. An explicitly zero type maximum returns raw data.
+        const Fixed ratio = calc.div(std::min(team_base_max_speed, profile.formation_type_max_speed),
+            profile.formation_type_max_speed);
+        result = calc.mul(calc.mul(result, ratio), speed_factor);
+    }
+    if (!calc.ok()) return core::Result<Fixed>::failure(calc.error("formation member deceleration"));
+    return core::Result<Fixed>::success(result);
 }
 
 core::Result<void> validate_squadron_table(const SquadronTable& table) {
@@ -37,7 +53,7 @@ core::Result<void> validate_squadron_table(const SquadronTable& table) {
         const auto label = "craft type " + std::to_string(craft.type_id);
         if (!rate(craft.max_speed, true) || !rate(craft.min_speed, false) || !rate(craft.rate_of_turn, true)
             || !rate(craft.lift, false) || !rate(craft.thrust, true) || !rate(craft.roll_rate, false)
-            || craft.bank_angle.raw() < 0 || craft.bank_angle.raw() > 90 * Fixed::scale || !distance(craft.strafe_distance)
+            || !distance(craft.strafe_distance)
             || !distance(craft.follow_distance) || !distance(craft.attack_distance)
             || craft.out_of_combat_defense.raw() > Fixed::scale
             || craft.out_of_combat_defense.raw() < -max_out_of_combat_defense * Fixed::scale
@@ -63,7 +79,8 @@ core::Result<void> validate_squadron_table(const SquadronTable& table) {
         }
         if (!std::all_of(squadron.offsets.begin(), squadron.offsets.end(), point) || !distance(squadron.guard_chase_range)
             || !distance(squadron.idle_chase_range) || !distance(squadron.attack_move_response_range)
-            || !distance(squadron.formation_tolerance)) {
+            || !distance(squadron.formation_tolerance) || !distance(squadron.autonomous_move_extension_vs_attacker)
+            || !distance(squadron.formation_deceleration) || !distance(squadron.formation_type_max_speed)) {
             return invalid(label + ": an offset or range is out of range");
         }
     }
@@ -89,6 +106,14 @@ core::Result<void> validate_squadron_table(const SquadronTable& table) {
             }
         }
         if (spawner.delay_frames > 30U * 3600U) return invalid(label + ": the delay exceeds an hour");
+    }
+    if (!table.campaign_spawners.empty()) {
+        auto selected = table; selected.campaign_spawners.clear();
+        for (const auto& [key, profile] : table.campaign_spawners) {
+            if (key.second == 0 || key.first != profile.type_id) return invalid("invalid campaign spawner binding");
+            selected.spawners = {profile};
+            if (auto valid = validate_squadron_table(selected); !valid) return valid;
+        }
     }
     return core::Result<void>::success();
 }

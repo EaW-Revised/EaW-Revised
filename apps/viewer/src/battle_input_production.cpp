@@ -65,6 +65,10 @@ void BattleInput::begin_placement(const sim::tactical::TypeId type, LiveSessionV
     const auto* ledger = live.local_economy();
     if (!live.reinforcement_allowed() || !ledger
         || std::find(ledger->pool.begin(), ledger->pool.end(), type) == ledger->pool.end()) return;
+    cancel_special_target("reinforcement placement");
+    beacon_targeting_ = false;
+    cancel_ability_target("reinforcement placement");
+    if (auto* orders = live.order_input()) orders->cancel_mode();
     placing_ = type;
     live.reinforcement_feedback(LiveSessionView::ReinforcementFeedback::Kind::placement, type);
     note("reinforce placing " + std::to_string(type));

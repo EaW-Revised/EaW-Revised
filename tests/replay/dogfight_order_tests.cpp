@@ -117,7 +117,58 @@ void test_group_move() {
             && split.value()[3].lane->ahead == Fixed{} && split.value()[3].lane->aside == Fixed{},
         "FO-07: a squadron far from the others flies alone to the point");
 
+    {
+        tactical::SquadronProfile parent;
+        parent.formation_type_max_speed = units(8);
+        parent.formation_deceleration = units(2);
+        const auto roster = tactical::formation_member_deceleration(parent, units(4), units(1));
+        const auto modified = tactical::formation_member_deceleration(parent, units(4), units(2));
+        const auto surviving = tactical::formation_member_deceleration(parent, units(8), units(1));
+        expect(roster && modified && surviving && roster.value() == units(1)
+            && modified.value() == units(2) && surviving.value() == units(2),
+            "WMV-44: live team base speed and the member's own speed modifier scale its override");
+        parent.formation_type_max_speed = Fixed{};
+        const auto raw_override = tactical::formation_member_deceleration(parent, units(4), units(2));
+        expect(raw_override && raw_override.value() == units(2),
+            "WMV-44: explicitly zero type maximum bypasses both roster and modifier scaling");
+    }
     // FO-10, FO-11: the lane steer and the row keeping.
+    // WMV-42/44: independently exercise the forward and sideways correction ceilings.
+    {
+        std::vector<tactical::LaneMember> lanes(2);
+        for (auto& lane : lanes) {
+            lane.lane.direction = at(1, 0);
+            lane.max_speed = units(30);
+        }
+        lanes[1].max_speed = units(2);
+        lanes[1].position = at(24, 0);
+        const auto absent = tactical::formation_lane_flight(lanes, Fixed{}, units(1));
+        expect(absent && absent.value()[0].speed == units(2),
+            "WMV-42: absent deceleration caps forward correction at formation speed");
+        lanes[0].deceleration = Fixed::from_raw(one / 12);
+        const auto authored = tactical::formation_lane_flight(lanes, Fixed{}, units(1));
+        expect(authored && std::abs(as_double(authored.value()[0].speed) - 4.0) < 1e-5,
+            "WMV-42: forward limit is formation speed plus sqrt(twice deceleration times error)");
+        lanes[1].position = at(0, 0);
+        lanes[0].lane.aside = units(4);
+        lanes[0].deceleration = Fixed::from_raw(one / 2);
+        const auto side = tactical::formation_lane_flight(lanes, Fixed{}, units(1));
+        // Base forward speed 2; shift 4. Length sqrt(17); side ceiling 2+sqrt(4)=4.
+        expect(side && std::abs(as_double(side.value()[0].speed) - std::sqrt(17.0)) < 1e-5,
+            "WMV-42: positive sideways component respects its own error-based ceiling");
+        lanes[0].deceleration = Fixed{};
+        const auto zero = tactical::formation_lane_flight(lanes, Fixed{}, units(1));
+        expect(zero && std::abs(as_double(zero.value()[0].speed) - std::sqrt(17.0) / 2) < 1e-5,
+            "WMV-42: zero deceleration also caps positive sideways correction");
+        lanes[0].lane.aside = units(-4);
+        const auto negative = tactical::formation_lane_flight(lanes, Fixed{}, units(1));
+        expect(negative && std::abs(as_double(negative.value()[0].speed) - 2 * std::sqrt(17.0)) < 1e-5,
+            "WMV-42: debug-build sideways ceiling tests the signed positive component");
+        lanes[0].lane.aside = Fixed::from_raw(1);
+        const auto tiny = tactical::formation_lane_flight(lanes, Fixed{}, units(1));
+        expect(tiny && tiny.value()[0].speed == units(2),
+            "WMV-42: a tiny nonbinding side correction does not overflow the ceiling quotient");
+    }
     {
         std::vector<tactical::LaneMember> lanes(2);
         for (auto& lane : lanes) {

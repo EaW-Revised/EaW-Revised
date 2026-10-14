@@ -2,8 +2,23 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <iomanip>
 #include <sstream>
+#include <string_view>
+
+// Only the qualified x86-64 route is enabled. Other targets, including ARM,
+// keep the portable compressor until native runtime validation is available.
+#if (defined(_M_X64) || defined(__x86_64__)) && !defined(_M_ARM64EC) \
+    && (defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__))
+#define EAWR_X86_SHA 1
+#include <immintrin.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
+#endif
 
 namespace eawr::core {
 namespace {
@@ -25,7 +40,7 @@ constexpr std::array<std::uint32_t, 64> sha_k{
     0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U,
 };
 
-void sha_transform(std::array<std::uint32_t, 8>& state, const std::uint8_t* block) noexcept {
+void sha_transform_scalar(std::array<std::uint32_t, 8>& state, const std::uint8_t* block) noexcept {
     std::array<std::uint32_t, 64> words{};
     for (std::size_t index = 0; index < 16; ++index) {
         const auto base = index * 4;
@@ -76,31 +91,162 @@ void sha_transform(std::array<std::uint32_t, 8>& state, const std::uint8_t* bloc
     state[7] += h;
 }
 
+using Compressor = void (*)(std::array<std::uint32_t, 8>&, const std::uint8_t*, std::size_t) noexcept;
+
+void compress_scalar(std::array<std::uint32_t, 8>& state, const std::uint8_t* bytes, const std::size_t blocks) noexcept {
+    for (std::size_t block = 0; block < blocks; ++block) sha_transform_scalar(state, bytes + block * 64);
+}
+
+#if defined(EAWR_X86_SHA)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("sha,ssse3"), noinline))
+#else
+__declspec(noinline)
+#endif
+void compress_x86_sha(std::array<std::uint32_t, 8>& state, const std::uint8_t* bytes, const std::size_t blocks) noexcept {
+    // FIPS 180-4 section 6.2; Intel SHA instruction definitions, tables 3 and
+    // figures 4/5. Lanes are low-to-high F,E,B,A and H,G,D,C respectively.
+    const auto as_int = [](const std::uint32_t word) { return std::bit_cast<int>(word); };
+    auto abef = _mm_setr_epi32(as_int(state[5]), as_int(state[4]), as_int(state[1]), as_int(state[0]));
+    auto cdgh = _mm_setr_epi32(as_int(state[7]), as_int(state[6]), as_int(state[3]), as_int(state[2]));
+    const auto endian = _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
+    for (std::size_t block = 0; block < blocks; ++block) {
+        const auto saved_abef = abef;
+        const auto saved_cdgh = cdgh;
+        __m128i schedule[4];
+        for (std::size_t group = 0; group < 4; ++group) {
+            schedule[group] = _mm_shuffle_epi8(_mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(bytes + block * 64 + group * 16)), endian);
+        }
+        for (std::size_t group = 0; group < 16; ++group) {
+            const auto slot = group & 3U;
+            if (group >= 4) {
+                // W[t-16] + sigma0(W[t-15]), then W[t-7], then sigma1(W[t-2]).
+                const auto partial = _mm_sha256msg1_epu32(schedule[slot], schedule[(slot + 1) & 3U]);
+                const auto minus_seven = _mm_alignr_epi8(schedule[(slot + 3) & 3U], schedule[(slot + 2) & 3U], 4);
+                schedule[slot] = _mm_sha256msg2_epu32(_mm_add_epi32(partial, minus_seven), schedule[(slot + 3) & 3U]);
+            }
+            const auto wk = _mm_add_epi32(schedule[slot], _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(sha_k.data() + group * 4)));
+            cdgh = _mm_sha256rnds2_epu32(cdgh, abef, wk);
+            abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32(wk, 0x0e));
+        }
+        abef = _mm_add_epi32(abef, saved_abef);
+        cdgh = _mm_add_epi32(cdgh, saved_cdgh);
+    }
+    std::array<std::uint32_t, 4> first{}, second{};
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(first.data()), abef);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(second.data()), cdgh);
+    state = {first[3], first[2], second[3], second[2], first[1], first[0], second[1], second[0]};
+}
+#endif
+
+Sha256CpuFeatures detect_features() noexcept {
+    Sha256CpuFeatures features;
+#if defined(EAWR_X86_SHA)
+    unsigned maximum{}, ecx{}, edx{}, ebx{};
+#if defined(_MSC_VER)
+    int registers[4]{};
+    __cpuidex(registers, 0, 0);
+    maximum = static_cast<unsigned>(registers[0]);
+    if (maximum >= 1) {
+        __cpuidex(registers, 1, 0);
+        ecx = static_cast<unsigned>(registers[2]); edx = static_cast<unsigned>(registers[3]);
+    }
+    if (maximum >= 7) {
+        __cpuidex(registers, 7, 0);
+        ebx = static_cast<unsigned>(registers[1]);
+    }
+#else
+    maximum = __get_cpuid_max(0, nullptr);
+    unsigned ignored_a{}, ignored_b{}, ignored_c{}, ignored_d{};
+    if (maximum >= 1) __cpuid_count(1, 0, ignored_a, ignored_b, ecx, edx);
+    if (maximum >= 7) __cpuid_count(7, 0, ignored_a, ebx, ignored_c, ignored_d);
+    (void)ignored_a; (void)ignored_b; (void)ignored_c; (void)ignored_d;
+#endif
+    // x86-64's OS ABI guarantees XMM state preservation. No AVX state is used.
+    features.sse2 = (edx & (1U << 26U)) != 0;
+    features.ssse3 = (ecx & (1U << 9U)) != 0;
+    features.sha = (ebx & (1U << 29U)) != 0;
+#endif
+    return features;
+}
+
+Compressor compressor(const Sha256Backend backend) noexcept {
+#if defined(EAWR_X86_SHA)
+    if (backend == Sha256Backend::x86_sha) return compress_x86_sha;
+#else
+    (void)backend;
+#endif
+    return compress_scalar;
+}
+
 } // namespace
 
+Sha256CpuFeatures sha256_cpu_features() noexcept {
+    static const auto features = detect_features();
+    return features;
+}
+
+Sha256Backend sha256_backend_for_features(const Sha256CpuFeatures features) noexcept {
+#if defined(EAWR_X86_SHA)
+    if (features.sse2 && features.ssse3 && features.sha) return Sha256Backend::x86_sha;
+#else
+    (void)features;
+#endif
+    return Sha256Backend::scalar;
+}
+
+Sha256Backend sha256_backend(const Sha256Backend requested) noexcept {
+    if (requested == Sha256Backend::scalar) return Sha256Backend::scalar;
+    if (requested == Sha256Backend::x86_sha) return sha256_backend_for_features(sha256_cpu_features());
+    static const auto selected = [] {
+#if defined(_MSC_VER)
+        char override_buffer[16]{};
+        std::size_t length{};
+        const auto* override_value = getenv_s(&length, override_buffer, sizeof(override_buffer), "EAWR_SHA256_BACKEND") == 0
+            ? override_buffer : nullptr;
+#else
+        const auto* override_value = std::getenv("EAWR_SHA256_BACKEND");
+#endif
+        if (override_value && std::string_view(override_value) == "scalar") return Sha256Backend::scalar;
+        return sha256_backend_for_features(sha256_cpu_features());
+    }();
+    return selected;
+}
+
+const char* sha256_backend_name(const Sha256Backend backend) noexcept {
+    switch (backend) {
+    case Sha256Backend::automatic: return "automatic";
+    case Sha256Backend::scalar: return "scalar";
+    case Sha256Backend::x86_sha: return "x86-sha";
+    }
+    return "scalar";
+}
+
 std::array<std::uint8_t, 32> sha256(const std::span<const std::uint8_t> bytes) noexcept {
+    return sha256(bytes, Sha256Backend::automatic);
+}
+
+std::array<std::uint8_t, 32> sha256(const std::span<const std::uint8_t> bytes, const Sha256Backend backend) noexcept {
+    const auto compress = compressor(sha256_backend(backend));
     std::array<std::uint32_t, 8> state{
         0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
         0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U,
     };
-    std::size_t offset = 0;
-    while (bytes.size() - offset >= 64) {
-        sha_transform(state, bytes.data() + offset);
-        offset += 64;
-    }
+    const auto blocks = bytes.size() / 64;
+    if (blocks != 0) compress(state, bytes.data(), blocks);
+    const auto remainder = bytes.size() % 64;
+    const auto offset = bytes.size() - remainder;
     std::array<std::uint8_t, 128> tail{};
-    const auto remainder = bytes.size() - offset;
-    std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(offset), remainder, tail.begin());
+    if (remainder != 0) std::copy_n(bytes.data() + offset, remainder, tail.begin());
     tail[remainder] = 0x80U;
     const std::size_t padded_size = remainder < 56 ? 64U : 128U;
     const auto bit_length = static_cast<std::uint64_t>(bytes.size()) * 8U;
     for (unsigned index = 0; index < 8; ++index) {
         tail[padded_size - 1U - index] = static_cast<std::uint8_t>(bit_length >> (8U * index));
     }
-    sha_transform(state, tail.data());
-    if (padded_size == 128U) {
-        sha_transform(state, tail.data() + 64);
-    }
+    compress(state, tail.data(), padded_size / 64);
     std::array<std::uint8_t, 32> digest{};
     for (std::size_t index = 0; index < state.size(); ++index) {
         digest[index * 4] = static_cast<std::uint8_t>(state[index] >> 24U);
@@ -112,7 +258,11 @@ std::array<std::uint8_t, 32> sha256(const std::span<const std::uint8_t> bytes) n
 }
 
 std::string sha256_hex(const std::span<const std::uint8_t> bytes) {
-    const auto digest = sha256(bytes);
+    return sha256_hex(bytes, Sha256Backend::automatic);
+}
+
+std::string sha256_hex(const std::span<const std::uint8_t> bytes, const Sha256Backend backend) {
+    const auto digest = sha256(bytes, backend);
     std::ostringstream output;
     output << std::hex << std::setfill('0');
     for (const auto byte : digest) {

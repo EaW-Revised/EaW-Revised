@@ -39,7 +39,68 @@
 
 namespace eawr::sim::tactical {
 
+void session_detail::Tick::set_special_hardpoint_gate(const PlayerId owner, const bool enabled) {
+    // WSW-48: one sparse lifecycle notification writes each allied player's flag.
+    // The latest notification wins; there is no reduction over other stations.
+    for (const auto& player : impl_->setup.players) if (impl_->allied(owner, player.player_id)) {
+        if (enabled) special_disabled_by_hardpoint_.erase(player.player_id);
+        else special_disabled_by_hardpoint_.insert(player.player_id);
+    }
+}
+
+void session_detail::Tick::set_named_hardpoint_gate(const UnitState& unit, const std::string_view name,
+    const bool enabled) {
+    if (const auto* profile = impl_->abilities.find(unit.type_id))
+        radar_dirty_ = set_named_ability_lock(named_ability_locks_, unit.owner, *profile, name, !enabled)
+            || radar_dirty_;
+}
+
+void session_detail::Tick::publish_special_hardpoints(const LiveUnit& unit) {
+    const auto* profile = impl_->health_profile(unit);
+    if (!profile || !unit.durability) return;
+    for (std::size_t slot = 0; slot < profile->hardpoints.size(); ++slot) {
+        if (!profile->hardpoints[slot].special_ability_name.empty())
+            set_named_hardpoint_gate(unit.state, profile->hardpoints[slot].special_ability_name,
+                !hardpoint_destroyed(*profile, *unit.durability, slot) && !hardpoint_disabled(*unit.durability, slot));
+        if (profile->hardpoints[slot].allows_special_weapon_use)
+            set_special_hardpoint_gate(unit.state.owner,
+                !hardpoint_destroyed(*profile, *unit.durability, slot) && !hardpoint_disabled(*unit.durability, slot));
+    }
+}
+
+void session_detail::Tick::sync_radar_creations(const UnitStage& staged, const EntityId first, const EntityId next) {
+    // FC-75: visit only IDs allocated by this creation event, without writing other lifecycle gates.
+    if (first == invalid_entity_id || first == next) return;
+    for (auto id = first; id != next; ++id) {
+        const auto added = staged.find(id);
+        if (added != staged.end()) {
+            auto slots = impl_->radar_slots(added->second.state.type_id);
+            if (!slots.empty()) {
+                if (!radar_roster_) radar_roster_ = impl_->radar_roster;
+                radar_roster_->insert_or_assign(id, std::move(slots));
+                radar_dirty_ = true;
+            }
+        }
+        if (id == std::numeric_limits<EntityId>::max()) break;
+    }
+}
+
 void session_detail::Tick::track_victory_change(const UnitState* before, const UnitState* after, const bool evaluate) {
+    const auto& roster = radar_roster_ ? *radar_roster_ : impl_->radar_roster;
+    auto slots = after ? impl_->radar_slots(after->type_id) : std::vector<std::size_t>{};
+    if ((before && roster.contains(before->entity_id)) || !slots.empty()) {
+        if (!radar_roster_) radar_roster_ = impl_->radar_roster;
+        if (before) radar_roster_->erase(before->entity_id);
+        if (after && !slots.empty()) radar_roster_->insert_or_assign(after->entity_id, std::move(slots));
+        radar_dirty_ = true;
+    }
+    if (!before && after) if (const auto* health = impl_->durability.find(after->type_id))
+        for (const auto& point : health->hardpoints)
+            if (!point.special_ability_name.empty()) set_named_hardpoint_gate(*after, point.special_ability_name, true);
+    // WSW-48: existing sparse creation notification; no additional entity scan.
+    if (!before && after) if (const auto* health = impl_->durability.find(after->type_id))
+        for (const auto& hardpoint : health->hardpoints) if (hardpoint.allows_special_weapon_use)
+            set_special_hardpoint_gate(after->owner, true);
     // WPJ-17: sparse ordered creation notifications register static sources even
     // when victory is disabled, before a later same-frame jammer activation.
     if (!before && after) {
@@ -56,6 +117,26 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
     }
     const auto& rules = impl_->victory;
     if (rules.condition == VictoryCondition::none) return;
+    // WGT-29/WGM-51: campaign installs these alongside all-enemy-units, without a lobby choice.
+    if (!pending_outcome_ && evaluate && before && !after && impl_->setup.campaign) {
+        const auto leader = [&](auto&& self, const CarriedObject& object) -> bool {
+            if (std::binary_search(rules.campaign_leaders.begin(), rules.campaign_leaders.end(), object.entity_id)) return true;
+            return std::any_of(object.members.begin(), object.members.end(), [&](const auto& member) { return self(self, member); });
+        };
+        const bool lost_leader = std::binary_search(rules.campaign_leaders.begin(), rules.campaign_leaders.end(), before->entity_id)
+            || std::any_of(before->contained.begin(), before->contained.end(), [&](const auto& object) { return leader(leader, object); });
+        if (lost_leader || before->entity_id == rules.campaign_station) {
+            const auto winner = std::find_if(rules.contenders.begin(), rules.contenders.end(), [&](const auto player) {
+                return impl_->teams.at(player) != impl_->teams.at(before->owner);
+            });
+            if (winner != rules.contenders.end()) {
+                const auto condition = lost_leader ? VictoryCondition::enemy_leader_destroyed : VictoryCondition::campaign_station_destroyed;
+                pending_outcome_ = BattleOutcome{condition, *winner, impl_->teams.at(*winner), tick, before->entity_id,
+                    tick + victory_countdown_frames};
+                pending_victory_event_ = Event{tick, EventKind::victory, *winner, 0, before->entity_id};
+            }
+        }
+    }
     const auto& types = rules.condition == VictoryCondition::all_enemy_units_destroyed ? rules.relevant_types : rules.starbase_types;
     const auto relevant = [&](const UnitState* unit) {
         return unit != nullptr && std::binary_search(types.begin(), types.end(), unit->type_id);
@@ -122,11 +203,88 @@ core::Result<void> session_detail::Tick::finalize() {
     const auto& members_before = tracked_.value().members_before.value();
     auto& events = impacts_.value().events.value();
     auto& instances = systems_.value().instances.value();
-    const auto& survivors = surviving_.value().survivors.value();
+    auto& survivors = surviving_.value().survivors.value();
     const auto& spins = fighters_.value().spins.value();
     const auto& world = targets_.value().world.value();
     const auto& view = world.value();
     const auto& table = impl_->motion;
+    finalized_.emplace();
+    auto& basic_ai = finalized_->basic_ai.emplace(impl_->basic_ai);
+    auto& controls = finalized_->departure_controls.emplace(impl_->departure_controls);
+    if (impl_->setup.departure_policy && !pending_quits_.empty()) {
+        // MP-37: deactivate controllers at the frame tail; transfer objects without
+        // killing them. Human priority precedes AI priority in ascending player lookup.
+        const auto& humans = impl_->setup.departure_policy->humans;
+        const auto active = [&](PlayerId player) {
+            const auto left = [player](const PlayerQuit& quit) { return quit.player == player; };
+            return std::none_of(impl_->quits.begin(), impl_->quits.end(), left)
+                && std::none_of(pending_quits_.begin(), pending_quits_.end(), left);
+        };
+        std::map<PlayerId, PlayerId> recipients;
+        for (const auto& quit : pending_quits_) {
+            PlayerId recipient{};
+            for (const bool human : {true, false}) {
+                for (const auto& player : impl_->setup.players)
+                    if (player.commandable() && active(player.player_id)
+                        && impl_->allied(quit.player, player.player_id)
+                        && std::binary_search(humans.begin(), humans.end(), player.player_id) == human) {
+                        recipient = player.player_id;
+                        break;
+                    }
+                if (recipient != 0) break;
+            }
+            controls.push_back({quit.player, recipient ? recipient : quit.player, quit.tick, recipient == 0});
+            if (recipient) recipients.emplace(quit.player, recipient);
+            else if (!std::binary_search(basic_ai.begin(), basic_ai.end(), quit.player))
+                basic_ai.insert(std::lower_bound(basic_ai.begin(), basic_ai.end(), quit.player), quit.player);
+        }
+        if (!recipients.empty()) {
+            std::vector<std::optional<UnitState>> before(survivors.size());
+            std::vector<std::optional<core::Diagnostic>> errors(tick_partition_count);
+            std::vector<CombatBonuses> categories(tick_partition_count * impl_->bonus_categories.size());
+            std::map<EntityId, TypeId> containers;
+            for (const auto& account : staging_->ledgers.value()) for (const auto& held : account.completed) {
+                const auto host = std::lower_bound(survivors.begin(), survivors.end(), held.station,
+                    [](const LiveUnit& unit, EntityId id) { return unit.state.entity_id < id; });
+                if (host != survivors.end() && host->state.entity_id == held.station)
+                    containers.emplace(held.station, host->state.type_id);
+            }
+            const auto transferred = executor.execute_phase("departure-transfer", tick_partition_count,
+                [&](std::size_t partition) {
+                    const auto range = partition_range(partition, survivors.size());
+                    for (auto index = range.begin; index < range.end; ++index) {
+                        auto& unit = survivors[index];
+                        const auto recipient = recipients.find(unit.state.owner);
+                        if (recipient == recipients.end()) continue;
+                        before[index] = unit.state;
+                        const auto scratch = std::span(categories).subspan(
+                            partition * impl_->bonus_categories.size(), impl_->bonus_categories.size());
+                        const auto bonuses = impl_->command_bonuses_for(unit, impl_->command_ledger,
+                            staging_->ledgers.value(), containers, scratch, nullptr, true, recipient->second);
+                        auto changed = impl_->transfer_owner(unit, recipient->second, bonuses);
+                        if (!changed) { errors[partition] = changed.error(); break; }
+                        instances[index].owner = recipient->second;
+                    }
+                });
+            if (!transferred) return transferred;
+            for (const auto& error : errors) if (error) return core::Result<void>::failure(*error);
+            // Sparse ordered notifications reconcile victory accounting after worker writes.
+            for (std::size_t index = 0; index < before.size(); ++index)
+                if (before[index]) {
+                    impl_->adjust_owned(*before[index], false);
+                    impl_->adjust_owned(survivors[index].state, true);
+                    if (auto share = staging_->shares.value().find(survivors[index].state.entity_id);
+                        share != staging_->shares.value().end()) share->second.owner = survivors[index].state.owner;
+                    track_victory_change(&*before[index], &survivors[index].state, false);
+                }
+        }
+    }
+    if (radar_dirty_) {
+        auto radar = impl_->publish_named_abilities(survivors, named_ability_locks_,
+            radar_roster_ ? *radar_roster_ : impl_->radar_roster, executor);
+        if (!radar) return core::Result<void>::failure(radar.error());
+        finalized_->players = std::move(radar).value();
+    } else finalized_->players = impl_->snapshot_players;
     if (!projectile_defence_order_.empty()) {
         std::vector<std::uint8_t> registered(survivors.size()), jammer_only(survivors.size());
         const auto prepared = executor.execute_phase("projectile-defence-lifecycle", tick_partition_count,
@@ -172,11 +330,17 @@ core::Result<void> session_detail::Tick::finalize() {
     // from the tick's final positions and fill the same disjoint slots.
     // WR-35/39: only the few active arrivals supply disabled IDs; the field's existing
     // observer build filters them. Model visibility at 35 never enables a sensor.
+    // WR-43: the disabled service never releases what the creation frame marked at the drop point,
+    // so the fog grid keeps that circle (the arrivals map is ascending by ID).
     std::vector<EntityId> disabled_revealers;
+    std::vector<Impl::HeldReveal> held_reveals;
     for (const auto& [id, arrival] : arrivals) {
-        if (arrival.frame < arrival_reveal_frame) disabled_revealers.push_back(id);
+        if (arrival.frame >= arrival_reveal_frame) continue;
+        disabled_revealers.push_back(id);
+        held_reveals.push_back({id, arrival.exit});
     }
-    auto field = SensorField::build(impl_->setup.players, positions, impl_->sensors, disabled_revealers);
+    auto field = SensorField::build(impl_->setup.players, positions, impl_->sensors, disabled_revealers,
+        bonuses_->command_ledger ? bonuses_->command_ledger->reveal_multipliers : impl_->command_ledger.reveal_multipliers);
     if (!field) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
             "tick " + std::to_string(tick) + ": " + field.error().message));
@@ -186,7 +350,6 @@ core::Result<void> session_detail::Tick::finalize() {
     // their circles, from the same final positions.
     // A transactional view of the session's shared rows: pointer metadata only, never grids.
     // Keeping the old rows until visibility succeeds also preserves failed-tick atomicity.
-    finalized_.emplace();
     auto& fog = finalized_.value().fog.emplace();
     if (impl_->fog) fog.emplace(*impl_->fog);
     if (fog) {
@@ -213,7 +376,33 @@ core::Result<void> session_detail::Tick::finalize() {
                 "fire reveal centre exceeds the coordinate range"));
             flashes.push_back(FogFlash{target->owner, {x.value(), y.value(), shooter->position.z}, profile->flash_radius});
         }
-        const auto advanced = fog->advance(tick, true, Impl::revealers(sensing, positions, disabled_revealers), executor, flashes);
+        auto revealers = Impl::revealers(sensing, positions, held_reveals);
+        if (!impl_->ability_spawns.empty()) {
+            std::array<std::vector<FogRevealer>, tick_partition_count> projectile_revealers;
+            const auto gathered = executor.execute_phase("projectile-reveal-sources", tick_partition_count, [&](const std::size_t partition) {
+                const auto range = partition_range(partition, impl_->ability_spawns.size());
+                for (auto index = range.begin; index < range.end; ++index) {
+                    const auto& spawn = impl_->ability_spawns[index];
+                    if (spawn.detonated || spawn.kind != AbilityKind::fow_reveal_ping) continue;
+                    const auto* profile = impl_->spawn_profile(spawn.type);
+                    if (!profile || !profile->reveal_range) continue;
+                    // WFP-01: distinct source identity, owner team only, through the ordinary fog service.
+                    projectile_revealers[partition].push_back({spawn.id | (std::uint64_t{1} << 63), spawn.owner,
+                        spawn.position, *profile->reveal_range, profile->dense_reveal_multiplier});
+                }
+            });
+            if (!gathered) return gathered;
+            for (const auto& part : projectile_revealers) revealers.insert(revealers.end(), part.begin(), part.end());
+            std::sort(revealers.begin(), revealers.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        }
+        std::array<PlayerId,max_players> forced{}; std::size_t forced_count{};
+        if (impl_->setup.campaign && (impl_->fog_modifiers_dirty || bonuses_->command_ledger)) {
+            const auto current=impl_->fog_multipliers(bonuses_->command_ledger ? *bonuses_->command_ledger : impl_->command_ledger);
+            for(std::size_t i=0;i<impl_->setup.players.size();++i) if(current[i]!=impl_->last_fog_multipliers[i]) forced[forced_count++]=impl_->setup.players[i].player_id;
+            finalized_->fog_multipliers=current;
+        }
+        const auto advanced = fog->advance(tick, true, revealers, executor, flashes,
+            std::span<const PlayerId>(forced.data(),forced_count));
         if (!advanced) {
             return core::Result<void>::failure(advanced.error());
         }
@@ -225,10 +414,24 @@ core::Result<void> session_detail::Tick::finalize() {
     const auto sensed = executor.execute_phase("visibility", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, positions.size());
         for (auto index = range.begin; index < range.end; ++index) {
+            // FS-09/FD-06: completed removal detaches the held ship target at
+            // frame end, including deaths after targeting. The next admitted
+            // turn therefore starts without it; keep every scan/weapon clock.
+            // Read the immutable final identities and write only this survivor.
+            auto& combat = survivors[index].combat;
+            if (combat && combat->attack_target != invalid_entity_id) {
+                const auto target = std::lower_bound(positions.cbegin(), positions.cend(), combat->attack_target,
+                    [](const UnitState& unit, const EntityId id) { return unit.entity_id < id; });
+                if (target == positions.cend() || target->entity_id != combat->attack_target) {
+                    combat->attack_target = invalid_entity_id;
+                    combat->attack_hardpoint = no_hardpoint;
+                    combat->direct = false;
+                }
+            }
             instances[index].visible_to = impl_->visible_to(sensing, cells, positions[index].owner, positions[index].position,
                 positions[index].type_id, positions[index].rotation);
             instances[index].reveal_range = std::binary_search(disabled_revealers.begin(), disabled_revealers.end(), positions[index].entity_id)
-                ? std::nullopt : sensing.reveal_range(positions[index].type_id);
+                ? std::nullopt : sensing.reveal_range(positions[index].type_id, positions[index].owner);
         }
         const auto spun = partition_range(partition, spins.size());
         for (auto index = spun.begin; index < spun.end; ++index) {
@@ -300,6 +503,7 @@ core::Result<void> session_detail::Tick::finalize() {
     }
 
     if (victory_error_) return core::Result<void>::failure(*victory_error_);
+    if (bounty_error_) return core::Result<void>::failure(*bounty_error_);
     finalized_.value().starbases.emplace(pending_starbases_);
     auto& outcome = finalized_.value().outcome.emplace(pending_outcome_);
     if (pending_victory_event_) events.push_back(*pending_victory_event_);
@@ -329,15 +533,31 @@ core::Result<void> session_detail::Tick::finalize() {
             return std::none_of(quits.begin(), quits.end(), [id](const PlayerQuit& entry) { return entry.player == id; });
         };
         const auto remaining = std::count_if(impl_->setup.players.begin(), impl_->setup.players.end(),
-            [&](const Player& player) { return player.commandable() && active(player.player_id); });
-        const bool local_departure = std::binary_search(impl_->victory.humans.begin(), impl_->victory.humans.end(), quit.player);
+            [&](const Player& player) {
+                // MP-38, LAN MVP owner policy: AI slots do not keep a one-human
+                // network match open. Legacy local games retain controller counting.
+                return player.commandable() && active(player.player_id)
+                    && (!impl_->setup.departure_policy || std::binary_search(
+                        impl_->setup.departure_policy->humans.begin(), impl_->setup.departure_policy->humans.end(), player.player_id));
+            });
+        const bool local_departure = !impl_->setup.departure_policy
+            && std::binary_search(impl_->victory.humans.begin(), impl_->victory.humans.end(), quit.player);
         if (!local_departure && remaining >= 2) continue;
         const auto* leaving = impl_->player_of(quit.player);
         const auto enemy = std::find_if(impl_->setup.players.begin(), impl_->setup.players.end(), [&](const Player& player) {
-            return player.commandable() && active(player.player_id) && player.team_id != leaving->team_id;
+            return player.commandable() && active(player.player_id) && player.team_id != leaving->team_id
+                && (!impl_->setup.departure_policy || std::binary_search(
+                    impl_->setup.departure_policy->humans.begin(), impl_->setup.departure_policy->humans.end(), player.player_id));
         });
         // WBF-43's unresolved fallback; ordinary two-player local skirmish finds its enemy above.
-        const auto winner = enemy != impl_->setup.players.end() ? enemy->player_id : quit.player;
+        auto winner = enemy != impl_->setup.players.end() ? enemy->player_id : quit.player;
+        if (impl_->setup.departure_policy && enemy == impl_->setup.players.end() && remaining == 1) {
+            const auto survivor = std::find_if(impl_->setup.players.begin(), impl_->setup.players.end(), [&](const Player& player) {
+                return player.commandable() && active(player.player_id) && std::binary_search(
+                    impl_->setup.departure_policy->humans.begin(), impl_->setup.departure_policy->humans.end(), player.player_id);
+            });
+            winner = survivor->player_id;
+        }
         outcome = BattleOutcome{VictoryCondition::intentional_quit, winner, impl_->teams.at(winner), tick,
             invalid_entity_id, tick + 1U};
     }
@@ -380,7 +600,13 @@ core::Result<void> session_detail::Tick::commit() {
     mark("rebuild_registry", false);
     impl_->starbases = std::move(starbases);
     impl_->outcome = outcome;
+    impl_->retreat_state = std::move(pending_retreat_);
+    impl_->midbattle_solve = pending_midbattle_solve_;
+    impl_->rng_state = pending_rng_;
     impl_->quits = std::move(quits);
+    impl_->beacons = std::move(beacons_);
+    impl_->basic_ai = std::move(finalized_->basic_ai.value());
+    impl_->departure_controls = std::move(finalized_->departure_controls.value());
     if (finalized_.value().losses) impl_->losses = std::make_shared<const std::vector<BattleLoss>>(std::move(*finalized_.value().losses));
     if (finalized_.value().productions) impl_->productions = std::make_shared<const std::vector<BattleProduction>>(std::move(*finalized_.value().productions));
     if (finalized_.value().economy_cues) impl_->economy_cues = std::make_shared<const std::vector<BattleEconomyCue>>(std::move(*finalized_.value().economy_cues));
@@ -397,6 +623,11 @@ core::Result<void> session_detail::Tick::commit() {
     impl_->projectile_collection = std::move(targets_.value().projectile_collection.value());
     impl_->next_id = next_id;
     impl_->manual_clocks = std::move(manual_clocks_);
+    impl_->special_weapons = std::move(special_weapons_);
+    impl_->special_disabled_by_hardpoint = std::move(special_disabled_by_hardpoint_);
+    impl_->named_ability_locks = std::move(named_ability_locks_);
+    if (radar_roster_) impl_->radar_roster = std::move(*radar_roster_);
+    impl_->snapshot_players = std::move(finalized_->players.value());
     impl_->projectile_defence_order = std::move(projectile_defence_order_);
     impl_->ledgers = std::move(ledgers);
     if (bonuses_.value().command_ledger) impl_->command_ledger = std::move(*bonuses_.value().command_ledger);
@@ -407,6 +638,7 @@ core::Result<void> session_detail::Tick::commit() {
     impl_->shares = std::move(shares);
     impl_->earners = std::move(earners);
     impl_->fog = std::move(fog);
+    if (finalized_->fog_multipliers) { impl_->last_fog_multipliers=*finalized_->fog_multipliers; impl_->fog_modifiers_dirty=false; }
     impl_->projectiles = std::move(projectiles);
     impl_->pending_blast_damage = std::move(pending_blast_damage);
     impl_->next_projectile = next_projectile;
@@ -479,7 +711,12 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
         std::move(instances), std::move(events), std::move(combat_events), impl_->projectiles, impl_->outcome,
         std::move(spinning), std::move(squadron_targets), impl_->squadrons,
         impl_->economy_views(impl_->ledgers, impl_->shares), impl_->pad_views(), impl_->quits, impl_->losses, impl_->productions,
-        impl_->manual_clock_views(), impl_->economy_cues, impl_->ability_spawns);
+        impl_->manual_clock_views(), impl_->economy_cues, impl_->ability_spawns, session_.retreat_views(), impl_->garrison_timer_views(), impl_->beacons);
+    std::vector<std::pair<EntityId, PlayerId>> deaths;
+    if (impl_->setup.first_free_entity_id) {
+        deaths.reserve(loss_killers_.size());
+        for (const auto& [id, entry] : loss_killers_) deaths.emplace_back(id, entry.second);
+    }
     return core::Result<TacticalTick>::success(TacticalTick{
         impl_->completed_tick,
         std::move(hash),
@@ -506,6 +743,7 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
         std::move(asteroid_impacts),
         asteroid_queries,
         asteroid_candidates,
+        std::move(deaths),
     });
 }
 

@@ -235,6 +235,21 @@ def main() -> int:
                f"stripped rows retained {bare['maps']['reference_rows_by_status']}")
         expect(bare["models"] == [] and bare["maps"]["sky_references"] == 8, "no model is probed without a catalog")
 
+        # #793: a failed registry or hardpoint include never loads silently (R-10, R-13, C-06).
+        expect("catalog load" not in first.stderr, f"a clean catalog prints no load health: {first.stderr}")
+        expect("registry_invalid=1" in result.stderr, f"the stripped registry is reported: {result.stderr}")
+        broken = fixture.write_fixture_root(base / "broken_hardpoint_install")
+        xml = broken / "GameData" / "Data" / "XML"
+        (xml / "HardpointDataFiles.xml").write_text(
+            "<Hard_Point_Files><File>eawr_sky_broken.xml</File><File>eawr_sky_absent.xml</File></Hard_Point_Files>\n",
+            encoding="utf-8")
+        (xml / "eawr_sky_broken.xml").write_text("<HardPoints><HardPoint Name=\"HP\"></HardPoints>\n", encoding="utf-8")
+        hardpoint = run(args.scanner, "--profile", "eaw", "--game-root", str(broken / "GameData"),
+                        "--report", str(out / "broken-hardpoint.json"))
+        expect(hardpoint.returncode == 0, f"a scan with a failed hardpoint include still completes: {hardpoint.stderr}")
+        expect("hardpoint_include_failed=1" in hardpoint.stderr and "include_missing=1" in hardpoint.stderr,
+               f"the failed and the missing hardpoint include are reported apart: {hardpoint.stderr}")
+
         bad_arguments = [
             [],
             ["--profile", "eaw", "--game-root", str(game)],

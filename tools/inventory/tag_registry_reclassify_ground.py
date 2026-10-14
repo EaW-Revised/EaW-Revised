@@ -39,10 +39,10 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from common import ascii_fold
-    from tag_registry import dumps_registry, normalise_path, row_order
+    from tag_registry import load_registry, write_registry, normalise_path, row_order
 else:
     from .common import ascii_fold
-    from .tag_registry import dumps_registry, normalise_path, row_order
+    from .tag_registry import load_registry, write_registry, normalise_path, row_order
 
 REPO = Path(__file__).resolve().parents[2]
 STATUSES_PATH = REPO / "docs" / "tag-coverage" / "statuses.json"
@@ -246,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, help="write the before/after report (Markdown) here")
     parser.add_argument("--write", action="store_true", help="rewrite statuses.json")
     args = parser.parse_args(argv)
-    registry = json.loads(args.statuses.read_text(encoding="utf-8"))
+    registry = load_registry(args.statuses)
     objects, failed = load_objects(args.game_xml)
     result, changed, stats = reclassify(registry, classify(objects))
     print(f"{len(objects)} objects ({failed} XML files failed to parse); {stats}")
@@ -263,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if args.write:
-        args.statuses.write_text(dumps_registry(result), encoding="utf-8", newline="\n")
+        write_registry(args.statuses, result)
     return 0
 
 

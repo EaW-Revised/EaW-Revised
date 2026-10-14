@@ -8,6 +8,7 @@
 #include "sflua_persist.hpp"
 #include "sflua_sandbox.hpp"
 
+#include <array>
 #include <deque>
 #include <map>
 #include <memory>
@@ -36,6 +37,15 @@ struct Handler {
     int function_reference{};
 };
 
+struct ProximityHandler {
+    Handler handler;
+    ProximityQuery query;
+};
+struct ProximityList {
+    std::uint64_t generation{};
+    std::vector<ProximityHandler> handlers;
+};
+
 struct Staging {
     std::vector<ScriptCommand> commands;
     std::vector<ScriptEvent> posts;
@@ -52,6 +62,8 @@ struct Mark {
     std::uint64_t command_sequence{};
     std::uint64_t post_sequence{};
     std::uint64_t timer_sequence{};
+    std::shared_ptr<ImmediateEffectState> immediate;
+    bool immediate_changed{};
 };
 
 struct Shared;
@@ -64,9 +76,16 @@ struct Instance {
     std::int64_t current_thread{-1};
     bool exit_requested{};
     InstanceOutcome outcome{InstanceOutcome::running};
+    bool rolled_back{}; // invocation-local; not saved or hashed
     std::map<std::string, std::vector<Handler>, std::less<>> handlers;
+    std::map<std::pair<std::uint32_t, std::uint64_t>, ProximityList> proximities;
     std::uint64_t next_handler_id{1};
     std::uint64_t mutation_generation{};
+    // Derived graph digest: execution/registry writes invalidate it. Never saved.
+    bool sync_graph_dirty{true};
+    std::string sync_graph_digest;
+    std::array<std::uint64_t, 3> sync_graph_sandbox_key{};
+    std::uint64_t sync_graph_encodes{};
     std::uint32_t registrations{};
     std::uint32_t queued_events{};
     std::uint32_t pending_timers{};
@@ -81,6 +100,8 @@ struct Instance {
 
     std::vector<ScriptEvent> inbox;
     Staging staging;
+    std::shared_ptr<ImmediateEffectState> immediate;
+    bool immediate_changed{};
 
     [[nodiscard]] Mark mark() const noexcept;
     void rollback(const Mark& mark);
@@ -97,6 +118,8 @@ inline constexpr char method_binding_prefix = '#';
 struct Shared {
     SessionConfig config;
     ModuleManifest manifest;
+    // Modules are pinned at creation; save/load reuse this identical identity.
+    std::string manifest_digest;
     std::vector<BindingEntry> bindings;
     // Handle kind -> method name -> binding index.
     std::map<std::uint32_t, std::map<std::string, int, std::less<>>> methods;
@@ -130,6 +153,7 @@ int abort_session(lua_State* state);
 
 // bindings.cpp
 [[nodiscard]] bool is_infrastructure_name(std::string_view name);
+[[nodiscard]] bool can_extend_infrastructure(std::string_view name);
 // The infrastructure's C functions with their stable save names.
 [[nodiscard]] std::vector<sf::CFunctionEntry> host_functions();
 void install_bindings(Instance& instance);
@@ -146,8 +170,15 @@ struct ScriptScheduler::Impl {
     std::unique_ptr<detail::Shared> shared;
     std::map<std::uint64_t, std::unique_ptr<detail::Instance>> instances;
     std::map<EventKey, ScriptEvent> pending;
+    std::map<std::uint64_t, ObjectScript> objects; // instance order, includes completed attachments
     std::uint64_t completed_tick{};
+    std::uint64_t galactic_frame{}; // persisted only by the GC clock profile
     bool aborted{};
+    std::shared_ptr<ImmediateEffectHost> immediate_host;
+    std::size_t immediate_instance_limit{};
+    std::optional<ManagedHandlePolicy> managed_handles{};
+    std::function<ValueList()> managed_roots{};
+    ManagedHandleWork managed_work{};
 
     [[nodiscard]] core::Result<void> check_usable() const {
         if (aborted) return core::Result<void>::failure(detail::make_error(codes::session_abort, "the script session was aborted"));

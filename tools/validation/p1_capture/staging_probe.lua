@@ -29,6 +29,13 @@
 --            script kill does not carry it. Line: "DT <ship> <state> +<s>".
 --   fighters An X-wing squadron, then a TIE squadron, the same way; every craft is taken
 --            down to about 10 %. Line: "FT <craft> k<kills> +<s since the last kill>".
+--   wrecks   #1874: a Star Destroyer, then a Calamari cruiser, for the enemy player at the local
+--            station. Each is taken down to about 10 % and finished by the station and by local
+--            ships spawned beside it (a Damage_Normal kill, so the Damage_Normal death clone is
+--            used), then its wreck is watched for wreck_after seconds with the camera left where
+--            the kill happened. Stills land at scattered moments of the repeating cycle, so
+--            each one's line dates it. Line: "WK <SD|MC> <state> +<s>", the seconds since the
+--            kill once it happened.
 --   victory  #453: after start_wait the enemy station takes a killing hit, so the local player
 --            wins: the win message, then 7 s later the battle end dialog, which stays up.
 --   defeat   The same with the local Rebel station: the lose message and the dialog.
@@ -38,6 +45,8 @@
 --            switched on by script (Activate_Ability), held, then switched off, and the ship is
 --            watched for a while after. Line: "AB <ship> <on|off|run> +<s since the phase began>
 --            v<speed in units per frame over the last half second>".
+--   ability_icons #2279: owner/enemy visible-state captures for S-foils, power to weapons,
+--            defend and stealth. The advisor tag identifies the side; capture with -NoFog.
 --   turbo    #559: the corvette alone, on a shorter cycle. Its line also lists the speed sampled every
 --            0.4 s since the switch ("AB CC off +5.4 v3.72 s7.4 6.9 6.2 ..."), so one still shows the
 --            whole ramp of the speed after TURBO goes on or off.
@@ -91,6 +100,16 @@ EaWR_Stage = {
 		{"Nebulon_B_Frigate", "DEFEND", "NB", false},
 		{"Rebel_X-Wing_Squadron", "SPOILER_LOCK", "XW", false},
 	},
+	ability_icon_cases = {
+		{"Rebel_X-Wing_Squadron", "SPOILER_LOCK", "OWN-XW", false, false},
+		{"Rebel_X-Wing_Squadron", "SPOILER_LOCK", "EN-XW", false, true},
+		{"Victory_Destroyer_No_Fighters", "POWER_TO_WEAPONS", "OWN-PW", false, false},
+		{"Victory_Destroyer_No_Fighters", "POWER_TO_WEAPONS", "EN-PW", false, true},
+		{"Nebulon_B_Frigate", "DEFEND", "OWN-NB", false, false},
+		{"Nebulon_B_Frigate", "DEFEND", "EN-NB", false, true},
+		{"Vengeance_Frigate", "STEALTH", "OWN-ST", false, false},
+		{"Vengeance_Frigate", "STEALTH", "EN-ST", false, true},
+	},
 	turbo_cases = {{"Corellian_Corvette", "TURBO", "CC", true}},
 	turbo_lead = 3,
 	turbo_hold = 5,
@@ -110,6 +129,12 @@ EaWR_Stage = {
 	death_ships = {{"Tartan_Patrol_Cruiser", "TT", 500}, {"Acclamator_Assault_Ship", "AC", 2000}},
 	fighter_squadrons = {{"Rebel_X-Wing_Squadron", "X-Wing", "XW", 60},
 	                     {"TIE_Fighter_Squadron", "TIE_Fighter", "TF", 50}},
+	-- wrecks (#1874): {type, tag, hull health}; the helpers are local ships that finish the victim
+	wreck_ships = {{"Star_Destroyer", "SD", 7500}, {"Calamari_Cruiser", "MC", 8500}},
+	wreck_helpers = {"Nebulon_B_Frigate", "Nebulon_B_Frigate", "Corellian_Corvette"},
+	wreck_kill_timeout = 90, -- seconds of fighting before a forced kill (the line says SK then)
+	wreck_after = 80,    -- seconds a wreck is watched after the kill
+	wreck_attack_every = 2, -- seconds between the helpers' attack orders on the living victim
 	hull_floor = 0.1,    -- the script stops damaging at this hull fraction
 	damage_step = 0.04,  -- of the unit's hull health per service
 	damage_time = 8,     -- seconds of stepping at most
@@ -157,6 +182,7 @@ EaWR_Stage = {
 	camera_wait = 0,
 	history = {},
 	victims = {},
+	helpers = {},
 }
 
 -- Game seconds. The engine writes LastService, the game time of the script's previous
@@ -292,6 +318,9 @@ function EaWR_Stage_Dispose(objects)
 			disposed = false
 		end
 		if not ok or valid then
+			if EaWR_Stage.scenario == "ability_icons" then
+				EaWR_Stage_Call("cleanup-vulnerable", function() return object.Make_Invulnerable(false) end)
+			end
 			if not EaWR_Stage_Call("despawn", function() return object.Despawn() end) then
 				disposed = false
 				EaWR_Stage_Call("cleanup-kill", function() return object.Take_Damage(1000000) end)
@@ -311,6 +340,9 @@ function EaWR_Stage_Owned()
 	for i = 1, table.getn(d.victims) do
 		table.insert(owned, d.victims[i])
 	end
+	for i = 1, table.getn(d.helpers) do
+		table.insert(owned, d.helpers[i])
+	end
 	return owned
 end
 
@@ -324,6 +356,7 @@ function EaWR_Stage_Abandon(reason)
 	EaWR_Stage_Dispose(EaWR_Stage_Owned())
 	d.ship = nil
 	d.victims = {}
+	d.helpers = {}
 	d.first_kill_time = nil
 	EaWR_Stage_Set_Phase("wait")
 	d.wait_for = 2
@@ -337,6 +370,7 @@ function EaWR_Stage_Reset()
 	EaWR_Stage_Dispose(EaWR_Stage_Owned())
 	d.service = 0
 	d.started = nil
+	d.queue_selected = nil
 	d.ai_suspended = false
 	d.next_index = 1
 	d.phase = "wait"
@@ -360,6 +394,9 @@ function EaWR_Stage_Reset()
 	d.at_sample = nil
 	d.at_good_against = nil
 	d.victims = {}
+	d.helpers = {}
+	d.icon_units = nil
+	d.attack_at = nil
 	d.ship = nil
 	d.subject = nil
 	d.tag = nil
@@ -415,9 +452,9 @@ function EaWR_Stage_Camera(object, force)
 	return EaWR_Stage_Call("camera", Point_Camera_At, object)
 end
 
-function EaWR_Stage_Spawn(type_name, player)
+function EaWR_Stage_Spawn(type_name, player, position)
 	local ok, result = pcall(function()
-		local anchor = Find_First_Object(EaWR_Stage.station)
+		local anchor = position or Find_First_Object(EaWR_Stage.station)
 		if not anchor then
 			error("no " .. EaWR_Stage.station)
 		end
@@ -655,6 +692,15 @@ function EaWR_Stage_Ability(ship, ability, on)
 	return EaWR_Stage_Call("ability " .. ability, function() return ship.Activate_Ability(ability, on) end)
 end
 
+function EaWR_Stage_Icon_Ability(on)
+	local d = EaWR_Stage
+	if d.scenario ~= "ability_icons" then return EaWR_Stage_Ability(d.ship, d.entry[2], on) end
+	for i = 1, table.getn(d.icon_units) do
+		if not EaWR_Stage_Ability(d.icon_units[i], d.entry[2], on) then return false end
+	end
+	return true
+end
+
 function EaWR_Stage_Abilities()
 	local d = EaWR_Stage
 	local now = EaWR_Stage_Now()
@@ -667,11 +713,13 @@ function EaWR_Stage_Abilities()
 		return
 	end
 	if d.phase == "spawn" then
-		local cases = (d.scenario == "turbo") and d.turbo_cases or d.ability_cases
+		local cases = (d.scenario == "turbo") and d.turbo_cases or
+			((d.scenario == "ability_icons") and d.ability_icon_cases or d.ability_cases)
 		local entry = cases[d.next_index]
 		d.next_index = (d.next_index >= table.getn(cases)) and 1 or d.next_index + 1
-		local localp = EaWR_Stage_Players()
-		local units = EaWR_Stage_Spawn(entry[1], localp)
+		local localp, enemy = EaWR_Stage_Players()
+		local position = (d.scenario == "ability_icons") and Create_Position(-2200, 1500, 0) or nil
+		local units = EaWR_Stage_Spawn(entry[1], entry[5] and enemy or localp, position)
 		if not units then
 			EaWR_Stage_Set_Phase("wait")
 			return
@@ -681,6 +729,26 @@ function EaWR_Stage_Abilities()
 		d.entry = entry
 		d.tag = entry[3]
 		d.history = {}
+		if d.scenario == "ability_icons" then
+			-- Spawn_Unit can return a whole craft set. Keep it at one anchor and own
+			-- every returned object, so later cases do not inherit orphaned craft/cards.
+			d.helpers = {}
+			d.icon_units = units
+			for i = 2, table.getn(units) do table.insert(d.helpers, units[i]) end
+			for i = 1, table.getn(units) do
+				local object = units[i]
+				if not EaWR_Stage_Call("invulnerable", function() return object.Make_Invulnerable(true) end) or
+				   not EaWR_Stage_Call("prevent-fire", function() return object.Prevent_Opportunity_Fire(true) end) then
+					EaWR_Stage_Abandon()
+					return
+				end
+			end
+		end
+		if d.scenario == "ability_icons" then
+			-- Public Lua selection request; captures, rather than its return value, establish
+			-- whether the enemy can actually occupy the local selection/card panel.
+			d.selection_ok = pcall(function() localp.Select_Object(d.ship) end)
+		end
 		if not EaWR_Stage_Camera(d.ship, true) then
 			EaWR_Stage_Abandon()
 			return
@@ -729,12 +797,14 @@ function EaWR_Stage_Abilities()
 	                     speed = speed, samples = d.speed_samples, samples_taken = d.samples_taken}
 	d.ability_states[d.tag] = d.ability_states[d.tag] or {}
 	d.ability_states[d.tag][d.phase] = d.timeline_sample
-	local lead = turbo and d.turbo_lead or d.ability_lead
-	local hold = turbo and d.turbo_hold or d.ability_hold
-	local after = turbo and d.turbo_after or d.ability_after
+	local icons = d.scenario == "ability_icons"
+	local lead = icons and 2 or (turbo and d.turbo_lead or d.ability_lead)
+	-- Guarded native stills take tens of seconds: hold the sustained foil state long enough.
+	local hold = icons and ((d.entry[2] == "SPOILER_LOCK") and 60 or 15) or (turbo and d.turbo_hold or d.ability_hold)
+	local after = icons and 3 or (turbo and d.turbo_after or d.ability_after)
 	if d.phase == "run" then
 		if age >= lead then
-			if not EaWR_Stage_Ability(d.ship, d.entry[2], true) then
+			if not EaWR_Stage_Icon_Ability(true) then
 				EaWR_Stage_Abandon()
 				return
 			end
@@ -745,7 +815,7 @@ function EaWR_Stage_Abilities()
 		end
 	elseif d.phase == "on" then
 		if age >= hold then
-			if not EaWR_Stage_Ability(d.ship, d.entry[2], false) then
+			if not EaWR_Stage_Icon_Ability(false) then
 				EaWR_Stage_Abandon()
 				return
 			end
@@ -756,10 +826,12 @@ function EaWR_Stage_Abilities()
 		end
 	elseif d.phase == "off" then
 		if age >= after then
-			EaWR_Stage_Dispose({d.ship})
+			EaWR_Stage_Dispose(icons and EaWR_Stage_Owned() or {d.ship})
+			d.helpers = {}
+			d.icon_units = nil
 			d.ship = nil
 			EaWR_Stage_Set_Phase("wait")
-			d.wait_for = 2
+			d.wait_for = icons and 1 or 2
 		end
 	end
 end
@@ -1359,8 +1431,9 @@ function EaWR_Stage_Deaths(fighters)
 	local d = EaWR_Stage
 	local now = EaWR_Stage_Now()
 	local age = now - d.phase_start
-	local list = fighters and d.fighter_squadrons or d.death_ships
-	local prefix = fighters and "FT " or "DT "
+	local wrecks = d.scenario == "wrecks"
+	local list = fighters and d.fighter_squadrons or (wrecks and d.wreck_ships or d.death_ships)
+	local prefix = fighters and "FT " or (wrecks and "WK " or "DT ")
 	if d.phase == "wait" then
 		EaWR_Stage_Wait_Line(string.sub(prefix, 1, 2), age)
 		if age >= d.wait_for then
@@ -1385,6 +1458,19 @@ function EaWR_Stage_Deaths(fighters)
 		d.err = nil
 		d.enemy = enemy
 		d.entry = entry
+		if wrecks then
+			-- Local ships beside the victim finish it with their own weapons.
+			local localp = EaWR_Stage_Players()
+			d.helpers = {}
+			for i = 1, table.getn(d.wreck_helpers) do
+				local helper = EaWR_Stage_Spawn(d.wreck_helpers[i], localp)
+				if not helper then
+					EaWR_Stage_Abandon()
+					return
+				end
+				table.insert(d.helpers, helper[1])
+			end
+		end
 		d.tag = fighters and entry[3] or entry[2]
 		d.health = fighters and entry[4] or entry[3]
 		d.victims = fighters and {} or {units[1]}
@@ -1419,6 +1505,17 @@ function EaWR_Stage_Deaths(fighters)
 		EaWR_Stage_Abandon()
 		return
 	end
+	if wrecks and living[1] and (not d.attack_at or now - d.attack_at >= d.wreck_attack_every) then
+		-- The AI is suspended, so the helpers fire only on an order; it is repeated in case a target is lost.
+		d.attack_at = now
+		for i = 1, table.getn(d.helpers) do
+			local helper, victim = d.helpers[i], living[1]
+			if EaWR_Stage_Valid(helper) and not EaWR_Stage_Call("attack", function() return helper.Attack_Target(victim) end) then
+				EaWR_Stage_Abandon()
+				return
+			end
+		end
+	end
 	local state
 	if d.last_kill then
 		state = (fighters and ("k" .. d.kills) or "dead") .. " +" .. EaWR_Stage_Seconds(d.last_kill)
@@ -1447,12 +1544,13 @@ function EaWR_Stage_Deaths(fighters)
 			finished = alive == 0 and d.last_kill and now - d.last_kill >= d.after_last_kill
 			finished = finished or (d.first_kill_time and now - d.first_kill_time >= d.squadron_time)
 		else
-			finished = d.last_kill and now - d.last_kill >= d.after_death
+			finished = d.last_kill and now - d.last_kill >= (wrecks and d.wreck_after or d.after_death)
 		end
 		if d.last_kill and not d.first_kill_time then
 			d.first_kill_time = d.last_kill
 		end
-		if not d.last_kill and age >= d.kill_timeout then
+		local kill_timeout = wrecks and d.wreck_kill_timeout or d.kill_timeout
+		if not d.last_kill and age >= kill_timeout then
 			-- The line says SK only once the forced kill went through; a refused one ends the case.
 			for i = 1, alive do
 				local victim = living[i]
@@ -1464,10 +1562,12 @@ function EaWR_Stage_Deaths(fighters)
 			d.forced = " SK"
 		end
 		-- Never stuck on one victim: the next spawn follows in any case.
-		finished = finished or age >= d.kill_timeout + d.squadron_time
+		finished = finished or age >= kill_timeout + (wrecks and d.wreck_after + 10 or d.squadron_time)
 		if finished then
 			-- A failed despawn has posted its ERR line and killed the craft instead.
 			EaWR_Stage_Dispose(living)
+			EaWR_Stage_Dispose(d.helpers)
+			d.helpers = {}
 			d.first_kill_time = nil
 			d.victims = {}
 			EaWR_Stage_Set_Phase("wait")
@@ -1912,13 +2012,36 @@ end
 
 function EaWR_Stage_Step()
 	local d = EaWR_Stage
-	if d.scenario == "bank" then
+	-- UFS-37: hold only. The debugger supplies the observation and release;
+	-- no fleet/economy/position/fire/camera mutation is part of this profile.
+	if d.scenario == "allocation_observe" then
+		return
+	end
+	if d.scenario == "queue_clock" then
+		-- Capture-only slow builds are generated on the host. Select once so
+		-- subsequent guarded menu clicks and queue captures retain their subject.
+		if not d.queue_selected then
+			local player = Find_Player("local")
+			local all = Find_All_Objects_Of_Type(player)
+			for i = 1, table.getn(all) do
+				local object = all[i]
+				if EaWR_Stage_Valid(object) and string.find(string.upper(object.Get_Type().Get_Name()), "STAR_BASE", 1, true) then
+					if player.Select_Object(object) == false then error("queue station selection refused") end
+					d.queue_selected = true
+					d.line = "QUEUE " .. player.Get_Faction_Name() .. " staged build 600s"
+					break
+				end
+			end
+		end
+	elseif d.scenario == "bank" then
 		EaWR_Stage_Bank()
 	elseif d.scenario == "deaths" then
 		EaWR_Stage_Deaths(false)
 	elseif d.scenario == "fighters" then
 		EaWR_Stage_Deaths(true)
-	elseif d.scenario == "abilities" or d.scenario == "turbo" then
+	elseif d.scenario == "wrecks" then
+		EaWR_Stage_Deaths(false)
+	elseif d.scenario == "abilities" or d.scenario == "ability_icons" or d.scenario == "turbo" then
 		EaWR_Stage_Abilities()
 	elseif d.scenario == "pause" or d.scenario == "pause_wings" then
 		EaWR_Stage_Pause()
@@ -1930,6 +2053,8 @@ function EaWR_Stage_Step()
 		EaWR_Stage_Find_Mask()
 	elseif d.scenario == "melee" then
 		EaWR_Stage_Melee()
+	elseif d.scenario == "seismic" then
+		EaWR_Stage_Seismic()
 	elseif d.scenario == "bolts" then
 		EaWR_Stage_Bolts()
 	elseif d.scenario == "shieldgen" then
@@ -2174,4 +2299,33 @@ function EaWR_Cap_Sample()
 	end
 	if now >= CP.started + 60 and CP.status ~= "done" then EaWR_Cap_Snapshot(count, records); CP.status = "unavailable" end
 	EaWR_Stage.line = "BC cap" .. CP.cap .. " " .. CP.status
+end
+
+-- Visual-only probe: fresh Slave I each cycle avoids waiting for recharge.
+-- The fixed drop camera and a departing source expose the charge for pixel measurements.
+function EaWR_Stage_Seismic()
+	local d = EaWR_Stage
+	local age = EaWR_Stage_Now() - d.phase_start
+	if d.phase == "wait" then
+		if age < d.wait_for then return end
+		d.ship = EaWR_Stage_Spawn_At("Slave_I", Create_Position(-2200, 1500, 0), Find_Player("local"))
+		if not d.ship then return end
+		if not EaWR_Stage_Stop(d.ship) then EaWR_Stage_Abandon() return end
+		if not EaWR_Stage_Camera(d.ship, true) then EaWR_Stage_Abandon() return end
+		EaWR_Stage_Set_Phase("armed_wait")
+	elseif d.phase == "armed_wait" then
+		if age < 2 then return end
+		if not EaWR_Stage_Call("seismic ability", function() return d.ship.Activate_Ability("HARMONIC_BOMB", true) end) then
+			EaWR_Stage_Abandon() return
+		end
+		-- Keep the camera at the drop; the ship leaves its own bomb unobstructed.
+		if not EaWR_Stage_Move(d.ship, -1800, 1500, 0) then EaWR_Stage_Abandon() return end
+		EaWR_Stage_Set_Phase("drop")
+	elseif d.phase == "drop" and age >= 5 then
+		EaWR_Stage_Dispose({d.ship})
+		d.ship = nil
+		d.wait_for = 1
+		EaWR_Stage_Set_Phase("wait")
+	end
+	d.line = "SEISMIC " .. d.phase .. " +" .. string.format("%.1f", age)
 end

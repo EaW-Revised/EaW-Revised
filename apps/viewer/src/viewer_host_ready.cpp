@@ -1,5 +1,8 @@
 #include "viewer_host_internal.hpp"
+#include "audio_buses.hpp"
 #include "audio_output.hpp"
+#include "gpu_memory_trace.hpp"
+#include "settings_store.hpp"
 #include "startup_trace.hpp"
 #include <godot_cpp/classes/rendering_server.hpp>
 
@@ -49,13 +52,53 @@ void ViewerHost::_ready() try {
         return;
     }
 
-    // Retail for every capture and test, enhanced for a player's view (#184).
-    apply_render_profile(*get_viewport(), requested_render_profile.value_or(default_render_profile({
-        .interactive = options_->camera_interactive,
-        .self_test = options_->camera_input_selftest,
-        .capture = !options_->capture_path.empty(),
-        .resize_test = options_->window_resize_test.has_value(),
-    })));
+    // #2927: a player's view takes the saved settings (the window, vsync, the render profile, and
+    // through ActiveSettings the battle's volumes and speed step); a capture, report or test run
+    // never does, so evidence runs do not depend on the machine's settings file.
+    const bool evidence_run = !options_->capture_path.empty() || !options_->report_path.empty()
+        || options_->camera_input_selftest || options_->window_resize_test.has_value() || options_->headless_probe
+        || options_->benchmark || options_->renderer_runtime_test || options_->startup_metrics;
+    std::optional<RenderProfile> saved_render_profile;
+    if (!evidence_run) {
+        const SettingsStore store(options_->settings_file);
+        if (store.exists()) {
+            presentation::ui::SettingsLoad saved = store.load();
+            if (!saved.defaulted) {
+                ApplyReport applied;
+                ApplyTargets targets;
+                targets.texture_detail = !options_->texture_mip_drop_explicit;
+                apply_video(saved.settings.video, targets, applied);
+                // #3165: the saved volumes reach the shared buses before the front end's music starts.
+                apply_audio(saved.settings.audio, applied);
+                // The log is the receipt that a player's start-up took the saved record (#2927).
+                for (const std::string& line : applied.applied) {
+                    UtilityFunctions::print(String("EAWR settings applied: ") + String::utf8(line.c_str()));
+                }
+                for (const std::string& line : applied.skipped) {
+                    UtilityFunctions::print(String("EAWR settings skipped: ") + String::utf8(line.c_str()));
+                }
+                if (saved.settings.video.render_profile != presentation::ui::RenderProfileSetting::automatic) {
+                    saved_render_profile = resolve_render_profile(saved.settings.video.render_profile,
+                                                                  RenderProfile::retail);
+                }
+                ActiveSettings::set(std::move(saved.settings));
+            }
+        }
+    }
+
+    // #3165: the shared audio buses exist from the viewer's start, front end included; a run
+    // without saved settings has them at FoC's 0.75 (BattleAudio and MenuAudio use these).
+    if (!audio_buses::exist()) audio_buses::ensure(audio::MixLevels{});
+
+    // Retail for every capture and test, enhanced for a player's view (#184), or what the
+    // player chose (#2927); --eawr-render-profile wins over both.
+    apply_render_profile(*get_viewport(), requested_render_profile.value_or(saved_render_profile.value_or(
+        default_render_profile({
+            .interactive = options_->camera_interactive,
+            .self_test = options_->camera_input_selftest,
+            .capture = !options_->capture_path.empty(),
+            .resize_test = options_->window_resize_test.has_value(),
+        }))));
 
     // The OS window still has the requested size (--resolution, else the
     // project's window size) here: a window manager's resize reaches Godot
@@ -93,17 +136,66 @@ void ViewerHost::_ready() try {
         return;
     }
 
-    if (!options_->skirmish_setup && (!options_->report_path.empty() || options_->startup_metrics))
+    if (!options_->skirmish_setup && !options_->front_end && (!options_->report_path.empty() || options_->startup_metrics))
         startup_trace.begin(false, process_start);
-    if (options_->skirmish_setup) {
+    if (options_->skirmish_setup || options_->front_end) {
+        // The front end draws the menus itself and takes captures of its own; the setup screen
+        // behind it only captures in the stand-alone mode.
         skirmish_setup_ = std::make_unique<SkirmishSetupMode>(SkirmishSetupMode::Options{
-            options_->game_root, options_->mod_root, options_->report_path, options_->capture_path,
+            options_->game_root, options_->mod_root, options_->report_path,
+            options_->front_end ? std::filesystem::path{} : options_->capture_path,
             options_->profile, options_->cache_shaders});
         if (!skirmish_setup_->ready(*this)) {
             status_message_ = skirmish_setup_->failure();
             static_cast<void>(write_report("failed"));
             stop(2);
             return;
+        }
+        gpu_memory_trace.sample("setup_ready");
+        if (options_->front_end) {
+            skirmish_setup_->leave();
+            auto front_options = FrontEndMode::from_command_line(
+                options_->capture_path, options_->game_root, options_->mod_root, options_->profile);
+            // The campaign hand-offs: a refused start owns only its own subtree and leaves the menu usable.
+            const auto start_galactic = [this](GalacticMode::Options campaign_options) {
+                campaign_options.game_root = options_->game_root;
+                campaign_options.mod_root = options_->mod_root;
+                auto* campaign_host = memnew(Node3D);
+                add_child(campaign_host);
+                auto campaign = std::make_unique<GalacticMode>(std::move(campaign_options));
+                if (!campaign->ready(*campaign_host)) {
+                    const std::string reason = campaign->failure();
+                    campaign.reset();
+                    remove_child(campaign_host);
+                    memdelete(campaign_host);
+                    return reason.empty() ? std::string("The campaign could not be started.") : reason;
+                }
+                galactic_mode_ = std::move(campaign);
+                return std::string{};
+            };
+            front_options.saved_game_launcher = [start_galactic](const presentation::ui::SavedGameRequest& request) {
+                auto campaign_options = GalacticMode::from_command_line();
+                campaign_options.restore_save = GalacticMode::Options::RestoreSave{request.directory, request.name};
+                return start_galactic(std::move(campaign_options));
+            };
+            // MNU-34: the staging screen's chosen campaign entry (WGP-29: the set's entry of the chosen
+            // faction). Faction and difficulty need no option of their own: the entry names its faction,
+            // and the mode starts every campaign at the authored difficulty. Accepted technology
+            // options cross the same campaign-creation boundary (WGP-190).
+            front_options.campaign_launcher = [start_galactic](const presentation::ui::CampaignStartRequest& request) {
+                auto campaign_options = GalacticMode::from_command_line();
+                campaign_options.campaign = request.campaign;
+                campaign_options.custom_economy = request.economy;
+                return start_galactic(std::move(campaign_options));
+            };
+            front_end_ = std::make_unique<FrontEndMode>(std::move(front_options));
+            if (!front_end_->ready(*this, *skirmish_setup_)) {
+                status_message_ = front_end_->failure();
+                UtilityFunctions::printerr(String::utf8(status_message_.c_str()));
+                static_cast<void>(write_report("failed"));
+                stop(2);
+                return;
+            }
         }
         skirmish_setup_->start_button()->connect("pressed", callable_mp(this, &ViewerHost::on_skirmish_start));
         set_process_input(true);
@@ -133,6 +225,40 @@ void ViewerHost::_ready() try {
     if (UiGalleryMode::requested()) {
         ui_gallery_mode_ = std::make_unique<UiGalleryMode>(UiGalleryMode::from_command_line());
         if (!ui_gallery_mode_->ready(*this)) stop(2);
+        return;
+    }
+
+    if (LanLobbyMode::requested()) {
+        lan_lobby_mode_ = std::make_unique<LanLobbyMode>(LanLobbyMode::from_command_line());
+        if (!lan_lobby_mode_->ready(*this)) stop(2);
+        return;
+    }
+
+    if (GalacticMode::requested()) {
+        galactic_mode_ = std::make_unique<GalacticMode>(GalacticMode::from_command_line());
+        if (!galactic_mode_->ready(*this)) {
+            stop(2);
+            return;
+        }
+        set_process_input(true);
+        set_process_unhandled_input(true);
+        return;
+    }
+
+    if (OptionsMode::requested()) {
+        options_mode_ = std::make_unique<OptionsMode>(OptionsMode::from_command_line());
+        if (!options_mode_->ready(*this)) stop(2);
+        return;
+    }
+
+    if (AttractRunner::requested()) {
+        AttractRunner::Options attract = AttractRunner::from_command_line();
+        if (attract.game_root.empty()) attract.game_root = options_->game_root;
+        if (attract.mod_root.empty()) attract.mod_root = options_->mod_root;
+        if (attract.profile.empty()) attract.profile = options_->profile;
+        attract_runner_ = std::make_unique<AttractRunner>(std::move(attract));
+        set_process_input(true);
+        set_process_unhandled_input(true);
         return;
     }
 

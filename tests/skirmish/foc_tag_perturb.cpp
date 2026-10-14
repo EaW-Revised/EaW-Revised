@@ -69,6 +69,12 @@ namespace foc_tag_perturb_test_support {
         const auto number = [&](const std::uint64_t low, const std::uint64_t high) { return whole(value, low, high); };
         if (name == "--plan") {
             options.plan = value;
+        } else if (name == "--galactic") {
+            options.galactic = value;
+        } else if (name == "--max-seconds") {
+            const auto parsed = number(1, 86400);
+            if (!parsed) return "--max-seconds takes 1 to 86400";
+            options.max_seconds = *parsed;
         } else if (name == "--out") {
             options.out = value;
         } else if (name == "--game-root") {
@@ -190,6 +196,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     installation.catalog.emplace(std::move(catalog).value());
+    if (!options.galactic.empty()) return run_galactic_perturb(installation, options, rows, began);
     installation.cache = std::make_unique<eawr::scene::VfsAssetCache>(*installation.filesystem);
 
     // The baseline: its loads are traced (which values a loader reads), then it runs once at one

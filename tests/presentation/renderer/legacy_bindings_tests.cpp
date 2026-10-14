@@ -1,4 +1,6 @@
 #include "legacy_family_support.hpp"
+#include "resource_lease_ledger.hpp"
+#include "../../../apps/viewer/src/effect_clock_assets.hpp"
 
 namespace legacy_family_test_support {
 
@@ -36,8 +38,8 @@ void binding_contracts() {
     const auto defaults = legacy::uniforms(material);
     check(value_of<std::array<float, 3>>(defaults, "eawr_color") == std::array<float, 3>{1.0F, 1.0F, 1.0F}
             && value_of<std::array<float, 2>>(defaults, "eawr_uv_scroll_rate") == std::array<float, 2>{0.0F, 0.0F}
-            && value_of<float>(defaults, "eawr_time") == 0.0F,
-        "unauthored MeshAdditive parameters keep the effect initializers and TIME is fixed at 0");
+            && value_of<float>(defaults, "eawr_effect_time") == 0.0F,
+        "unauthored MeshAdditive parameters keep the effect initializers and the clock starts at 0");
 
     material.bindings = {
         {"BaseTexture", std::string("w_glow.tga")},
@@ -50,6 +52,58 @@ void binding_contracts() {
     check(value_of<std::array<float, 3>>(authored, "eawr_color") == std::array<float, 3>{0.5F, 0.75F, 1.5F}
             && value_of<std::array<float, 2>>(authored, "eawr_uv_scroll_rate") == std::array<float, 2>{0.25F, -0.5F},
         "MeshAdditive binds Color.rgb unclamped and UVScrollRate.xy exactly");
+    check(legacy::reads_effect_time(material) && legacy::reads_effect_time(vertex_additive),
+        "A-12/AVC-05: both additive passes subscribe to the scene effect clock");
+    for (const float time : {0.0F, 2.1F}) {
+        MaterialDescription timed = material;
+        timed.bindings.push_back({"eawr_effect_time", time});
+        const auto mapped = legacy::uniforms(timed);
+        check(rejection(timed).empty() && value_of<float>(mapped, "eawr_effect_time") == time,
+            "A-12: the supplied scene clock survives upload and material reconfiguration");
+        const auto uv = legacy::mesh_additive::reference_uv({0.125F, 0.5F},
+            value_of<std::array<float, 2>>(mapped, "eawr_uv_scroll_rate"), value_of<float>(mapped, "eawr_effect_time"));
+        check(near(uv[0], 0.125F + time * 0.25F) && near(uv[1], 0.5F - time * 0.5F),
+            "A-03/A-12: time in seconds scales the authored xy rate without a frame multiplier");
+        check(legacy::mesh_additive::reference_uv({0.125F, 0.5F}, {0.0F, 0.0F}, time)
+                == std::array<float, 2>{0.125F, 0.5F}, "A-03: zero-rate materials are unchanged at either time");
+    }
+    MaterialDescription stationary = selector(additive, RenderPass::transparent);
+    check(!legacy::reads_effect_time(stationary), "A-12: an unauthored zero rate needs no per-tick writes");
+    stationary.bindings = {{"UVScrollRate", eawr::assets::Vec4f{0.0F, 0.0F, 7.0F, 9.0F}}};
+    check(!legacy::reads_effect_time(stationary), "A-05: unused rate components do not subscribe to the clock");
+    godot_backend::detail::ResourceLeaseLedger leases;
+    check(leases.upload(91) && leases.upload(92) && leases.retain(91),
+        "the live model and its fog memory share one clocked material lease");
+    std::vector<eawr::sim::AssetId> clocks{91, 92};
+    check(leases.release(91) == godot_backend::detail::ResourceLeaseLedger::Release::retained,
+        "retiring the live model keeps its fog memory's material resident");
+    godot_backend::prune_effect_clock_assets(clocks, leases.resources());
+    std::vector<eawr::sim::AssetId> writes;
+    for (const auto asset : clocks) writes.push_back(asset);
+    check(writes == std::vector<eawr::sim::AssetId>{91, 92},
+        "the clock keeps writing to the fog-held material after live retirement");
+    check(leases.release(91) == godot_backend::detail::ResourceLeaseLedger::Release::free,
+        "discarding the fog memory releases its final material lease");
+    godot_backend::prune_effect_clock_assets(clocks, leases.resources());
+    writes.clear();
+    for (const auto asset : clocks) writes.push_back(asset);
+    check(writes == std::vector<eawr::sim::AssetId>{92},
+        "freeing the fog material stops its clock writes and keeps unrelated live clocks");
+    check(leases.release(92) == godot_backend::detail::ResourceLeaseLedger::Release::free,
+        "the unrelated model releases its final lease");
+    godot_backend::prune_effect_clock_assets(clocks, leases.resources());
+    check(clocks.empty(), "final release leaves no stale material clock subscriptions");
+    for (const MaterialBinding& binding : std::array<MaterialBinding, 3>{
+             MaterialBinding{"eawr_effect_time", eawr::assets::Vec3f{1.0F, 2.0F, 3.0F}},
+             MaterialBinding{"eawr_effect_time", std::numeric_limits<float>::infinity()},
+             MaterialBinding{"eawr_effect_time", std::numeric_limits<float>::quiet_NaN()}}) {
+        MaterialDescription invalid = material;
+        invalid.bindings.push_back(binding);
+        check(!rejection(invalid).empty(), "A-12: malformed or nonfinite clocks fail closed");
+    }
+    MaterialDescription duplicate_clock = material;
+    duplicate_clock.bindings.insert(duplicate_clock.bindings.end(), {{"eawr_effect_time", 1.0F}, {"eawr_effect_time", 2.0F}});
+    check(!rejection(duplicate_clock).empty(), "A-12: duplicate clocks fail closed");
     material.bindings[2].value = eawr::assets::Vec3f{0.25F, 0.375F, 0.5F};
     check(rejection(material).empty()
             && value_of<std::array<float, 3>>(legacy::uniforms(material), "eawr_color")
@@ -88,13 +142,16 @@ void binding_contracts() {
         "a float3 UVScrollRate binds its first two components");
 
     MaterialDescription offset = selector(legacy::mesh_additive_offset::family, RenderPass::transparent);
+    check(!legacy::reads_effect_time(offset)
+            && !legacy::reads_effect_time(selector(legacy::mesh_gloss_colorize::family, RenderPass::opaque)),
+        "A-12: offset-only additive materials and hull materials do not subscribe to time");
     offset.bindings = {{"UVOffset", eawr::assets::Vec4f{0.5F, -0.25F, 3.0F, 4.0F}},
         {"Color", eawr::assets::Vec4f{0.2F, 0.4F, 0.6F, 1.0F}}};
     const auto offset_uniforms = legacy::uniforms(offset);
     check(rejection(offset).empty()
             && value_of<std::array<float, 2>>(offset_uniforms, "eawr_uv_offset") == std::array<float, 2>{0.5F, -0.25F}
             && value_of<std::array<float, 3>>(offset_uniforms, "eawr_color") == std::array<float, 3>{0.2F, 0.4F, 0.6F}
-            && uniform(offset_uniforms, "eawr_time") == nullptr,
+            && uniform(offset_uniforms, "eawr_effect_time") == nullptr,
         "MeshAdditiveOffset binds UVOffset.xy and Color.rgb and no time");
     offset.bindings[0].value = 2.0F;
     check(rejection(offset).find("binds parameter 'UVOffset' as a scalar") != std::string::npos,

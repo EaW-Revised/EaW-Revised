@@ -262,7 +262,7 @@ class CatalogInputIdentity(unittest.TestCase):
                 (xml / name).write_text(content, encoding="utf-8")
             object_file = xml / "objects.xml"
 
-            def scan(model: str, label: str):
+            def scan(model: str, label: str, expected_health: str = ""):
                 object_file.write_text(
                     "<Objects><GroundBuildable Name=\"TEST\"><Land_Model_Name>"
                     + model + "</Land_Model_Name></GroundBuildable></Objects>", encoding="utf-8")
@@ -272,6 +272,8 @@ class CatalogInputIdentity(unittest.TestCase):
                      "--game-root", str(root), "--all", "--report", str(report)],
                     text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
                 self.assertEqual(completed.returncode, 0, completed.stdout)
+                if expected_health:
+                    self.assertIn("scene_scan: catalog load: " + expected_health, completed.stdout)
                 return json.loads(report.read_text(encoding="utf-8"))["inputs"]
 
             before = scan("a.alo", "before")
@@ -279,7 +281,7 @@ class CatalogInputIdentity(unittest.TestCase):
             self.assertEqual(before["catalog_sha256"], after["catalog_sha256"])
             self.assertNotEqual(before["catalog_input_sha256"], after["catalog_input_sha256"])
             (xml / "SFXEventFiles.xml").unlink()
-            missing_root = scan("b.alo", "missing-root")
+            missing_root = scan("b.alo", "missing-root", "registry_invalid=1")
             self.assertTrue(missing_root["catalog_provisional"])
             self.assertIn({"logical_path": "data/xml/sfxeventfiles.xml", "outcome": "missing"},
                           missing_root["unloaded_registry_roots"])

@@ -82,11 +82,12 @@ struct Script final {
     particles::RegistryWorkCounts work;
 };
 Script play(const bool batched, const particles::StepExecutor* executor, const bool hashes,
-            const std::size_t count = 40, const int frames = 45, const bool detail_changes = false) {
+            const std::size_t count = 40, const int frames = 45, const bool detail_changes = false, const bool measure = false) {
     RecordingBackend backend;
     particles::EffectRegistry registry(backend);
     registry.set_executor(executor);
     registry.set_stream_hashes(hashes);
+    registry.begin_measurement(measure);
     std::vector<particles::EffectHandle> handles;
     for (std::size_t index = 0; index < count; ++index) {
         const auto handle = registry.spawn(mixed_system(), 900U + static_cast<std::uint32_t>(index), 256);
@@ -163,8 +164,16 @@ AttachmentScript play_attachments(const bool batched, const particles::StepExecu
     for (std::size_t index = 0; index < count; ++index) {
         const bool mesh = index % 5 == 0;
         auto system = mesh ? mesh_system(particles::MeshSpawnMode::every_vertex) : mixed_system();
+        if (index % 5 == 1) {
+            system.emitters.resize(2);
+            system.emitters[0].lifetime = 0.1F;
+            system.emitters[1].creator_id = 40;
+            system.emitters[1].parent_emitter = 0;
+            system.emitters[1].bursting = true;
+        }
         system.leave_particles = index % 4 != 0;
-        for (auto& emitter : system.emitters) emitter.lifetime = 0.5F;
+        for (std::size_t emitter = 0; emitter < system.emitters.size(); ++emitter)
+            if (index % 5 != 1 || emitter != 0) system.emitters[emitter].lifetime = 0.5F;
         const auto spawn = [system, mesh](particles::EffectRegistry& owner, const std::uint32_t seed) {
             if (mesh) return owner.spawn(system, seed, 256, test_mesh_binding());
             return owner.spawn(system, seed, 256);
@@ -254,30 +263,51 @@ void test_particle_detail_batch() {
     }
 }
 
+// The default particle pool size by host: hosts under eight hardware threads keep the earlier
+// participant count (the main thread alone from 1 to 7 threads), eight and up take half, capped at 4.
+void test_default_worker_count_table() {
+    struct Row { std::size_t threads, workers; };
+    for (const Row row : {Row{0, 1}, Row{1, 1}, Row{2, 1}, Row{4, 1}, Row{6, 1}, Row{7, 1}, Row{8, 4},
+                          Row{10, 4}, Row{16, 4}, Row{64, 4}}) {
+        expect(particles::default_particle_worker_count(row.threads) == row.workers,
+            "the default particle worker count follows the hardware thread table");
+    }
+}
+
 void test_batch_matches_serial() {
+    particles::EffectRegistry::set_stream_bucketing_default(false);
     const Script serial = play(false, nullptr, true);
+    particles::EffectRegistry::set_stream_bucketing_default(true);
     expect(!serial.stats.empty() && serial.stats.front().hash != 0, "the serial reference hashes its frames");
     const Script inline_batch = play(true, nullptr, true);
     const ReverseExecutor reverse;
     const Script reversed = play(true, &reverse, true);
-    const ThreadExecutor four(4);
+    const ThreadExecutor two(2), four(4);
     const Script threaded = play(true, &four, true);
     const ThreadExecutor eight(8);
     const Script wide = play(true, &eight, true);
     expect(same_script(serial, inline_batch), "a batch on the calling thread equals one advance after another");
     expect(same_script(serial, reversed), "a batch whose tasks run last to first equals the serial run");
+    expect(same_script(serial, play(true, &two, true)), "a batch on 2 threads equals the serial run");
     expect(same_script(serial, threaded), "a batch on 4 threads equals the serial run (statistics, hashes, uploads)");
     expect(same_script(serial, wide), "a batch on 8 threads equals the serial run");
     expect(four.runs > 0 && eight.runs > 0, "the thread executors ran the batches");
+    expect(same_script(serial,play(true,&four,true,40,45,false,true)),"opt-in timing cannot change worker output");
 }
 
 void test_attachment_batch_matches_serial() {
+    particles::EffectRegistry::set_stream_bucketing_default(false);
     const auto serial = play_attachments(false, nullptr);
-    const ThreadExecutor one(1), four(4), eight(8);
+    particles::EffectRegistry::set_stream_bucketing_default(true);
+    const ThreadExecutor one(1), two(2), four(4), eight(8);
     const ReverseExecutor reverse;
     expect(!serial.steps.empty() && serial.created > 24, "attachment batch fixture respawns generations");
+    expect(std::any_of(serial.steps.begin(), serial.steps.end(), [](const auto& step) {
+        return step.stats.advance.death_bursts != 0;
+    }), "attachment batch fixture exercises dependent death bursts");
     expect(same_attachments(serial, play_attachments(true, nullptr)), "attachment inline batch equals serial lifecycle");
     expect(same_attachments(serial, play_attachments(true, &one)), "attachment 1-thread batch equals serial lifecycle");
+    expect(same_attachments(serial, play_attachments(true, &two)), "attachment 2-thread batch equals serial lifecycle");
     expect(same_attachments(serial, play_attachments(true, &four)), "attachment 4-thread batch equals serial lifecycle");
     expect(same_attachments(serial, play_attachments(true, &eight)), "attachment 8-thread batch equals serial lifecycle");
     expect(same_attachments(serial, play_attachments(true, &reverse)), "attachment reverse tasks equal serial lifecycle");
@@ -320,6 +350,12 @@ void test_batch_work_counts() {
     const std::size_t count = 100;
     const int frames = 10;
     const Script script = play(true, &four, false, count, frames);
+    std::uint64_t particle_samples = 0;
+    for (const auto& frame : script.stats) particle_samples += frame.particles;
+    expect(script.work.particle_bucket_visits == particle_samples * 2,
+        "advance and present each partition the system particles exactly once");
+    expect(script.work.stream_particle_visits <= script.work.particle_bucket_visits,
+        "stream candidate visits stay linear in live particles, independent of emitter count");
     // Frames 0-29 run all 100 effects (the fixture releases one at frame 30, past these 10).
     const std::uint64_t instance_frames = count * static_cast<std::uint64_t>(frames);
     expect(script.work.steps == instance_frames, "one step per effect per frame");
@@ -389,6 +425,7 @@ public:
     std::map<std::uint64_t, bool> shown;
     std::uint64_t groups{}, prepared{}, visible{}, stepped{};
     std::uint64_t create_emitter(const particles::EmitterRenderPlan& plan) override { return recording.create_emitter(plan); }
+    void prepare_emitter(const std::uint64_t id, const particles::VertexStream& stream) override { recording.prepare_emitter(id, stream); }
     void update_emitter(const std::uint64_t id, const particles::VertexStream& stream) override { recording.update_emitter(id, stream); }
     void destroy_emitter(const std::uint64_t id) override { recording.destroy_emitter(id); }
     particles::CullingFrame culling_frame() const override { return view; }

@@ -90,6 +90,15 @@ void encode(Encoder& out, const Weapon& weapon) {
         out.text("APPEARANCE-DELAY-v1");
         out.u32(*weapon.appearance_delay_frames);
     }
+    if (weapon.full_salvo_delay_multiplier) {
+        out.text("FULL-SALVO-DELAY-v1");
+        out.fixed(*weapon.full_salvo_delay_multiplier);
+    }
+    if (!weapon.charged_projectile.empty()) {
+        out.text("CHARGED-PROJECTILE-v1");
+        out.text(weapon.charged_projectile);
+        out.u32(weapon.charged_projectile_index);
+    }
 }
 
 void encode(Encoder& out, const std::optional<Weapon>& weapon) {
@@ -187,6 +196,11 @@ void encode(Encoder& out, const UnitType& unit) {
     out.text(movement.space_layer);
     out.fixed(movement.layer_z_adjust);
     out.text(unit.targeting_priority_set);
+    if (unit.unit_ai) out.text("unit-ai-retaliation-v1"); // WTA-29: effective behavior is content
+    if (unit.attack_category_restrictions != 0) {
+        out.text("unit-ai-category-restrictions-v1");
+        out.u64(unit.attack_category_restrictions);
+    }
     out.u32(unit.targeting_priority_set_index);
     out.fixed(unit.targeting_max_attack_distance);
     if (unit.targeting_min_attack_distance) {
@@ -210,6 +224,11 @@ void encode(Encoder& out, const UnitType& unit) {
         out.fixed(unit.team_dense_fow_multiplier);
     }
     out.text(unit.team_type);
+    if (unit.team_movement.deceleration && unit.team_movement.deceleration->raw() != 0) {
+        out.text("team-formation-deceleration-v1");
+        out.fixed(unit.team_movement.deceleration);
+        out.fixed(unit.team_movement.max_speed);
+    }
     if (!unit.replenish_team.empty() || unit.redirect_damage_to_teammates) {
         out.text("hero-wingmen-v1"); out.text(unit.replenish_team); out.flag(unit.redirect_damage_to_teammates);
     }
@@ -222,8 +241,10 @@ void encode(Encoder& out, const UnitType& unit) {
         out.text("projectile-defence-v1"); out.fixed(unit.passive_missile_shield_radius);
         out.fixed(unit.ranged_target_z_adjust);
     }
+    if (unit.target_stealth_units) out.text("target-stealth-v1");
     out.flag(unit.powered);
     out.flag(unit.ion_stun_effect);
+    if (unit.damage_tracking) out.text("damage-tracking-v1");
     out.flag(unit.collision.has_value());
     if (unit.collision) {
         out.vec3(unit.collision->min);
@@ -239,12 +260,28 @@ void encode(Encoder& out, const UnitType& unit) {
     out.fixed(unit.collision_box_modifier);
     out.each(unit.hardpoints, [&](const Hardpoint& hardpoint) { encode(out, hardpoint); });
     encode(out, unit.weapon);
+    if (unit.object_turret) {
+        out.text("object-turret-v1");
+        const auto& turret = *unit.object_turret;
+        encode(out, turret.turret);
+        encode(out, turret.barrel);
+        out.vec3(turret.rest);
+        out.fixed(turret.speed);
+        out.fixed(turret.rest_delay);
+        out.fixed(turret.yaw_extent);
+        out.fixed(turret.pitch_extent);
+        out.flag(turret.xy_only);
+    }
     if (!unit.death_projectiles.empty()) {
         out.text("death-projectiles-v1");
         out.each(unit.death_projectiles, [&](const std::string& projectile) { out.text(projectile); });
         out.each(unit.death_projectile_indices, [&](const std::uint32_t index) { out.u32(index); });
     }
     out.each(unit.target_bones, [&](const BonePoint& point) { encode(out, point); });
+    if (!unit.muzzle_bones.empty()) {
+        out.text("muzzle-bones-v1");
+        out.each(unit.muzzle_bones, [&](const BonePoint& point) { encode(out, point); });
+    }
     out.each(unit.abilities, [&](const Ability& ability) {
         out.text(ability.type);
         out.text(ability.authored_type);
@@ -255,6 +292,15 @@ void encode(Encoder& out, const UnitType& unit) {
             out.fixed(modifier.value);
         });
         out.flag(ability.supports_autofire);
+        if (ability.disable_movement) {
+            out.text("deployment-lock-v1"); out.flag(true);
+        }
+        if (!ability.modifier_flags.empty()) {
+            out.text("ability-modifier-flags-v1");
+            out.each(ability.modifier_flags, [&](const ModFlag& flag) {
+                out.text(flag.modifier); out.flag(flag.value);
+            });
+        }
         if (!ability.spawned_object.empty()) {
             out.text("hero-spawn-v1"); out.text(ability.spawned_object); out.u32(ability.spawned_projectile_index);
             out.fixed(ability.bomb_countdown_seconds); out.fixed(ability.effective_radius); out.fixed(ability.target_position_z_offset);
@@ -270,6 +316,16 @@ void encode(Encoder& out, const UnitType& unit) {
             out.u32(ability.projectile_index);
             out.fixed(ability.fixed_inaccuracy);
             out.fixed(ability.target_z_offset);
+        }
+        if (ability.type == "LURE") {
+            out.text("LURE-v1");
+            out.fixed(ability.effective_radius);
+            out.texts(ability.target_types);
+            out.fixed(ability.pulse_frequency_seconds);
+            out.flag(ability.max_pulses.has_value());
+            out.u32(ability.max_pulses.value_or(0));
+            out.flag(ability.is_pulsing.value_or(false));
+            out.text(ability.lure_particle);
         }
     });
     out.each(unit.team_abilities, [&](const Ability& ability) {
@@ -297,6 +353,10 @@ void encode(Encoder& out, const UnitType& unit) {
     out.fixed(unit.strafe_distance);
     out.fixed(unit.guard_chase_range);
     out.fixed(unit.idle_chase_range);
+    if (unit.autonomous_move_extension_vs_attacker) {
+        out.text("retaliation-divert-extension-v1");
+        out.fixed(unit.autonomous_move_extension_vs_attacker);
+    }
     out.fixed(unit.attack_move_response_range);
     out.fixed(unit.formation_error_tolerance);
     out.fixed(unit.out_of_combat_defense);
@@ -307,10 +367,18 @@ void encode(Encoder& out, const UnitType& unit) {
         out.texts(group.types);
     });
     out.fixed(production.build_cost_multiplayer);
+    if (!production.buildable_campaign.empty() || production.build_cost_campaign) {
+        out.text("campaign-production-v1");
+        out.each(production.buildable_campaign, [&](const BuildGroup& group) {
+            out.text(group.faction);
+            out.texts(group.types);
+        });
+        out.fixed(production.build_cost_campaign);
+    }
     out.fixed(production.build_time_seconds);
     out.text(production.production_queue);
-    out.flag(production.population_value.has_value());
-    out.u32(production.population_value.value_or(0));
+    out.flag(production.population_value.has_value() || production.space_override_population_value.has_value());
+    out.u32(population_in_space(production.population_value, production.space_override_population_value));
     out.fixed(production.reinforcement_prevention_radius);
     out.each(production.income, [&](const IncomeStream& stream) {
         out.text(stream.name);
@@ -542,6 +610,44 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             });
         });
     }
+    // WAB-70..73: bind authored buzz-droid content without changing profiles that omit it.
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return unit.buzz_droids || unit.team_buzz_droids;
+        })) {
+        out.text("buzz-droids-v1");
+        const auto droids = [&](const std::optional<BuzzDroids>& buzz) {
+            out.flag(buzz.has_value());
+            if (!buzz) return;
+            out.text(buzz->name);
+            for (const auto& value : {buzz->min_range, buzz->max_range, buzz->chase_radius, buzz->damage_radius,
+                     buzz->enemy_damage_per_second, buzz->own_damage_per_second, buzz->activation_seconds})
+                out.fixed(value);
+            out.text(buzz->object_type);
+        };
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            droids(unit.buzz_droids);
+            droids(unit.team_buzz_droids);
+            out.u64(unit.special_weapon_targets);
+        });
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return unit.cluster_bomb.has_value(); })) {
+        out.text("cluster-bomb-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id); out.flag(unit.cluster_bomb.has_value());
+            if (!unit.cluster_bomb) return;
+            const auto& cluster = *unit.cluster_bomb;
+            out.text(cluster.name); out.text(cluster.bomb_type); out.u8(static_cast<std::uint8_t>(cluster.style));
+            out.u32(cluster.projectile_index); out.u32(cluster.count); out.fixed(cluster.detonation_seconds);
+        });
+    }
+    if (std::any_of(tables.projectiles.begin(), tables.projectiles.end(), [](const Projectile& shot) { return shot.reveal_range.has_value(); })) {
+        out.text("projectile-reveal-v1");
+        out.each(tables.projectiles, [&](const Projectile& shot) {
+            out.text(shot.id); out.fixed(shot.reveal_range);
+            if (shot.reveal_range) out.fixed(shot.dense_reveal_multiplier);
+        });
+    }
     // EN-08: bind the optional engine-disable content without changing profiles that omit it.
     if (std::any_of(tables.projectiles.begin(), tables.projectiles.end(), [](const Projectile& projectile) {
             return projectile.disables_engines_when_power_drained;
@@ -574,6 +680,16 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             });
         });
     }
+    // WTA-36: bind the AI's hero answer without changing tables that author no space special weapon.
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return unit.special_weapon_in_space;
+        })) {
+        out.text("special-weapon-in-space-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.flag(unit.special_weapon_in_space);
+        });
+    }
     if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
             return !unit.special_abilities.empty() || !unit.team_special_abilities.empty();
         })) {
@@ -584,10 +700,24 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             out.flag(profile.initially_enabled.has_value());
             if (profile.initially_enabled) out.flag(*profile.initially_enabled);
             out.flag(profile.causes_despawn); out.u32(profile.service_interval);
+            if (profile.kind == sim::tactical::SpecialAbilityKind::enable_radar) {
+                out.text("station-radar-v1"); out.flag(profile.affects_all_allies);
+            }
             out.each(profile.filter.applicable_types, [&](const auto id) { out.u64(id); });
             out.u64(profile.filter.applicable_categories);
             out.each(profile.filter.excluded_types, [&](const auto id) { out.u64(id); });
             out.u64(profile.filter.excluded_categories);
+            if (profile.kind == sim::tactical::SpecialAbilityKind::force_healing) {
+                out.text("space-healing-v1");
+                out.fixed(profile.heal_range); out.fixed(profile.heal_percent); out.fixed(profile.heal_amount);
+                out.u32(profile.heal_interval_frames); out.flag(profile.single_target_heal);
+                out.text(profile.heal_sfx); out.text(profile.heal_particle); out.texts(profile.heal_target_bones);
+                out.text(profile.heal_lightning); out.text(profile.heal_owner_bone);
+                for (const auto channel : profile.heal_target_colour) out.fixed(channel);
+                for (const auto channel : profile.heal_owner_colour) out.fixed(channel);
+                out.u32(profile.heal_target_light_frames); out.u32(profile.heal_owner_light_frames);
+                out.u32(profile.heal_target_light_pulses); out.u32(profile.heal_owner_light_pulses);
+            }
             if (profile.kind == sim::tactical::SpecialAbilityKind::concentrate_fire) {
                 out.text("concentrate-fire-v1");
                 out.fixed(profile.target_damage_increase);
@@ -605,6 +735,60 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
                 out.u64(profile.doubled_speed_categories);
                 out.text(profile.beam_owner_particle);
                 out.text(profile.beam_owner_bone);
+            }
+            if (profile.kind == sim::tactical::SpecialAbilityKind::stealth) {
+                out.text("stealth-v1");
+                out.fixed(profile.stealth_transition);
+                for (const auto channel : profile.stealth_colour) out.u8(channel);
+            }
+            if (profile.charged_blast) {
+                out.text("CHARGED-BLAST-v1");
+                out.u32(profile.charged_blast->charge_frames);
+                out.fixed(profile.charged_blast->damage_multiplier);
+                out.text(profile.charged_blast->charging_effect);
+                out.text(profile.charged_blast->charged_effect);
+                out.text(profile.charged_blast->activate_sfx);
+            }
+            if (profile.kind == sim::tactical::SpecialAbilityKind::leech_shields) {
+                out.text("leech-shields-v1");
+                out.fixed(profile.beam_min_range); out.fixed(profile.beam_max_range);
+                out.fixed(profile.damage_per_frame); out.fixed(profile.leech_damage_bonus);
+                out.u32(profile.leech_duration_frames); out.u32(profile.leech_beam_frames);
+                for (const auto channel : profile.leech_colour) out.u8(channel);
+                out.fixed(profile.leech_beam_width); out.text(profile.beam_owner_bone);
+                out.text(profile.leech_texture); out.text(profile.leech_lightning); out.text(profile.leech_effect);
+            }
+            if (profile.kind == sim::tactical::SpecialAbilityKind::corrupt_systems) {
+                out.text("corrupt-systems-v1");
+                out.fixed(profile.corrupt_min_range); out.fixed(profile.corrupt_max_range);
+                out.fixed(profile.corrupt_drain_per_frame); out.fixed(profile.corrupt_inaccuracy);
+                out.u32(profile.corrupt_duration_frames);
+                out.text(profile.corrupt_target_particle); out.text(profile.corrupt_owner_particle);
+                out.text(profile.corrupt_activate_sfx);
+            }
+            if (profile.kind == sim::tactical::SpecialAbilityKind::redirect_blaster) {
+                out.text("redirect-blaster-v1");
+                out.fixed(profile.redirect_chance);
+                out.fixed(profile.block_chance);
+                out.fixed(profile.reaction_arc);
+                out.fixed(profile.max_redirect_angle);
+                out.flag(profile.turn_to_face_unblockable);
+                out.text(profile.redirect_activate_sfx);
+            }
+            if (profile.kind == sim::tactical::SpecialAbilityKind::laser_defense) {
+                out.text("laser-defense-v1");
+                out.u32(profile.defence_duration_frames);
+                out.u32(profile.defence_look_frames);
+                out.u32(profile.defence_beam_frames);
+                out.fixed(profile.defence_radius);
+                out.fixed(profile.defence_min_travel);
+                out.u32(profile.defence_categories);
+                for (const auto channel : profile.defence_colour) out.u8(channel);
+                out.fixed(profile.defence_beam_width);
+                out.texts(profile.defence_bones);
+                out.text(profile.defence_beam_texture);
+                out.text(profile.defence_lightning_effect);
+                out.text(profile.defence_zap_sfx);
             }
         };
         out.each(tables.units, [&](const UnitType& unit) {
@@ -630,6 +814,21 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             });
         });
     }
+    // WRB-05: an upgrade's Enable_Ability rows, bound as an extension for closures that have any.
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return !unit.production.ability_enables.empty();
+        })) {
+        out.text("ability-enables-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.each(unit.production.ability_enables, [&](const AbilityEnable& enable) {
+                out.text(enable.ability_name);
+                out.texts(enable.types);
+                out.texts(enable.categories);
+                out.flag(enable.all_allies);
+            });
+        });
+    }
     // WWP-72: zero and omission have identical aim behavior. Preserve older identities for
     // closures without an effective adjustment; bind nonzero adjustments as an extension.
     if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
@@ -639,6 +838,78 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
         out.each(tables.units, [&](const UnitType& unit) {
             out.text(unit.id);
             out.fixed(unit.ranged_target_z_adjust.value_or(Fixed{}));
+        });
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return unit.planetary_weapon.has_value(); })) {
+        out.text("planetary-weapons-v1");
+        for (const auto& unit : tables.units) {
+            if (!unit.planetary_weapon) continue;
+            out.text(unit.id);
+            out.u32(unit.planetary_weapon->index);
+            out.u32(unit.planetary_weapon->target_action);
+            out.u64(unit.planetary_weapon->valid_targets);
+        }
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+        return !unit.special_unlocks.empty() || unit.consume_after_special_fire;
+    })) {
+        out.text("special-unlocks-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id); out.flag(unit.consume_after_special_fire);
+            out.each(unit.special_unlocks, [&](const UnitType::SpecialUnlock& unlock) {
+                out.flag(unlock.enable); out.flag(unlock.all_allies); out.flag(unlock.reverse);
+            });
+        });
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+        return std::any_of(unit.hardpoints.begin(), unit.hardpoints.end(),
+            [](const Hardpoint& hardpoint) { return hardpoint.allows_special_weapon_use; });
+    })) {
+        out.text("hardpoint-special-weapon-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.each(unit.hardpoints, [&](const Hardpoint& hardpoint) { out.flag(hardpoint.allows_special_weapon_use); });
+        });
+    }
+    // WST-03: cloak-duration modifiers bind as an extension, so closures without one keep their identity.
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return !unit.production.stealth_duration_bonuses.empty();
+        })) {
+        out.text("stealth-duration-modifiers-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.each(unit.production.stealth_duration_bonuses, [&](const StealthDurationBonus& bonus) {
+                out.u32(bonus.stacking_category);
+                out.fixed(bonus.multiplier);
+                out.flag(bonus.all_allies);
+            });
+        });
+    }
+    if (tables.campaign_scene) {
+        out.text("campaign-salvage-v1"); out.flag(tables.campaign_multiplayer);
+        for (const auto* list : {&tables.constants.bounty_sp, &tables.constants.bounty_mp})
+            out.each(*list, [&](const auto& row) { out.u64(row.category); out.fixed(row.value); });
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id); out.fixed(unit.bounty_sp); out.fixed(unit.bounty_mp);
+            out.each(unit.production.bounties, [&](const Production::Bounty& row) {
+                out.fixed(row.percentage); out.u32(static_cast<std::uint32_t>(row.category)); out.flag(row.all_allies);
+                out.each(row.factions, [&](const auto& faction) { out.text(faction); });
+            });
+        });
+        out.text("campaign-space-scene-v1");
+        out.each(tables.campaign_ability_locks, [&](const CampaignAbilityLock& lock) {
+            out.u32(lock.player); out.text(lock.type); out.text(lock.name); out.flag(lock.enabled);
+        });
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id); out.text(unit.campaign_ship_class);
+            out.each(unit.production.battlefield_bonuses, [&](const BattlefieldBonus& bonus) {
+                out.text(bonus.name); out.u32(bonus.category); out.fixed(bonus.defence); out.fixed(bonus.reveal_delta);
+                out.flag(bonus.all_allies); out.flag(bonus.enabled);
+            });
+            if (unit.spawner) for (unsigned tech = 0; tech < 6; ++tech) {
+                out.each(unit.spawner->campaign_starting[tech], [&](const SpawnEntry& entry) { encode(out, entry); });
+                out.each(unit.spawner->campaign_reserves[tech], [&](const SpawnEntry& entry) { encode(out, entry); });
+            }
         });
     }
     return out.take();

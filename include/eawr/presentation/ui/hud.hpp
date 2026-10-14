@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/presentation/ui/layout.hpp"
+#include "eawr/presentation/ui/command_bar_placement.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 
 #include <functional>
@@ -36,6 +37,7 @@ struct HudViewModel {
     std::vector<HudFaceplate> faceplates;
     std::optional<data::ui::ReferenceRect> visible_extent;
     std::vector<core::Diagnostic> diagnostics;
+    CommandBarPlacement shell_placement;
 
     // Contiguous two-digit indices starting at 00, present in catalogue AND shell.
     // Includes temporarily hidden slots, so animation cannot change capacity.
@@ -45,7 +47,8 @@ struct HudViewModel {
     [[nodiscard]] bool hit_test_screen(ReferencePoint point, const ReferenceSpace& space) const noexcept;
 };
 [[nodiscard]] HudViewModel hud_view_model(const data::ui::ShellAnchors& shell,
-    const data::ui::CommandBarCatalog& catalog, std::uint32_t variant, const ShellMaskLookup& masks);
+    const data::ui::CommandBarCatalog& catalog, std::uint32_t variant, const ShellMaskLookup& masks,
+    ShellOrigin manual_origin = ShellOrigin::lower_left);
 
 // Reuses the validated ALA player's translation/rotation/scale interpolation.
 // The player must have been created for this exact model. Callers can retain

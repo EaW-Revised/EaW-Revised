@@ -112,6 +112,9 @@ int main(const int argc, char** argv) {
         : args->profile == "foc" ? eawr::data::Profile::foc : eawr::data::Profile::remake;
     assets::ObjectTypeCatalog catalog;
     if (auto loaded = eawr::data::load_catalog(filesystem, profile)) {
+        if (!loaded.value().health.clean()) {
+            std::cerr << "sky_scan: catalog load: " << eawr::data::describe_load_health(loaded.value().health) << '\n';
+        }
         catalog = assets::object_type_catalog(loaded.value().catalog);
         for (const auto& root : loaded.value().catalog.registry_roots()) {
             if (root.category == eawr::data::Category::game_object && root.outcome == "loaded") {
@@ -119,6 +122,8 @@ int main(const int argc, char** argv) {
                 break;
             }
         }
+    } else {
+        std::cerr << "sky_scan: catalog load: " << eawr::core::format_diagnostic(loaded.error()) << '\n';
     }
 
     Resolver resolver(filesystem);

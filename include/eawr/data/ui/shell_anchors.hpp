@@ -82,6 +82,10 @@ struct ShellAnchorLoad {
     std::vector<core::Diagnostic> diagnostics;
 };
 
+// A named bone's model-space point after its full parent-chain transform,
+// including bones that have no mesh. Case-insensitive like component lookup.
+[[nodiscard]] std::optional<assets::Vec2f> shell_point(const assets::Model& model, std::string_view name);
+
 // Anchors of every mesh with at least one vertex, in model mesh order.
 [[nodiscard]] ShellAnchorLoad shell_anchors(const assets::Model& model);
 // One validated model-space transform per bone of this exact model.

@@ -446,6 +446,12 @@ void test_engine_deadline() {
     tactical::disable_engines(state, 0, 56);
     expect(tactical::service_disabled_engines(state, 56) && tactical::engines_online(profile, state),
         "EN-09: zero-duration disable recovers at its service frame");
+    tactical::disable_engines(state, tactical::indefinite_engine_disable_frames, 57);
+    tactical::disable_engines(state, 30, 58);
+    expect(!tactical::service_disabled_engines(state, 1000000)
+        && !tactical::service_disabled_engines(state, UINT64_MAX)
+        && !tactical::engines_online(profile, state),
+        "EN-08: negative duration has no expiry and a finite hit cannot shorten it");
 }
 
 struct EngineRun {
@@ -456,7 +462,8 @@ struct EngineRun {
 };
 
 EngineRun engine_run(const eawr::sim::PartitionExecutor& executor, const bool flag = true,
-    const bool powered = true, const bool shield_holds = false, const std::uint32_t duration = 30) {
+    const bool powered = true, const bool shield_holds = false, const std::uint32_t duration = 30,
+    const bool checkpoint = false) {
     auto health = durability();
     auto& target = health.profiles.back();
     target.max_speed = units(3);
@@ -477,6 +484,7 @@ EngineRun engine_run(const eawr::sim::PartitionExecutor& executor, const bool fl
     EngineRun result;
     auto previous = at(300, 0);
     std::optional<std::uint64_t> last_deadline;
+    std::optional<std::uint64_t> kill_tick;
     for (std::uint64_t tick = 0; tick < 200; ++tick) {
         auto stepped = value.step(executor);
         expect(static_cast<bool>(stepped), "EN-08: session step succeeds");
@@ -487,6 +495,7 @@ EngineRun engine_run(const eawr::sim::PartitionExecutor& executor, const bool fl
             last_deadline = state->engines_disabled_until;
             if (!result.disabled) {
                 result.disabled = true;
+                kill_tick = stepped.value().completed_tick;
                 expect(static_cast<bool>(value.submit({{stepped.value().completed_tick, 1, 0}, {1},
                     tactical::DamagePayload{units(100000), tactical::hull_target}})), "EN-08: remove shooter after first drain");
             }
@@ -508,6 +517,27 @@ EngineRun engine_run(const eawr::sim::PartitionExecutor& executor, const bool fl
         const auto found = std::find_if(live.begin(), live.end(), [](const auto& entry) { return entry.entity_id == 2; });
         if (found != live.end()) previous = found->position;
         result.rows.push_back(stepped.value().state_sha256 + ',' + stepped.value().snapshot->sha256());
+        if (checkpoint && tick == 100) {
+            const auto saved = value.save_checkpoint_state();
+            auto restored = tactical::TacticalSession::create(setup, sensors(), health, motion(), std::nullopt, weapons);
+            expect(saved && restored, "EN-08: indefinite disable checkpoint saves and creates its restore target");
+            if (saved && restored) {
+                expect(static_cast<bool>(restored.value().submit({{0, 2, 0}, {2}, tactical::MovePayload{at(300, 3000)}})),
+                    "EN-08: restore target seals the recorded move command");
+                if (kill_tick) expect(static_cast<bool>(restored.value().submit({{*kill_tick, 1, 0}, {1},
+                    tactical::DamagePayload{units(100000), tactical::hull_target}})),
+                    "EN-08: restore target seals the recorded shooter removal");
+                const auto applied = restored.value().load_checkpoint_state(saved.value());
+                expect(static_cast<bool>(applied), "EN-08: indefinite disable checkpoint restores");
+                if (!applied) std::cerr << applied.error().message << '\n';
+                if (applied) {
+                    const auto restored_state = restored.value().durability_state(2);
+                    expect(restored_state && restored_state->engines_disabled_until == UINT64_MAX,
+                        "EN-08: checkpoint preserves the no-expiry engine state");
+                    value = std::move(restored).value();
+                }
+            }
+        }
     }
     return result;
 }
@@ -522,9 +552,22 @@ void test_session_engine_disable() {
     expect(!engine_run(executor, true, true, true).disabled, "EN-08: a fully absorbed hit cannot trigger disable");
     expect(engine_run(executor, true, true, false, 60).rows != reference.rows,
         "EN-09: disable duration changes authoritative state hashes");
+    const auto zero_duration = engine_run(executor, true, true, false, 0);
+    expect(zero_duration.disabled && zero_duration.recovered,
+        "EN-08: zero duration disables on the hit frame and recovers at the next engine service");
+    const auto indefinite = engine_run(executor, true, true, false, tactical::indefinite_engine_disable_frames);
+    expect(indefinite.disabled && !indefinite.recovered, "EN-08: an indefinite draining shot never recovers");
+    expect(engine_run(executor, true, true, false, tactical::indefinite_engine_disable_frames, true).rows == indefinite.rows,
+        "EN-08: checkpoint continuation hashes match the uninterrupted indefinite run");
+    const auto long_duration = engine_run(executor, true, true, false, 30U * 3601U);
+    expect(long_duration.disabled && !long_duration.recovered, "EN-08: durations above an hour pass session validation");
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
         const eawr::platform::ThreadWorkerAdapter parallel(workers);
         expect(engine_run(parallel).rows == reference.rows, "EN-08: engine-disable hashes match at " + std::to_string(workers) + " workers");
+        expect(engine_run(parallel, true, true, false, tactical::indefinite_engine_disable_frames).rows == indefinite.rows,
+            "EN-08: indefinite engine-disable hashes match at " + std::to_string(workers) + " workers");
+        expect(engine_run(parallel, true, true, false, tactical::indefinite_engine_disable_frames, true).rows == indefinite.rows,
+            "EN-08: indefinite checkpoint continuation hashes match at " + std::to_string(workers) + " workers");
     }
 }
 

@@ -22,11 +22,8 @@ namespace {
 namespace model = presentation::ui;
 
 // ABE-5: the press flash (Selected_Texture_Name) fades out over 0.2 s.
-constexpr double flash_seconds = 0.2;
-
-[[nodiscard]] String reason_text(const std::string_view reason) {
-    return reason.empty() ? String{} : String::utf8(reason.data(), static_cast<int64_t>(reason.size()));
-}
+// PU-70: sourced press-overlay timing; Selected_Texture_Name names art, not a duration.
+constexpr double flash_seconds = presentation::ui::command_bar_press_fade_seconds;
 
 [[nodiscard]] Rect2 rect2(const model::PixelRect& rect) {
     return Rect2(static_cast<float>(rect.x), static_cast<float>(rect.y), static_cast<float>(rect.width),
@@ -90,7 +87,6 @@ void EawrAbilityButtons::show(model::AbilityBar bar) {
     if (same) return;
     bar_ = std::move(bar);
     if (hovered_ && *hovered_ >= bar_.buttons.size()) hovered_.reset();
-    set_tooltip_text(hovered_ ? reason_text(bar_.buttons[*hovered_].disabled_reason) : String());
     queue_redraw();
 }
 
@@ -133,7 +129,6 @@ void EawrAbilityButtons::_gui_input(const Ref<InputEvent>& event) {
         const auto index = button_at(motion->get_position());
         if (index != hovered_) {
             hovered_ = index;
-            set_tooltip_text(index ? reason_text(bar_.buttons[*index].disabled_reason) : String());
             queue_redraw();
         }
         return;

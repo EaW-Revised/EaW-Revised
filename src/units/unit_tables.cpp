@@ -18,6 +18,19 @@ void Loader::run(const std::vector<std::string>& types, const std::vector<std::s
             const auto [id, kind] = queue_[loaded];
             load_unit(id, kind);
         }
+        // WSW-01/02: expand active faction mappings after the pinned fleet; do not
+        // guess source names from purchase menus or instantiate a ground model.
+        for (const auto& definition : input_.catalog->definitions()) {
+            if (!definition.namespace_winner || definition.category != data::Category::faction) continue;
+            auto faction = resolve(*input_.catalog, definition.id, data::Category::faction,
+                definition.id, "faction", report_);
+            if (!faction || !flag(*faction, "Is_Playable", false).value_or(false)) continue;
+            record_layers(*faction);
+            for (const auto tag : {"Standalone_Space_Maps_Special_Weapon_A", "Standalone_Space_Maps_Special_Weapon_B"}) {
+                const auto name = trim(faction->text(tag));
+                if (!name.empty()) enqueue(name, UnitKind::ship);
+            }
+        }
         // WBP-01, WHZ-50/51: capture points and damageable map objects need their authored
         // combat and durability profiles as well as their existing map footprints.
         for (const auto& id : obstacles) {
@@ -43,6 +56,20 @@ void Loader::run(const std::vector<std::string>& types, const std::vector<std::s
         for (const auto& id : obstacle_ids_) load_obstacle(id);
         load_priority_sets(*input_.filesystem, priority_ids_, tables_, report_);
         link();
+        {
+            // WRB-05: an Enable_Ability matters only for a nested handler some loaded unit authors; the rest
+            // (ground abilities, kinds the sim does not model) stay out of the content, and so out of its identity.
+            std::set<std::string> handlers;
+            for (const auto& unit : tables_.units) {
+                for (const auto& special : unit.special_abilities) {
+                    if (special.kind == sim::tactical::SpecialAbilityKind::redirect_blaster) handlers.insert(lower(special.name));
+                }
+            }
+            for (auto& unit : tables_.units) {
+                std::erase_if(unit.production.ability_enables,
+                    [&](const AbilityEnable& enable) { return !handlers.contains(lower(enable.ability_name)); });
+            }
+        }
         std::set<std::string> damage;
         std::set<std::string> armor;
         const auto add = [](std::set<std::string>& set, const std::string& value) {
@@ -130,6 +157,7 @@ void Loader::link() {
             return no_index;
         };
         for (auto& unit : tables_.units) {
+            if (unit.cluster_bomb) unit.cluster_bomb->projectile_index = projectile_index(unit.cluster_bomb->bomb_type);
             for (const auto& projectile : unit.death_projectiles)
                 unit.death_projectile_indices.push_back(projectile_index(projectile));
             for (auto& member : unit.members) member.craft_index = unit_index(member.craft);
@@ -145,7 +173,10 @@ void Loader::link() {
                 }
             }
             for (auto& hardpoint : unit.hardpoints) {
-                if (hardpoint.weapon) hardpoint.weapon->projectile_index = projectile_index(hardpoint.weapon->projectile);
+                if (hardpoint.weapon) {
+                    hardpoint.weapon->projectile_index = projectile_index(hardpoint.weapon->projectile);
+                    hardpoint.weapon->charged_projectile_index = projectile_index(hardpoint.weapon->charged_projectile);
+                }
             }
             for (std::size_t index = 0; index < tables_.priority_sets.size(); ++index) {
                 if (!unit.targeting_priority_set.empty() && iequals(tables_.priority_sets[index].id, unit.targeting_priority_set)) {
@@ -225,6 +256,8 @@ core::Result<UnitTables> load_unit_tables(const LoadInput& input) {
         }
     }
     UnitTables tables;
+    tables.campaign_scene = input.campaign_scene;
+    if (input.campaign_scene) tables.campaign_ability_locks = input.campaign_ability_locks;
     Report report;
     if (!input.space_map.empty()) {
         auto source = input.filesystem->stat(input.space_map);

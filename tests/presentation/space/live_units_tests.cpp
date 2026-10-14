@@ -5,6 +5,7 @@
 #include "eawr/presentation/space/unit_fade.hpp"
 #include "eawr/presentation/particles/render.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -99,13 +100,19 @@ void test_interpolation() {
 }
 
 void test_map_prop_fog_visibility() {
-    const std::vector<std::string> idle{"SPACE_OBSTACLE", "IDLE", "UNIT_AI"};
-    const std::vector<std::string> hidden{"HIDE_WHEN_FOGGED"};
-    const std::vector<std::string> team{"team"};
+    const std::string idle{"SPACE_OBSTACLE, IDLE, UNIT_AI"};
+    const std::string hidden{"HIDE_WHEN_FOGGED"};
+    const std::string team{"team"};
     expect(!space::map_prop_fog_bound(idle, {}) && !space::map_prop_fog_bound({}, {}),
            "FW-24: asteroid and behavior-free props are not fog-bound");
     expect(space::map_prop_fog_bound(hidden, {}) && space::map_prop_fog_bound({}, hidden)
         && space::map_prop_fog_bound(team, idle), "FW-24: either behavior list can bind a prop to fog");
+    expect(space::map_prop_fog_bound(" IDLE, hide_when_fogged\tUNIT_AI ", {})
+        && !space::map_prop_fog_bound("TEAM_LOCOMOTOR, NOT_HIDE_WHEN_FOGGED", {}),
+        "FW-24: comma/whitespace lists match whole behavior tokens without substring admission");
+    // Geonosis places SpaceUnit derelicts with neither behavior list declared.
+    expect(!space::map_prop_fog_bound({}, {}),
+           "FW-24: behavior-free placed derelicts remain unfogged regardless of XML type");
 
     const std::vector<eawr::sim::EntityId> visible{2, 6}, alive{1, 2, 4, 6}, props{1, 2, 3, 4, 7};
     std::vector<eawr::sim::EntityId> drawn;
@@ -318,6 +325,37 @@ void test_snapshot_index_budget() {
     expect(index.alive().empty() && index.instance(1) == nullptr, "clearing a snapshot drops every borrowed pointer");
 }
 
+// WST-13 (#1887): the viewer's one visibility list drops a stealth-invisible enemy for every viewer
+// that cannot detect it (draw, fade, selection, minimap, economy and audio read it), while the
+// cloaked unit's owner and its allies keep seeing it.
+void test_stealth_visibility() {
+    std::vector<tactical::TacticalInstance> rows(3);
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        rows[i].entity_id = 1 + i;
+        rows[i].type_id = 7;
+        rows[i].visible_to = 0b111; // fog alone would show every unit to every seat
+    }
+    rows[0].owner = 1; rows[0].team = 10U; rows[0].stealth_on = true; rows[0].stealth_invisible = true;
+    rows[1].owner = 3; rows[1].team = 10U;  // an ally of the cloaked unit
+    rows[2].owner = 2; rows[2].team = 20U;  // its enemy
+    const std::vector<tactical::SnapshotPlayer> players{{1, 10}, {2, 20}, {3, 10}};
+    const auto snapshot = std::make_shared<const tactical::TacticalSnapshot>(5, players, rows, std::vector<tactical::Event>{});
+    space::SnapshotIndex index;
+    const auto sees = [&](const tactical::PlayerId viewer, const eawr::sim::EntityId entity) {
+        index.refresh(snapshot, viewer);
+        return std::binary_search(index.visible().begin(), index.visible().end(), entity);
+    };
+    expect(!sees(2, 1), "WST-13: an enemy viewer's visible list excludes the cloaked unit");
+    expect(sees(2, 2) && sees(2, 3), "WST-13: other units stay visible to the enemy");
+    expect(sees(1, 1) && sees(3, 1), "WST-13: the owner and its ally still see the cloaked unit");
+    index.refresh(snapshot, 2);
+    expect(index.visible() == snapshot->visible_entities(2), "WST-13: the cached list matches visible_entities");
+    rows[0].stealth_invisible = false; // revealed by a detector
+    const auto revealed = std::make_shared<const tactical::TacticalSnapshot>(6, players, rows, std::vector<tactical::Event>{});
+    index.refresh(revealed, 2);
+    expect(std::binary_search(index.visible().begin(), index.visible().end(), 1), "WST-09: a detected cloaked unit is visible again");
+}
+
 class PoseExecutor final : public eawr::presentation::particles::StepExecutor {
 public:
     explicit PoseExecutor(std::size_t threads) : threads_(threads) {}
@@ -384,6 +422,7 @@ int main() {
     test_roll();
     test_reveal();
     test_snapshot_index_budget();
+    test_stealth_visibility();
     test_pose_worker_budget();
     test_fading_entities();
     test_spinning();

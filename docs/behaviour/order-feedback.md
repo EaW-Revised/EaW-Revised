@@ -1,7 +1,7 @@
 # Tactical destination feedback
 
 Scope: the local player's admitted move, attack-move and guard gestures in the
-space scene and minimap. Presentation only; no command or snapshot changes.
+space scene and minimap. Presentation reads published snapshot data and never changes commands or canonical state.
 
 | Rule | Visible behavior | Evidence |
 | --- | --- | --- |
@@ -9,7 +9,7 @@ space scene and minimap. Presentation only; no command or snapshot changes.
 | OF-02 | The scene effect uses the particle object's `Space_Model_Name`, its authored colors and `Particle_Lifetime_Frames`. `GUI_Move_Acknowledge_Scale_Space` (5 in FoC) scales the emitter frame, without multiplying the particle size tracks. The ordinary particle geometry uses world dimensions and normal camera projection. The three ordinary types live for 30 logical frames, then their particle systems detach and drain. | debug build: destination acknowledgement, model transform, particle size and geometry submission, particle expiry; delayed retail capture at the default space camera; effective `particles.xml` |
 | OF-03 | A double move uses `GUI_Double_Click_Move_Command_Ack_Effect` and replaces the nearest ordinary scene move effect. Attack-move and guard take precedence over double move for the scene. The radar removes its youngest ordinary click before a double click; attack-move takes precedence on the radar, guard otherwise uses the ordinary click event. | debug build: destination acknowledgement |
 | OF-04 | The radar event comes from `GUI_Movement_Click_Radar_Event_Name`, `GUI_Attack_Movement_Click_Radar_Event_Name`, or `GUI_Movement_Double_Click_Radar_Event_Name`. Its `Event_Model_Name` is animated with its first clip, without player tint; `Event_Model_Scale` scales it against the radar rectangle. `Event_Duration` expires it; `Event_Single_Instance` replaces an existing event of the same type. `Use_Event_System` enables events. FoC's three click events use scale 0.001, last 0.8 seconds and allow multiple instances. | debug build: radar event admission, placement and servicing; effective `radarmap.xml` |
-| OF-05 | Ordinary clicks draw no waypoint path. The waypoint flag and lines are serviced only while Alt or waypoint mode is held. | debug build: waypoint display service; effective `WaypointFlagModelName`, `WaypointLineTextureName`, `LoopWaypointLineTextureName`, `MaxWaypointsPerPath` |
+| OF-05 | Ordinary clicks draw no waypoint path. Alt or Waypoint mode shows only locally owned selected formations; selected craft address their team and duplicate references draw once. The chronological authored queued points start at the formation centre. A repeated segment closes at its earliest repeated point; omit the centre stub if its planar distance from the closing line is strictly below four units. Each destination receives the flag model at identity scale/orientation plus translation. Path lines are a pass-always, unculled line list, sampling the ordinary authored texture at UV (0,0) with RGB 128/255 and full alpha. Loops dash the entire display with the XML dash/gap lengths and velocity; the remake derives phase from elapsed presented logical frames and resets when display mode ends, so pause freezes it and redraw rate does not change speed. Space keeps authored Z rather than a terrain lift. | debug build: waypoint display service; effective `WaypointFlagModelName`, `WaypointLineTextureName`, `LoopWaypointLineTextureName`, `MaxWaypointsPerPath` |
 
 The scene renderer reuses the existing particle backend. The acknowledgement's
 scale multiplies the emitter basis, affecting emission positions and velocities;
@@ -44,9 +44,25 @@ The ordinary radar model's corner coordinates expand from approximately
 approximately ±12.7952: scale 0.001 yields about 4.25 pixels of geometry on a
 166-pixel radar. Its small early footprint follows this authored model and scale.
 
-The space-only scope leaves `GUI_Move_Acknowledge_Scale_Land` and the land dash
-length, gap and velocity constants to land. Waypoint queuing and persistent path
-display remain outside this change. Other radar event types (unit death, control
+The space-only scope leaves `GUI_Move_Acknowledge_Scale_Land` and the
+terrain lift to land. Despite their names, `WaypointLineLandDashLength`,
+`WaypointLineLandGapLength` and `WaypointLineLandDashVelocity` also control the
+space loop display. `LoopWaypointLineTextureName` is not read by the inspected display service;
+loop lines use `WaypointLineTextureName` instead. Consumers outside this
+service remain unverified, so its existing deferred registry row is retained. The authored flag's visible surfaces use the
+production model/material renderer without replacing the scene camera,
+environment or light; its shadow-volume surface is not displayed. Other radar event types (unit death, control
 point transitions, beacons and persistent ability events) remain deferred to
 their own consumers. The clock follows presented battle time, including pause
 and speed changes; exact paused retail acknowledgement timing remains unverified.
+
+The flag translation uses the renderer basis `(x, z, -y)` while retaining
+identity scale and orientation, because the model upload already changes the
+authored vertices into that basis. Sending source Y as render height displaces
+the beacon away from its route. The stock beacon spans about 6.5 by 5.6 by 35.6
+world units. Its additive rings bind the authored `Color` RGB (the fourth
+component does not modulate additive RGB), and the detached overlay inherits
+scene lighting without replacing the camera or environment. Dash velocity
+remains the XML distance per logical frame; presented-tick sampling is a
+remake presentation policy consistent with the radar clock, not a claim about
+retail paused display servicing.

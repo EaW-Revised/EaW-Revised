@@ -135,6 +135,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         decision.damage_decals.clear();
         decision.missing = {"drawn by the live session from its snapshot (#80)"};
         ++session_records_skipped_;
+        skipped_session_records_.push_back(record);
     }
     if (options_.debug_ship) {
         const auto& ship = *options_.debug_ship;
@@ -213,10 +214,16 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         debug_ship_status_ = "composed";
     }
     live_decisions_.assign(options_.placed_ships.size(), std::nullopt);
+    hull_surface_assets_.assign(options_.placed_ships.size(), {});
+    live_models_.assign(options_.placed_ships.size(), std::nullopt);
     live_shown_.assign(options_.placed_ships.size(), true);
     live_defend_.assign(options_.placed_ships.size(), false);
+    live_stealth_.assign(options_.placed_ships.size(), false);
+    live_blast_charging_.assign(options_.placed_ships.size(), false);
+    live_blast_charged_.assign(options_.placed_ships.size(), false);
     live_clips_.assign(options_.placed_ships.size(), std::nullopt);
     contact_bones_.resize(options_.placed_ships.size());
+    turret_bindings_.assign(options_.placed_ships.size(), std::nullopt);
     live_alternate_clips_.assign(options_.placed_ships.size(), std::nullopt);
     live_retired_.assign(options_.placed_ships.size(), false);
     live_alternates_.assign(options_.placed_ships.size(), 0);
@@ -254,9 +261,15 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         scene::BuildInput placed_input = input;
         placed_input.map = &placed_map;
         scene::Scene placed_scene = scene::build(placed_input);
+        if (placed_scene.placements.size() == 1) {
+            // MM-17: no model path is a known model-free placement. A model that
+            // is currently hidden or has no drawable surface still has a model identity.
+            live_models_[ship_index] = !placed_scene.placements.front().model_path.empty();
+        }
         if (placed_scene.placements.size() != 1
             || (!placed_scene.placements.front().drawable()
-                && !(ship.projectile_slot && scene::drawable_projectile_effects(placed_scene.placements.front())))) {
+                && !((ship.projectile_slot || ship.ability_proxy_owner)
+                    && scene::drawable_projectile_effects(placed_scene.placements.front())))) {
             if (live) {
                 (ship.projectile_slot ? projectile_slots_undrawn_ : ship.launch_slot ? launch_slots_undrawn_ : live_undrawn_).push_back(live_name + ": no drawable FoC model");
                 continue;
@@ -286,7 +299,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
             -> std::optional<scene::SpaceObjectTags> {
             auto object = resolve(object_id, data::Category::game_object);
             return object ? std::optional(scene::space_object_tags(*object, resolve)) : std::nullopt;
-        }).front();
+        }, ship.ability_proxy_owner).front();
         decision.scene_ordinal = scene_->placements.size() - 1;
         if (decision.role != scene::SpaceRole::drawn) {
             if (live) {
@@ -342,6 +355,11 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         bool live_clip{};                   // posed by its ship's PlacedShip::clip (#81)
         bool shield{};                      // its ship's shield shell (#427)
         std::optional<std::uint32_t> alternate{};
+        bool cloak{};                       // its ship's STEALTH sub-object (WST-12)
+        bool cloak_hidden{};                // hidden while its ship is cloaked (WST-12)
+        std::optional<bool> blast_charged{};
+        // GM-03: its team colour, set on its instance; the upload is colour-free.
+        TeamColour colour{};
     };
     std::vector<Piece> pieces;
     // Keyed by model path, mesh and submesh: a model shared by placements or
@@ -403,11 +421,12 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
     };
     const auto shared_upload = [&](const std::string& path, const assets::Model& model, const std::uint32_t mesh_index,
                                    const std::uint32_t submesh_index, const scene::LegacySelector& selector,
-                                   const std::string& texture_path, const TeamColour& colour) -> const SurfaceUpload* {
-        const auto key = std::make_tuple(path, mesh_index, submesh_index, colour);
+                                   const std::string& texture_path) -> const SurfaceUpload* {
+        // GM-03: one upload per surface for every team colour; the colour is per instance.
+        const auto key = std::make_tuple(path, mesh_index, submesh_index, TeamColour{});
         auto found = uploads.find(key);
         if (found == uploads.end()) {
-            found = uploads.emplace(key, upload_surface(renderer, filesystem, cache, textures, next_asset, model, mesh_index, submesh_index, selector, texture_path, colour,
+            found = uploads.emplace(key, upload_surface(renderer, filesystem, cache, textures, next_asset, model, mesh_index, submesh_index, selector, texture_path, TeamColour{},
                 path + " mesh " + std::to_string(mesh_index) + " submesh " + std::to_string(submesh_index))).first;
         }
         return found->second ? &*found->second : nullptr;
@@ -430,6 +449,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
 
     hardpoint_states_.assign(decisions_.size(), {});
     for (std::size_t decision_index = 0; decision_index < decisions_.size(); ++decision_index) {
+        if (options_.progress) options_.progress(decision_index, decisions_.size());
         scene::SpacePlacementDecision& decision = decisions_[decision_index];
         if (decision.role != scene::SpaceRole::drawn) continue;
         hardpoint_states_[decision_index].assign(decision.hardpoints.size(), scene::HardpointState::intact);
@@ -454,18 +474,25 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
             if (pose->second) contact_bones_[*live_ship] = *pose->second;
         }
         const std::size_t first_piece = pieces.size();
+        const bool cloak_ship = live_ship && options_.placed_ships[*live_ship].stealth_shell;
         const auto add_surface = [&](const std::size_t index, const std::optional<HardpointGate> gate) {
             const scene::Surface& surface = placement.surfaces[index];
+            // WST-12: the STEALTH sub-object is drawn only as the cloak below.
+            if (cloak_ship && ieq(surface.mesh_name, stealth_mesh_name)) return;
             std::string texture_path;
             for (const scene::TextureBinding& binding : surface.textures) {
                 if (ieq(binding.parameter, "BaseTexture")) texture_path = binding.resolved;
             }
             const SurfaceUpload* upload = shared_upload(placement.model_path, *model, surface.mesh_index,
-                surface.submesh_index, *scene::find_legacy_selector(surface.shader), texture_path,
-                scene::colorizes(surface.shader) ? colour : TeamColour{});
+                surface.submesh_index, *scene::find_legacy_selector(surface.shader), texture_path);
             if (upload != nullptr) {
                 pieces.push_back({upload, placement.transform->matrix, std::nullopt, gate, live_ship,
                                   sim::math::identity_matrix()});
+                if (scene::colorizes(surface.shader)) pieces.back().colour = colour;
+                pieces.back().cloak_hidden = cloak_ship && ieq(surface.mesh_name, cloak_base_mesh_name);
+                if (ieq(surface.mesh_name, "buildup") || ieq(surface.mesh_name, "charged")) {
+                    pieces.back().blast_charged = ieq(surface.mesh_name, "charged");
+                }
                 if (live_ship && options_.placed_ships[*live_ship].construction) {
                     const auto alternate = scene::mesh_alternate(surface.mesh_name);
                     pieces.back().alternate = alternate;
@@ -486,6 +513,36 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
                 ? owner_art.engine_mesh_hardpoint[mesh] : scene::HardpointOwnerArt::none;
             if (hardpoint == scene::HardpointOwnerArt::none) add_surface(index, std::nullopt);
             else add_surface(index, HardpointGate{decision_index, hardpoint, HardpointGate::Art::engine_particle});
+        }
+        // BP-74/WHE-35/36: hidden charge meshes are admitted once, then gated by the
+        // published BLAST phase, including FD-55's delayed charged cleanup.
+        if (live_ship) for (std::uint32_t mesh_index = 0; mesh_index < model->meshes.size(); ++mesh_index) {
+            const auto& mesh = model->meshes[mesh_index];
+            if (!ieq(mesh.name, "buildup") && !ieq(mesh.name, "charged")) continue;
+            if (std::any_of(decision.drawn_surfaces.begin(), decision.drawn_surfaces.end(), [&](const auto index) {
+                return placement.surfaces[index].mesh_index == mesh_index;
+            })) continue;
+            for (std::uint32_t submesh_index = 0; submesh_index < mesh.submeshes.size(); ++submesh_index) {
+                const auto& submesh = mesh.submeshes[submesh_index];
+                const auto* selector = scene::find_legacy_selector(submesh.shader);
+                if (selector == nullptr) {
+                    decision.missing.push_back("charge mesh " + mesh.name + " unsupported shader " + submesh.shader);
+                    continue;
+                }
+                std::string texture_path;
+                for (const auto& parameter : submesh.parameters) {
+                    if (!ieq(parameter.name, "BaseTexture")) continue;
+                    if (const auto* name = std::get_if<std::string>(&parameter.value))
+                        texture_path = probe(cache, "data/art/textures/", *name, texture_suffixes);
+                }
+                const auto* upload = shared_upload(placement.model_path, *model, mesh_index, submesh_index,
+                    *selector, texture_path);
+                if (upload == nullptr) continue;
+                pieces.push_back({upload, placement.transform->matrix, std::nullopt, std::nullopt, live_ship,
+                                  sim::math::identity_matrix()});
+                pieces.back().blast_charged = ieq(mesh.name, "charged");
+                pieces.back().cloak_hidden = cloak_ship;
+            }
         }
         // Each Damage_Decal surface is uploaded as well and drawn once its
         // hardpoint is destroyed.
@@ -519,6 +576,33 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
                 pieces.push_back(piece);
             }
         }
+        // WST-12: the STEALTH sub-object of a live ship with a STEALTH ability, drawn with its
+        // MeshShield.fx material while the cloak is on; only MeshShield.fx submeshes are drawn.
+        if (cloak_ship) {
+            std::string& status = stealth_shells_[decision.object_id];
+            const std::optional<std::uint32_t> cloak = stealth_mesh_index(*model);
+            if (!cloak) status = "no STEALTH sub-object";
+            for (std::uint32_t submesh = 0; cloak && submesh < model->meshes[*cloak].submeshes.size(); ++submesh) {
+                const std::string& shader = model->meshes[*cloak].submeshes[submesh].shader;
+                if (!ieq(shader, meshshield_program)) {
+                    status = "STEALTH submesh " + std::to_string(submesh) + " shader " + shader + " not drawn";
+                    continue;
+                }
+                auto found = shell_uploads.find({placement.model_path, ((*cloak + 1U) << 16U) | submesh});
+                if (found == shell_uploads.end()) {
+                    std::string cause;
+                    found = shell_uploads.emplace(std::pair{placement.model_path, ((*cloak + 1U) << 16U) | submesh},
+                                                  upload_shell(renderer, filesystem, cache, next_asset, *model, *cloak, submesh, cause, true)).first;
+                    if (!found->second || !cause.empty()) status = cause;
+                }
+                if (!found->second) continue;
+                if (status.empty()) status = "composed";
+                Piece piece{&*found->second, placement.transform->matrix, std::nullopt, std::nullopt, live_ship,
+                            sim::math::identity_matrix()};
+                piece.cloak = true;
+                pieces.push_back(piece);
+            }
+        }
         if (std::any_of(pieces.begin() + static_cast<std::ptrdiff_t>(first_piece), pieces.end(),
                 [](const Piece& piece) { return piece.upload->pose.has_value(); })) {
             const std::string live_clip_path = live_ship ? options_.placed_ships[*live_ship].clip : std::string{};
@@ -544,6 +628,47 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
             }
         }
 
+        if (live_ship) {
+            const auto object = resolve(placement.object_id, data::Category::game_object);
+            const auto text = [&](std::string_view tag) -> std::string_view {
+                const auto* value = object ? object->value(tag) : nullptr;
+                auto result = value ? std::string_view(value->value.raw_text) : std::string_view{};
+                const auto first = result.find_first_not_of(" \t\r\n");
+                if (first == std::string_view::npos) return {};
+                const auto last = result.find_last_not_of(" \t\r\n");
+                return result.substr(first, last - first + 1);
+            };
+            if (!text("Turret_Bone_Name").empty()) {
+                const auto bone_index = [&](std::string_view name) -> std::optional<std::size_t> {
+                    for (std::size_t index = 0; index < model->bones.size(); ++index)
+                        if (ieq(model->bones[index].name, name)) return index;
+                    return std::nullopt;
+                };
+                if (const auto turret = bone_index(text("Turret_Bone_Name"))) {
+                    TurretBinding binding;
+                    binding.turret = *turret;
+                    binding.barrel = bone_index(text("Barrel_Bone_Name"));
+                    for (const auto& [idle, ship] : idle_live_ships_) {
+                        if (ship == *live_ship) {
+                            binding.idle = idle;
+                            binding.player = clips_[idle_placements_[idle].clip];
+                            break;
+                        }
+                    }
+                    if (!binding.player) {
+                        if (auto player = animation::Player::create(*model))
+                            binding.player = std::make_shared<const animation::Player>(std::move(player.value()));
+                    }
+                    if (binding.player) {
+                        if (auto sampled = binding.player->sample({})) {
+                            binding.pose = std::move(sampled.value());
+                            if (!binding.idle) binding.bind_bones = binding.pose.bones;
+                            turret_bindings_[*live_ship] = std::move(binding);
+                        }
+                    }
+                }
+            }
+        }
         // Model_To_Attach at the owner's Attachment_Bone in its bind pose,
         // drawn while the hardpoint's state shows it. Anything that cannot
         // attach is listed, not guessed.
@@ -611,8 +736,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
                         if (texture_path.empty()) decision.missing.push_back(who + "texture_unresolved " + *name);
                     }
                     const SurfaceUpload* upload
-                        = shared_upload(path, *attached, mesh_index, submesh_index, *selector, texture_path,
-                                        scene::colorizes(submesh.shader) ? colour : TeamColour{});
+                        = shared_upload(path, *attached, mesh_index, submesh_index, *selector, texture_path);
                     if (upload == nullptr) {
                         const std::string where = "placement " + std::to_string(decision.scene_ordinal) + " ("
                             + decision.object_id + ") hardpoint " + hardpoint.hardpoint + " mesh "
@@ -624,6 +748,8 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
                     pieces.push_back({upload, placed.value(), std::nullopt,
                                       HardpointGate{decision_index, hardpoint_index, HardpointGate::Art::attached_model},
                                       live_ship, *frame});
+                    pieces.back().cloak_hidden = cloak_ship; // WST-12: the cloak hides the hardpoints
+                    if (scene::colorizes(submesh.shader)) pieces.back().colour = colour;
                 }
             }
         }
@@ -633,6 +759,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         if (options_.debug_ship && decision.scene_ordinal == scene_->placements.size() - 1)
             debug_piece_range = std::pair{first_piece, pieces.size()};
     }
+    if (options_.progress) options_.progress(decisions_.size(), decisions_.size());
 
     if (!failed_placements.empty()) {
         failure_ = std::to_string(failed_placements.size()) + " supported surface placement uploads failed";
@@ -648,9 +775,21 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         const Piece& piece = pieces[piece_index];
         const sim::EntityId entity = next_entity++;
         pieces_.push_back({{entity, piece.upload->renderer_asset, source_to_render(piece.source)}, piece.gate,
-                           piece.live, piece.local, piece.shield, piece.alternate});
+                           piece.live, piece.local, piece.shield, piece.alternate, piece.cloak, piece.cloak_hidden,
+                           piece.blast_charged});
+        if (piece.live && !piece.shield && !piece.cloak && !piece.gate
+            && (!piece.alternate || *piece.alternate == 0))
+            hull_surface_assets_[*piece.live].push_back(piece.upload->renderer_asset);
+        if (piece.colour) {
+            // GM-03: the colour the shared upload's material would have carried, stored 0..1 as the
+            // colorize shaders' instance colour expects (they linearise it where their material does).
+            const auto& rgb = *piece.colour;
+            renderer.set_unit_colorization(entity, {static_cast<float>(rgb[0]) / 255.0F,
+                static_cast<float>(rgb[1]) / 255.0F, static_cast<float>(rgb[2]) / 255.0F});
+            ++team_colour_variants_;
+        }
         if (piece.upload->pose) {
-            if (!piece.shield) ++skinned_instances_;
+            if (!piece.shield && !piece.cloak) ++skinned_instances_;
             const auto posed = renderer.set_skin_pose(entity, piece.upload->renderer_asset, *piece.upload->pose);
             if (!posed) upload_failures_.push_back("entity " + std::to_string(entity) + " bind pose: "
                                                    + core::format_diagnostic(posed.error()));

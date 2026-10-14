@@ -6,6 +6,7 @@
 #include "eawr/sim/tactical/session.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -143,7 +144,8 @@ void expect(const bool condition, const std::string_view message) {
         }
     }
     std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
-    auto created = tactical::TacticalSession::create(fixture.setup, sensors, fixture.durability, fixture.motion, std::nullopt, fixture.weapons);
+    auto created = tactical::TacticalSession::create(fixture.setup, sensors, fixture.durability, fixture.motion, std::nullopt, fixture.weapons,
+        tactical::VictoryRules{}, tactical::AbilityTable{}, tactical::EconomyRules{}, fixture.box);
     expect(static_cast<bool>(created), "the session builds");
     if (!created) {
         std::cerr << created.error().message << '\n';
@@ -275,12 +277,44 @@ void test_survivor_formation_slots() {
     }
 }
 
+void test_refused_member_find() {
+    auto fixture = trio_fight();
+    fixture.orders = {{rebel, 20, tactical::MovePayload{at(2000, 0)}}};
+    // The detached follower can see and attack the enemy; the formation's leader cannot
+    // attack it from the idle allowance circle. Sharing and pairing still run on refusal.
+    fixture.setup.units[2].position = at(600, 20);
+    fixture.setup.units[3].position = at(600, -20);
+    for (std::size_t index = 4; index < fixture.setup.units.size(); ++index)
+        fixture.setup.units[index].position.x = units(900);
+    bool found = false;
+    const auto hashes = run(fixture, 1, 2, [&](const auto& session, const auto&) {
+        const auto formation = session.squadron_state(10);
+        expect(formation && formation->target == 20 && formation->formation
+            && formation->formation->attack_target == 0 && !formation->formation->attack_override,
+            "WDF-01/03: the team shares the find while the idle formation refuses diversion");
+        for (const EntityId member : {EntityId{12}, EntityId{13}}) {
+            const auto combat_state = session.combat_state(member);
+            const auto flight = session.craft_state(member);
+            found = found || (combat_state && combat_state->attack_target == 20);
+            const auto chased = session.craft_state(member + 10);
+            expect(flight && chased && flight->chase == 0 && flight->chase_until == 301
+                && chased->chase == member && chased->chase_until == 301,
+                "FS-18/WDF-03/WSQ-20: earlier notification reserves the reciprocal roster clocks despite refusal");
+        }
+        const auto leader = session.combat_state(11);
+        expect(leader && leader->attack_target == 0,
+            "WDF-02: the refused shared target is cleared only for the out-of-reach member");
+    });
+    expect(found, "WDF-02: an in-reach refused find remains a member target");
+    expect_workers(fixture, 2, hashes, "WDF-02/03 refused member find");
+}
+
 void test_solo_fighter() {
     // WHE-SQ-02: the hero is one real craft, not a ship or an extra invisible container.
     for (const bool enemy_solo : {false, true}) {
         auto fixture = trio_fight();
         fixture.setup.units.erase(fixture.setup.units.begin(), fixture.setup.units.begin() + 4);
-        fixture.setup.units.insert(fixture.setup.units.begin(), unit(10, craft_type, empire, at(-350, 0)));
+        fixture.setup.units.insert(fixture.setup.units.begin(), unit(30, craft_type, empire, at(-350, 0)));
         fixture.setup.squadrons.erase(fixture.setup.squadrons.begin());
         fixture.motion.squadrons.squadrons.insert(fixture.motion.squadrons.squadrons.begin(),
             {craft_type, {craft_type}, {at(0, 0)}, units(1000), units(200), units(300), units(20)});
@@ -289,21 +323,224 @@ void test_solo_fighter() {
             fixture.setup.units[1] = unit(20, craft_type, rebel, at(350, 0), 180);
             fixture.setup.squadrons.clear();
         }
+        // FS-18/20: create the tested solo craft after the opposing group so
+        // this remains a chaser control, rather than only a chased reservation.
+        std::sort(fixture.setup.units.begin(), fixture.setup.units.end(), [](const auto& left, const auto& right) {
+            return left.entity_id < right.entity_id;
+        });
+        for (auto& order : fixture.orders) if (order.unit == 10) order.unit = 30;
         bool moved = false;
         bool cell = false;
         bool chase = false;
         const auto hashes = run(fixture, 1, 360, [&](const auto& session, const auto& tick) {
-            const auto position = position_of(*tick.snapshot, 10);
+            const auto position = position_of(*tick.snapshot, 30);
             moved = moved || (position && *position != at(-350, 0));
             expect(session.units().size() == fixture.setup.units.size(),
                 "WHE-SQ-02: solo flight creates no extra entity");
-            const auto flight = session.craft_state(10);
+            const auto flight = session.craft_state(30);
             chase = chase || (flight && flight->chase != eawr::sim::invalid_entity_id);
             for (const auto& target : tick.snapshot->squadron_targets())
-                if (target.squadron == 10) cell = cell || target.recorded;
+                if (target.squadron == 30) cell = cell || target.recorded;
         });
         expect(moved && cell && chase, "WHE-SQ-02: solo fighter moves, joins fighter combat and chases");
         expect_workers(fixture, 360, hashes, "WHE-SQ-02 solo fighter");
+    }
+}
+
+// WSQ-15, WWP-21 (#739): the strafe reach adds the target's soft radius as the combat world gives
+// it: a lone fighter its type's radius, a team container in a formation its ideal team box's.
+// Squadron 10 records the WU-25a cell (FD-02) on the first frame its leader starts within
+// Strafe_Distance (200) plus that radius of the target (unit 20), in the plane.
+void test_reach_soft_radius() {
+    for (const bool team : {false, true}) {
+        auto fixture = trio_fight();
+        double radius = 100.0;
+        if (team) {
+            // Craft hard extents of 10 about the slots (0, 0), (-20, 20), (-20, -20) and the origin:
+            // half extents 20 and 30.
+            fixture.weapons.footprints = {tactical::TargetFootprint{craft_type, units(10), units(10), units(10)}};
+            radius = std::sqrt(20.0 * 20.0 + 30.0 * 30.0);
+        } else {
+            // WHE-SQ-02: unit 20 is one craft flying as its own squadron; its type radius is 100.
+            fixture.setup.units.resize(5);
+            fixture.setup.units[4] = unit(20, craft_type, rebel, at(350, 0), 180);
+            fixture.setup.squadrons.resize(1);
+            fixture.motion.squadrons.squadrons.insert(fixture.motion.squadrons.squadrons.begin(),
+                {craft_type, {craft_type}, {at(0, 0)}, units(1000), units(200), units(300), units(20)});
+            fixture.weapons.footprints = {tactical::TargetFootprint{craft_type, units(100), units(10), units(10)}};
+        }
+        std::optional<math::Vec3> leader;
+        std::optional<math::Vec3> target;
+        bool target_formed = false;
+        std::optional<double> reached;
+        bool formed_then = false;
+        const auto hashes = run(fixture, 1, 200, [&](const auto& session, const auto& tick) {
+            const auto state = session.squadron_state(10);
+            if (!reached && state && state->cell && leader && target) {
+                const double x = as_double(leader->x) - as_double(target->x);
+                const double y = as_double(leader->y) - as_double(target->y);
+                reached = std::sqrt(x * x + y * y);
+                formed_then = target_formed;
+            }
+            leader = position_of(*tick.snapshot, 11);
+            target = position_of(*tick.snapshot, 20);
+            const auto theirs = session.squadron_state(20);
+            target_formed = theirs && theirs->formation.has_value();
+        });
+        const std::string label = team ? "formed team" : "lone fighter";
+        if (team) expect(formed_then, "WWP-21: squadron 20 is in a formation when squadron 10 reaches it");
+        expect(reached && *reached <= 200.0 + radius + 0.001 && *reached > 200.0 + radius - 12.0,
+            "WSQ-15: the " + label + " target's soft radius widens the strafe reach (cell recorded at "
+                + (reached ? std::to_string(*reached) : std::string{"never"}) + ", reach "
+                + std::to_string(200.0 + radius) + ")");
+        expect_workers(fixture, 200, hashes, "WSQ-15 " + label + " target reach");
+    }
+}
+
+// WSQ-53, FM-14 (#741): every frame the team container takes its leader's whole facing, and its
+// snapshot placement turns with it about the craft's centre.
+void test_container_facing() {
+    auto fixture = trio_fight();
+    fixture.orders = {{empire, 10, tactical::MovePayload{at(-350, 1500)}}};
+    const auto rotation_rows = [](const tactical::TacticalSnapshot& snapshot, const EntityId id) {
+        std::optional<std::array<Fixed, 9>> rows;
+        for (const auto& entry : snapshot.instances()) {
+            if (entry.entity_id != id) continue;
+            rows.emplace();
+            for (std::size_t row = 0; row < 3; ++row) {
+                for (std::size_t column = 0; column < 3; ++column) (*rows)[row * 3 + column] = entry.fixed_transform.rows[row][column];
+            }
+        }
+        return rows;
+    };
+    bool turned = false;
+    const auto hashes = run(fixture, 1, 90, [&](const auto& session, const auto& tick) {
+        std::optional<math::Quat> container;
+        std::optional<math::Quat> leader;
+        for (const auto& state : session.units()) {
+            if (state.entity_id == 10) container = state.rotation;
+            if (state.entity_id == 11) leader = state.rotation;
+        }
+        expect(container && leader && *container == *leader,
+            "WSQ-53: the container's facing is its leader's at tick " + std::to_string(tick.completed_tick));
+        const auto own = rotation_rows(*tick.snapshot, 10);
+        expect(own && own == rotation_rows(*tick.snapshot, 11),
+            "WSQ-53: the container's placement turns with its leader at tick " + std::to_string(tick.completed_tick));
+        turned = turned || (leader && *leader != math::identity_quat());
+    });
+    expect(turned, "WSQ-53: the leader turns during the move");
+    expect_workers(fixture, 90, hashes, "WSQ-53 container facing");
+}
+
+// WSQ-59 (#741): a move given to one craft of a squadron is accepted (it still ends the team's
+// ion shot and Hunt, WAB-40, WAB-51) but changes nothing on the craft: the battle runs as if
+// no order came.
+void test_member_move() {
+    const auto fixture = trio_fight();
+    auto ordered = fixture;
+    ordered.orders.push_back({empire, 12, tactical::MovePayload{at(-2000, 0)}, {}, 30});
+    std::vector<std::vector<tactical::UnitState>> plain;
+    std::vector<std::optional<tactical::CraftState>> plain_flight;
+    static_cast<void>(run(fixture, 1, 120, [&](const auto& session, const auto&) {
+        plain.push_back(session.units());
+        plain_flight.push_back(session.craft_state(12));
+    }));
+    bool accepted = false;
+    std::size_t index = 0;
+    bool same = true;
+    const auto hashes = run(ordered, 1, 120, [&](const auto& session, const auto& tick) {
+        for (const auto& event : tick.snapshot->events()) {
+            accepted = accepted || (event.unit == 12 && event.kind == tactical::EventKind::order_accepted);
+        }
+        same = same && index < plain.size() && session.units() == plain[index] && session.craft_state(12) == plain_flight[index];
+        ++index;
+    });
+    expect(accepted, "WSQ-59: the move given to one craft is accepted");
+    expect(same && index == plain.size(), "WSQ-59: the craft keeps its order and flight as if no move came");
+    expect_workers(ordered, 120, hashes, "WSQ-59 member move");
+}
+
+// WHZ-20/23, WSQ-06/51: nebula contact disables Hunt, but a surviving
+// squadron leader still has its ordinary idle flight and target service.
+void test_nebula_survivor() {
+    constexpr tactical::TypeId volume_type = 500;
+    for (const bool human : {false, true}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup setup;
+            setup.seed = seed;
+            setup.players = players();
+            setup.units = {unit(10, trio_type, empire, at(0, 0)),
+                unit(11, craft_type, empire, at(0, 0)),
+                unit(12, craft_type, empire, at(-20, 20)),
+                unit(13, craft_type, empire, at(-20, -20)),
+                unit(20, frigate_type, rebel, at(300, 0)),
+                unit(30, volume_type, empire, at(0, 0))};
+            setup.squadrons = {{10, {11, 12, 13}}};
+            auto movement = motion(false);
+            movement.nebula_service_types = {craft_type};
+            movement.nebula_disable_seconds = units(5);
+            // The same validated avoidance interface as the hazard contracts.
+            const auto decimal = [](const char* text) { return Fixed::from_decimal(text).value(); };
+            movement.avoidance = tactical::AvoidanceRules{units(24), decimal("0.2"), units(100),
+                decimal("0.8"), units(15), decimal("0.66"), decimal("1.2"), decimal("0.25"),
+                decimal("1.7"), decimal("0.5"), decimal("0.5"), 3500, 6, 90, 45, units(50)};
+            tactical::Footprint volume;
+            volume.type_id = volume_type;
+            volume.layer = tactical::SpaceLayer::static_object;
+            volume.radius = units(2800);
+            volume.obstacle = true;
+            volume.nebula = true;
+            movement.footprints.push_back(volume);
+            tactical::AbilityProfile hunt;
+            hunt.kind = tactical::AbilityKind::hunt;
+            tactical::AbilityTable abilities;
+            abilities.profiles = {{craft_type, {hunt}, false}};
+            if (human) abilities.humans = {empire};
+            const std::vector<tactical::SensorProfile> sensors{{craft_type, units(800)}, {trio_type, units(800)}};
+            auto created = tactical::TacticalSession::create(setup, sensors, durability(1000000),
+                movement, std::nullopt, combat(), {}, abilities);
+            expect(static_cast<bool>(created), "nebula survivor fixture creates");
+            if (!created) { std::cerr << created.error().message << '\n'; continue; }
+            auto session = std::move(created).value();
+            expect(static_cast<bool>(session.submit({{1, empire, 1}, {11, 12},
+                tactical::DamagePayload{units(2000000)}})), "reduce squadron to its last craft");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            bool moved = false, targeted = false, contacted = false;
+            std::optional<math::Vec3> previous;
+            for (std::size_t tick = 0; tick < 240; ++tick) {
+                const auto stepped = session.step(executor);
+                expect(static_cast<bool>(stepped), "nebula survivor advances");
+                if (!stepped) { std::cerr << stepped.error().message << '\n'; break; }
+                if (workers == 1) reference.push_back(stepped.value().state_sha256);
+                else expect(tick < reference.size() && stepped.value().state_sha256 == reference[tick],
+                    "nebula survivor remains equal on 1/2/4/8 workers");
+                const auto point = position_of(*stepped.value().snapshot, 13);
+                if (tick >= 3 && point && previous) moved = moved || *point != *previous;
+                previous = point;
+                const auto mind = session.squadron_state(10);
+                targeted = targeted || (mind && mind->target != 0);
+                const auto flight = session.craft_state(13);
+                bool nebula = false;
+                for (const auto& instance : stepped.value().snapshot->instances())
+                    if (instance.entity_id == 13) nebula = instance.in_nebula;
+                contacted = contacted || nebula;
+                if (workers == 1 && tick % 30 == 0 && point && mind && flight) {
+                    std::cout << "nebula-survivor human=" << human << " tick=" << tick
+                        << " mode=" << static_cast<int>(mind->mode) << " target=" << mind->target
+                        << " roster=";
+                    for (const auto id : mind->roster) std::cout << id << ':';
+                    std::cout << " x=" << point->x.raw() << " y=" << point->y.raw()
+                        << " vx=" << flight->velocity.x.raw() << " vy=" << flight->velocity.y.raw()
+                        << " nebula=" << nebula << '\n';
+                }
+                if (tick == 3) expect(!session.craft_state(11) && !session.craft_state(12) && flight,
+                    "last non-original leader survives alone");
+            }
+            expect(contacted, "survivor really is inside a nebula");
+            expect(moved, "nebula survivor retains ordinary fighter motion");
+            expect(targeted, "nebula survivor acquires a revealed hostile in range");
+        }
     }
 }
 
@@ -324,8 +561,13 @@ int main(const int argc, char** argv) {
     test_intercepted();
     test_retarget_clears_the_hardpoint();
     test_group_move();
+    test_refused_member_find();
     test_solo_fighter();
     test_survivor_formation_slots();
+    test_reach_soft_radius();
+    test_container_facing();
+    test_member_move();
+    test_nebula_survivor();
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

@@ -58,10 +58,19 @@ struct ShieldSegmentHit final {
                                                                const Vec3d& start, const Vec3d& delta) noexcept;
 
 // A model-space point of a live unit in the source basis: the model's fixed +90 degree turn about
-// +Z, the bank roll about the forward axis, the yaw, the uniform scale and the position
+// +Z, the bank roll, FM-02 pitch, yaw, uniform scale and position
 // (R-ROT-01, scene::placement_transform).
 [[nodiscard]] Vec3d live_model_point(const Vec3d& model_point, const Vec3d& position, double yaw_degrees,
-                                     double roll_degrees, double scale) noexcept;
+                                     double roll_degrees, double scale, double pitch_degrees = 0.0) noexcept;
+
+// BP-14/BP-15 and FM-02: the unit's yaw+pitch+roll frame, without the model's quarter turn or scale.
+// Hardpoint points are already in unit axes; particles keep their authored local +Z.
+[[nodiscard]] ShieldHitAxes live_unit_axes(double yaw_degrees, double roll_degrees,
+                                           double pitch_degrees = 0.0) noexcept;
+
+// BP-30: a unit-frame attachment, using the same hull rotation as live_unit_axes.
+[[nodiscard]] Vec3d live_unit_point(const Vec3d& point, const Vec3d& position, double yaw_degrees,
+                                    double roll_degrees, double pitch_degrees = 0.0) noexcept;
 
 // Where a unit stands as it is drawn: the arguments of live_model_point.
 struct LivePose final {
@@ -69,6 +78,7 @@ struct LivePose final {
     double yaw_degrees{};
     double roll_degrees{};
     double scale{1.0};
+    double pitch_degrees{};
 };
 
 // A unit type's collision triangles in model space, kept once per type, with the bounds a cast

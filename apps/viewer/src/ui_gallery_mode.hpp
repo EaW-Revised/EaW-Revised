@@ -40,6 +40,36 @@ public:
         // #425 --eawr-ui-hud-cards: a made-up selection for the HUD page's unit cards, comma-separated
         // <type>[*<count>][:<ABILITY>][@<health>][~<shield>] (for example TIE_Fighter*30:HUNT@0.5).
         std::string hud_cards;
+        std::string hud_readouts; // HCB-61/62: bounded prepared-state presentation probes.
+        std::string hud_flytext; // HCB-64: caller-prepared bounty feedback states.
+        // MNU-42 `--eawr-message-box <none|one|two|three|small|quit>[-centred]`: the runtime message box and
+        // its scripted clicks (ui_gallery_box.cpp).
+        std::string message_box;
+        // MNU-39/41 `--eawr-load-game <script|saves|live>`: the Load Game screen, scripted over the
+        // recordings (a self-checking run), scripted over the saved games, or left open until Cancel
+        // or Play. `--eawr-replay-store <dir>` names the replay store (default: the user data
+        // directory's replays folder), `--eawr-save-dir <dir>` the save directory (default: its saves
+        // folder) and `--eawr-load-launcher <none|accept|refuse>` the stand-in for the restore hand-off
+        // (none: Load on a saved game stays off; accept: records the request; refuse: answers with a
+        // fixed reason).
+        std::string load_game;
+        std::filesystem::path replay_store;
+        // The finished recording fixture for the focused MNU-41 GPU flow.
+        std::filesystem::path save_replay_fixture;
+        std::filesystem::path save_directory;
+        std::string load_launcher{"none"};
+        // MNU-07 `--eawr-credits <script|script-click|live>`: the credits screen over the movie in
+        // `--eawr-movie-cache`; script skips with Esc (or a click) after a few seconds, live stays open
+        // until it closes.
+        std::string credits;
+        // Set by the host when a Play was refused: the page opens with a box that says why.
+        std::string notice;
+    };
+
+    // A recording the Load Game screen chose to play: the host starts the replay mode with it.
+    struct ReplayRequest final {
+        std::filesystem::path path;
+        std::string map; // logical map path, empty when the recording has none
     };
 
     [[nodiscard]] static bool requested();
@@ -56,6 +86,8 @@ public:
     [[nodiscard]] bool ready(godot::Node3D& host);
     // One frame; returns the exit code once the report has been written.
     [[nodiscard]] std::optional<int> process();
+    // The recording Play chose; once taken the page is closed and the host owns what comes next.
+    [[nodiscard]] std::optional<ReplayRequest> take_replay_request();
 
 private:
     struct State;

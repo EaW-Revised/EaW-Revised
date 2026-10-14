@@ -29,12 +29,52 @@ void operator delete(void* const memory, std::size_t) noexcept { std::free(memor
 
 namespace particle_render_contracts {
 void test_legacy_sort_triangles_and_atlas() {
+    // Interleaved system storage, ineligible slots and equal-distance ties:
+    // partitioning by emitter must preserve every geometry bit and sort key.
+    std::vector<particles::Particle> interleaved(48);
+    for (std::size_t index = 0; index < interleaved.size(); ++index) {
+        auto& particle = interleaved[index];
+        particle.id = index + 1;
+        particle.emitter_index = index % 3;
+        particle.draw_slot = (index * 7) % 17;
+        particle.draw_eligible = index % 5 != 0;
+        particle.position = {static_cast<float>(index % 4), 2, 0};
+        particle.velocity = {1, 2, 0};
+        particle.size = 1;
+        particle.rotation = 0.2F;
+    }
+    interleaved[7].position.x = std::numeric_limits<float>::infinity();
+    for (const auto renderer : {22U, 28U, 52U}) {
+        for (const bool sorted : {false, true}) {
+            for (const bool slot_order : {false, true}) {
+                auto source = drawable_emitter();
+                source.renderer_id = renderer;
+                source.depth_sort = sorted;
+                source.legacy_slot_order = slot_order;
+                const auto selected_plan = particles::plan_emitter(source, 1);
+                std::vector<const particles::Particle*> selected;
+                for (const auto& particle : interleaved)
+                    if (particle.emitter_index == 1 && particle.draw_eligible) selected.push_back(&particle);
+                particles::VertexStream full, subset;
+                particles::build_stream(selected_plan, interleaved, test_camera(), full);
+                particles::build_stream_subset(selected_plan, selected, test_camera(), subset);
+                expect(particles::stream_hash(full) == particles::stream_hash(subset)
+                    && full.sort_candidates == subset.sort_candidates && full.quads == subset.quads
+                    && full.triangles == subset.triangles
+                    && std::bit_cast<std::array<float, 3>>(full.bounds_min) == std::bit_cast<std::array<float, 3>>(subset.bounds_min)
+                    && std::bit_cast<std::array<float, 3>>(full.bounds_max) == std::bit_cast<std::array<float, 3>>(subset.bounds_max),
+                    "emitter selection preserves interleaved geometry, invalid-slot filtering and sort ties");
+            }
+        }
+    }
     LegacyEmitter authored; authored.depth_sort = true; authored.primitive = 0;
     const auto decoded = particles::load_alo(legacy_system({authored}), "sort-triangle.alo");
     expect(bool(decoded), "serialized sort/primitive fixture parses");
     if (!decoded) return;
     expect(decoded.value().emitters[0].depth_sort && decoded.value().emitters[0].primitive_mode == 0,
         "PS-31/32 preserve authored sort and triangle selection");
+    expect(decoded.value().emitters[0].legacy_slot_order,
+        "V1 decoding preserves primitive slot ordering independently of depth sorting");
     auto emitter = drawable_emitter(); emitter.depth_sort = true; emitter.blend_mode = 2;
     emitter.primitive_mode = 0;
     std::vector<particles::Particle> live(3);
@@ -70,6 +110,21 @@ void test_legacy_sort_triangles_and_atlas() {
         expect(!plan.sort_particles && stream.sort_candidates == 0 && stream.sorted_particles.empty()
             && close(stream.vertices[0].position.x, 1), "additive and ignore-depth omit sorting and retain storage order");
     }
+    emitter.legacy_slot_order = true; emitter.blend_mode = 2; emitter.disable_depth_test = true;
+    live[0].draw_slot = 2; live[1].draw_slot = 0; live[2].draw_slot = 1;
+    live[0].color = {1, 0.8F, 0.1F, 0.5F}; live[1].color = {0.5F, 0.5F, 0.5F, 0.5F};
+    stream.clear();
+    const auto slot_plan = particles::plan_emitter(emitter, 0);
+    const auto slot_before = global_allocations.load(std::memory_order_relaxed);
+    particles::build_stream(slot_plan, live, camera, stream);
+    expect(global_allocations.load(std::memory_order_relaxed) == slot_before,
+        "preallocated V1 alpha slot ordering performs no allocation");
+    expect(stream.sort_candidates == 0 && close(stream.vertices[0].position.x, 1)
+        && close(stream.vertices[3].position.x, 3) && close(stream.vertices[6].position.x, 2),
+        "V1 ignore-depth alpha follows descending logical slots, including reused slots, rather than birth IDs");
+    expect(close(stream.vertices[0].color.z, 0.1F) && close(stream.vertices[6].color.z, 0.5F),
+        "slot ordering preserves authored vertex tint");
+    emitter.legacy_slot_order = false;
     emitter.primitive_mode = 1; emitter.depth_sort = false; stream.clear();
     particles::build_stream(particles::plan_emitter(emitter, 0), live, camera, stream);
     expect(stream.quads == 3 && stream.triangles == 0 && stream.vertices.size() == 12 && stream.indices.size() == 18,
@@ -350,6 +405,26 @@ void test_legacy_moving_kite() {
     stream.clear(); particles::build_stream(plan, cpu.particles().first(1), camera, stream);
     expect(particles::stream_hash(stream) == particles::stream_hash(repeat_stream),
            "MD-07: repeated inherited motion produces identical streams");
+
+    // MD-08: inspect generated vertices under perspective, including off-centre
+    // flight whose global camera-plane projection reverses its visible direction.
+    camera = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, true};
+    particle.size = 2;
+    for (const auto position : {particles::Vec3{0, 0, -100}, particles::Vec3{70, 40, -100},
+                               particles::Vec3{-70, -40, -100}}) {
+        for (const auto velocity : {particles::Vec3{100, 20, -200}, particles::Vec3{-100, -20, 200},
+                                   particles::Vec3{0, 0, -200}, particles::Vec3{20, 100, 50}}) {
+            particle.position = position;
+            particle.motion_velocity = velocity;
+            stream.clear();
+            particles::build_stream(plan, std::span{&particle, 1}, camera, stream);
+            const bool radial = position.x == 0 && position.y == 0 && velocity.x == 0 && velocity.y == 0;
+            expect(stream.quads == 1, "MD-08: motion and radial fallback both draw");
+            expect(stream.axis_samples == (radial ? 0U : 1U)
+                && stream.axis_max_sine_error < 0.00001 && stream.axis_reversed == 0,
+                "MD-08: generated particle head/tail match perspective frame displacement");
+        }
+    }
 }
 
 void test_parent_link_rejection(){
@@ -452,8 +527,32 @@ void test_finite_rotation_boundary() {
     particles::VertexStream stream;
     particles::build_stream(particles::plan_emitter(drawable_emitter(), 0),
                             std::span{&particle, 1}, test_camera(), stream);
-    expect(stream.vertices.empty() && stream.indices.empty() && stream.quads == 0,
-           "finite rotation that overflows angle skips its whole quad");
+    expect(stream.vertices.size() == 4 && stream.indices.size() == 6 && stream.quads == 1,
+           "finite radian rotation does not overflow through a second conversion");
+}
+
+void test_billboard_radian_rotation() {
+    particles::Particle particle;
+    particle.size = 2;
+    particle.color = {1, 1, 1, 1};
+    particle.texcoords = {0, 0, 1, 1};
+    particle.rotation = 3.14159265358979323846F / 2;
+    particles::VertexStream stream;
+    particles::CameraFrame camera;
+    camera.right = {1, 0, 0};
+    camera.up = {0, 1, 0};
+    auto emitter = drawable_emitter();
+    for (const auto renderer : {22U, 28U}) {
+        emitter.renderer_id = renderer;
+        stream.clear();
+        particles::build_stream(particles::plan_emitter(emitter, 0),
+                                std::span{&particle, 1}, camera, stream);
+        expect(stream.vertices.size() == 4, "radian quarter-turn creates a full quad");
+        if (stream.vertices.size() != 4) continue;
+        const auto corner = stream.vertices.front().position;
+        expect(std::abs(corner.x + 2) < 0.0001F && std::abs(corner.y + 2) < 0.0001F,
+               "PS-29 quarter-turn radians rotate the textured corner once in billboard and XY streams");
+    }
 }
 
 void test_stream_validation() {
@@ -785,6 +884,20 @@ void test_present_allocates_nothing() {
     expect(backend.updates - updates == 150 && backend.quads - quads == 150, "each effect is uploaded once with its glow");
 }
 
+namespace {
+// Runs every task inline on the calling thread: the executor dispatch path (its lambda and
+// slicing) without threads, so the allocation counter stays deterministic.
+class InlineExecutor final : public particles::StepExecutor {
+public:
+    bool run(const std::size_t count, const std::function<void(std::size_t)>& task) const override {
+        for (std::size_t index = 0; index < count; ++index) task(index);
+        ++runs;
+        return true;
+    }
+    mutable std::size_t runs{};
+};
+} // namespace
+
 // #638: the batched frame (advance_all, present_all) allocates nothing either once its streams,
 // its statistics and its batch have grown.
 void test_batch_present_allocates_nothing() {
@@ -792,10 +905,10 @@ void test_batch_present_allocates_nothing() {
     particles::EffectRegistry registry(backend);
     particles::SystemDefinition system;
     auto glow = drawable_emitter(); glow.translater_id = 26; glow.position.point = {0.0F, 2.0F, 0.0F};
-    system.emitters.push_back(glow);
+    for (std::size_t emitter = 0; emitter < 4; ++emitter) system.emitters.push_back(glow);
     std::vector<particles::EffectHandle> handles;
     for (std::uint32_t index = 0; index < 150; ++index) {
-        const auto handle = registry.spawn(system, index + 1U, 16);
+        const auto handle = registry.spawn(system, index + 1U, 64);
         expect(bool(handle), "batch present fixture spawns");
         if (!handle) return;
         handles.push_back(handle.value());
@@ -811,7 +924,31 @@ void test_batch_present_allocates_nothing() {
     const std::size_t allocated = global_allocations.load(std::memory_order_relaxed) - before;
     expect(presented, "every running effect is presented in one batch");
     expect(allocated == 0, "a batched frame presenting 150 effects allocates nothing");
-    expect(backend.updates - updates == 150, "the batch uploads each effect once");
+    expect(backend.updates - updates == 600, "the batch uploads all four emitters of each effect once");
+    const std::size_t before_advance = global_allocations.load(std::memory_order_relaxed);
+    const bool advanced = bool(registry.advance_all(handles, 1.0F / 30.0F, camera, stats));
+    const std::size_t advance_allocations = global_allocations.load(std::memory_order_relaxed) - before_advance;
+    expect(advanced && advance_allocations == 0,
+        "a steady multi-emitter batch retains statistics, particle buckets and callback storage");
+
+    // The same frames through an executor: the dispatch lambda must stay within std::function's
+    // small buffer (no capture growth) and the slicing must not allocate.
+    InlineExecutor executor;
+    registry.set_executor(&executor);
+    expect(bool(registry.advance_all(handles, 1.0F / 30.0F, camera, stats)), "threaded fixture samples");
+    expect(bool(registry.present_all(handles, camera)), "threaded fixture presents");
+    const std::size_t runs = executor.runs;
+    const std::size_t before_threaded = global_allocations.load(std::memory_order_relaxed);
+    const bool threaded_advanced = bool(registry.advance_all(handles, 1.0F / 30.0F, camera, stats));
+    const std::size_t threaded_advance_allocations = global_allocations.load(std::memory_order_relaxed) - before_threaded;
+    const std::size_t before_threaded_present = global_allocations.load(std::memory_order_relaxed);
+    const bool threaded_presented = bool(registry.present_all(handles, camera));
+    const std::size_t threaded_present_allocations =
+        global_allocations.load(std::memory_order_relaxed) - before_threaded_present;
+    registry.set_executor(nullptr);
+    expect(executor.runs > runs, "the threaded fixture dispatches through the executor");
+    expect(threaded_advanced && threaded_advance_allocations == 0, "a steady batch advance through an executor allocates nothing");
+    expect(threaded_presented && threaded_present_allocations == 0, "a batch present through an executor allocates nothing");
 }
 
 void test_camera_and_attachment_frames() {

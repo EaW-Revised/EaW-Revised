@@ -48,6 +48,14 @@ void EawrTacticalHud::setup(Setup setup, TextureButton* options) {
     relayout();
 }
 
+void EawrTacticalHud::set_alternate(const std::optional<std::uint32_t> index, const float alpha) {
+    if (index == alternate_ && alpha == alternate_alpha_) return;
+    alternate_ = index;
+    alternate_alpha_ = alpha;
+    laid_out_ = Vector2(-1.0F, -1.0F);
+    relayout();
+}
+
 void EawrTacticalHud::set_probe(std::function<void()> probe) {
     probe_ = std::move(probe);
     set_process(static_cast<bool>(probe_));
@@ -94,6 +102,8 @@ void EawrTacticalHud::relayout() {
         const RID item = items_[index];
         rendering->canvas_item_clear(item);
         if (mesh.texture.is_null()) continue;
+        if (mesh.alternate && mesh.alternate != alternate_) continue;
+        const float tint = mesh.alternate ? alternate_alpha_ : 1.0F;
         PackedVector2Array points;
         PackedVector2Array uvs;
         PackedColorArray colours;
@@ -104,7 +114,7 @@ void EawrTacticalHud::relayout() {
                 indices.push_back(static_cast<int32_t>(points.size()));
                 points.push_back(Vector2(static_cast<float>(point.x), static_cast<float>(point.y)));
                 uvs.push_back(Vector2(vertex.uv.x, vertex.uv.y));
-                colours.push_back(Color(1, 1, 1, 1));
+                colours.push_back(Color(1, 1, 1, tint));
             }
         }
         rendering->canvas_item_add_triangle_array(item, indices, points, colours, uvs, PackedInt32Array(),

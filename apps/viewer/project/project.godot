@@ -12,7 +12,8 @@ window/size/window_width_override=1280
 window/size/window_height_override=720
 
 [display/window]
-vsync/vsync_mode=1
+; ST-V1: retail defaults to off; saved player settings may enable it.
+vsync/vsync_mode=0
 
 [rendering]
 renderer/rendering_method="forward_plus"
@@ -20,3 +21,8 @@ rendering_device/driver.windows="vulkan"
 rendering_device/fallback_to_d3d12=true
 rendering_device/fallback_to_opengl3=true
 textures/default_filters/use_nearest_mipmap_filter=false
+
+[eawr]
+; WGS-97: observed save profile. Configurable independently from camera bindings.
+input/quick_save="F6"
+input/quick_load="F5"

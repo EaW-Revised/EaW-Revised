@@ -1,11 +1,131 @@
 #include "xml_internal.hpp"
 #include "eawr/data/tag_trace.hpp"
+#include "eawr/data/retail_values.hpp"
 
+#include <algorithm>
+#include <array>
 #include <optional>
 #include <unordered_set>
 #include <utility>
 
 namespace eawr::data {
+
+core::Result<TypeMemberFlags> Catalog::member_flags(const std::string_view object_id) const {
+    using Result = core::Result<TypeMemberFlags>;
+    const auto* definition = find(object_id, Category::game_object);
+    if (definition == nullptr) return Result::failure(diagnostic(
+        diagnostic_codes::object_not_found, "member flags: unknown game object " + std::string(object_id)));
+    const auto& issue = overlay_ ? overlay_->member_flags_issue : impl_->member_flags_issue;
+    if (!issue.empty()) return Result::failure(diagnostic(
+        diagnostic_codes::member_timeline_unavailable, "member-parse-timeline: " + issue, &definition->root.source));
+    const auto& flags = overlay_ ? overlay_->member_flags : impl_->member_flags;
+    const auto& indexes = impl_->by_id.at(ascii_lower(object_id));
+    for (const auto index : indexes) {
+        if (definition_at(index).category == Category::game_object) return Result::success(flags[index]);
+    }
+    return Result::failure(diagnostic(diagnostic_codes::member_timeline_unavailable,
+        "member-parse-timeline: game object has no timeline slot"));
+}
+
+// WGA-363/364, WAR-84: load-only state machine. Preserve copy-time flags and
+// rosters rather than closing the final variant ancestry over the final roster.
+void derive_member_flags(const std::span<const Definition* const> definitions,
+    std::vector<TypeMemberFlags>& flags, std::string& issue) {
+    struct State {
+        bool complete{};
+        std::string base;
+        std::array<std::vector<std::string>, 2> rosters;
+    };
+    flags.assign(definitions.size(), {});
+    issue.clear();
+    std::vector<State> states(definitions.size());
+    std::vector<std::size_t> order;
+    std::unordered_map<std::string, std::size_t> available;
+    constexpr std::array<std::string_view, 2> tags{"Company_Units", "Squadron_Units"};
+    const auto authored = [&](const std::size_t index, const bool variant) {
+        for (std::size_t roster = 0; roster < tags.size(); ++roster) {
+            bool first = true;
+            for (const auto& node : definitions[index]->root.children) {
+                if (!ascii_iequals(node.name, tags[roster]) || retail::is_placeholder(node.raw_text)) continue;
+                tag_trace::used(node);
+                std::vector<std::string> names;
+                std::string name;
+                for (const char ch : node.raw_text) {
+                    if (xml_space(static_cast<unsigned char>(ch)) || ch == ',' || ch == '\f' || ch == '\v') {
+                        if (!name.empty()) names.push_back(std::exchange(name, {}));
+                    } else name += ch;
+                }
+                if (!name.empty()) names.push_back(std::move(name));
+                if (names.empty()) continue;
+                if (variant && first) states[index].rosters[roster].clear();
+                first = false;
+                auto& destination = states[index].rosters[roster];
+                destination.insert(destination.end(), names.begin(), names.end());
+            }
+        }
+    };
+    const auto overlay = [&](const std::size_t index) {
+        const auto found = available.find(ascii_lower(states[index].base));
+        if (found == available.end() || !states[found->second].complete) return;
+        flags[index] = flags[found->second];
+        states[index].rosters = states[found->second].rosters;
+        authored(index, true);
+        states[index].complete = true;
+    };
+    for (std::size_t index = 0; index < definitions.size(); ++index) {
+        const auto& definition = *definitions[index];
+        if (!definition.active || definition.category != Category::game_object) continue;
+        if (definition.id.empty() || !available.emplace(ascii_lower(definition.id), index).second) {
+            issue = "empty or duplicate game-object identity: " + definition.id;
+            return;
+        }
+        order.push_back(index);
+        if (const auto* base = child_named(definition.root, "Variant_Of_Existing_Type");
+            base && !retail::is_placeholder(base->raw_text)) {
+            tag_trace::used(*base);
+            states[index].base = trim(base->raw_text);
+        }
+        authored(index, false);
+        states[index].complete = states[index].base.empty();
+        if (!states[index].complete) overlay(index);
+    }
+    // Pass zero created types in registry/document order. Later passes replay
+    // an entire file for each still-incomplete type from that file, including
+    // already-complete variants in it. Copying may overwrite earlier marks.
+    for (std::size_t pass = 0; pass < 10; ++pass) {
+        if (pass != 0) {
+            for (std::size_t start = 0; start < order.size();) {
+                std::size_t end = start + 1;
+                const auto file = definitions[order[start]]->registry_order;
+                while (end < order.size() && definitions[order[end]]->registry_order == file) ++end;
+                for (std::size_t candidate = start; candidate < end; ++candidate) {
+                    if (states[order[candidate]].complete) continue;
+                    for (std::size_t entry = start; entry < end; ++entry)
+                        if (!states[order[entry]].base.empty()) overlay(order[entry]);
+                }
+                start = end;
+            }
+        }
+        // All current rosters participate, including an incomplete variant's
+        // authored roster. Writes only set true; the fix-up never clears bits.
+        for (const auto index : order) {
+            for (std::size_t roster = 0; roster < tags.size(); ++roster) {
+                for (const auto& member : states[index].rosters[roster]) {
+                    const auto found = available.find(ascii_lower(member));
+                    if (found == available.end()) {
+                        issue = "unresolved " + std::string(tags[roster]) + " member " + member
+                            + " in " + definitions[index]->id;
+                        return;
+                    }
+                    auto& target = flags[found->second];
+                    (roster == 0 ? target.ground_company_member : target.squadron_member) = true;
+                }
+            }
+        }
+        if (std::all_of(order.begin(), order.end(), [&](const auto index) { return states[index].complete; })) return;
+    }
+    issue = "variant loading incomplete after ten passes";
+}
 
 const EffectiveValue* EffectiveObject::value(const std::string_view tag_name) const noexcept {
     const EffectiveValue* result = nullptr;

@@ -25,12 +25,20 @@
 - **Cadence (debug build, EWSQ-02).** The craft's locomotor, the craft's targeting and the team
   service are each serviced every logical frame (1/30 s). The spawner is serviced every 30 frames
   (FL-01).
-- **Entry points in the frame, in words.** Every object is serviced once a frame in the object
-  manager's order, and each of its services in turn. A squadron's craft are created before their
-  container (FL-06), so the craft are serviced before the container within a frame
-  (**unverified**: the object manager's order was not read). Per craft, the locomotor service runs
+- **Entry points in the frame, in words.** Every object is serviced in its manager's service
+  registration order, and each of its due, enabled services in attachment order.
+  The 2026-10-08 follow-up corrects the earlier creation-order inference:
+  [FS-18/19](../frame-service-schedule.md#squadron-order-rules) establishes that an ordinary
+  launch creates craft before the container but front-registers each, so the container runs
+  first, then members in reverse creation order, with the first-added leader last.
+  Re-registration, late addition and restore retain UFS-14; roster traversal is a separate list.
+  Per craft, the locomotor service runs
   the rules WSQ-01 to WSQ-40 below; per craft, the targeting service runs WSQ-41 to WSQ-46; per
   container, the team service runs WSQ-47 to WSQ-53 and the team locomotor WSQ-54.
+  A specialized StarViper container additionally authors targeting and Buzz Droids:
+  FS-23/FC-51 retains an admitted point-special request on that holder and retries it
+  on its targeting turn. Ordinary member target sharing is not per-member ability
+  activation; range failure does not drop that admitted request (FD-32/FSC-33).
 
 ## Rules, in evaluation order
 
@@ -137,6 +145,13 @@
   the target names one). At close range the leader clears every member's and the container's
   paths; a target that is a squadron starts the dogfight (WSQ-19), anything else gives up the
   combat cell and runs WSQ-18.
+  The formation retains its destination attachment separately from the shared team order.
+  An ordinary attack fills an absent attachment through OR-24; a destroyed attachment is
+  replaced by the same selection. Formations sharing a command coordinator and active target
+  share the first member's choice; independent orders remain separate. The remake replaces
+  on the next flight frame; the original coordinator-phase cadence remains the documented
+  seam in [space fighters](../space-fighters.md#attack-runs). Approach planning and WSQ-18 use that world position too
+  (debug build, distant-station evidence EDSH-01 to EDSH-08).
 - **WSQ-16** (debug build, EWSQ-10; FA-07) Beyond the strafe reach the squadron gives up its combat
   cell; a craft on an unfinished path flies the approach as a move (WSQ-10: out of combat, in
   formation, at the layer height); otherwise it steers around ships (WSQ-35) or heads straight
@@ -293,7 +308,10 @@
   target loss; unused later scans neither run nor advance their clocks.
 - **WSQ-44** (debug build, EWSQ-26) A held target is dropped (the craft clears it) when it is in
   limbo, dead, being deleted, stealthed and the craft cannot target stealth, or fogged for the
-  craft's owner.
+  craft's owner. When the craft held the team's target, the loss is shared in the same ordered
+  commit: the team drops its target, hardpoint and approach and leaves its cell, every member
+  holding that target lets go, and the formation's attack destination is cleared as an unmatched
+  find would (a member's different target is kept).
 - **WSQ-45** (debug build, EWSQ-26; G-F5) A held target that is unsuitable, or whose priority is
   not the best (1), is re-scanned for a better one on the scan period; a better find replaces it.
   Candidate admission accepts the exact held formation target, the craft's own attack reach, or
@@ -323,6 +341,13 @@
 - **WSQ-47** (debug build, EWSQ-22) Setting the squadron's attack target: a craft of a squadron
   stands for its squadron; the squadron signals a move start; every member's targeting and every
   weapon hardpoint of every member takes the target (FT-05, FO-04).
+- **WSQ-64** (debug build, ER2866-01/02; WSQ-20, WSQ-47) Sharing or replacing a live squadron
+  attack target updates targeting and acquisition pairing without changing an idle craft's
+  desired hold point. It does not revert the craft to idle. Movement notification can separately
+  adopt a formation attack destination under WDF-03; genuine idle reversion still follows
+  WSQ-11/14. In particular, an idle craft without a movement formation keeps its hold point
+  when its retained shared target changes. Recentring it at its current position is not part
+  of the target setter or the acquisition notification.
 - **WSQ-48** (debug build, EWSQ-19) The container's bounds are the union of its craft's model
   bounds; its position is their centre (unless its team locomotor holds it; hyperspace only), and
   its selection box scale twice the larger planar extent.
@@ -354,8 +379,39 @@
 - **WSQ-57** (debug build, EWSQ-21; FC-01) Removing a craft (death): it leaves the roster at once
   (WSQ-51); the squadron's container is destroyed with its last craft, which releases the spawner
   entry (FL-08). The killed craft's dead copy spins away or explodes (space-fighter-deaths).
-- **WSQ-58** (debug build, EWSQ-17) A newly created craft is idle and holds its container's
-  position; no idle cell is claimed until its first revert to idle (WSQ-09).
+- **WSQ-58** (debug build, EWSQ-17, EWSQ-63..68) A newly created craft is idle and holds its
+  container's position, or its own position without a parent. This is retained desired-position
+  state, not a fresh read of the container's changing world position. The craft initializer
+  claims no idle cell; ordinary idle reversion claims one under WSQ-09, while the separate
+  assembly mode below can claim one during creation.
+  - The ordinary skirmish company path creates and places the craft before creating their
+    team. They have no parent at initialization, so each retains its own placed point. Team
+    attachment sets membership and formation bookkeeping without replacing that point.
+    This assembly path does not request the separate idle-cell placement mode; a creation
+    path which does request it explicitly sets each member's hold to the claimed cell.
+    These are distinct producers, not a rule that all newly parented craft recenter their hold.
+  - Ordinary position publication updates position and transform without replacing the
+    retained locomotion destination. A later position sample alone therefore cannot recover
+    that destination.
+  - Lua `Teleport` is a separate producer. On a team it preserves each member's offset from
+    the container and teleports every member. The locomotion path writes each teleported
+    object's desired position from its resulting world position and clears its idle/combat
+    cell coordinates. Space placement also applies that object's `Layer_Z_Adjust`.
+    The member's degenerate-movement follow-up excludes members of a team; it does not
+    replace their destination with the container's.
+  - Lua `Face_Immediate` calls immediate facing. Its inspected space entry changes facing
+    without writing desired position; the separate land position-adjustment branch does not
+    apply. WSQ-06 consequently reads the leader's retained post-teleport destination.
+  - The S-97 recorder stages its single team wrapper with `Teleport` followed by
+    `Face_Immediate`. Replacing only recorded craft poses leaves out this destination producer.
+    Each staged leader's retained destination is therefore its own teleported position at
+    sample zero (S-97 capture: every leader's desired point is its spawn point), which differs
+    from the container's point a slot away. Ordinary skirmish placement reaches the same
+    leader-point hold through the unparented initialization above; the container's point
+    stays the formation base (FM-20). A hangar launch does not go through this producer and keeps
+    its bay or spawner point. A later recording boundary, such as S-98's native frame 150,
+    needs the retained destination at that boundary; its current pose alone does not
+    establish that value.
 - **WSQ-59** (debug build, EWSQ-17) A move order given to one craft is refused (the squadron's
   container takes orders, FO-01).
 
@@ -407,7 +463,7 @@ Our code: `src/sim/tactical/fighters_motion.cpp` and `src/sim/tactical/fighters_
 | **WSQ-08, WSQ-09, WSQ-50** | none: an idle squadron holds `SquadronState::anchor`, the exact point it was given | **missing** (overlapping squadron craft (legacy EAWR-674): escorts of one carrier and squadrons ending one move stack) |
 | WSQ-10, WSQ-11 | `Locomotor::move`, `squadron_move_arrived` | same, except the idle cell claim (WSQ-09) |
 | WSQ-12 | none: the escort flies at `Max_Speed` | differs (escort override speed; movement walk) |
-| WSQ-13 to WSQ-17 | `Locomotor::directed_combat`, `form_up` | same |
+| WSQ-13 to WSQ-17 | `Locomotor::directed_combat`, `form_up`; the strafe reach adds the target's soft radius from the combat geometry (WWP-21: ordinary space craft and team containers use the type radius; ideal geometry requires a specialized formation-team locomotor) | same |
 | WSQ-18a | `Locomotor::target_speed` | **differs**: gated on the craft's own error, not the squadron's largest (WSQ-52) |
 | WSQ-18 | `directed_combat` with `target_craft` | differs for a lone craft target (FA-06); none in M2 |
 | WSQ-19, WSQ-22 | `dogfight`, the session's dogfight and chase phases | same |
@@ -422,12 +478,15 @@ Our code: `src/sim/tactical/fighters_motion.cpp` and `src/sim/tactical/fighters_
 | WSQ-41 | partitioned player command hand-off before member scans | base attacks retain direct assignment; autonomous overrides over an idle/escort base remain autonomous; destination-stack collision fallback, target extents and hardpoint persistence remain gaps |
 | WSQ-43, WSQ-47 | `Tick::targets` member results and `hand_target` | normalized team sharing with the actual player-direct flag |
 | WSQ-42 | `target_combat` in partitioned member preparation | per-member collection box, own 30 + 0..15 clock and formation diversion admission; guard candidates admit from the guarded destination; launch admission delay retained |
-| WSQ-44, WSQ-45 | `UnitCombat::ship_target`, shared target-loss commit | live/hostile/visible checks, member admission with facing-dependent hard extent, and better-target rescan; stealth and detailed limbo service remain outside this port |
-| WSQ-46 | new-target approach and sparse acquisition notification | team player-direct/pursuit dispatch; movement walk owns the destination |
-| WSQ-48, WSQ-53 | container at the centre of its craft's positions | same (points, not model bounds: negligible) |
+| WSQ-44, WSQ-45 | `UnitCombat::ship_target`, shared target-loss commit | live/hostile/visible checks, member admission with facing-dependent hard extent, and better-target rescan; `commit_squadron_target` shares a held target's loss with the team, its members and the formation destination, then ends the combat; stealth and detailed limbo service remain outside this port |
+| WSQ-46 | separate shared team target and active formation destination; sparse per-frame mismatch notification | WMV-17 allowance-circle admission of a non-player find always runs and gates only movement diversion (WDF-03); a player's attack sets the destination and starts the FA-07 approach without splitting the base destination (WMV-18); initial sharing and WSQ-20 roster pairing survive refusal; WDF-02 retains targets without a formation and otherwise checks the active destination |
+| WSQ-48 | container at the centre of its craft's positions | same (points, not model bounds: negligible) |
+| WSQ-53 | the squadron phase gives the container its leader's rotation and placement every frame | same |
 | **WSQ-51** | `roster_offset`: the surviving roster | current roster order closes the slots after a death (FM-10) |
 | WSQ-52 | none | missing (part of the WSQ-18a gap) |
-| WSQ-54, WSQ-56 to WSQ-59 | squadron frame, FC-01 | same |
+| WSQ-54, WSQ-56 to WSQ-57 | squadron frame, FC-01 | same |
+| WSQ-58 | `bind_squadrons` initializes the hold of a squadron placed at the start from its leader's point (the staged teleport's destination; the container's point stays the formation base), `launch` from the bay or spawner point | hangar creation matches; placed squadrons match the teleported-leader destination at S-97 sample zero (`test_placed_idle_hold`); scripted teleport/immediate-facing consumers remain missing (legacy EAWR-2389); recorded pose replacement alone does not restore retained hold |
+| WSQ-59 | a move given to one craft is accepted, ends the team's ion shot and Hunt (abilities WAB-40, WAB-51) and changes nothing on the craft | same; an attack given to one craft still gives it its own target (not traced, fidelity list) |
 
 **The runaway note (dogfight craft dispersion, scatter and burst timing, and long-battle soak).** FoC's speed rules (WSQ-37) let a follower fly
 several times `Max_Speed` while it catches up, never 40 times: the asked speed falls as the craft
@@ -467,7 +526,7 @@ Question IDs are retained; these boundaries no longer require a new source read.
 
 | ID | Sourced disposition | Evidence |
 |---|---|---|
-| U-01 | Most recent service-registration first object traversal; each object runs periodic behaviours in attachment order, then its special/script/hardpoint services. Ordinary attachment follows general Behavior then SpaceBehavior XML lists. This is per-object order, not global subsystem phases (WFO-12/15/17/24). | EUS-04 |
+| U-01 | Most recent service-registration first object traversal; each object runs periodic behaviours in attachment order, then its special/script/hardpoint services. Ordinary attachment follows general Behavior then SpaceBehavior XML lists. FS-18/19 now traces ordinary launch through that boundary: container before reverse-created members, independent of first-added-first roster notifications. This is per-object order, not global subsystem phases (WFO-12/15/17/24); UFS-14 retains exceptional registration/restore. | EUS-04; debug build EFS-32..35 |
 | U-04 | Formation override maximum speed is set during layer mapping and updated-path acceptance, and reset during replanning (WMV-19). This was already sourced by the movement walk. | EMV-13 |
 | U-05 | Settled by the debug build's constant initializer: `Space_Idle_Movement_Speed` defaults to 1 (WSQ-05). WMV-14's idle drift defaults to disabled. | Previously sourced in this walk |
 
@@ -476,8 +535,12 @@ Question IDs are retained; these boundaries no longer require a new source read.
 - **U-02** Creation/presence settled by WMV-18: a starting team registers a position formation,
   and completion preserves it. Retail S-99's 4150-unit chase does not establish absence of a
   formation; the remaining destination-stack and diversion timing differences need measurement.
-- **U-03** The gating of the pairing at target acquisition (WSQ-20): the pursue flag and when the
-  formation's attack target lags the craft's. Ghidra: the targeting interface's pursue getter. Sweep (EUS-37): Still unverified: The space targeting service contains virtual pursue/formation-target gates, but the pursue getter/setter was not resolved. Wrapper flags alone do not settle when formation target lags the craft.
+- **U-03** Narrowed by FS-20/FC-41/42: ordinary team assignment passes the actual player-direct
+  flag into both direct and pursuit state; a held autonomous mismatch notifies the team
+  locomotion, and roster notification/pairing is independent of diversion admission.
+  What remains is the runtime age of an admitted/refused formation destination and its
+  acquisition before a later member turn, FSC-24/UFS-16/18. Fresh debug build EFS-35/36;
+  earlier EUS-37 was a bounded unresolved lookup, not a competing verdict.
 - **U-06** A retail capture of two squadrons launched by one carrier idling side by side would
   confirm WSQ-09 on screen (two holds 120 or more units apart): the capture-mod Lua staging of
   hardpoint breakoff debris can spawn two squadrons at one point and let them idle.

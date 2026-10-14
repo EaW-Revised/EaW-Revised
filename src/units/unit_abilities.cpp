@@ -2,7 +2,7 @@
 #include "eawr/units/unit_tables.hpp"
 
 #include <algorithm>
-#include <cctype>
+#include "eawr/core/ascii.hpp"
 #include <string>
 #include <utility>
 
@@ -23,7 +23,7 @@ namespace tactical = sim::tactical;
 [[nodiscard]] bool iequals(const std::string_view left, const std::string_view right) noexcept {
     if (left.size() != right.size()) return false;
     for (std::size_t index = 0; index < left.size(); ++index) {
-        if (std::toupper(static_cast<unsigned char>(left[index])) != std::toupper(static_cast<unsigned char>(right[index]))) {
+        if (core::ascii_upper(static_cast<unsigned char>(left[index])) != core::ascii_upper(static_cast<unsigned char>(right[index]))) {
             return false;
         }
     }
@@ -37,10 +37,48 @@ namespace tactical = sim::tactical;
     return static_cast<std::uint32_t>(std::min<std::uint64_t>(product / Fixed::scale, tactical::max_ability_frames));
 }
 
+// WAB-70..73: the nested Buzz_Droids_Ability data and the droid type it creates. Speed is the
+// droid's Max_Speed under the space multiplier (MV-01, the same speed source as every ship).
+[[nodiscard]] core::Result<tactical::BuzzDroidsProfile> buzz_profile(const UnitTables& tables,
+    const std::string& owner, const BuzzDroids& data, const std::uint32_t damage_type) {
+    using Result = core::Result<tactical::BuzzDroidsProfile>;
+    const auto droid = std::find_if(tables.units.begin(), tables.units.end(),
+        [&](const UnitType& type) { return iequals(type.id, data.object_type); });
+    if (droid == tables.units.end()) return Result::failure(failure(owner + " buzz droids need their object type (WAB-71)"));
+    std::optional<Fixed> multiplier;
+    for (const auto& constant : tables.constants.scalars)
+        if (constant.tag == "Object_Max_Speed_Multiplier_Space") multiplier = constant.value;
+    if (!multiplier) return Result::failure(failure(owner + " buzz droids need Object_Max_Speed_Multiplier_Space (MV-01)"));
+    const auto per_frame = [](const std::optional<Fixed>& per_second) {
+        const auto raw = per_second.value_or(Fixed{}).raw();
+        const auto fps = static_cast<std::int64_t>(tactical::logical_frames_per_second);
+        return Fixed::from_raw(raw >= 0 ? (raw + fps / 2) / fps : -((-raw + fps / 2) / fps));
+    };
+    tactical::BuzzDroidsProfile profile;
+    profile.droid_type = assets::object_type_crc(droid->id);
+    profile.min_range = data.min_range.value_or(Fixed{});
+    profile.max_range = data.max_range.value_or(Fixed{});
+    profile.chase_radius = data.chase_radius.value_or(Fixed{});
+    profile.damage_radius = data.damage_radius.value_or(Fixed{});
+    profile.enemy_damage = per_frame(data.enemy_damage_per_second);
+    profile.own_damage = per_frame(data.own_damage_per_second);
+    profile.activation_frames = frames(data.activation_seconds);
+    auto speed = sim::math::multiply(droid->movement.max_speed.value_or(Fixed{}), *multiplier);
+    if (!speed) return Result::failure(failure(owner + " buzz droid speed: " + speed.error().message));
+    profile.speed = speed.value();
+    profile.victim_categories = droid->special_weapon_targets;
+    profile.damage_type = damage_type;
+    return Result::success(profile);
+}
+
 } // namespace
 
 bool runs_defend_script(const UnitType& type) noexcept {
     return iequals(type.lua_script, "ObjectScript_PowerToShields");
+}
+
+bool runs_self_destruct_script(const UnitType& type) noexcept {
+    return iequals(type.lua_script, "ObjectScript_Krayt");
 }
 
 core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std::span<const tactical::PlayerId> humans,
@@ -53,6 +91,13 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
     std::sort(table.humans.begin(), table.humans.end());
     table.humans.erase(std::unique(table.humans.begin(), table.humans.end()), table.humans.end());
     if (default_autofire) table.autofire_defaults = table.humans;
+    std::uint32_t detection_frames = 30; // WST-09: default 1.0 s, trunc(seconds x 30).
+    for (const auto& constant : tables.constants.scalars) {
+        if (constant.tag != "Stealth_Detection_Time") continue;
+        if (!constant.value || constant.value->raw() < 0 || constant.value->raw() > 3600 * Fixed::scale)
+            return Result::failure(failure("Stealth_Detection_Time must be in [0, 3600] seconds (WST-09)"));
+        detection_frames = frames(constant.value);
+    }
     for (const auto& unit : tables.units) {
         // AB-15: a squadron's own Unit_Abilities_Data is not the one that acts; its craft's is.
         // AB-60 (#561): a team ability acts on the squadron's team container, which is the
@@ -63,46 +108,101 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             team.special = unit.team_special_abilities;
             for (const auto& ability : unit.team_abilities) {
                 if (allowed != nullptr && !allowed(unit.id, ability.type)) continue;
-                if (tactical::ability_kind(ability.type) != tactical::AbilityKind::ion_cannon_shot) continue;
+                const auto kind = tactical::ability_kind(ability.type);
+                if (kind != tactical::AbilityKind::ion_cannon_shot && kind != tactical::AbilityKind::buzz_droids) continue;
                 tactical::AbilityProfile entry;
-                entry.kind = tactical::AbilityKind::ion_cannon_shot;
+                entry.kind = kind;
                 entry.recharge_frames = frames(ability.recharge_seconds);
                 entry.supports_autofire = ability.supports_autofire;
                 entry.team = true;
+                if (kind == tactical::AbilityKind::buzz_droids) {
+                    // WAB-70: the team container holds it; without its nested data it is not modelled.
+                    if (!unit.team_buzz_droids) continue;
+                    auto buzz = buzz_profile(tables, unit.id, *unit.team_buzz_droids, table.beam_damage_type);
+                    if (!buzz) return Result::failure(buzz.error());
+                    entry.buzz = buzz.value();
+                }
                 team.abilities.push_back(entry);
             }
             if (!team.abilities.empty() || !team.special.empty()) table.profiles.push_back(std::move(team));
             continue;
         }
         tactical::UnitAbilityProfile profile;
+        profile.stealth_detection_frames = detection_frames;
         profile.type_id = assets::object_type_crc(unit.id);
         profile.special = unit.special_abilities;
         profile.force_sensitive = unit.force_sensitive;
+        for (std::size_t index = 0; index < unit.hardpoints.size(); ++index) {
+            if (unit.hardpoints[index].type == HardpointType::gravity_well)
+                profile.gravity_well_hardpoints.push_back(static_cast<std::uint32_t>(index));
+        }
         for (const auto& ability : unit.abilities) {
             if (allowed != nullptr && !allowed(unit.id, ability.type)) continue;
             const auto kind = tactical::ability_kind(ability.type);
             if (kind == tactical::AbilityKind::none) continue; // AB-03: not modelled
+            // WAB-70: a squadron's buzz droids belong to its team container (AB-60), not each craft.
+            if (kind == tactical::AbilityKind::buzz_droids && (unit.kind == UnitKind::craft || !unit.buzz_droids)) continue;
             tactical::AbilityProfile entry;
             entry.kind = kind;
+            // WHD-01: a surviving point of the type, not a named beam bone.
+            const auto required = kind == tactical::AbilityKind::tractor_beam ? HardpointType::tractor_beam
+                : HardpointType::weapon_special;
+            entry.requires_hardpoint = kind == tactical::AbilityKind::tractor_beam
+                || kind == tactical::AbilityKind::blast || kind == tactical::AbilityKind::leech_shields;
+            if (entry.requires_hardpoint) {
+                for (std::size_t index = 0; index < unit.hardpoints.size(); ++index)
+                    if (unit.hardpoints[index].type == required)
+                        entry.required_hardpoints.push_back(static_cast<std::uint32_t>(index));
+            }
             if (kind == tactical::AbilityKind::hunt) profile.hunt_reveal_range = unit.space_fow_reveal_range.value_or(Fixed{});
             entry.expiration_frames = frames(ability.expiration_seconds);
+            if (kind == tactical::AbilityKind::stealth && entry.expiration_frames != 0) {
+                entry.expiration_seconds = *ability.expiration_seconds; // WST-03: the cloak's own count
+            }
             entry.recharge_frames = frames(ability.recharge_seconds);
             entry.supports_autofire = ability.supports_autofire;
+            entry.disable_movement = ability.disable_movement;
             if (kind == tactical::AbilityKind::barrage) {
                 entry.barrage_target_type = assets::object_type_crc("Dummy_Barrage_Target");
                 entry.fixed_inaccuracy = ability.fixed_inaccuracy;
                 entry.target_z_offset = ability.target_z_offset.value_or(Fixed{});
+            }
+            if (kind == tactical::AbilityKind::buzz_droids) {
+                auto buzz = buzz_profile(tables, unit.id, *unit.buzz_droids, table.beam_damage_type);
+                if (!buzz) return Result::failure(buzz.error());
+                entry.buzz = buzz.value();
+            }
+            if (kind == tactical::AbilityKind::lure) {
+                // WLU-01: the craft authors the pulse; without listed types it lures nothing and
+                // stays out of the table (AB-26). The squadron's own entry names no data (AB-15).
+                if (unit.kind == UnitKind::squadron || ability.target_types.empty() || !ability.max_pulses) continue;
+                tactical::LureProfile lure;
+                lure.radius = ability.effective_radius.value_or(Fixed{});
+                lure.pulse_frames = frames(ability.pulse_frequency_seconds);
+                lure.max_pulses = std::min<std::uint32_t>(*ability.max_pulses, tactical::max_ability_frames);
+                for (const auto& name : ability.target_types) lure.target_types.push_back(assets::object_type_crc(name));
+                std::sort(lure.target_types.begin(), lure.target_types.end());
+                lure.target_types.erase(std::unique(lure.target_types.begin(), lure.target_types.end()), lure.target_types.end());
+                lure.particle = ability.lure_particle;
+                entry.lure = std::move(lure);
             }
             if (kind == tactical::AbilityKind::replenish_wingmen) {
                 if (unit.replenish_team.empty()) return Result::failure(failure(unit.id + " replenishment requires a team (WHE-63)"));
                 entry.replenish_team = assets::object_type_crc(unit.replenish_team);
                 entry.replenish_particle = ability.replenish_particle;
             }
-            bool modelled = true;
-            if (kind == tactical::AbilityKind::harmonic_bomb || kind == tactical::AbilityKind::weaken_enemy) {
-                if (ability.spawned_projectile_index >= tables.projectiles.size())
+            if (kind == tactical::AbilityKind::harmonic_bomb || kind == tactical::AbilityKind::weaken_enemy
+                || kind == tactical::AbilityKind::self_destruct || kind == tactical::AbilityKind::cluster_bomb
+                || kind == tactical::AbilityKind::fow_reveal_ping) {
+                auto projectile_index = ability.spawned_projectile_index;
+                if (kind == tactical::AbilityKind::cluster_bomb) {
+                    if (!unit.cluster_bomb || unit.cluster_bomb->name != ability.gui_activated_ability_name
+                        || unit.cluster_bomb->style != tactical::SpecialActivationStyle::user_input) continue;
+                    projectile_index = unit.cluster_bomb->projectile_index;
+                }
+                if (projectile_index >= tables.projectiles.size())
                     return Result::failure(failure(unit.id + " spawned ability requires a projectile type (WHE-61)"));
-                const auto& projectile = tables.projectiles[ability.spawned_projectile_index];
+                const auto& projectile = tables.projectiles[projectile_index];
                 tactical::SpawnedAbilityProfile spawned;
                 spawned.type = assets::object_type_crc(projectile.id);
                 spawned.damage = projectile.damage.value_or(Fixed{});
@@ -114,13 +214,78 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 spawned.countdown_frames = frames(ability.bomb_countdown_seconds);
                 spawned.reach = ability.effective_radius.value_or(Fixed{});
                 spawned.z_offset = ability.target_position_z_offset.value_or(Fixed{});
+                if (kind == tactical::AbilityKind::cluster_bomb || kind == tactical::AbilityKind::fow_reveal_ping) {
+                    spawned.speed = projectile.max_speed.value_or(Fixed{});
+                    spawned.max_travel = projectile.max_flight_distance.value_or(Fixed{});
+                    spawned.lifetime = projectile.max_lifetime;
+                    spawned.reveal_range = projectile.reveal_range;
+                    spawned.dense_reveal_multiplier = projectile.dense_reveal_multiplier;
+                }
+                if (kind == tactical::AbilityKind::cluster_bomb) {
+                    spawned.reach = {}; // WCB-03: Effective_Radius is not the launch ring
+                    spawned.ring_count = unit.cluster_bomb->count;
+                    spawned.countdown_frames = frames(unit.cluster_bomb->detonation_seconds);
+                }
                 entry.spawned = std::move(spawned);
             }
             if (kind == tactical::AbilityKind::concentrate_fire || kind == tactical::AbilityKind::energy_weapon
                 || kind == tactical::AbilityKind::tractor_beam || kind == tactical::AbilityKind::missile_shield
-                || kind == tactical::AbilityKind::sensor_jamming) {
+                || kind == tactical::AbilityKind::sensor_jamming || kind == tactical::AbilityKind::corrupt_systems
+                || kind == tactical::AbilityKind::leech_shields) {
                 entry.effective_radius = ability.effective_radius.value_or(Fixed{});
                 entry.gui_activated_ability_name = ability.gui_activated_ability_name;
+            }
+            if (kind == tactical::AbilityKind::blast) {
+                entry.gui_activated_ability_name = ability.gui_activated_ability_name;
+                const auto handler = std::find_if(unit.special_abilities.begin(), unit.special_abilities.end(),
+                    [&](const auto& special) { return special.kind == tactical::SpecialAbilityKind::blast
+                        && special.style == tactical::SpecialActivationStyle::user_input
+                        && special.name == entry.gui_activated_ability_name; });
+                if (handler == unit.special_abilities.end() || !handler->charged_blast) continue;
+                entry.charged_blast = handler->charged_blast;
+                entry.expiration_frames = 0;
+                entry.recharge_at_activation = true; // WHE-35: independent from charge/shot completion
+            }
+            if (kind == tactical::AbilityKind::stealth) {
+                // WST-02: the nested handler named by the ability does the work; without one, or
+                // without a time limit (WST-05), the ability stays out of the table (AB-26).
+                entry.gui_activated_ability_name = ability.gui_activated_ability_name;
+                const auto handler = std::find_if(unit.special_abilities.begin(), unit.special_abilities.end(),
+                    [&](const tactical::SpecialAbilityProfile& special) {
+                        return special.kind == tactical::SpecialAbilityKind::stealth
+                            && special.style == tactical::SpecialActivationStyle::user_input
+                            && special.name == ability.gui_activated_ability_name;
+                    });
+                if (handler == unit.special_abilities.end() || entry.expiration_frames == 0) continue;
+            }
+            if (kind == tactical::AbilityKind::leech_shields) {
+                const auto handler = std::find_if(unit.special_abilities.begin(), unit.special_abilities.end(),
+                    [&](const auto& special) { return special.kind == tactical::SpecialAbilityKind::leech_shields
+                        && special.name == ability.gui_activated_ability_name; });
+                if (handler == unit.special_abilities.end()) continue;
+                entry.expiration_frames = handler->leech_duration_frames;
+                entry.recharge_at_activation = true; // WLS-03
+            }
+            if (kind == tactical::AbilityKind::corrupt_systems) {
+                const auto handler = std::find_if(unit.special_abilities.begin(), unit.special_abilities.end(),
+                    [&](const auto& special) { return special.kind == tactical::SpecialAbilityKind::corrupt_systems
+                        && special.name == entry.gui_activated_ability_name; });
+                if (handler == unit.special_abilities.end() || handler->corrupt_duration_frames == 0) continue;
+                entry.recharge_at_activation = true;
+            }
+            if (kind == tactical::AbilityKind::laser_defense) {
+                // WLD-02, WLD-06: the nested handler's duration is the time limit and the 60 s countdown
+                // starts at the switch-on. A handler the sim cannot fly (AB-26) keeps the ability out.
+                entry.gui_activated_ability_name = ability.gui_activated_ability_name;
+                const auto handler = std::find_if(unit.special_abilities.begin(), unit.special_abilities.end(),
+                    [&](const tactical::SpecialAbilityProfile& special) {
+                        return special.kind == tactical::SpecialAbilityKind::laser_defense
+                            && special.name == ability.gui_activated_ability_name;
+                    });
+                if (handler == unit.special_abilities.end() || handler->defence_categories == 0
+                    || handler->defence_duration_frames == 0) continue;
+                entry.expiration_frames = handler->defence_duration_frames;
+                entry.recharge_at_activation = true;
             }
             for (const auto& modifier : ability.modifiers) {
                 auto& m = entry.modifiers;
@@ -135,9 +300,19 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 else if (iequals(name, "SPEED_MULTIPLIER")) m.speed = modifier.value;
                 else if (iequals(name, "CAUSE_DAMAGE_MULTIPLIER")) m.cause_damage = modifier.value;
                 else if (iequals(name, "TAKE_DAMAGE_MULTIPLIER")) m.take_damage = modifier.value;
-                else { modelled = false; break; } // AB-26: expose only completely supported abilities
+                else if (iequals(name, "TARGET_SPEED_MULTIPLIER")) m.target_speed = modifier.value;
+                else if (iequals(name, "TARGET_TAKE_DAMAGE_MULTIPLIER")) m.target_take_damage = modifier.value;
+                // AB-26: an unknown name does not discard the ability or its other modifiers.
             }
-            if (modelled) profile.abilities.push_back(entry);
+            // AB-26: duplicate flags use the last authored value as an inferred host choice;
+            // retail duplicate precedence is unverified (see the ability fidelity unknowns).
+            for (const auto& flag : ability.modifier_flags) {
+                auto& m = entry.modifiers;
+                if (iequals(flag.modifier, "WEAPONS_ENABLED_FLAG")) m.weapons_enabled = flag.value;
+                else if (iequals(flag.modifier, "CAN_BE_SQUASHED")) m.can_be_squashed = flag.value;
+                else if (iequals(flag.modifier, "ALLOW_TARGET_DIMINISHING_FIREPOWER")) m.allow_target_diminishing_firepower = flag.value;
+            }
+            profile.abilities.push_back(entry);
         }
         if (profile.abilities.empty() && profile.special.empty() && !profile.force_sensitive) continue;
         if (profile.abilities.size() > tactical::max_abilities_per_type) {
@@ -146,8 +321,33 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
         // AB-41: the DEFEND stand-in of the PowerToShields object script, for a type with DEFEND.
         profile.defend_script = runs_defend_script(unit)
             && tactical::ability_slot(profile, tactical::AbilityKind::defend).has_value();
+        // WSD-09: the Krayt object script's SELF_DESTRUCT triggers, for a type with SELF_DESTRUCT.
+        profile.self_destruct_script = runs_self_destruct_script(unit)
+            && tactical::ability_slot(profile, tactical::AbilityKind::self_destruct).has_value();
+        // FS-29: attach the visible MC30 consumer only to its authored object script.
+        profile.mc30_script = iequals(unit.lua_script, "ObjectScript_MC30")
+            && tactical::ability_slot(profile, tactical::AbilityKind::cluster_bomb).has_value();
         table.profiles.push_back(std::move(profile));
     }
+    // WSD-10: the AI combat rating of a type is its AI_Combat_Power; a squadron's is the sum over its craft (PL-13).
+    for (const auto& unit : tables.units) {
+        std::optional<Fixed> rating = unit.ai_combat_power;
+        if (!unit.members.empty()) {
+            Fixed sum{};
+            for (const auto& member : unit.members) {
+                if (member.craft_index >= tables.units.size() || !tables.units[member.craft_index].ai_combat_power) continue;
+                const auto added = sim::math::add(sum, *tables.units[member.craft_index].ai_combat_power);
+                if (!added) return Result::failure(failure(unit.id + " squadron combat rating: " + added.error().message));
+                sum = added.value();
+            }
+            rating = sum;
+        }
+        if (rating && rating->raw() > 0) table.combat_ratings.emplace_back(assets::object_type_crc(unit.id), *rating);
+    }
+    std::sort(table.combat_ratings.begin(), table.combat_ratings.end(),
+        [](const auto& left, const auto& right) { return left.first < right.first; });
+    table.combat_ratings.erase(std::unique(table.combat_ratings.begin(), table.combat_ratings.end(),
+        [](const auto& left, const auto& right) { return left.first == right.first; }), table.combat_ratings.end());
     std::sort(table.profiles.begin(), table.profiles.end(),
         [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
     for (std::size_t index = 1; index < table.profiles.size(); ++index) {

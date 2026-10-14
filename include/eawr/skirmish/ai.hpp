@@ -27,4 +27,9 @@ namespace eawr::skirmish {
 [[nodiscard]] core::Result<std::map<std::string, std::string>> ai_modules(
     const vfs::Vfs& files, const script::foc::AiSetup& setup, bool plans = false);
 
+// Select a session's bounded closure from previously frozen module bytes.
+// Cached paths use the same logical naming as ai_modules; missing dependencies fail.
+[[nodiscard]] core::Result<std::map<std::string, std::string>> select_ai_modules(
+    const std::map<std::string, std::string>& cached, const script::foc::AiSetup& setup, bool plans = false);
+
 } // namespace eawr::skirmish

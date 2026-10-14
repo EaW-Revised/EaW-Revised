@@ -1,6 +1,8 @@
 #include "../../src/sim/tactical/combat_internal.hpp"
 #include "../../src/sim/tactical/collection.hpp"
 #include "../../src/sim/tactical/rocket_internal.hpp"
+#include "../../src/sim/tactical/motion_internal.hpp"
+#include "eawr/platform/sim_workers.hpp"
 
 #include <cstdlib>
 #include <iostream>
@@ -15,6 +17,12 @@ using m::Fixed;
 int failures{};
 Fixed q(const std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }
 m::Vec3 at(const std::int64_t x, const std::int64_t y = 0, const std::int64_t z = 0) { return {q(x), q(y), q(z)}; }
+m::Vec3 plus(const m::Vec3& a, const m::Vec3& b) {
+    return {m::add(a.x, b.x).value(), m::add(a.y, b.y).value(), m::add(a.z, b.z).value()};
+}
+m::Vec3 minus(const m::Vec3& a, const m::Vec3& b) {
+    return {m::subtract(a.x, b.x).value(), m::subtract(a.y, b.y).value(), m::subtract(a.z, b.z).value()};
+}
 void expect(const bool value, const std::string_view message) {
     if (!value) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
 }
@@ -162,9 +170,9 @@ void impact_suppresses_expiry() {
 }
 void unsupported_and_encoding() {
     auto profile = rocket_profile();
-    profile.curve_offset = q(1); expect(!d::valid_flight(profile), "RFL-03: custom curve remains explicitly unsupported");
+    profile.curve_offset = q(1); expect(d::valid_flight(profile), "RFL-03: nonzero spatial offset is accepted");
     profile.curve_offset = {}; profile.target_radius = false;
-    expect(!d::valid_flight(profile), "RFL-05: post-aim extension remains explicitly unsupported");
+    expect(d::valid_flight(profile), "RFL-05: post-aim extension is accepted");
     auto projectile = launch(rocket_profile());
     std::vector<std::uint8_t> before, after;
     d::append_projectile(before, projectile);
@@ -173,6 +181,212 @@ void unsupported_and_encoding() {
     expect(before != after, "RFL-01/04: initialized path is hashed projectile state");
     before = after; after.clear(); projectile.flight->aim.z = q(1); d::append_projectile(after, projectile);
     expect(before != after, "RFL-01: retained aim height participates in projectile hash");
+}
+
+m::Vec3 spline_end(const t::FlightState& flight) {
+    if (flight.path.empty()) return {};
+    const auto& last = flight.path.back();
+    return plus(last.a, plus(last.b, plus(last.c, last.d)));
+}
+Fixed path_length(const t::FlightState& flight) {
+    Fixed total{};
+    for (const auto& segment : flight.path) total = m::add(total, segment.length).value();
+    return total;
+}
+void seeded_spatial_offsets() {
+    auto profile = rocket_profile(); profile.curve_distance = q(50);
+    profile.straight_distance = {}; profile.curve_offset = q(20);
+    auto projectile = launch(profile, at(200));
+    t::CombatRandom random(7, 9, 1, t::rocket_path_slot), expected(7, 9, 1, t::rocket_path_slot);
+    d::RocketPathWork work;
+    expect(static_cast<bool>(d::prepare_rocket_path(projectile, &random, &work)), "RFL-03: seeded route constructs");
+    if (!projectile.flight || projectile.flight->path.size() != 4) {
+        expect(false, "RFL-03: ceil(200 / 55) supplies four segments"); return;
+    }
+    const auto inverse_root_two = m::divide(q(1), m::sqrt(q(2)).value()).value();
+    for (std::size_t i = 1; i < 4; ++i) {
+        const auto turn = Fixed::from_raw(expected.uniform(0, static_cast<std::uint32_t>(Fixed::scale - 1)));
+        const auto radius = m::multiply(q(20), Fixed::from_raw(expected.uniform(0, static_cast<std::uint32_t>(Fixed::scale)))).value();
+        // The sourced midpoint axes for this X segment are (0,-1,1) and (0,-1,-1).
+        const auto cosine = m::cos_turn(turn), sine = m::sin_turn(turn);
+        const auto y = m::multiply(m::add(m::multiply(Fixed::from_raw(-inverse_root_two.raw()), cosine).value(),
+            m::multiply(Fixed::from_raw(-inverse_root_two.raw()), sine).value()).value(), radius).value();
+        const auto z = m::multiply(m::add(m::multiply(inverse_root_two, cosine).value(),
+            m::multiply(Fixed::from_raw(-inverse_root_two.raw()), sine).value()).value(), radius).value();
+        const auto& control = projectile.flight->path[i].a;
+        expect(control.x == q(static_cast<std::int64_t>(i) * 50)
+            && std::llabs(control.y.raw() - y.raw()) < 100 && std::llabs(control.z.raw() - z.raw()) < 100,
+            "RFL-03: interior controls pin angle-before-radius uniform draws and spatial axes");
+    }
+    expect(random.draws() == 6 && work.control_points == 5 && work.arc_visits <= d::rocket_arc_visit_limit,
+        "RFL-03/04: two draws per interior point, bounded arc work");
+    expect(projectile.flight->path.front().a == at(0)
+        && m::length(minus(spline_end(*projectile.flight), at(200))).value().raw() < 100,
+        "RFL-03: endpoints have no random offsets");
+    const auto cursor = random.draws();
+    expect(static_cast<bool>(d::prepare_rocket_path(projectile, &random)) && random.draws() == cursor,
+        "RFL-01/03: retained construction consumes no second set of draws");
+
+    profile.straight_distance = q(200);
+    projectile = launch(profile, at(400)); projectile.speed = q(32); projectile.step = at(32);
+    t::CombatRandom scaled_random(7, 9, 1, t::rocket_path_slot);
+    expect(static_cast<bool>(d::prepare_rocket_path(projectile, &scaled_random)), "RFL-02/03: initial/main scales construct");
+    if (!projectile.flight || projectile.flight->path.size() != 8) {
+        expect(false, "RFL-03: initial and main each supply four segments"); return;
+    }
+    for (std::size_t i = 1; i < 8; ++i) {
+        if (i == 4) { expect(projectile.flight->path[i].a == at(200), "RFL-03: shared initial/main endpoint stays exact"); continue; }
+        const auto& control = projectile.flight->path[i].a;
+        const auto radius = m::length(m::Vec3{{}, control.y, control.z}).value();
+        expect(radius.raw() <= q(i < 4 ? 2 : 20).raw() + 100, "RFL-03: initial offset is one tenth of the main offset");
+    }
+    expect(scaled_random.draws() == 12, "RFL-03: initial draws precede main draws without endpoint draws");
+    profile.curve_offset = {}; projectile = launch(profile, at(400));
+    t::CombatRandom stock(7, 9, 1, t::rocket_path_slot);
+    expect(static_cast<bool>(d::prepare_rocket_path(projectile, &stock)) && stock.draws() == 0,
+        "RFL-03: stock zero-offset construction consumes no draws");
+}
+
+void extension_and_construction_states() {
+    auto profile = rocket_profile(); profile.target_radius = false;
+    profile.authored_distance = q(10); profile.straight_distance = {};
+    profile.curve_distance = Fixed::from_raw(Fixed::scale / 2);
+    auto projectile = launch(profile, at(2));
+    d::RocketPathWork work;
+    expect(static_cast<bool>(d::prepare_rocket_path(projectile, nullptr, &work)), "RFL-05: short sampled-tangent extension constructs");
+    expect(work.tangent_samples == 2 && projectile.flight->profile.authored_distance == q(10)
+        && std::llabs(spline_end(*projectile.flight).x.raw() - q(6).raw()) < 100,
+        "RFL-04/05: unnormalized half-unit sample delta yields endpoint 6, independent of allowance 10");
+    const auto total = path_length(*projectile.flight);
+    expect(d::rocket_point(*projectile.flight, total) && !d::rocket_point(*projectile.flight, total).value(),
+        "RFL-04/05: equality at an extended endpoint exhausts lookup");
+    d::CollectionTrees collidables; d::CombatWorld world; d::ProjectileScratch scratch;
+    world.projectile_collection = &collidables;
+    auto step = d::step_projectile(world, projectile, scratch);
+    expect(step && step.value().expired && step.value().projectile.position == projectile.position
+        && step.value().expiry_reason == t::ProjectileExpiryReason::rocket_path_exhausted && scratch.exact_count == 0,
+        "RFL-06: exhausted extension terminates at current pose without collision or endpoint snap");
+
+    profile.curve_offset = Fixed::from_raw(Fixed::scale / 100);
+    auto bowed = launch(profile, at(2)); t::CombatRandom offset_random(7, 9, 1, t::rocket_path_slot);
+    expect(static_cast<bool>(d::prepare_rocket_path(bowed, &offset_random, &work)), "RFL-05: post-aim offset constructs");
+    if (bowed.flight->path.size() == 12) {
+        const auto endpoint = spline_end(*bowed.flight);
+        for (std::int64_t i = 1; i < 8; ++i) {
+            const auto delta = minus(endpoint, at(2));
+            const auto fraction = Fixed::from_raw(Fixed::scale * i / 8);
+            const auto centre = plus(at(2), {m::multiply(delta.x, fraction).value(),
+                m::multiply(delta.y, fraction).value(), m::multiply(delta.z, fraction).value()});
+            const auto deviation = m::length(minus(bowed.flight->path[static_cast<std::size_t>(4 + i)].a, centre)).value();
+            expect(deviation.raw() > 0 && deviation <= Fixed::from_raw(Fixed::scale * 3 / 1000 + 100),
+                "RFL-03/05: post-aim interior offsets use three tenths of authored amplitude");
+        }
+        expect(offset_random.draws() == 20, "RFL-03/05: post-aim draws follow the six main draws, omitting all endpoints");
+    } else expect(false, "RFL-05: nonzero short extension remains untrimmed at twelve segments");
+    profile.curve_offset = {};
+
+    // With roughly 45-unit segments the final sample delta is roughly nine: extension overshoots
+    // allowance 400, then its selected spatial point becomes the rebuilt endpoint.
+    profile.authored_distance = q(400); profile.curve_distance = q(50);
+    projectile = launch(profile, at(220, 0, 40));
+    expect(static_cast<bool>(d::prepare_rocket_path(projectile, nullptr, &work)), "RFL-05: overshooting extension trims and rebuilds");
+    // Independent natural-cubic reference: the allowance selects segment 8 at
+    // its arc fraction, yielding (393.5618028184, 0, 71.5566914215), not a
+    // point whose distance from the origin is 400. Bound Q24 parameter
+    // rounding through the rebuilt cut segment's derivative below.
+    const m::Vec3 cutpoint{Fixed::from_raw(6602871375LL), {}, Fixed::from_raw(1200522068LL)};
+    expect(!projectile.flight->path.empty() && projectile.flight->path.size() < work.control_points - 1
+        && projectile.flight->aim == at(220, 0, 40)
+        && spline_end(*projectile.flight).z > projectile.flight->aim.z,
+        "RFL-01/05: trimming retains spatial aim and a post-aim endpoint");
+    if (!projectile.flight->path.empty()) {
+        const auto trimmed_total = path_length(*projectile.flight);
+        const auto exact = d::rocket_point(*projectile.flight, trimmed_total);
+        const auto below = d::rocket_point(*projectile.flight, Fixed::from_raw(trimmed_total.raw() - 1));
+        const auto& last = projectile.flight->path.back();
+        const auto norm1 = [](const m::Vec3& value) {
+            return std::llabs(value.x.raw()) + std::llabs(value.y.raw()) + std::llabs(value.z.raw());
+        };
+        // At one raw distance unit below the endpoint, t differs by at most
+        // one Q24 unit here. The cubic derivative bounds displacement; allow
+        // another unit plus 32 raw units for fixed Horner evaluation rounding.
+        const auto tolerance = 2 * (norm1(last.b) + 2 * norm1(last.c) + 3 * norm1(last.d)) / Fixed::scale + 32;
+        // Add 1e-4 units for accumulated arc tolerance to the same derivative
+        // bound. Arc inversion's roughly 0.0141-unit offset is far outside it.
+        const auto cut_tolerance = tolerance + (Fixed::scale + 9999) / 10000;
+        expect(100 * cut_tolerance < m::length(cutpoint).value().raw() - q(400).raw(),
+            "RFL-04/05: cutpoint tolerance rejects arc inversion by more than one hundred times");
+        expect(m::length(minus(spline_end(*projectile.flight), cutpoint)).value().raw() <= cut_tolerance,
+            "RFL-04/05: derivative-bounded cutpoint rejects arc inversion");
+        expect(exact && !exact.value() && below && below.value()
+            && m::length(minus(*below.value(), spline_end(*projectile.flight))).value().raw() <= tolerance,
+            "RFL-04/05: trimmed whole-path equality exhausts, with fractional lookup approaching its rebuilt endpoint");
+    }
+    profile.authored_distance = q(1);
+    projectile = launch(profile, at(220));
+    expect(static_cast<bool>(d::prepare_rocket_path(projectile, nullptr, &work))
+        && projectile.flight->path_initialized && projectile.flight->path.empty(),
+        "RFL-05/06: backwards extension and early trimming retain an unevaluable path, not construction failure");
+
+    profile.target_radius = true; profile.curve_offset = q(1);
+    projectile = launch(profile, at(220));
+    const auto unbuilt = *projectile.flight;
+    expect(!d::prepare_rocket_path(projectile) && *projectile.flight == unbuilt,
+        "RFL-06: failed construction is a diagnostic and leaves no initialized route");
+    profile.curve_distance = Fixed::from_raw(1);
+    projectile = launch(profile, at(220)); t::CombatRandom random(7, 9, 1, t::rocket_path_slot);
+    expect(!d::prepare_rocket_path(projectile, &random, &work) && !projectile.flight->path_initialized
+        && projectile.flight->path.empty() && random.draws() == 0 && work.control_points <= d::rocket_point_limit,
+        "RFL-03/06: pathological subdivision fails before draws or canonical path commit");
+    auto repeated = projectile; d::RocketPathWork repeated_work;
+    t::CombatRandom repeated_random(7, 9, 1, t::rocket_path_slot);
+    expect(!d::prepare_rocket_path(repeated, &repeated_random, &repeated_work)
+        && repeated_work.control_points == work.control_points && repeated_work.arc_visits == work.arc_visits,
+        "RFL-03/04: failed construction has repeatable deterministic work bounds");
+    profile = rocket_profile(); profile.straight_distance = {};
+    projectile = launch(profile, at(1));
+    expect(static_cast<bool>(d::prepare_rocket_path(projectile)) && projectile.flight->path_initialized
+        && projectile.flight->path.empty(), "RFL-06: an unevaluable retained route is distinct from failed construction");
+}
+
+void seeded_worker_and_target_independence() {
+    auto profile = rocket_profile(); profile.curve_offset = q(180);
+    profile.curve_distance = q(400); profile.straight_distance = q(120);
+    const auto original = launch(profile, at(1800, 200, 400));
+    d::CollectionTrees collidables;
+    d::CombatWorld world; world.seed = 717; world.frame = 19; world.projectile_collection = &collidables;
+    d::CombatUnit target; target.id = 2; target.position = at(0, 9000, -1000); world.units.push_back(target);
+    auto moved_world = world; moved_world.units[0].position = at(-8000, 0, 9000);
+    d::ProjectileScratch first_scratch, moved_scratch;
+    const auto first = d::step_projectile(world, original, first_scratch);
+    const auto moved = d::step_projectile(moved_world, original, moved_scratch);
+    expect(first && moved && first.value().projectile == moved.value().projectile,
+        "RFL-01/03: retained aim height and seeded trajectory ignore current target movement");
+    if (!first) return;
+    expect(first.value().projectile.flight->aim == at(1800, 200, 400)
+        && first.value().projectile.position.z.raw() != 0, "RFL-01: nonzero route retains and follows aim height");
+    std::vector<std::uint8_t> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        std::vector<t::Projectile> flying(16, original);
+        std::vector<std::uint8_t> succeeded(16);
+        const auto ran = pool.execute_phase("rocket-contract", 16, [&](const std::size_t index) {
+            auto projectile = original; projectile.id = index + 1;
+            auto local_world = world;
+            if (index % 2 == 1) projectile.flight->profile.target_radius = false;
+            d::ProjectileScratch scratch;
+            auto result = d::step_projectile(local_world, projectile, scratch);
+            if (result) { flying[index] = result.value().projectile; succeeded[index] = 1; }
+        });
+        std::vector<std::uint8_t> bytes;
+        for (std::size_t index = 0; index < flying.size(); ++index) {
+            expect(succeeded[index] == 1, "RFL-01..06: partitioned seeded/extended flight succeeds");
+            d::append_projectile(bytes, flying[index]);
+        }
+        expect(static_cast<bool>(ran), "RFL: threaded flight phase succeeds");
+        if (workers == 1) reference = bytes;
+        else expect(bytes == reference, "RFL-01..06: seeded and extended canonical flight bytes agree on 1/2/4/8 workers");
+    }
 }
 // WAD-37/40: equality reveals a delayed projectile; the next frame begins movement.
 void appearance_delay_contract() {
@@ -409,6 +623,7 @@ int main() {
     impact_suppresses_expiry();
     appearance_delay_contract();
     endpoint_and_retained_aim(); cubic_height_and_boundary(); default_endpoints_and_lifetime(); unsupported_and_encoding();
+    seeded_spatial_offsets(); extension_and_construction_states(); seeded_worker_and_target_independence();
     if (failures) return 1;
     std::cout << "rocket endpoint contracts passed (WAD-04, RFL-01..08)\n";
     return 0;

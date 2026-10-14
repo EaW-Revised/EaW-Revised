@@ -1,10 +1,15 @@
 #pragma once
 
+#include "attract_runner.hpp"
 #include "camera_input.hpp"
 #include "effect_mode.hpp"
 #include "font_mode.hpp"
+#include "galactic/galactic_mode.hpp"
 #include "input_routing_mode.hpp"
+#include "lan_lobby_mode.hpp"
 #include "map_mode.hpp"
+#include "front_end_mode.hpp"
+#include "options_mode.hpp"
 #include "skirmish_setup_mode.hpp"
 #include "ui_gallery_mode.hpp"
 #include "unit_mode.hpp"
@@ -112,6 +117,13 @@ private:
     void write_report_camera(std::ostream& output);
     void write_report_scene(std::ostream& output);
     void stop(int exit_code);
+    void close_active_modes();
+    // #1923: the skirmish Start shows the battle loading screen, then prepares the battle behind it
+    // once the screen has drawn (EawrLoadingScreen::frames).
+    void open_skirmish_loading();
+    void start_skirmish_battle();
+    // MNU-41: the Load Game page chose a recording; the replay mode takes the window over.
+    void start_replay_battle(const UiGalleryMode::ReplayRequest& request, bool interactive);
 
     std::unique_ptr<Options> options_;
     std::string active_content_profile_{"remake"};
@@ -119,7 +131,12 @@ private:
     // frame loop; this host only parses the option and hands over.
     std::unique_ptr<MapMode> map_mode_;
     std::unique_ptr<SkirmishSetupMode> skirmish_setup_;
+    // `--eawr-front-end`: the menus in front of skirmish_setup_ (which it shares its load with).
+    std::unique_ptr<FrontEndMode> front_end_;
     godot::Node3D* skirmish_battle_host_{};
+    // Owned by skirmish_battle_host_ (freed with it).
+    EawrLoadingScreen* skirmish_loading_{};
+    std::optional<skirmish::FixtureOptions> pending_start_;
     // `--eawr-effect` is likewise self-contained and parses its own options.
     std::unique_ptr<EffectMode> effect_mode_;
     // `--eawr-unit` (P1-03 whole-unit animation strips) is self-contained too.
@@ -128,6 +145,14 @@ private:
     std::unique_ptr<FontMode> font_mode_;
     // `--eawr-ui-gallery` (UI-06 kit controls and catalogue dialogs) is self-contained too.
     std::unique_ptr<UiGalleryMode> ui_gallery_mode_;
+    // `--eawr-lan-lobby` (the LAN lobby and staging screens, #2940) is self-contained too.
+    std::unique_ptr<LanLobbyMode> lan_lobby_mode_;
+    // `--eawr-galactic` (the galactic mode skeleton) is self-contained too.
+    std::unique_ptr<GalacticMode> galactic_mode_;
+    // `--eawr-options` (the options screen, #2927) is self-contained too.
+    std::unique_ptr<OptionsMode> options_mode_;
+    // `--eawr-attract` (the main-menu demo battle, #2937) is self-contained too.
+    std::unique_ptr<AttractRunner> attract_runner_;
     // `--eawr-input-routing` (UI-07 routing self-test) is self-contained too.
     std::unique_ptr<InputRoutingMode> input_routing_mode_;
     // Mouse buttons the world pressed and has not released yet.

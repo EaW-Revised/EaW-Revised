@@ -2,6 +2,7 @@
 #include "eawr/presentation/ui/command_sink.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +27,8 @@ struct CursorInput final {
     OrderMode mode{OrderMode::none};
     CursorTarget ability{CursorTarget::none};
     bool ability_valid{};
+    std::optional<std::uint32_t> special_weapon;
+    bool special_weapon_valid{};
 };
 // CU-04..11: pure resolution of already evaluated input, with no world scans.
 [[nodiscard]] std::string_view battle_cursor(const CursorInput& input) noexcept;

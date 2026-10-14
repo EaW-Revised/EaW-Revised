@@ -122,6 +122,9 @@ core::Result<void> session_detail::Tick::nebulas() {
             scratch.events[index].push_back(Event{tick, enter ? EventKind::ability_cancelled : EventKind::ability_ready,
                 unit.state.owner, static_cast<std::uint64_t>(ability.kind), signal_unit(unit)});
         }
+        // Early hits follow this cancellation boundary; derived modes must
+        // reflect the current flags rather than the carried gather values.
+        if (enter) impl_->refresh_damage_modes(unit);
     };
     const auto serviced = executor.execute_phase("nebula-service", tick_partition_count, [&](const std::size_t partition) {
         auto& candidates = scratch.candidates[partition];
@@ -202,6 +205,40 @@ core::Result<void> session_detail::Tick::nebulas() {
     return teams;
 }
 
+core::Result<void> session_detail::Tick::hull_service() {
+    auto& units = gather_->moving.value();
+    std::vector<ServiceOutcome> outcomes(units.size());
+    std::vector<std::optional<core::Diagnostic>> errors(units.size());
+    // WFO-23/WCC-30/31: cap and drag precede hardpoint weapons, using post-hit health.
+    const auto result = executor.execute_phase("hull-service", tick_partition_count, [&](const std::size_t partition) {
+        const auto range = partition_range(partition, units.size());
+        for (auto index = range.begin; index < range.end; ++index) {
+            auto& unit = units[index];
+            if (!unit.durability) continue;
+            const auto& profile = *impl_->health_profile(unit);
+            auto serviced = service_durability(profile, impl_->durability.rules, *unit.durability);
+            if (!serviced) errors[index] = serviced.error();
+            else outcomes[index] = std::move(serviced).value();
+        }
+    });
+    if (!result) return result;
+    for (const auto& error : errors) if (error) return core::Result<void>::failure(*error);
+    auto& events = impacts_->events.value();
+    auto& killed = impacts_->killed.value();
+    for (std::size_t index = 0; index < units.size(); ++index) {
+        for (const auto hardpoint : outcomes[index].destroyed_hardpoints)
+            events.push_back(destruction_event(tick, EventKind::hardpoint_destroyed, units[index].state, hardpoint));
+        if (outcomes[index].unit_destroyed) {
+            events.push_back(destruction_event(tick, EventKind::unit_destroyed, units[index].state));
+            killed.push_back(units[index].state);
+            impl_->adjust_owned(units[index].state, false);
+        }
+    }
+    std::size_t index = 0;
+    std::erase_if(units, [&](const LiveUnit&) { return outcomes[index++].unit_destroyed; });
+    return core::Result<void>::success();
+}
+
 core::Result<void> session_detail::Tick::systems() {
     const auto& arrivals = staging_.value().arrivals.value();
     const auto& world = targets_.value().world.value();
@@ -210,13 +247,13 @@ core::Result<void> session_detail::Tick::systems() {
     const auto& craft_states = staging_.value().crafts.value();
     const auto& squadron_states = craft_prep_.value().minds.value();
     auto& pads = impl_->pad_stage.values;
-    auto& construction = impl_->construction_stage.values;
-    const auto& durability = impl_->durability;
-    // Systems phase: workers read the copied ascending-ID units and fill disjoint slots. Each
-    // durable unit's hull and hardpoints are serviced (HS-01) before its instance is built.
+    const auto& construction = impl_->construction_stage.values;
+    // Systems phase: workers service recharge and build instances from copied ascending-ID
+    // units. Hull cap and drag already ran before targeting (WFO-23).
     mark("systems_setup", true);
     systems_.emplace();
     auto& inputs = systems_.value().inputs.emplace(staged.release());
+    if (auto serviced = impl_->service_healing(inputs, arrivals, tick, executor, targets_->combat_events.value()); !serviced) return serviced;
     if (auto serviced = impl_->service_beams(inputs, tick, executor); !serviced) return serviced;
     if (auto serviced = impl_->service_weaken(inputs, tick, executor); !serviced) return serviced;
     if (inputs.size() != impl_->concentrate_service_census
@@ -465,17 +502,12 @@ core::Result<void> session_detail::Tick::systems() {
             }
             if (unit.durability) {
                 const auto& profile = *impl_->health_profile(unit);
+                // WBP-16: retain post-command construction healing, so a killed
+                // under-construction object cannot heal before the command hit.
                 if (const auto building = construction.find(unit.state.entity_id);
                     building != construction.end() && tick > building->second.start_frame && unit.durability->hull.raw() > 0) {
                     unit.durability->hull = service_construction(unit.durability->hull, profile.max_hull, building->second);
                 }
-                auto outcome = service_durability(profile, durability.rules, *unit.durability);
-                if (!outcome) {
-                    errors[index] = detail::diagnostic(
-                        diagnostic_codes::worker_failure, context() + outcome.error().message);
-                    continue;
-                }
-                serviced[index] = std::move(outcome).value();
                 // With damage rules (#74): a lost last shield generator drops the shield (DG-17); the
                 // pool (EN-02), then the shield (DG-13), recharge on the unit's own recharge frames.
                 if (damage_rules != nullptr) {
@@ -586,7 +618,7 @@ core::Result<void> session_detail::Tick::systems() {
             if (unit.durability && !serviced[index].unit_destroyed && !arrivals.contains(unit.state.entity_id)
                 && std::any_of(unit.durability->repairing_players.begin(), unit.durability->repairing_players.end(),
                     [](const auto& payers) { return !payers.empty(); })) repair_units[partition].push_back(index);
-            instances[index] = impl_->instance_for(unit, transform.value(), tick + 1);
+            instances[index] = impl_->instance_for(unit, transform.value(), tick + 1, &special_weapons_);
             // WSU-34: publish copied render inputs in the existing disjoint worker slots.
             if (const auto craft = craft_states.find(unit.state.entity_id); craft != craft_states.end()) {
                 instances[index].craft_velocity_per_frame = craft->second.velocity;
@@ -640,7 +672,7 @@ core::Result<void> session_detail::Tick::systems() {
             serviced[index].unit_destroyed = true;
             events.push_back(destruction_event(tick, EventKind::unit_destroyed, unit.state));
         }
-        const auto updated = impl_->instance_for(unit, instances[index].fixed_transform, tick + 1);
+        const auto updated = impl_->instance_for(unit, instances[index].fixed_transform, tick + 1, &special_weapons_);
         instances[index].durability = updated.durability;
         instances[index].abilities = updated.abilities;
         return core::Result<void>::success();
@@ -664,6 +696,7 @@ core::Result<void> session_detail::Tick::systems() {
     struct RepairJob {
         std::size_t unit{};
         std::vector<std::vector<PlayerId>> paid;
+        std::vector<std::size_t> special_restored;
     };
     std::vector<RepairJob> repairs;
     auto& accounts = staging_->ledgers.value();
@@ -677,7 +710,7 @@ core::Result<void> session_detail::Tick::systems() {
         if (serviced[index].unit_destroyed) continue; // deletion wins over active repair
         const auto& profile = *impl_->health_profile(unit);
         const auto& state = *unit.durability;
-        RepairJob job{index, reserve_hardpoint_repairs(profile, state, budgets)};
+        RepairJob job{index, reserve_hardpoint_repairs(profile, state, budgets), {}};
         repairs.push_back(std::move(job));
     }
     for (const auto& budget : budgets) {
@@ -697,6 +730,7 @@ core::Result<void> session_detail::Tick::systems() {
                 const auto& profile = *impl_->health_profile(unit);
                 auto& state = *unit.durability;
                 for (std::size_t slot = 0; slot < job.paid.size(); ++slot) {
+                    const bool disabled_before = hardpoint_disabled(state, slot);
                     state.repairing_players[slot] = std::move(job.paid[slot]);
                     for (const auto payer : state.repairing_players[slot]) {
                         static_cast<void>(payer);
@@ -704,13 +738,24 @@ core::Result<void> session_detail::Tick::systems() {
                         if (!result) { errors[job.unit] = result.error(); break; }
                         if (result.value().stopped) { state.repairing_players[slot].clear(); break; }
                     }
+                    if ((profile.hardpoints[slot].allows_special_weapon_use
+                        || !profile.hardpoints[slot].special_ability_name.empty()) && disabled_before
+                        && !hardpoint_disabled(state, slot) && !hardpoint_destroyed(profile, state, slot))
+                        job.special_restored.push_back(slot);
                 }
-                const auto updated = impl_->instance_for(unit, instances[job.unit].fixed_transform, tick + 1);
+                const auto updated = impl_->instance_for(unit, instances[job.unit].fixed_transform, tick + 1, &special_weapons_);
                 instances[job.unit].durability = updated.durability;
             }
         });
         if (!repaired) return repaired;
         for (const auto& job : repairs) if (errors[job.unit]) return core::Result<void>::failure(*errors[job.unit]);
+        // WSW-48: partition outputs commit in existing repair unit/slot order.
+        for (const auto& job : repairs) for (const auto slot : job.special_restored) {
+            const auto& unit = inputs[job.unit];
+            const auto& point = impl_->health_profile(unit)->hardpoints[slot];
+            if (point.allows_special_weapon_use) set_special_hardpoint_gate(unit.state.owner, true);
+            if (!point.special_ability_name.empty()) set_named_hardpoint_gate(unit.state, point.special_ability_name, true);
+        }
     }
     return core::Result<void>::success();
 }

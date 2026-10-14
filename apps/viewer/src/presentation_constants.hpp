@@ -43,9 +43,7 @@ inline void diagnostic(const std::string_view tag, const std::string_view reason
         static_cast<int>(tag.size()), tag.data(), static_cast<int>(reason.size()), reason.data());
 }
 
-template<std::size_t N, typename T = float>
-inline std::array<T, N> read(const data::XmlDocument* document, const std::string_view tag,
-                               const std::array<T, N> fallback) {
+inline const data::XmlNode* last_child(const data::XmlDocument* document, const std::string_view tag) {
     const data::XmlNode* found = nullptr;
     if (document) for (const auto& child : document->root.children) {
         if (child.name.size() != tag.size()) continue;
@@ -56,6 +54,13 @@ inline std::array<T, N> read(const data::XmlDocument* document, const std::strin
         }
         if (matches) found = &child;
     }
+    return found;
+}
+
+template<std::size_t N, typename T = float>
+inline std::array<T, N> read(const data::XmlDocument* document, const std::string_view tag,
+                               const std::array<T, N> fallback) {
+    const data::XmlNode* found = last_child(document, tag);
     if (!found) { diagnostic(tag, "missing tag"); return fallback; }
     data::tag_trace::used(*found);
     std::array<T, N> result{};
@@ -91,8 +96,8 @@ inline Lasers load_lasers(const vfs::Vfs& filesystem) {
     auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
     if (!document) diagnostic("gameconstants.xml", core::format_diagnostic(document.error()));
     const auto* root = document ? &document.value() : nullptr;
-    return {read<1>(root, "Laser_Beam_Z_Scale_Factor", {8.0F})[0],
-            read<1>(root, "Laser_Kite_Z_Scale_Factor", {1.2F})[0]};
+    return {read<1>(root, "Laser_Beam_Z_Scale_Factor", {8.0F})[0], // xml-fallback: Laser_Beam_Z_Scale_Factor; load: apps/viewer/src/presentation_constants.hpp#load_lasers
+            read<1>(root, "Laser_Kite_Z_Scale_Factor", {1.2F})[0]}; // xml-fallback: Laser_Kite_Z_Scale_Factor; load: apps/viewer/src/presentation_constants.hpp#load_lasers
 }
 
 struct Flash {
@@ -103,8 +108,8 @@ inline Flash load_flash(const vfs::Vfs& filesystem) {
     auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
     if (!document) diagnostic("gameconstants.xml", core::format_diagnostic(document.error()));
     const auto* root = document ? &document.value() : nullptr;
-    return {read<3>(root, "Shield_Flash_Scale", {1.0F, 1.1F, 1.25F}),
-            read<1, double>(root, "Shield_Flash_Duration", {0.1})[0]};
+    return {read<3>(root, "Shield_Flash_Scale", {1.0F, 1.1F, 1.25F}), // xml-fallback: Shield_Flash_Scale; load: apps/viewer/src/presentation_constants.hpp#load_flash
+            read<1, double>(root, "Shield_Flash_Duration", {0.1})[0]}; // xml-fallback: Shield_Flash_Duration; load: apps/viewer/src/presentation_constants.hpp#load_flash
 }
 
 } // namespace eawr::presentation::godot_backend::presentation_constants

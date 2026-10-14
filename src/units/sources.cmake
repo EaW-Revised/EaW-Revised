@@ -2,6 +2,7 @@
 # Paths are absolute so both projects can include this list directly.
 
 set(EAWR_UNITS_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_types.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/unit_abilities.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/unit_combat.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/unit_durability.cpp"

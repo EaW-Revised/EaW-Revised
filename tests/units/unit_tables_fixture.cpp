@@ -96,7 +96,9 @@ std::string units_xml(const std::string_view frigate_health, const std::string_v
 <Squadron Name="Test_Squadron_Pair">
   <Variant_Of_Existing_Type>Test_Squadron</Variant_Of_Existing_Type>
   <Create_Team_Type> Test_Pair_Container </Create_Team_Type>
-  <Squadron_Units>Test_Fighter, Test_Fighter</Squadron_Units>
+  <Squadron_Units>TBD</Squadron_Units>
+  <Squadron_Units>Test_Fighter</Squadron_Units>
+  <Squadron_Units>Test_Fighter</Squadron_Units>
   <Squadron_Offsets>10.0,0.0,0.0</Squadron_Offsets>
   <Squadron_Offsets>-10.0,0.0,0.0</Squadron_Offsets>
 </Squadron>
@@ -260,6 +262,7 @@ constexpr std::string_view constants_xml = R"xml(<GameConstants>
   <Ion_Storm_Shield_Disable_Time>5</Ion_Storm_Shield_Disable_Time>
   <Hull_Vs_Hard_Points_Health_Constraint> 0.2 </Hull_Vs_Hard_Points_Health_Constraint>
   <Hardpoint_Recharge_Cutoff_For_Opportunity_Fire> 3.0 </Hardpoint_Recharge_Cutoff_For_Opportunity_Fire>
+  <Melee_Cutoff_Range>51</Melee_Cutoff_Range>
   <Engines_Disabled_Speed_Modifier> 0.4 </Engines_Disabled_Speed_Modifier>
   <Space_Elevated_Vulnerability_Duration>5.0</Space_Elevated_Vulnerability_Duration>
   <Space_Elevated_Vulnerability_Factor>-3.0</Space_Elevated_Vulnerability_Factor>
@@ -273,6 +276,9 @@ constexpr std::string_view constants_xml = R"xml(<GameConstants>
   <Health_Low_Percent_Threshold> 0.33 </Health_Low_Percent_Threshold>
   <MaxRotationsSpace> 24.0 </MaxRotationsSpace>
   <XYExpansionDistanceSpace> 300.0 </XYExpansionDistanceSpace>
+  <MovementReevaluationFrameCount> 10 </MovementReevaluationFrameCount>
+  <MaxWaypointsPerPath> 6 </MaxWaypointsPerPath>
+  <Space_Guard_Range> 750.0 </Space_Guard_Range>
   <TurnInPlaceSlowdownCorvette> 2.0 </TurnInPlaceSlowdownCorvette>
   <TurnInPlaceSlowdownFrigate> 3.0 </TurnInPlaceSlowdownFrigate>
   <TurnInPlaceSlowdownCapital> 4.0 </TurnInPlaceSlowdownCapital>

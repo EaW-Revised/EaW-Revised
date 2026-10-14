@@ -40,13 +40,13 @@ inline constexpr std::string_view minimap_settings = "EAWR-UI-0330"; // a RadarM
 struct MinimapSettings {
     data::ui::Rgba8 background{12, 30, 51, 255};    // MM-14: <Color name="space"> under RadarMapSettings
     std::string backdrop{"i_radar_map_grid.tga"};   // Space_Backdrop_Texture_Name
-    data::ui::Rgba8 fog{25, 66, 120, 100};          // Space_FOW_Color
+    data::ui::Rgba8 fog{25, 66, 120, 100};          // xml-fallback: Space_FOW_Color; load: src/presentation/ui/minimap.cpp#minimap_settings
     bool guide_rectangle{};                         // Space_Is_Guide_Rectangle
     bool colorize_selected{true};                   // Radar_Colorize_Selected_Units
-    data::ui::Rgba8 selected{209, 255, 209, 255};   // Radar_Selected_Units_Color
-    data::ui::Rgba8 nebula{255, 255, 255, 64};     // Nebula_Effect_Color, WHZ-71
-    data::ui::Rgba8 field{103, 130, 139, 127};     // Space_Asteroid_Field_Color, WHZ-72
-    data::ui::Rgba8 field_border{174, 171, 200, 127}; // Space_Asteroid_Field_Border_Color
+    data::ui::Rgba8 selected{209, 255, 209, 255};   // xml-fallback: Radar_Selected_Units_Color; load: src/presentation/ui/minimap.cpp#minimap_settings
+    data::ui::Rgba8 nebula{255, 255, 255, 64};     // xml-fallback: Nebula_Effect_Color, WHZ-71; load: src/presentation/ui/minimap.cpp#minimap_settings
+    data::ui::Rgba8 field{103, 130, 139, 127};     // xml-fallback: Space_Asteroid_Field_Color, WHZ-72; load: src/presentation/ui/minimap.cpp#minimap_settings
+    data::ui::Rgba8 field_border{174, 171, 200, 127}; // xml-fallback: Space_Asteroid_Field_Border_Color; load: src/presentation/ui/minimap.cpp#minimap_settings
     // MM-07: Factions.xml `Color` per faction name, for owners without a lobby colour.
     std::vector<std::pair<std::string, data::ui::Rgba8>> faction_colours;
     std::vector<std::pair<std::string, data::ui::Rgba8>> faction_no_colorization;
@@ -114,6 +114,7 @@ struct MinimapLiveState {
     bool jammed{};
     bool stealthed{};
     bool display_enemies{true};
+    std::optional<bool> model_present{}; // MM-17: only known model absence rejects an ordinary icon
 };
 struct MinimapCaptureColour {
     bool raw_local_fog{};

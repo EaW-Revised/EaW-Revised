@@ -1,0 +1,2 @@
+*.hashes.csv text eol=lf
+*.eawr-gcreplay binary

@@ -7,6 +7,9 @@
 
 #include "eawr/data/ui/shell_anchors.hpp"
 #include "eawr/presentation/ui/layout.hpp"
+#include "eawr/presentation/ui/skirmish_setup.hpp"
+#include "eawr/presentation/ui/command_bar_placement.hpp"
+#include "eawr/presentation/ui/fleet_cells.hpp"
 
 #include "ui_test_support.hpp"
 
@@ -73,6 +76,49 @@ constexpr std::array<InkBox, 2> planet_ink{{
     {{1280U, 720U}, 120, 214, 491, 500},
     {{1920U, 1061U}, 176, 319, 725, 737},
 }};
+
+void command_bar_offset_contracts() {
+    // Independent numeric cases cover all translation axes and both update
+    // sources. In particular, Manual_Offset alone must not move an axis.
+    const auto space = retail_space({1280,720});
+    for (const bool manual : {false,true}) {
+        for (const bool x : {false,true}) for (const bool y : {false,true}) {
+            layout::CommandBarPlacement policy;
+            policy.configured = true;
+            policy.model_offset_x = x; policy.model_offset_y = y;
+            policy.manual_offset = manual;
+            policy.manual_origin = layout::ShellOrigin::centre;
+            policy.manual_translation = {32,-16};
+            const auto result = layout::place_command_bar(space,1077,policy,{64,48});
+            expect(result == ShellPlacement{640 + (x ? (manual ? 30.0 : 60.0) : 0.0),
+                360 - (y ? (manual ? -15.0 : 45.0) : 0.0), .9375},
+                "GHUDL-02/03: each axis gates the chosen manual/automatic translation");
+        }
+    }
+    const ReferenceRect slot{-455.5F,272.5F,43,43};
+    layout::CommandBarPlacement centred;
+    centred.configured = true;
+    centred.model_offset_y = true; // Organize: automatic zero translation.
+    for (const auto viewport : {Viewport{1280,720},Viewport{1920,1080}}) {
+        const auto reference = retail_space(viewport);
+        const auto placed = layout::place_command_bar(reference,1000,centred);
+        const auto rect = layout::shell_to_screen(slot,placed);
+        const double factor = viewport.height / 720.0;
+        expect(rect_near(rect,{212.96875*factor,64.21875*factor,40.3125*factor,40.3125*factor},1e-8),
+            "GHUDL-04: focused unit slot uses the viewport centre and one uniform scale");
+    }
+    for (const auto viewport : {Viewport{1280,720},Viewport{2560,1080},Viewport{1280,1024}}) {
+        for (const auto rules : {LayoutRules::retail,LayoutRules::aspect_correct}) {
+            const auto reference = layout::reference_space(viewport,rules);
+            expect(layout::place_command_bar(reference,1077,{}) == layout::place_shell(reference,1077),
+                "shells without offset tags preserve the exact legacy placement");
+            layout::CommandBarPlacement root;
+            root.configured = root.model_offset_x = root.model_offset_y = root.manual_offset = true;
+            expect(layout::place_command_bar(reference,1077,root) == layout::place_shell(reference,1077),
+                "GHUDL-04: explicit lower-left roots preserve the exact legacy placement");
+        }
+    }
+}
 
 void reference_space_table() {
     struct Row {
@@ -460,9 +506,117 @@ void corpus_contracts() {
     }
 }
 
+// GHUD-S63: a command-bar text sits on its bone origin plus Text_Offset, y up in the shell.
+void text_anchor_contracts() {
+    const ShellPlacement placed{100.0, 700.0, 0.9375};
+    const ReferenceRect bone{-50.0F, 20.0F, 0.0F, 0.0F};
+    const auto none = layout::text_anchor(bone, {0.0, 0.0}, placed);
+    expect(near(none.x, 100.0 - 50.0 * 0.9375, 1e-9) && near(none.y_shift, 0.0, 1e-9), "a zero offset leaves the anchor");
+    const auto offset = layout::text_anchor(bone, {-10.0, 0.0}, placed);
+    expect(near(offset.x, none.x - 10.0 * 0.9375, 1e-9) && near(offset.y_shift, 0.0, 1e-9),
+        "an authored x moves the anchor along the shell x");
+    const auto raised = layout::text_anchor(bone, {0.0, 20.0}, placed);
+    expect(near(raised.x, none.x, 1e-9) && near(raised.y_shift, -20.0 * 0.9375, 1e-9),
+        "a positive authored y raises the text on screen by the shell scale");
+    const auto lowered = layout::text_anchor(bone, {0.0, -8.0}, placed);
+    expect(near(lowered.y_shift, 8.0 * 0.9375, 1e-9), "a negative authored y lowers it");
+}
+
 } // namespace
 
 void layout_contracts() {
+    {
+        using layout::FleetCellCoordinate;
+        using layout::FleetCellIcon;
+        const auto coordinate = layout::fleet_cell_coordinate("mod_panel_1207");
+        expect(coordinate && coordinate->row == 12 && coordinate->column == 7, "fleet neighbours follow authored row/column names");
+        expect(!layout::fleet_cell_coordinate("mod_panel_12x7"), "malformed cell coordinates cannot fabricate neighbours");
+        const std::vector<std::optional<FleetCellCoordinate>> grid{{FleetCellCoordinate{0, 1}}, {FleetCellCoordinate{0, 2}},
+            {FleetCellCoordinate{1, 1}}, {FleetCellCoordinate{1, 2}}};
+        const auto wide = layout::fleet_cell_layout(grid, std::array{FleetCellIcon{52, 36, {}}, FleetCellIcon{52, 36, {}}});
+        expect(!wide.compact && wide.groups[0]->cell == 0 && wide.groups[1]->cell == 2,
+            "two wide cards admit across separate rows without wrapping");
+        expect(wide.owners[1] == 0 && wide.owners[3] == 1 && wide.groups[0]->x_shift() == 22,
+            "wide neighbour ownership and count shift stay with the original group");
+        const auto high = layout::fleet_cell_layout(grid, std::array{FleetCellIcon{36, 52, {}}, FleetCellIcon{36, 36, {}}});
+        expect(!high.compact && high.owners[2] == 0 && high.groups[0]->y_shift() == -22 && high.groups[0]->hover_variant() == 1,
+            "a high card reserves down and selects its authored hover variant");
+        const auto corner = layout::fleet_cell_layout(grid, std::array{FleetCellIcon{52, 52, {}}});
+        expect(!corner.compact && corner.owners[3] == 0 && corner.groups[0]->hover_variant() == 3,
+            "a card doubled on both axes reserves its corner too");
+        const auto crowded = layout::fleet_cell_layout(grid, std::array{FleetCellIcon{52, 52, {}}, FleetCellIcon{36, 36, {}}});
+        expect(crowded.compact && crowded.groups[0]->cell == 0 && crowded.groups[1]->cell == 1 && !crowded.owners[2],
+            "capacity retry compacts the panel without dropping or merging groups");
+        const std::vector<std::optional<FleetCellCoordinate>> sparse{{FleetCellCoordinate{0, 1}}, {FleetCellCoordinate{0, 3}}};
+        const auto missing = layout::fleet_cell_layout(sparse, std::array{FleetCellIcon{52, 36, {}}});
+        expect(missing.compact, "an absent right neighbour does not become a two-cell card");
+        const std::vector<std::optional<FleetCellCoordinate>> row{{FleetCellCoordinate{0, 1}}, {FleetCellCoordinate{0, 2}}, {FleetCellCoordinate{0, 3}}};
+        const auto retry = layout::fleet_cell_layout(row, std::array{FleetCellIcon{36, 36, 1}, FleetCellIcon{52, 36, {}}});
+        expect(!retry.compact && retry.groups[0]->cell == 0 && retry.groups[1]->cell == 1,
+            "a fresh doubled pass succeeds before compacting an awkward prior layout");
+        // GHUD-S69: a dropped group claims its target after the kept groups, else the nearest free cell
+        // below it, then above it.
+        const std::vector<std::optional<FleetCellCoordinate>> strip{{FleetCellCoordinate{0, 1}}, {FleetCellCoordinate{0, 2}},
+            {FleetCellCoordinate{0, 3}}, {FleetCellCoordinate{0, 4}}};
+        const auto free_target = layout::fleet_cell_layout(strip, std::array{FleetCellIcon{36, 36, 0}, FleetCellIcon{36, 36, 3, true}});
+        expect(free_target.groups[0]->cell == 0 && free_target.groups[1]->cell == 3, "a dropped group takes a free target cell");
+        const auto taken = layout::fleet_cell_layout(strip, std::array{FleetCellIcon{36, 36, 2, true}, FleetCellIcon{36, 36, 2}});
+        expect(taken.groups[1]->cell == 2 && taken.groups[0]->cell == 1,
+            "a dropped group yields a cell a kept group holds and takes the nearest free one below it");
+        const auto from_front = layout::fleet_cell_layout(strip, std::array{FleetCellIcon{36, 36, 0, true}, FleetCellIcon{36, 36, 0}});
+        expect(from_front.groups[1]->cell == 0 && from_front.groups[0]->cell == 1,
+            "with nothing free below the target the nearest free cell above is taken");
+    }
+    // The old project status geometry stays exact for the stock resource.
+    const auto stock_band = layout::staging_status_band({477, 304, 155, 128},
+        {477, 272, 155, 128}, {859, 304, 95, 192}, 378);
+    expect(stock_band.x == 480 && stock_band.y == 332 && stock_band.width == 470 && stock_band.height == 40,
+        "stock status band is unchanged");
+    // Synthetic widened and relocated columns prove that no stock offsets drive the band.
+    const auto moved_band = layout::staging_status_band({700, 420, 200, 128},
+        {700, 380, 200, 128}, {1300, 420, 160, 192}, 520);
+    expect(moved_band.x == 703 && moved_band.y == 456 && moved_band.width == 753 && moved_band.height == 58,
+        "status follows moved columns, row pitch and footer");
+    const auto no_gap = layout::staging_status_band({700, 420, 200, 128},
+        {700, 380, 200, 128}, {1300, 420, 160, 192}, 430);
+    expect(no_gap.height == 0, "a resource without a status gap keeps zero height");
+    // #3167: the stock staging resource's player columns, placed with the retail rules at 1280 by 720, split
+    // as the measured retail capture does (left edges from the name column, inclusive pixel widths, within
+    // 1 px). The same rectangles at any other size stay in the same proportion; the viewer gives each combo
+    // exactly its rectangle (its text clips), so this split is the one on screen.
+    {
+        struct Column { RcRect rect; double offset; double width; };
+        const std::array<Column, 4> stock{{
+            {{477, 73, 155, 128}, 0.0, 194.0},    // name
+            {{636, 73, 135, 120}, 199.0, 169.0},  // faction
+            {{778, 73, 75, 216}, 376.0, 94.0},    // colour
+            {{859, 73, 95, 192}, 478.0, 118.0},   // team
+        }};
+        const auto space = layout::reference_space({1280, 720}, LayoutRules::retail);
+        const auto dialog = layout::place_dialog({0, 0, 965, 422}, Placement::centre, space);
+        const auto name = layout::place_gadget(dialog, stock[0].rect);
+        for (const auto& column : stock) {
+            const auto placed = layout::place_gadget(dialog, column.rect);
+            expect(near(placed.x - name.x, column.offset, 1.0) && near(placed.width, column.width, 1.0),
+                   "#3167: a stock staging column keeps the retail capture's left edge and width");
+        }
+        // The columns never touch: each gap is the resource's own, scaled.
+        for (std::size_t i = 1; i < stock.size(); ++i) {
+            const auto before = layout::place_gadget(dialog, stock[i - 1].rect);
+            const auto after = layout::place_gadget(dialog, stock[i].rect);
+            expect(after.x - before.right() >= 4.0, "#3167: neighbouring staging columns keep a gap");
+        }
+    }
+    for (const auto rules : {LayoutRules::retail, LayoutRules::aspect_correct}) {
+        const auto space = layout::reference_space({1920, 1080}, rules);
+        const auto dialog = layout::place_dialog({0, 0, 1600, 600}, Placement::centre, space);
+        const auto band = layout::place_gadget(dialog, moved_band);
+        const auto button = layout::place_gadget(dialog, {1300, 520, 160, 24});
+        expect(band.x >= dialog.frame.x && band.right() <= dialog.frame.right() && band.bottom() < button.y,
+            "widened dialog keeps status within its columns and above its footer");
+    }
+    text_anchor_contracts();
+    command_bar_offset_contracts();
     reference_space_table();
     aspect_correct_table();
     wide_shell_contracts();

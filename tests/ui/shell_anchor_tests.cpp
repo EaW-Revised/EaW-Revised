@@ -88,6 +88,11 @@ void shell_anchor_synthetic() {
     spun.relative_transform[4] = -1.0F;
     spun.relative_transform[5] = 0.0F;
     model.bones.push_back(spun);
+    model.bones.push_back(bone("popup_point", 5, 7.0F, 11.0F, 0.0F));
+    const auto point = data::ui::shell_point(model, "POPUP_POINT");
+    expect(point && point->x == 311.0F && point->y == -7.0F,
+           "a bone-only point follows its rotated parent chain and ignores case");
+    expect(!data::ui::shell_point(model, "missing_popup_point"), "an absent point is not a guessed position");
 
     model.meshes.push_back(mesh("b_button", 2, {quad(-12.0F, -12.0F, 12.0F, 12.0F, 0.0F)}));
     assets::Submesh faceplate = quad(-1.0F, -1.0F, 1077.0F, 283.0F, 0.0F);

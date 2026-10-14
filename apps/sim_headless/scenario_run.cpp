@@ -21,7 +21,8 @@ bool projectile_contact_diagnostics() {
 core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::string& path, const std::string& bytes,
     core::Result<eawr::units::UnitTables>& tables, const std::vector<tactical::SensorProfile>& sensors,
     core::Result<tactical::DurabilityTable>& durability, core::Result<tactical::MotionTable>& motion,
-    core::Result<tactical::CombatTable>& combat, std::size_t workers, const std::string& build_sha256) {
+    core::Result<tactical::CombatTable>& combat, const tactical::MapBox& map_box, std::size_t workers,
+    const std::string& build_sha256) {
     tactical::TacticalSetup setup;
     setup.content_identity = eawr::units::content_identity(tables.value());
     std::map<std::string, tactical::PlayerId> player_ids;
@@ -137,7 +138,7 @@ core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::
     auto abilities = eawr::units::ability_table(tables.value());
     if (!abilities) return core::Result<ScenarioRun>::failure(abilities.error());
     auto session_result = tactical::TacticalSession::create(setup, sensors, durability.value(), motion.value(),
-        std::nullopt, combat.value(), tactical::VictoryRules{}, abilities.value());
+        std::nullopt, combat.value(), tactical::VictoryRules{}, abilities.value(), tactical::EconomyRules{}, map_box);
     if (!session_result) return core::Result<ScenarioRun>::failure(session_result.error());
     auto session = std::move(session_result).value();
     ScenarioRun run;
@@ -183,7 +184,7 @@ core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::
                 command.units.push_back(other);
             }
             if (event.action == "move") {
-                command.payload = tactical::MovePayload{event.position};
+                command.payload = tactical::MovePayload{event.position, false, event.append};
             } else if (event.action == "face") {
                 command.payload = tactical::FacePayload{event.position};
             } else if (event.action == "stop") {
@@ -254,7 +255,7 @@ core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::
     std::ostringstream hashes;
     trace << "tick,object,field,value\n";
     hashes << "tick,sha256\n";
-    const auto rows = [&](const std::uint64_t tick) { return write_rows(session, labels, unit_ids, traced, trace, tick); };
+    const auto rows = [&](const std::uint64_t tick) { return write_rows(session, labels, unit_ids, traced, trace, tick, scenario.installed_replay_audit); };
     // The combat log (#536): names by label, a craft `<squadron>.<n>`, else `entity.<id>`;
     // hardpoints by their XML name. Health rows are written when the value changes.
     std::ostringstream combat_log;
@@ -268,6 +269,21 @@ core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::
     const auto combat_rows = [&](const std::uint64_t tick) { write_combat_rows(session, labels, types_by_id, last_health, live_before, combat_log, tick); };
     const auto bind_observed = [&]() {
         if (observed.empty()) return;
+        if (scenario.installed_replay_audit) {
+            for (const auto& squadron : session.squadrons()) {
+                const auto units = session.units();
+                const auto container = std::find_if(units.begin(), units.end(), [&](const auto& unit) {
+                    return unit.entity_id == squadron.container;
+                });
+                if (container == units.end()) continue;
+                const auto named = std::find_if(observed.begin(), observed.end(), [&](const auto& slot) {
+                    return slot.type_id == container->type_id && slot.owner == container->owner;
+                });
+                if (named == observed.end()) continue;
+                for (const auto craft : squadron.members)
+                    labels.try_emplace(craft, named->label + "." + std::to_string(craft));
+            }
+        }
         for (const auto& unit : session.units()) {
             // A staged squadron's craft carry `<squadron>.<n>`; a slot of that name traces one (#457).
             if (const auto named = labels.find(unit.entity_id); named != labels.end()) {

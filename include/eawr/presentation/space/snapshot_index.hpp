@@ -66,7 +66,11 @@ public:
         for (const auto& instance : snapshot_->instances()) {
             ++work_.instance_rows;
             alive_.push_back(instance.entity_id);
-            if ((instance.visible_to & bit) != 0U) visible_.push_back(instance.entity_id);
+            // WST-13 (WSU-03): a stealth-invisible enemy is out of the viewer's sight for draw, fade,
+            // selection, minimap and economy alike; the owner and allies keep seeing it.
+            const bool stealth_hidden = instance.stealth_invisible
+                && sim::tactical::players_hostile(players, viewer, instance.owner);
+            if ((instance.visible_to & bit) != 0U && !stealth_hidden) visible_.push_back(instance.entity_id);
             if (seat != players.end() && instance.team == seat->team_id && instance.reveal_range) {
                 revealers_.push_back({real(instance.fixed_transform.rows[0][3]), real(instance.fixed_transform.rows[1][3]),
                                      real(*instance.reveal_range)});

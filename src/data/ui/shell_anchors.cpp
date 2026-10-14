@@ -63,6 +63,22 @@ std::vector<const ShellAnchor*> ShellAnchors::for_variant(const std::uint32_t va
     return result;
 }
 
+std::optional<assets::Vec2f> shell_point(const assets::Model& model, const std::string_view name) {
+    const auto found = std::find_if(model.bones.begin(), model.bones.end(),
+        [&](const assets::Bone& bone) { return detail::iequals(bone.name, name); });
+    if (found == model.bones.end()) return std::nullopt;
+    auto combined = identity();
+    for (auto index = static_cast<std::int32_t>(found - model.bones.begin()); index >= 0;) {
+        const auto& bone = model.bones[static_cast<std::size_t>(index)];
+        auto local = identity();
+        for (std::size_t r = 0; r < 3; ++r)
+            for (std::size_t c = 0; c < 4; ++c) local[c*4+r] = bone.relative_transform[r*4+c];
+        combined = multiply(local, combined);
+        index = bone.parent;
+    }
+    return assets::Vec2f{combined[12], combined[13]};
+}
+
 ShellAnchorLoad shell_anchors(const assets::Model& model) {
     std::vector<ShellTransform> transforms;
     transforms.reserve(model.bones.size());

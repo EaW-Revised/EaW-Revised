@@ -6,9 +6,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // UI-07 (#304, docs/ui/ui-layer.md §3.1 and rules UI-C1/UI-C2): the one path from player input
@@ -36,6 +40,8 @@ enum class TacticalVerb : std::uint8_t {
     pad_sell = 11, // WBP-30
     intentional_quit = 12, // WBF-43/48
     repair_hardpoint = 13, // WSL-40: station in units, hardpoint index, local payer
+    special_fire = 14, // WSW-31: one source and a player-admitted object target
+    beacon = 15, // HCB-12: player-owned point placement, no selection.
 };
 
 // Where an intent came from. Presentation-only: it never enters a command, so a HUD button and
@@ -70,6 +76,8 @@ struct TacticalIntent {
     std::uint64_t queue_entry_id{}; // PU-17: identity from the displayed queue entry.
     bool through_hazards{}; // WHZ-08a: explicit double-click movement
     std::optional<sim::math::Fixed> reinforcement_facing{}; // WR-X01: local battle deployment choice
+    std::uint64_t reinforcement_token{}; // WGM-48: published persistent reserve identity
+    bool append{}; // HCB-57: queued point movement.
     friend bool operator==(const TacticalIntent&, const TacticalIntent&) = default;
 };
 
@@ -96,6 +104,21 @@ protected:
     CommandSink& operator=(const CommandSink&) = default;
 };
 
+// Pending UI reservations survive transport handoff until their effects reach presentation.
+struct PendingCommand {
+    std::uint64_t tick{}, sequence{};
+    TacticalIntent intent;
+    bool handed_off{};
+    std::optional<std::uint64_t> execution_tick{};
+};
+using PendingBuildOption = std::function<const sim::tactical::BuildOption*(sim::EntityId, sim::tactical::TypeId)>;
+[[nodiscard]] sim::tactical::EconomyView pending_economy(sim::tactical::EconomyView snapshot,
+    std::span<const PendingCommand> pending, const PendingBuildOption& option_of);
+[[nodiscard]] sim::tactical::ProductionCounts pending_production_counts(
+    sim::tactical::ProductionCounts base, const sim::tactical::EconomyView& ledger,
+    std::uint64_t completed_tick, std::span<const PendingCommand> pending,
+    const PendingBuildOption& option_of, sim::tactical::TypeId type);
+
 // The standard sink, and the hand-off of one local player's orders from the presentation
 // thread to the thread that steps the session. Each side has one owner:
 // - issue() is the producer side, called on the Godot main thread (through OrderInput). It
@@ -110,18 +133,65 @@ protected:
 // records that tick. Sequences increase across ticks and never repeat, so every batch follows
 // the player's previous submission (TacticalSession::submit). One per local player.
 class CommandScheduler final : public CommandSink {
+    struct EpochState {
+        std::mutex mutex;
+        std::optional<std::uint64_t> epoch;
+    };
 public:
+    // Producer-thread scopes nest around decoding one input. The shared state
+    // keeps restoration safe even if a callback releases its scheduler.
+    class IntentEpochScope final {
+    public:
+        IntentEpochScope() = default;
+        IntentEpochScope(IntentEpochScope&& other) noexcept;
+        IntentEpochScope(const IntentEpochScope&) = delete;
+        IntentEpochScope& operator=(const IntentEpochScope&) = delete;
+        IntentEpochScope& operator=(IntentEpochScope&&) = delete;
+        ~IntentEpochScope();
+        [[nodiscard]] explicit operator bool() const noexcept { return state_ != nullptr; }
+        [[nodiscard]] std::uint64_t epoch() const noexcept { return epoch_; }
+    private:
+        friend class CommandScheduler;
+        IntentEpochScope(std::shared_ptr<EpochState> state, std::optional<std::uint64_t> previous,
+            std::uint64_t epoch) : state_(std::move(state)), previous_(previous), epoch_(epoch) {}
+        std::shared_ptr<EpochState> state_;
+        std::optional<std::uint64_t> previous_;
+        std::uint64_t epoch_{};
+    };
+    // A nonempty epoch provider selects LAN intent admission: issue reads its live
+    // frame, take drains every queued intent while retaining that producer epoch,
+    // and the lockstep handoff assigns the final execution key. The provider is
+    // called by issue/open_tick and capture_intent_epoch under the epoch mutex;
+    // it must be thread-safe and must not call back into this scheduler.
     explicit CommandScheduler(sim::tactical::PlayerId player, std::uint64_t first_sequence = 0,
-        std::uint64_t first_tick = 0) noexcept;
+        std::uint64_t first_tick = 0, std::function<std::uint64_t()> intent_epoch = {});
+
+    // Sample and reserve under the same lock observed by LAN sealing. Decoding
+    // callbacks must not block: a held epoch can prevent simulation progress.
+    [[nodiscard]] IntentEpochScope capture_intent_epoch();
+    // Earliest input still being decoded or queued. LAN seals below its target,
+    // then releases the reservation when take hands the encoded intent over.
+    [[nodiscard]] std::optional<std::uint64_t> pending_intent_epoch() const;
 
     // Producer side. Thread-safe; a failure queues nothing and uses no sequence.
     [[nodiscard]] core::Result<void> issue(const TacticalIntent& intent) override;
+
+    // Enables snapshot reservations. Offline receipts retire strictly after execution;
+    // LAN producer epochs are not execution ticks, so LAN retires by command result instead.
+    void present_snapshot(std::uint64_t completed_tick);
+    void present_result(std::uint64_t sequence);
+    void note_execution(std::uint64_t sequence, std::uint64_t tick);
+    void present_event_gap(std::uint64_t lost_through);
+    [[nodiscard]] std::vector<PendingCommand> reservations() const;
+    [[nodiscard]] bool consumed(const TacticalIntent& intent) const;
+    [[nodiscard]] std::uint64_t reservation_revision() const;
 
     // Consumer side: removes and returns, in sequence order, the commands for `next_tick`, the
     // session's next tick to execute (its completed_tick()), and closes that tick: an intent
     // issued after this returns is stamped for a later tick. A command stamped for an earlier
     // tick (one the consumer never took) is restamped to `next_tick`. Returns nothing when no
-    // command is due. Thread-safe.
+    // command is due. With an intent epoch provider, drains all current intents
+    // and preserves their producer epochs for LAN admission. Thread-safe.
     [[nodiscard]] std::vector<sim::tactical::PlayerCommand> take(std::uint64_t next_tick);
 
     [[nodiscard]] std::size_t pending() const;
@@ -129,14 +199,27 @@ public:
     [[nodiscard]] std::uint64_t next_sequence() const;
     // The tick the next issued intent is stamped for.
     [[nodiscard]] std::uint64_t open_tick() const;
+    // Optional acceptance instrumentation, called after a successful issue.
+    void set_issue_observer(std::function<void(std::uint64_t, std::uint64_t)> observer) {
+        const std::lock_guard lock(mutex_); issue_observer_ = std::move(observer);
+    }
 
 private:
     const sim::tactical::PlayerId player_;
     mutable std::mutex mutex_;
     std::uint64_t next_sequence_;
     std::uint64_t open_tick_;
+    // LAN owns the future execution stamp. Its producer records the live epoch,
+    // and a consumer drains intents even when that epoch has already been visited.
+    std::function<std::uint64_t()> intent_epoch_;
+    std::shared_ptr<EpochState> epoch_state_;
+    [[nodiscard]] std::uint64_t producer_epoch() const;
     // Stamped commands in sequence order; their ticks never decrease.
     std::vector<sim::tactical::PlayerCommand> queue_;
+    std::function<void(std::uint64_t, std::uint64_t)> issue_observer_;
+    bool reservations_enabled_{};
+    std::vector<PendingCommand> reservations_;
+    std::uint64_t reservation_revision_{};
 };
 
 // Presentation-local order input (UI-C2): the selection and the HUD's pending order mode. It
@@ -144,7 +227,7 @@ private:
 // the same commands. None of this state enters a command, the replay or a hash. Selection
 // gestures themselves (click, box, type, group) belong to #82, which sets the selection here.
 // #452 adds the command bar's attack-move and guard modes (docs/behaviour/space-orders.md OR-01).
-enum class OrderMode : std::uint8_t { none = 0, move = 1, attack = 2, attack_move = 3, guard = 4 };
+enum class OrderMode : std::uint8_t { none = 0, move = 1, attack = 2, attack_move = 3, guard = 4, waypoint = 5 };
 
 // What the pointer is over when a world click lands: the point on the play plane and, when
 // the pick hit a unit, that unit, whether it is hostile to the local player, whether the local
@@ -188,7 +271,7 @@ public:
     // selected is guarded and anything else but a hostile unit is a guard of the point (OR-01).
     // Move mode: always a move. Attack mode: only a hostile unit gives a command; anything else
     // gives none and keeps the mode. Attack-move and guard modes act as their modifiers do. An
-    // issued command disarms the mode. With no selection nothing is issued. Returns whether an
+    // issued command disarms the mode, except Waypoint remains armed for another point. With no selection nothing is issued. Returns whether an
     // intent was issued.
     [[nodiscard]] core::Result<bool> world_command(const WorldPick& pick, CommandOrigin origin = CommandOrigin::world_click,
         OrderModifiers modifiers = {});

@@ -1,6 +1,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "battle_effects.hpp"
 #include "eawr/presentation/particles/contact_frame.hpp"
+#include "eawr/presentation/space/debris.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
 
 #include "eawr/presentation/space/space.hpp"
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <unordered_map>
 #include <utility>
 
 #include "battle_effects_internal.hpp"
@@ -56,12 +58,6 @@ constexpr std::size_t shield_sample_limit = 64;
     return std::abs(dot(relative, up)) <= height && std::abs(dot(relative, right)) <= height * aspect;
 }
 
-[[nodiscard]] particles::Basis3 yaw_basis(const double yaw_degrees) {
-    const double radians = yaw_degrees * 3.14159265358979323846 / 180.0;
-    const auto c = static_cast<float>(std::cos(radians));
-    const auto s = static_cast<float>(std::sin(radians));
-    return {{c, s, 0.0F}, {-s, c, 0.0F}, {0.0F, 0.0F, 1.0F}};
-}
 } // namespace
 
 const std::string* BattleEffects::hit_pick(const std::vector<std::string>& list, const space::HitParticleList kind,
@@ -91,7 +87,7 @@ bool BattleEffects::spawn(const std::string& particle, const std::array<double, 
     // or a session that ran ahead of the first frame) would only be spawned to detach at once.
     if (type->lifetime_frames > 0 && due_ > birth_ && due_ - birth_ >= type->lifetime_frames) {
         ++expired_[key];
-        if (spawn_log_.size() < spawn_log_limit) spawn_log_.push_back({tick, key, std::nullopt});
+        if (spawn_log_.size() < spawn_log_limit) spawn_log_.push_back({tick, key, std::nullopt, std::nullopt});
         return true;
     }
     if (effects_.size() >= max_live_effects) {
@@ -113,7 +109,7 @@ bool BattleEffects::spawn(const std::string& particle, const std::array<double, 
     }
     ++spawned_[key];
     const std::size_t row = spawn_log_.size() < spawn_log_limit ? spawn_log_.size() : spawn_log_limit;
-    if (row < spawn_log_limit) spawn_log_.push_back({tick, key, std::nullopt});
+    if (row < spawn_log_limit) spawn_log_.push_back({tick, key, std::nullopt, frame});
     LiveEffect effect{handle.value(), particle, birth_, 0U, type->lifetime_frames, false, false, row, std::nullopt, 0U, frame};
     if (type->attached_to_collision && owner != sim::invalid_entity_id) {
         const auto posed = contact_bones_ ? contact_bones_(owner, bone) : std::nullopt;
@@ -249,6 +245,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                           const double presented_tick, const SnapshotAt& snapshot_at, const BoneLookup& bones,
                           const FixedCamera* laser_camera) {
     terminal_sounds_.clear();
+    healing_presented_tick_ = presented_tick;
     if (released_) return true;
     ++frames_;
     const auto& depth_camera = laser_camera ? *laser_camera : camera;
@@ -284,6 +281,148 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
         else last_seen_.erase(craft.entity_id);
     }
     note_ability_shots(reached, latest, snapshot_at);
+    // WHE-33/34: one following recipient effect, refreshed in place and removed with its status.
+    for (auto effect = effects_.begin(); effect != effects_.end();) {
+        if (effect->corrupt_target == sim::invalid_entity_id || effect->detached) { ++effect; continue; }
+        const auto instance = std::find_if(latest.instances().begin(), latest.instances().end(),
+            [&](const auto& row) { return row.entity_id == effect->corrupt_target; });
+        const auto shown = units(effect->corrupt_target);
+        if (instance == latest.instances().end() || !instance->corrupt || !shown) {
+            const auto detached = registry_->detach(effect->handle);
+            effect->detached = true;
+            effect->drain_from = effect->age;
+            if (!detached || detached.value() == particles::EffectDetachState::released) {
+                effect = effects_.erase(effect);
+                continue;
+            }
+        } else {
+            effect->frame.origin = {static_cast<float>(shown->position[0]), static_cast<float>(shown->position[1]),
+                static_cast<float>(shown->position[2])};
+            if (!registry_->set_frame(effect->handle, effect->frame)) return false;
+        }
+        ++effect;
+    }
+    for (const auto& instance : latest.instances()) {
+        if (!instance.corrupt || std::any_of(effects_.begin(), effects_.end(), [&](const auto& effect) {
+                return effect.corrupt_target == instance.entity_id && !effect.detached;
+            })) continue;
+        const auto shown = units(instance.entity_id);
+        const auto type = types_.find(instance.corrupt->source_type);
+        if (!shown || type == types_.end() || type->second.corrupt_target_particle.empty()) continue;
+        birth_ = sample_of(presented_tick);
+        const auto before = effects_.size();
+        if (!spawn(type->second.corrupt_target_particle, shown->position, {}, "corrupt_recipient", latest.completed_tick())) return false;
+        if (effects_.size() > before) {
+            effects_.back().corrupt_target = instance.entity_id;
+            effects_.back().lifetime = std::numeric_limits<std::uint32_t>::max();
+        }
+    }
+    // WLU-09: one effect per luring team at its formation centre (the mean of its shown craft),
+    // while a craft's LURE is on; it follows the team and drains when the ability ends.
+    const auto lure_of = [&](const tactical::Squadron& team) -> std::optional<std::pair<std::array<double, 3>, const std::string*>> {
+        std::array<double, 3> sum{};
+        std::size_t shown_count = 0;
+        const std::string* particle = nullptr;
+        for (const auto member : team.members) {
+            const auto instance = std::find_if(latest.instances().begin(), latest.instances().end(),
+                [&](const auto& row) { return row.entity_id == member; });
+            if (instance == latest.instances().end()) continue;
+            const bool luring = std::any_of(instance->abilities.begin(), instance->abilities.end(), [](const auto& ability) {
+                return ability.kind == tactical::AbilityKind::lure && ability.active;
+            });
+            const auto type = types_.find(instance->type_id);
+            if (luring && particle == nullptr && type != types_.end() && !type->second.lure_particle.empty())
+                particle = &type->second.lure_particle;
+            if (const auto shown = units(member)) {
+                for (std::size_t axis = 0; axis < 3; ++axis) sum[axis] += shown->position[axis];
+                ++shown_count;
+            }
+        }
+        if (particle == nullptr || shown_count == 0) return std::nullopt;
+        for (auto& value : sum) value /= static_cast<double>(shown_count);
+        return std::pair{sum, particle};
+    };
+    for (auto effect = effects_.begin(); effect != effects_.end();) {
+        if (effect->lure_team == sim::invalid_entity_id || effect->detached) { ++effect; continue; }
+        const auto team = std::find_if(latest.squadrons().begin(), latest.squadrons().end(),
+            [&](const auto& row) { return row.container == effect->lure_team; });
+        const auto centre = team != latest.squadrons().end() ? lure_of(*team) : std::nullopt;
+        if (!centre) {
+            const auto detached = registry_->detach(effect->handle);
+            effect->detached = true;
+            effect->drain_from = effect->age;
+            if (!detached || detached.value() == particles::EffectDetachState::released) {
+                effect = effects_.erase(effect);
+                continue;
+            }
+        } else {
+            effect->frame.origin = {static_cast<float>(centre->first[0]), static_cast<float>(centre->first[1]),
+                static_cast<float>(centre->first[2])};
+            if (!registry_->set_frame(effect->handle, effect->frame)) return false;
+        }
+        ++effect;
+    }
+    for (const auto& team : latest.squadrons()) {
+        if (std::any_of(effects_.begin(), effects_.end(), [&](const auto& effect) {
+                return effect.lure_team == team.container && !effect.detached;
+            })) continue;
+        const auto centre = lure_of(team);
+        if (!centre) continue;
+        birth_ = sample_of(presented_tick);
+        const auto before = effects_.size();
+        if (!spawn(*centre->second, centre->first, {}, "lure", latest.completed_tick())) return false;
+        if (effects_.size() > before) {
+            effects_.back().lure_team = team.container;
+            effects_.back().lifetime = std::numeric_limits<std::uint32_t>::max();
+        }
+    }
+    // WHE-36/FD-55: authored charge/charged effects follow the owner and drain at the next
+    // admitted cleanup poll. Empty stock fields intentionally produce no substitute particle.
+    std::unordered_map<sim::EntityId, bool> blast_phases;
+    for (const auto& instance : latest.instances()) {
+        for (const auto& ability : instance.abilities) if (ability.kind == tactical::AbilityKind::blast) {
+            if (ability.blast_charge_remaining != 0) { blast_phases.emplace(instance.entity_id, false); break; }
+            if (ability.blast_charged_presentation) { blast_phases.emplace(instance.entity_id, true); break; }
+        }
+    }
+    const auto blast_phase = [&](const sim::EntityId owner) -> std::optional<bool> {
+        const auto found = blast_phases.find(owner);
+        return found == blast_phases.end() ? std::nullopt : std::optional<bool>{found->second};
+    };
+    for (auto effect = effects_.begin(); effect != effects_.end();) {
+        if (effect->blast_owner == sim::invalid_entity_id || effect->detached) { ++effect; continue; }
+        const auto phase = blast_phase(effect->blast_owner);
+        const auto shown = units(effect->blast_owner);
+        if (!phase || *phase != effect->blast_charged || !shown) {
+            const auto detached = registry_->detach(effect->handle);
+            effect->detached = true; effect->drain_from = effect->age;
+            if (!detached || detached.value() == particles::EffectDetachState::released) {
+                effect = effects_.erase(effect); continue;
+            }
+        } else {
+            effect->frame.origin = {static_cast<float>(shown->position[0]), static_cast<float>(shown->position[1]),
+                static_cast<float>(shown->position[2])};
+            if (!registry_->set_frame(effect->handle, effect->frame)) return false;
+        }
+        ++effect;
+    }
+    for (const auto& instance : latest.instances()) {
+        const auto phase = blast_phase(instance.entity_id);
+        const auto shown = units(instance.entity_id);
+        const auto type = types_.find(instance.type_id);
+        if (!phase || !shown || type == types_.end()) continue;
+        const auto& particle = *phase ? type->second.blast_charged_particle : type->second.blast_charging_particle;
+        if (particle.empty() || std::any_of(effects_.begin(), effects_.end(), [&](const auto& effect) {
+            return effect.blast_owner == instance.entity_id && !effect.detached;
+        })) continue;
+        birth_ = sample_of(presented_tick);
+        const auto before = effects_.size();
+        if (!spawn(particle, shown->position, {}, *phase ? "blast_charged" : "blast_charging", latest.completed_tick())) return false;
+        if (effects_.size() > before) {
+            effects_.back().blast_owner = instance.entity_id; effects_.back().blast_charged = *phase;
+            effects_.back().lifetime = std::numeric_limits<std::uint32_t>::max();
+        }
+    }
     if (!follow_contacts(latest)) return false;
     // Events fire on the frame that first reaches their tick, oldest tick first; the effects
     // already live are aged up to each tick's birth before its effects are born.
@@ -293,6 +432,20 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
         // WHE-63: successful refill emits the authored particle on every current team member.
         // A full-team no-op leaves started_tick/recharge unchanged and emits nothing.
         const auto after_refill = snapshot_at ? snapshot_at(record.tick) : nullptr;
+        if (after_refill) for (const auto& instance : after_refill->instances()) {
+            if (!units(instance.entity_id)) continue;
+            const auto type = types_.find(instance.type_id);
+            if (type == types_.end()) continue;
+            for (const auto& ability : instance.abilities) {
+                if (ability.kind != tactical::AbilityKind::corrupt_systems || !ability.position
+                    || ability.started_tick + 1 != record.tick) continue;
+                const auto convert = [](const sim::math::Fixed value) {
+                    return static_cast<double>(value.raw()) / static_cast<double>(sim::math::Fixed::scale);
+                };
+                const std::array<double, 3> point{convert(ability.position->x), convert(ability.position->y), convert(ability.position->z)};
+                if (!spawn(type->second.corrupt_owner_particle, point, {}, "corrupt_area", record.tick)) return false;
+            }
+        }
         if (after_refill) for (const auto& instance : after_refill->instances()) {
             const auto active = std::find_if(instance.abilities.begin(), instance.abilities.end(), [&](const auto& ability) {
                 return ability.kind == tactical::AbilityKind::replenish_wingmen && ability.remaining_frames > 0
@@ -312,8 +465,13 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
         }
         // WHE-62/BP-70: retain bomb death effects; WAD-07 supplies the weaken fallback.
         const auto before_spawn = snapshot_at && record.tick > 0 ? snapshot_at(record.tick - 1) : nullptr;
+        std::erase_if(seen_deaths_, [&](const auto& death) { return death.second + 8 < record.tick; });
         if (before_spawn) for (const auto& spawn_state : before_spawn->ability_spawns()) {
-            if (spawn_state.detonated || spawn_state.due + 1 != record.tick || !units(spawn_state.source)) continue;
+            if (spawn_state.kind == tactical::AbilityKind::cluster_bomb || spawn_state.kind == tactical::AbilityKind::fow_reveal_ping) continue;
+            if (spawn_state.detonated || spawn_state.due + 1 != record.tick) continue;
+            // WSD-11: a self-destruct's source has left the world; the blast shows if it was seen dying.
+            if (spawn_state.kind == tactical::AbilityKind::self_destruct ? !seen_deaths_.contains(spawn_state.source)
+                                                                         : !units(spawn_state.source)) continue;
             const auto type = types_.find(spawn_state.type);
             if (type == types_.end()) continue;
             const auto look = type->second.weapons.find(tactical::object_weapon);
@@ -324,6 +482,44 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             if (!spawn(terminal, position, {}, "hero_detonation", record.tick)) return false;
         }
         for (const tactical::CombatEvent& event : record.combat_events) {
+            if (event.kind == tactical::CombatEventKind::heal_pulse) {
+                const auto source = last_seen_.find(event.shooter), target = last_seen_.find(event.target);
+                if (source == last_seen_.end() || target == last_seen_.end()) continue;
+                const auto source_type = types_.find(source->second.type), target_type = types_.find(target->second.type);
+                if (source_type == types_.end() || target_type == types_.end()
+                    || event.weapon >= source_type->second.healing.size()) continue;
+                const auto& handler = source_type->second.healing[event.weapon];
+                std::uint32_t target_bone = 0, source_bone = 0;
+                const auto lower_bone = [](std::string text) { for (auto& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return text; };
+                for (const auto& name : handler.heal_target_bones) {
+                    const auto bone = target_type->second.named_bones.find(lower_bone(name));
+                    if (bone != target_type->second.named_bones.end()) { target_bone = bone->second; break; }
+                }
+                if (const auto bone = source_type->second.named_bones.find(lower_bone(handler.heal_owner_bone));
+                    bone != source_type->second.named_bones.end()) source_bone = bone->second;
+                auto point = target->second.position;
+                particles::Basis3 basis{};
+                if (bones) if (const auto pose = bones(event.target, target_bone)) {
+                    point = {pose->frame.origin.x, pose->frame.origin.y, pose->frame.origin.z}; basis = pose->frame.basis;
+                }
+                bool created = false;
+                if (!spawn(handler.heal_particle, point, basis, "heal_target", record.tick, event.target, target_bone, &created)) return false;
+                ++healing_pulses_; if (created) ++healing_particles_;
+                if (!handler.heal_lightning.empty() && healing_bolts_.size() < max_live_effects)
+                    healing_bolts_.push_back({event.shooter, event.target, handler.heal_lightning,
+                        static_cast<double>(record.tick) - 1.0, source_bone, target_bone});
+                continue;
+            }
+            if (event.kind == tactical::CombatEventKind::point_defence_zap) {
+                // WLD-12: the beam is drawn while the local player sees the Crusader; the shot's own
+                // detonation arrives as its projectile_expired event.
+                const auto shooter = entity_types_.find(event.shooter);
+                if (shooter != entity_types_.end() && last_seen_.contains(event.shooter)) {
+                    defence_zaps_.push_back({event.shooter, shooter->second, event.tick,
+                        {to_float(event.aim.x), to_float(event.aim.y), to_float(event.aim.z)}});
+                }
+                continue;
+            }
             if (event.kind == tactical::CombatEventKind::projectile_expired) {
                 // WAD-07: retain the terminal event even after snapshot history is gone.
                 // Its projectile ID selects ability/barrage looks remembered at launch.
@@ -339,8 +535,16 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                 }
                 const V position = vec(event.aim);
                 const auto* terminal = particle_type(look->lifetime_detonation);
-                if (terminal && terminal->decoration
-                    && (!projectile_terminal_admitted(event) || !terminal_in_frustum(position, camera))) continue;
+                if (terminal && terminal->decoration) {
+                    const std::string_view culled = visibility == projectile_visibility_.end() ? "unobserved"
+                        : !visibility->second.hide.drawn() ? "hidden"
+                        : !projectile_terminal_admitted(event) ? "fog"
+                        : !terminal_in_frustum(position, camera) ? "frustum" : "";
+                    if (!culled.empty()) {
+                        ++terminal_culls_[std::string(culled)];
+                        continue;
+                    }
+                }
                 bool created = false;
                 if (!spawn(look->lifetime_detonation, {position.x, position.y, position.z}, {},
                     "lifetime_detonation", record.tick, sim::invalid_entity_id, 0, &created)) return false;
@@ -350,20 +554,33 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                 continue;
             }
             if (event.kind != tactical::CombatEventKind::projectile_hit) continue;
+            // WRB-12: a shot a Redirect_Blaster handler deflected leaves no impact; its block sound plays instead.
+            if ((event.outcome & tactical::hit_outcome_redirected) != 0U) continue;
             // Shown when the local player sees the target: a lethal hit's target has left the
             // session by that tick, and its last visible frame stands for it (#370 review 1).
             if (!last_seen_.contains(event.target)) continue;
             ++hit_events_[record.tick];
             const auto shooter = entity_types_.find(event.shooter);
             const ProjectileLook* found = nullptr;
+            bool retained_profile = false;
             // #862 (AB-66): an ability shot's hit shows the ability shot's own particles.
             std::optional<std::uint64_t> hit;
             if (snapshot_at) {
-                if (const auto before = snapshot_at(event.tick)) hit = space::hit_projectile(before->projectiles(), event);
+                if (const auto before = snapshot_at(event.tick)) {
+                    hit = space::hit_projectile(before->projectiles(), event);
+                    if (hit) for (const auto& projectile : before->projectiles()) {
+                        // WRB-08: terminal particles retain the launcher's type, slot and override after reflection.
+                        if (projectile.id == *hit) {
+                            found = look_of(projectile);
+                            retained_profile = found != nullptr;
+                            break;
+                        }
+                    }
+                }
             }
             const bool ability = hit && ability_projectiles_.contains(*hit);
             const bool barrage = hit && barrage_projectiles_.contains(*hit);
-            if (shooter != entity_types_.end()) {
+            if (!retained_profile && shooter != entity_types_.end()) {
                 if (const auto type = types_.find(shooter->second); type != types_.end()) {
                     const auto& weapons = ability && type->second.ability_weapons.contains(event.weapon)
                         ? type->second.ability_weapons
@@ -391,22 +608,22 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                 std::optional<space::Vec3d> normal;
                 const UnitFrame& target = last_seen_.at(event.target);
                 const auto target_looks = types_.find(target.type);
-                std::optional<space::ShieldSegmentHit> hit;
+                std::optional<space::ShieldSegmentHit> shield_hit;
                 if (target_looks != types_.end() && !target_looks->second.collision.triangles.empty()) {
                     const space::LivePose pose{target.position, target.yaw_degrees, target.roll_degrees,
-                                               target_looks->second.scale};
+                                               target_looks->second.scale, target.pitch_degrees};
                     if (const auto met = space::shield_flight_hit(target_looks->second.collision, pose,
                                                                   dvec(vec(event.origin)), dvec(flight),
                                                                   look.step_length, &shield_casts_)) {
-                        hit = met->hit;
+                        shield_hit = met->hit;
                         ++(met->in_step ? shield_in_step_ : shield_ahead_);
                     }
                 }
-                if (hit) place = hit->contact;
+                if (shield_hit) place = shield_hit->contact;
                 if (target_looks == types_.end() || !target_looks->second.shield_mesh) {
                     ++shield_no_mesh_;
-                } else if (hit) {
-                    normal = hit->normal;
+                } else if (shield_hit) {
+                    normal = shield_hit->normal;
                     ++shield_on_mesh_;
                 } else {
                     ++shield_mesh_missed_;
@@ -426,8 +643,8 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                     if (const std::string* pick = hit_pick(target_looks->second.shield_hits, space::HitParticleList::shield,
                                                            event, snapshot_at);
                         pick != nullptr && !spawn(*pick, place, basis, "shield_hit", record.tick, event.target,
-                            hit && hit->triangle < target_looks->second.collision_bones.size()
-                                ? target_looks->second.collision_bones[hit->triangle] : 0U)) {
+                            shield_hit && shield_hit->triangle < target_looks->second.collision_bones.size()
+                                ? target_looks->second.collision_bones[shield_hit->triangle] : 0U)) {
                         return false;
                     }
                 }
@@ -477,8 +694,8 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                     ac[axis] = triangle.c[axis] - triangle.a[axis];
                 }
                 normal = {ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]};
-                place = space::live_model_point(point, seen->second.position, seen->second.yaw_degrees, seen->second.roll_degrees, look.scale);
-                const auto rotated = space::live_model_point(normal, {}, seen->second.yaw_degrees, seen->second.roll_degrees, 1.0);
+                place = space::live_model_point(point, seen->second.position, seen->second.yaw_degrees, seen->second.roll_degrees, look.scale, seen->second.pitch_degrees);
+                const auto rotated = space::live_model_point(normal, {}, seen->second.yaw_degrees, seen->second.roll_degrees, 1.0, seen->second.pitch_degrees);
                 const double length = std::sqrt(rotated[0] * rotated[0] + rotated[1] * rotated[1] + rotated[2] * rotated[2]);
                 if (length > 0.0) for (std::size_t axis = 0; axis < 3; ++axis) {
                     direction[axis] = rotated[axis] / length;
@@ -496,10 +713,48 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             }
             const auto seen = last_seen_.find(event.unit);
             if (seen == last_seen_.end()) continue;  // never seen by the local player
-            const UnitFrame& unit = seen->second;
+            UnitFrame unit = seen->second;
+            // BP-15/BP-30: the particle and breakoff share the death event's pose.
+            // A hull kill removes the unit from that snapshot, so use the last live
+            // snapshot, also for hardpoints hit in the same kill tick (BP-37).
+            const bool killed = std::any_of(record.events.begin(), record.events.end(), [&](const tactical::Event& other) {
+                return other.kind == tactical::EventKind::unit_destroyed && other.unit == event.unit;
+            });
+            const auto event_pose = snapshot_at
+                ? snapshot_at(killed && record.tick > 0 ? record.tick - 1 : record.tick) : nullptr;
+            if (const auto* instance = event_pose ? space::find_instance(*event_pose, event.unit) : nullptr) {
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    unit.position[axis] = static_cast<double>(instance->fixed_transform.rows[axis][3].raw())
+                        / static_cast<double>(sim::math::Fixed::scale);
+                }
+                const auto facing = space::instance_unit_facing(instance->fixed_transform);
+                unit.yaw_degrees = facing[0];
+                unit.pitch_degrees = facing[1];
+                unit.roll_degrees = facing[2];
+            }
             const auto type = types_.find(unit.type);
             if (type == types_.end()) continue;
-            const particles::Basis3 basis = yaw_basis(unit.yaw_degrees);
+            // BP-14/BP-15: explosions share the drawn hull's banked unit frame.
+            const auto axes = space::live_unit_axes(unit.yaw_degrees, unit.roll_degrees, unit.pitch_degrees);
+            const particles::Basis3 basis{vec(axes.x), vec(axes.y), vec(axes.z)};
+            const auto hardpoint_explosion = [&](const std::uint32_t hardpoint, const std::string& reason) {
+                if (hardpoint >= type->second.hardpoint_explosions.size()) return true;
+                const V local = vec(type->second.hardpoint_points[hardpoint]);
+                const V world = add(add(scale(basis.x, local.x), scale(basis.y, local.y)), scale(basis.z, local.z));
+                return spawn(type->second.hardpoint_explosions[hardpoint],
+                             {unit.position[0] + world.x, unit.position[1] + world.y, unit.position[2] + world.z},
+                             basis, reason, record.tick);
+            };
+            if (event.kind == tactical::EventKind::unit_destroyed) {
+                // WCC-71 (BP-37): the kill self-destructs every destroyable hardpoint before the
+                // unit's own explosion: a standing one is destroyed, one already destroyed
+                // explodes again. The kill tick's snapshot no longer lists the unit.
+                const auto before = record.tick > 0 && snapshot_at ? snapshot_at(record.tick - 1) : nullptr;
+                for (const space::SelfDestructHardpoint& hardpoint :
+                     space::self_destruct_hardpoints(before.get(), event.unit, record.events)) {
+                    if (!hardpoint_explosion(hardpoint.hardpoint, "self_destruct")) return false;
+                }
+            }
             // #447 SP-03, SP-08: a craft that spins away shows its spin-away explosion when it is
             // killed and is followed on; its death explosion comes when the spin ends.
             const bool spins = event.kind == tactical::EventKind::unit_destroyed
@@ -512,17 +767,11 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             }
             if (event.kind == tactical::EventKind::unit_destroyed || event.kind == tactical::EventKind::spin_away_ended) {
                 if (!spawn(type->second.death_explosion, unit.position, basis, "death", record.tick)) return false;
+                if (event.kind == tactical::EventKind::unit_destroyed) seen_deaths_[event.unit] = record.tick;
                 last_seen_.erase(seen);
                 continue;
             }
-            if (event.hardpoint >= type->second.hardpoint_explosions.size()) continue;
-            const V local = vec(type->second.hardpoint_points[event.hardpoint]);
-            const V world = add(add(scale(basis.x, local.x), scale(basis.y, local.y)), scale(basis.z, local.z));
-            if (!spawn(type->second.hardpoint_explosions[event.hardpoint],
-                       {unit.position[0] + world.x, unit.position[1] + world.y, unit.position[2] + world.z}, basis,
-                       "hardpoint", record.tick)) {
-                return false;
-            }
+            if (!hardpoint_explosion(event.hardpoint, "hardpoint")) return false;
         }
     }
     if (!draw_projectiles(previous, latest, alpha, units, depth_camera)) return false;

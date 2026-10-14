@@ -9,11 +9,13 @@
 #include <godot_cpp/classes/range.hpp>
 #include <godot_cpp/classes/v_scroll_bar.hpp>
 #include <godot_cpp/classes/style_box_texture.hpp>
+#include <godot_cpp/classes/theme.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -66,6 +68,7 @@ void EawrOverlayButton::set_caption(const KitTextStyle& style, const String& tex
 
 void EawrOverlayButton::activate() {
     ++presses_;
+    godot::UtilityFunctions::print("EAWR battle overlay: ", get_name(), " pressed");
     if (action_) action_();
 }
 
@@ -132,6 +135,14 @@ void EawrBattleOverlay::setup(Style style, std::function<void()> resume, std::fu
     panel_->set_anchors_and_offsets_preset(PRESET_FULL_RECT);
     panel_->set_visible(false);
     add_child(panel_);
+    result_status_ = memnew(EawrUiLabel);
+    result_status_->set_role("L_Text");
+    result_status_->add_theme_color_override("L_Text_top", Color(1, 1, 1, 1));
+    result_status_->add_theme_color_override("L_Text_bottom", Color(1, 1, 1, 1));
+    result_status_->set_wrap(true);
+    result_status_->set_clip_contents(true);
+    result_status_->set_mouse_filter(MOUSE_FILTER_IGNORE);
+    panel_->add_child(result_status_);
     resume_ = memnew(EawrOverlayButton);
     resume_->set_name("EawrResumeGame");
     resume_->set_action(std::move(resume));
@@ -164,6 +175,7 @@ void EawrBattleOverlay::show_paused(const bool paused) {
 void EawrBattleOverlay::show_end(const std::optional<bool> won) {
     if (ended_ == won) return;
     ended_ = won;
+    set_process_input(ready_ || ended_.has_value());
     laid_out_ = Vector2(-1.0F, -1.0F);
     relayout();
 }
@@ -171,7 +183,28 @@ void EawrBattleOverlay::show_end(const std::optional<bool> won) {
 void EawrBattleOverlay::set_results(const model::BattleResults& results) {
     if (results_ == results) return;
     results_ = results;
-    if (ended_) layout_results();
+    if (ended_) {
+        if (result_dialog_) layout_results();
+        else {
+            laid_out_ = Vector2(-1.0F, -1.0F);
+            relayout();
+        }
+    }
+}
+
+void EawrBattleOverlay::allow_save_replay(const bool allowed) {
+    save_replay_allowed_ = allowed;
+    if (result_dialog_) for (auto& gadget : result_dialog_->gadgets) {
+        if (gadget.id == "IDC_SAVE_REPLAY_BUTTON" && gadget.control)
+            gadget.control->set_visible(allowed && static_cast<bool>(style_.save_replay));
+    }
+}
+
+void EawrBattleOverlay::save_replay() {
+    if (!ended_ || !save_replay_allowed_ || !style_.save_replay
+        || (save_screen_ && UtilityFunctions::is_instance_id_valid(save_screen_id_))) return;
+    save_screen_ = style_.save_replay();
+    if (save_screen_) save_screen_id_ = static_cast<int64_t>(save_screen_->get_instance_id());
 }
 
 void EawrBattleOverlay::scroll_your(const double value) {
@@ -186,6 +219,30 @@ void EawrBattleOverlay::scroll_enemy(const double value) {
 
 void EawrBattleOverlay::layout_results() {
     if (!result_dialog_ || !ended_) return;
+    // The LAN notice uses free header space, never a popup over either loss pane.
+    model::PixelRect header{};
+    double losses_top = get_size().y;
+    for (const auto& gadget : result_dialog_->gadgets) {
+        if (gadget.id == "IDC_TITLE_STATIC") {
+            header.x = gadget.rect.x;
+            header.width = gadget.rect.width;
+        }
+        if (gadget.id == "IDC_TITLE_STATIC" || gadget.id == "IDC_TIME_STATIC"
+            || gadget.id == "IDC_BATTLE_END_PLANET_STATIC")
+            header.height = std::max(header.height, gadget.rect.y + gadget.rect.height);
+        if (gadget.id == "IDC_STATIC_LOSS1" || gadget.id == "IDC_STATIC_LOSS2"
+            || gadget.id.starts_with("IDC_YOUR_UNIT") || gadget.id.starts_with("IDC_ENEMY_UNIT")
+            || gadget.id.starts_with("IDC_YOUR_HERO") || gadget.id.starts_with("IDC_ENEMY_HERO"))
+            losses_top = std::min(losses_top, gadget.rect.y);
+    }
+    const auto status = model::battle_result_status_rect(header, losses_top);
+    result_status_->set_theme(result_dialog_->frame->get_theme());
+    result_losses_top_ = losses_top;
+    result_status_->set_position(Vector2(static_cast<float>(status.x), static_cast<float>(status.y)));
+    result_status_->set_size(Vector2(static_cast<float>(status.width), static_cast<float>(status.height)));
+    result_status_->set_text(String::utf8(results_.status_message.c_str()));
+    result_status_->set_visible(!results_.status_message.empty() && status.width > 0 && status.height > 0);
+    result_status_->move_to_front();
     for (std::size_t side = 0; side < result_scroll_.size(); ++side) {
         result_scroll_[side] = std::min(result_scroll_[side], model::loss_scroll_max(results_.losses[side].size()));
     }
@@ -243,17 +300,28 @@ void EawrBattleOverlay::show_begin(const bool ready) {
     if (ready_ == ready) return;
     ready_ = ready;
     set_mouse_filter(ready ? MOUSE_FILTER_STOP : MOUSE_FILTER_IGNORE);
-    set_process_input(ready);
+    set_process_input(ready || ended_.has_value());
     laid_out_ = Vector2(-1.0F, -1.0F);
     relayout();
 }
 
 void EawrBattleOverlay::_input(const Ref<InputEvent>& event) {
+    if (save_screen_ && UtilityFunctions::is_instance_id_valid(save_screen_id_)) return;
     // WBF-10: the local Begin barrier also admits keyboard activation. These
     // bindings are the viewer's input policy, not a claim about retail key routing.
-    if (!ready_) return;
+    if (!ready_ && !ended_) return;
     const auto* key = Object::cast_to<InputEventKey>(event.ptr());
     if (key == nullptr || !key->is_pressed() || key->is_echo()) return;
+    if (ended_) {
+        // MNU-45: the finished battle's dialog continues on Enter, Space and Escape as well as its
+        // Continue button (the same action; the host leaves the battle on the next frame).
+        const auto code = key->get_keycode();
+        if (result_dialog_ && (code == KEY_ENTER || code == KEY_KP_ENTER || code == KEY_SPACE || code == KEY_ESCAPE)) {
+            quit_->activate();
+            get_viewport()->set_input_as_handled();
+        }
+        return;
+    }
     if (key->get_keycode() == KEY_ENTER || key->get_keycode() == KEY_KP_ENTER || key->get_keycode() == KEY_SPACE) {
         // The same action as the Begin button, without manufacturing a mouse event.
         if (begin_action_) begin_action_();
@@ -411,6 +479,9 @@ void EawrBattleOverlay::relayout() {
                         quit_->set_position(gadget.control->get_position() + result_dialog_->frame->get_position());
                         quit_->set_size(gadget.control->get_size());
                         quit_->set_caption(button_style, String(), scale);
+                    } else if (gadget.id == "IDC_SAVE_REPLAY_BUTTON" && gadget.control != nullptr) {
+                        gadget.control->set_visible(save_replay_allowed_ && static_cast<bool>(style_.save_replay));
+                        gadget.control->connect("pressed", callable_mp(this, &EawrBattleOverlay::save_replay));
                     } else if (gadget.id == "IDC_YOUR_SCROLLBAR" || gadget.id == "IDC_ENEMY_SCROLLBAR") {
                         // The stock resource marks these trackbars vertical. Keep their
                         // authored rect/variation and use the existing vertical scroll skin.
@@ -463,6 +534,12 @@ void EawrBattleOverlay::relayout() {
         } else {
         panel_rect_ = Rect2(size.x * (1.0F - panel_width) * 0.5F, size.y * panel_top, size.x * panel_width,
                             size.y * panel_height);
+        result_status_->set_position(panel_rect_.position + Vector2(0, panel_rect_.size.y * 0.55F));
+        result_status_->set_size(Vector2(panel_rect_.size.x, panel_rect_.size.y * 0.15F));
+        result_status_->add_theme_font_override("L_Text", button_style.font);
+        result_status_->add_theme_font_size_override("L_Text", button_style.size);
+        result_status_->set_text(String::utf8(results_.status_message.c_str()));
+        result_status_->set_visible(!results_.status_message.empty());
         int title_pixels = 0;
         const KitTextStyle title_style = text_style(style_.message, *ended_ ? style_.win : style_.lose, title_pixels);
         const String& title = *ended_ ? style_.victory_title : style_.defeat_title;
@@ -486,6 +563,12 @@ void EawrBattleOverlay::relayout() {
 }
 
 std::optional<Rect2> EawrBattleOverlay::control_rect(const std::string_view name) const {
+    if (name == "save_replay" && ended_ && result_dialog_) {
+        for (const auto& gadget : result_dialog_->gadgets) {
+            if (gadget.id == "IDC_SAVE_REPLAY_BUTTON" && gadget.control && gadget.control->is_visible())
+                return gadget.control->get_global_rect();
+        }
+    }
     if (name == "message" && message_ && !ended_) return message_rect_;
     if ((name == "resume" || (name == "begin" && ready_)) && resume_ != nullptr && resume_->is_visible()) return Rect2(resume_->get_position(), resume_->get_size());
     if ((name == "quit" || name == "exit") && quit_ != nullptr && (quit_->is_visible() || (ended_ && result_dialog_)))
@@ -516,6 +599,9 @@ std::string EawrBattleOverlay::report_json() const {
         output << "{\"title\": " << json(utf8(*ended_ ? style_.victory_title : style_.defeat_title))
                << ", \"rect\": " << rect_json(panel_rect_)
                << ", \"authored_dialog\": " << (result_dialog_ ? "true" : "false")
+               << ", \"status\": " << json(results_.status_message)
+               << ", \"status_rect\": " << rect_json(Rect2(result_status_->get_position(), result_status_->get_size()))
+               << ", \"losses_top\": " << result_losses_top_
                << ", \"quit_rect\": " << rect_json(Rect2(quit_->get_position(), quit_->get_size())) << "}";
     } else {
         output << "null";

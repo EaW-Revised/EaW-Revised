@@ -135,7 +135,11 @@ private:
     void adjust_turn(const Fixed angle, Fixed& turn) {
         const Calc::Site site(calc_, "FM-03 turn");
         const Fixed wanted = clamp180(angle);
-        const Fixed target_roll = calc_.neg(std::clamp(wanted, calc_.neg(profile_.bank_angle), profile_.bank_angle));
+        // FM-03: test the lower limit first, even when a negative authored bank reverses
+        // the limits. std::clamp requires ordered limits and cannot express this case.
+        const Fixed lower_bank = calc_.neg(profile_.bank_angle);
+        const Fixed limited_turn = wanted < lower_bank ? lower_bank : std::min(wanted, profile_.bank_angle);
+        const Fixed target_roll = calc_.neg(limited_turn);
         Fixed roll = clamp180(state_.roll);
         const Fixed gap = clamp180(calc_.sub(target_roll, roll));
         const Fixed roll_budget = std::clamp(calc_.mul(calc_.div(turn, profile_.rate_of_turn), profile_.roll_rate),
@@ -364,7 +368,7 @@ private:
             }
             return;
         }
-        if (within_combat_cell_reach(position_, frame_.cell) && frame_.chase != nullptr) {
+        if (within_combat_cell_reach(position_, frame_.cell, frame_.box) && frame_.chase != nullptr) {
             Fixed yaw;
             Fixed pitch;
             if (followable(calc_, position_, state_, frame_.chase->position, profile_.attack_distance, yaw, pitch)) {
@@ -377,7 +381,7 @@ private:
         }
         // FD-03, FD-07: the leader heads for the cell point, the others form up at the layer.
         if (leading()) {
-            head_for(combat_cell_point(frame_.cell, profile_.layer_z), profile_.max_speed, budget(), false);
+            head_for(combat_cell_point(frame_.cell, profile_.layer_z, frame_.box), profile_.max_speed, budget(), false);
         } else {
             form_up(profile_.max_speed, profile_.layer_z);
         }
@@ -451,10 +455,11 @@ private:
         const auto across = squared_components(dx, dy);
         const auto reach_squared = squared_components(reach, Fixed{});
         if (math::detail::compare(reach_squared, across) < 0) {
-            if (frame_.approach) {
-                // FA-07: the approach in formation at the layer height, the leader along its path
-                // (the planar line to the target, unverified G-F8).
-                form_up(profile_.max_speed, profile_.layer_z, Vec3{dx, dy, Fixed{}});
+            if (frame_.approach && frame_.attack_lane) {
+                // FD-65/FC-70: the leader reads accepted geometry. Followers still
+                // form up from leader velocity and roster offsets (FM-11).
+                form_up(profile_.max_speed, profile_.layer_z,
+                    frame_.attack_lane->direction, frame_.attack_lane->shift);
                 return true;
             }
             Vec3 aim = target;

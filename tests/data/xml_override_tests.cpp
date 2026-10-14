@@ -85,6 +85,30 @@ void override_contracts(const eawr::data::Catalog& catalog, const eawr::vfs::Vfs
         expect(elsewhere == "<absent>", "a document override is not seen by another thread");
     }
     expect(marker() == "<absent>", "a document override ends with its scope");
+    {
+        const auto original = eawr::data::load_document(filesystem, "data/xml/objects-a.xml");
+        expect(static_cast<bool>(original), "selector fixture loads");
+        if (original) {
+            std::string selected;
+            for (const auto& node : original.value().root.children) {
+                if (node.name != "SpaceUnit") continue;
+                for (const auto& attr : node.attributes) if (attr.name == "Name") selected = attr.value;
+                if (!selected.empty()) break;
+            }
+            expect(!selected.empty(), "selector fixture has a named object");
+            const eawr::data::DocumentOverrides scope({{"data/xml/objects-a.xml", "SpaceUnit/Marker_Test", {"selected"}, selected}});
+            const auto modified = eawr::data::load_document(filesystem, "data/xml/objects-a.xml");
+            std::size_t markers = 0;
+            if (modified) for (const auto& node : modified.value().root.children) {
+                bool matches = false;
+                for (const auto& attr : node.attributes) matches |= attr.name == "Name" && attr.value == selected;
+                for (const auto& child : node.children) if (child.name == "Marker_Test") {
+                    ++markers; expect(matches && child.raw_text == "selected", "only the named record is changed");
+                }
+            }
+            expect(markers == 1, "named document overlay changes exactly one record");
+        }
+    }
 }
 
 } // namespace eawr::tests::data_contracts

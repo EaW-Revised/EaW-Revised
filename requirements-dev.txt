@@ -1,6 +1,7 @@
-# Optional Python packages for the test suite and tooling (pip install -r requirements-dev.txt).
-# CTest runs without them: a test whose package is missing skips (exit 77) or skips its cases.
+# Python packages for the test suite and tooling (pip install -r requirements-dev.txt).
+# pytest is required by the installed replay contracts; other missing packages skip tests/cases.
 # None of these is linked into or shipped with project binaries (THIRD_PARTY_NOTICES.md).
+pytest==9.1.1          # MIT; installed replay compare/record Python contracts require it
 Pillow==10.4.0          # HPND; image evidence in the acceptance and capture tests
 numpy>=1.26             # BSD-3-Clause; image comparisons
 jsonschema==4.23.0      # MIT; acceptance-contract schemas (pulls in referencing, MIT)

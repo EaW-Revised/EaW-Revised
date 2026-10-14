@@ -170,7 +170,7 @@ enum class PathSearchMode : std::uint8_t { bounded, exact };
     const Footprint& footprint, const CollisionWorld& world, EntityId entity, std::uint64_t tick,
     math::Vec3 position, math::Fixed yaw, math::Fixed speed, math::Vec3 target, PathSearchStats* stats = nullptr,
     PathSearchMode mode = PathSearchMode::bounded, bool through_hazards = false,
-    std::optional<math::Vec3> filter_destination = std::nullopt);
+    std::optional<math::Vec3> filter_destination = std::nullopt, bool* exhausted = nullptr);
 
 // PC-08 (#520): the bounded plan_space_move, given up once its expansions reach `budget`
 // (checked between two parents): nullopt then, else the plan_space_move result.
@@ -178,7 +178,7 @@ enum class PathSearchMode : std::uint8_t { bounded, exact };
     const MotionProfile& limits, const Footprint& footprint, const CollisionWorld& world, EntityId entity,
     std::uint64_t tick, math::Vec3 position, math::Fixed yaw, math::Fixed speed, math::Vec3 target, std::uint64_t budget,
     PathSearchStats* stats = nullptr, bool through_hazards = false,
-    std::optional<math::Vec3> filter_destination = std::nullopt);
+    std::optional<math::Vec3> filter_destination = std::nullopt, bool* exhausted = nullptr);
 
 // PC-08 (#520): the bounded plan_space_move run in slices over several ticks. It copies the
 // unit's layer view and the static layer of `world` when it is made, and reads only those
@@ -186,6 +186,25 @@ enum class PathSearchMode : std::uint8_t { bounded, exact };
 // whichever thread its slices run. `table` must outlive it. Nothing runs until run().
 class SlicedPathSearch final {
 public:
+    // A derived search is rebuilt from its copied inputs and deterministic expansion cursor.
+    struct Checkpoint {
+        MotionProfile limits;
+        Footprint footprint;
+        TrackingLayerView layer;
+        std::vector<TrackedLeaf> statics;
+        std::uint32_t interval{};
+        bool has_layer{}, has_statics{};
+        EntityId entity{};
+        std::uint64_t tick{};
+        math::Vec3 position{}, target{};
+        math::Fixed yaw{}, speed{};
+        bool through_hazards{};
+        std::optional<math::Vec3> filter_destination;
+        std::uint64_t expansions{};
+        bool started{}, ended{};
+    };
+    [[nodiscard]] Checkpoint checkpoint() const;
+    [[nodiscard]] static core::Result<SlicedPathSearch> from_checkpoint(const MotionTable& table, const Checkpoint& saved);
     SlicedPathSearch(const MotionTable& table, const MotionProfile& limits, const Footprint& footprint,
         const CollisionWorld& world, EntityId entity, std::uint64_t tick, math::Vec3 position, math::Fixed yaw,
         math::Fixed speed, math::Vec3 target, bool through_hazards = false,
@@ -200,6 +219,8 @@ public:
     // given, receives this slice's work.
     bool run(std::uint64_t expansions, PathSearchStats* stats = nullptr);
     [[nodiscard]] bool ended() const noexcept;
+    // FC-68: true only after all centre-path attempts fail, excluding prelude completion.
+    [[nodiscard]] bool exhausted() const noexcept;
     // The plan, once ended.
     [[nodiscard]] core::Result<MotionState> result() const;
     // The expansions of every slice so far.

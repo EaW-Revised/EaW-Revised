@@ -1,8 +1,262 @@
 #include "fighter_support.hpp"
+#include "eawr/sim/tactical/space.hpp"
+#include "eawr/sim/tactical/abilities.hpp"
+#include "../../apps/sim_headless/squadron_trace.hpp"
 
 #include <array>
+#include <sstream>
 
 namespace fighter_test_support {
+
+namespace {
+
+void test_launched_idle_fraction() {
+    // WMV-18 / FT-02: three actual mobile launches lose their carrier after
+    // arrival, beside three persistent ships inside the authored scan envelope.
+    // A 90-frame warm-up precedes a full 60-second observation. The 5% bound
+    // allows 90 inactive frames per squadron; permanent refusal cannot pass it.
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto table = motion();
+        auto& hangar = table.squadrons.spawners.front();
+        hangar.mobile = true;
+        hangar.entries = {{squadron_a, 3, 0}};
+        hangar.bays.front().position = at(600, 0);
+        tactical::TacticalSetup setup;
+        setup.seed = seed;
+        setup.players = players();
+        setup.units = {unit(1, carrier_type, empire, at(0, 0))};
+        auto made = tactical::TacticalSession::create(setup, sensors(), durability(), table, std::nullopt, combat());
+        expect(static_cast<bool>(made), "WMV-18: idle-fraction battle builds");
+        if (!made) return;
+        auto session = std::move(made).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        std::uint64_t tick = 0;
+        bool arrived = false;
+        for (; tick < 1500 && !arrived; ++tick) {
+            const auto step = session.step(executor);
+            expect(static_cast<bool>(step), "WMV-18: three mobile launches approach");
+            if (!step) return;
+            hashes.push_back(step.value().state_sha256);
+            arrived = session.squadrons().size() == 3;
+            for (const auto& squadron : session.squadrons()) {
+                const auto mind = session.squadron_state(squadron.container);
+                arrived = arrived && mind && mind->idle_cell.has_value();
+            }
+        }
+        expect(arrived, "WMV-18: all three launches arrive before the measured combat window");
+        if (!arrived) return;
+        expect(static_cast<bool>(session.submit({{tick, empire, 1}, {1}, tactical::DamagePayload{units(6000)}})),
+            "WMV-18: idle-fraction carrier loss submits");
+        // Let the escort loss commit before enemies exist, so the old escort
+        // allowance cannot admit pursuit on the destruction tick. Each ship
+        // is placed relative to its team's actual, separately claimed hold.
+        for (int wait = 0; wait < 3; ++wait) {
+            const auto step = session.step(executor);
+            expect(static_cast<bool>(step), "WMV-18: carrier loss settles before contact");
+            if (!step) return;
+            hashes.push_back(step.value().state_sha256);
+        }
+        const auto holds = session.units();
+        for (const auto& squadron : session.squadrons()) {
+            const auto team = std::find_if(holds.begin(), holds.end(), [&](const auto& value) {
+                return value.entity_id == squadron.container;
+            });
+            expect(team != holds.end(), "FT-02: every launched team retains its own idle hold");
+            if (team == holds.end()) return;
+            auto point = team->position;
+            point.x = Fixed::from_raw(point.x.raw() + units(650).raw());
+            expect(static_cast<bool>(session.stage_spawn(unit(0, frigate_type, rebel, point))),
+                "FT-02: each persistent ship starts 650 units from its team's actual hold");
+            std::cout << "IDLE-HOLD team=" << squadron.container << " x=" << team->position.x.raw() / one
+                << " y=" << team->position.y.raw() / one << " enemy-x=" << point.x.raw() / one
+                << " enemy-y=" << point.y.raw() / one << '\n';
+        }
+        std::uint64_t idle = 0, samples = 0, shots = 0;
+        for (int visit = 0; visit < 1890; ++visit) {
+            const auto step = session.step(executor);
+            expect(static_cast<bool>(step), "WMV-18: idle-fraction combat advances");
+            if (!step) return;
+            hashes.push_back(step.value().state_sha256);
+            if (visit < 90) continue;
+            for (const auto& squadron : session.squadrons()) {
+                const auto mind = session.squadron_state(squadron.container);
+                ++samples;
+                idle += !mind || mind->target == 0 || !mind->formation
+                    || mind->formation->attack_target == 0 ? 1U : 0U;
+            }
+            for (const auto& event : step.value().snapshot->combat_events())
+                shots += event.kind == tactical::CombatEventKind::weapon_fired ? 1U : 0U;
+        }
+        std::cout << "IDLE-FRACTION workers=" << workers << " idle=" << idle << " samples=" << samples
+            << " shots=" << shots << '\n';
+        expect(samples == 5400 && idle * 20 <= samples && shots != 0,
+            "WMV-18: three launched squadrons stay below 5% inactive over 60 seconds beside three ships");
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "WMV-18: 60-second idle fraction battle agrees every tick on 1/2/4/8 workers");
+    }
+}
+
+} // namespace
+
+void test_squadron_hunt() {
+    test_launched_idle_fraction();
+    // WAB-04/53/55/56: an arrived escort is in fighter-idle, while an
+    // unfinished escort keeps its flight. Hunt must patrol and fight again
+    // after an encountered target dies, without another player order.
+    for (const int origin : {0, 1, 2}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup setup;
+            setup.seed = seed;
+            setup.players = players();
+            auto table = motion();
+            if (origin == 0) {
+                table.squadrons.spawners.clear();
+                setup.units = {unit(10, squadron_a, empire, at(0, 0)),
+                    unit(11, craft_type, empire, at(0, 0)), unit(12, craft_type, empire, at(-10, 10))};
+                setup.squadrons = {{10, {11, 12}}};
+            } else {
+                setup.units = {unit(1, carrier_type, empire, at(0, 0))};
+                auto& hangar = table.squadrons.spawners.front();
+                hangar.mobile = true;
+                hangar.entries = {{squadron_a, 1, 0}};
+                hangar.bays.front().position = at(600, 0);
+            }
+            tactical::Footprint enemy_motion;
+            enemy_motion.type_id = frigate_type;
+            enemy_motion.locomotor = true;
+            table.footprints = {enemy_motion};
+            tactical::AbilityProfile hunt;
+            hunt.kind = tactical::AbilityKind::hunt;
+            tactical::UnitAbilityProfile holder;
+            holder.type_id = craft_type;
+            holder.abilities = {hunt};
+            tactical::AbilityTable abilities;
+            abilities.profiles = {holder};
+            tactical::EconomyRules economy;
+            economy.bounds = std::array{units(-4000), units(-4000), units(4000), units(4000)};
+            auto created = tactical::TacticalSession::create(setup, sensors(), durability(), table,
+                std::nullopt, combat(), {}, abilities, economy);
+            expect(static_cast<bool>(created), "WAB-53: Hunt combat fixture builds");
+            if (!created) return;
+            auto session = std::move(created).value();
+            tactical::TacticalContent trace_content;
+            trace_content.motion = table;
+            trace_content.combat = combat();
+            trace_content.abilities = abilities;
+            sim_headless::SquadronTrace diagnostic;
+            std::ostringstream diagnostic_rows;
+            sim_headless::SquadronTrace::header(diagnostic_rows);
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            eawr::sim::EntityId container = origin == 0 ? 10U : 0U;
+            std::uint64_t tick = 0;
+            std::vector<std::string> hashes;
+            bool arrived = origin == 0;
+            bool checked_flight = false;
+            for (; tick < 900 && !arrived; ++tick) {
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), "WAB-53: mobile escort approaches");
+                if (!step) return;
+                hashes.push_back(step.value().state_sha256);
+                if (!session.squadrons().empty()) container = session.squadrons().front().container;
+                const auto mind = session.squadron_state(container);
+                if (origin == 1 && mind && !checked_flight) {
+                    const auto saved = session.save_checkpoint_state();
+                    auto control = tactical::TacticalSession::from_replay(session.record(), sensors(), durability(), table,
+                        std::nullopt, combat(), {}, abilities, economy);
+                    expect(saved && control, "WAB-04: unfinished escort control checkpoint exists");
+                    if (!saved || !control) return;
+                    expect(static_cast<bool>(control.value().load_checkpoint_state(saved.value())),
+                        "WAB-04: unfinished escort control restores");
+                    expect(static_cast<bool>(control.value().submit({{control.value().completed_tick(), empire, 1}, {container},
+                        tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::activate}})),
+                        "WAB-04: Hunt starts during the unfinished escort");
+                    for (int visit = 0; visit < 30; ++visit) {
+                        const auto moved = control.value().step(executor);
+                        expect(static_cast<bool>(moved), "WAB-04: unfinished escort control advances");
+                        if (!moved) return;
+                        hashes.push_back(moved.value().state_sha256);
+                        const auto held = control.value().squadron_state(container);
+                        expect(held && held->mode == tactical::SquadronMode::escort && !held->idle_cell,
+                            "WAB-04/53: Hunt preserves the distant escort's flight before arrival");
+                    }
+                    checked_flight = true;
+                }
+                arrived = mind && mind->idle_cell.has_value();
+            }
+            expect(arrived, "WAB-53: actual mobile escort reaches its idle hold");
+            if (!arrived) return;
+            if (origin == 2) {
+                expect(static_cast<bool>(session.submit({{tick, empire, 1}, {1},
+                    tactical::DamagePayload{units(6000)}})), "WAB-53: carrier loss submits");
+                for (int wait = 0; wait < 3; ++wait, ++tick) {
+                    const auto step = session.step(executor);
+                    expect(static_cast<bool>(step), "WAB-53: carrier loss advances");
+                    if (!step) return;
+                    hashes.push_back(step.value().state_sha256);
+                }
+            }
+            const auto enemy = session.stage_spawn(unit(0, frigate_type, rebel, at(2000, 0)));
+            expect(static_cast<bool>(enemy), "WAB-55: distant moving-capable enemy stages");
+            if (!enemy) return;
+            expect(static_cast<bool>(session.submit({{tick, empire, 2}, {container},
+                tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::activate}})),
+                "WAB-04: Hunt activation submits");
+            bool patrol = false, acquired = false, fired = false;
+            bool reacquired = false, refired = false;
+            eawr::sim::EntityId replacement = 0;
+            for (int visit = 0; visit < 1300; ++visit, ++tick) {
+                if (visit == 650) {
+                    expect(static_cast<bool>(session.submit({{tick, empire, 3}, {enemy.value()},
+                        tactical::DamagePayload{units(6000)}})), "WAB-56: hunted target destruction submits");
+                    const auto next = session.stage_spawn(unit(0, frigate_type, rebel, at(2400, 0)));
+                    expect(static_cast<bool>(next), "WAB-56: replacement enemy stages");
+                    if (!next) return;
+                    replacement = next.value();
+                }
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), "WAB-56: Hunt combat advances");
+                if (!step) return;
+                hashes.push_back(step.value().state_sha256);
+                const auto mind = session.squadron_state(container);
+                expect(mind.has_value(), "WAB-56: Hunt squadron remains live throughout combat");
+                if (!mind) return;
+                if (workers == 1) {
+                    diagnostic.observe(diagnostic_rows, session, trace_content);
+                    if (session.completed_tick() % 30 == 0)
+                        expect(session.state_sha256() == step.value().state_sha256,
+                            "Hunt diagnostic never changes the running simulation hash");
+                }
+                const auto live = session.units();
+                const auto team = std::find_if(live.begin(), live.end(), [container](const auto& value) {
+                    return value.entity_id == container;
+                });
+                patrol = patrol || (team != live.end() && team->order.kind == tactical::OrderKind::attack_move);
+                acquired = acquired || mind->target == enemy.value();
+                reacquired = reacquired || (replacement != 0 && mind->target == replacement);
+                for (const auto& event : step.value().snapshot->combat_events()) {
+                    if (event.kind != tactical::CombatEventKind::weapon_fired
+                        || std::find(mind->roster.begin(), mind->roster.end(), event.shooter) == mind->roster.end()) continue;
+                    fired = fired || event.target == enemy.value();
+                    refired = refired || (replacement != 0 && event.target == replacement);
+                }
+                for (const auto member : mind->roster) {
+                    const auto active = session.ability_state(member);
+                    expect(active && active->slots.front().active, "WAB-51: autonomous patrol/retarget keeps Hunt on");
+                }
+            }
+            std::cout << "HUNT origin=" << origin << " workers=" << workers << " patrol=" << patrol
+                << " acquired=" << acquired << " fired=" << fired << " reacquired=" << reacquired
+                << " refired=" << refired << '\n';
+            expect(patrol && acquired && fired, "WAB-53/55/56: idle hunter patrols, engages and fires");
+            expect(reacquired && refired, "WAB-56: hunter engages and fires after its target dies");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "WAB-56: Hunt engagement and target loss match every tick on 1/2/4/8 workers");
+        }
+    }
+}
 
 // frigate far beyond its chase reach; the hashes are the same with 1, 2 and 4 workers.
 struct OrderRun {
@@ -385,6 +639,10 @@ struct ApproachRun {
     if (!created) return run;
     auto session = std::move(created).value();
     expect(static_cast<bool>(session.submit({{5, empire, 1}, {10}, tactical::AttackPayload{20}})), "C-16: the attack submits");
+    const std::array<std::uint8_t, 4> path_tag{'S', 'Q', 'A', 'P'};
+    const auto initial = session.canonical_state_bytes();
+    expect(std::search(initial.begin(), initial.end(), path_tag.begin(), path_tag.end()) == initial.end(),
+        "SQAP: a squadron with no attack path emits no optional block");
     if (again) {
         expect(static_cast<bool>(session.submit({{60, empire, 2}, {10}, tactical::AttackPayload{20}})),
             "C-16: the second attack submits");
@@ -398,6 +656,35 @@ struct ApproachRun {
         }
         run.hashes.push_back(stepped.value().state_sha256);
         if (const auto* craft = instance(*stepped.value().snapshot, 11)) run.leader[tick] = position(*craft);
+        if (tick == 6) {
+            const auto state = session.squadron_state(10);
+            expect(state && state->attack_path && !state->attack_path->stack.empty()
+                && state->attack_path->stack.back().trackers.at(11).started
+                && state->attack_path->stack.back().trackers.at(12).started,
+                "FSC-73: the subsequent admitted flight starts each member tracker");
+        }
+        if (tick == 5) {
+            const auto state = session.squadron_state(10);
+            expect(state && state->formation && state->formation->attack_target == 20,
+                "FSC-73: the admitted attack destination is retained before future flight");
+            expect(state && state->attack_path && !state->attack_path->stack.empty(),
+                "FSC-73: the later formation turn installs a path on container and roster");
+            if (state && state->attack_path && !state->attack_path->stack.empty()) {
+                const auto& route = state->attack_path->stack.back();
+                expect(route.trackers.size() == 3 && !route.trackers.at(11).started,
+                    "FSC-73: installation is separate from first admitted flight");
+                const auto installed_frame = stepped.value().snapshot->completed_tick();
+                expect(state->attack_path->next_refresh_frame >= installed_frame + 31
+                    && state->attack_path->next_refresh_frame <= installed_frame + 60,
+                    "FSC-72/FC-44: initial formation refresh is seeded 31..60 frames ahead");
+            }
+            const auto bytes = session.canonical_state_bytes();
+            expect(std::search(bytes.begin(), bytes.end(), path_tag.begin(), path_tag.end()) != bytes.end(),
+                "SQAP: accepted geometry has a versioned optional block");
+            session.scramble_storage_for_testing();
+            expect(session.canonical_state_bytes() == bytes,
+                "SQAP: registry reconstruction preserves path and refresh state");
+        }
     }
     return run;
 }
@@ -427,6 +714,66 @@ void test_attack_order_approach() {
     }
 }
 
+// SQAP is part of the checkpoint (review of the squadron-approach change). A checkpoint taken while a
+// squadron holds an accepted attack path and flies its approach restores the path, its trackers
+// and refresh state, and the run then continues like the live one, on 1, 2, 4 and 8 workers.
+void test_attack_path_checkpoint() {
+    const std::array<std::uint8_t, 4> path_tag{'S', 'Q', 'A', 'P'};
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const auto label = "SQAP checkpoint (" + std::to_string(workers) + " workers): ";
+        tactical::TacticalSetup setup;
+        setup.seed = seed;
+        setup.players = players();
+        setup.units = {unit(10, squadron_a, empire, at(0, 0)), unit(11, craft_type, empire, at(0, 0)),
+            unit(12, craft_type, empire, at(-10, 10)), unit(20, frigate_type, rebel, at(3000, 0, -400))};
+        setup.squadrons = {{10, {11, 12}}};
+        auto table = motion();
+        table.squadrons.spawners.clear();
+        auto created = tactical::TacticalSession::create(setup, sensors(), durability(), table, std::nullopt, combat());
+        expect(static_cast<bool>(created), label + "the session builds");
+        if (!created) return;
+        auto live = std::move(created).value();
+        expect(static_cast<bool>(live.submit({{5, empire, 1}, {10}, tactical::AttackPayload{20}})),
+            label + "the attack submits");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto step = [&](tactical::TacticalSession& value) {
+            const auto stepped = value.step(executor);
+            expect(static_cast<bool>(stepped), label + "the step succeeds");
+            return stepped ? stepped.value().state_sha256 : std::string{};
+        };
+        for (int tick = 0; tick < 20; ++tick) (void)step(live);
+        const auto state = live.squadron_state(10);
+        expect(state && state->attack_path && !state->attack_path->stack.empty()
+            && state->attack_path->stack.back().trackers.at(11).started && state->approach,
+            label + "the squadron holds a started attack path on its approach at the save");
+        const auto live_bytes = live.canonical_state_bytes();
+        expect(std::search(live_bytes.begin(), live_bytes.end(), path_tag.begin(), path_tag.end()) != live_bytes.end(),
+            label + "the live state carries the path block");
+        const auto saved = live.save_checkpoint_state();
+        auto fresh = tactical::TacticalSession::from_replay(live.record(), sensors(), durability(), table,
+            std::nullopt, combat());
+        expect(saved && fresh, label + "the save and a fresh session exist");
+        if (!saved || !fresh) return;
+        auto restored = std::move(fresh).value();
+        expect(static_cast<bool>(restored.load_checkpoint_state(saved.value())), label + "the checkpoint loads");
+        const auto restored_state = restored.squadron_state(10);
+        expect(restored_state && state && restored_state->attack_path == state->attack_path
+            && restored_state->approach == state->approach, label + "the restored squadron keeps its path");
+        expect(restored.canonical_state_bytes() == live_bytes, label + "the restored state is the live state");
+        const auto resaved = restored.save_checkpoint_state();
+        expect(resaved && resaved.value() == saved.value(), label + "the checkpoint round-trips");
+        std::vector<std::string> hashes;
+        for (int tick = 0; tick < 380; ++tick) {
+            const auto expected = step(live);
+            expect(step(restored) == expected, label + "the restored run follows the live run");
+            hashes.push_back(expected);
+        }
+        if (workers == 1U) reference = hashes;
+        else expect(hashes == reference, label + "the continuation hashes like one worker");
+    }
+}
+
 // C-10 (#424, FO-04): a player attack on a
 // squadron targets its team container, which has no weapons target of its own; each attacker
 // #531 (space-orders OR-26): a squadron ordered to attack one hardpoint of a ship has each craft's
@@ -437,6 +784,215 @@ struct HardpointRun {
     std::vector<std::string> hashes;
     std::vector<tactical::CombatEvent> shots; // the craft's shots at the frigate
 };
+
+// WSQ-15/18: a surviving attachment well beyond the body's strafe circle must remain
+// reachable. Two different craft flight profiles attack an otherwise unarmed station.
+struct DistantHardpointRun {
+    std::vector<std::string> hashes;
+    std::array<bool, 2> reached{};
+    std::array<bool, 2> damaged{};
+    bool replacement_reached{};
+    bool replacement_damaged{};
+};
+
+[[nodiscard]] DistantHardpointRun run_distant_hardpoint(const std::size_t workers,
+    const bool ordered, const bool rotated, const bool replace, const bool ion,
+    const bool multi_choice, const bool separate) {
+    DistantHardpointRun run;
+    constexpr auto bomber_type = craft_type + 1;
+    constexpr auto bomber_team = squadron_b + 1;
+    tactical::TacticalSetup setup;
+    setup.seed = seed;
+    setup.players = players();
+    setup.units = {unit(10, squadron_a, empire, at(650, 0)), unit(11, craft_type, empire, at(650, 0)),
+        unit(12, craft_type, empire, at(640, 10)), unit(20, carrier_type, rebel, at(700, 0)),
+        unit(30, bomber_team, empire, at(650, -50)), unit(31, bomber_type, empire, at(650, -50))};
+    setup.squadrons = {{10, {11, 12}}, {30, {31}}};
+    if (multi_choice) {
+        setup.units[4].position = at(650, -1600);
+        setup.units[5].position = setup.units[4].position;
+    }
+    if (rotated) setup.units[3].rotation = {Fixed{}, Fixed{},
+        math::sin_turn(Fixed::from_raw(one / 8)), math::cos_turn(Fixed::from_raw(one / 8))};
+    auto table = motion();
+    table.squadrons.spawners.clear();
+    auto bomber = table.squadrons.craft.front();
+    bomber.type_id = bomber_type;
+    bomber.max_speed = Fixed::from_raw(one * 36 / 10);
+    bomber.rate_of_turn = units(4);
+    table.squadrons.craft.push_back(bomber);
+    table.squadrons.squadrons.push_back({bomber_team, {bomber_type}, {at(0, 0)},
+        units(1000), units(200), units(300), units(20)});
+    auto health = durability();
+    health.damage.emplace();
+    health.damage->shield_recharge_frames = 30;
+    auto bomber_health = health.profiles[1];
+    bomber_health.type_id = bomber_type;
+    health.profiles.push_back(bomber_health);
+    tactical::HardpointProfile point;
+    point.role = tactical::HardpointRole::weapon;
+    point.destroyable = true;
+    point.max_health = units(10000);
+    health.profiles.front().max_hull = units(100000);
+    health.profiles.front().hardpoints = {point, point, point};
+    auto weapons = combat();
+    auto bomber_combat = weapons.profiles[1];
+    bomber_combat.type_id = bomber_type;
+    weapons.profiles.push_back(bomber_combat);
+    weapons.footprints.push_back({carrier_type, units(250), units(50), units(50)});
+    for (auto& profile : weapons.profiles) {
+        if (profile.type_id == craft_type || profile.type_id == bomber_type) {
+            profile.priority_set.reset(); // nearest live attachment, with no fixed stock priorities
+            auto& gun = profile.weapons.front();
+            gun.shot.emplace();
+            gun.shot->speed = units(50);
+            gun.shot->max_travel = gun.range;
+            gun.shot->damage = units(10);
+            if (ion) {
+                gun.hardpoint = 0;
+                gun.ability_shot = gun.shot;
+            }
+        } else if (profile.type_id == carrier_type) {
+            profile.star_base = true;
+            profile.hardpoints = {{0, at(0, 0), true}, {1, at(0, 2000), true}, {2, at(0, -3000), true}};
+            profile.collision = tactical::CollisionBox{at(-50, -3050, -50), at(50, 2050, 50)};
+        }
+    }
+    auto sight = sensors();
+    sight.push_back({bomber_type, units(8000)});
+    const auto by_type = [](const auto& left, const auto& right) { return left.type_id < right.type_id; };
+    std::sort(health.profiles.begin(), health.profiles.end(), by_type);
+    std::sort(weapons.profiles.begin(), weapons.profiles.end(), by_type);
+    std::sort(sight.begin(), sight.end(), by_type);
+    tactical::AbilityTable abilities;
+    if (ion) {
+        tactical::AbilityProfile own;
+        own.kind = tactical::AbilityKind::ion_cannon_shot;
+        auto team = own;
+        team.team = true;
+        team.recharge_frames = 600;
+        abilities.profiles = {{craft_type, {own}, false}, {bomber_type, {own}, false},
+            {squadron_a, {team}, false}, {bomber_team, {team}, false}};
+        abilities.humans = {empire, rebel};
+    }
+    auto created = tactical::TacticalSession::create(setup, sight, health, table, std::nullopt, weapons, {}, abilities);
+    expect(static_cast<bool>(created), created ? "distant hardpoint: session builds"
+        : "distant hardpoint: session builds: " + created.error().message);
+    if (!created) return run;
+    auto world = std::move(created).value();
+    if (!ion) expect(static_cast<bool>(world.submit({{1, rebel, 0}, {20}, tactical::DamagePayload{units(10000), 0}})),
+        "distant hardpoint: core attachment destruction submits");
+    if (!replace && !multi_choice) expect(static_cast<bool>(world.submit({{1, rebel, 1}, {20}, tactical::DamagePayload{units(10000), 2}})),
+        "distant hardpoint: only the distant attachment survives");
+    const auto requested = ordered ? 1U : tactical::attack_hull;
+    if (ion) {
+        tactical::AbilityPayload activate{tactical::AbilityKind::ion_cannon_shot, tactical::AbilityAction::activate};
+        activate.target = 20;
+        activate.target_hardpoint = 1;
+        expect(static_cast<bool>(world.submit({{5, empire, 0}, {10}, activate})), "distant hardpoint: explicit fighter ion target submits");
+        expect(static_cast<bool>(world.submit({{5, empire, 1}, {30}, activate})), "distant hardpoint: explicit bomber ion target submits");
+    } else if (separate) {
+        expect(static_cast<bool>(world.submit({{5, empire, 0}, {10}, tactical::AttackPayload{20, requested}})),
+            "distant hardpoint: independent first coordinator submits");
+        expect(static_cast<bool>(world.submit({{5, empire, 1}, {30}, tactical::AttackPayload{20, requested}})),
+            "distant hardpoint: independent second coordinator submits");
+    } else expect(static_cast<bool>(world.submit({{5, empire, 0}, {10, 30}, tactical::AttackPayload{20, requested}})),
+        "distant hardpoint: coordinated squadron attack submits");
+    const auto transform = math::to_matrix(setup.units[3].rotation, setup.units[3].position).value();
+    const auto first = math::transform_point(transform, at(0, 2000)).value();
+    const auto second = math::transform_point(transform, at(0, -3000)).value();
+    const eawr::platform::ThreadWorkerAdapter executor(workers);
+    std::optional<tactical::TacticalSession> restored;
+    for (int tick = 0; tick < (replace ? 3400 : 1600); ++tick) {
+        if (replace && tick == 1499) {
+            const tactical::PlayerCommand destroy{{1500, rebel, 1}, {20}, tactical::DamagePayload{units(10000), 1}};
+            expect(static_cast<bool>(world.submit(destroy)), "distant hardpoint: retained attachment destruction submits");
+            if (restored) expect(static_cast<bool>(restored->submit(destroy)), "distant hardpoint: restored destruction submits");
+        }
+        const auto step = world.step(executor);
+        expect(static_cast<bool>(step), step ? "distant hardpoint: step succeeds"
+            : "distant hardpoint: step succeeds: " + step.error().message);
+        if (!step) break;
+        run.hashes.push_back(step.value().state_sha256);
+        if (tick == 5 && !ordered) {
+            // Tick-key 5 is applied by this step: no later flight/refresh may repair the assertion.
+            for (const auto id : {10U, 30U}) {
+                const auto mind = world.squadron_state(id);
+                const auto expected = separate && id == 30 ? second : first;
+                expect(mind && mind->attack_path && mind->attack_path->cached_position == expected,
+                    "distant hardpoint: the order-tick path is already planned to the chosen live attachment");
+                expect(mind && mind->formation && mind->formation->attack_hardpoint == (separate && id == 30 ? 2U : 1U),
+                    "distant hardpoint: the order-tick choice is retained consistently with the cohort");
+            }
+        }
+        if (restored) {
+            const auto continued = restored->step(executor);
+            expect(continued && continued.value().state_sha256 == run.hashes.back(),
+                "distant hardpoint: checkpoint continuation matches the uninterrupted run");
+        }
+        if (tick == 20) {
+            const auto saved = world.save_checkpoint_state();
+            auto fresh = tactical::TacticalSession::from_replay(world.record(), sight, health, table, std::nullopt, weapons, {}, abilities);
+            expect(saved && fresh, "distant hardpoint: checkpoint and fresh session exist");
+            if (saved && fresh) {
+                restored.emplace(std::move(fresh).value());
+                expect(static_cast<bool>(restored->load_checkpoint_state(saved.value())), "distant hardpoint: checkpoint restores");
+                expect(restored->canonical_state_bytes() == world.canonical_state_bytes(),
+                    "distant hardpoint: restored destination attachment has identical state");
+            }
+        }
+        for (const auto id : {11U, 12U, 31U}) {
+            const auto* craft = instance(*step.value().snapshot, id);
+            if (craft == nullptr) continue;
+            const auto own = position(*craft);
+            if (tactical::within_range(own, separate && id == 31 ? second : first, units(500), tactical::RangeMetric::planar))
+                run.reached[id == 31 ? 1 : 0] = true;
+            if (replace && tick > 1500 && tactical::within_range(own, second, units(500), tactical::RangeMetric::planar))
+                run.replacement_reached = true;
+        }
+        for (const auto& event : step.value().snapshot->combat_events()) {
+            if (event.kind != tactical::CombatEventKind::projectile_hit || event.target != 20) continue;
+            if (event.target_hardpoint == (separate && event.shooter == 31 ? 2U : 1U))
+                run.damaged[event.shooter == 31 ? 1 : 0] = true;
+            if (replace && event.target_hardpoint == 2 && tick > 1500) run.replacement_damaged = true;
+        }
+        if (const auto mind = world.squadron_state(10); tick > 10 && tick < 1500 && mind && mind->formation) {
+            expect(mind->formation->attack_hardpoint == 1,
+                "distant hardpoint: a live destination attachment is retained while the craft flies");
+            const auto activated = ion ? world.ability_state(10) : std::nullopt;
+            if (!ion || (activated && activated->slots.front().active))
+                expect(mind->target_hardpoint == requested,
+                    "distant hardpoint: implicit selection does not change the explicit team order");
+            const auto other = world.squadron_state(30);
+            expect(other && other->formation && other->formation->attack_hardpoint == (separate ? 2U : 1U),
+                "distant hardpoint: a coordinator shares one choice while independent orders keep their own choice");
+        }
+    }
+    const auto final = world.durability_state(20);
+    expect(final && (replace || final->hardpoints[1] < units(10000)),
+        "distant hardpoint: actual projectile damage reduces surviving attachment health");
+    return run;
+}
+
+void test_distant_hardpoints() {
+    for (const auto mode : {0, 1, 2, 3, 4, 5}) {
+        const bool ordered = mode == 1 || mode == 2 || mode == 3;
+        const bool rotated = mode == 1;
+        const bool replace = mode == 2;
+        const bool ion = mode == 3;
+        const bool multi_choice = mode >= 4;
+        const bool separate = mode == 5;
+        const auto reference = run_distant_hardpoint(1, ordered, rotated, replace, ion, multi_choice, separate);
+        expect(reference.reached[0] && reference.reached[1], "distant hardpoint: both flight profiles reach weapon range");
+        expect(reference.damaged[0] && reference.damaged[1], "distant hardpoint: both squadrons hit the live attachment");
+        expect(!replace || (reference.replacement_reached && reference.replacement_damaged),
+            "distant hardpoint: loss of the retained attachment redirects flight and damage to the survivor");
+        for (const std::size_t workers : {2U, 4U, 8U}) {
+            const auto again = run_distant_hardpoint(workers, ordered, rotated, replace, ion, multi_choice, separate);
+            expect(again.hashes == reference.hashes, "distant hardpoint: hashes agree on 1/2/4/8 workers");
+        }
+    }
+}
 
 [[nodiscard]] HardpointRun run_hardpoint_attack(const std::size_t workers) {
     HardpointRun run;
@@ -484,6 +1040,7 @@ struct HardpointRun {
 }
 
 void test_squadron_hardpoint_attack() {
+    test_distant_hardpoints();
     const auto run = run_hardpoint_attack(1);
     expect(run.hashes.size() == 800, "C-17: 800 ticks");
     std::size_t before = 0;

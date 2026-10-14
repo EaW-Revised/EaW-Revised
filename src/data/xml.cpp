@@ -106,6 +106,10 @@ core::Result<LoadResult> load_catalog(
     impl->profile = profile;
     impl->generation = next_generation.fetch_add(1, std::memory_order_relaxed);
     std::vector<core::Diagnostic> diagnostics;
+    LoadHealth health;
+    const auto fail_load = [&health](const core::Diagnostic& diagnostic) {
+        if (!health.fatal) health.fatal = diagnostic;
+    };
     std::unordered_map<std::string, std::pair<bool, std::string>> parse_outcomes;
 
     // Inventory coverage is deliberately wider than the active XML registries:
@@ -141,6 +145,8 @@ core::Result<LoadResult> load_catalog(
                 record.value().source_id, record.value().layer_id, 1, 1};
             diagnostics.push_back((!bytes ? bytes.error() : record.error()));
             diagnostics.back().code = std::string(diagnostic_codes::registry_invalid);
+            ++health.registry_invalid;
+            fail_load(diagnostics.back());
             continue;
         }
         root_receipt.source = SourceLocation{record.value().canonical_path,
@@ -153,6 +159,8 @@ core::Result<LoadResult> load_catalog(
             parse_outcomes[record.value().canonical_path] = {false, parsed.error().message};
             diagnostics.push_back(parsed.error());
             diagnostics.back().code = std::string(diagnostic_codes::registry_invalid);
+            ++health.registry_invalid;
+            fail_load(diagnostics.back());
             continue;
         }
         parse_outcomes[record.value().canonical_path] = {true, "parsed active registry XML"};
@@ -165,6 +173,8 @@ core::Result<LoadResult> load_catalog(
                 "registry root is '" + std::string(parsed.value().root.name()) + "', expected '" +
                     std::string(registry.root) + "'",
                 &source));
+            ++health.registry_invalid;
+            fail_load(diagnostics.back());
             continue;
         }
         root_receipt.outcome = "loaded";
@@ -191,7 +201,18 @@ core::Result<LoadResult> load_catalog(
                 auto error = !included_bytes ? included_bytes.error() : included_record.error();
                 error.code = std::string(diagnostic_codes::registry_include_missing);
                 error.message = "active registry include is unavailable: " + path;
+                const bool unreadable = registry_file.outcome == "read_error";
                 diagnostics.push_back(std::move(error));
+                if (unreadable) {
+                    // The file exists and cannot be read: not an omitted include (R-10, R-13).
+                    ++health.include_failed;
+                    if (registry.category == Category::hardpoint) {
+                        ++health.hardpoint_include_failed;
+                        fail_load(diagnostics.back());
+                    }
+                } else {
+                    ++health.include_missing;
+                }
                 impl->registry_files.push_back(std::move(registry_file));
                 ++global_registry_order;
                 continue;
@@ -205,6 +226,12 @@ core::Result<LoadResult> load_catalog(
                 registry_file.outcome = "parse_error";
                 parse_outcomes[included_record.value().canonical_path] = {false, included.error().message};
                 diagnostics.push_back(included.error());
+                ++health.include_failed;
+                if (registry.category == Category::hardpoint) {
+                    // C-06: R-10 and R-13 do not make an admitted hardpoint parse failure recoverable.
+                    ++health.hardpoint_include_failed;
+                    fail_load(diagnostics.back());
+                }
                 impl->registry_files.push_back(std::move(registry_file));
                 ++global_registry_order;
                 continue;
@@ -272,7 +299,45 @@ core::Result<LoadResult> load_catalog(
     }
 
     index_winners(*impl, diagnostics);
-    return core::Result<LoadResult>::success(LoadResult{Catalog(std::move(impl)), std::move(diagnostics)});
+    std::vector<const Definition*> member_definitions;
+    member_definitions.reserve(impl->definitions.size());
+    for (const auto& definition : impl->definitions) member_definitions.push_back(&definition);
+    derive_member_flags(member_definitions, impl->member_flags, impl->member_flags_issue);
+    return core::Result<LoadResult>::success(LoadResult{Catalog(std::move(impl)), std::move(diagnostics), std::move(health)});
+}
+
+core::Result<LoadResult> load_catalog_strict(const vfs::Vfs& vfs, const Profile profile) {
+    return load_catalog_strict(vfs, profile, LoadOptions{});
+}
+
+core::Result<LoadResult> load_catalog_strict(
+    const vfs::Vfs& vfs,
+    const Profile profile,
+    const LoadOptions& options
+) {
+    auto loaded = load_catalog(vfs, profile, options);
+    if (loaded && loaded.value().health.failed()) {
+        auto error = *loaded.value().health.fatal;
+        error.severity = core::Severity::error;
+        return core::Result<LoadResult>::failure(std::move(error));
+    }
+    return loaded;
+}
+
+std::string describe_load_health(const LoadHealth& health) {
+    std::string text;
+    const auto add = [&text](std::string_view name, const std::size_t count) {
+        if (count == 0) return;
+        if (!text.empty()) text += ' ';
+        text += name;
+        text += '=';
+        text += std::to_string(count);
+    };
+    add("registry_invalid", health.registry_invalid);
+    add("include_failed", health.include_failed);
+    add("hardpoint_include_failed", health.hardpoint_include_failed);
+    add("include_missing", health.include_missing);
+    return text;
 }
 
 

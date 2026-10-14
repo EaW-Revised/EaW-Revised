@@ -99,19 +99,43 @@ def security_scan(root: Path, config: dict[str, Any], files: Iterable[Path],
     patterns = [(name, re.compile(regex)) for name, regex in {**scan["regex"], **(extra_regex or {})}.items()]
     terms = sorted(set(extra_terms), key=len, reverse=True)
     term_pattern = re.compile("|".join(re.escape(t) for t in terms), re.I) if terms else None
-    allowed = [(item["path"], re.compile(item["regex"]), item["patterns"]) for item in scan["allow"]]
+    allowed = [(item["path"], re.compile(item["regex"]), item["patterns"],
+                re.compile(item["value_regex"]) if "value_regex" in item else None,
+                bool(item.get("match_only")))
+               for item in scan["allow"]]
+    identifiers = {(item["path"], item["identifier"]) for item in scan.get("identifier_allow", [])}
+    # These two patterns never use context regexes: only reviewed full-line bytes
+    # in an exact file can suppress them. New or changed text always needs review.
+    exact_patterns = {"lan-host", "private-ipv4"}
+    exact_lines = {(item["path"], item["sha256"], name)
+                   for item in scan.get("exact_line_allow", []) for name in item["patterns"]
+                   if name in exact_patterns}
     hits = []
     for path in files:
         relpath = rel(path, root)
         text = read_text(path, config["assets"].get("text_encodings", {}).get(relpath, "utf-8"))
         lines = [(0, relpath)] + list(enumerate(text.splitlines(), 1)) if text is not None else [(0, relpath)]
         for number, line in lines:
-            found = [(name, m.group(0)) for name, rx in patterns for m in rx.finditer(line)]
+            line_digest = hashlib.sha256(line.encode("utf-8")).hexdigest()
+            found = [(name, m, False) for name, rx in patterns for m in rx.finditer(line)]
             if term_pattern is not None:
-                found += [("private-name", m.group(0)) for m in term_pattern.finditer(line)]
-            for name, value in found:
-                if number and name not in (extra_regex or {}) and name != "private-name" and any(
-                        name in names and matches(relpath, p) and rx.search(line) for p, rx, names in allowed):
+                found += [("private-name", m, True) for m in term_pattern.finditer(line)]
+            for name, match, private_term in found:
+                value = match.group(0)
+                if private_term and any(
+                        (relpath, token.group(0)) in identifiers
+                        and token.start() <= match.start() and token.end() >= match.end()
+                        for token in re.finditer(r"(?<!\w)[A-Za-z_][A-Za-z0-9_]*(?!\w)", line)):
+                    continue
+                if number and name not in (extra_regex or {}) and (relpath, line_digest, name) in exact_lines:
+                    continue
+                if number and name not in (extra_regex or {}) and name not in exact_patterns | {"private-name"} and any(
+                        name in names and matches(relpath, p) and rx.search(line)
+                        and (value_rx is None or value_rx.fullmatch(value))
+                        and (not match_only or any(context.start() <= match.start()
+                                                  and context.end() >= match.end()
+                                                  for context in rx.finditer(line)))
+                        for p, rx, names, value_rx, match_only in allowed):
                     continue
                 hits.append(f"{relpath}:{number}: {name}: {value}")
     return hits

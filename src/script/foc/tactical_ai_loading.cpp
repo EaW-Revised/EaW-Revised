@@ -244,6 +244,16 @@ std::vector<std::string> required_modules(const AiSetup& setup) {
     if (setup.bounds && !setup.xml.empty()) {
         for (auto list : {plan_library_modules(), selected_plans()}) paths.insert(paths.end(), list.begin(), list.end());
     }
+    // SOS-01/45: authored module names are data, never a stock admission list.
+    std::set<std::string> objects;
+    for (const auto& type : setup.content.types) {
+        const auto script = upper(type.lua_script);
+        if (admitted_object_script(script)) objects.insert(script);
+    }
+    if (!objects.empty()) paths.push_back("Data/Scripts/Library/PGStateMachine.lua");
+    // SOS-17: the stock Sundered Heart script also requires its hero-plan library.
+    if (objects.contains("SUNDERED_HEART")) paths.push_back("Data/Scripts/GameObject/HeroPlanAttach.lua");
+    for (const auto& script : objects) paths.push_back("Data/Scripts/GameObject/" + script + ".lua");
     return paths;
 }
 
@@ -253,7 +263,7 @@ std::vector<std::string> selected_plans() {
              "spacescout", "hidesurpriseunits", "hidetransports", "turboattack", "turboattacklocation", "spaceartillery",
              "movetolocation", "movetolocationrush", "retreatplan", "burnunits", "ai_plan_expansiongeneric_defendspacestation",
              "tacticalmultiplayerbuildspaceunitsgeneric", "ai_plan_expansiongeneric_skirmishupgradespacestation", "purchasespaceupgradesgeneric",
-             "buildrefineryspace", "buildstructurespace"}) {
+             "buildrefineryspace", "buildstructurespace", "groundtospacedamage", "groundtospacedisable"}) {
         paths.push_back(std::string("Data/Scripts/AI/SpaceMode/") + name + ".lua");
     }
     paths.push_back("Data/Scripts/AI/ai_plan_expansiongeneric_generatemagiccashdrop.lua");

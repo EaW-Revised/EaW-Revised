@@ -2,16 +2,23 @@
 
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/data/xml.hpp"
+#include "eawr/data/tag_trace.hpp"
 #include "eawr/presentation/ui/theme.hpp"
 #include "eawr/presentation/animation/animation.hpp"
+#include "eawr/presentation/ui/ability_buttons.hpp"
 
 #include <algorithm>
 #include <charconv>
+#include <cctype>
+#include <cmath>
 #include <map>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
+#include <tuple>
+#include <sstream>
 
 namespace eawr::presentation::ui {
 namespace {
@@ -62,7 +69,8 @@ HudShellButton shell_button(const data::ui::ShellAnchor& anchor, const data::ui:
     return button;
 }
 
-HudBar shell_bar(const data::ui::ShellAnchor& anchor, const data::ui::CommandBarComponent& component) {
+HudBar shell_bar(const data::ui::ShellAnchor& anchor, const data::ui::CommandBarComponent& component,
+                 std::vector<core::Diagnostic>& diagnostics) {
     HudBar bar;
     bar.name = anchor.name;
     bar.origin = anchor.origin.value_or(
@@ -73,7 +81,12 @@ HudBar shell_bar(const data::ui::ShellAnchor& anchor, const data::ui::CommandBar
     bar.back.assign(back.begin(), back.end());
     const auto overlay = component.list(data::ui::Field::bar_overlay_name);
     bar.overlay.assign(overlay.begin(), overlay.end());
-    bar.max_level = component.integer(data::ui::Field::max_bar_level).value_or(10);
+    const auto max_level = component.integer(data::ui::Field::max_bar_level);
+    if (!max_level) {
+        diagnostics.push_back(warning(diagnostic_codes::hud_shell_part,
+            component.name + " Max_Bar_Level is absent or malformed; the FoC value is used"));
+    }
+    bar.max_level = max_level.value_or(10); // xml-fallback: Max_Bar_Level; load: src/presentation/ui/hud_shell.cpp#shell_bar
     bar.smooth = component.flag(data::ui::Field::smooth_bar);
     return bar;
 }
@@ -124,6 +137,60 @@ std::uint32_t alt_variant(const HudFaction faction) noexcept {
     return data::ui::alt_variant::rebel;
 }
 
+std::string tactical_tech_text(const std::string_view localized_label, const TacticalTechView& view) {
+    // HCB-61: multiplayer space and Consortium campaign hide this label.
+    if ((view.multiplayer && view.space) || (!view.multiplayer && view.faction == HudFaction::underworld)) return {};
+    return std::string(localized_label) + " " + std::to_string(view.displayed_level);
+}
+
+std::optional<HudIconText> hud_readout_style(const data::ui::CommandBarCatalog& catalog,
+    const std::string_view name, const data::ui::ShellAnchor& anchor) {
+    const auto* component = catalog.find(name);
+    if (!component) return std::nullopt;
+    HudIconText text;
+    text.text.name = std::string(name);
+    text.text.rect = anchor.rect;
+    text.origin = anchor.origin.value_or(assets::Vec2f{
+        anchor.rect.x + anchor.rect.width / 2.0F, anchor.rect.y + anchor.rect.height / 2.0F});
+    text.text.face = std::string(component->text(data::ui::Field::font_name));
+    if (text.text.face.empty()) text.text.face = std::string(last_resort_face);
+    text.text.point_size = component->integer(data::ui::Field::font_point_size).value_or(8);
+    if (const auto colour = component->color(data::ui::Field::text_color)) text.text.colour = *colour;
+    text.text.outline = component->flag(data::ui::Field::text_outline);
+    text.text.emboss = component->flag(data::ui::Field::text_emboss);
+    text.icon = first_token(*component, data::ui::Field::icon_texture_name);
+    text.text_offset = component->vec2(data::ui::Field::text_offset).value_or(data::ui::Vec2{});
+    text.right_justified = component->flag(data::ui::Field::right_justified);
+    text.left_justified = component->flag(data::ui::Field::left_justified);
+    text.blink_duration = component->number(data::ui::Field::blink_duration).value_or(0.0F);
+    text.blink_rate = component->number(data::ui::Field::blink_rate).value_or(0.0F);
+    text.icon_offset = component->vec2(data::ui::Field::icon_offset).value_or(data::ui::Vec2{});
+    return text;
+}
+
+std::optional<HudTimerStyle> hud_timer_style(const data::ui::CommandBarCatalog& catalog,
+                                           const std::string_view name) {
+    const auto* component = catalog.find(name);
+    if (!component || !component->flag(data::ui::Field::no_shell)) return std::nullopt;
+    data::ui::ShellAnchor anchor;
+    anchor.name = std::string(name);
+    HudTimerStyle style;
+    style.button = shell_button(anchor, *component);
+    style.build = first_token(*component, data::ui::Field::build_texture_name);
+    if (const auto colour = component->color(data::ui::Field::color)) style.colour = *colour;
+    style.blink_duration = component->number(data::ui::Field::blink_duration).value_or(0.0F);
+    style.blink_rate = component->number(data::ui::Field::blink_rate).value_or(0.0F);
+    style.blink_fade = component->flag(data::ui::Field::blink_fade);
+    return style;
+}
+
+std::optional<double> hud_timer_progress(const std::uint64_t frame,
+    const std::optional<std::uint64_t> due_frame, const std::uint32_t duration_frames) noexcept {
+    if (!due_frame || frame >= *due_frame || duration_frames == 0) return std::nullopt;
+    const auto left = std::min<std::uint64_t>(*due_frame - frame, duration_frames);
+    return static_cast<double>(duration_frames - left) / static_cast<double>(duration_frames);
+}
+
 std::string_view to_string(const HudFaction faction) noexcept {
     switch (faction) {
     case HudFaction::empire: return "empire";
@@ -133,11 +200,26 @@ std::string_view to_string(const HudFaction faction) noexcept {
     return "rebel";
 }
 
+std::string_view special_weapon_icon(const HudShellButton& button, const HudFaction faction) noexcept {
+    // WSW-28: component order differs from the HudFaction enum order.
+    const auto index = faction == HudFaction::rebel ? 0U : faction == HudFaction::empire ? 1U : 2U;
+    return index < button.alternates.size() ? std::string_view(button.alternates[index]) : std::string_view{};
+}
+
 std::optional<HudFaction> hud_faction_from(const std::string_view text) noexcept {
     if (equal_name(text, "empire")) return HudFaction::empire;
     if (equal_name(text, "rebel")) return HudFaction::rebel;
     if (equal_name(text, "underworld")) return HudFaction::underworld;
     return std::nullopt;
+}
+
+std::size_t allegiance_emblem_index(const std::string_view faction, const SideNames& sides) noexcept {
+    const auto is = [&](const std::string_view name) { return !name.empty() && equal_name(faction, name); };
+    if (is(sides.good)) return 0;
+    if (is(sides.evil)) return 1;
+    if (is(sides.corrupt)) return 2;
+    if (is(pirates_faction_name)) return 3;
+    return 4;
 }
 
 std::string tactical_shell_model(const data::ui::CommandBarCatalog& catalog) {
@@ -177,7 +259,7 @@ core::Result<PauseShell> pause_shell(const vfs::Vfs& filesystem, const data::ui:
         if (!anchor.visible || (!additive && !equal_name(anchor.shader, "MeshAlpha.fx"))
             || anchor.base_texture.empty()) continue;
         out.meshes.push_back({anchor.name, additive ? ShellBlend::additive : ShellBlend::alpha,
-            anchor.base_texture, anchor.z_min, anchor.triangles});
+            anchor.base_texture, anchor.z_min, anchor.triangles, std::nullopt});
     }
     std::stable_sort(out.meshes.begin(), out.meshes.end(),
         [](const auto& left, const auto& right) { return left.z < right.z; });
@@ -197,8 +279,48 @@ std::string command_bar_mega_texture(const data::ui::CommandBarCatalog& catalog)
     return "Data/Art/Textures/" + name;
 }
 
+core::Result<float> movie_letterbox_height(const vfs::Vfs& filesystem) {
+    auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
+    if (!document) return core::Result<float>::failure(document.error());
+    const data::XmlNode* found = nullptr;
+    for (const auto& node : document.value().root.children)
+        if (equal_name(node.name, "Camera_FX_Manager_Letterbox_Height")) found = &node;
+    if (found) {
+        data::tag_trace::used(found);
+        std::string_view text = found->raw_text;
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.remove_prefix(1);
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.remove_suffix(1);
+        if (!text.empty() && (text.back() == 'f' || text.back() == 'F')) text.remove_suffix(1);
+        float value{};
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (error == std::errc{} && end == text.data() + text.size() && std::isfinite(value)
+            && value >= 0.0F && value < 0.5F) return core::Result<float>::success(value);
+    }
+    return core::Result<float>::failure(warning(diagnostic_codes::hud_shell_part,
+        "movie letterbox height must be a finite fraction in [0, 0.5)", "data/xml/gameconstants.xml"));
+}
+
+std::optional<double> beacon_place_delay(const vfs::Vfs& filesystem) {
+    auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
+    if (!document) return std::nullopt;
+    const data::XmlNode* found{};
+    for (const auto& node : document.value().root.children)
+        if (equal_name(node.name, "BeaconPlaceDelay")) found = &node;
+    if (!found) return std::nullopt;
+    data::tag_trace::used(found);
+    const auto start = found->raw_text.find_first_not_of(" \t\r\n");
+    const auto end = found->raw_text.find_last_not_of(" \t\r\n");
+    if (start == std::string::npos) return std::nullopt;
+    const auto text = std::string_view(found->raw_text).substr(start, end - start + 1);
+    double value{};
+    const auto [last, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || last != text.data() + text.size() || !std::isfinite(value) || value < 0)
+        return std::nullopt;
+    return value / 1000.0;
+}
+
 HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
-                   const HudFaction faction) {
+                   const HudFaction faction, const bool keep_alternates) {
     HudShell out;
     out.model = shell.model_path();
     out.faction = faction;
@@ -206,17 +328,26 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
         out.diagnostics.push_back(warning(diagnostic_codes::hud_shell_part,
             std::string(part) + " " + std::string(why) + "; the HUD shell draws without it", out.model));
     };
-    for (const auto* anchor : shell.for_variant(alt_variant(faction))) {
+    std::vector<const data::ui::ShellAnchor*> candidates;
+    if (keep_alternates) {
+        for (const auto& anchor : shell.anchors()) candidates.push_back(&anchor);
+    } else {
+        candidates = shell.for_variant(alt_variant(faction));
+    }
+    for (const auto* anchor : candidates) {
         const bool alpha = equal_name(anchor->shader, "MeshAlpha.fx");
         const bool additive = equal_name(anchor->shader, "MeshAdditive.fx");
         if ((!alpha && !additive) || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
         // Decorative art the shell shows by itself; a bound component's mesh is
         // drawn only for the parts this ticket owns (the radar's scan lines).
-        const bool bound = catalog.find(anchor->name) != nullptr;
+        // An index-keyed alternate panel stays decorative even when the catalogue lists an empty
+        // component of its name (the stock catalogue does for land_art_ALT0).
+        const bool bound = catalog.find(anchor->name) != nullptr && !(keep_alternates && anchor->alt.variant);
         const bool radar = equal_name(anchor->name, radar_name);
         if (bound ? !radar : !anchor->visible) continue;
         out.meshes.push_back({anchor->name, additive ? ShellBlend::additive : ShellBlend::alpha,
-                              anchor->base_texture, anchor->z_min, anchor->triangles});
+                              anchor->base_texture, anchor->z_min, anchor->triangles,
+                              keep_alternates ? anchor->alt.variant : std::nullopt});
     }
     std::stable_sort(out.meshes.begin(), out.meshes.end(),
                      [](const HudShellMesh& a, const HudShellMesh& b) { return a.z < b.z; });
@@ -237,6 +368,14 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
     } else {
         missing(options_name, option_anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
     }
+    if (const auto* anchor = shell.find("b_camera_t")) {
+        if (const auto* component = catalog.find("b_camera_t"))
+            out.movie_camera = shell_button(*anchor, *component);
+    }
+    if (const auto* anchor = shell.find("b_special_weapon2")) {
+        if (const auto* component = catalog.find("b_special_weapon2"))
+            out.beacon = shell_button(*anchor, *component);
+    }
     for (const std::string_view name : tactical_panel_buttons) {
         const auto* anchor = shell.find(name);
         const auto* component = catalog.find(name);
@@ -245,7 +384,28 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
     }
 
     const auto* text_anchor = shell.find(planet_name_component);
-    // BA-27: retain authored positions, including the deferred waypoint slot's gap.
+    if (const auto* anchor = shell.find("b_special_weapon")) {
+        if (const auto* component = catalog.find("b_special_weapon")) {
+            HudAbilityButton special;
+            special.button = shell_button(*anchor, *component);
+            special.blank = special.button.blank;
+            special.build = first_token(*component, data::ui::Field::build_texture_name);
+            out.special_weapon = std::move(special);
+        }
+    }
+    // HCB-15: the component authors no Icon_Texture_Name; its icon is the first alternate.
+    if (const auto* anchor = shell.find("b_retreat")) {
+        if (const auto* component = catalog.find("b_retreat")) {
+            HudAbilityButton retreat;
+            retreat.button = shell_button(*anchor, *component);
+            if (retreat.button.normal.empty() && !retreat.button.alternates.empty())
+                retreat.button.normal = retreat.button.alternates.front();
+            retreat.blank = retreat.button.blank;
+            retreat.build = first_token(*component, data::ui::Field::build_texture_name);
+            out.retreat = std::move(retreat);
+        }
+    }
+    // BA-27: retain authored positions, including the waypoint slot.
     for (const auto name : tactical_order_buttons) {
         const auto* anchor = shell.find(name);
         const auto* component = catalog.find(name);
@@ -297,7 +457,7 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
             const std::string bar_name = numbered(stem, index);
             const auto* bar_anchor = shell.find(bar_name);
             const auto* bar_component = catalog.find(bar_name);
-            if (bar_anchor != nullptr && bar_component != nullptr) *bar = shell_bar(*bar_anchor, *bar_component);
+            if (bar_anchor != nullptr && bar_component != nullptr) *bar = shell_bar(*bar_anchor, *bar_component, out.diagnostics);
             else missing(bar_name, bar_anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
         }
         out.card_slots.push_back(std::move(slot));
@@ -354,26 +514,20 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
         slot.outline = component->flag(data::ui::Field::text_outline);
         out.queue_slots.push_back(std::move(slot));
     }
+    out.reinforcement_counter = hud_timer_style(catalog, "reinforcement_counter");
+    out.garrison_respawn_counter = hud_timer_style(catalog, "garrison_respawn_counter");
     // #530 PU-65: the credits text and its money icon.
-    const auto* credits_anchor = shell.find(credits_component);
-    const auto* credits = catalog.find(credits_component);
-    if (credits_anchor != nullptr && credits != nullptr) {
-        HudIconText text;
-        text.text.name = std::string(credits_component);
-        text.text.rect = credits_anchor->rect;
-        text.text.face = std::string(credits->text(data::ui::Field::font_name));
-        if (text.text.face.empty()) text.text.face = std::string(last_resort_face);
-        text.text.point_size = credits->integer(data::ui::Field::font_point_size).value_or(8);
-        if (const auto colour = credits->color(data::ui::Field::text_color)) text.text.colour = *colour;
-        text.text.outline = credits->flag(data::ui::Field::text_outline);
-        text.icon = first_token(*credits, data::ui::Field::icon_texture_name);
-        text.text_offset = credits->vec2(data::ui::Field::text_offset).value_or(data::ui::Vec2{});
-        text.right_justified = credits->flag(data::ui::Field::right_justified);
-        text.blink_duration = credits->number(data::ui::Field::blink_duration).value_or(0.0F);
-        text.blink_rate = credits->number(data::ui::Field::blink_rate).value_or(0.0F);
-        out.credits = std::move(text);
-    } else {
-        missing(credits_component, credits_anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
+    for (const auto name : {credits_component, std::string_view("Text_Planetary_Pop"), std::string_view("Text_Tactical_Tech")}) {
+        const auto* credits_anchor = shell.find(name);
+        const auto* credits = catalog.find(name);
+        if (credits_anchor != nullptr && credits != nullptr) {
+            HudIconText text = *hud_readout_style(catalog, name, *credits_anchor);
+            if (name == credits_component) out.credits = std::move(text);
+            else if (name == "Text_Planetary_Pop") out.population = std::move(text);
+            else out.tactical_tech = std::move(text);
+        } else {
+            missing(name, credits_anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
+        }
     }
     const auto* reinforce_anchor = shell.find(reinforcement_component);
     const auto* reinforce = catalog.find(reinforcement_component);
@@ -412,7 +566,7 @@ HudReinforcePane reinforce_pane(const data::ui::ShellAnchors& shell, const data:
             if ((!alpha && !additive) || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
             if (catalog.find(anchor->name) != nullptr || !anchor->visible) continue;
             out.meshes[rows].push_back({anchor->name, additive ? ShellBlend::additive : ShellBlend::alpha,
-                                      anchor->base_texture, anchor->z_min, anchor->triangles});
+                                      anchor->base_texture, anchor->z_min, anchor->triangles, std::nullopt});
         }
         std::stable_sort(out.meshes[rows].begin(), out.meshes[rows].end(),
                          [](const HudShellMesh& a, const HudShellMesh& b) { return a.z < b.z; });
@@ -568,9 +722,149 @@ PlanetName planet_name(const std::optional<std::string>& context_name, const dat
     return out;
 }
 
+std::optional<data::ui::Rgba8> production_queue_tint(const vfs::Vfs& filesystem) {
+    const auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
+    if (!document) return std::nullopt;
+    for (const auto& node : document.value().root.children) {
+        if (!equal_name(node.name, "Right_Queue_Tint")) continue;
+        data::tag_trace::used(node);
+        std::string raw = node.raw_text;
+        std::replace(raw.begin(), raw.end(), ',', ' ');
+        std::istringstream stream(raw);
+        std::array<int, 4> channels{0, 0, 0, 255};
+        std::size_t count{};
+        std::string token;
+        while (stream >> token) {
+            int value{};
+            const auto [end, error] = std::from_chars(token.data(), token.data() + token.size(), value);
+            if (error != std::errc{} || end != token.data() + token.size()
+                || count == channels.size() || value < 0 || value > 255) return std::nullopt;
+            channels[count++] = value;
+        }
+        if (!stream.eof() || (count != 3 && count != 4)) return std::nullopt;
+        return data::ui::Rgba8{static_cast<std::uint8_t>(channels[0]), static_cast<std::uint8_t>(channels[1]),
+            static_cast<std::uint8_t>(channels[2]), static_cast<std::uint8_t>(channels[3])};
+    }
+    return std::nullopt;
+}
+
+EncyclopediaConstants encyclopedia_constants(const vfs::Vfs& filesystem) {
+    EncyclopediaConstants result;
+    const auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
+    if (!document) {
+        result.diagnostics.push_back(warning("EAWR-UI-0321",
+            "encyclopedia globals are unavailable; defaults retained", "data/xml/gameconstants.xml"));
+        return result;
+    }
+    const auto scalar = [&](const std::string_view tag, const bool nonnegative) -> std::optional<double> {
+        const auto invalid = [&]() -> std::optional<double> {
+            result.diagnostics.push_back(warning("EAWR-UI-0321",
+                std::string(tag) + " is missing or malformed; default retained", "data/xml/gameconstants.xml"));
+            return std::nullopt;
+        };
+        const data::XmlNode* found{};
+        for (const auto& child : document.value().root.children) if (equal_name(child.name, tag)) found = &child;
+        if (!found) return invalid();
+        const auto start = found->raw_text.find_first_not_of(" \t\r\n");
+        const auto end = found->raw_text.find_last_not_of(" \t\r\n");
+        if (start == std::string::npos) return invalid();
+        const auto raw = std::string_view(found->raw_text).substr(start, end - start + 1);
+        double value{};
+        const auto [last, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+        if (error != std::errc{} || last != raw.data() + raw.size() || !std::isfinite(value)
+            || (nonnegative && value < 0)) return invalid();
+        return value;
+    };
+    EncyclopediaTiming timing;
+    bool complete = true;
+    for (const auto& [tag, destination, divisor] : std::array{
+        std::tuple{"Encyclopedia_Delay", &timing.delay, 1000.0},
+        std::tuple{"Encyclopedia_Min_Display_Time", &timing.minimum, 1.0},
+        std::tuple{"Encyclopedia_Fade_Rate", &timing.fade_rate, 1.0}}) {
+        if (const auto value = scalar(tag, true)) *destination = *value / divisor;
+        else complete = false;
+    }
+    if (complete) result.timing = timing;
+    for (const auto& [tag, destination] : std::array{
+        std::pair{"Encyclopedia_Population_Offset", &result.population_offset},
+        std::pair{"Encyclopedia_Name_Offset", &result.name_offset},
+        std::pair{"Encyclopedia_Cost_Offset", &result.cost_offset},
+        std::pair{"Encyclopedia_Icon_X_Offset", &result.icon_x_offset},
+        std::pair{"Encyclopedia_Icon_Y_Offset", &result.icon_y_offset},
+        std::pair{"Encyclopedia_Class_Y_Offset", &result.class_y_offset}}) {
+        if (const auto value = scalar(tag, false)) {
+            // Offsets may be signed, but must remain representable in shell coordinates.
+            if (std::abs(*value) <= std::numeric_limits<float>::max()) *destination = static_cast<float>(*value);
+            else result.diagnostics.push_back(warning("EAWR-UI-0321",
+                std::string(tag) + " is out of range; default retained", "data/xml/gameconstants.xml"));
+        }
+    }
+    return result;
+}
+
+std::optional<EncyclopediaTiming> encyclopedia_timing(const vfs::Vfs& filesystem) {
+    return encyclopedia_constants(filesystem).timing;
+}
+
+static UnitCardLooks ability_card_looks_bounded(const std::string_view type, const std::uint32_t ability,
+                               const data::Catalog* objects, const data::ui::TextDatabase* text, const std::size_t depth) {
+    // A malformed cyclic/nested roster must not exhaust the presentation stack.
+    constexpr std::size_t maximum_roster_depth = 32;
+    if (depth >= maximum_roster_depth) return {};
+    UnitCardLooks out;
+    const std::string name(ability_name(ability));
+    if (name.empty()) return out;
+    std::string title = "TEXT_TOOLTIP_ABILITY_" + name + "_NAME";
+    std::string description = "TEXT_TOOLTIP_ABILITY_" + name + "_DESCRIPTION";
+    out.icon = ability_icon(ability);
+    const auto trim = [](std::string_view raw) {
+        const auto first = raw.find_first_not_of(" \t\r\n");
+        return first == std::string_view::npos ? std::string{} : std::string(raw.substr(first, raw.find_last_not_of(" \t\r\n") - first + 1));
+    };
+    if (objects && objects->find(type, data::Category::game_object)) {
+        if (auto resolved = objects->resolve(type, data::Category::game_object)) {
+            if (const auto* roster = resolved.value().value("Squadron_Units")) {
+                const auto raw = trim(roster->value.raw_text);
+                const auto leader = raw.substr(0, raw.find_first_of(" ,\t\r\n"));
+                if (!equal_name(leader, type) && objects->find(leader, data::Category::game_object))
+                    return ability_card_looks_bounded(leader, ability, objects, text, depth + 1);
+            }
+            if (const auto* abilities = resolved.value().value("Unit_Abilities_Data")) {
+                for (const auto& entry : abilities->value.children) {
+                    bool matches{};
+                    for (const auto& value : entry.children)
+                        if (equal_name(value.name, "Type")) matches = equal_name(trim(value.raw_text), name);
+                    if (!matches) continue;
+                    // CARD-15: independently authored overrides fall back only
+                    // when their keys are empty, before localization.
+                    for (const auto& value : entry.children) {
+                        const auto raw = trim(value.raw_text);
+                        if (raw.empty()) continue;
+                        if (equal_name(value.name, "Alternate_Name_Text")) title = raw;
+                        if (equal_name(value.name, "Alternate_Description_Text")) description = raw;
+                        if (equal_name(value.name, "Alternate_Icon_Name")) out.icon = raw;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if (text) {
+        if (const auto* entry = text->find(title)) out.name = data::ui::to_utf8(entry->value);
+        if (const auto* entry = text->find(description)) out.description = data::ui::to_utf8(entry->value);
+    }
+    return out;
+}
+
+UnitCardLooks ability_card_looks(const std::string_view type, const std::uint32_t ability,
+                               const data::Catalog* objects, const data::ui::TextDatabase* text) {
+    return ability_card_looks_bounded(type, ability, objects, text, 0);
+}
+
 UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* objects,
-                              const data::ui::TextDatabase* text) {
-    UnitCardLooks out{std::string(), std::string(type), std::nullopt, {}};
+                              const data::ui::TextDatabase* text, const bool multiplayer) {
+    UnitCardLooks out;
+    out.name = type;
     if (objects == nullptr || objects->find(type, data::Category::game_object) == nullptr) return out;
     auto resolved = objects->resolve(type, data::Category::game_object);
     if (!resolved) return out;
@@ -580,6 +874,17 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
         return first == std::string::npos ? std::string() : value.substr(first, last - first + 1U);
     };
     if (const data::EffectiveValue* icon = resolved.value().value("Icon_Name")) out.icon = trimmed(icon->value.raw_text);
+    const auto integer = [&](const std::string_view tag) {
+        const auto* field = resolved.value().value(tag);
+        if (!field) return std::int32_t{};
+        const auto raw = trimmed(field->value.raw_text);
+        std::int32_t value{};
+        const auto [last, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+        return error == std::errc{} && last == raw.data() + raw.size() ? value : 0;
+    };
+    const auto usage = integer("Population_Value");
+    out.population = usage > 0 ? -usage : 0;
+    if (!out.population) out.population = std::max(0, integer("Additional_Population_Capacity"));
     if (const data::EffectiveValue* cost = resolved.value().value("Tactical_Build_Cost_Multiplayer")) {
         const std::string digits = trimmed(cost->value.raw_text);
         std::int64_t value{};
@@ -591,22 +896,61 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
         const data::ui::TextEntry* entry = text != nullptr && !key.empty() ? text->find(key) : nullptr;
         if (entry != nullptr) out.name = data::ui::to_utf8(entry->value);
     }
-    // WBP-36: multiplayer description overrides the generic encyclopedia text.
-    for (const std::string_view tag : {"Encyclopedia_Text", "MP_Encyclopedia_Text"}) {
-        if (const auto* id = resolved.value().value(tag)) {
-            const auto keys = trimmed(id->value.raw_text);
-            std::string description;
-            std::size_t begin = keys.find_first_not_of(" ,\t\r\n");
-            while (begin != std::string::npos) {
-                const auto end = keys.find_first_of(" ,\t\r\n", begin);
-                const auto key = std::string_view(keys).substr(begin, end == std::string::npos ? end : end - begin);
-                if (const auto* entry = text ? text->find(key) : nullptr) {
-                    if (!description.empty()) description += '\n';
-                    description += data::ui::to_utf8(entry->value);
+    const auto tokens = [&](const std::string_view tag) {
+        std::vector<std::string> result;
+        const auto* value = resolved.value().value(tag);
+        if (!value) return result;
+        const auto& raw = value->value.raw_text;
+        auto begin = raw.find_first_not_of(" ,\t\r\n");
+        while (begin != std::string::npos) {
+            const auto end = raw.find_first_of(" ,\t\r\n", begin);
+            result.push_back(raw.substr(begin, end == std::string::npos ? end : end - begin));
+            begin = end == std::string::npos ? end : raw.find_first_not_of(" ,\t\r\n", end);
+        }
+        return result;
+    };
+    const auto localized = [&](const std::string_view key) {
+        const auto* entry = text ? text->find(key) : nullptr;
+        return entry ? data::ui::to_utf8(entry->value) : std::string();
+    };
+    // P-1/P-2: choose the authored list before localization, including unknown MP keys.
+    auto descriptions = multiplayer ? tokens("MP_Encyclopedia_Text") : std::vector<std::string>{};
+    if (descriptions.empty()) descriptions = tokens("Encyclopedia_Text");
+    for (std::size_t index = 0; index < descriptions.size(); ++index) {
+        if (index) out.description += '\n';
+        out.description += localized(descriptions[index]);
+    }
+    // P-3: the class is a text key, not the object's simulation class.
+    if (const auto* value = resolved.value().value("Encyclopedia_Unit_Class"))
+        out.unit_class = localized(trimmed(value->value.raw_text));
+    const auto icons = [&](const std::string_view tag) {
+        std::vector<std::string> result;
+        for (const auto& name : tokens(tag)) {
+            if (result.size() == 3) break;
+            std::string icon;
+            if (objects->find(name, data::Category::game_object)) {
+                auto target = objects->resolve(name, data::Category::game_object);
+                if (target) {
+                    if (const auto* value = target.value().value("Icon_Name")) icon = trimmed(value->value.raw_text);
                 }
-                begin = end == std::string::npos ? end : keys.find_first_not_of(" ,\t\r\n", end);
             }
-            if (!description.empty()) out.description = std::move(description);
+            result.push_back(std::move(icon));
+        }
+        return result;
+    };
+    // P-4: blank icons retain their position; a fourth entry is dropped.
+    out.good_against_icons = icons("Encyclopedia_Good_Against");
+    out.vulnerable_to_icons = icons("Encyclopedia_Vulnerable_To");
+    // CARD-16: a company uses its first authored craft's static abilities.
+    auto ability_source = resolved;
+    if (const auto roster = tokens("Squadron_Units"); !roster.empty()
+        && objects->find(roster.front(), data::Category::game_object))
+        ability_source = objects->resolve(roster.front(), data::Category::game_object);
+    if (ability_source) if (const auto* abilities = ability_source.value().value("Unit_Abilities_Data")) {
+        for (const auto& entry : abilities->value.children) for (const auto& value : entry.children) {
+            if (!equal_name(value.name, "Type")) continue;
+            const auto look = ability_card_looks(ability_source.value().object_id, ability_index(trimmed(value.raw_text)), objects, text);
+            if (!look.name.empty() && !look.icon.empty()) out.ability_icons.push_back(look.icon);
         }
     }
     return out;

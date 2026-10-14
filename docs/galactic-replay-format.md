@@ -1,0 +1,724 @@
+# Galactic replay format v2 (EAWRGCR)
+
+The replay of a galactic session: the tick-zero galaxy, every executed command in canonical
+order and the final tick. A live run records it with `GalacticSession::record()`, and
+`GalacticSession::from_replay()` reproduces that run headless with identical per-tick state
+hashes. It is the remake's own format, not an original-game save or replay. It carries the game
+session's command envelope, issued by seats (players own, seats command), as the galactic
+architecture decides in [the architecture decisions](architecture-decisions.md); the tactical
+replay is [a separate format](replay-format.md).
+
+All integers are fixed-width little-endian; signed values are two's complement int64, Q24 raw
+values where the field is a position. There is no padding or floating value; extension text
+uses length-prefixed strings.
+Unknown versions, flags, layers and opcodes, malformed lengths and trailing bytes fail. Counts
+are checked against the bytes left before anything is allocated; the whole input is at most
+256 MiB.
+
+## Header: 96 bytes
+
+| Offset | Width | Field | Rule |
+|---:|---:|---|---|
+| 0 | 8 | magic | ASCII `EAWRGCR` followed by zero |
+| 8 | 2 | format_version | 2 |
+| 10 | 2 | flags | bit 0: debug commands admitted; bit 1: header extensions present; other bits zero |
+| 12 | 4 | rules_version | the galactic rules version of the build, 1 |
+| 16 | 32 | content_identity | identity of the content tables the galaxy was built from |
+| 48 | 32 | campaign_identity | identity of the campaign definition |
+| 80 | 8 | seed | the session seed |
+| 88 | 8 | final_tick_count | completed session ticks, at most 100,000,000 |
+
+A replay recorded under another rules version is refused ("saved by another build"); M3 has no
+migration.
+
+Focused member transfer uses galactic opcode 20 (GHUD-S86). Its body starts
+with a uint32 count and that many pairs of uint64 source-fleet ID and uint64
+member ID, followed by uint64 target fleet (zero creates one) and uint8
+creation slot (zero when a target is named). Member IDs must be nonzero and
+unique; empty lists and malformed lengths fail admission. Ordinary in-card
+GUI indices are local presentation state, outside command recordings and
+simulation hashes (GHUD-S87); opcode 21 is held for the launch follow-up.
+
+When flag bit 1 is set, an extension table follows the 96-byte fixed header, before the player
+table: uint32 extension count, then uint16 tag, uint32 byte length and payload per entry. This is
+a GC-only extension-tag space, separate from tactical replay tags. The supported-tag table
+bounds the entry count, with entries in strictly increasing tag order: graph rules (1), fleet control (2), player
+economy setup (3), movement (4), seat control (5), opt-in base-income fiscal setup (6), production (7), political control (8), census (10), trusted outcomes (11), observers (12), income (13), victory (14), corruption economy (15), and native effects (16). Unknown, duplicate or unordered tags and malformed lengths fail. The graph
+payload is int64 Q24 `MaximumFleetMovementDistance`, uint32 route count, then uint64
+route ID and int64 Q24 `HS_Speed_Factor` for each route in route-table order. Every route ID/count
+must match the route table; speed factors must be positive. Legacy setups omit the extension and
+use factor one for their synthetic routes, preserving bytes and all existing corpus pins.
+
+Graph-enabled state encoding appends section ID 5, version 1, containing the graph-rules payload
+(without an extension tag/length). Legacy state uses the original five sections; graph state uses
+six, and the section table hash counts only present sections. Snapshot v1 appends uint16 tag 1 and
+the same graph payload after its events only for graph-enabled setups. The unreleased GC checkpoint
+keeps section versions at 1: setup/replay carries the extension and the planets section appends a
+length-framed graph-state blob after planet and route blobs. This allocation is compatible with
+existing synthetic saves and does not change tactical replay/checkpoint encodings.
+
+## Native effect journal (tag 16)
+
+The project reconstruction journal records direct native owner admissions separately from
+ordinary seat commands. It reproduces committed inputs without initializing or deciding AI
+plans. The payload is uint64 count, then uint64 completed-world frontier, uint64 owner sequence,
+uint8 phase, uint16 effect kind, uint32 payload length and exact typed-owner bytes per effect.
+Sequences are consecutive from one. Frontiers are nondecreasing and at most the final tick;
+phase zero (barrier admission) precedes phase one (world-service callback) at each frontier.
+World-service effects require a following tick. Counts share the command limit and each typed
+payload is at most 64 KiB; empty extensions, unknown kinds/phases, reordered effects and
+trailing bytes fail. The aggregate replay limit remains 256 MiB.
+
+Barrier effects replay after the preceding world commit and before the next world service.
+World-service consumers read their recorded payment/outcome facts at the actual callback,
+without running the AI decision again. Fleet, launch, landing and orbit-recheck replay use the
+same owned world validators and require exact recorded admission receipts. Launch records its
+logical containment change, suppressing its nested fleet admission. Runtime replayers are
+rebound before reconstruction; they are not saved. The journal itself is reconstruction input;
+world and native state hashes still cover the resulting owned state. Galaxy checkpoint sections
+are version 6; older galaxy checkpoints are refused. Replay format 1 adds the optional
+tag 16 through its existing extension table, preserving ordinary command bytes.
+
+Native kind **10** is the retained explicit invasion owner. Its payload contains
+u64 version **1** and u64 operation. Operation **1** is barrier admission:
+player, fleet, pending-local-conflict Boolean, admitted Boolean, request ID,
+queued Boolean and reject reason, each u64. Operation **2** is the actual
+world-service dispatch decision: request ID and reserved conflict ID, each u64;
+zero conflict means the qualified undefended branch. Runtime reconstruction
+consumes that decision at the campaign conflict tail instead of repeating the
+capability/admission decision. Actual battle completion is derived only after
+the existing trusted outcome or child-return journal applies its real winner.
+Operation **3** is a barrier reader release with a u64 request ID. It marks a
+pending request released or prunes a terminal result; it never selects a winner.
+
+Conditional state section **18**, version 1, retains the next invasion request
+ID and the sorted request records: ID u64, state u8 (unqueued, pending, conflict,
+completed), invader/defender u32, historical fleet/planet/conflict IDs u64,
+success u8, reader-released u8, explicit transport count u64 and ID/type pairs u64. A final u64
+count and u64 IDs preserve pending queue order. Completed records release their
+transport lists. Once the result's reader releases it, a terminal record is
+pruned; a released pending record waits for actual completion before pruning.
+Queue transport inventory and result counts are bounded by
+the ordinary object limit. The derived inventory counter is not encoded.
+Galaxy checkpoint v6 adds an always-framed section-18 blob to its existing
+planets DTO; absent queues use an empty blob. No ordinary command opcode,
+replay format version or checkpoint section ID changes. Next free galactic
+state section is **20** (section **19** is reserved for B's planet-access owner),
+next native effect kind is **11**.
+
+## Tick-zero galaxy
+
+### Trusted campaign outcome journal
+
+Tag 11 records engine-selected return inputs rather than player commands. Its payload starts
+with a uint32 count, followed per entry by uint64 completed session tick, uint64 conflict ID,
+uint32 payload length and campaign-owned payload bytes. Ticks are positive and nondecreasing;
+conflict IDs are nonzero and unique. Each payload is at most 1 MiB, the journal at most 64 MiB,
+and its count at most the galaxy object limit. A selected return occurs at the completed-tick
+barrier, without servicing another galactic frame. Automatic conflict-service admission remains
+the named GFD-25 / GFS-U07 seam in the galactic frame schedule.
+
+The campaign payload encodes the planet, participants and layer, structure/base requests, typed
+battle result, ordered ordinary damage requests, ascending confirmed post-delivery casualty identities, invasion-order surviving
+transports, reverse-orbit retreat fleets, original-type battle record entries and ordered AI
+learning requests. Integers use the same little-endian encoding; booleans are exactly 0 or 1;
+vectors and strings have uint32 lengths. The campaign decoder rejects unknown dispositions,
+invalid participant relationships, duplicate identities, truncated fields and trailing bytes.
+The boundary services bind lethal effects (WAR-U04), political control (WAR-62), ordinary
+orbital/surface retreat (WAR-49) and story/learning/cleanup consumers. Missing required control
+or retreat adapters fail explicitly. The journal does not select a retreat destination or assign
+political ownership.
+
+WAR-85..88 keep selections separate from successful ordinary death: every selected damage
+request requires an explicit post-delivery casualty view, which may be empty for immunity or
+restoration. Space transport history reads contents before delivery; attrition container history
+requires an explicit view of contents after delivery. No selected identity is implicitly deleted.
+
+After the first successful return, state section ID 12, version 1, contains the count and exact
+entry encodings of the applied prefix. Future journal entries do not alter the current state
+hash. Section tables enumerate the actual present IDs, so reserved IDs between existing sections
+and section 12 are absent. Checkpoints reconstruct the same applied prefix and reinstall the
+boundary services; the runtime eight-record battle ring is discarded on load under WAR-63.
+Tactical replay and checkpoint encodings are unchanged.
+
+The tables follow the header in this order. Each starts with a uint32 count.
+
+| Table | Count limit | Record |
+|---|---|---|
+| players | 64 | uint32 player ID, uint32 faction ID, uint32 flags (12 bytes) |
+| seats | 256 | uint32 seat ID, uint32 player ID, uint8 kind (1 human, 2 AI, 3 script), uint32 lobby slot, uint8 active (0 or 1), uint32 human side ID (18 bytes) |
+| rules | none: one record, no count | uint32 fiscal cycle in logical frames, 0 for none (4 bytes) |
+| planets | 1,000,000 | uint64 ID, int64 x, y, z (Q24 raw), uint32 owner (36 bytes) |
+| routes | 1,000,000 | uint64 ID, uint64 from planet, uint64 to planet (24 bytes) |
+| fleets | 1,000,000 | uint64 ID, uint32 owner, uint64 orbit planet, uint32 member count, then per member uint64 ID and uint64 type (24 bytes + 16 per member) |
+
+The rules are the galaxy's constants converted from its content at load: the fiscal cycle is
+`Fiscal_Cycle_Time_In_Secs` times 30, rounded to the nearest frame with ties away from zero (1350
+frames for the stock 45 seconds).
+
+The `eawr::sim::galactic::Seat` row is a versioned galactic replay DTO. It remains
+separate from `eawr::checkpoint::Seat` in the [checkpoint format](checkpoint-format.md):
+that v1 row is 16 bytes, places the active flag before the lobby slot, and derives tactical
+sides from player teams; this 18-byte v1 row stores explicit human side membership. The
+separate namespaces preserve both formats. A shared in-memory controller model and typed
+seat ID will be consolidated in a later change without conflating these wire encodings.
+
+The galaxy obeys `validate_setup` (`include/eawr/sim/galactic/types.hpp`): players and seats in
+strictly increasing nonzero ID, each seat in a listed player; planets, routes and fleets each in
+strictly increasing ID; every object and member ID nonzero and distinct across all tables; owners
+listed players, route ends and orbits listed planets, no empty fleet. Fleet members keep their
+fleet order. Until campaign start builds the galaxy from data, the replay carries the whole
+tick-zero galaxy; the identities let a loader check it against the content it names.
+
+The seat roster has at most eight humans, including inactive humans. Their explicit nonzero
+human side IDs group them into one coop side or exactly two versus sides, independently of
+owning player/faction. AI/script issuers have human side ID zero and do not count as human
+sides. The 256-seat limit bounds the whole table. Human side membership is canonical hashed
+session state; command authorization still uses the seat's owning player.
+
+## Movement transport-role tail
+
+The existing movement payload (replay extension tag 4 and state section 7) may
+end with a transport-role tail: uint8 version **1**, uint32 nonzero type count,
+then that many strictly ascending uint64 transport type IDs. Each ID must name
+a movement type and may not also be a squadron or fleet container. Unknown tail
+versions, unknown/duplicate IDs, zero count and trailing bytes refuse.
+
+The encoder omits the entire tail when no transport type exists, preserving the
+previous movement replay, snapshot and checkpoint bytes. No new replay version,
+opcode, extension tag or state section is assigned. A transport retains explicit
+live contents but uses its own authored type for travel speed; combat skipping
+recurses through carried troops and an empty transport does not skip
+([WGM-26/38](behaviour/walks/gc-movement-control.md)).
+
+## Census original-company binding tail
+
+Census types are serialized in the self-contained replay/setup payload; decoding
+does not rerun the authored-type adapter. After the existing composite-members
+tail, census extension tag 10 / state section 11 may therefore carry a further
+tail: uint8 version **1**, uint32 nonzero binding count, then strictly ascending
+pairs of uint64 original company type ID and uint64 runtime transport type ID.
+The original ID must name a composite census type. Validation requires the exact
+transport link to be one of its authored members and to name a known type.
+Unknown versions, unknown/duplicate IDs, zero counts and trailing bytes refuse.
+
+The tail is absent unless an explicit company binding exists, preserving all
+previous atomic and composite census bytes. No new tag, state section, opcode or
+format version is allocated. A live member's different original type is admitted
+only for that company's exact transport type, with the movement transport role,
+nonempty explicit contents and authored contained types. All other live original
+identity overrides refuse. Population and immediate-parent suppression continue
+to read the retained original company identity (WGEP-68/69/78 and WGS-80).
+
+## Commands
+
+A uint64 command count (at most 10,000,000), then one record per command:
+
+| Width | Field |
+|---:|---|
+| 8 | tick |
+| 4 | seat ID |
+| 8 | sequence |
+| 1 | layer: 1 session, 2 galactic, 3 tactical |
+| 2 | opcode, in the layer's own number space |
+| 4 | payload length, at most 64 KiB |
+| n | payload |
+
+Commands are in strictly increasing `(tick, seat, sequence)` order, every tick is below the final
+tick, and every seat is listed. Because the order is canonical, each seat's own commands follow
+strictly increasing `(tick, sequence)`, which is the submission rule of a live session.
+
+### Opcodes
+
+The opcode blocks are coordinator-reserved at once, so later work implements reserved numbers.
+A reserved number without an implementation is refused like an unknown one.
+
+| Layer | Opcodes | Meaning |
+|---|---|---|
+| session | 1 pause, 2 resume, 3 set strategic speed, 4 set tactical speed | implemented |
+| session | 5 save request, 6 resign, 7 battle choice, 8 battle vote, 9 dialog acknowledge, 10 victory retry or continue, 11 seat leave, 12 seat rejoin | 5/7/11/12 implemented; remaining numbers reserved for save/battle/coop work |
+| session | 13..61 | reserved for the wave-3 walks |
+| session | 62 debug set planet owner, 63 debug set fleet orbit | implemented; only with header flag bit 0 |
+| galactic | 1 create fleet, 2 add members, 3 remove members, 4 merge fleets, 5 move fleet, 6 set orbit slot, 7 production, 8 land transports, 9..11 legacy production reservations, 12 black-market prepare, 13 black-market buy, 14 special action prepare, 15 special action execute, 16 special action cancel, 17 galactic ability | 1/2/3/4/6/7 implemented; others reserved |
+| galactic | 18..127 | reserved for the wave-3 walks |
+| tactical | 1..255 | the tactical replay's opcodes; 28 is the reserved tactical retreat |
+
+### Payloads
+
+| Command | Payload |
+|---|---|
+| pause, resume | empty |
+| battle choice (session 7) | uint64 nonzero conflict ID, uint8 tactical choice (0 auto, 1 tactical); 9 bytes |
+| set strategic speed, set tactical speed | int64 Q24 factor, above 0 and at most 16 (8 bytes) |
+| debug set planet owner | uint64 planet ID, uint32 player ID (12 bytes) |
+| debug set fleet orbit | uint64 fleet ID, uint64 planet ID (16 bytes) |
+| tactical | uint64 conflict ID (nonzero), then the command body exactly as the tactical replay encodes it for that opcode |
+
+A debug command is refused, at submission and in a replay, unless the header admits debug
+commands; a campaign or multiplayer session never does. A tactical command names its conflict,
+so a command for an ended battle is refused instead of reaching the next one; the galaxy alone
+refuses every tactical command, and the battle work validates the body.
+
+## Execution and authorization
+
+Commands execute in their tick's serial commit, in canonical order. A command is authorized at
+execution by its seat: the seat must be active, and a command on an owned object needs the seat's
+player to own it (players own, seats command). An unauthorized or unknown order is executed as a
+rejection event and changes no state; it is still recorded, so the replay reproduces the event.
+Two seats of one player ordering the same fleet in one tick both apply in seat order, so the later
+seat's order wins. Pause, resume and the speeds take any active seat, in coop and versus play,
+until the multiplayer vote rules land. Pause is a nested counter; a resume without a pause is
+rejected. The speeds are pacing only: they are session state but outside the state hash, so a
+speed change never changes a hash.
+
+## Diagnostics
+
+| Code | Meaning |
+|---|---|
+| `EAWR-SIM-0501` | invalid tick-zero galaxy |
+| `EAWR-SIM-0510` | malformed bytes: magic, truncation, counts, flags, trailing bytes |
+| `EAWR-SIM-0511` | another format or rules version |
+| `EAWR-SIM-0512` | a size, tick or command-count limit |
+| `EAWR-SIM-0513` | commands out of canonical order, or at or past the final tick |
+| `EAWR-SIM-0514` | an unknown layer, an unimplemented or unknown opcode, a malformed payload, an unknown seat, a debug command without the flag, a tactical command without a conflict |
+
+## Fleet-control extension (tag 2)
+
+Opt-in fleet control requires graph extension tag 1. Records are in ascending tag order; unknown,
+duplicate or unordered tags fail. The extension payload is:
+
+- uint8 queued-campaign-conflict and active-speech flags (0/1).
+- uint32 original-trait count, then uint64 supplied TypeId and uint8 transport,
+  can-hyperspace-without-ability and requires-live-children flags.
+- uint32 detached-unit count, then uint64 member ID/type, uint32 owner and uint64 planet.
+- uint32 fleet-slot count, then uint64 fleet ID and uint8 logical slot (0/1/2), exactly matching
+  the main fleet rows' IDs and order.
+
+Types and detached identities are strictly ascending. Every live member needs a listed original
+trait. Extension tag 2 also appends these current values to snapshot bytes and conditional state
+section 6. Main fleet row bytes stay unchanged. The version-1 checkpoint fleets section becomes
+two length-framed blobs (fleet rows, fleet-control state) only for an enabled setup; its session
+replay supplies the complete tick-zero rules and accepted input for reconstruction.
+
+Galactic opcodes 1/2/3/4/6 are implemented for [fleet membership](behaviour/galactic-fleets.md):
+
+| Command | Payload |
+|---|---|
+| create fleet (1) | uint64 planet, uint32 member count, ordered uint64 member IDs, uint8 slot |
+| add members (2), remove members (3) | uint64 fleet, uint32 member count, ordered uint64 member IDs |
+| merge fleets (4) | uint64 source fleet, uint64 target fleet |
+| set orbit slot (6) | uint64 fleet, uint8 slot |
+
+Member counts are positive and bounded by the payload cap; IDs are nonzero/distinct, and slots
+are 0/1/2. Create/add attach existing detached identities. A split is remove then create/add.
+Event kinds 12/13 are fleet-created/destroyed, 14/15 member-attached/detached (subject member,
+value fleet), 16 slot-changed (subject fleet, value slot). Rejection reasons 6..10 are management
+suppressed, invalid-membership, incompatible-location, movement-ability-required and resource-limit.
+Legacy setups omit the extension/state section and preserve every prior pin.
+
+## Player economy setup extension (tag 3)
+
+The optional [campaign startup economy](behaviour/campaign-player-setup.md) payload is uint32
+player count, then one 36-byte row per player: uint32 player ID, int64 Q24 credits, int64 Q24
+credit cap, int64 committed current tech and int64 maximum tech. IDs and order must exactly
+match the main player table; the count is bounded by 64. Tech values must fit the source's
+signed 32-bit integer domain. Credits are assigned directly and may exceed the cap. Current
+tech is the result of the startup provider's current-before-maximum sequence, so it need not
+be bounded by the newly assigned maximum.
+
+Tag 3 can occur without graph or fleet control. It appends this same count/rows payload after
+the player rows in canonical players state section 1 and snapshot encoding, and therefore in
+the existing players checkpoint section. Presence is supplied by setup/replay; no new state
+section, checkpoint section or version is allocated. Absent economy appends no bytes and
+preserves legacy replay, state, snapshot and checkpoint encodings. This payload represents
+committed startup values; later economy mutation remains separate work.
+
+### Seat-control extension and session commands
+
+The optional coordinator-reserved replay header extension **5** stores the
+WGS-P01..P09 session policy. Its little-endian payload is: u32 team count (0..2),
+then each team's u32 side ID, u32 lead SeatId and u8 observer-AI flag; u32 controller
+count, then each controller's u32 player, u8 current kind (1 human, 2 AI, 3 passive),
+u8 dropout kind (2 AI or 3 passive), u32 configuration length and bytes, u32
+persistent-state length and bytes. Each opaque payload is bounded to 16 KiB.
+Tables are strictly ascending by ID and cover every declared human side/faction.
+This extension can appear without graph/fleet extensions. Its absence preserves
+legacy replay, state and snapshot bytes.
+
+SESSION opcodes **11** (seat leave) and **12** (seat rejoin) have empty payloads;
+the envelope's seat is the transition subject. Coordinator-reserved opcode **14**
+(battle team role) is u64 conflict ID followed by u8 role (1 AI-side control,
+2 spectate, 3 temporary ally). There is no subset/seat-list field. Admission and
+rejection use the existing command events and reasons.
+
+With extension 5 enabled, galaxy session section 0 appends u16 tag 5 and the
+current seat-control payload, followed by u8 battle presence. When present,
+its battle context is u64 conflict, u32 human player, u32 AI player, u32 choosing
+side, u32 observer player and u8 role (0 pending, or 1..3 above). The ordinary
+session seat rows carry live active flags. Existing checkpoint session/seats and
+child-log sections retain this state and the effective conflict seat mapping;
+no new checkpoint section or state-section ID is used. The opt-in child hash
+also includes the parent session tick, including readiness waits.
+
+Graph (1), fleet (2), economy (3), movement (4), seat-control (5), fiscal (6), production (7), political control (8), census (10), trusted outcomes (11), observers (12), income (13), and victory (14) extensions may coexist; the count includes every present extension and entries remain in ascending tag order.
+
+## Base-income fiscal setup
+
+Extension tag **6** carries int64 Q24 `Credit_Cap_Per_Planet`, uint32 player count,
+then each player's uint32 ID, uint8 planet-income eligibility (0 or 1), and int64
+Q24 positive-credit multiplier. A uint32 planet count follows, then uint64 planet
+ID and int64 Q24 `Planet_Credit_Value` per row. Both tables exactly match setup
+player/planet order. The service requires player-economy setup and a nonzero fiscal
+window; negative inputs or overflowing income/cap products fail validation.
+Eligibility and AI difficulty factors are explicit sourced inputs (WGEP-03/16).
+Campaign setup loads base income and the cap from validated tables when these
+inputs are supplied, and refuses missing authored values.
+
+State section 1 encodes the live player ledger, followed by this fiscal payload
+when enabled. Replay setup keeps initial balances immutable; checkpoint restore
+reconstructs and verifies the live ledger. Existing clock-only setups retain
+legacy bytes and hashes. Fiscal-enabled setups start with cycle 1 at frame 0 and
+service expiry before advancing the mode frame (WGEP-59). Payment sums intact
+planet base income in stable order, skips zero/ineligible totals, applies the
+positive-credit factor once, and clamps the ledger (WGEP-03/05/16). Ownership
+commits refresh all credit caps using `max(1, owned planets)` (WGEP-17/60).
+No tax, redistribution or maintenance debit is introduced (WGEP-15).
+
+Destroyed/blocked planetary state, alignment, political/trade/structure modifiers,
+corruption and black-market income remain separate income-service seams. AI budget
+notifications, credit-dependent victory and story accumulation remain delivery
+seams. This slice does not claim complete fiscal fidelity for those states.
+
+Fiscal ordering follows the [galactic frame service schedule](behaviour/galactic-frame-service-schedule.md):
+GFD-02 gathers current ownership after commits, GFD-05 clamps credit caps immediately,
+and GFD-04 reads the fiscal deadline before advancing configured mode time. Synthetic
+fiscal contracts cover a transfer exactly at the payment deadline (GFSC-02).
+GFD-21 preview/source-expiry effects remain the named income-service seam above;
+consumable sources and retained political income remain named seams.
+
+### Static planet contribution tail
+
+Tag 6 optionally appends a uint8 version **1**, int64 Q24 maximum alignment
+bonus/penalty, then four uint32-counted tables: political curve pairs (int64 Q24
+x/y), player alignment (uint32 player, uint8 enum), planet alignment (uint64
+planet, uint8 enum, int64 Q24 strength), and route factors (uint64 route, int64
+Q24 factor). Alignment enums are neutral=0, light=1, dark=2. Player, planet and
+route tables exactly follow setup order; curve points have strictly increasing
+x. Bounds, unsupported versions/enums, missing rows, truncation and trailing
+bytes fail admission. No tail means the recorded legacy base-income payload;
+it re-encodes byte-identically. This contains immutable authored inputs only.
+Campaign binding retains that legacy base-income fallback only when the entire
+alignment-maxima/political-curve constant group is absent; a partially present
+group is refused rather than filled with stock literals.
+
+WGEP-06/07/09 contributions use a shared partitioned payment/forecast provider.
+Alignment and trade are additive on unmultiplied basic income. Black-market
+multiplier writer (legacy EAWR-1130) defaults to one; political source-ledger
+writer (legacy EAWR-2375) defaults to zero (WGEP-75/U-03). The WGEP-63 evaluator and positive WGEP-08 formula
+are available, but political forecasts remain unavailable until that writer.
+A valid trade link here is an admitted setup route with existing, distinct
+planet endpoints (the galaxy graph contract, WGM-16); a positive factor counts
+only when both current endpoint owners are nonzero and allied. Dynamic route
+removal and WGEP-05 destroyed/intimidated income lifecycle remain the named
+GFS-U05 external-lifecycle seam; this provider does not infer those callbacks.
+Forecast publication caches raw contributions by the values of current owners,
+live economic source/planet inputs, gambling sources and alliances. Static route
+endpoints are indexed once. The cache and its deterministic rebuild-work counter
+are derived diagnostics, excluded from canonical bytes and checkpoints; loading
+reconstructs the cache. Ownership changes invalidate it, while account balances
+and knowledge filtering are applied anew to each publication.
+
+The new tail changes fiscal-enabled stock campaign setup identities and their
+section-1 bytes; legacy setups and tactical replays have no added bytes.
+
+## Planet production (tag 7)
+
+Production requires fiscal and fleet-control setup. Tag 7 encodes `ProductionSetup`
+using the shared [production codec](../src/sim/galactic/production_encoding.cpp):
+uint32 human queue limit, length-prefixed player rows and planet rows. All integers
+are little endian, booleans are uint8 0/1, enums uint8, fixed values signed int64
+Q24, and every vector starts with uint32 count. Nested prerequisite vectors are an
+AND of OR groups. The codec's field order is also used for live state/snapshots.
+Player and planet rows exactly match the primary setup tables. Offers are strictly
+ascending TypeId; initial objects have distinct ascending nonzero identities.
+Setup queues are empty. Runtime queues preserve admission order, independently
+for ground and space. Structures share their domain's unit queue (WGEP-36).
+
+Opcode 7 has a 22-byte base payload: uint64 planet, uint64 type, uint8 action
+(0 buy, 1 indexed cancel, 2 last-matching-type cancel, 3 bulk stop), uint8 domain
+(0 ground, 1 space), uint32 index. Type is nonzero except for bulk stop, which uses
+zero; only indexed cancel accepts a nonzero index. Invalid variants/trailing bytes
+fail decoding. Explicit cancellation credits the supplied recipient (WGEP-45/67/64);
+bulk stop emits forward-order cancellations without a direct refund (WGEP-56).
+Command ownership follows the issuing seat's player (ADR-020).
+
+An indexed cancel may append version **1** (uint8) and a nonzero target build
+identity (uint64), for **31** bytes total. The simulation checks that identity
+before refund or removal and reports the `stale_entry` admission detail on a
+mismatch, so a displayed entry cannot cancel a later same-type replacement.
+The viewer always supplies this guard. The original 22-byte form retains its
+type/index semantics and byte encoding; other actions, unknown versions, zero
+identities, truncated fields and additional trailing bytes reject the extension.
+
+WGEP-45 sources cancellation by type and index. The build-identity guard is an
+EAWR extension because the displayed snapshot can lag simulation execution;
+the guard keeps the visible cancellation matched to the clicked entry.
+
+Event kinds 22/23/24 report started/completed/cancelled production, with subject
+planet, value type and sequence build identity. Rejection reason 14 carries a
+`ProductionAdmission` detail in value. Events remain delivery data, outside state.
+Conditional state section 8 contains the live production codec payload; section 7
+contains movement state when that service is present. The checkpoint's existing production section
+uses those section-8 bytes, and reconstruction verifies them. Queue entries retain
+builder/build identity, stored price, full duration, last serviced remaining time,
+countdown origin and frame count. Thus resync restores the exact runtime timer
+without a second debit or refund. No existing format version or pin changes.
+
+Admission profiles explicitly supply affiliation, direct-build eligibility,
+planet restrictions, prerequisite identities, slots and ownership/occupancy gates.
+The validated type adapter prepares stored price/time and supported tech/base/
+population/limit fields (WGEP-18..34); it refuses missing modifier inputs. Historical completion inputs, AI task budgets/prequeues,
+corruption/modifier lifecycle and nested company/squadron placement remain named
+owning-service seams. AI production is refused until its payment provider exists;
+human pay-as-you-go follows WGEP-43/46/65. Flat surface results and structures are
+published with persistent IDs and paid cost; flat orbital units use fleet commands.
+An orbital unit's production object row retains its build provenance and paid cost;
+its current orbit, membership and ownership come from the fleet snapshot. Population
+and census invalidation for initial objects without offers remains the population/census
+adapter's responsibility (legacy EAWR-1129).
+
+## Political control extension (tag 8)
+
+After the legacy absent-force roster, a nonempty sourced ground-capability table
+appends tail version **1** (u8), count (u32), then each current TypeId (u64),
+Q24 combat power (i64), transport-behavior flag (u8) and stay-in-transport flag
+(u8). The count and identities exactly match the ordered control type table.
+Flags must be 0/1; unknown versions, missing/duplicate/reordered identities,
+truncation and trailing bytes refuse. No table emits no tail and preserves
+legacy bytes and supplied capability predicates. The same existing control
+state/checkpoint payload retains these facts; capability reads direct live
+movement contents ([WGM-106](behaviour/walks/gc-movement-control.md)).
+
+Opt-in tag 8 contains the canonical `PoliticalControlSetup` encoding from
+`src/sim/galactic/control.cpp#encode_control`: authored transition duration and
+surface limit; ordered player flags and faction identities, relationship/type tables; planet surface/base,
+production, leaning, special-category, cap, transition-modifier and capture inputs;
+route gains; current/target/controller/orbital state; captured player/planet-type
+history; and absent political-roster identities. Fixed values are signed int64 Q24;
+IDs are uint64 entities/types and uint32 players; counts are uint32 and boolean
+flags uint8 0/1. Nested counts, ordering, identity uniqueness, complete player
+relations and consumed types are validated. Unknown tags and trailing bytes fail.
+
+The conditional hashed control section is **9**. Section IDs are encoded explicitly;
+section **8** remains the separate production lane's reservation and is not emitted
+by a control-only setup. The version-1 checkpoint planet section appends a framed
+control-state blob only when enabled; recording reconstruction retains political
+progress, surface identities and first-capture history. Existing setups omit tag 8
+and section 9, retaining their previous bytes and pins.
+
+Galactic opcode **8** is `LandFleet`: uint64 fleet, uint64 destination planet
+(16 bytes, both nonzero). It checks the issuing seat's fleet ownership, orbit,
+surface accessibility and authored surface capacity, then transfers persistent
+transport identities. This lane admits allied landing and the verified empty-surface
+uncontested branch; defended and special hero invasions remain conflict-service
+inputs. Ownership uses existing event kind **3**, `planet_owner_changed`, after
+political service, never an unconditional assignment from the battle winner.
+
+Galactic opcode **18** is `LaunchFromSurface` (WGM-13, WGUI-55): uint32 unit count
+(at least one), that many nonzero distinct uint64 surface identities in launch
+order, uint64 target fleet (zero creates a fleet), uint8 creation slot (0..2,
+canonically zero when a target fleet is named). The body is exactly that length.
+It is the seat form of the native launch: each unit must be the issuing player's
+live landed transport on an unblockaded surface, and the ordinary fleet creation
+or membership admission (pause, target ownership and orbit, one planet) decides
+the whole group. Admission is all-or-nothing: a refusal leaves every unit on the
+surface with no temporary detached link and publishes `command_rejected` with the
+reason. A launch publishes `command_executed` naming the new or target fleet, then
+the ordinary fleet events, and removes the surface links and the observer's live
+transport references in the same commit. It is neither an invasion nor a movement.
+
+## Global population extension (tag 10)
+
+The opt-in census requires production and its graph/fleet services. Header tag **10**
+contains u32 original-type count and rows of u64 type ID, i64 Q24 GC population and
+i64 additional capacity; u32 player count and rows of u32 player ID, i64 faction
+base capacity, u8 AI-cap flag, u32 unusable-planet count and u64 planet IDs; then
+u32 owned-list metadata count and rows of u64 object ID, u64 original type ID,
+u32 owner, u64 enclosing planet, u64 immediate container, u8 dead and u8
+delete-pending flags. All tables are strictly ordered; player rows match setup.
+Owned-list metadata augments containers/transports and overrides the original type
+and lifecycle flags of existing planet/member/result identities. Existing live
+ownership, orbit and membership remain authoritative.
+
+State section **11** stores these inputs followed by u32 total count and rows of
+u32 player, i64 Q24 capacity, usage and reservations, and u8 uses-cap. Sections
+9 is emitted for enabled political control; section 10 is not emitted. Snapshot tail tag 10 carries only
+the totals. The existing checkpoint production DTO frames section 8 and section
+11 separately when enabled; replay reconstruction verifies both. Disabled census
+keeps all existing replay/state/snapshot/checkpoint encodings unchanged.
+
+Usage reads original types, suppresses only children of immediate positive-population
+containers, and includes dead/delete-pending identities still in the owned list.
+Capacity excludes those lifecycle states and additionally includes an owned planet's
+current station. Each producer rounds the sum of both actual queues once; global
+owned usage rounds once. WGEP-68 enclosing-planet traversal filters AI-unusable planets for capped nonhuman
+players independently of immediate-parent suppression. That suppression also excludes
+the producer's queue contribution. Disabled AI cap reports zero capacity and usage
+and bypasses admission (WGEP-69).
+These are WGEP-48/49/50/62 and the population accounting clarification in the
+[economy/production walk](behaviour/walks/gc-economy-production.md). Admission reads
+earlier synchronized commits; publication follows interval-1 production service
+(GFS-01/09, GFC-08 in the [galactic frame schedule](behaviour/galactic-frame-service-schedule.md)).
+
+Campaign startup accepts a census provider beside its prepared-production provider.
+It supplies original owned-list metadata, faction base capacity and AI usability;
+live fleet/result tables supply ordinary identities. Cumulative historical completions
+remain an explicit setup ledger, and AI task/budget payment remains with its owning
+service. Census arithmetic is partitioned with an ordered reduction, and unchanged
+idle frames reuse it without scanning the owned list.
+WGEP-78 exact-original owned counts retain dead and delete-pending identities while
+still owned; there is no separate lifetime filter. The production result model
+keeps atomic requested original types; initial movement children retain their
+separate original identities. Orbital production refuses stock
+`requires_live_children` composites before admission. The named
+`census_composite_owned_count` seam waits for the static type-table/child service:
+its sourced rule adds the recursive maximum component or company-transport count,
+with all-allies disabled, rather than summing child counts. The named
+`census_retained_reinforcements` owning-service seam supplies zero until GC models
+retained reinforcement type entries. These relationships/pools are not added to
+replay tag 10.
+
+## Source income and production reduction extension (tag 13)
+
+Opt-in tag **13** encodes the validated `IncomeSetup`. Every count is uint32,
+entity/type/planet ID uint64, player/category ID uint32, fixed value signed int64
+Q24, and boolean uint8 exactly 0 or 1. Its tables, in order, are:
+
+- Original types: count, then type ID and mining-present flag; when present,
+  percentage, absolute and colony multiplier; gambling-present flag and, when
+  present, chance, minimum, maximum and uint32 interval frames; reduction count
+  and rows of target type, category, reduction, price flag and galaxy-wide flag;
+  then a credit-halt-present flag and, when present, the authored halt duration in
+  seconds (int64 Q24, nonnegative, bounded by the production frame conversion).
+- Planets: count, then planet ID, mining-colony, destroyed and intimidation flags.
+- Declared sources: count, then source ID, original type, current planet, owner,
+  planet-source flag and enabled flag.
+- Nominal offers: count, then planet, target type, unrounded price and seconds.
+
+Types and sources are strictly ID ordered; planets match the complete galaxy
+planet table; reductions follow `(type, price, category, galaxy_wide)` order;
+offers follow `(planet, type)` order. Nonplanet declarations must match their
+owning live identity. Counts obey the galaxy object bound and available bytes;
+intervals are at most 32767 frames. Missing fiscal inputs, malformed identities,
+unsupported values, truncated payloads and trailing bytes fail admission.
+
+Conditional state section **15**, version 1, contains that same income encoding
+with current source bindings, followed by uint64 random-draw statistic and uint32
+gambling-state count. Each gambling row stores uint64 source, planet and deadline,
+int64 Q24 contribution, uint8 scheduled and uint32 previous target owner. Rows are
+in stable source order, followed by a uint32 income-blocker count and rows of
+uint64 planet, uint64 source, uint64 first frame and uint64 first expired frame
+in ascending (planet, source) order (WGEP-163..165). Only unexpired rows are
+stored: ordered expiry commits at the GC frame advance remove a row at its first
+expired frame, and an ordinary pause does not advance that frame. Native effect
+kind **18** (`income_block`) journals each write or removal as uint8 operation
+(1 set, 2 remove), uint64 planet, uint64 source, then the row written or removed
+(uint64 first frame, uint64 first expired frame). Reconstruction applies the
+recorded absolute frames and verifies the retained ledger, so it never duplicates
+or extends a halt. Galaxy checkpoint section version **25** carries this ledger
+(older galaxy checkpoints are refused, per the pre-1.0 policy). Snapshot tail tag 13 carries this state. The existing
+checkpoint production DTO appends a length-framed section-15 blob after its
+production and optional census blobs; typed replay reconstruction verifies the
+same deadlines, ownership cleanup and contributions. Absent income keeps previous
+replay/state/snapshot/checkpoint bytes unchanged. This project continuation does
+not claim retail random-stream or restore equivalence; see the named boundaries
+in the [economy walk](behaviour/walks/gc-economy-production.md).
+
+## Galactic victory extension
+
+Opt-in header tag **14** retains WGS-15..32/57's installed monitor and copied
+provider metadata. State section **16** stores its live monitor; the existing
+checkpoint victory section carries those bytes. No new player opcode is added.
+Entries retain authored order and duplicates, parameters, occurrence/text flags,
+and the pending copy. Countdown, previous service frame, nested wait count,
+ordered queued tests and retry flags survive restoration. A persisted dispatch
+flag publishes the matured event once while the pending copy remains available
+to presentation. Events **39..41** and rejection **20** are reserved for victory.
+Legacy recordings without this opt-in keep their bytes and hashes.
+
+Configured GameSession runs the victory tail after hosted AI/story and before
+active-parent timer advance (GFS-15/GFD-04). A standalone world without hosted
+story uses its own step tail. Trusted superweapon return producers reuse the
+existing result roster/journal and loss reconciliation; they do not add a second
+casualty pass or introduce a player command. Hero lifecycle and story/tutorial
+caller inputs remain named owning-provider seams as described in WGS-92.
+
+## Corruption economy extension
+
+Opt-in header tag **15**, payload version **1**, and state section **17** retain
+corruption economy inputs and live state: faction eligibility and production
+factors, current corruption/siphon/piracy, planetary income factors, market item
+order, prepared prices/owned flags/absence, independent unlocks and buyer handoffs.
+The native checkpoint planets DTO appends the length-framed section-17 bytes;
+recording reconstruction verifies the same state. Market prepare and buy are
+galactic opcodes **12** and **13**. They use the shared account and the retained
+AI funding notification routes, with no ordinary production queue.
+
+Income previews are pure. Collection commits piracy consumption and strict
+siphon expiry; the ordered post-payment pass chooses the next planet factor.
+The original stored siphon amount, blocked-income early return and preview-side
+refresh (WGEP-114/115) remain owning-producer seams; this reducer takes explicit
+pre-siphon inputs. Fiscal funding retains the existing actual capped-delta
+notification contract; original gross-aggregate funding parity remains separate
+work (legacy EAWR-2622).
+This implementation uses a dedicated synchronized counter stream seeded from
+the session seed and the fixed economy domain, retaining its position in section
+17. The original game uses the shared synchronized RNG; identical retail draws
+across unrelated services remain a fidelity seam. Draw allocation and ordered
+commit are independent of worker completion order. Destroyed influenced planets
+reset to one without drawing.
+
+Live corruption transitions, siphon deployment, departure piracy accrual and
+hero lifecycle updates remain named owning-host producers of the copied inputs.
+Successful purchases record an absence/despawn handoff for that lifecycle.
+Market ability routing, local feedback delivery, stale UI submission and stock
+station discovery (WGEP U-11) remain separate qualification seams. Missing
+tutorial item authoring refuses through a named omission seam until its defaults
+are sourced; authored tutorial pricing follows WGEP-58/81.
+
+## Identity sale and retained unit cost
+
+GHUD-S93..S94 extend GALACTIC opcode **19** to `SellObject`: two u64 values,
+planet and exact object identity. Structures and units use the same payload;
+`first_reserved` remains **21**, following member transfer **20**.
+
+The census payload now begins with u8 version **1**. Each type row additionally
+contains i64 Q24 authored build price, u8 sale policy (0 Default, 1 Always,
+2 Never), and boolean named-hero and superweapon flags. Each actor row additionally
+contains i64 Q24 actual paid cost after its garrison byte. These facts are saved,
+hashed and used by the shared sale admission/refund query. Nested completion
+retains its production payment on the original strategic identity. Older census
+payloads are unsupported; game-state encoding is bumped when the field lands.
+The existing composite and exact-company binding tails follow the new rows.
+## Registered planet spies
+
+The registered planet-spy list is appended to observer extension 12 after its logical-FPS
+field (WGUI-19..25/98/101/102). The list starts with a uint32 count. Each entry stores uint64
+planet identity and ability identity, a uint32-length-prefixed source text identity, uint32
+requested intelligence mask, int64 Q24 duration and influence range, uint8 style (0 disabled,
+1 galactic automatic, 2 ground activated), then uint8 enabled and despawning Booleans.
+
+The existing observer records retain ordered per-player modifiers separately. Fresh campaign
+initialization inserts automatic effects once; replay and checkpoint reconstruction retain
+these definitions and lists without repeating initialization. Termination persists cancellation
+in the registered enabled flag. Canonical galactic state and game checkpoint state identities
+are version 3 after the retained unit-cost extension; older project encodings are refused. See [the observer rules](behaviour/walks/gc-ui-sensors.md)
+for event-time ownership transfer, expiry and unresolved registration/text-identity seams.
+
+Galactic opcode **21** is `RecheckOrbit` (WGM-154): one nonzero uint64 target
+identity, resolving to a live fleet or planet at execution. Only an active
+script seat may execute it. A planet selects its first orbit-list fleet; an
+enroute fleet or an empty orbit supplies no encounter. It reuses the ordinary
+relink/gather provider and publishes conflict to the existing tail. This is the
+staged Lua adapter, with synchronous result and conflict-end wait qualified in
+[the movement walk](behaviour/walks/gc-movement-control.md).

@@ -40,8 +40,13 @@ inline constexpr std::uint8_t opcode_cancel_entry = 22; // coordinator-reserved,
 inline constexpr std::uint8_t opcode_ai_reservation_debit = 23; // coordinator-reserved, WAS-25
 inline constexpr std::uint8_t opcode_prepaid_buy = 24; // coordinator-reserved, WAS-26
 inline constexpr std::uint8_t opcode_repair_hardpoint = 25; // coordinator-reserved: WSL-40
+inline constexpr std::uint8_t opcode_campaign_credit_release = 29; // WGA-54
 inline constexpr std::uint8_t opcode_reinforce_facing = 26; // coordinator-reserved: WR-X01
-inline constexpr std::uint8_t max_command_opcode = opcode_reinforce_facing;
+inline constexpr std::uint8_t opcode_special_fire = 27; // coordinator-reserved: WSW-16/20
+inline constexpr std::uint8_t opcode_retreat = 28; // WR-43..47
+inline constexpr std::uint8_t opcode_retreat_cinematic = 30; // WR-50..53 recorded playback
+inline constexpr std::uint8_t opcode_beacon = 31; // coordinator-reserved, HCB-12
+inline constexpr std::uint8_t max_command_opcode = opcode_beacon;
 
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,

@@ -98,6 +98,14 @@ target_link_libraries(
 target_compile_features(eawr_script_authoritative PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_script_authoritative)
 
+# Mode-aware GC host around the same authoritative scheduler (ADR-012).
+add_library(eawr_script_galactic STATIC ${EAWR_SCRIPT_GALACTIC_SOURCES})
+add_library(eawr::script_galactic ALIAS eawr_script_galactic)
+target_include_directories(eawr_script_galactic PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>")
+target_link_libraries(eawr_script_galactic PUBLIC eawr::script_authoritative eawr::sim_galactic)
+target_compile_features(eawr_script_galactic PUBLIC cxx_std_20)
+eawr_target_project_warnings(eawr_script_galactic)
+
 # The FoC tactical space AI host (#79, docs/behaviour/foc-tactical-ai.md "#79 host"):
 # the retail space freestore script driven as the FoC engine drives it.
 add_library(eawr_script_foc STATIC ${EAWR_SCRIPT_FOC_SOURCES})
@@ -107,6 +115,6 @@ target_include_directories(
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
-target_link_libraries(eawr_script_foc PUBLIC eawr::script_authoritative eawr::sim eawr::script_numeric)
+target_link_libraries(eawr_script_foc PUBLIC eawr::script_authoritative eawr::sim eawr::script_numeric eawr::sim_galactic)
 target_compile_features(eawr_script_foc PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_script_foc)

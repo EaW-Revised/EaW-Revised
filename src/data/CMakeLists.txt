@@ -1,4 +1,5 @@
 include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/galactic/sources.cmake")
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
@@ -15,7 +16,7 @@ add_custom_command(
     VERBATIM
 )
 
-add_library(eawr_data STATIC ${EAWR_DATA_SOURCES} "${EAWR_XML_SCHEMA_INC}")
+add_library(eawr_data STATIC ${EAWR_DATA_SOURCES} ${EAWR_GALACTIC_DATA_SOURCES} "${EAWR_XML_SCHEMA_INC}")
 add_library(eawr::data ALIAS eawr_data)
 target_include_directories(
     eawr_data

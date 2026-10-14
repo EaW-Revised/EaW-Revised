@@ -75,7 +75,7 @@ jobs:
           python -m pip install -r requirements-dev.txt
           cmake --preset "$PRESET"
           cmake --build --preset "$PRESET"
-          ctest --preset "$PRESET"
+          ctest --preset "$PRESET" -LE "game-data|installed-required"
 
       - name: Fetch the pinned godot-cpp
         shell: bash

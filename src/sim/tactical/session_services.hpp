@@ -31,6 +31,8 @@ void apply_squadron_order(SquadronState& state, const CommandPayload& payload, c
 [[nodiscard]] core::Result<math::Mat3x4> level_transform(LiveUnit& unit);
 
 [[nodiscard]] core::Result<math::Mat3x4> unit_transform(LiveUnit& unit);
+// Immutable geometry readers must never update a shared victim's placement cache.
+[[nodiscard]] core::Result<math::Mat3x4> unit_transform(const LiveUnit& unit);
 
 // The first frame of the window that holds `frame` when windows roll every `interval` frames
 // from `anchor` (the object tracking layer's service step, research E71-13).

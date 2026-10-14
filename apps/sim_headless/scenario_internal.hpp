@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -76,6 +77,7 @@ struct ScenarioEvent {
     Fixed amount;          // damage
     std::string hardpoint; // damage: the XML hardpoint name, empty for the hull
     std::vector<std::string> with; // move: further units of the same command (#599, a group move)
+    bool append{}; // HCB-57: queue a move after the current route.
 };
 
 struct Scenario {
@@ -86,6 +88,7 @@ struct Scenario {
     std::vector<ScenarioEvent> events;
     std::uint64_t duration{};
     bool fog_revealed{}; // staging.fog "revealed"
+    bool installed_replay_audit{}; // Extended diagnostics use a separate trace format.
 };
     // A traced object: a unit, or a hardpoint under test (`weapon` is its combat weapon slot).
 struct Traced {
@@ -121,7 +124,7 @@ using Health = std::map<std::pair<eawr::sim::EntityId, std::string>, std::int64_
 using Live = std::map<eawr::sim::EntityId, tactical::TypeId>;
 bool projectile_contact_diagnostics();
 core::Result<void> write_rows(const tactical::TacticalSession& session, const Labels& labels, const UnitIds& unit_ids,
-    const std::vector<Traced>& traced, std::ostringstream& trace, std::uint64_t tick);
+    const std::vector<Traced>& traced, std::ostringstream& trace, std::uint64_t tick, bool installed_replay_audit);
 void write_combat_rows(const tactical::TacticalSession& session, const Labels& labels, const Types& types_by_id,
     Health& last_health, Live& live_before, std::ostringstream& combat_log, std::uint64_t tick);
 core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_path,
@@ -129,7 +132,8 @@ core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_p
 core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::string& path, const std::string& bytes,
     core::Result<eawr::units::UnitTables>& tables, const std::vector<tactical::SensorProfile>& sensors,
     core::Result<tactical::DurabilityTable>& durability, core::Result<tactical::MotionTable>& motion,
-    core::Result<tactical::CombatTable>& combat, std::size_t workers, const std::string& build_sha256);
+    core::Result<tactical::CombatTable>& combat, const tactical::MapBox& map_box, std::size_t workers,
+    const std::string& build_sha256);
 void trace_header(ScenarioRun& run, const Scenario& scenario, const std::string& bytes, const std::string& build_sha256);
 
 } // namespace sim_headless::scenario_detail

@@ -34,12 +34,22 @@ constexpr std::uint64_t engine_drain_limit_samples = 300;
     // IS-09: the stun shows its emitters from the hit until its end frame (IS-03).
     modes.ion_stunned = instance->ion_stun_frames > 0;
     for (const auto& ability : instance->abilities) {
+        if (ability.kind == sim::tactical::AbilityKind::blast) {
+            modes.blast_charging = ability.blast_charge_remaining != 0;
+            modes.blast_charged = !modes.blast_charging && ability.blast_charged_presentation;
+        }
         if (!ability.active) continue;
         if (ability.kind == sim::tactical::AbilityKind::turbo || ability.kind == sim::tactical::AbilityKind::spoiler_lock) {
             modes.turbo = true;
         }
-        if (ability.kind == sim::tactical::AbilityKind::power_to_weapons) modes.power_to_weapons = true;
+        // WAB-80: FULL_SALVO shows the same power-to-weapons emitter type as POWER_TO_WEAPONS.
+        if (ability.kind == sim::tactical::AbilityKind::power_to_weapons
+            || ability.kind == sim::tactical::AbilityKind::full_salvo) {
+            modes.power_to_weapons = true;
+        }
         if (ability.kind == sim::tactical::AbilityKind::invulnerability) modes.invulnerability = true;
+        if (ability.kind == sim::tactical::AbilityKind::interdict) modes.gravity_well = true;
+        if (ability.kind == sim::tactical::AbilityKind::missile_shield) modes.missile_shield = true;
     }
     return modes;
 }
@@ -70,6 +80,8 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
     const bool stun_ended = ship.planned && ship.modes.ion_stunned && !modes.ion_stunned;
     // AB-32, BP-48: hiding the glow at switch-off or expiration drains its existing particles.
     const bool power_ended = ship.planned && ship.modes.power_to_weapons && !modes.power_to_weapons;
+    const bool blast_changed = ship.planned && (ship.modes.blast_charging != modes.blast_charging
+        || ship.modes.blast_charged != modes.blast_charged);
     if (!ship.planned || ship.modes != modes
         || !std::equal(ship.states.begin(), ship.states.end(), states.begin(), states.end())) {
         plan(ship, view, states, modes);
@@ -86,6 +98,9 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
         // particles drain, as a hidden proxy's do in FoC (rig recording, #559).
         if (((turbo_swap && running->engine) || (stun_ended && running->ion_stun)
              || (power_ended && running->power_to_weapons)
+             || (!modes.gravity_well && running->gravity_well)
+             || (!modes.missile_shield && running->missile_shield)
+             || (blast_changed && running->blast_effect)
              || (ship.planned && !modes.invulnerability && running->invulnerability))
             && registry_->stop_emission(running->handle)) {
             running->draining = true;
@@ -94,6 +109,8 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
             if (running->ion_stun) ++ion_stun_drains_started_;
             if (running->power_to_weapons) ++power_to_weapons_drains_started_;
             if (running->invulnerability) ++invulnerability_drains_started_;
+            if (running->gravity_well) ++deployment_drains_started_["gravity_well"];
+            if (running->missile_shield) ++deployment_drains_started_["missile_shield"];
             ++running;
             continue;
         }
@@ -109,12 +126,8 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
         if (present) continue;
         const EffectSystem& system = effect_system(wanted.effect);
         auto definition = *system.system;
-        // BP-70: the frame scales emission; sprite sizes also use the root model scale.
-        if (wanted.size_scale != 1.0F) for (auto& emitter : definition.emitters) {
-            if (emitter.size.keys.empty()) emitter.size.keys.push_back({0.0F, wanted.size_scale});
-            else for (auto& key : emitter.size.keys) key.value *= wanted.size_scale;
-            emitter.tail_size *= wanted.size_scale;
-        }
+        // BP-70/PS-28: object scale transforms emission positions; billboard
+        // size stays authored and has its separate dynamic-size multiplier.
         auto handle = wanted.mesh ? registry_->spawn(std::move(definition), wanted.seed, wanted.capacity, *wanted.mesh)
                                   : registry_->spawn(std::move(definition), wanted.seed, wanted.capacity);
         if (!handle) {
@@ -130,6 +143,10 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
         ship.running.push_back(
             {wanted.proxy, handle.value(), wanted.local, wanted.mesh_local, wanted.engine, wanted.ion_stun,
              wanted.power_to_weapons, born, wanted.invulnerability, log});
+        ship.running.back().gravity_well = wanted.gravity_well;
+        ship.running.back().missile_shield = wanted.missile_shield;
+        ship.running.back().blast_effect = wanted.blast_effect;
+        ship.running.back().elapsed_clock = view.projectile;
         ++started_[wanted.proxy_name];
     }
 }
@@ -297,21 +314,36 @@ bool UnitEmitters::advance_sample() {
     clone_max_live_ = std::max(clone_max_live_, clone_live);
     clone_max_particles_ = std::max(clone_max_particles_, clone_particles_now_);
     clone_particles_now_ = 0;
-    std::uint64_t particles_now = 0;
+    return advance_running(presentation_constants::logical_frame_seconds, false);
+}
+
+bool UnitEmitters::advance_running(const float delta_seconds, const bool projectiles) {
+    std::uint64_t particles_now = projectiles ? sampled_particles_ : 0;
     // #638: every running emitter steps in one batch on the particle workers; the results are
     // then taken in the running order, as one advance after another gave them.
     batch_handles_.clear();
     for (const Ship& ship : ships_) {
-        for (const Running& running : ship.running) batch_handles_.push_back(running.handle);
+        for (const Running& running : ship.running) {
+            if (running.elapsed_clock == projectiles) batch_handles_.push_back(running.handle);
+        }
     }
-    if (auto advanced = registry_->advance_all(batch_handles_, presentation_constants::logical_frame_seconds, camera_frame_, batch_stats_); !advanced) {
+    if (auto advanced = registry_->advance_all(batch_handles_, delta_seconds, camera_frame_, batch_stats_); !advanced) {
         failure_ = "unit emitter: " + core::format_diagnostic(advanced.error());
         return false;
     }
     std::size_t next = 0;
     for (Ship& ship : ships_) {
         for (auto running = ship.running.begin(); running != ship.running.end();) {
+            if (running->elapsed_clock != projectiles) { ++running; continue; }
             const particles::EffectFrameStats& advanced = batch_stats_[next++];
+            if (collect_axis_diagnostics_ && running->log < start_log_.size()) {
+                auto& measured = model_axis_[start_log_[running->log].proxy];
+                for (const auto& emitter : advanced.emitters) {
+                    measured.samples += emitter.axis_samples;
+                    measured.reversed += emitter.axis_reversed;
+                    measured.max_sine_error = std::max(measured.max_sine_error, emitter.axis_max_sine_error);
+                }
+            }
             particles_now += advanced.particles;
             if (running->log < start_log_.size()) {
                 std::uint64_t quads = 0;
@@ -343,8 +375,33 @@ bool UnitEmitters::advance_sample() {
             ++running;
         }
     }
+    if (!projectiles) sampled_particles_ = particles_now;
     max_particles_ = std::max(max_particles_, particles_now);
     particles_ = particles_now;
+    return true;
+}
+
+bool UnitEmitters::advance_projectiles(const double presented_tick) {
+    // PS-42: both linked and world particles consume the elapsed time of the
+    // pose just supplied. Following only the linked particles between integer
+    // samples separates a moving ring from its inherited-motion kite.
+    if (!projectile_clock_tick_) projectile_clock_tick_ = clock_start_;
+    const double elapsed = std::max(0.0, presented_tick - *projectile_clock_tick_);
+    if (elapsed == 0.0) {
+        batch_handles_.clear();
+        for (const Ship& ship : ships_) {
+            for (const Running& running : ship.running) {
+                if (running.elapsed_clock) batch_handles_.push_back(running.handle);
+            }
+        }
+        if (auto presented = registry_->present_all(batch_handles_, camera_frame_); !presented) {
+            failure_ = "projectile emitter: " + core::format_diagnostic(presented.error());
+            return false;
+        }
+        return true;
+    }
+    if (!advance_running(static_cast<float>(elapsed * presentation_constants::logical_frame_seconds), true)) return false;
+    projectile_clock_tick_ = presented_tick;
     return true;
 }
 
@@ -352,7 +409,9 @@ bool UnitEmitters::present_running() {
     // #638: one batch on the particle workers, as advance_sample.
     batch_handles_.clear();
     for (const Ship& ship : ships_) {
-        for (const Running& running : ship.running) batch_handles_.push_back(running.handle);
+        for (const Running& running : ship.running) {
+            if (!running.elapsed_clock) batch_handles_.push_back(running.handle);
+        }
     }
     if (auto presented = registry_->present_all(batch_handles_, camera_frame_); !presented) {
         failure_ = "unit emitter: " + core::format_diagnostic(presented.error());
@@ -361,6 +420,7 @@ bool UnitEmitters::present_running() {
     std::uint64_t effects = 0;
     for (const Ship& ship : ships_) {
         for (const Running& running : ship.running) {
+            if (running.elapsed_clock) continue;
             ++effects;
             if (running.log < start_log_.size()) ++start_log_[running.log].presented;
         }
@@ -393,6 +453,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
             presented_tick, reached.empty() ? std::nullopt : std::optional<std::uint64_t>(reached.front().tick));
     }
     camera_frame_ = particles::camera_frame_from_render(camera.eye, camera.target, camera.up);
+    camera_frame_.collect_axis_diagnostics = collect_axis_diagnostics_;
     const auto due = static_cast<std::uint64_t>(std::max(0.0, std::floor(presented_tick - *clock_start_ + 1.0e-9)));
     ships_.resize(std::max(ships_.size(), population.live_ship_count()));
     // #406: a frame due more than one sample (a stall) first runs the samples before its own,
@@ -507,7 +568,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
             update(ship, *view, states, modes, base + 1U, samples_);
             place(index, *pose);
         }
-        if (!advance_sample()) return false;
+        if (!advance_projectiles(tick) || !advance_sample()) return false;
     }
     // The frame's own sample: the poses just drawn and the latest states.
     for (std::size_t index = 0; index < ships_.size(); ++index) {
@@ -577,6 +638,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
     for (; samples_ < due; ++samples_) {
         if (!advance_sample()) return false;
     }
+    if (!advance_projectiles(presented_tick)) return false;
     // What this frame draws: each new emitter's age now is the one it is first seen at.
     for (const Ship& ship : ships_) {
         for (const Running& running : ship.running) {

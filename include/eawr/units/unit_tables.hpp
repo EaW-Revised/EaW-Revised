@@ -9,6 +9,7 @@
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/motion.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "eawr/units/population.hpp"
 
 #include <array>
 #include <cstdint>
@@ -72,6 +73,8 @@ struct InaccuracyEntry final {
 struct Weapon final {
     std::string projectile;
     std::uint32_t projectile_index{no_index};
+    std::string charged_projectile; // WAD-35: Blast_Ability_Fire_Projectile_Type
+    std::uint32_t charged_projectile_index{no_index};
     std::optional<Fixed> min_recharge_seconds;
     std::optional<Fixed> max_recharge_seconds;
     std::optional<std::uint32_t> pulse_count;
@@ -86,6 +89,7 @@ struct Weapon final {
     bool opportunity_fire_when_targeting{};
     bool opportunity_fire_when_idle{};
     std::optional<std::uint32_t> appearance_delay_frames; // WAD-37/40, hardpoint only
+    std::optional<Fixed> full_salvo_delay_multiplier; // Full_Salvo_Weapon_Delay_Multiplier, hardpoint only (WAB-80)
     bool operator==(const Weapon&) const = default;
 };
 
@@ -123,6 +127,7 @@ struct Hardpoint final {
     // HARD_POINT_FIGHTER_BAY (#75): the X axis of the attachment bone's bind frame, model space.
     std::optional<Vec3> bay_axis;
     bool requires_manual_target{}; // WAD-39: no automatic shot without a manual assignment
+    bool allows_special_weapon_use{}; // WSW-48: allied permission lifecycle notifications
     std::optional<Fixed> manual_cooldown_seconds;
     bool manual_is_turret{};
     BonePoint manual_turret;
@@ -167,6 +172,8 @@ struct Projectile final {
     std::optional<Fixed> rocket_straight_distance{};
     sim::tactical::WeakenProfile weaken{};
     Fixed damage_delay{}; // Projectile_Damage_Delay_Secs, WAD-26
+    std::optional<Fixed> reveal_range{};
+    Fixed dense_reveal_multiplier{Fixed::from_raw(Fixed::scale)};
     bool operator==(const Projectile&) const = default;
 };
 
@@ -176,12 +183,19 @@ struct ModMultiplier final {
     bool operator==(const ModMultiplier&) const = default;
 };
 
+struct ModFlag final {
+    std::string modifier;
+    bool value{};
+    bool operator==(const ModFlag&) const = default;
+};
+
 struct Ability final {
     std::string type;          // upper-case, as the engine's ability enum is spelled
     std::string authored_type; // as written (`power_to_weapons` on the Acclamator)
     std::optional<Fixed> expiration_seconds;
     std::optional<Fixed> recharge_seconds;
     std::vector<ModMultiplier> modifiers;
+    std::vector<ModFlag> modifier_flags;
     bool supports_autofire{};
     // #561: the projectile the ability fires instead of the weapons' own (Projectile_Types_Override),
     // resolved to its index in the projectile table.
@@ -195,7 +209,35 @@ struct Ability final {
     std::uint32_t spawned_projectile_index{no_index};
     std::optional<Fixed> bomb_countdown_seconds, target_position_z_offset;
     std::string replenish_particle;
+    // WLU-01: LURE's pulse data as authored (Target_Types names, the pulse period and count, the
+    // Is_Pulsing flag the service never reads, and the presentation particle).
+    std::vector<std::string> target_types;
+    std::optional<Fixed> pulse_frequency_seconds;
+    std::optional<std::uint32_t> max_pulses;
+    std::optional<bool> is_pulsing;
+    std::string lure_particle;
+    bool disable_movement{}; // WIN-02, WMS-02: authored movement lock while deployed
     bool operator==(const Ability&) const = default;
+};
+
+// WAB-70/71: a nested Buzz_Droids_Ability as authored (the droid object it creates at a point,
+// that object's arming delay, chase and damage radii and per-second damage).
+struct BuzzDroids final {
+    std::string name;
+    std::optional<Fixed> min_range, max_range, chase_radius, damage_radius;
+    std::optional<Fixed> enemy_damage_per_second, own_damage_per_second, activation_seconds;
+    std::string object_type;
+    std::string activate_sfx; // presentation: the droids' own arming cue (WAB-75)
+    bool operator==(const BuzzDroids&) const = default;
+};
+
+// WCB-01..03: a named self-targeted ring launcher, independent of the unit ability's radius.
+struct ClusterBomb final {
+    std::string name, bomb_type;
+    sim::tactical::SpecialActivationStyle style{};
+    std::uint32_t projectile_index{no_index}, count{1};
+    Fixed detonation_seconds{Fixed::from_raw(Fixed::scale)};
+    bool operator==(const ClusterBomb&) const = default;
 };
 
 struct SpawnEntry final {
@@ -213,6 +255,7 @@ struct Spawner final {
     std::optional<Fixed> delay_seconds;
     std::vector<SpawnEntry> reserves;
     bool reserves_used{false};
+    std::array<std::vector<SpawnEntry>, 6> campaign_starting, campaign_reserves;
     bool operator==(const Spawner&) const = default;
 };
 
@@ -245,6 +288,10 @@ struct CollisionBounds final {
     Vec3 max;
     bool operator==(const CollisionBounds&) const = default;
 };
+// WGM-128: strict reference-pose collision box for model-backed GC objects.
+// Reuses the shared model/bone loader; no collidable meshes yield [-1,1]^3.
+// Malformed bounds, bones and arithmetic overflow refuse rather than falling back.
+[[nodiscard]] core::Result<CollisionBounds> prepare_galactic_collision_bounds(const assets::Model&);
 
 // A collidable mesh a projectile hits (#536, docs/behaviour/space-damage.md DG-36): its ALO name
 // and its triangles in model space, bind pose, before Scale_Factor. `hardpoint` is the index of
@@ -348,13 +395,52 @@ struct CombatBonus final {
     bool operator==(const CombatBonus&) const = default;
 };
 
+// WGT-49/50: source-owned player effects; independent from Combat_Bonus_Ability.
+struct BattlefieldBonus final {
+    std::string name;
+    std::uint32_t category{};
+    Fixed defence{}, reveal_delta{};
+    bool all_allies{}, enabled{true};
+    bool operator==(const BattlefieldBonus&) const = default;
+};
+// WST-03: a Space_Automatic Battlefield_Modifier_Ability's Stealth_Duration_Multiplier, for its owner
+// (and its allies with Apply_To_All_Allies).
+struct StealthDurationBonus final {
+    std::uint32_t stacking_category{};
+    Fixed multiplier{};
+    bool all_allies{};
+    bool operator==(const StealthDurationBonus&) const = default;
+};
+
+// WRB-05: an Enable_Ability authored on an upgrade object: it enables the named nested ability on
+// the listed types (or categories) of its holder, and of the holder's allies when `all_allies`.
+struct AbilityEnable final {
+    std::string ability_name;
+    std::vector<std::string> types;
+    std::vector<std::string> categories;
+    bool all_allies{};
+    bool operator==(const AbilityEnable&) const = default;
+};
+
 // What a type builds and costs in a skirmish (#530, PU-10 to PU-21, PU-31).
 struct Production final {
+    // WGCH-164: authored source-owned tactical salvage modifier.
+    struct Bounty {
+        Fixed percentage{};
+        std::int32_t category{};
+        std::vector<std::string> factions{};
+        bool all_allies{};
+        bool operator==(const Bounty&) const = default;
+    };
+    std::vector<Bounty> bounties{};
     std::vector<BuildGroup> buildable;                   // Tactical_Buildable_Objects_Multiplayer
     std::optional<Fixed> build_cost_multiplayer;         // Tactical_Build_Cost_Multiplayer
+    std::vector<BuildGroup> buildable_campaign;          // WGT-26
+    std::optional<Fixed> build_cost_campaign;
     std::optional<Fixed> build_time_seconds;             // Tactical_Build_Time_Seconds
     std::string production_queue;                        // Tactical_Production_Queue
     std::optional<std::uint32_t> population_value;       // Population_Value
+    std::optional<std::uint32_t> space_override_population_value; // negative authored sentinel becomes absent
     std::optional<Fixed> reinforcement_prevention_radius; // Reinforcement_Prevention_Radius
     std::vector<IncomeStream> income;
     std::vector<IncomeBonus> income_bonuses;
@@ -370,12 +456,24 @@ struct Production final {
     std::string removes_previous;
     std::string next_upgrade; // WPR-63: menu metadata, outside content identity
     std::vector<CombatBonus> combat_bonuses;
+    std::vector<StealthDurationBonus> stealth_duration_bonuses;
+    std::vector<BattlefieldBonus> battlefield_bonuses;
+    std::vector<AbilityEnable> ability_enables; // WRB-05
     bool operator==(const Production&) const = default;
 };
 
 struct UnitType final {
+    std::optional<Fixed> bounty_sp{}, bounty_mp{}; // WGCH-65: negative means category fallback
+    struct ObjectTurret {
+        BonePoint turret, barrel;
+        Vec3 rest{};
+        std::optional<Fixed> speed, yaw_extent, pitch_extent, rest_delay;
+        bool xy_only{};
+        bool operator==(const ObjectTurret&) const = default;
+    };
     std::string id;
     UnitKind kind{UnitKind::ship};
+    std::string campaign_ship_class; // WGT-45: opt-in Ship_Class, independent of movement layer
     std::string xml_type; // SpaceUnit, StarBase, Squadron
     std::vector<std::string> variant_chain;
     std::string affiliation;
@@ -407,6 +505,7 @@ struct UnitType final {
     bool has_space_evaluator{};
     std::uint32_t tech_level{};
     std::uint32_t base_level{}; // SAE-02: Base_Level on live stations
+    std::vector<std::uint32_t> previous_base_levels{}; // SAE-02: resolved Prev_Level_Base chain, AI-only
     std::optional<Fixed> space_fow_reveal_range; // the type's own range (#68); used only with `reveal`
     bool force_sensitive{}; // WAB-54: Is_Force_Sensitive
     bool reveal{}; // REVEAL in its Behavior or SpaceBehavior list (#271)
@@ -428,6 +527,7 @@ struct UnitType final {
     std::optional<Fixed> ranged_target_z_adjust;
     bool powered{};  // POWERED in its Behavior or SpaceBehavior list: it has an energy pool (#361)
     bool ion_stun_effect{}; // ION_STUN_EFFECT in its Behavior or SpaceBehavior list: it can be ion stunned (#561)
+    bool damage_tracking{}; // DAMAGE_TRACKING in its Behavior or SpaceBehavior list: its rate of damage taken (WCC-82)
     std::optional<CollisionBounds> collision; // collidable meshes of its model (#74)
     // #536: the model's collidable meshes, then each hardpoint's attached model's, placed at its
     // attachment bone; and Collision_Box_Modifier (a value above 1 adds the sphere of DG-37).
@@ -443,6 +543,7 @@ struct UnitType final {
     // Squadrons (#271): the team container the squadron spawns (Create_Team_Type, default
     // `Team`), and that container's Space_FOW_Reveal_Range when the container has REVEAL.
     std::string team_type;
+    Movement team_movement; // WMV-44: the spawned container's own formation inputs
     std::optional<Fixed> team_reveal_range;
     Fixed team_dense_fow_multiplier{Fixed::from_raw(Fixed::scale / 2)};
     // WSQ-60: container trace metadata, independent of the craft's combat durability.
@@ -457,8 +558,17 @@ struct UnitType final {
     std::vector<Hardpoint> hardpoints; // in HardPoints order
     std::optional<Weapon> weapon;      // object weapon (Projectile_Types)
     std::vector<BonePoint> target_bones;
+    // WWP-47 (docs/behaviour/walks/weapons.md U-06): the object weapon's muzzle bones, the
+    // Muzzle_Bone_Name prefix (default MUZZLEA) with _00 and consecutive two-digit suffixes while
+    // the model has them. Empty without an object weapon or without a _00 bone.
+    std::vector<BonePoint> muzzle_bones;
+    std::optional<ObjectTurret> object_turret{};
     std::vector<Ability> abilities;
     std::vector<sim::tactical::SpecialAbilityProfile> special_abilities;
+    std::optional<BuzzDroids> buzz_droids; // WAB-70: its nested Buzz_Droids_Ability
+    std::optional<ClusterBomb> cluster_bomb;
+    std::optional<BuzzDroids> team_buzz_droids; // WAB-70: the team container's (AB-60)
+    std::uint64_t special_weapon_targets{}; // WAB-73: Special_Weapon_Valid_Targets in category bits
     // `Abilities` sub-objects (station income and radar) as authored; since #530 the income is
     // modelled through `production`, the radar stays off (SK-31):
     // element name and Name attribute.
@@ -474,6 +584,7 @@ struct UnitType final {
     std::optional<Fixed> strafe_distance;
     std::optional<Fixed> guard_chase_range;
     std::optional<Fixed> idle_chase_range;
+    std::optional<Fixed> autonomous_move_extension_vs_attacker;
     std::optional<Fixed> attack_move_response_range;
     std::optional<Fixed> formation_error_tolerance;
     // #447 (space-fighter-deaths SP-01): with Spin_Away_On_Death, a killed craft spins away with
@@ -491,8 +602,25 @@ struct UnitType final {
     bool under_construction{};
     bool living_projectile_collision{}; // WBP-50/51: effective living object types opt in
     bool valid_target{true}; // WCC-25: effective Is_Valid_Target, default true
+    bool target_stealth_units{}; // WST-07: Target_Stealth_Units
     bool special_weapon{}; // effective SPECIAL_WEAPON behavior
+    // WSW-01/14: a standalone planetary source, separate from station manual weapons.
+    struct PlanetaryWeapon {
+        std::uint32_t index{}, target_action{};
+        std::uint64_t valid_targets{};
+        bool operator==(const PlanetaryWeapon&) const = default;
+    };
+    std::optional<PlanetaryWeapon> planetary_weapon;
+    struct SpecialUnlock {
+        bool enable{}, all_allies{}, reverse{};
+        bool operator==(const SpecialUnlock&) const = default;
+    };
+    std::vector<SpecialUnlock> special_unlocks{}; // WSW-10/46: space-automatic battlefield effects.
+    bool consume_after_special_fire{}; // WSW-09: authored marker, independent of unlock kind.
     bool star_base{}; // effective DUMMY_STAR_BASE behavior
+    bool unit_ai{}; // WTA-29: damage retaliation belongs to the type, regardless of owner
+    bool targeting{}; // EX-31: effective TARGETING behavior; AI attack blocks give such movers the attack order
+    std::uint64_t attack_category_restrictions{}; // WTA-29: type gate, distinct from weapon restrictions
     bool influences_capture{true};
     bool ownership_sticks{};
     bool community_property{};
@@ -508,6 +636,9 @@ struct UnitType final {
     std::string constructed_type;
     bool tactical_sale{};
     std::optional<Fixed> tactical_sell_percentage;
+    // MAT-15: Build_Tab_Space_Units, the type is listed among the space reinforcements. Only the demo
+    // attract's pool return reads it (the setup carries the set); outside it the tag changes nothing.
+    bool build_tab_space_units{};
     BonePoint build_attachment;
     // #457: Minimum_Follow_Distance, how close a chasing craft closes before it slows (FD-05).
     std::optional<Fixed> follow_distance;
@@ -515,6 +646,7 @@ struct UnitType final {
     std::optional<Fixed> score_combat_power{}; // WBF-45: original scoring type's combat metric
     bool named_hero{}; // WHE-01: authored identity, independent of class/category
     bool generic_hero{};
+    bool special_weapon_in_space{}; // WTA-36: Is_Special_Weapon_In_Space, a hero to the AI's type query
     bool team_named_hero{};
     bool team_generic_hero{};
     struct CompanyMember {
@@ -588,6 +720,8 @@ struct NamedConstant final {
 };
 
 struct CombatConstants final {
+    struct Bounty { std::uint64_t category{}; Fixed value{}; bool operator==(const Bounty&) const = default; };
+    std::vector<Bounty> bounty_sp{}, bounty_mp{};
     std::vector<NamedConstant> scalars;
     std::vector<DamageToArmor> damage_to_armor;
     bool operator==(const CombatConstants&) const = default;
@@ -613,7 +747,17 @@ struct InputFile final {
     bool operator==(const InputFile&) const = default;
 };
 
+// Explicit GC player type/name locks; the story/corruption producer is an input seam.
+struct CampaignAbilityLock final {
+    std::uint32_t player{};
+    std::string type, name;
+    bool enabled{};
+    bool operator==(const CampaignAbilityLock&) const = default;
+};
 struct UnitTables final {
+    bool campaign_scene{}; // opt-in identity for GC-only scene metadata
+    bool campaign_multiplayer{}; // WGCH-65: tactical bounty table selection
+    std::vector<CampaignAbilityLock> campaign_ability_locks;
     std::optional<Fixed> ai_credit_multiplier{Fixed::from_raw(Fixed::scale)}; // WPR-12: neutral for synthetic content without difficulty data
     std::optional<Fixed> pad_ai_build_multiplier; // WBP-15: difficulty data, only with live capture content
     std::vector<std::uint64_t> pad_neutral_factions; // WHZ-51: authored Is_Neutral, sorted faction type CRCs
@@ -638,6 +782,7 @@ using ModelLookup = std::function<const assets::Model*(std::string_view logical_
 using FileDigest = std::function<std::string(std::string_view logical_path)>;
 
 struct LoadInput final {
+    bool campaign_scene{}; // GC extensions are never decoded by ordinary skirmish loads
     const data::Catalog* catalog{};
     const vfs::Vfs* filesystem{}; // targeting priority sets and gameconstants.xml
     ModelLookup model;
@@ -645,6 +790,7 @@ struct LoadInput final {
     std::vector<std::string> types; // empty = pinned_m2_types()
     std::vector<std::string> obstacles; // empty with empty `types` = pinned_m2_obstacles()
     std::string difficulty{"Normal_Default"}; // SK-42 default; alternate difficulties use their XML values
+    std::vector<CampaignAbilityLock> campaign_ability_locks;
     std::string space_map; // WHZ-01: load effective profiles for this map's actual placed types
 };
 
@@ -725,6 +871,9 @@ inline constexpr Fixed unlisted_priority = Fixed::from_raw(std::numeric_limits<s
 // Whether a type runs the PowerToShields object script (`Lua_Script`), whose DEFEND rule the
 // ability table's stand-in carries (AB-41).
 [[nodiscard]] bool runs_defend_script(const UnitType& type) noexcept;
+// Whether a type runs the Krayt object script (`Lua_Script`), whose SELF_DESTRUCT triggers the ability table's
+// stand-in carries (WSD-09).
+[[nodiscard]] bool runs_self_destruct_script(const UnitType& type) noexcept;
 
 // Q24 bind frames of every bone, root-to-bone in Q24 (docs/unit-data.md).
 [[nodiscard]] core::Result<std::vector<sim::math::Mat3x4>> bind_frames(const assets::Model& model);

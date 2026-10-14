@@ -209,6 +209,27 @@ std::vector<PoolSlot> layout_pool(const std::span<const tactical::TypeId> pool, 
     return result;
 }
 
+std::vector<PoolSlot> layout_campaign_pool(const std::span<const tactical::ReserveView> reserves,
+    const std::uint32_t population, const std::uint32_t cap, const std::size_t slots) {
+    std::map<tactical::TypeId, PoolSlot> groups;
+    for (const auto& reserve : reserves) {
+        auto& slot = groups[reserve.type]; slot.type = reserve.type; ++slot.count;
+        if (!slot.token && reserve.token && !reserve.restricted && population <= cap
+            && reserve.population <= cap - population) {
+            slot.token = reserve.token; slot.enabled = true;
+        }
+    }
+    std::vector<PoolSlot> result; result.reserve(std::min(groups.size(), slots));
+    for (auto& [type, slot] : groups) {
+        static_cast<void>(type);
+        if (result.size() == slots) break;
+        slot.slot = result.size();
+        if (slot.count > 1) slot.text = "x" + std::to_string(slot.count);
+        result.push_back(std::move(slot));
+    }
+    return result;
+}
+
 std::size_t pool_rows(const std::size_t filled) noexcept {
     if (filled == 0) return 0;
     return std::min<std::size_t>((filled - 1) / pool_columns, pool_row_limit - 1);

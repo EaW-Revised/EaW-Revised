@@ -2,7 +2,9 @@
 // BP-30 to BP-36). Values are the FoC Nebulon-B's front-left breakoff prop.
 #include "eawr/presentation/space/debris.hpp"
 
+#include <bit>
 #include <cmath>
+#include "eawr/presentation/space/shield_hits.hpp"
 #include <cstdint>
 #include <iostream>
 #include <set>
@@ -81,6 +83,33 @@ void test_motion() {
     expect(near(spawn.facing_degrees[0], 0.0) && near(spawn.facing_degrees[1], 0.0)
                && near(spawn.facing_degrees[2], 90.0),
            "the prop starts with its ship's facing");
+    for (const double yaw : {0.0, 37.0, -120.0}) {
+        for (const double roll : {0.0, -12.5, 45.0}) {
+            const std::array<double, 3> position{100.0, -20.0, 7.0}, point{5.0, 12.0, 3.0};
+            const double y = yaw * 3.14159265358979323846 / 180.0;
+            const double r = roll * 3.14159265358979323846 / 180.0;
+            const double cy = std::cos(y), sy = std::sin(y), cr = std::cos(r), sr = std::sin(r);
+            const double side = cr * point[1] - sr * point[2];
+            const std::array<double, 3> old{position[0] + cy * point[0] - sy * side,
+                position[1] + sy * point[0] + cy * side, position[2] + sr * point[1] + cr * point[2]};
+            const auto level = space::debris_spawn(position, yaw, roll, point);
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                expect(std::bit_cast<std::uint64_t>(level.position[axis]) == std::bit_cast<std::uint64_t>(old[axis]),
+                       "non-pitched debris position is bit-identical");
+            }
+            for (const double pitch : {-90.0, -40.0, 35.0, 90.0, 110.0}) {
+                const auto pitched = space::debris_spawn(position, yaw, roll, point, pitch);
+                const auto axes = space::live_unit_axes(yaw, roll, pitch);
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    const double expected = position[axis] + axes.x[axis] * point[0]
+                        + axes.y[axis] * point[1] + axes.z[axis] * point[2];
+                    expect(near(pitched.position[axis], expected), "FM-02/BP-30: pitched breakoff and explosion agree");
+                }
+                expect(near(pitched.facing_degrees[1], pitch < 0.0 ? pitch + 360.0 : pitch),
+                       "FM-02: breakoff retains the ship pitch");
+            }
+        }
+    }
     const auto banked = space::debris_spawn({0.0, 0.0, 0.0}, 0.0, -90.0, {0.0, 10.0, 0.0});
     expect(std::abs(banked.position[2] + 10.0) < 1.0e-9 && std::abs(banked.position[1]) < 1.0e-9,
            "a -90 bank lowers the unit frame's left side");
@@ -132,6 +161,47 @@ void test_ship_at_the_event_tick() {
            "without the tick's snapshot what the player saw is unknown and nothing is thrown");
 }
 
+void test_self_destruct_at_the_kill() {
+    // WCC-71 (BP-37): a ship with five hardpoints dies at tick 21. Hardpoint 1 is no destroyable
+    // one (maximum health 0); hardpoint 2 was destroyed before; hardpoint 3 stood at tick 20 and
+    // a hit destroyed it in the kill tick; 0 and 4 stood until the kill.
+    namespace t = eawr::sim::tactical;
+    const auto health = [](const double value) {
+        return eawr::sim::math::Fixed::from_raw(static_cast<std::int64_t>(std::llround(value * 16777216.0)));
+    };
+    const auto status = [&](const double now, const double maximum) {
+        t::HardpointStatus row;
+        row.health = health(now);
+        row.max_health = health(maximum);
+        row.state = now <= 0.0 && maximum > 0.0 ? t::HardpointState::destroyed : t::HardpointState::intact;
+        return row;
+    };
+    t::InstanceDurability durability;
+    durability.hardpoints = {status(300.0, 300.0), status(0.0, 0.0), status(0.0, 300.0), status(40.0, 300.0),
+                             status(1.0, 300.0)};
+    t::TacticalInstance ship{6, 100, 1, 1, placed(100.0, 200.0, 90.0), 0b01, {}, durability};
+    t::TacticalInstance plain{9, 100, 2, 2, placed(-50.0, 0.0, 0.0), 0b10, {}, {}};
+    const t::TacticalSnapshot before{20, {{1, 1}, {2, 2}}, {ship, plain}, {}};
+    const std::vector<t::Event> kill_tick{
+        {21, t::EventKind::hardpoint_destroyed, 2, 0, 9, t::OrderKind::none, t::RejectReason::none, 3},
+        {21, t::EventKind::hardpoint_destroyed, 1, 0, 6, t::OrderKind::none, t::RejectReason::none, 3},
+        {21, t::EventKind::unit_destroyed, 1, 0, 6, t::OrderKind::none, t::RejectReason::none, 0},
+    };
+    const auto hardpoints = space::self_destruct_hardpoints(&before, 6, kill_tick);
+    const std::vector<space::SelfDestructHardpoint> expected{{0, true}, {2, false}, {3, false}, {4, true}};
+    expect(hardpoints == expected,
+           "every destroyable hardpoint self-destructs in HardPoints order; only those standing at the kill "
+           "are destroyed again, the rest replay their explosion");
+    expect(space::self_destruct_hardpoints(&before, 6, {})
+               == std::vector<space::SelfDestructHardpoint>{{0, true}, {2, false}, {3, true}, {4, true}},
+           "without a hit in the kill tick, hardpoint 3 still stood");
+    expect(space::self_destruct_hardpoints(&before, 9, kill_tick).empty(), "a unit without durability has none");
+    expect(space::self_destruct_hardpoints(&before, 7, kill_tick).empty(),
+           "a unit the tick before does not list: what stood is unknown, nothing is shown");
+    expect(space::self_destruct_hardpoints(nullptr, 6, kill_tick).empty(),
+           "without the snapshot before the kill nothing is shown");
+}
+
 void test_effect_clock() {
     // #401 review 2: the first frame at presented tick 200 reaches an event of tick 15.
     expect(near(space::debris_clock_start(200.0, std::nullopt), 200.0), "without events the clock starts at the frame");
@@ -179,6 +249,7 @@ int main() {
     test_lifetime();
     test_motion();
     test_ship_at_the_event_tick();
+    test_self_destruct_at_the_kill();
     test_effect_clock();
     test_flights_in_tick_order();
     if (failures != 0) {

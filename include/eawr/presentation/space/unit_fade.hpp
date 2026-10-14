@@ -116,4 +116,14 @@ private:
     bool contact_{};
 };
 
+// WST-12: a model-wide white-to-colour ease, retaining velocity when the cloak ends.
+class StealthBlend final {
+public:
+    void service(bool on, double transition_seconds);
+    [[nodiscard]] float value() const noexcept { return static_cast<float>(value_); }
+private:
+    double value_{};
+    double velocity_{};
+};
+
 } // namespace eawr::presentation::space

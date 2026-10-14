@@ -41,6 +41,8 @@ set(EAWR_SIM_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/tactical/fog_cells.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/ion.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/replay.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/retreat.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/retreat_session.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/replay_parse.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/replay_encode.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session.cpp"

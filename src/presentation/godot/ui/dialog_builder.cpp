@@ -71,7 +71,7 @@ namespace data = eawr::data::ui;
 } // namespace
 
 BuiltDialog build_dialog(const data::Dialog& dialog, const model::ThemeModel& theme, data::TextLookup* text,
-                         const model::Placement placement) {
+                         const model::Placement placement, const bool retail_combos) {
     BuiltDialog built;
     const std::string frame_style = theme.variation(dialog, nullptr);
     const model::RcRect size{0, 0, dialog.rect.width, dialog.rect.height};
@@ -113,6 +113,7 @@ BuiltDialog build_dialog(const data::Dialog& dialog, const model::ThemeModel& th
             auto* check = memnew(EawrUiCheck);
             check->set_text(caption);
             check->set_radio(gadget.kind == "radio");
+            check->set_pushlike(has_style(control, "BS_PUSHLIKE"));
             made = check;
         } else if (gadget.kind == "label") {
             auto* label = memnew(EawrUiLabel);
@@ -131,7 +132,16 @@ BuiltDialog build_dialog(const data::Dialog& dialog, const model::ThemeModel& th
             edit->set_ime(iequal(control.class_name, "IMEEditBox"));
             made = edit;
         } else if (gadget.kind == "combo") {
-            made = memnew(EawrUiCombo);
+            // With `retail_combos` a combo keeps the width its resource rectangle gives it (its text
+            // clips, as the retail control's does; the box never grows to its longest item) and its list
+            // takes the retail list skin (#3167).
+            auto* combo = memnew(EawrUiCombo);
+            if (retail_combos) {
+                combo->set_fit_to_longest_item(false);
+                combo->set_clip_text(true);
+                combo->set_retail_list(true);
+            }
+            made = combo;
         } else if (gadget.kind == "list") {
             made = memnew(EawrUiList);
         } else if (gadget.kind == "slider") {

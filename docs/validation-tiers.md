@@ -124,3 +124,28 @@ The `nightly-alert` job runs after every scheduled run on the Linux support runn
 nightly opens one issue labelled `ci-nightly`, or comments on the one that is already open. The
 next green nightly comments and closes it. A nightly that skipped because `main` has not
 changed since the last green one leaves the issue as it is.
+
+## Installed replay batch group
+
+Installed combat and motion replays run at batch/release time, separately from
+synthetic replay checks. Combat/motion PRs may select this group as their own
+feature test. See the [command scripts and recording workflow](../tests/skirmish/fixtures/installed/README.md).
+
+```powershell
+python tools/replay/compare_installed.py --group installed --program <sim_headless> --game-root <installation> --out <fresh-receipts>
+python tools/replay/compare_installed.py --group synthetic --program <sim_headless> --game-root <installation> --baseline <synthetic-receipt.json> --out <other-fresh-receipts>
+```
+
+Fetch the executable for these comparisons with
+`python tools/offload/windows_build.py --ref <head> --preset windows-msvc-ninja --no-test --no-werror-probe --fetch-sim-headless out/replay-bin`.
+Pass `out/replay-bin/sim_headless.exe` as `--program` and retain its adjacent
+`provenance.json` with the comparison receipts. The same executable can run the
+19-fixture comparison on 1/2/4/8 workers (76 runs); no private slot-copy wrapper is
+needed. See worker offload.
+
+
+The installed group requires all four native recordings and compares hashes,
+events and snapshots against its frozen baseline on 1/2/4/8 workers. A verified
+installed-data Windows job may select `^installed_replay_recording$` to regenerate
+and validate only this group; it is labelled `batch-only` and is excluded from
+routine PR checks.

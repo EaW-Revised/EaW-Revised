@@ -1,5 +1,6 @@
 #include "frame_timer.hpp"
 #include "startup_trace.hpp"
+#include "gpu_memory_trace.hpp"
 #include "battle_content.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
@@ -92,15 +93,44 @@ std::optional<int> MapMode::process(const double delta) {
     if (state.perf_trace) state.perf_trace->begin_frame();
     state.hud_ms = 0.0;
     core::load_profile::Scope first_frame_scope(core::load_profile::Phase::session);
+    // BLD-12: the loading screen's Begin button, pressed since the last frame.
+    if (state.loading != nullptr && state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready
+        && state.loading->take_begin()) {
+        state.begin_battle();
+    }
     state.sync_perf_overlay();
     if (state.space) {
         const std::optional<int> finished = state.space->process(delta);
+        if (!finished && state.attract_motion && state.live_session) {
+            // The attract's camera follows the fight: presentation only, read from the session's
+            // snapshot; the battle itself is never touched.
+            state.attract_ships.clear();
+            const double presented = state.live_session->presented_tick();
+            const auto snapshot = state.live_session->snapshot_at(static_cast<std::uint64_t>(std::max(0.0, presented)));
+            if (snapshot) {
+                const auto scale = static_cast<double>(sim::math::Fixed::scale);
+                for (const sim::tactical::TacticalInstance& instance : snapshot->instances()) {
+                    if (!instance.durability) continue;
+                    const auto& rows = instance.fixed_transform.rows;
+                    state.attract_ships.push_back({static_cast<float>(static_cast<double>(rows[0][3].raw()) / scale),
+                                                   static_cast<float>(static_cast<double>(rows[2][3].raw()) / scale),
+                                                   -static_cast<float>(static_cast<double>(rows[1][3].raw()) / scale)});
+                }
+            }
+            const AttractCameraPose pose = state.attract_motion->update(
+                delta, AttractBattleView{state.attract_ships, state.live_session->time().paused()});
+            if (state.attract_motion->valid()) {
+                if (state.attract_camera_updates++ == 0) state.attract_first_eye = pose.eye;
+                state.space->set_attract_pose(pose.eye, pose.target);
+            }
+        }
         // #82: selection and orders see the frame the view just drew.
         // #848: the overview level the camera just took decides what the battle UI draws this frame.
         if (!finished) state.sync_overview_ui();
         if (!finished && state.battle && state.live_session && state.space_population) {
             FrameTimer timer(state.perf_trace ? &state.hud_ms : nullptr, true);
             state.battle->frame(*state.live_session, *state.space_population, *state.space);
+            gpu_memory_trace.at_tick(state.live_session->presented_tick());
             if (state.hud && state.hud->minimap()) {
                 state.hud->minimap()->order_frame(state.live_session->presented_tick() / 30.0);
             }
@@ -137,6 +167,9 @@ std::optional<int> MapMode::process(const double delta) {
             }
             if (state.battle_effects) frame.projectile_prepare_ms = state.battle_effects->projectile_prepare_ms();
             frame.particle_work = GodotParticleBackend::frame_work();
+            if (state.unit_emitters) frame.emitter_timing = state.unit_emitters->particle_timings();
+            if (state.battle_effects) frame.effects_timing = state.battle_effects->particle_timings();
+            if (state.debris_props) frame.debris_timing = state.debris_props->particle_timings();
             frame.submit_ms = state.space->live_submit_ms();
             frame.pieces = state.space->live_submit_pieces();
             frame.sent = state.space->live_submit_sent();
@@ -163,6 +196,20 @@ std::optional<int> MapMode::process(const double delta) {
                     } else if (phase.name == "lua") {
                         frame.lua_ms += phase.ms;
                         frame.lua_worst_ms = std::max(frame.lua_worst_ms, phase.ms);
+                    } else if (phase.name == "world") {
+                        frame.world_ms += phase.ms;
+                    } else if (phase.name == "worker-total") {
+                        frame.worker_ms += phase.ms;
+                    } else if (phase.name == "serial-remainder") {
+                        frame.serial_ms += phase.ms;
+                    } else if (phase.name == "fog") {
+                        frame.sim_fog_ms += phase.ms;
+                    } else if (phase.name == "session-lock") {
+                        frame.sim_lock_ms += phase.ms;
+                    } else if (phase.name == "publish-tail") {
+                        frame.sim_publish_ms += phase.ms;
+                    } else if (phase.name.starts_with("worker.")) {
+                        frame.worker_phases.emplace_back(phase.name.substr(7), phase.ms);
                     }
                 }
             }
@@ -629,13 +676,26 @@ void MapMode::observe_pointer(const Ref<InputEvent>& event) {
 
 void MapMode::input(const Ref<InputEvent>& event) {
     State& state = *state_;
+    // MAT-10, WGUI-76: the demo battle's world rejects input; the front end owns the keys.
+    if (state.options.attract) return;
+    if (state.live_session && state.live_session->multiplayer()
+        && lan_escape_aborts(state.live_session->lan_view())) {
+        if (const auto* key = Object::cast_to<InputEventKey>(event.ptr());
+            key && key->is_pressed() && !key->is_echo() && key->get_keycode() == KEY_ESCAPE) {
+            state.live_session->quit();
+            return;
+        }
+    }
     if (state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready) {
         // WBF-10: keyboard Begin remains available with the optional HUD disabled.
+        // BLD-12: the loading screen also takes Escape as Begin.
+        const bool screen = state.loading != nullptr && state.loading->shown();
         if (const auto* key = Object::cast_to<InputEventKey>(event.ptr());
             key != nullptr && key->is_pressed() && !key->is_echo()
-            && (key->get_keycode() == KEY_ENTER || key->get_keycode() == KEY_KP_ENTER || key->get_keycode() == KEY_SPACE)) {
-            state.live_session->begin();
-            state.sync_battle_hud();
+            && (key->get_keycode() == KEY_ENTER || key->get_keycode() == KEY_KP_ENTER || key->get_keycode() == KEY_SPACE
+                || (screen && key->get_keycode() == KEY_ESCAPE))) {
+            if (screen) state.loading->request_begin();
+            else state.begin_battle();
         }
         return;
     }
@@ -647,6 +707,13 @@ void MapMode::input(const Ref<InputEvent>& event) {
             == KEY_F3) {
         state.set_perf_overlay(state.perf == nullptr || !state.perf->shown());
         return;
+    }
+    if (state.space && state.space->live_camera_movie()) {
+        if (const auto* key = Object::cast_to<InputEventKey>(event.ptr()); key && key->is_pressed() && !key->is_echo()) {
+            const auto code = key->get_physical_keycode() != KEY_NONE ? key->get_physical_keycode() : key->get_keycode();
+            if (code == KEY_ESCAPE) state.set_movie_mode(false);
+        }
+        return; // HCB-11b: Escape is consumed; it never opens a menu or issues an order.
     }
     if (state.hud) state.hud->world_input(event);
     if (state.space) {
@@ -708,6 +775,66 @@ void MapMode::input(const Ref<InputEvent>& event) {
     }
 }
 
+MapMode::AttractStatus MapMode::attract_status() {
+    State& state = *state_;
+    AttractStatus status;
+    status.hud = state.hud != nullptr;
+    status.battle_input = state.battle != nullptr;
+    status.camera_updates = state.attract_camera_updates;
+    status.camera_first_eye = state.attract_first_eye;
+    if (state.attract_motion) status.camera_eye = state.attract_motion->pose().eye;
+    if (state.battle_audio) {
+        const BattleAudio::AttractSilence silence = state.battle_audio->attract_silenced();
+        status.speech_refused = silence.refused;
+        status.speech_queued = silence.queued;
+        status.speech_started = silence.started;
+        status.sfx_3d_refused = silence.sfx_3d_refused;
+        status.sfx_3d_started = silence.sfx_3d_started;
+    }
+    if (!state.live_session) return status;
+    status.live = true;
+    status.paused = state.live_session->time().paused();
+    const double presented = state.live_session->presented_tick();
+    const auto snapshot = state.live_session->snapshot_at(static_cast<std::uint64_t>(std::max(0.0, presented)));
+    if (!snapshot) return status;
+    status.latest_tick = snapshot->completed_tick();
+    const bool first = state.attract_baseline.empty();
+    std::set<sim::EntityId> present;
+    for (const sim::tactical::TacticalInstance& instance : snapshot->instances()) {
+        const auto& rows = instance.fixed_transform.rows;
+        State::AttractSample sample;
+        sample.position = {rows[0][3].raw(), rows[1][3].raw(), rows[2][3].raw()};
+        sample.hull = instance.durability ? instance.durability->hull.raw() : 0;
+        present.insert(instance.entity_id);
+        if (first) {
+            state.attract_baseline.emplace(instance.entity_id, sample);
+            continue;
+        }
+        const auto base = state.attract_baseline.find(instance.entity_id);
+        if (base == state.attract_baseline.end()) {
+            ++status.joined;
+            continue;
+        }
+        if (base->second.position != sample.position) ++status.moved;
+        if (instance.durability && sample.hull < base->second.hull) ++status.damaged;
+    }
+    status.units = state.attract_baseline.size();
+    status.alive = present.size();
+    if (!first) {
+        for (const auto& [entity, sample] : state.attract_baseline) {
+            if (!present.contains(entity)) ++status.lost;
+        }
+    }
+    return status;
+}
+
+void MapMode::set_attract_paused(const bool paused) {
+    LiveSessionView* live = state_->live_session.get();
+    if (live == nullptr) return;
+    if (paused && !live->time().paused()) live->press_pause();
+    else if (!paused && live->time().paused()) live->resume();
+}
+
 void MapMode::focus(const bool focused) {
     if (state_->battle && !focused) state_->battle->cancel();
     if (state_->space) {
@@ -726,6 +853,7 @@ void MapMode::pointer_left() {
 }
 
 void MapMode::viewport_changed(const float width, const float height) {
+    if (state_->loading != nullptr) state_->loading->viewport_changed(width, height);
     if (state_->space) {
         state_->space->camera_viewport(width, height);
         return;

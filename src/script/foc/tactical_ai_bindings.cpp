@@ -146,7 +146,8 @@ core::Result<ValueList> find_nearest(const Host& host, const ValueList& argument
         if (host.neutral(player.id)) continue;
         if (player_filter && host.allied(player.id, *player_filter) != ally) continue;
         for (const ViewUnit& unit : host.view->units) {
-            if (unit.owner != player.id || unit.id == excluded) continue;
+            // WSW-01: persistent planetary sources are attachment handles, not combat targets.
+            if (unit.owner != player.id || unit.id == excluded || unit.planetary_weapon) continue;
             const AiType* type = host.type(unit.type);
             if (type_filter != nullptr && type != type_filter) continue;
             const std::uint64_t properties = type != nullptr ? type->property_bits : 0;
@@ -170,10 +171,18 @@ core::Result<ValueList> find_nearest(const Host& host, const ValueList& argument
 // FH-22 EvaluatePerception: the equations the freestore evaluates.
 core::Result<ValueList> evaluate_perception(const Host& host, BindingContext& context, const ValueList& arguments) {
     if (arguments.size() < 2 || as_text(arguments[0]) == nullptr) return fail("EvaluatePerception expects a name and a player");
+    const Handle* player = as_handle(arguments[1], handle_player);
+    if (player == nullptr) return fail("EvaluatePerception: parameter 2 is not a player");
+    if (host.ai_world && host.ai_world->goal_mode() == "GALACTIC") {
+        const auto immediate = context.query_immediate("galactic.markup_perception", arguments);
+        if (immediate && !immediate.value().empty()) {
+            if (std::get_if<LuaNumber>(&immediate.value().front().data)) return immediate;
+            context.report(authoritative::codes::unsupported_api, "EvaluatePerception(" + *as_text(arguments[0]) + ") failed; 0");
+            return one(number(LuaNumber(0)));
+        }
+    }
     if (host.engine != nullptr) {
         // PE-30: the equation for the player, with the object or AI target as Target.
-        const Handle* player = as_handle(arguments[1], handle_player);
-        if (player == nullptr) return fail("EvaluatePerception: parameter 2 is not a player");
         const ai::Target* target = nullptr;
         if (arguments.size() > 2) {
             if (const Handle* object = as_handle(arguments[2], handle_game_object)) {
@@ -194,7 +203,9 @@ core::Result<ValueList> evaluate_perception(const Host& host, BindingContext& co
     if (name == "ALLOWED_AS_DEFENDER_LAND") {
         // basiclandequations.xml: (IsCampaignGame == 0) + (IsCampaignGame == 1) * ((1 - IsDefender)
         // + IsDefender * (BaseLevel == 0) + IsDefender * (BaseLevel > 0) * (force test)).
-        if (!perception.campaign_game || !perception.defender || perception.base_level == 0) {
+        const bool defender = perception.campaign_defender
+            ? player->id == *perception.campaign_defender : perception.defender;
+        if (!perception.campaign_game || !defender || perception.base_level == 0) {
             return one(number(LuaNumber(1)));
         }
         context.report(authoritative::codes::unsupported_api,
@@ -211,11 +222,35 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
     const auto add = [&](std::string_view name, Binding binding) {
         if (auto added = scripts.register_binding(name, std::move(binding)); !added) errors.push_back(added.error());
     };
+    add("Suspend_AI", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto* value = arguments.size() == 1 ? std::get_if<LuaNumber>(&arguments[0].data) : nullptr;
+        if (value == nullptr) return fail("Suspend_AI expects one number");
+        context.issue_command("tactical-suspend-ai", {number(*value)});
+        return none();
+    });
     add("Get_Game_Mode", [](BindingContext&, const ValueList&) { return one(Value::text("Space")); });
     add("Find_Nearest", [host](BindingContext&, const ValueList& arguments) { return find_nearest(*host, arguments); });
     add("EvaluatePerception", [host](BindingContext& context, const ValueList& arguments) {
         return evaluate_perception(*host, context, arguments);
     });
+    // WGA-80/81: preserve skirmish bindings when no real parent was supplied.
+    if (host->setup.evaluate_in_galactic_context) {
+        add("Evaluate_In_Galactic_Context", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+            if (arguments.size() != 2 || as_text(arguments[0]) == nullptr)
+                return fail("Evaluate_In_Galactic_Context expects an equation name and player");
+            const auto* player = as_handle(arguments[1], handle_player);
+            if (!player) return fail("Evaluate_In_Galactic_Context: parameter 2 is not a player");
+            const auto value = host->setup.perception.campaign_game
+                ? host->setup.evaluate_in_galactic_context(*as_text(arguments[0]), static_cast<tactical::PlayerId>(player->id))
+                : std::nullopt;
+            if (!value) {
+                context.report(authoritative::codes::unsupported_api,
+                    "Evaluate_In_Galactic_Context requires its retained campaign parent, manager and conflict planet");
+                return none();
+            }
+            return one(number(*value));
+        });
+    }
     add("Find_Object_Type", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         if (arguments.size() != 1 || as_text(arguments[0]) == nullptr) return fail("Find_Object_Type expects a name");
         const auto found = host->types_by_name.find(upper(*as_text(arguments[0])));
@@ -253,6 +288,47 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
             {number(LuaNumber(static_cast<std::int64_t>(issuer))), arguments[0]});
         return none();
     });
+    // WHE-68 (debug build): parameter 1 is a table of objects, parameter 2 the radius.
+    // Entries that are not objects warn; dead objects are skipped; the rest are
+    // taken in ID order. Answers a position wrapper and its threat, or nil when
+    // no center has positive threat. The initial centers draw from the
+    // instance stream, the existing per-instance RNG seam.
+    add("Find_Best_Local_Threat_Center", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 2) return fail("Find_Best_Local_Threat_Center -- invalid number of parameters. Expected 2");
+        const auto* list = std::get_if<std::vector<Value>>(&arguments[0].data);
+        if (list == nullptr) return fail("Find_Best_Local_Threat_Center -- invalid type for parameter 1. Expected table.");
+        const auto* radius = std::get_if<LuaNumber>(&arguments[1].data);
+        if (radius == nullptr) return fail("Find_Best_Local_Threat_Center -- invalid type for parameter 2. Expected number.");
+        std::vector<const ViewUnit*> objects;
+        for (const Value& entry : *list) {
+            if (as_handle(entry, handle_game_object) == nullptr) {
+                context.report(authoritative::codes::script_error, "Find_Best_Local_Threat_Center -- invalid type for entry in object table");
+                continue;
+            }
+            if (const ViewUnit* unit = live_object(*host, entry)) objects.push_back(unit);
+        }
+        std::stable_sort(objects.begin(), objects.end(), [](const ViewUnit* a, const ViewUnit* b) { return a->id < b->id; });
+        if (objects.empty()) {
+            // WHE-68: an empty sample warns and returns nil; the next update
+            // must still run (IG-2000 reaches this before its first sample).
+            context.report(authoritative::codes::script_warning, "Find_Best_Local_Threat_Center -- no objects supplied");
+            return none();
+        }
+        auto& random = context.random();
+        const auto center = ai::local_threat_center(objects, *radius * *radius,
+            [&](const ViewUnit& unit) {
+                // The company type's power: a team's own (squadron) type, else the object's.
+                const AiType* type = host->type(unit.type);
+                return type != nullptr ? type->combat_power : LuaNumber{};
+            },
+            [&](LuaNumber low, LuaNumber high) {
+                if (high < low) std::swap(low, high);
+                const auto fraction = ai::to_single(LuaNumber(random.next_in_range(0, 32767)) / LuaNumber(32767));
+                return ai::to_single(low + ai::to_single(fraction * ai::to_single(high - low)));
+            });
+        if (!(LuaNumber(0) < center.threat)) return none();
+        return core::Result<ValueList>::success(ValueList{position_handle(center.x, center.y), number(center.threat)});
+    });
     register_plan_bindings(scripts, host, errors);
     // A plan's definition load (PGAICommands Set_Contrast_Values) builds its contrast lists. The
     // lists feed the goal system's contrast sizing, which is not hosted: the handle is opaque
@@ -273,20 +349,28 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
     };
     // Arguments start with the handle itself. A method on a dead object gives nothing (the
     // wrappers assert and return no value).
-    object("Is_Valid", [host](BindingContext&, const ValueList& arguments) {
+    object("Is_Valid", [host](BindingContext& context, const ValueList& arguments) {
+        auto immediate = galactic_immediate_query(context, *host, "galactic.created_valid", {arguments[0]});
+        if (!immediate || !immediate.value().empty()) return immediate;
         return one(boolean(live_object(*host, arguments[0]) != nullptr));
     });
-    object("Get_Type", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+    object("Get_Type", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        auto immediate = galactic_immediate_query(context, *host, "galactic.created_type", {arguments[0]});
+        if (!immediate || !immediate.value().empty()) return immediate;
         const ViewUnit* unit = live_object(*host, arguments[0]);
         if (unit == nullptr) return none();
         return one(handle(handle_type, unit->type));
     });
-    object("Get_Owner", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+    object("Get_Owner", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        auto immediate = galactic_immediate_query(context, *host, "galactic.created_owner", {arguments[0]});
+        if (!immediate || !immediate.value().empty()) return immediate;
         const ViewUnit* unit = live_object(*host, arguments[0]);
         if (unit == nullptr) return none();
         return one(handle(handle_player, unit->owner));
     });
-    object("Get_Position", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+    object("Get_Position", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        auto immediate = galactic_immediate_query(context, *host, "galactic.created_position", {arguments[0]});
+        if (!immediate || !immediate.value().empty()) return immediate;
         const ViewUnit* unit = live_object(*host, arguments[0]);
         if (unit == nullptr) return none();
         return one(position_value(unit->position));
@@ -330,6 +414,15 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         if (!fraction) return one(number(LuaNumber(1)));
         return one(number(numeric::from_fixed(fraction.value())));
     });
+    // SOS-19: the immutable container view holds actual live members, including
+    // its leader. Inherited script names never supply an absent ability.
+    object("Get_Contained_Object_Count", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        std::int64_t count = 0;
+        for (const auto member : unit->members) if (host->view->find(member) != nullptr) ++count;
+        return one(number(LuaNumber(count)));
+    });
     object("Has_Active_Orders", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const ViewUnit* unit = live_object(*host, arguments[0]);
         if (unit == nullptr) return none();
@@ -365,7 +458,8 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         const ViewUnit* unit = live_object(*host, arguments[0]);
         if (unit == nullptr) return none();
         if (arguments.size() < 2 || as_text(arguments[1]) == nullptr) return fail("Activate_Ability expects an ability name");
-        request_ability(context, *host, *unit, upper(*as_text(arguments[1])), arguments.size() >= 3 ? &arguments[2] : nullptr);
+        if (request_ability(context, *host, *unit, upper(*as_text(arguments[1])), arguments.size() >= 3 ? &arguments[2] : nullptr))
+            return one(boolean(true));
         return none();
     });
     object("Should_Switch_Weapons", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
@@ -481,27 +575,154 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
             return one(boolean(false));
         });
     }
-    for (const char* name : {"Lock_Current_Orders", "Service_Wrapper", "Event_Object_In_Range", "Get_Current_Projectile_Type"}) {
+    object("Event_Object_In_Range", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (live_object(*host, arguments[0]) == nullptr) return none();
+        if (arguments.size() < 3 || std::get_if<LuaNumber>(&arguments[2].data) == nullptr)
+            return fail("Event_Object_In_Range expects a function and numeric range");
+        authoritative::ProximityQuery query;
+        query.object = *as_handle(arguments[0], handle_game_object);
+        query.extent = ai::to_single(*std::get_if<LuaNumber>(&arguments[2].data));
+        for (std::size_t index = 3; index < std::min(arguments.size(), std::size_t{5}); ++index) {
+            if (!query.player) if (const auto* player = as_handle(arguments[index], handle_player)) query.player = *player;
+            if (!query.type) if (const auto* type = as_handle(arguments[index], handle_type)) query.type = *type;
+        }
+        const auto registered = context.register_proximity(std::move(query));
+        if (!registered) return core::Result<ValueList>::failure(registered.error());
+        return one(boolean(true));
+    });
+    object("Cancel_Event_Object_In_Range", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (live_object(*host, arguments[0]) == nullptr) return none();
+        const auto cancelled = context.cancel_proximity(*as_handle(arguments[0], handle_game_object));
+        if (!cancelled) return core::Result<ValueList>::failure(cancelled.error());
+        return none();
+    });
+    object("Service_Wrapper", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto* object = as_handle(arguments[0], handle_game_object);
+        if (object == nullptr) return none();
+        // L-33 project policy: stable entity order over the immutable completed
+        // world view. FC-58/UFS-27 names its post-movement sampling seam.
+        const auto serviced = context.service_proximities(*object, [host](const authoritative::ProximityQuery& query) {
+            std::vector<Handle> out;
+            const auto* origin = host->view->find(query.object.id);
+            if (origin == nullptr) return out;
+            const std::array center_axes{numeric::from_fixed(origin->position.x), numeric::from_fixed(origin->position.y),
+                numeric::from_fixed(origin->position.z)};
+            for (const auto& unit : host->view->units) {
+                if (unit.id == origin->id) continue;
+                const auto* type = host->type(unit.type);
+                if (type != nullptr && type->decoration) continue;
+                if (query.player && !host->allied(unit.owner, static_cast<tactical::PlayerId>(query.player->id))) continue;
+                if (query.type && unit.type != query.type->id) continue;
+                auto low = unit.position;
+                auto high = unit.position;
+                if (type != nullptr && type->proximity_bounds) {
+                    const auto matrix = math::to_matrix(unit.rotation, unit.position);
+                    if (!matrix) continue;
+                    bool first = true;
+                    for (unsigned corner = 0; corner < 8; ++corner) {
+                        const auto& bounds = *type->proximity_bounds;
+                        const auto point = math::transform_point(matrix.value(), {bounds[corner & 1U].x,
+                            bounds[(corner >> 1U) & 1U].y, bounds[(corner >> 2U) & 1U].z});
+                        if (!point) continue;
+                        if (first) { low = high = point.value(); first = false; }
+                        else {
+                            low = {std::min(low.x, point.value().x), std::min(low.y, point.value().y), std::min(low.z, point.value().z)};
+                            high = {std::max(high.x, point.value().x), std::max(high.y, point.value().y), std::max(high.z, point.value().z)};
+                        }
+                    }
+                }
+                const std::array low_axes{numeric::from_fixed(low.x), numeric::from_fixed(low.y), numeric::from_fixed(low.z)};
+                const std::array high_axes{numeric::from_fixed(high.x), numeric::from_fixed(high.y), numeric::from_fixed(high.z)};
+                bool inside = true;
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    const auto middle = center_axes[axis];
+                    inside = inside && low_axes[axis] <= middle + query.extent && high_axes[axis] >= middle - query.extent;
+                }
+                if (inside) out.push_back({handle_game_object, unit.id});
+            }
+            return out;
+        });
+        if (!serviced) return core::Result<ValueList>::failure(serviced.error());
+        return none();
+    });
+    for (const char* name : {"Lock_Current_Orders"}) {
         object(name, [](BindingContext&, const ValueList&) { return none(); });
     }
-    // DT-04: the time-to-death estimate is not tracked here; a unit is never about to die.
+    // WTA-34: a team answers for its leader. Get_Current_Projectile_Type is the object weapon's
+    // projectile (index 0 of Projectile_Types, the only one the tables keep); a unit without an
+    // object weapon has no current projectile and answers nil.
+    // Get_All_Projectile_Types lists the projectile of every standing hardpoint in HardPoints order,
+    // then the object weapon's.
+    object("Get_Current_Projectile_Type", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr || (unit = projectile_leader(*host, *unit)) == nullptr) return none();
+        const AiType* type = host->type(unit->type);
+        if (type == nullptr || type->object_projectile == 0) return none();
+        return one(handle(handle_type, type->object_projectile));
+    });
+    object("Get_All_Projectile_Types", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr || projectile_leader(*host, *unit) == nullptr) return none();
+        std::vector<Value> list;
+        for (const auto projectile : projectile_types_of(*host, *unit)) list.push_back(handle(handle_type, projectile));
+        return one(Value{std::move(list)});
+    });
+    // DT-04, WTA-32: the unit's remaining health (its destroyable hardpoints', else its hull, plus
+    // its shield) over its rate of damage taken; 10^18 at a zero rate or without damage tracking.
     object("Get_Time_Till_Dead", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
-        if (live_object(*host, arguments[0]) == nullptr) return none();
-        return one(number(LuaNumber(1000000)));
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if (!unit->time_till_dead) return one(number(LuaNumber(std::int64_t{1000000000000000000})));
+        return one(number(numeric::from_fixed(*unit->time_till_dead)));
     });
+    // DT-04, WTA-30: the hull and shield taken in the last 30-frame window, per second.
     object("Get_Rate_Of_Damage_Taken", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
-        if (live_object(*host, arguments[0]) == nullptr) return none();
-        return one(number(LuaNumber(0)));
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        return one(number(numeric::from_fixed(unit->damage_rate)));
     });
-    // FH-27: a star base fires its special weapon only through a hardpoint that takes a manual
-    // target; without one the call is a script warning and answers nil. No M2 station has one
-    // (fidelity list), so the station answers nil; any other object is still the missing API.
-    object("Fire_Special_Weapon", [host, fallback = missing("GameObject.Fire_Special_Weapon")](
+    // WSW-37/40: the Empire online handler retries its attached planetary source here.
+    object("Fire_Special_Weapon", [host](
                                       BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if (arguments.size() != 3) return fail("Fire_Special_Weapon expects an object target and a player");
+        const ViewUnit* target = destination_object(*host, arguments[1]);
+        const Handle* player = as_handle(arguments[2], handle_player);
+        if (player == nullptr || player->id > std::numeric_limits<tactical::PlayerId>::max() ||
+            host->view->player(static_cast<tactical::PlayerId>(player->id)) == nullptr)
+            return fail("Fire_Special_Weapon: expected a player");
+        if (as_handle(arguments[1], handle_game_object) == nullptr && as_handle(arguments[1], ai::handle_ai_target) == nullptr)
+            return fail("Fire_Special_Weapon: expected an object or AI target");
+        if (target == nullptr) return none();
+        if (unit->planetary_weapon) {
+            const auto issuer = static_cast<tactical::PlayerId>(player->id);
+            if (!planetary_fire_ready(*host, *unit, *target, issuer)) return none();
+            issue_special_fire(context, *unit, *target, issuer, tactical::SpecialFireAdmission::ai_object);
+            return one(handle(handle_game_object, unit->id));
+        }
         const AiType* type = unit != nullptr ? host->type(unit->type) : nullptr;
-        if (type != nullptr && type->star_base) return none();
-        return fallback(context, arguments);
+        if (type != nullptr && type->star_base) {
+            if (!host->snapshot) return none();
+            const auto instances = host->snapshot->instances();
+            const auto source = std::lower_bound(instances.begin(), instances.end(), unit->id,
+                [](const auto& instance, sim::EntityId id) { return instance.entity_id < id; });
+            if (source == instances.end() || source->entity_id != unit->id || source->manual_weapons.empty()) {
+                // WSW-40: a station lacking the authored gun warns without staging an order.
+                context.report(authoritative::codes::unsupported_api, "Station has no manual special gun");
+                return none();
+            }
+            const auto issuer = static_cast<tactical::PlayerId>(player->id);
+            const auto* permission = host->economy(issuer);
+            if (permission == nullptr || !permission->special_weapons_enabled || !host->snapshot) return none();
+            // WSW-40: frozen gun readiness/admission, independent of the human player clock.
+            const auto admitted = tactical::manual_special_fire_admission(*host->snapshot, unit->id, target->id);
+            if (!admitted) return core::Result<ValueList>::failure(admitted.error());
+            if (!admitted.value()) return none();
+            issue_special_fire(context, *unit, *target, issuer, tactical::SpecialFireAdmission::ai_object);
+            return one(handle(handle_game_object, unit->id));
+        }
+        return none();
     });
     object("Get_Build_Pad_Contents", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const auto* unit = live_object(*host, arguments[0]);
@@ -511,8 +732,15 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         const auto child = pad->second.constructed != 0 ? pad->second.constructed : pad->second.under_construction;
         return child != 0 ? one(handle(handle_game_object, child)) : none();
     });
-    for (const char* name : {"Garrison", "Leave_Garrison", "Get_Parent_Object",
-             "Get_Combat_Rating", "Get_All_Projectile_Types"}) {
+    // SOS-16, WSD-10: a squadron craft's parent is its live team container; any
+    // other space object has none (debug build: the parent-container query).
+    object("Get_Parent_Object", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr || !unit->craft || host->view->find(unit->squadron) == nullptr) return none();
+        return one(handle(handle_game_object, unit->squadron));
+    });
+    // Type.Get_Combat_Rating is the type method below, not this object namesake.
+    for (const char* name : {"Garrison", "Leave_Garrison", "Get_Combat_Rating"}) {
         object(name, missing(std::string("GameObject.") + name));
     }
 
@@ -557,7 +785,9 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         }
         return none();
     });
-    player("Get_Credits", [host](BindingContext&, const ValueList& arguments) {
+    player("Get_Credits", [host](BindingContext& context, const ValueList& arguments) {
+        auto immediate = galactic_immediate_query(context, *host, "galactic.credits", {arguments[0]});
+        if (!immediate || !immediate.value().empty()) return immediate;
         return one(number(numeric::from_fixed(host->credits(
             static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id)))));
     });
@@ -565,8 +795,10 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         const auto* account = host->economy(static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id));
         return one(number(LuaNumber(account != nullptr ? account->tech_level : 0)));
     });
-    player("Give_Money", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+    player("Give_Money", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         if (arguments.size() != 2 || std::get_if<LuaNumber>(&arguments[1].data) == nullptr) return fail("Give_Money expects a credit amount");
+        if (host->ai_world && host->ai_world->goal_mode() == "GALACTIC")
+            return context.apply_immediate("galactic.give_money", arguments);
         const auto amount = numeric::to_fixed(std::get<LuaNumber>(arguments[1].data));
         if (!amount || amount.value().raw() <= 0) return fail("Give_Money expects positive credits");
         const auto player = std::get<Handle>(arguments[0].data).id;
@@ -584,11 +816,43 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         if (found == nullptr) return none();
         return one(number(found->max_attack_distance));
     });
-    type("Get_Min_Range", [](BindingContext&, const ValueList&) { return one(number(LuaNumber(0))); });
-    // No M2 type is a hero, and no projectile is affected by the defensive abilities.
-    for (const char* name : {"Is_Hero", "Is_Affected_By_Laser_Defense", "Is_Affected_By_Missile_Shield"}) {
-        type(name, [](BindingContext&, const ValueList&) { return one(boolean(false)); });
-    }
+    // SOS-16, WSD-10: the type's AI_Combat_Power metric in single precision; a
+    // squadron type's is its craft sum (PL-13).
+    type("Get_Combat_Rating", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const AiType* found = host->type(std::get<Handle>(arguments[0].data).id);
+        if (found == nullptr) return none();
+        return one(number(ai::to_single(found->combat_power)));
+    });
+    type("Get_Min_Range", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const AiType* found = host->type(std::get<Handle>(arguments[0].data).id);
+        if (found == nullptr) return none();
+        return one(number(found->min_attack_distance));
+    });
+    type("Is_Hero", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const AiType* found = host->type(std::get<Handle>(arguments[0].data).id);
+        return one(boolean(found != nullptr && found->hero));
+    });
+    // WTA-34: the defensive abilities test the projectile type's category. LASER_DEFENSE affects
+    // MISSILE, ROCKET and MPTL_ROCKET; MISSILE_SHIELD only ROCKET and MPTL_ROCKET. A type that is not
+    // a projectile answers false.
+    const auto affected = [host](std::uint32_t mask) {
+        return [host, mask](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+            return one(boolean(projectile_in_categories(*host, std::get<Handle>(arguments[0].data).id, mask)));
+        };
+    };
+    type("Is_Affected_By_Laser_Defense", affected(laser_defense_categories));
+    type("Is_Affected_By_Missile_Shield", affected(missile_shield_categories));
+    // A position wrapper is valid unless it holds the unset value (1e18 on every
+    // axis); a planar wrapper's z is 0, so it always is.
+    const auto position = [&](std::string_view name, Binding binding) {
+        if (auto added = scripts.register_method(handle_position, name, std::move(binding)); !added) errors.push_back(added.error());
+    };
+    position("Is_Valid", [](BindingContext&, const ValueList&) { return one(boolean(true)); });
+    position("Get_XYZ", [](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto& wrapper = std::get<Handle>(arguments[0].data);
+        return core::Result<ValueList>::success(ValueList{number(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id >> 32U))),
+            number(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id & 0xffffffffU))), number(LuaNumber(0))});
+    });
     if (auto added = scripts.register_method(handle_type_list, "Parse", [](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
             const auto* names = arguments.size() == 3 ? std::get_if<std::vector<Value>>(&arguments[1].data) : nullptr;
             const auto* weights = arguments.size() == 3 ? std::get_if<std::vector<Value>>(&arguments[2].data) : nullptr;

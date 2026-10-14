@@ -44,6 +44,720 @@
           "home-path",
           "user-path"
         ]
+      },
+      {
+        "path": "docs/behaviour/gc-hud-inventory.md",
+        "regex": "Previous/next/home/zoom state",
+        "value_regex": "/home/(?:zoom)",
+        "match_only": true,
+        "patterns": [
+          "home-path"
+        ],
+        "reason": "Exact slash-separated behaviour prose, not a user directory; match span only."
+      },
+      {
+        "path": "docs/behaviour/walks/gc-unverified-sweep.md",
+        "regex": "overview constants/home/clamp/perspective argument",
+        "value_regex": "/home/(?:clamp)",
+        "match_only": true,
+        "patterns": [
+          "home-path"
+        ],
+        "reason": "Exact slash-separated behaviour prose, not a user directory; match span only."
+      },
+      {
+        "path": "include/eawr/campaign/galaxy.hpp",
+        "regex": "faction/home/starting-force setup remains the campaign-session owner's lane",
+        "value_regex": "/home/(?:starting-force)",
+        "match_only": true,
+        "patterns": [
+          "home-path"
+        ],
+        "reason": "Exact slash-separated behaviour prose, not a user directory; match span only."
+      }
+    ],
+    "identifier_allow": [
+      {
+        "path": "apps/viewer/src/galactic/galactic_hud.cpp",
+        "identifier": "EawrBuildQueueDial",
+        "reason": "Exact public project type or CMake module identifier; no other private-name substring is exempt."
+      },
+      {
+        "path": "apps/viewer/src/galactic/galactic_report.cpp",
+        "identifier": "EawrBuildQueueDial",
+        "reason": "Exact public project type or CMake module identifier; no other private-name substring is exempt."
+      },
+      {
+        "path": "apps/viewer/src/register_types.cpp",
+        "identifier": "EawrBuildQueueDial",
+        "reason": "Exact public project type or CMake module identifier; no other private-name substring is exempt."
+      },
+      {
+        "path": "src/presentation/godot/ui/build_queue_dial.hpp",
+        "identifier": "EawrBuildQueueDial",
+        "reason": "Exact public project type or CMake module identifier; no other private-name substring is exempt."
+      },
+      {
+        "path": "tools/publish_scan/config.json",
+        "identifier": "EawrBuildQueueDial",
+        "reason": "Exact public project type or CMake module identifier; no other private-name substring is exempt."
+      },
+      {
+        "path": "cmake/EawrBuildIdentity.cmake",
+        "identifier": "EawrBuildIdentity",
+        "reason": "Exact public project type or CMake module identifier; no other private-name substring is exempt."
+      },
+      {
+        "path": "src/core/sources.cmake",
+        "identifier": "EawrBuildIdentity",
+        "reason": "Exact public project type or CMake module identifier; no other private-name substring is exempt."
+      },
+      {
+        "path": "tools/publish_scan/config.json",
+        "identifier": "EawrBuildIdentity",
+        "reason": "Exact public project type or CMake module identifier; no other private-name substring is exempt."
+      }
+    ],
+    "exact_line_allow": [
+      {
+        "path": "apps/viewer/src/live_session_config.cpp",
+        "sha256": "29ba83a39ca49cf5fe3e22803761113490a93fc2b041b86b60aee901dbc30438",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "a2bde358274086ea7c1f30e7a584c9ffdb10990d32f6790c394a580f5eb3f378",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "896cdc5b693cc375804c56d7c61cfcc495cc92062933f7095e5cd44e52ff697f",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "a2bde358274086ea7c1f30e7a584c9ffdb10990d32f6790c394a580f5eb3f378",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "a2bde358274086ea7c1f30e7a584c9ffdb10990d32f6790c394a580f5eb3f378",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "14eeac7e3bb0d09175db3119a8aba40d1b093a34a3470c05d5a97ec96e659b0b",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "0e45a90d816d5f8501219c23083ef0b15726d3db79af290eb8791288845a69af",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "6ad651639887fee27cefe770056fa3a3dc93fc3f475f4928223a1af4c4e6690c",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "6edbc54647fca79ce283ebe300ee07e0dd2d5a801bf247d2484d110fcc392668",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "686dd3b87445130664eb265c36be17945d9b4665545b290f3337e56487e64a0d",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "296b8826a2a9d2551c8ce6e830eac6c138994ab977ecfc9bcee9d84cc5b70619",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "d756d7ffb06b85aaf7db18b85e14482369b2622112b871f536437b851a992289",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "b6fb3bfffc26ac6a97ae591d78b088cb337df11ce4f61b853227a0273e34ae1d",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "686dd3b87445130664eb265c36be17945d9b4665545b290f3337e56487e64a0d",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "d5266fa46ed2f0737f1cab777992bac5179f4351a3a0ac4edb4d346dea7bf47d",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "7b6afb902adc43a7bb34dff260de9cbff2d0b1fea5b15a8f9bf0504fb36d54e1",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed lan-host false positive: options_.lan is a local field guard for shared staging/live preparation, with no host or address value; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "77d6c6faee587c4db26cdee17a458c1a548a9927c2b697ae2435739d1b560f9b",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "0a0ef22b4030bd7a7cd41e0fc2207c2125824a6ae2f786d7be046e5e287486e1",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "0952aab45214dcdb1e1588bcfdefffe03c69cfc6177ac462eea69d4a0eeafce0",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "6334351ae4f911ab153833c44f0ff15cfe49c6b1f87fffde25fc8facc838c584",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "1a857bbc4b132fa3d957b14fa19ed6fb1f76c3c9276345ecccbeddcf6cee24e1",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "9422770df5d772e5f51c943d497bfb69cb02242ac310ba2f17022b84de648846",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_view.cpp",
+        "sha256": "4cda4edc6dd3bcdb4dfe878c98615f19a7b282002a3147f6458b68996ff76b72",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_view.hpp",
+        "sha256": "016b4d8c31efb93bfeae44adc303c0ee3d6f012bbb053f8ff09a698ae9e8d27d",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_view.hpp",
+        "sha256": "bc3853dbf22a43f07e125892e971f45bb02dccbae93de4dffa8794452b9dfcc1",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_view.hpp",
+        "sha256": "877620b6625a541424955e90ac7d152ae5ceca07cce9d5dab35fc07eec7b51ea",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_view.hpp",
+        "sha256": "3b64b71bc51c7c18ded7860e67e3113cf7ecefd8b1a95e164a7d6c77acbb98d6",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_view.hpp",
+        "sha256": "bbe88c5eaab4b9a3ef2024e55046ff301c48027d3dded3ce94f8c9f1fe10489d",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_view.hpp",
+        "sha256": "3b64b71bc51c7c18ded7860e67e3113cf7ecefd8b1a95e164a7d6c77acbb98d6",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_view.hpp",
+        "sha256": "560196fed744a2dcc68695acfa5730284c9ed654730c7ac9fef9d62147087f55",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_hud.cpp",
+        "sha256": "17276e016b9d4484ef0efa1b5ac992a065d25e2c3e66bc919c6ba77ba811fe7b",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_ready.cpp",
+        "sha256": "dca8349873e142affa4263b173d6da2ac0d513194ea32c837577a18a7a4e6132",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_ready.cpp",
+        "sha256": "b3d858dfb11917027fe04719bd58f361e6ab35463e97edd3ce02a9143aec2806",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_ready.cpp",
+        "sha256": "5cb31215708e10cca24afe5c285ee617478cfaf89f90f0ad2394c3c2c7f35f8d",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/skirmish_setup_mode.cpp",
+        "sha256": "7d9cd61dcff1be7341496c3385b5d6f56587e4e45fa1ac6f43b2ef30f27cfd08",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/skirmish_setup_mode.cpp",
+        "sha256": "c3ff743256e2136fa1b0a049ad9494a83c6144e86b818453a9de929daafc40b6",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/ui/front_end_tests.cpp",
+        "sha256": "3469f7f0c57fc4350e1799829a357db8ce86a640782c235876089d6fc23b9e91",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "23d26757ec96ba815d69004f4131f3fbcd2737d6d4d0d230d3e1232d0748cc2e",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "b3f32d15cb663bf40e6cfe9fd9e79ae6a85706f9423760741bd34dfb6f495957",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "58d4c2e6a59652df4abcf332e47ab7f06c45781ad119f3520ac5265197fb4d13",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "522f6f526cf2ef665eb54c2ea1b2aae1e853082c41a1ceceba1fd88a430a92ca",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "57e379d220de93007f996597d7f6d274dd039f45876fa46e698731b89c055051",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "8642d51edaf9fb5cbbee5d8b24ac8fd6e623f724e16cf7c77e845b5127e64d43",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "5724642dddf46e376af041961cd2092ed72dccc2046f5ab48198a95783a20fcb",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "8c48a4f34713ea9a62f1e6bb859fc0d5cac83d095be6003d21228f45551650ba",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "4118679cb90a8a77cde4a75574f6b7e632e6fae7a6eec2c5fb4962b2e81201da",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "3fb0b1e55a32585d119f3a6ef5087da333130c0b939b421b4ce205b101f0efb6",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "2c388b156195314402e7d915d4a976e9c2cf6e53286a2d2c8ee157c82b534f21",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "1acfee9d7291f3082f614aa57fae614d5ccfff161e0e4518cb6b95a9c4529b24",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "7abb3631a9f7e5cd47fa5f5283343cf0edbf7ca8bff1e4b3d5156cf2a47757bd",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "2bc1e5939278e0815bcadd3c9d71de895869ed2d2a71cb2eb8577d2aa61a71c4",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "ad9c461a85c366a53c4c4818958e1e06ee4098c05312c909eb09087162312746",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "41d898ac71b710d888199466749ed6f5c5045e878025339e77981d4a5ea61f30",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "04e735bf8bcc205b7f0c2e2f8a0e8721367eddab51a46a9c42f134c554713101",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "1486bc2fa70ea5ad54365d275c0e05f4af9662b2d4c538259179421514beace4",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "038f2ab2401b374649e47ea3caece03470133275dd2013b6af63f580799b9c08",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "2daf6ba2b388b3a2dde4fb4968974db35416777ec6166b57a1e4fe68e2d00f05",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "8896555decb66dedb2db52b3ec965748ad16a14f44cfbd1c5326670a2beb82fa",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/port_mapping_tests.cpp",
+        "sha256": "72dcf2245906477c1d26ab238a1f4764c52d65b3ee2ca6cf95e3d4aba0136daa",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/port_mapping_tests.cpp",
+        "sha256": "445e2c24f74273c269fb17ddef6e23f8d2509929a45f8e8b63dc752b40bae347",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/port_mapping_tests.cpp",
+        "sha256": "5f72777494cdbab48e6aee1a22909515c3ac4dbf3cc1dc741f455b3a5f956213",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/port_mapping_tests.cpp",
+        "sha256": "94dee789f1b7c7901cbdf30c8a3a7f44a0e5e176e61a8261aa8e7cedcd75d9c3",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/port_mapping_tests.cpp",
+        "sha256": "dbbc67be859dddf114c2f94c8ee625a901c210652f51c381e9c604ab3530a973",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/port_mapping_tests.cpp",
+        "sha256": "62b822e4bdc029bafcdeb90599c0ce2aa58ceb2f37ffcaacfad1583c9967865f",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/port_mapping_tests.cpp",
+        "sha256": "2324bb3ea213878d4f4db86fd9828817625601e316fb55a09cd1a3ed922dc12f",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/presentation/renderer/test_lan_lobby.py",
+        "sha256": "7668f291cc82c4d22a907cc5456b8387a1e93d97fe832fef38ea87224d614ded",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/presentation/renderer/test_lan_lobby.py",
+        "sha256": "7c2472f4eb2d119e8f9d49f93ca988122f3ae64ad9be4807404fa513184cae8c",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/presentation/renderer/test_lan_lobby.py",
+        "sha256": "cb7c46edc0810517c63e58582f53566812191339ee490dd8f5586102f4c1d973",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/presentation/renderer/test_lan_lobby.py",
+        "sha256": "e9d3b1cc2059a823606f9927010add743ed88ad991157bd7d432f3fe07626c2e",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_hud.cpp",
+        "sha256": "cd0c00089c7a480659a6a4d365d719705a9581b09aac21c48108368a66d48443",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed LAN recovery UI member access; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_hud.cpp",
+        "sha256": "55b0897a1916d6e258ec8e485c6f5af5ce602ea4c5860fce3d651fc9e22c8df4",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed LAN recovery UI member access; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_hud.cpp",
+        "sha256": "0ef767b2c281e33aa2fc25efd4ea003238efee06fe251d01b7f820a3dafd76a1",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed LAN recovery UI member access; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "ad5800c4a715a75ce2a4b52aa2b9ee316c3b059011e9e69fc0802c7e94934e16",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed LAN recovery UI member access; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_prepare.cpp",
+        "sha256": "f6cb60135ed1cd1b39513a761bbe0405a6e30368329706555a158deedd18f50b",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed LAN recovery UI member access; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_hud.cpp",
+        "sha256": "b7338bbd147640ac0275e9e44b3a9ec7f6f4fc2a09a845ab755ed141b9674b9a",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed LAN recovery UI member access; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_hud.cpp",
+        "sha256": "a9d3c8c16f1f4c3d241d8fd0553a7a9133e9dcde5cb72aa9fecadd5b2fb786f7",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed LAN recovery UI member access; exact full line only."
+      },
+      {
+        "path": "docs/deploy/relay-server.md",
+        "sha256": "e7460259c3e478a0bc92f83df8a3ba590f7587e39a09b96e71942c15fe64459d",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "coturn's standard deny list of private ranges (RFC 1918) in the relay guide; documentation, not a host."
+      },
+      {
+        "path": "docs/deploy/relay-server.md",
+        "sha256": "31ada10f9fb2c6350865489f83d44882decd820b0ccc6da97d50ee28fdf4f8be",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "coturn's standard deny list of private ranges (RFC 1918) in the relay guide; documentation, not a host."
+      },
+      {
+        "path": "docs/deploy/relay-server.md",
+        "sha256": "1a202bc460cec7f3e65caa9918362ccfdf67ad43551180c30c9cbfe07f640704",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "coturn's standard deny list of private ranges (RFC 1918) in the relay guide; documentation, not a host."
+      },
+      {
+        "path": "tools/publish_scan/config.json",
+        "sha256": "3c8f1759a4fe93c07c952640b4fc4caa1620fb8bbf014316ba68bf035592ae1a",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "The scanner config quotes its own reviewed lan-host pin pattern."
       }
     ]
   },
@@ -98,9 +812,9 @@
       "third_party/lua/etc/lua.xpm": "2efc535d4e7ea430363a9592a6238217c3a24d825994f6546262bac3c83b709e"
     },
     "binary_allowlist": {
-      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "3fa81cbcc3d8424124974a3bdbc43619487ef864b0bf3da516cbf326bd3c6a7e",
-      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "711808fd87578c95454319922c492059f82ca9942446c0d203c431ed0b26db11",
-      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "f33e18b581a9d6123be75a90e3abd05cdfbc6ce676ccaf812de8bd6b0ed53f09",
+      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "ec95f37d13abd1464f14396a7f5d3cef645eea5a075594a1d37095ba8ec854a8",
+      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "1b22b075bb949f46f024fa2dd3e76edd9b6aacf656c7f1d6439a09ad06aa8935",
+      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "7dcae733fe6ba8432b2c5bc1cf4dbe09daf93e1825f1fa6543a7d40abcf6c175",
       "tests/fog/fixtures/fog-stub-v1-one-cell.eawr-fog": "a3f3015681fac46bb56f8fd5270c46bf29e7f090559a6d6d2f8e7c29246f9b27",
       "tests/fog/fixtures/fog-stub-v1-zero-tick.eawr-fog": "34a86fcc4b9bc2a39556d8aa249355c5df37e9955a3bda7e983c10bb5e53664b",
       "tests/fog/fixtures/fog-stub-v1.eawr-fog": "259541928e1855e91b084d6743fbde1f579851cd41b81199f440f1881c0a9c58",
@@ -170,8 +884,24 @@
       "tests/replay/fixtures/tactical-visibility-frame-6.eawr-replay": "8bc3d6aa2d789702fde9af586071cb36a06ff28f0d679907b3eba9219f85668a",
       "tests/replay/fixtures/tactical-visibility-frame-7.eawr-replay": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
       "tests/replay/fixtures/zero-tick-v1.eawr-replay": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
-      "tests/skirmish/fixtures/m2-start.eawr-replay": "4f8925a9b650f2539895047ccffd0338c57a5926ef8eb214f297e7cad0c3e4aa",
-      "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2"
+      "tests/skirmish/fixtures/m2-start.eawr-replay": "0950c1fc37694268440909146ada690d142dd9cf49f23f58a83cc1e6f883b6a9",
+      "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2",
+      "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "5de18cf77870675b3ec7a184a7611237af3d5e6188448e7b91ea8f5044149fc1",
+      "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "427a20237b1f22a35232bb56c67a23cadccb7443c5a7e1ac9472ad0e9d2d8251",
+      "tests/galactic/fixtures/corpus/fiscal-boundary.eawr-gcreplay": "d4cc4cc09c468b61e36c48a5cb9f5294e43c97f49ea219bd2c1966292407afd0",
+      "tests/galactic/fixtures/corpus/partitioned-orders.eawr-gcreplay": "b1192496cc319429e18926138577b55b8f75ed8926fa1bf140399e9d66637762",
+      "tests/galactic/fixtures/corpus/quiet-minimal.eawr-gcreplay": "207dba4ef69eac6eb58df338856ee95033f401dd6fe53e25988903d0d8c4eeca",
+      "tests/galactic/fixtures/fleet-corpus/fleet-commands.eawr-gcreplay": "8368607a2af62ceabdbf80fc17b782fa903b90a18cbd9482c30dda010fdbad3d",
+      "tests/galactic/fixtures/graph-corpus/graph-rules.eawr-gcreplay": "a5e4e6f6cd089810d8594cdadc17351f761a9086f152811c8f824ebc8045e002",
+      "tests/galactic/fixtures/movement-corpus/fleet-travel.eawr-gcreplay": "3dfa8fdd42611e7dc780441d12ab50a96778350c49d46b304b975c09babfa263",
+      "tests/galactic/fixtures/outcome-corpus/space-loss.eawr-gcreplay": "b3c932ccb20206e9227a13e90ef5c7b7ca0881ee4e3951e8aa57e7bd566f02ea",
+      "tests/galactic/fixtures/production-corpus/queues-basic.eawr-gcreplay": "95f46587e64b7ccc2c74c5a9451ee15b60812bc3f34c5b14f84db7c577826f69",
+      "tests/galactic/fixtures/production-corpus/queues-orbit.eawr-gcreplay": "6a8feaf0f386c597ca7bb4ea80955f9f3666e58c4c2392db270709db90bcfc34",
+      "tests/galactic/fixtures/production-corpus/queues-paygo.eawr-gcreplay": "847f32a3830adca6c249ba9bf44149f3ff685c4807c2e2aca2a22566f81f0012",
+      "tests/skirmish/fixtures/installed/banked-hardpoints.eawr-replay": "b7ed71e4e5f9c38aa3ab06cfb2817ae6912deee4885f75f986d40f9e5a3906dc",
+      "tests/skirmish/fixtures/installed/carrier-waypoints.eawr-replay": "54c9e94401d316f0d214aa7e65e4a8253d125d4d569833eb6f02c71867742972",
+      "tests/skirmish/fixtures/installed/leech-shields.eawr-replay": "b3df5279063c69ac618d54e993b93be4a954e22cab9042338ebbb1d9ed228a86",
+      "tests/skirmish/fixtures/installed/special-blast.eawr-replay": "c02139cd2f6b88051b131659aa13c7fbf32bf71a47905be734f8a632cc47f2f4"
     },
     "image_allowlist_origins": {
       "third_party/lua/doc/logo.gif": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",
@@ -179,7 +909,23 @@
       "third_party/lua/etc/lua.xpm": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT)."
     },
     "binary_allowlist_origins": {
-      "third_party/lua/test/life.lua": "Upstream Lua 5.0.2 Life sample with non-UTF-8 display glyphs, normalized to LF; reviewed by exact SHA-256, from the distribution identified in third_party/lua/COPYRIGHT."
+      "third_party/lua/test/life.lua": "Upstream Lua 5.0.2 Life sample with non-UTF-8 display glyphs, normalized to LF; reviewed by exact SHA-256, from the distribution identified in third_party/lua/COPYRIGHT.",
+      "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/corpus/fiscal-boundary.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/corpus/partitioned-orders.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/corpus/quiet-minimal.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/fleet-corpus/fleet-commands.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/graph-corpus/graph-rules.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/movement-corpus/fleet-travel.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/outcome-corpus/space-loss.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/production-corpus/queues-basic.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/production-corpus/queues-orbit.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/galactic/fixtures/production-corpus/queues-paygo.eawr-gcreplay": "Synthetic campaign replay generated by tests/galactic/replay_corpus_generate.cpp; serialized project state, not original game assets.",
+      "tests/skirmish/fixtures/installed/banked-hardpoints.eawr-replay": "Project tactical replay generated from its adjacent installed scenario JSON by tools/replay/record_installed.py; serialized simulation state, no original game assets.",
+      "tests/skirmish/fixtures/installed/carrier-waypoints.eawr-replay": "Project tactical replay generated from its adjacent installed scenario JSON by tools/replay/record_installed.py; serialized simulation state, no original game assets.",
+      "tests/skirmish/fixtures/installed/leech-shields.eawr-replay": "Project tactical replay generated from its adjacent installed scenario JSON by tools/replay/record_installed.py; serialized simulation state, no original game assets.",
+      "tests/skirmish/fixtures/installed/special-blast.eawr-replay": "Project tactical replay generated from its adjacent installed scenario JSON by tools/replay/record_installed.py; serialized simulation state, no original game assets."
     },
     "text_encodings": {
       "third_party/lua/test/life.lua": "latin-1"

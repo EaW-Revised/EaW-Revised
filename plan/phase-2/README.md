@@ -347,6 +347,10 @@ The UI foundation work was split from the UI design task. The critical path from
 
 ## Fidelity list
 
+- Galactic space entry selects population buckets by ascending campaign type ID (WGT-08 project choice), rather than FoC's internal type hash-table order; see [galactic space entry](../../docs/behaviour/galactic-space-entry.md).
+- Interdictor deployments (legacy EAWR-2190): generator-loss deactivation of INTERDICT and facing lock for INTERDICT/MISSILE_SHIELD are **inferred**, unverified defaults; WIN-02/04 establish activation and movement lock, not these choices. WMS-U1 projectile limits and WMS-02 deployable-type deployment remain unimplemented or unverified; stock Interdictor has no deployment tags.
+- Team Buzz Droids events admitted at t apply from the t+1 targeting turn (FSC-33); the direct handler remains immediate. The remake cancels a special request on accepted ordinary replacement orders (face preserves it), and drops a failed retry when its approach completes, is interrupted or replaced, or loses its formation or holder targeting state, without recharge or a swarm. This approach cancellation is an inferred project choice pending original-game evidence (WAB-70, UFS-21), rather than a sourced exception to FS-23/FC-51.
+
 - Projectile blast recipients preserve the existing player/collection-tree order (U-02 project policy); retail ordering and mixed bounds/interior collision fidelity (U-01), delayed source retention/rounding (U-04), and authored hardpoint share routing remain open. Secondary damage uses the ordinary hull/area seam; U-03 and U-06–08 retain their owners. The U-05 random selector is settled by a debug-build read (WAD-27), while its runtime share/exclusion witness and G8 delivery remain open in the [area-damage walk](../../docs/behaviour/walks/area-damage.md) (legacy EAWR-1071, EAWR-1076).
 
 - The temporary skirmish ship gate retains required station infrastructure; Underworld station mass-driver and higher-level special hardpoints remain unsupported until their weapon family services land: RG-05 (legacy EAWR-1046).
@@ -512,3 +516,10 @@ Known differences and deferred work. None of these block M2.
   this implementation; alternate-holder support for GC/mods is nice-to-have
   work (legacy EAWR-1016). Holder ownership-change
   propagation and original search order remain unverified there; no captures pending.
+
+- Skirmish loading screen: the dialog's 3D planet render (`IDC_PLANET_ICON`, lit by the
+  `Battle_Load_Planet_*` game constants, BLD-07) is not drawn; the retail fallback for a map that
+  names no planet (BLD-09) and a cold-cache load's timing are unverified
+  (docs/behaviour/loading-screen.md).
+
+- Ordinary object turret runtime boundaries (UA-05, WWP-17, FS-33, FC-60/61): `ordinary_object_turret_runtime_boundaries` retains UFS-29 timestamp-zero/float normalization and indirect lifecycle producers. Tracking and strict idle-delay/rest steps are implemented; FD-52 target pose age still follows committed global movement, pending the post-sign-off object-order work.

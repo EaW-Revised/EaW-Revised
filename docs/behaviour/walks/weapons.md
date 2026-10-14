@@ -105,7 +105,24 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
   hardpoint that is not destroyed and is targetable, nearest to the parent's height-adjusted
   position (WWP-72), the first on a tie; else none.
 - **WWP-17** (debug build, EWW-03) A turret hardpoint (`Is_Turret`) fails unless its barrel already
-  points within `Fire_Cone_Width` of the target (space-weapon-fire W-07; no M2 turret).
+  points within `Fire_Cone_Width` of the target (space-weapon-fire W-07). Ordinary object turrets
+  also gate a pointing call on UA-05 mechanical readiness: reject desired yaw/pitch outside the
+  authored extents, advance each by the authored turn speed (shortest wrapped yaw), and release
+  firing only after both angles arrive. Turret/barrel bone posing follows UA-05. Space
+  targeting invokes pointing on each admitted target-in-range turn independently of the
+  weapon recharge/pulse countdown. The firing attempt reads the resulting readiness; the
+  separate turret service does not advance a tracked target. Target clear starts the
+  strict authored idle hold, then per-call return toward rest; reacquisition cancels it.
+  FS-33, FC-60/61 and FD-51 supply this cadence. The named
+  `Turret_Rotate_To_Rest_Delay_Sec` and `Turret_XY_Only` are unauthored in stock.
+  Both are recognized by the object-definition engine-tag catalog on main (legacy EAWR-2321),
+  now carried into Skirmish as `docs/tag-coverage/engine-tags.json` (ET-T053).
+  The XY-only absent-tag default is false.
+  Its absent-tag default is two seconds; equality still holds before the first later
+  admitted return step. (FC-61; debug build EFSB-06)
+  `ordinary_object_turret_runtime_boundaries` seam retains UFS-29's runtime normalization
+  and indirect lifecycle producers.
+
 - **WWP-18** (debug build, EWW-03) The projectile is the hardpoint's `Fire_Projectile_Type`, replaced
   by a unit ability's override for this target and aimed hardpoint: the Y-wing's ion shot (legacy EAWR-561).
   A craft whose squadron runs the ion-shot or lucky-shot ability and that has no override for this
@@ -122,11 +139,18 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
   exceeds the weapon's range plus the **target's soft radius** (WWP-21), or is less than
   `Fire_Min_Range_Distance`. The range is `Fire_Range_Distance` times one plus the parent's fire
   range modifiers (abilities), times the garrisoned multiplier while the parent is in limbo.
-- **WWP-21** (debug build, EWW-05) A unit's soft radius is its type's `Custom_Soft_Footprint_Radius`
+- **WWP-21** (debug build, EWW-05) A unit without model geometry has zero type soft radius,
+  before either radius override. Otherwise its soft radius is its type's `Custom_Soft_Footprint_Radius`
   when positive, else its `Space_Obstacle_Radius` when positive, else the larger planar half extent
-  of its model's box; times `Scale_Factor`. A squadron's container in a formation uses its hard
-  radius instead (the length of its two planar hard extents). The M2 stations author 300 (Rebel)
-  and 250 (Empire); the ships take their model's half length.
+  of its model's box; times `Scale_Factor`. Only a specialized formation-team locomotor uses its
+  hard radius instead (the length of its two planar hard extents). Ordinary space squadron
+  containers use the type radius even while their movement formation is active (A-07, WSQ-45,
+  UFS-35). The M2 stations author 300 (Rebel) and 250 (Empire); the ships take their model's half
+  length. The specialized formation team's ideal box includes
+  the origin and each surviving member's base slot widened by its hard extents; its radius is
+  the length of the two resulting half extents, independent of scattered current positions
+  (debug build, EUS-18). The ground-only `MaxJiggleDistance` padding has no authored space-squadron
+  consumer in the stock data.
 - **WWP-22** (debug build, EWW-03) The muzzle: with `Randomize_Between_Fire_Bones`, a uniform point
   in the box between the two fire bones (three synchronized draws); else `Fire_Bone_A` when there
   is no second bone; else a synchronized 50 % draw between the two (space-weapon-fire W-06).
@@ -143,7 +167,8 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
 - **WWP-27** (debug build, EWW-03) Its travel limit is the weapon's range of WWP-20 (the projectile's
   `Projectile_Max_Flight_Distance` when the range is zero), plus the target's soft radius, plus the
   squadron container's soft radius when the target is a squadron craft (unless the parent's type is
-  melee), plus the height between the scattered point and the muzzle.
+  melee), plus the height between the scattered point and the muzzle. The melee test compares
+  the parent type's `Targeting_Max_Attack_Distance` to `Melee_Cutoff_Range`, inclusive (debug build).
 - **WWP-28** (debug build, EWW-03) `Projectile_Appearance_Delay_Frames` above zero hides the
   projectile and holds its flight until the delay ends (no M2 hardpoint sets it).
 - **WWP-29** (debug build, EWW-03; space-damage MS-02, MS-03) A `MISSILE` projectile holds the
@@ -201,23 +226,40 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
   `Projectile_Energy_Per_Shot` does not fire; the cost is paid after the shot.
 - **WWP-47** (debug build, EWW-07, EWW-09) The muzzle is the next of the model's muzzle bones in turn
   (the X-wing's four wingtip `MuzzleA_00` to `_03`, round robin); with several projectile types, the
-  bone of the current type's index.
+  bone of the current type's index. The index advances when the weapon takes the bone, before the launch can be rejected
+  (WWP-53's cone or the lead), so a rejected shot still uses its muzzle up.
 - **WWP-48** (debug build, EWW-09) The shot's travel limit is the type's `Targeting_Max_Attack_Distance`
   times one plus the fire range modifiers; its damage is the type's own `Projectile_Damage` when
   positive, else the projectile's; its damage type is the type's `Damage_Type` unless that is the
   default, else the projectile's. This is the unit's own `Projectile_Types` weapon only:
   the unit tag does not replace the damage type of its hardpoint weapons (DG-12). The M2
   ships do not author the unit tag; their hardpoints supply their own damage types.
-- **WWP-49** (debug build, EWW-09) A squadron's team container as target stands for its craft
-  nearest the muzzle (or nearest the shooter's own squadron centre when the shooter flies in one);
-  that craft is fired at with no aimed hardpoint (space-fighters FO-04). A target hardpoint that is
+- **WWP-49** (debug build, EWW-09; conditional parent reference rechecked in the debug build) A
+  squadron's team container as target stands for its craft nearest the actual firing muzzle.
+  Only when the shooter's parent exists and has ordinary targeting does its centre replace the
+  muzzle reference; squadron membership and team target metadata alone do not qualify.
+  That craft is fired at with no aimed hardpoint (space-fighters FO-04). A target hardpoint that is
   gone or destroyed is dropped.
-- **WWP-50** (debug build, EWW-09) The aim point: the unit's ordered hardpoint on its attack target
-  when it has one; else one of the target type's `Target_Bones`, picked by a synchronized draw, at
-  its animated position; else the target's height-adjusted position (WWP-72). There is no
-  nearest-hardpoint choice and no range test.
+- **WWP-50** (debug build, EWW-09; the targeting service, G-W3) The aim point: the hardpoint attached to
+  the unit's attack target when it has one (the one its order named, else the one the ship-level
+  targeting attached when it acquired the target: the nearest standing targetable hardpoint for a
+  targeting set without priorities, re-picked when it is destroyed); else one of the target type's
+  `Target_Bones`, picked by a synchronized draw, at its animated position; else the target's
+  height-adjusted position (WWP-72). The weapon itself makes no nearest-hardpoint choice and runs no
+  range test in the aim choice.
 - **WWP-51** (debug build, EWW-09; space-weapon-fire W-10) The aim point is led from the muzzle at
-  the projectile's `Max_Speed`.
+  the projectile's `Max_Speed`. The target's current, previous and before-previous matrix
+  translations define its motion. The chords from the oldest point are normalized; stationary
+  lengths within 0.001 or a direction dot product within 0.001 of one use linear lead. Otherwise
+  fit their circle and predict around it at the latest displacement length divided by radius.
+  Degenerate geometry, a radius above 1000 units or failed numerical convergence falls back to
+  linear lead. The meeting-time residual is spatial distance from the muzzle to the predicted
+  centre minus projectile distance. A secant solve starts at 0.1 and 1000 seconds, permits
+  fewer than 15 iterations, and stops when successive times differ by less than 0.001 seconds;
+  equal residuals fail. The selected aim's offset from the current target centre is added after
+  predicting the centre. The remake uses deterministic Q24 geometry and frame units; absent
+  history keeps linear lead. The captured muzzle origin and member selection remain separate
+  upstream inputs, so circular-lead parity alone does not establish ordinary battle parity.
 - **WWP-52** (debug build, EWW-09; space-damage DG-24) Scatter: a draw within the type's
   `Targeting_Fire_Inaccuracy_Fixed_Radius` when it sets one; else a radius of the spatial distance
   times its `Targeting_Fire_Inaccuracy` row for the target (doubled in space) over its
@@ -277,6 +319,19 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
 - **WWP-72** (debug build, EWW-16) A unit's height-adjusted position is its position raised by its
   type's `Ranged_Target_Z_Adjust` (M2: the Nebulon-B 35, every other M2 type 0 or unset).
 
+- **WWP-73** (debug build; BK-05, W-07) Weapon geometry uses the current world placement of the
+  model's fire bones, including the ship's bank. Setting the synchronized facing also sets the
+  displayed facing; the placement applies yaw, pitch and roll before the fixed model turn, and
+  that placement feeds the model and its bones. The hardpoint's midpoint and cone axes come from
+  those bones. A level heading used for movement planning is not a separate weapon placement.
+- **WWP-74** (debug build; WWP-47, WWP-51, WWP-53, WWP-54) Projectile construction takes its
+  spawn position from the current world fire bone, and aims from that bone's placement toward
+  the led/scattered target. Thus banking moves an off-axis gun's launch point and can change
+  the launch ray; it does not force an aimed shot to fly along the gun axis. Categories whose
+  launch follows the bone axis also take that axis from the banked placement. `Fires_Forward`
+  retains its separate facing rule (WWP-53). A source without a fire bone retains the
+  height-adjusted object-position fallback (WWP-72).
+
 <a id="planar-or-3-d-666"></a>
 
 ## Planar or 3-D
@@ -314,11 +369,11 @@ at.
 | W-06, W-08 | same (WWP-22, WWP-31) |
 | W-07, W-10, W-11, W-12 | same (WWP-23, WWP-24) |
 | W-09 | same for the cone and the omitted-tag defaults (G-W4 resolved); `Fires_Forward` yes fires along the facing (WWP-53), which the code does not do |
-| P-04 | differs: the soft radius is not zero (WWP-21); `Fire_Min_Range_Distance` is read (no M2 hardpoint authors it) |
+| P-04 | type soft-radius computation shared by movement and combat (WWP-21), including craft without a movement layer; `Fire_Min_Range_Distance` is read (no M2 hardpoint authors it) |
 | P-06 | same (project choice kept) |
 | space-damage DG-21 | same for the unit weapon (WWP-54); for a hardpoint's projectile **unverified** (U-02) |
 | DG-22, DG-24 | same (WWP-63, WWP-25, WWP-52) |
-| DG-23 | differs: the travel adds the target's soft radius and a squadron container's (WWP-27) |
+| DG-23 | travel adds the target's soft radius and its squadron container's, with the melee exception (WWP-27) |
 | DG-25 | **wrong**: the MC80's weapon hardpoints author `Projectile_Damage` (20 on the lasers against the projectile's 15, 40 on the ion cannons against 20), and FoC uses it (WWP-26) |
 | DG-30 | same; the first eligible object in sorted hostile-player and persistent projectile ray-collection order is WWP-66; DG-30a to DG-30g specify the tree walk, lifecycle and continuing flight after target detach |
 | DG-32 | same, sharpened: only players the owner counts as enemies (WWP-66) |
@@ -328,7 +383,7 @@ at.
 | EN-05, EN-06 | same (WWP-46; hardpoints pay nothing) |
 | space-targeting R-01 to R-15 | same (WWP-12 hands off to them) |
 | space-fighters FT-07 | same (WWP-06) |
-| space-fighters FO-04 | differs for hardpoints: a hardpoint ordered at a squadron fires at a random craft each attempt (WWP-19); only a unit's own weapon takes the nearest (WWP-49) |
+| space-fighters FO-04 | same (corrected by random craft selection by ordered hardpoints (legacy EAWR-711)): a hardpoint ordered at a squadron fires at a random craft each attempt (WWP-19); only a unit's own weapon takes the nearest (WWP-49) |
 | space-abilities AB-21 | same (WWP-32, WWP-33) |
 
 ## Gap list against the remake
@@ -352,15 +407,15 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-13, WWP-15 | `attempt` (live, fogged, restricted); stealth and hero clash not modelled | same for M2 |
 | WWP-14 | not modelled | missing (not in M2) |
 | WWP-16 | nearest targetable hardpoint from the shooter's height-adjusted position | **same** for space units and structures |
-| WWP-17 | turrets treated as fixed (P-04) | missing (not in M2; G-08) |
+| WWP-17 | ordinary TURRET objects use authored mechanical aim/readiness and posed muzzle | applied to ordinary space objects; manual hardpoint visual pose remains missing |
 | WWP-18 | projectile override comes with targeted ion-shot input and HUD (legacy EAWR-561) | same after the targeted ion-shot input and HUD work |
-| WWP-19 | a squadron resolves to its nearest craft (`resolve_target`) | **differs (G-04)** |
-| WWP-20 | planar range, soft radius zero, no minimum range | **differs (G-01)**; minimum range missing (not in M2; G-08) |
-| WWP-21 | the motion table has it (AV-05); combat does not use it | **differs (G-01)** |
+| WWP-19 | a squadron resolves to a random live craft per hardpoint attempt (`random_member`, a draw keyed by seed, frame, unit and slot), then the R-10 search on it | **same** (G-04 resolved) |
+| WWP-20 | planar range plus the target radius | same for M2; minimum range missing (not in M2; G-08) |
+| WWP-21 | shared type-footprint conversion (AV-05), including no-layer types and ordinary space squadron containers | same for M2; specialized formation-team geometry has no ordinary space consumer |
 | WWP-22 | 50 % draw | same for M2 (no `Randomize_Between_Fire_Bones`; G-08) |
 | WWP-23 to WWP-25 | `lead`, `pointable`, `scatter` | same |
 | WWP-26 | the projectile's damage only | **differs (G-02)** |
-| WWP-27 | range plus height | **differs (G-01)** |
+| WWP-27 | range plus target radius, non-melee craft target's container radius, and height | same |
 | WWP-28 | not loaded | missing (not in M2; G-08) |
 | WWP-29 | `launch_projectile` | same |
 | WWP-30 | ion shot with targeted ion-shot input and HUD | same after the targeted ion-shot input and HUD work |
@@ -371,10 +426,10 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-43 | planar range to the aim point against `Targeting_Max_Attack_Distance` in `attempt` | **differs (G-05)**, the gate's inside is walk 1/2's |
 | WWP-44 | drops only a dead or fogged target | same for M2 (no ownership changes) |
 | WWP-45, WWP-46 | `service_weapon` | same |
-| WWP-47 | the unit's origin | **differs (G-03)** |
-| WWP-48 | the projectile's `Projectile_Max_Flight_Distance` (500 for the small lasers) | **differs (G-03)** |
-| WWP-49 | `resolve_target` from the copied shooter's squadron centre for object weapons, without an aimed hardpoint | squadron-centre clause implemented; ungrouped muzzle reference remains G-03 |
-| WWP-50 | the nearest targetable hardpoint, else the R-10 search with a range test | **differs (G-03)** |
+| WWP-47 | the object weapon's muzzle bones (`Muzzle_Bone_Name`, default `MUZZLEA`, then `_00` and consecutive two-digit suffixes; U-06), next one in turn kept in the weapon state and advanced on every launch attempt, also one the cone or lead rejects (EWW-07); the unit's origin when the model has no `_00` bone | **same** for the first projectile type (the loader reads the first of several types); the bone of the current type's index is not modelled |
+| WWP-48 | the type's `Targeting_Max_Attack_Distance` plus the target's soft radius and the height (`launch_projectile`); the projectile's own flight distance only when the type authors none | **same**; the fire range modifiers of walk 7 are not applied to travel (none is active in M2 skirmish) |
+| WWP-49 | `resolve_target` from the next actual muzzle for object weapons, substituting the parent position only when the immutable parent has an ordinary combat binding, without an aimed hardpoint | conditional parent-targeting clause implemented; team target metadata alone retains the muzzle reference |
+| WWP-50 | the object weapon: the hardpoint attached to its attack target (ordered, else the unit's best one the targeting attached, capital-combat WCC-18, EWW-09 with G-W3), else a keyed draw over `Target_Bones` at their bind positions, else the height-adjusted position; hardpoint weapons keep the nearest hardpoint (WWP-19, G-04) | **same**; bone positions are bind poses until animated attachment poses exist (legacy EAWR-1759); the attachment is chosen per shot instead of kept until destroyed (G-W3) |
 | WWP-51, WWP-52 | `lead`; no unit weapon scatter | same |
 | WWP-53 | cone as W-09; `Fires_Forward` yes flies at the aim point | same for M2; missing for `Fires_Forward` yes (G-08) |
 | WWP-54, WWP-55 | new shots move from the next frame | same |
@@ -386,18 +441,18 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-68 to WWP-70 | `step_projectile` | same; lifetime expiry missing (not in M2; G-08) |
 | WWP-72 | loaded for `SpaceUnit` and `SpaceStructure`; applied to launch fallback, nearest-hardpoint reference and homing | **same** for these classes |
 
-Counts, by rule (62 simulation rules; WWP-40 is presentation): **same 43**, **differs 12**
-(WWP-02, 19, 20, 21, 26, 27, 43, 47, 48, 50, 72, and the project choice of WWP-66), **missing 7**
+Counts, by rule (62 simulation rules; WWP-40 is presentation): **same 47**, **differs 8**
+(WWP-02, 26, 43, 47, 48, 50, 72, and the project choice of WWP-66), **missing 7**
 (WWP-04, 09, 14, 17, 28, 60, 61; none authored by an M2 object).
 
 ### The gaps, by impact on the M2 battle
 
 | Gap | Rules | What | Size |
 |---|---|---|---|
-| G-01 target soft-radius range adjustment (legacy EAWR-708) | WWP-20, WWP-21, WWP-27 (and R-11, A-07) | Add the target's soft radius to a hardpoint's fire range and travel, to the opportunity aim distance and to the attack distance. FoC's weapons reach the stations 250 to 300 units further and every ship by its half length. | M |
+| G-01 target soft-radius range adjustment (legacy EAWR-708) | WWP-20, WWP-21, WWP-27 (and R-11, A-07) | Resolved: shared scaled type geometry reaches hardpoint admission, aim selection, attack distance and partitioned projectile launches, including no-layer craft and their container radius. | resolved |
 | G-02 MC80 hardpoint damage overrides (legacy EAWR-709) | WWP-26 | A hardpoint's `Projectile_Damage` replaces the projectile's: the MC80's lasers do 20 (not 15) and its ion cannons 40 (not 20). | S |
-| G-03 fighter aim and muzzle bones (legacy EAWR-710) | WWP-47, WWP-48, WWP-49, WWP-50 | The unit's own weapon: aim at the ordered hardpoint, else a random target bone, else the height-adjusted centre (never the nearest hardpoint, which with DG-39 also sends the damage to that hardpoint); fire from the muzzle bones in turn; travel `Targeting_Max_Attack_Distance`. | M |
-| G-04 random craft selection by ordered hardpoints (legacy EAWR-711) | WWP-19 | A hardpoint ordered at a squadron fires at a random craft each attempt (a synchronized draw), not the nearest; FO-04 is corrected. | S |
+| G-03 fighter aim and muzzle bones (legacy EAWR-710) | WWP-47, WWP-48, WWP-49, WWP-50 | The unit's own weapon: aim at its attached hardpoint (ordered, else the nearest the targeting attached), else a random target bone, else the height-adjusted centre; fire from the muzzle bones in turn; travel `Targeting_Max_Attack_Distance`. | **Implemented** (legacy EAWR-710) for the unit's own weapon: keyed bone draw and height-adjusted centre when the target has no attached hardpoint; muzzle bones in turn; travel `Targeting_Max_Attack_Distance`. The aim at the nearest hardpoint stays: the debug build's targeting attaches it (G-W3), so the issue's "never the nearest hardpoint" did not hold (S-45 records no direct hull loss). The weapon's cone opens at the muzzle (WWP-53); its planar range test still measures from the unit (G-05). |
+| G-04 random craft selection by ordered hardpoints (legacy EAWR-711) | WWP-19 | **Resolved**: a hardpoint ordered at a squadron fires at a random craft each attempt (a keyed draw), not the nearest; FO-04 is corrected. | resolved |
 | G-05 fighter targeting-state fire gate (legacy EAWR-712) | WWP-43 | The unit's own weapon fires only in the "okay to attack" targeting state and tests no range; ours tests the planar attack distance. The state's inside (walk 1/2) decides when a fighter may fire; the retail dogfight outcome comparison shot log shows retail fighters never firing beyond 424 units. | M (after walk 1/2) |
 | G-06 height-adjusted target positions (legacy EAWR-713) | WWP-16, WWP-19, WWP-64, WWP-72 | **Implemented** for `SpaceUnit` and `SpaceStructure`: launch fallbacks, nearest-hardpoint reference and missile steering use `Ranged_Target_Z_Adjust` (Nebulon-B +35; resource container +30). | S |
 | G-07 ion weapons, energy drain and stun (legacy EAWR-561) | WWP-02 | A stunned, disabled or in-limbo parent's hardpoints freeze their recharge (ion energy drain and hardpoint damage (legacy EAWR-561)). | XS in ion weapons, energy drain and stun (legacy EAWR-561) |
@@ -449,8 +504,7 @@ and `_Length` are drawing data (presentation). `HardPoint/Allows_Special_Weapon_
 
 - **retail dogfight outcome comparison (TIEs fire 64 shots where retail's fire 163).** The fire itself matches (WWP-41 to WWP-55
   with dogfight scatter and burst timing), except that ours holds a fighter's fire outside its attack distance where FoC
-  asks the targeting state (G-05), and aims at the nearest hardpoint where FoC aims at the centre
-  (G-03). Fire-to-target distance in the retail shot log never exceeds 424 units. The count gap is
+  asks the targeting state (G-05), and ours aimed at the nearest hardpoint exactly where FoC attaches one (G-03). Fire-to-target distance in the retail shot log never exceeds 424 units. The count gap is
   the chase geometry (walk 1) plus G-05.
 - **concussion-missile flight comparison (legacy EAWR-660) (missile comparison).** The flight rules match (WWP-62, WWP-64, WWP-66 to WWP-70); the
   steering point misses the Nebulon-B's height adjustment (G-06). The rest of concussion-missile flight comparison (legacy EAWR-660) is presentation.
@@ -478,3 +532,123 @@ Question IDs are retained; these boundaries no longer require a new source read.
 |---|---|---|
 | U-02 | Whether a hardpoint's projectile moves in the frame it is fired (its muzzle delay is left at the data default). | A retail per-frame projectile position trace of one hardpoint shot (S-15 has shot and hit ticks only). |
 | U-03 | What sets the "okay to attack" targeting state (two targeting checks not read here). **Sweep:** Still unverified: Attack wrappers assign targets, but the two virtual okay-to-attack gates are not resolved by those assignments. Their setters and policy remain unverified. | Walk 1/2's read of the targeting service. Retained sweep boundary: EUS-37. |
+
+## Space skirmish special weapons
+
+Walk date: 2026-10-07; remake audited at `5b3fa1d83269fa64ba516fca9ac3d81729d44978`.
+Tracking: space skirmish special weapons (legacy EAWR-1917).
+WSW rules cover the Rebel planetary ion cannon, Empire planetary hypervelocity gun and
+Underworld station plasma cannon. They exclude the Death Star, campaign ownership,
+land weapons and the Y-wing's `ION_CANNON_SHOT` ability.
+
+Fresh read-only **debug build** receipts use opaque WSW-E identifiers; their mapping,
+queries and original implementation details remain in ignored research output. WSW-D
+identifies parsed effective XML or stock Lua data. **Sourced** means the stated branch
+was read, or explicitly reuses an existing sourced damage/manual-cannon interface;
+it does not claim a retail capture. **Unverified** identifies a remaining boundary.
+No new retail capture was made for this walk.
+
+### Active definitions and ownership
+
+| ID | Rule | Evidence / status |
+|---|---|---|
+| WSW-01 | Standalone space initialization visits playable players, reads each faction's `Standalone_Space_Maps_Special_Weapon_A` and `_B`, creates each nonempty type with that player's ownership and registers it by `Special_Weapon_Index`. This runs from both stock skirmish ownership-initialization routes. Weapon existence is separate from purchasing permission to fire. | **Sourced**, debug build WSW-E01 and its callers; WSW-D01 |
+| WSW-02 | Search map objects carrying `DUMMY_SPECIAL_WEAPON_SOURCE`; use the first returned object's position and facing for every created planetary weapon. With no source object, use zero position and zero facing. This is a map source, not the player's station or start marker. Stock source objects include planet backdrops and `Space_Special_Weapon_Source_Marker`; their XML authors `Layer_Z_Adjust` -2500. The creation route copies the resulting object position rather than applying a new fixed altitude. | **Sourced**, debug build WSW-E01; WSW-D01 |
+| WSW-03 | Rebel maps to active `Ground_Ion_Cannon` (weapon index 0, target-action index 1); Empire maps to active `Ground_Empire_Hypervelocity_Gun` (weapon index 1, target-action index 0). Both have `SpaceBehavior` `SPECIAL_WEAPON` and `Is_Special_Weapon_In_Space` Yes. The `Space_Mode_Ground_*` definitions are inside XML comments and do not exist in the parsed active definitions. Their old 15-second recharge values must not supply skirmish inputs. | **Sourced**, parsed effective XML WSW-D01 |
+| WSW-04 | Underworld's two standalone mappings are empty. Its plasma weapon is the manually targeted `HP_Underworld_L3_Station_Main_Cannon`, present on skirmish station levels 3, 4 and 5. It fires from the station's posed muzzle through ordinary hardpoint service. It is not a third planetary object or the index-2 magnepulse weapon. | **Sourced**, WSW-D01/03; debug build WSW-E10/15/17; WAD-39/40 |
+| WSW-05 | Registration is per owner and weapon index. A second registered object of the same type at that index increments the existing weapon's instance count and destroys the duplicate. The ordinary skirmish faction mapping creates one source per authored slot per playable player. The influence of a count greater than one on recharge is outside that stock case and remains unverified. | **Sourced** for registration, debug build WSW-E19; **unverified** for multiple-instance recharge |
+
+### Purchases, enablement and consumption
+
+| ID | Rule | Evidence / status |
+|---|---|---|
+| WSW-06 | Station levels 3 through 5 offer their faction's use upgrade in `Tactical_Upgrades`. All three upgrades author multiplayer cost 2800, `Build_Limit_Current_Per_Player` 1 and `Is_Skirmish_Tactical_Super_Weapon` true. Rebel and Underworld build time is 40 seconds; Empire is 45 seconds. These are production inputs, subject to the production walk's ordinary modifiers and admission. | **Sourced**, WSW-D02/04; WPR-22/33 |
+| WSW-07 | Each use upgrade has a `Space_Automatic` battlefield modifier with `Enable_Special_Weapons` Yes, `Apply_To_All_Allies` No and `Stacking_Category` 0. Multiplayer fire enablement combines the player's special-weapon modifiers and the required-hardpoint flag. A destroyed conflict planet disables it; outside multiplayer the ordinary non-destroyed-planet path is enabled. Readiness alone does not authorize a skirmish shot. | **Sourced**, debug build WSW-E09; WSW-D02 |
+| WSW-08 | Rebel and Empire use upgrades author `DUMMY_DESTROY_AFTER_SPECIAL_WEAPON_FIRED`. Underworld authors only `DUMMY_UPGRADE`, so its completed plasma upgrade remains an enabling source after fire and its current-player limit continues to block a second purchase. Do not impose consume-on-fire on all three factions by upgrade name or tooltip. | **Sourced**, WSW-D02; debug build WSW-E03/15/16 |
+| WSW-09 | The player fire event checks the firing player's enabled flag before dispatching a planetary shot or assigning the station's manual target. It then destroys all objects owned by the weapon owner that carry `DUMMY_DESTROY_AFTER_SPECIAL_WEAPON_FIRED`. The cleanup is after dispatch, before projectile impact, and does not inspect the planetary fire helper's success result. A malformed event can therefore consume permission without producing a shot. Ordinary UI admission is a separate earlier gate. | **Sourced**, debug build WSW-E03 |
+| WSW-10 | The object Lua route performs the same marker-based cleanup for the supplied player after a successful planetary fire or after attempting a valid manual assignment. The TaskForce Lua route cleans up the selected weapon owner's marked objects only after successful fire. These entry routes have distinct rejection/return contracts; consumption is not an impact or last-pulse callback. | **Sourced**, debug build WSW-E15/16 |
+| WSW-11 | Production's current-player limit counts queued and existing objects. Consuming a Rebel/Empire use object releases its current count and removes that object's enabling effect; it does not erase lifetime production history or destroy the persistent planetary source. Re-purchase and the source's own recharge are independent conditions for the next shot. | **Sourced**, WPR-22/33/51 and WSW-01/08/09; debug build WSW-E03 |
+| WSW-12 | Match denial belongs to purchase admission for types flagged `Is_Skirmish_Tactical_Super_Weapon`, as WSS-30 specifies. At the audited remake revision, `src/skirmish/inputs.cpp` and `src/skirmish/economy.cpp` already load and apply that policy to human/AI listings and purchases. It does not imply deleting map source objects or disabling unrelated ship abilities. | **Sourced**, WSS-30; current remake consumers |
+
+### Target selection and entry gates
+
+| ID | Rule | Evidence / status |
+|---|---|---|
+| WSW-13 | A planetary target needs a nonnull source/type and target/type, must be alive and must not be allied to the source owner. Its category mask must intersect `Special_Weapon_Valid_Targets`. The stock mask is Transport, Corvette, Frigate, Capital or Super; Fighter/Bomber are absent. This helper does not require a positive enemy relationship beyond rejecting allies. | **Sourced**, debug build WSW-E02; WSW-D01 |
+| WSW-14 | The planetary target validator checks no fog, distance, minimum range, source-to-target firing cone or destroyable-hardpoint requirement. The UI's special-target branch reuses it and does not add a fog/range test there. Shared projectile creation still has its own aim/cone/stealth checks. Whether the screen picker supplies a hidden remembered target is an upstream visibility boundary, not evidence for adding a fog check to this validator. | **Sourced** for the read validators, debug build WSW-E02/08/11; **unverified** for hidden-object screen picking |
+| WSW-15 | `Special_Weapon_Index` selects the stored weapon; `Special_Weapon_Target_Action_Index` selects its target action, cursor family and indexed faction HUD speech. The numbers are separate: Rebel uses action 1, Empire action 0. Underworld's manual targeting uses action 0 directly. Action 2 is not the plasma cannon. | **Sourced**, debug build WSW-E04/06/11/12; WSW-D01 |
+| WSW-16 | Planetary fire rechecks full readiness, target validity and the launch wrapper before starting recharge/burst state. The player event's earlier readiness check admits at 0.99, but this helper still requires 1.0. Object/TaskForce Lua routes also require full readiness. A new source starts fully ready, with no pending burst or targeting state; purchasing permission is still required. Do not model 99-percent readiness as a successful early shot. | **Sourced**, debug build WSW-E03/04/15/16/22 |
+| WSW-17 | The manual station target requires a nonnull enemy, no `Fire_Category_Restrictions` match, pointability, visibility to the station owner and inclusive planar range from its fire midpoint: minimum range through weapon range plus the target's soft radius. Stock plasma excludes Fighter/Bomber/Transport and authors range 20000. This is different from the planetary category-only validator. | **Sourced**, fresh debug build WSW-E17; WSW-D03; WAD-39 |
+| WSW-18 | A manual assignment is refused while that gun already retains a target; accepted assignment stores target, requesting player and current logical frame. The selected hardpoint is the first authored hardpoint requiring manual targeting. Turret yaw admission and desired facing transform the target into attachment coordinates, add 90 degrees to yaw, then wrap before applying the authored extent. Desired facing also clamps pitch; gun service applies its existing pitch and two yaw steps before the posed muzzle cone. Successful clearing and the strict greater-than-300-frame weapon-state timeout remain WAD-39 and MC-02/03 interfaces. | **Sourced**, debug build WSW-E17/20/25/26; WAD-39; MC-02/03 |
+
+### Burst, flight and damage
+
+| ID | Rule | Evidence / status |
+|---|---|---|
+| WSW-19 | Initial planetary fire launches once immediately, then stores `max(0, Projectile_Fire_Pulse_Count - 1)` remaining pulses. Recharge starts at that initial firing frame. Pulse delay and recharge convert seconds to logical frames by nearest whole frame (`seconds * logical FPS + 0.5`, then truncate). Rebel authors three pulses with 0.5-second separation and 30-second recharge; Empire authors ten pulses with 0.1-second separation and 45-second recharge. | **Sourced**, debug build WSW-E04/05; WSW-D01 |
+| WSW-20 | Periodic special-weapon service checks the pending pulse deadline before its readiness/enablement notification. If a stored target still resolves, it attempts one pulse per service; success decrements the count and advances the deadline by its interval, while a wrapper failure ends the burst. The final pulse clears the remembered target. Service does not recheck battlefield enablement or target validity for these continuation pulses. Consuming the enabling purchase after initial fire therefore does not cancel the remaining burst. | **Sourced**, debug build WSW-E05/06 |
+| WSW-21 | A missing remembered target produces no continuation launch in the read service. Exact retained-counter cleanup after target removal and visible outcomes when a target dies between pulses remain unverified; do not invent retargeting to another enemy. | **Sourced** for no launch, debug build WSW-E06; **unverified** for retained-state cleanup and retail outcome |
+| WSW-22 | Planetary fire uses ordinary object projectile construction with the target object and no authored hardpoint/muzzle selector. It starts from the source's height-adjusted object position. The shared aim route chooses a target location, applies interception and authored inaccuracy, and checks projectile-facing validity, including the source's turret extents. Successful construction creates a travelling projectile with source owner/identity. The special launch wrapper ignores the construction return value, plays its fire cue and reports success even when that shared construction rejects a shot. Thus advancing burst/recharge does not prove a projectile exists. | **Sourced**, debug build WSW-E08/21; ordinary WWP-45–50 interfaces |
+| WSW-23 | Projectile damage and damage type fall back to the selected projectile type when the firing properties have no positive damage/nondefault type override. Flight allowance similarly falls back to `Projectile_Max_Flight_Distance` when the source supplies no positive attack distance, then adds target soft radius and the absolute launch-to-target height difference. The planetary wrapper supplies no firing bone, so this shared route supplies no positive muzzle appearance delay. | **Sourced**, debug build WSW-E08; WSW-D01/03 |
+| WSW-24 | `Proj_Ion_Cannon_Planetary` authors speed 400, default projectile category, damage 15000 and flight allowance 150000; shield and energy damage Yes, hitpoint damage No. Engine disable after drained power is 10 seconds. Its detonation ion-stun inputs are duration 30 seconds, speed reduction 0.999, shot-rate reduction 0.8 and nonstacking duration. **The two timers are independent (Focumentation cross-check, debug build).** The ion stun applies its speed and shot-rate modifiers for the stun duration only (30 s here), and the engine disable is a separate locomotor timer set from the engine-disable duration (10 s here); neither reads the other. After 10 s the engines come back, but the 0.999 speed reduction holds until 30 s, so a stunnable victim barely moves for the full stun. The wiki's "must match" is an authoring convention, not a rule, and retail data does not follow it: the Krayt megaweapon authors 3 s and 3 s, the Krayt bombardment 10 s disable against 7 s stun, the planetary cannon 10 s against 30 s, and the small ship ion cannon only a 20 s disable with no stun at all. Both timers are modelled (EN-08, EN-09, IS-01 to IS-06); no change. Shield, energy and stun routing use the existing damage/ion interfaces, including recipient eligibility and armor; these numbers are not a promise that every recipient loses exactly 15000 shield points. No positive blast-area damage/range is authored here. | **Sourced**, WSW-D03; EN-07–09 and the ion-damage interfaces in [space-damage](../space-damage.md) |
+| WSW-25 | `Proj_Hypervelocity_Gun` authors speed 70, default category, damage 300 and flight allowance 50000; shield/energy damage No, hitpoint damage Yes. It requests random hardpoint damage routing. Each of the ten projectiles is routed independently through ordinary collision and damage; do not combine them into one guaranteed hull hit of 3000. No positive blast-area damage/range or ion stun is authored here. | **Sourced**, WSW-D03; WAD-27 and WWP-66/67 |
+| WSW-26 | Plasma retains the ordinary one-pulse manual hardpoint: weapon recharge 1 second, appearance delay 15 frames and player cooldown 120 seconds. Its projectile authors speed 70, direct damage 6000, blast damage 1000 and radius 300; shield/energy damage No, hitpoint damage Yes. Flight allowance is supplied by the hardpoint firing path, not blindly limited to the projectile type's authored 1000. Turret service, posed muzzle/cone, delay, collision and area routing are the existing WAD-32/39/40 and MC-06/07 interfaces. | **Sourced**, WSW-D03; WAD-32/39/40; MC-06/07 |
+| WSW-27 | Special-weapon service readiness is elapsed frames since initial fire divided by its stored recharge interval, clamped to zero through one; it is one once the ready frame is reached. Underworld's HUD instead uses the local player's manual-fire clock: one with no positive cooldown or once elapsed reaches that cooldown, otherwise elapsed/cooldown. Its gun's ordinary readiness is a separate per-gun recharge/burst measure. | **Sourced**, debug build WSW-E07/10/18; MC-04/05 |
+
+### UI, sound and enemy observations
+
+| ID | Rule | Evidence / status |
+|---|---|---|
+| WSW-28 | In standalone space, the main tactical button uses the local faction's mapped planetary weapon, or for Underworld the first allied station's manual gun. With no source/station, active setup, or battlefield special weapons disabled, it clears the bound source and disables the button. A planetary source supplies its own readiness; a missing, destroyed or disabled manual gun supplies zero, otherwise the manual player clock supplies readiness. Less than one disables the button. The icon comes from the local faction's slot in `b_special_weapon`'s `Icon_Alternate_Texture_Name`: Rebel slot zero (`i_button_command_bar_ion_cannon.tga`), Empire slot one (`i_button_command_bar_hyper_gun.tga`), Underworld slot two (`i_button_command_bar_station_turret.tga`). All three use the same HUD source while ready, targeting and recharging; weapon `Icon_Name` and use-upgrade `Icon_Name` remain separate build/purchase art. A missing alternate supplies no icon. | **Sourced**, debug build WSW-E10; active weapon/upgrade XML WSW-D01/02 and effective `b_special_weapon` command-bar XML |
+| WSW-29 | The button's readiness display receives the positive readiness fraction, or one when readiness is zero; the source parameter and disabled flag are updated separately. Resource names `b_special_weapon` and `b_special_weapon2` exist. The exact visible zero-ready fill, second-button use in stock space, hover text and pixel appearance require captures; no second usable plasma slot follows from these names. | **Sourced** for inputs/resource names, debug build WSW-E10 and string discovery; **unverified** for rendering and second-button use |
+| WSW-30 | Planetary targeting activation toggles its own active mode off if already active. Otherwise it refuses activation if another owned special weapon already targets in space, with local negative feedback; success sets its targeting flag. This activation helper does not itself enforce purchase/readiness; the button and firing entry gates own those conditions. | **Sourced**, debug build WSW-E13 |
+| WSW-31 | Hovering a valid planetary/manual target produces that weapon's indexed target action; invalid targets produce the invalid special-weapon action. A valid click queues the player fire event and clears the planetary or manual targeting flag. Underworld also plays command-bar attack acknowledgement. The invalid-target click uses the targeted-action feedback route and queues no shot in the read branch. | **Sourced**, debug build WSW-E11/12 |
+| WSW-32 | Ending special-weapon targeting clears local planetary targeting flags and, for Underworld in space, the first allied station's manual-targeting flag. It creates no shot and consumes no purchase. Mouse handling and beginning another object-targeted ability call this cancellation route. Exact button/right-click/Escape gesture mapping remains a capture/handler boundary. | **Sourced** for cancellation and callers, debug build WSW-E14; **unverified** for each gesture |
+| WSW-33 | Initial planetary fire plays the source type's positional `SFXEvent_Fire`, then selects indexed firing HUD speech from the local faction. A locally owned/allied weapon uses `SFXEvent_HUD_Special_Weapon_Firing`; an enemy uses `SFXEvent_HUD_Enemy_Special_Weapon_Firing`. Missing/out-of-range/null authored entries produce no substituted warning. The source-fire wrapper runs for each continuation pulse; indexed firing speech is selected on initial fire. | **Sourced**, debug build WSW-E04/06/08; BA-56 |
+| WSW-34 | Once the stored ready frame is reached, readiness notification waits until battlefield special weapons are enabled. Local/allied weapons prefer the source type's `SFXEvent_Special_Weapon_Ready`, falling back to the indexed local-faction ready entry; enemy weapons use the indexed enemy-ready entry. It then clears the notification deadline and emits the weapon-online signal once. A completed use upgrade's build-complete cue is a separate production event; do not synthesize an additional charging/ready cue without its triggering state. | **Sourced**, debug build WSW-E06; WSW-D02; BA-56/60 |
+| WSW-35 | Both planetary projectile types and the plasma projectile have `HIDE_WHEN_FOGGED`; their authored projectile models, hit particles and detonation sounds pass to the usual presentation consumers. An enemy's HUD speech follows relationship and authored entries, not visibility of the invisible firing source. Exact enemy-visible trail timing, fog reveal, flash, audible positional attenuation and charging speech trigger remain unverified for these shots. | **Sourced** for authored inputs and speech selection, WSW-D03 and WSW-E04/06; **unverified** for rendered/audio observation |
+
+### Stock AI and remake integration
+
+| ID | Rule | Evidence / status |
+|---|---|---|
+| WSW-36 | `PurchaseSpaceUpgradesGeneric` offers all three faction use upgrades among ordinary upgrade alternatives and produces up to two selected upgrades. Its sourced stock goal requires game age greater than 120 seconds and friendly force greater than half enemy force; in skirmish it also requires resource structures, no refinery saving/replacement-station need and fewer than eight unit-space slots available. After production the Lua plan waits for a credits threshold based on tech level, at most 120 seconds. These are generic purchase heuristics, not a guaranteed superweapon-first policy. | **Sourced**, stock Lua/XML WSW-D05/06; ordinary tactical-AI production interface |
+| WSW-37 | Rebel `GroundToSpaceDisable` produces/attaches `Ground_Ion_Cannon`, fires once through `TaskForce.Fire_Special_Weapon(type_name, AITarget)` when the target is valid, waits five seconds and exits. Empire `GroundToSpaceDamage` similarly uses `Ground_Empire_Hypervelocity_Gun`, fires, then waits while the target is valid; its weapon-online handler retries through `GameObject.Fire_Special_Weapon(AITarget, PlayerObject)`. Neither script searches the whole battlefield in those calls: the goal-selected target is supplied by the AI host. | **Sourced**, stock Lua WSW-D05; debug build entry routes WSW-E15/16 |
+| WSW-38 | The active basic-offensive goal-function file maps `Ground_To_Space_Damage` to `Needs_Ion_Shot` and `Ground_To_Space_Disable` to `Needs_Hypervelocity_Shot`. Preserve the authored mapping rather than swapping it to match the names. Both perceptions score zero on Easy and reject Corvette force; both favor non-starbases by a factor of 20. The ion score also includes shield and engine-online terms. Perception data and target-category admission remain separate gates. | **Sourced**, parsed effective XML WSW-D06 |
+| WSW-39 | Space free-store service retains the station, attacks its dangerous enemy, and asks for a reachable `Needs_Hypervelocity_Shot` enemy target with the station reference and distance argument 1500, variance 0.5. If valid, it invokes the station object binding with that target and AI player. Its player service interval is 20 seconds. This station call is shared by all factions; only a station with a manual gun can fire it, which stock Underworld levels 3–5 have. | **Sourced**, stock Lua WSW-D05; FH-21/27; debug build WSW-E15 |
+| WSW-40 | Object `Fire_Special_Weapon(target, player)` accepts an object target or an AI-target wrapper resolving to one and a player. A station without a manual gun warns and returns nil. A station with one checks the gun's ordinary readiness, the supplied player's enabling flag and manual target validity, then assigns the target and returns its own object wrapper. The read Lua station branch does not check the HUD's separate 120-second player cooldown. That distinction must not be lost by assuming every stock entry uses HUD admission. | **Sourced**, debug build WSW-E15/17/18 |
+| WSW-41 | TaskForce `Fire_Special_Weapon(type_name, target)` resolves a space special-weapon type, checks player enablement/category and searches attached members for that original type with full readiness. Unavailable/disabled/category mismatch returns false; successful activation and fire returns the weapon object wrapper. Missing type or malformed arguments are script errors. This is a distinct binding from the station object call and is needed by both planetary AI plans. | **Sourced**, debug build WSW-E16 |
+| WSW-42 | At the audited remake revision the station object binding still answers nil under FH-27, nonstation calls fall through to the missing API and no TaskForce special-fire method is registered. Planetary source creation, enabling purchase effects, consume-on-fire, the special HUD and these Lua consumers are missing. Existing manual targeting, partitioned gun/turret service, player clocks, snapshots and replay command hooks already implement MC-01–08; reuse them. Their current command gate enforces the player cooldown for every issuer, so it is not yet the stock Lua admission of WSW-40. | **Sourced**, current `tactical_ai_bindings.cpp`, `plan_bindings.cpp`, `session_step_commands.cpp`, `combat_aim.cpp`, `combat_fire.cpp`; [manual cannon](../manual-cannon.md) |
+
+### Remaining evidence and tag boundaries
+
+| ID | Boundary | Required evidence / status |
+|---|---|---|
+| WSW-43 | Retail shots, button/targeting cancellation gestures, hidden target picking, enemy presentation and Underworld repeated fire must be observed before claiming full visual/timing fidelity. Also record rejected/dead targets between click and admission, purchase during recharge, target death during a burst, hardpoint loss and station level replacement. | **Unverified**; coordinator-queued retail/debug captures, one faction per controlled battle plus an enemy view |
+| WSW-44 | Multiple players sharing stations, manual HUD-versus-Lua cooldown admission, modifier stacking/required-hardpoint changes and source-marker ordering across several candidates need covering tests or additional evidence for those cases. The unauthored turret-extent defaults are resolved by WSW-45. A fixed one-station/two-player fixture does not establish these cases. | **Unverified** beyond the explicitly sourced gates above; targeted debug traces and installed-game cases |
+| WSW-45 | The object-type defaults for unauthored `Turret_Rotate_Extent_Degrees` and `Turret_Elevate_Extent_Degrees` are 360 and 180 degrees. These apply to the active planetary source object firing path; they do not add a range or cone check to the special target validator. | **Sourced**: debug build, type construction and WSW-14/21 |
+| WSW-46 | A battlefield unlock applies a true enable modifier identified by the ability and its owning object; removing or terminating that effect removes modifiers from the same source. `Apply_To_All_Allies` selects allied players when true, otherwise the owner alone. An effect accepts a null target or its own object. The required-hardpoint gate in WSW-07 remains independent of the enable list. | **Sourced**: debug build, effect application, removal, termination and target-player selection |
+| WSW-47 | AI proposals can include existing free-store objects whose original type resolves to a space special weapon when the plan permits special weapons. The proposal pool requires full source readiness and battlefield enablement. Attachment uses that live object identity; the type is not a new purchased combat ship. Plans that disallow special weapons (HA-01) give that type no instantiation weight as an extra, team-less attachment; a team that lists the type admits it either way. `Collect_All_Free_Units` checks category, duplicate membership, movement lock and reservation; it does not consult purchase enablement or `DenySpecialWeaponAttach`. | **Sourced**: debug build, free-store proposal initialization, proposal enumeration, instantiation admission and collection callbacks |
+| WSW-48 | The required-hardpoint permission defaults to true. A hardpoint with `Allows_Special_Weapon_Use` writes its enabled state to every allied player on lifecycle notification; the latest notification wins, independently of other stations. Station replacement writes the transferred disabled state, and completing repair restores permission. This gate restricts new dispatch and ready notification; an active planetary burst continues. | **Sourced**: debug build WSW-E23/24, default flag, hardpoint lifecycle and transferred state |
+
+Runtime inputs for this section are the faction standalone mappings, source behavior and map transform,
+`Special_Weapon_Index`, `Special_Weapon_Target_Action_Index`, `Special_Weapon_Valid_Targets`,
+`Is_Special_Weapon_In_Space`, production costs/time/limits/queue and the superweapon-policy flag,
+`DUMMY_DESTROY_AFTER_SPECIAL_WEAPON_FIRED`, battlefield modifier activation/enable/allies/stacking,
+projectile type/pulse/delay/recharge, the manual hardpoint inputs in WAD-39/40,
+ordinary projectile damage/energy/shield/ion/random-hardpoint/area inputs, and presentation inputs
+for icons, positional fire, indexed HUD speech, model/particles and fog hiding.
+Parsing any of these without its runtime consumer does not make its registry row applied.
+
+The active ground structures' land model, construction, required-land structures, sabotage,
+healing and land reveal/damage-alternate fields remain land/campaign interfaces; they do not
+authorize a rendered ground building in standalone space. Their auto-resolve fields belong
+to campaign resolution. Index-2 magnepulse, tactical planet destruction and Death Star/land
+power-up stages remain outside this space-skirmish section. `Energy_Beam_*` applies to a
+separate beam family; none of these three selected projectile definitions uses that family.
+The obsolete commented `Space_Mode_Ground_*` records supply no runtime input.
+
+Implementation follows the project's partitioned immutable-input/staged-output phases and
+ordered commits. Purchase/consumption and command entry must preserve deterministic player,
+source, target and pulse identities across worker counts. These are remake policies,
+not claims about the original game's scheduling.

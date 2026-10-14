@@ -190,13 +190,25 @@ void rc_mod_tolerance_contracts() {
     const auto& script = parsed.value();
     std::vector<std::string> kept;
     for (const auto& dialog : script.dialogs) kept.push_back(dialog.name);
-    expect(kept == std::vector<std::string>{"IDD_GOOD_FIRST", "IDD_GOOD_SECOND", "IDD_NO_ID", "IDD_GOOD_LAST"},
+    expect(kept == std::vector<std::string>{"IDD_GOOD_FIRST", "IDD_EMPTY_FIELD", "IDD_GOOD_SECOND", "IDD_NO_ID", "IDD_GOOD_LAST"},
            "every readable dialog around the malformed ones is kept");
     expect(script.find("IDD_GOOD_SECOND") != nullptr && script.find("IDD_GOOD_SECOND")->controls.size() == 2U &&
                script.find("IDD_GOOD_LAST") != nullptr && script.find("IDD_GOOD_LAST")->controls.size() == 1U,
            "dialogs after a rejected one keep their controls");
     expect(script.skipped.size() == 1U && script.skipped[0].type == "DESIGNINFO",
            "resources after the last malformed dialog are still read");
+    const auto* recovered = script.find("IDD_EMPTY_FIELD");
+    expect(recovered != nullptr && recovered->controls.size() == 2U &&
+        recovered->controls[0].rect == ui::RcRect{265, 550, 215, 22},
+        "repeated comma leaves the next numeric token as the height and retains later controls");
+    const auto repeated = ui::parse_dialog_script(
+        "IDD_RELOCATED DIALOGEX 0,,0,1600,,,600\nBEGIN\n"
+        "PUSHBUTTON \"Caption, with comma\",IDC_MOVED,700,,420,200,,,24\nEND\n", source("repeated.rc"));
+    expect(repeated && repeated.value().rejected.empty() && repeated.value().dialogs.size() == 1U &&
+        repeated.value().dialogs[0].rect == ui::RcRect{0, 0, 1600, 600} &&
+        repeated.value().dialogs[0].controls[0].rect == ui::RcRect{700, 420, 200, 24} &&
+        repeated.value().dialogs[0].controls[0].text == "Caption, with comma",
+        "repeated separators recover dialog/control geometry while quoted commas stay literal");
 
     struct Expected final {
         std::string_view dialog;
@@ -205,7 +217,6 @@ void rc_mod_tolerance_contracts() {
         std::string_view reason;
     };
     constexpr std::array rejected{
-        Expected{"IDD_EMPTY_FIELD", 7U, 9U, "after ',', found ','"},
         Expected{"IDD_MISSING_COMMA", 12U, 14U, "CONTROL has 2 fields"},
         Expected{"IDD_DANGLING_STYLE", 17U, 19U, "after '|', found 'CAPTION'"},
         Expected{"IDD_STYLE_INTO_BEGIN", 29U, 31U, "after '|', found 'BEGIN'"},
@@ -258,7 +269,7 @@ void rc_mod_tolerance_contracts() {
     expect(static_cast<bool>(catalog), "a catalogue with rejected dialogs loads");
     if (!catalog) return;
     const auto& value = catalog.value();
-    expect(value.script.dialogs.size() == 4U && value.script.rejected.size() == rejected.size(),
+    expect(value.script.dialogs.size() == 5U && value.script.rejected.size() == rejected.size(),
            "the loaded catalogue keeps the readable dialogs");
     const auto* no_id = value.script.find("IDD_NO_ID");
     expect(no_id != nullptr && !no_id->id &&

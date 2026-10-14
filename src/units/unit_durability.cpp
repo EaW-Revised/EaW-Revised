@@ -2,7 +2,7 @@
 #include "eawr/units/unit_tables.hpp"
 
 #include <algorithm>
-#include <cctype>
+#include "eawr/core/ascii.hpp"
 #include <string>
 #include <utility>
 
@@ -50,7 +50,7 @@ namespace tactical = sim::tactical;
     std::string result;
     result.reserve(text.size());
     for (const auto character : text) {
-        result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
+        result.push_back(static_cast<char>(core::ascii_lower(static_cast<unsigned char>(character))));
     }
     // Tags are trimmed by the scan; a list value may still carry spaces.
     const auto first = result.find_first_not_of(" \t\r\n");
@@ -74,7 +74,7 @@ namespace tactical = sim::tactical;
         token.clear();
     };
     for (const auto character : text) {
-        if (character == ',' || std::isspace(static_cast<unsigned char>(character))) {
+        if (character == ',' || core::ascii_space(static_cast<unsigned char>(character))) {
             flush();
         } else {
             token.push_back(character);
@@ -168,6 +168,7 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
     damage.asteroid_rate = scalar("Asteroid_Field_Damage_Rate").value_or(Fixed{});
     damage.ion_storm_disable_seconds = scalar("Ion_Storm_Shield_Disable_Time").value_or(Fixed{});
     damage.asteroid_damage_type = types.damage("");
+    damage.default_damage_type = types.damage("");
     // DG-13, EN-02: trunc(interval x fps + 0.5) frames, the retail service interval.
     const auto service_frames = [](const Fixed seconds, const std::string& tag) -> core::Result<std::uint32_t> {
         auto frames = sim::math::multiply(seconds, Fixed::from_raw(tactical::logical_frames_per_second * Fixed::scale));
@@ -219,6 +220,7 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
         }
         // EN-01: only a POWERED type has an energy pool; it starts full.
         profile.ion_stun_effect = unit.ion_stun_effect; // IS-02
+        profile.damage_tracking = unit.damage_tracking; // WCC-82
         if (unit.powered) {
             profile.powered = true;
             profile.max_energy = unit.energy_capacity.value_or(Fixed{});
@@ -240,6 +242,9 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
             }
             entry.repair_amount_per_frame = hardpoint.repair_amount_per_frame.value_or(Fixed{});
             entry.repair_cost_per_frame = hardpoint.repair_cost_per_frame.value_or(Fixed{});
+            entry.allows_special_weapon_use = hardpoint.allows_special_weapon_use;
+            if (hardpoint.type == HardpointType::enable_special_ability)
+                entry.special_ability_name = hardpoint.special_ability_name;
             profile.hardpoints.push_back(entry);
         }
         table.profiles.push_back(std::move(profile));

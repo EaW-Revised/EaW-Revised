@@ -104,6 +104,20 @@ core::Result<TacticalReplay> parse_replay(
     std::uint64_t command_count{};
     TacticalReplay replay;
     std::vector<EntityId> disabled_garrisons;
+    std::vector<UnitState> carriers;
+    const auto node = [&](auto&& self, Reader& body, std::size_t& nodes, CarriedObject& object, const std::size_t depth) -> bool {
+        std::uint32_t flags{}, members{};
+        if (depth > 32 || ++nodes > max_units || !body.read_u64(object.entity_id)
+            || !body.read_u64(object.type_id) || !body.read_u64(object.parent)
+            || !body.read_u32(flags) || (flags & ~7U) != 0 || !body.read_u32(members)
+            || members > body.remaining() / 32U) return false;
+        object.named_hero = (flags & 1U) != 0;
+        object.generic_hero = (flags & 2U) != 0;
+        object.combat_preserved = (flags & 4U) != 0;
+        object.members.resize(members);
+        for (auto& member : object.members) if (!self(self, body, nodes, member, depth + 1)) return false;
+        return true;
+    };
     if (!reader.read_bytes(magic) || !reader.read_u16(format) || !reader.read_u16(header_size)
         || !reader.read_u32(rules) || !reader.read_u32(decoded_math) || !reader.read_u32(decoded_bits)
         || !reader.read_u32(numerator) || !reader.read_u32(denominator)
@@ -156,6 +170,181 @@ core::Result<TacticalReplay> parse_replay(
                 return fail<Parsed>(diagnostic_codes::malformed, "replay header extension tags must increase", logical_path);
             }
             previous_tag = tag;
+            if (tag == replay_extension_cinematic_seats) {
+                Reader body(bytes.subspan(reader.offset(), length));
+                std::uint32_t version{}, seats{};
+                if (!body.read_u32(version) || version != 1 || !body.read_u32(seats)
+                    || seats == 0 || seats > max_players || length != 8U + 8U * seats)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid cinematic seat extension", logical_path);
+                for (std::uint32_t seat = 0; seat < seats; ++seat) {
+                    CinematicSeat row; std::uint32_t enabled{};
+                    if (!body.read_u32(row.player) || !body.read_u32(enabled) || enabled > 1)
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid cinematic seat setting", logical_path);
+                    row.cinematics_enabled = enabled != 0;
+                    replay.setup.cinematic_seats.push_back(row);
+                }
+                std::vector<std::uint8_t> consumed(length);
+                static_cast<void>(reader.read_bytes(consumed));
+                continue;
+            }
+            if (tag == replay_extension_match_identity) {
+                Reader body(bytes.subspan(reader.offset(), length));
+                constexpr std::string_view domain = "eawr-match-identity";
+                std::vector<std::uint8_t> prefix(domain.size());
+                sim::MatchIdentity identity;
+                if (!body.read_bytes(prefix) || !std::equal(prefix.begin(), prefix.end(), domain.begin())
+                    || !body.read_u32(identity.version))
+                    return fail<Parsed>(sim::match_identity_invalid_code, "invalid MTID header", logical_path);
+                std::uint32_t count_domains{};
+                if (!body.read_u32(count_domains) || count_domains == 0 || count_domains > 64)
+                    return fail<Parsed>(sim::match_identity_invalid_code, "invalid MTID domain count", logical_path);
+                for (std::uint32_t domain_index = 0; domain_index < count_domains; ++domain_index) {
+                    sim::IdentityDomain item;
+                    std::uint32_t size{};
+                    if (!body.read_u32(size) || size == 0 || size > 128 || size > body.remaining())
+                        return fail<Parsed>(sim::match_identity_invalid_code, "invalid MTID component length", logical_path);
+                    item.name.resize(size);
+                    if (!body.read_bytes(std::span(reinterpret_cast<std::uint8_t*>(item.name.data()), item.name.size()))
+                        || !body.read_u32(item.version) || !body.read_bytes(item.digest))
+                        return fail<Parsed>(sim::match_identity_invalid_code, "truncated MTID component", logical_path);
+                    identity.domains.push_back(std::move(item));
+                }
+                if (!body.read_bytes(identity.sha256) || body.remaining() != 0)
+                    return fail<Parsed>(sim::match_identity_invalid_code, "invalid MTID digest length", logical_path);
+                if (auto valid = sim::validate_match_identity(identity); !valid)
+                    return core::Result<Parsed>::failure(valid.error());
+                replay.setup.match_identity = std::move(identity);
+                std::vector<std::uint8_t> consumed(length);
+                static_cast<void>(reader.read_bytes(consumed));
+                continue;
+            }
+            if (tag == replay_extension_carriers) {
+                Reader body(bytes.subspan(reader.offset(), length));
+                std::uint32_t version{}, count_carriers{};
+                if (!body.read_u32(version) || version != 1 || !body.read_u32(count_carriers)
+                    || count_carriers == 0 || count_carriers > body.remaining() / 20U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid carrier header", logical_path);
+                std::size_t nodes{};
+                EntityId previous{};
+                for (std::uint32_t row = 0; row < count_carriers; ++row) {
+                    UnitState carrier; std::uint32_t roots{};
+                    if (!body.read_u64(carrier.entity_id) || carrier.entity_id <= previous
+                        || !body.read_u64(carrier.purchase_type) || !body.read_u32(roots)
+                        || roots > body.remaining() / 32U || (roots == 0 && carrier.purchase_type == 0))
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid carrier row", logical_path);
+                    previous = carrier.entity_id;
+                    carrier.contained.resize(roots);
+                    for (auto& object : carrier.contained) if (!node(node, body, nodes, object, 1))
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid carried tree", logical_path);
+                    carriers.push_back(std::move(carrier));
+                }
+                if (body.remaining() != 0)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid carrier body length", logical_path);
+                std::vector<std::uint8_t> consumed(length);
+                static_cast<void>(reader.read_bytes(consumed));
+                continue;
+            }
+            if (tag == replay_extension_campaign) {
+                Reader body(bytes.subspan(reader.offset(), length));
+                CampaignBattleSetup binding;
+                std::uint32_t version{}, count_players{}, count_reserves{}, count_upgrades{};
+                std::int64_t price_multiplier{};
+                if (!body.read_u32(version) || (version != 3 && version != 4) || !body.read_i64(price_multiplier) || !body.read_u32(count_players)
+                    || count_players == 0 || count_players > max_players)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign setup header", logical_path);
+                binding.corruption_price_multiplier = math::Fixed::from_raw(price_multiplier);
+                for (std::uint32_t row = 0; row < count_players; ++row) {
+                    EconomyPlayer p;
+                    std::uint32_t flags{};
+                    std::int64_t credits{}, yaw{}, multiplier{}, cap{}, strategic{};
+                    if (!body.read_u32(p.player) || !body.read_i64(credits) || !body.read_u32(p.population_cap)
+                        || !body.read_u32(flags) || flags > 3 || !body.read_i64(yaw)
+                        || !body.read_u32(p.start_tech) || !body.read_u32(p.max_tech)
+                        || !body.read_i64(multiplier) || !body.read_i64(cap) || !body.read_i64(strategic)
+                        || ((flags & 2U) == 0 && strategic != 0))
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign account", logical_path);
+                    p.credits = math::Fixed::from_raw(credits);
+                    p.ai = (flags & 1U) != 0;
+                    p.reinforcement_yaw = math::Fixed::from_raw(yaw);
+                    p.credit_multiplier = math::Fixed::from_raw(multiplier);
+                    p.credit_cap = math::Fixed::from_raw(cap);
+                    if ((flags & 2U) != 0) p.strategic_credits = math::Fixed::from_raw(strategic);
+                    binding.players.push_back(p);
+                }
+                if (!body.read_u32(count_reserves) || count_reserves > body.remaining() / 36U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign reserve count", logical_path);
+                std::size_t reserve_nodes{};
+                for (std::uint32_t row = 0; row < count_reserves; ++row) {
+                    CampaignReserve r; std::uint32_t restricted{}, roots{};
+                    if (!body.read_u64(r.id) || !body.read_u64(r.type) || !body.read_u32(r.owner)
+                        || !body.read_u32(restricted) || restricted > 1 || !body.read_u64(r.purchase_type)
+                        || !body.read_u32(roots) || roots > body.remaining() / 32U)
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign reserve", logical_path);
+                    r.restricted = restricted != 0;
+                    r.contained.resize(roots);
+                    for (auto& object : r.contained) if (!node(node, body, reserve_nodes, object, 1))
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid reserve attachment tree", logical_path);
+                    binding.reserves.push_back(r);
+                }
+                if (!body.read_u32(count_upgrades) || count_upgrades > body.remaining() / 20U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign upgrade count", logical_path);
+                for (std::uint32_t row = 0; row < count_upgrades; ++row) {
+                    CampaignUpgrade u;
+                    if (!body.read_u64(u.type) || !body.read_u64(u.holder) || !body.read_u32(u.owner))
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign upgrade", logical_path);
+                    binding.upgrades.push_back(u);
+                }
+                std::uint32_t registered{};
+                if (!body.read_u32(registered) || registered > body.remaining() / 8U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid registered population count", logical_path);
+                binding.population_registered.resize(registered);
+                for (auto& id : binding.population_registered) if (!body.read_u64(id))
+                    return fail<Parsed>(diagnostic_codes::malformed, "truncated registered population", logical_path);
+                std::uint32_t leaders{};
+                if (!body.read_u32(leaders) || leaders > body.remaining() / 8U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign leader count", logical_path);
+                binding.victory_leaders.resize(leaders);
+                for (auto& id : binding.victory_leaders) if (!body.read_u64(id))
+                    return fail<Parsed>(diagnostic_codes::malformed, "truncated campaign leader", logical_path);
+                if (!body.read_u64(binding.victory_station))
+                    return fail<Parsed>(diagnostic_codes::malformed, "truncated campaign station condition", logical_path);
+                if (version == 4) {
+                    std::uint32_t count_ordered_reserves{};
+                    if (!body.read_u32(count_ordered_reserves) || count_ordered_reserves == 0
+                        || count_ordered_reserves != count_reserves || count_ordered_reserves > body.remaining() / 8U)
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign reserve order count", logical_path);
+                    binding.reserve_order.resize(count_ordered_reserves);
+                    for (auto& id : binding.reserve_order) if (!body.read_u64(id))
+                        return fail<Parsed>(diagnostic_codes::malformed, "truncated campaign reserve order", logical_path);
+                }
+                if (body.remaining() != 0)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign setup length", logical_path);
+                std::vector<std::uint8_t> consumed(length);
+                static_cast<void>(reader.read_bytes(consumed));
+                replay.setup.campaign = std::move(binding);
+                continue;
+            }
+            if (tag == replay_extension_first_free_id) {
+                EntityId first{};
+                if (length != 8 || !reader.read_u64(first) || first == invalid_entity_id) {
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid shared allocator extension", logical_path);
+                }
+                replay.setup.first_free_entity_id = first;
+                continue;
+            }
+            if (tag == replay_extension_multiplayer_departure) {
+                std::uint32_t version{}, humans{};
+                if (length < 8 || !reader.read_u32(version) || !reader.read_u32(humans)
+                    || version != 1 || humans > max_players || length != 8U + 4U * humans)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid multiplayer departure extension", logical_path);
+                replay.setup.departure_policy.emplace();
+                for (std::uint32_t human = 0; human < humans; ++human) {
+                    PlayerId id{};
+                    if (!reader.read_u32(id)) return fail<Parsed>(diagnostic_codes::malformed, "truncated departure roster", logical_path);
+                    replay.setup.departure_policy->humans.push_back(id);
+                }
+                continue;
+            }
             if (tag == replay_extension_free_garrison) {
                 const auto end = reader.offset() + length;
                 std::uint32_t version{}, players{};
@@ -222,6 +411,66 @@ core::Result<TacticalReplay> parse_replay(
                 replay.setup.skirmish = std::move(metadata);
                 continue;
             }
+            if (tag == replay_extension_beacon_rules) {
+                std::uint32_t version{}, rows{};
+                if (!reader.read_u32(version) || !reader.read_u32(rows) || version != 1
+                    || rows == 0 || rows > max_players || length != 8U + 16U * rows)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid beacon rules extension", logical_path);
+                replay.setup.beacon_rules.reserve(rows);
+                for (std::uint32_t row = 0; row < rows; ++row) {
+                    TacticalSetup::BeaconRule rule;
+                    if (!reader.read_u32(rule.player) || !reader.read_u32(rule.lifetime_frames) || !reader.read_u64(rule.type))
+                        return fail<Parsed>(diagnostic_codes::malformed, "truncated beacon rules row", logical_path);
+                    replay.setup.beacon_rules.push_back(rule);
+                }
+                continue;
+            }
+            if (tag == replay_extension_attract_pool) {
+                std::uint32_t version{}, rows{};
+                if (replay.setup.attract_pool || !reader.read_u32(version) || !reader.read_u32(rows) || version != 1
+                    || length != 8U + 8U * static_cast<std::uint64_t>(rows) || rows > max_units)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid or duplicate ATRC extension", logical_path);
+                AttractPoolReturn pool;
+                pool.types.reserve(rows);
+                for (std::uint32_t row = 0; row < rows; ++row) {
+                    TypeId type{};
+                    if (!reader.read_u64(type) || type == 0 || (!pool.types.empty() && type <= pool.types.back()))
+                        return fail<Parsed>(diagnostic_codes::malformed,
+                            "ATRC types must be nonzero and strictly increasing", logical_path);
+                    pool.types.push_back(type);
+                }
+                replay.setup.attract_pool = std::move(pool);
+                continue;
+            }
+            if (tag == replay_extension_native_scene) {
+                std::vector<std::uint8_t> encoded(length);
+                if (replay.setup.native_scene || !reader.read_bytes(encoded))
+                    return fail<Parsed>(diagnostic_codes::malformed, "duplicate or truncated native scene", logical_path);
+                Reader body(encoded);
+                ReplayNativeScene scene;
+                std::uint32_t version{}, flags{};
+                if (!body.read_u32(version) || version != 1 || !body.read_u32(flags) || (flags & ~1U) != 0)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid native scene version or flags", logical_path);
+                scene.multiplayer = flags != 0;
+                for (auto* names : {&scene.source_types, &scene.source_obstacles, &scene.battle_types}) {
+                    std::uint32_t name_count{};
+                    if (!body.read_u32(name_count) || name_count > body.remaining() / 3U)
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid native scene count", logical_path);
+                    for (std::uint32_t row = 0; row < name_count; ++row) {
+                        std::uint16_t size{};
+                        if (!body.read_u16(size) || size == 0 || size > body.remaining())
+                            return fail<Parsed>(diagnostic_codes::malformed, "invalid native scene type length", logical_path);
+                        std::string name(size, '\0');
+                        if (!body.read_bytes(std::span(reinterpret_cast<std::uint8_t*>(name.data()), name.size())))
+                            return fail<Parsed>(diagnostic_codes::malformed, "truncated native scene type", logical_path);
+                        names->push_back(std::move(name));
+                    }
+                }
+                if (body.remaining() != 0)
+                    return fail<Parsed>(diagnostic_codes::malformed, "trailing native scene bytes", logical_path);
+                replay.setup.native_scene = std::move(scene);
+                continue;
+            }
             if (tag != replay_extension_match_policy) {
                 return fail<Parsed>(diagnostic_codes::version,
                     "unknown replay header extension tag " + std::to_string(tag), logical_path);
@@ -240,7 +489,11 @@ core::Result<TacticalReplay> parse_replay(
         }
         if (reader.offset() != header_size
             || (!replay.setup.match_policy && !replay.setup.skirmish && !replay.setup.queue_identities
-                && disabled_garrisons.empty() && replay.setup.free_garrisons.empty())) {
+                && disabled_garrisons.empty() && replay.setup.free_garrisons.empty()
+                && !replay.setup.first_free_entity_id && !replay.setup.campaign && carriers.empty()
+                && replay.setup.cinematic_seats.empty() && !replay.setup.match_identity
+                && !replay.setup.departure_policy && replay.setup.beacon_rules.empty()
+                && !replay.setup.attract_pool && !replay.setup.native_scene)) {
             return fail<Parsed>(diagnostic_codes::malformed, "invalid replay header extension length", logical_path);
         }
     }
@@ -300,6 +553,14 @@ core::Result<TacticalReplay> parse_replay(
         replay.setup.units.push_back(unit);
     }
     auto disabled = disabled_garrisons.begin();
+    for (auto& carrier : carriers) {
+        const auto unit = std::find_if(replay.setup.units.begin(), replay.setup.units.end(),
+            [&](const auto& value) { return value.entity_id == carrier.entity_id; });
+        if (unit == replay.setup.units.end())
+            return fail<Parsed>(diagnostic_codes::malformed, "carrier references an absent initial entity", logical_path);
+        unit->purchase_type = carrier.purchase_type;
+        unit->contained = std::move(carrier.contained);
+    }
     for (auto& unit : replay.setup.units) {
         if (disabled != disabled_garrisons.end() && unit.entity_id == *disabled) {
             unit.garrison_enabled = false;
@@ -385,7 +646,12 @@ core::Result<TacticalReplay> parse_replay(
                     + " is shorter than its fixed payload" + at,
                 logical_path);
         }
-        if (opcode == detail::opcode_reveal_all) {
+        if (opcode == detail::opcode_beacon) {
+            BeaconPayload beacon;
+            if (!read_vec3(reader, beacon.position))
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated beacon position" + at, logical_path);
+            command.payload = beacon;
+        } else if (opcode == detail::opcode_reveal_all) {
             RevealAllPayload reveal;
             std::uint32_t reveal_reserved{};
             if (!reader.read_u32(reveal.player) || !reader.read_u32(reveal_reserved) || reveal_reserved != 0) {
@@ -488,6 +754,29 @@ core::Result<TacticalReplay> parse_replay(
                 return fail<Parsed>(diagnostic_codes::version, "nonzero reserved ability field" + at, logical_path);
             }
             command.payload = payload;
+        } else if (opcode == detail::opcode_retreat_cinematic) {
+            std::uint32_t playing{}, frame{};
+            if (!reader.read_u32(playing) || !reader.read_u32(frame) || playing > 1)
+                return fail<Parsed>(diagnostic_codes::malformed, "invalid retreat cinematic payload" + at, logical_path);
+            command.payload = RetreatCinematicPayload{playing != 0, frame};
+        } else if (opcode == detail::opcode_retreat) {
+            std::uint32_t action{}, reserved_retreat{};
+            if (!reader.read_u32(action) || !reader.read_u32(reserved_retreat) || reserved_retreat
+                || action < 1 || action > 3)
+                return fail<Parsed>(diagnostic_codes::malformed, "invalid retreat payload" + at, logical_path);
+            command.payload = RetreatPayload{static_cast<RetreatAction>(action)};
+        } else if (opcode == detail::opcode_special_fire) {
+            SpecialFirePayload special;
+            std::uint32_t admission{}, reserved_special{};
+            if (!reader.read_u64(special.target) || !reader.read_u32(admission)
+                || !reader.read_u32(reserved_special)) {
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated special fire payload" + at, logical_path);
+            }
+            if (reserved_special != 0 || admission > static_cast<std::uint32_t>(SpecialFireAdmission::ai_taskforce)) {
+                return fail<Parsed>(diagnostic_codes::version, "unsupported special fire field" + at, logical_path);
+            }
+            special.admission = static_cast<SpecialFireAdmission>(admission);
+            command.payload = special;
         } else if (opcode == detail::opcode_manual_target) {
             ManualTargetPayload manual;
             std::uint32_t reserved_manual{};
@@ -523,6 +812,10 @@ core::Result<TacticalReplay> parse_replay(
                 return fail<Parsed>(diagnostic_codes::malformed, "truncated buy payload" + at, logical_path);
             }
             command.payload = buy;
+        } else if (opcode == detail::opcode_campaign_credit_release) {
+            std::int64_t request{};
+            if (!reader.read_i64(request)) return fail<Parsed>(diagnostic_codes::malformed, "truncated campaign release" + at, logical_path);
+            command.payload = CampaignCreditReleasePayload{math::Fixed::from_raw(request)};
         } else if (opcode == detail::opcode_credit_grant) {
             std::int64_t amount{};
             if (!reader.read_i64(amount)) return fail<Parsed>(diagnostic_codes::malformed, "truncated credit grant" + at, logical_path);
@@ -599,7 +892,9 @@ core::Result<TacticalReplay> parse_replay(
         const std::size_t target_bytes = aimed != nullptr ? (aimed->position ? 24U : aimed->target != invalid_entity_id ? 8U : 0U) : 0U;
         const auto expected = detail::command_common_size + prefix + target_bytes + detail::unit_list_header_size
             + 8U * static_cast<std::size_t>(listed);
-        if (body_size != expected) {
+        const bool append_tail = (opcode == 2 || opcode == detail::opcode_hazard_move)
+            && body_size == expected + 8U;
+        if (body_size != expected && !append_tail) {
             return fail<Parsed>(diagnostic_codes::malformed,
                 "opcode " + std::to_string(opcode) + " with " + std::to_string(listed)
                     + " units requires body length " + std::to_string(expected) + ", found "
@@ -611,6 +906,16 @@ core::Result<TacticalReplay> parse_replay(
             if (!reader.read_u64(unit)) {
                 return fail<Parsed>(diagnostic_codes::malformed, "truncated unit list" + at, logical_path);
             }
+        }
+        if (append_tail) {
+            std::uint32_t version{}, append_flags{};
+            if (!reader.read_u32(version) || !reader.read_u32(append_flags)) {
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated waypoint tail" + at, logical_path);
+            }
+            if (version != 1 || append_flags != 1) {
+                return fail<Parsed>(diagnostic_codes::malformed, "unsupported waypoint tail" + at, logical_path);
+            }
+            std::get<MovePayload>(command.payload).append = true;
         }
         replay.commands.push_back(std::move(command));
     }

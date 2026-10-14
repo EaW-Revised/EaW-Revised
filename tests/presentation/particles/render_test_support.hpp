@@ -4,6 +4,7 @@
 #include "eawr/presentation/particles/attachment_lifecycle.hpp"
 #include "eawr/presentation/particles/particles.hpp"
 #include "eawr/presentation/particles/render.hpp"
+#include "eawr/presentation/particles/worker_count.hpp"
 #include "eawr/presentation/particles/proxy_binding.hpp"
 
 #include <algorithm>
@@ -174,12 +175,23 @@ public:
         if (std::this_thread::get_id() != caller_) { ++wrong_thread; return 0; }
         if (refuse_emitter && plan.emitter_index == *refuse_emitter) return 0;
         const std::uint64_t id = next_++;
+        prepared[id] = {};
         live[id] = plan.emitter_index; ++created; return id;
+    }
+    void prepare_emitter(const std::uint64_t resource, const particles::VertexStream& stream) override {
+        // Slots are created before dispatch; concurrent tasks only write disjoint slots.
+        auto& slot = prepared.at(resource);
+        slot.hash = particles::stream_hash(stream);
+        slot.ready = true;
     }
     void update_emitter(const std::uint64_t resource, const particles::VertexStream& stream) override {
         if (std::this_thread::get_id() != caller_) { ++wrong_thread; return; }
         if (!live.contains(resource)) { ++invalid_updates; return; }
         expect(finite_stream(stream), "backend uploads only finite vertices and bounds");
+        auto& slot = prepared.at(resource);
+        expect(slot.ready && slot.hash == particles::stream_hash(stream),
+            "worker preparation matches the stream committed on the caller thread");
+        slot.ready = false;
         record.push_back(particles::stream_hash(stream));
         last[resource]=stream;
         vertices += stream.vertices.size();
@@ -187,7 +199,10 @@ public:
     void destroy_emitter(const std::uint64_t resource) override {
         if (std::this_thread::get_id() != caller_) { ++wrong_thread; return; }
         if (live.erase(resource) == 0) ++invalid_destroys; else ++destroyed;
+        prepared.erase(resource);
     }
+    struct Prepared final { std::uint64_t hash{}; bool ready{}; };
+    std::map<std::uint64_t, Prepared> prepared;
     std::map<std::uint64_t, std::size_t> live;
     std::map<std::uint64_t, particles::VertexStream> last;
     std::vector<std::uint64_t> record;
@@ -237,6 +252,7 @@ void test_parent_link_rejection();
 void test_plan_policy();
 void test_quad_geometry();
 void test_finite_rotation_boundary();
+void test_billboard_radian_rotation();
 void test_stream_validation();
 void test_fixed_seed_streams();
 void test_particle_detail_gates();
@@ -269,6 +285,7 @@ void test_attachment_draining_bound();
 void test_attachment_determinism();
 void test_attachment_merge_stats();
 void test_heat_pixel_change_bound();
+void test_default_worker_count_table();
 void test_batch_matches_serial();
 void test_attachment_batch_matches_serial();
 void test_attachment_batch_requires_stats();

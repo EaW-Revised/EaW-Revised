@@ -26,6 +26,9 @@ HARNESS = r"""
 #include <optional>
 #include <vector>
 namespace sim { using EntityId = std::uint64_t; }
+namespace ui { enum class TacticalVerb { repair_hardpoint }; struct TacticalIntent {
+    TacticalVerb verb{}; std::vector<sim::EntityId> units; std::uint32_t hardpoint{};
+}; }
 namespace tactical { struct StationMenu { int station; }; }
 struct Health {
     int value;
@@ -43,7 +46,8 @@ struct Index {
 struct LiveSessionView {
     Index snapshot_index_;
     int player_ = 1;
-    bool has_account = true;
+    bool has_account = true, pending = false;
+    bool command_pending(const ui::TacticalIntent&) const { return pending; }
     Type type;
     std::map<int, const Type*> presentation_types_{{10, &type}};
     struct Economy { std::vector<tactical::StationMenu> menus{{10}}; } economy_;
@@ -58,6 +62,7 @@ int main() {
     auto& slot = instance.durability->hardpoints[0];
     auto emit = [&](const char* name) { std::cout << name << '=' << view.hardpoint_repair_allowed(1, 0) << '\n'; };
     emit("own");
+    view.pending = true; emit("pending_repair"); view.pending = false;
     instance.owner = 3; emit("ally_community");
     view.type.station_community_property = false; emit("ally_private");
     view.type.station_community_property = true;
@@ -101,7 +106,7 @@ class HardpointRepairPermissionCases:
         actual = dict(line.split("=") for line in ran.stdout.splitlines())
         allowed = {"own", "ally_community", "disabled_positive", "other_payer", "missing_type_own"}
         expected = {name: "1" if name in allowed else "0" for name in (
-            "own", "ally_community", "ally_private", "enemy", "neutral", "undamaged", "destroyed",
+            "own", "pending_repair", "ally_community", "ally_private", "enemy", "neutral", "undamaged", "destroyed",
             "disabled_positive", "already_paying", "other_payer", "missing_account", "missing_type_ally",
             "missing_type_own", "not_station", "missing_entity", "invalid_slot", "missing_durability")}
         self.assertEqual(actual, expected)

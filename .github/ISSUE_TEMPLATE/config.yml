@@ -1,5 +1,11 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Suggest or vote on an idea
+    url: https://github.com/EaW-Revised/EaW-Revised/discussions/categories/ideas
+    about: New features and wishes go on the Ideas board, where everyone can upvote them.
+  - name: Ask a question
+    url: https://github.com/EaW-Revised/EaW-Revised/discussions/categories/q-a
+    about: Help with building, running or modding.
   - name: Security vulnerability
     url: https://github.com/EaW-Revised/EaW-Revised/security/advisories/new
     about: Report security problems privately, not as an issue.

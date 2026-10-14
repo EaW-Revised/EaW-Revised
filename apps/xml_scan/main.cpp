@@ -1,6 +1,9 @@
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/data/galactic/galactic_data.hpp"
+#include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"
+#include "galactic_report.hpp"
 #include "eawr/sim/replay.hpp"
 #include "eawr/vfs/vfs.hpp"
 
@@ -11,6 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -27,12 +31,15 @@ struct Arguments {
     std::filesystem::path report;
     std::optional<std::filesystem::path> input_receipt;
     std::vector<std::string> samples;
+    std::optional<std::filesystem::path> galactic_report;
+    std::optional<std::filesystem::path> galactic_trace;
     bool profile_set{false};
 };
 
 void usage(std::ostream& out) {
     out << "Usage: xml_scan --profile <eaw|foc|remake> --game-root <dir> "
-           "[--mod-root <leaf;parent;...>] --report <json> [--input-receipt <json>] [--sample <object-id>]...\n";
+           "[--mod-root <leaf;parent;...>] --report <json> [--input-receipt <json>] [--sample <object-id>]... "
+           "[--galactic-report <json>] [--galactic-trace-out <json>]\n";
 }
 
 std::optional<Arguments> arguments(const int argc, char** argv) {
@@ -53,10 +60,13 @@ std::optional<Arguments> arguments(const int argc, char** argv) {
         else if (option == "--report") result.report = value;
         else if (option == "--input-receipt") result.input_receipt = std::filesystem::path(value);
         else if (option == "--sample") result.samples.push_back(value);
+        else if (option == "--galactic-report") result.galactic_report = std::filesystem::path(value);
+        else if (option == "--galactic-trace-out") result.galactic_trace = std::filesystem::path(value);
         else return std::nullopt;
     }
     if (!result.profile_set || result.game_root.empty() || result.report.empty() ||
-        (result.profile == eawr::data::Profile::remake && !result.mod_root)) return std::nullopt;
+        (result.profile == eawr::data::Profile::remake && !result.mod_root)
+        || (result.galactic_trace && !result.galactic_report)) return std::nullopt;
     return result;
 }
 
@@ -372,6 +382,24 @@ int main(const int argc, char** argv) {
     if (args->input_receipt && !write_input_receipt(*args->input_receipt, catalog)) {
         std::cerr << "cannot create input receipt\n";
         return 2;
+    }
+    if (args->galactic_report) {
+        // The galactic conquest tables (docs/galactic-data.md); issues are rows in the report.
+        std::unique_ptr<eawr::data::tag_trace::Recording> recording;
+        if (args->galactic_trace) recording = std::make_unique<eawr::data::tag_trace::Recording>();
+        const auto galactic = eawr::data::galactic::load_galactic_data(mounted.value(), catalog);
+        if (!galactic) { std::cerr << eawr::core::format_diagnostic(galactic.error()) << '\n'; return 1; }
+        if (!args->galactic_report->parent_path().empty()) std::filesystem::create_directories(args->galactic_report->parent_path());
+        if (!xml_scan::write_galactic_report(*args->galactic_report, galactic.value())) {
+            std::cerr << "cannot create galactic report\n";
+            return 2;
+        }
+        if (recording) {
+            if (!args->galactic_trace->parent_path().empty()) std::filesystem::create_directories(args->galactic_trace->parent_path());
+            std::ofstream trace(*args->galactic_trace, std::ios::binary);
+            trace << eawr::data::tag_trace::to_json(recording->finish());
+            if (!trace) { std::cerr << "cannot create galactic tag trace\n"; return 2; }
+        }
     }
     auto diagnostics = std::move(loaded.value().diagnostics);
     std::vector<eawr::core::Diagnostic> unresolved;

@@ -74,7 +74,11 @@ Nothing here reaches the simulation.
   the largest extent of the bounds along it (`GUI_Bounds_Scale` 1, the default) or by the bounds'
   half diagonal (any other `GUI_Bounds_Scale`), times `GUI_Bounds_Scale`. The shield bar is drawn
   there and the health bar below it by the shield bar's height x `Health_Bar_Spacing` (2); without
-  a shield bar the health bar takes its place. Project policy: the bounds are the remake's pick box.
+  a shield bar the health bar takes its place. The projected point is truncated to whole screen
+  pixels before the bars are placed there (WSU-54). The health bar shows the unit's display health
+  (WSU-52): the hull percent, or for a type that dies with its destroyable hardpoints (HD-21) the
+  lesser of that and the combined destroyable-hardpoint percent. Project policy: the bounds are the
+  remake's pick box.
 
 ## Hero world identity
 
@@ -89,8 +93,12 @@ Nothing here reaches the simulation.
   There is no camera-distance admission threshold. The ordinary world UI switch
   hides the identity; the reduced-frame mode retains it. The remake applies these
   rules to visible standalone space heroes and reuses the squadron hit rectangle
-  for selection and orders. Carried hero heads and stacked flagship identities
-  remain unimplemented (legacy EAWR-1194).
+  for selection and orders. A visible carrier now publishes its hidden riders;
+  the world identity draws the first rider with an admitted authored head,
+  using the carrier's position, health, fog admission and selection target
+  (WGT-21, WHE-45/47). This minimal representation does not establish retail's
+  layout for multiple heads: stacked flagship identities and the hero tray
+  remain separate work (legacy EAWR-1194).
 
 ## Squadron icon
 
@@ -106,11 +114,12 @@ Nothing here reaches the simulation.
   and a small health bar (`st_health_bar`, Scale 0.8, 16 reference pixels below its centre).
 - WU-21. The frame is tinted by the owner's lobby colour in a skirmish
   (debug build: its multiplayer-tactical test; the owner's footage shows blue frames), by the faction's
-  `Color` otherwise. While the squadron is selected or the pointer is over the icon the frame is
+  `Color` otherwise, as in a campaign battle (WGT-120). While the squadron is selected or the pointer is over the icon the frame is
   the yellow `i_button_unit_frame_gripper_select`, untinted (project: the footage shows it bright
   yellow).
-- WU-22. The icon's bar shows the squadron's health. Project policy (unverified): the live craft's
-  hull over the hull of all of its craft, so a lost craft empties its share.
+- WU-22 (walk [WSU-32](walks/sensors-ui.md)). The icon's bar shows the squadron's health: the mean
+  display health percent (WSU-52) of the squadron's current craft. A lost craft leaves the mean; it
+  does not count as empty (debug build).
 - WU-23. Clicking the icon selects the squadron, as clicking one of its craft does.
 - WU-23a (squadron-type double-click selection; walk [WSU-38](walks/sensors-ui.md)). A left double click on an own squadron's icon
   runs the type-on-screen selection for the squadron leader's craft type (the squadron's own type
@@ -199,6 +208,39 @@ Nothing here reaches the simulation.
   ability art, so pixel comparisons retain identical active snapshot, selection and world
   background, including the pixels visible through translucent identity art.
 
+### Owner and enemy ability state (legacy EAWR-2279)
+
+Retail staging compares an owned and an enemy X-wing squadron (`SPOILER_LOCK`), Victory
+destroyer without fighters (`POWER_TO_WEAPONS`), and Nebulon-B (`DEFEND`). This distinguishes
+active world art from static ability art in a hover tooltip and from the model's effect.
+
+| Indicator while active | Owner, visible | Enemy, visible | Enemy, hidden by fog |
+|---|---|---|---|
+| S-foil world icon | Yes, above the squadron identity | None | None |
+| Power to Weapons / Defend world icon | Eligible allied bracket under WU-44 | None | None |
+| Selected unit card | Owned selection, with active card art | Enemy selection request does not create an enemy card | None |
+| Hover tooltip's authored ability art | May show | May show; does not disclose activation | None |
+| Folded S-foil model | Visible | Visible | None |
+| Defend blue model effect | Visible | Visible | None (inferred: a fog-hidden enemy object is not drawn at all, as `fog/005` shows for the X-wing; no dedicated fogged Defend still) |
+
+Owned units remain known, so an owner fogged row is not a retail state. Presentation admission
+still suppresses a hidden ally defensively. Ready, recharge, disabled and autofire without
+activation do not show active world art. Model visibility uses ordinary sight and stealth
+admission; it does not gain the allied-only gate used for world ability icons.
+
+The 2026-10-09 retail visible series confirms owned active S-foil icons (`guarded_004`,
+`guarded_009`) and the inactive control (`guarded_014`); visible enemies have folded wings
+without an icon (`guarded_005`, `guarded_006`). The fog series has an active enemy X-wing
+without a model, icon or tooltip (`stills_focus`, `guarded_005`), and an owned active icon
+(`guarded_004`). Visible owner and enemy Defend shells are also observed (visible
+`guarded_023`, fog-enabled but sighted `guarded_002`). The owner capital world-icon row
+retains WU-44's earlier debug receipts: enlarged overlapping bars in this fixture do not
+provide a fresh positive glyph observation. The tested Victory variant establishes no
+distinct additional Power to Weapons model glow. A forced Lua activation of black-market
+gated Vengeance `STEALTH` produces an owned purple model and an invisible enemy model;
+it does not establish normal button availability or a world-icon rule for that gated case.
+Enabling fog alone is not proof that an enemy is hidden: nearby owned units can provide sight.
+
 Source receipt AO-01 is the debug build's squadron-icon update; AO-02 is its bracket anchor and
 state update; AO-03 is bracket layout; AO-04 is bracket submission; AO-05 is the ability-state
 query, recharge predicate and expiration start. R983-01 resolves the squadron ability setter
@@ -266,8 +308,10 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
   defines the slot lifetime and small-fight layout; the retail rule above is
   unchanged as evidence.
 - WU-27. Project policy (unverified): the remake draws an icon's centre where FoC sets the icon's
-  drag position; FoC's grid starts at the space map's box, which the remake does not load, so its
-  grid starts at the world origin and has no edges; since the squadron dogfight pairing and chase work the sim flies the dogfights over
+  drag position; FoC's grid starts at the space map's box (walk dogfight WDF-05) and the remake lays it
+  from the same corner: the box is the map's declared extents about the origin (the box the fog grid and
+  the playable bounds span), carried into the session and read by the viewer, with the truncated row and
+  column and the clamp at the low x. The grid has no upper edges. Since the squadron dogfight pairing and chase work the sim flies the dogfights over
   these cells (space-fighters FD-01 to FD-03) and the snapshot carries each squadron's cell, so
   the viewer draws the icons from the sim's cells; the service order is ascending squadron ID (FoC services each craft
   and the order across squadrons was not traced); and the icon jumps to its slot where FoC slides
@@ -277,11 +321,33 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
 
 - WU-37 (hangar-launched craft flags). A hangar-launched squadron's icon carries a small white flag. The hangar spawner
   marks every craft it creates, and the team object that holds them, as a "garrison unit"; the
-  starting forces of a skirmish are not marked (the start marks only fleet escort objects, which
-  the M2 fixture has none of). Craft a script spawns are not known to be marked: the remake leaves
+  remake's M2 skirmish starting forces are not marked: escort-object starts are not modelled.
+  The debug build's starting-force path marks fleet escort objects, rather than every starting
+  unit. Space reinforcements create their teams with the marking gate off in both the skirmish
+  and persistent-fleet branches; purchased hyperspace arrivals therefore stay unmarked, as in
+  the remake's reinforcement path. Evidence: debug build, reinforcement team-creation gates.
+  Craft a script spawns are not known to be marked: the remake leaves
   them unmarked until that is traced. Evidence: debug build (the spawner's per-craft and per-team
   marking; the start's marking gated on the escort property); a retail still on the rig, a launched
   X-wing squadron's two icons showing the flag beside a launched enemy squadron's icon without one.
+  The mark belongs to each object and is latched when the hangar creates it; it is not a query
+  of the surviving hangar roster. Changing ownership retains it. Adding a craft to a team
+  does not copy either object's mark to the other. `REPLENISH_WINGMEN` retains an existing
+  parent's mark, but creates unmarked wingmen; without a parent it creates an unmarked team,
+  even when the retained leader is marked. Evidence: debug build, marking writes and their
+  callers, ownership-change path, team creation/join paths and both replenish branches (WU-37).
+  Losing the last original craft does not clear a surviving team's mark: loss removes the
+  registered craft, while the object mark remains independent of that registry. When the
+  team itself dies its mark leaves with it (debug build: object marking getter/setter callers,
+  space hangar birth and destruction paths). The remake retains the object and team marks
+  in canonical state block GRSN v1; copied snapshot flags stay outside snapshot canonical bytes.
+  The mark gives an available AI free-store candidate an additional weight of 2 (PL-20),
+  including at zero path cost; the remake does not yet apply this AI preference.
+  Population registration instead uses the spawned type's
+  population value and member shares without testing the mark; it is not a cap exemption.
+  Evidence: debug build, AI candidate weighting and both population-registration paths.
+  Station-upgrade replacements retain a pre-existing mark; stock M2 station starts are
+  unmarked, while a synthetic generic free-garrison station birth exercises this retention.
 - WU-38. The icon update draws the flag on a marked squadron's icon only in space mode and only
   when the object is an ally of the local player, so an enemy squadron's icon never shows it
   (debug build; the retail still shows an enemy launched squadron's icon without the flag).
@@ -302,6 +368,12 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
 - WU-30. While the pointer is over a selectable unit with hardpoints (own or enemy, not fogged),
   each of its targetable hardpoints that still stands shows a reticle; a destroyed one loses it. An
   enemy's disabled hardpoint shows none (nothing is disabled in M2).
+- WU-54 (retail enemy-icon hover overlap, 2026-10-10). An enemy squadron world icon over an
+  enemy capital's visible hull takes the hover: its frame highlights, while the capital's
+  tooltip and hardpoint reticles do not appear. Moving onto visible hull clear of the icon
+  shows the capital tooltip and reticles (WU-30). Observed with a TIE icon over a Star Destroyer,
+  entering the icon from empty space, with fog off. An owned-icon overlap remains unverified;
+  this capture does not qualify WU-41's retention by an already-visible reticle.
 - WU-31. The reticle is `HardPoint_Target_Reticle_*_Screen_Size` (0.03) of the screen wide and 4/3
   of that share of the screen high, centred on the hardpoint. Both shares are of the whole
   screen (the HUD's 0..1 screen units), so the size is fixed on the screen: it is not scaled with
@@ -311,8 +383,15 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
   64 x 64 reticle texture is stretched over the rectangle (texture coordinates 0..1); the art
   mostly leaves a transparent margin, so the visible ring is a little smaller. Every frame the
   rectangle is sized from the enemy share; the friendly share (also 0.03) only sizes a
-  friendly ship's reticles when they appear, and only that first rectangle is snapped to whole
-  pixels.
+  friendly ship's reticles when they appear (debug build). Initialization aligns both corners
+  of the rectangle for either team to the pixel grid with a half-pixel offset (debug build);
+  it does not floor the width and height separately. That initialization does not establish
+  that the first visible retail frame is snapped. Retail hover stills and a sampled appearance
+  transition video at 1280 x 720 are inconclusive on visible snapping: the filtered art's
+  transparent margins do not expose the rectangle bounds, and sampled frames do not establish
+  the first rendered frame. A flash-only reticle without hover was not observed. Project
+  policy: the remake retains fractional rectangles until a retail observation distinguishes
+  them from snapped ones; this does not assert that retail never snaps.
 - WU-32. The art is the hardpoint type's `HardPoint_Target_Reticle_*_Texture` (weapons, engines,
   shield generator, docking bay, generic); the hardpoint under the pointer shows its `_Tracked` art.
 - WU-33. The tint is the hardpoint's health: green (32, 255, 32) from 66 %, yellow (255, 255, 32)
@@ -390,7 +469,6 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
 
 - The skirmish's ring colour (WU-01) and icon frame colour (WU-21) are read from the footage: which
   of FoC's two multiplayer tests the skirmish passes was not traced.
-- The squadron icon's health (WU-22).
 - `GUI_Bounds_Scale` default 1 (WU-18) is inferred from the M2 ships, which do not set it.
 - The dogfight grid's origin, anchor, service order and jump (WU-27); its rows' direction (WU-26).
-- Whether a script-spawned craft is marked as a garrison unit, and whether a reinforcement arriving by hyperspace is (WU-37); the overlay offset's Y direction is taken from the retail still (WU-39).
+- Whether a script-spawned craft is marked as a garrison unit (WU-37); the overlay offset's Y direction is taken from the retail still (WU-39).

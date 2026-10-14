@@ -75,7 +75,7 @@ For a step starting with completed tick t:
 2. Draw one SplitMix64 value into the authoritative synthetic `tick_nonce`; this is
    deliberate RNG exercise for this harness, not gameplay randomness.
 3. Evaluate movement from the post-command, pre-movement state. Per component,
-   displacement raw is nearest-even(velocity_raw × tick_numerator / tick_denominator).
+   displacement raw is nearest-even(velocity_raw Ã— tick_numerator / tick_denominator).
    Then checked-add that displacement to position. Do not quantize the tick duration
    to Fixed before multiplying. On any arithmetic error, discard the whole step.
 4. Commit entity results in ascending stable-ID order, advance completed tick to t+1,
@@ -257,6 +257,13 @@ and ordered uint64 template IDs, a uint64 count and sorted uint64 registered liv
 timer-present flag/reserved zero, uint64 due frame (zero when absent), then uint64 pending
 count and ordered uint64 type IDs. Empty live/pending lists do not remove the configuration.
 
+Tag 6 (coordinator-reserved) is the galactic child battle's shared allocator boundary.
+The body is exactly one uint64 first-free entity ID, nonzero and greater than every
+initial unit ID. Sparse persistent IDs need no other extension. The boundary initializes
+the tactical allocator; battle-only objects allocate above it, and the campaign takes the
+resulting first-free ID on return. Records still increase by tag. Absent tag 6 preserves
+legacy versions 2/3 and their exact bytes and state hashes.
+
 ## Header: exactly 104 bytes for versions 2/3
 
 | Offset | Width | Field | Rule |
@@ -312,7 +319,7 @@ reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasin
 | 5 | Face (ship movement) | three int64 target raw values | 56 + 8n |
 | 6 | Attack-move | three int64 destination raw values, uint64 target entity ID (zero: the point) | 64 + 8n |
 | 7 | Guard | three int64 destination raw values, uint64 guarded entity ID (zero: the point) | 64 + 8n |
-| 8 | Ability (space ability handling) | uint8 ability (1 DEFEND, 2 TURBO, 3 POWER_TO_WEAPONS, 4 SPOILER_LOCK, 5 ION_CANNON_SHOT, 7 INVULNERABILITY, 8 CONCENTRATE_FIRE, 9 ENERGY_WEAPON, 10 TRACTOR_BEAM, 11 HARMONIC_BOMB, 12 WEAKEN_ENEMY), uint8 action (1 activate, 2 deactivate, 3 autofire on, 4 autofire off), uint16 extension (0 none, 1 object target, 2 world point), uint32 target hardpoint (zero except object target; 0xffffffff for hull), then uint64 target with extension 1 or three int64 Q24 position components with extension 2. Extensions are exclusive; only WEAKEN_ENEMY activation uses a point. | 40 + 8n, object 48 + 8n, point 64 + 8n |
+| 8 | Ability (space ability handling) | uint8 ability (1 DEFEND, 2 TURBO, 3 POWER_TO_WEAPONS, 4 SPOILER_LOCK, 5 ION_CANNON_SHOT, 7 INVULNERABILITY, 8 CONCENTRATE_FIRE, 9 ENERGY_WEAPON, 10 TRACTOR_BEAM, 11 HARMONIC_BOMB, 12 WEAKEN_ENEMY, 13 REPLENISH_WINGMEN, 14 HUNT, 15 MISSILE_SHIELD, 16 SENSOR_JAMMING, 17 BUZZ_DROIDS, 18 LASER_DEFENSE, 19 FULL_SALVO, 20 STEALTH, 21 SELF_DESTRUCT, 22 CORRUPT_SYSTEMS, 23 LEECH_SHIELDS, 24 LURE), uint8 action (1 activate, 2 deactivate, 3 autofire on, 4 autofire off), uint16 extension (0 none, 1 object target, 2 world point), uint32 target hardpoint (zero except object target; 0xffffffff for hull), then uint64 target with extension 1 or three int64 Q24 position components with extension 2. Extensions are exclusive; WEAKEN_ENEMY, BUZZ_DROIDS and CORRUPT_SYSTEMS activation use a point. | 40 + 8n, object 48 + 8n, point 64 + 8n |
 | 9 | Buy | uint64 type ID; the unit list is the station | 48 |
 | 10 | Cancel | uint32 queue (0 units, 1 upgrades), uint32 entry index; no unit | 40 |
 | 11 | Reinforce | uint64 type ID, three int64 point raw values; no unit | 64 |
@@ -474,7 +481,8 @@ additions to format version 2: files without them are unchanged.
 
 Temporary engine-disable projectiles set coordinator-reserved flag bit 12 in `PROJ` and append
 a uint32 disable duration in frames after the homing and ion-stun extensions, before any blast
-extension. Shots without this flag keep their prior bytes (EN-08, EN-09).
+extension. The duration value `UINT32_MAX` means no expiry for a negative authored
+duration. Shots without this flag keep their prior bytes (EN-08, EN-09).
 
 Blast projectile flags extend the `PROJ` record: bit 8 carries positive type-level blast data,
 and bit 9 requests explicit service explosion on the next step. After any homing and ion
@@ -508,6 +516,16 @@ for a nonhoming projectile, after the muzzle-delay and bit-13 damage-delay exten
 the previous zero turn rate; homing projectiles continue using their existing
 turn-rate/facing extension. The facing avoids accumulating angle error from
   reconstructing a direct projectile's orientation from a rounded step.
+Coordinator-reserved bit 16 marks a retained launch-profile key (WRB-10), for a
+reflected projectile or an unreflected ability/barrage override. After all other
+optional projectile fields it appends uint64 launch-profile type, uint32 original
+weapon slot and uint32 profile kind (0 ordinary, 1 ability override, 2 barrage
+override, 3 death). This immutable combat-table key survives changes to shooter and
+owner. An ordinary launch derives its key from the firing event and content table;
+reflection detaches it from the shooter's encoded identity, while an override
+retains the selected variant independently of later ability changes. Ordinary
+unreflected projectile records are unchanged.
+
 Coordinator-reserved bit 15 marks a rocket shield-detour attempt and appends one
 int64 Q24 remaining target-radius allowance after the bit-14 facing extension.
 It remains set when the forward ray cannot rebuild the route; such a failure
@@ -584,7 +602,7 @@ starts at completed tick t:
    changes nothing. A speed change plans the unit's path move again from this tick (AB-24).
    Before the commands, the `abilities` phase services every unit with abilities over the
    same partitions: durations that are up end, lost engines end `TURBO` and `SPOILER_LOCK`,
-   and at a multiple of 30 ticks the damage-rate window closes and the `DEFEND` stand-in runs
+   and at a multiple of 30 ticks the damage-rate window closes for every tracked unit (WCC-82) and the `DEFEND` stand-in runs
    (AB-11, AB-16, AB-41, AB-42); units whose speed changed plan again in ascending ID.
    A buy, cancel or reinforce emits one event naming the station, no
    unit, or the unit brought in (a squadron's team container); a refusal carries its reason.
@@ -659,7 +677,7 @@ SHA-256 consumes, without padding:
 | optional | With formation and avoidance rules (legacy EAWR-71): ASCII `TRAK` and four uint64 window anchors, one per dynamic tracking layer (capital, frigate, corvette, super capital): the frame the layer was last rebuilt |
 | optional | With a banked unit: ASCII `ROLL`, a uint64 count and per unit whose roll is not zero, in ascending ID, the uint64 unit and its int64 roll (degrees) raw |
 | optional | With damage rules: ASCII `PROJ`, uint64 next projectile ID, uint64 projectile count and per projectile in ascending ID 128 bytes: uint64 ID, shooter and target, uint32 owner, weapon, target hardpoint and damage type, uint32 flags (bit 0 shield damage, bit 1 hitpoint damage, bit 2 the shooter's DG-05 diminishing-firepower flag was off at the shot, bit 3 the projectile's internal damage type was not the misc type (DG-05); bits 2 and 3 are 0 for every M2 shooter and projectile, so the word is unchanged from before diminishing-firepower gates; bit 4 homing, bit 5 holds its target, bit 6 energy damage and bit 7 ion stun (ion weapon handling; both 0 before ion weapon handling, so no earlier word changed)), uint32 zero, int64 position and per-frame step raw (x, y, z each), and int64 speed, travel, maximum travel and damage raw; a homing projectile then appends 48 bytes: int64 turn rate, yaw and pitch raw (degrees) and its offset in the target's frame (x, y, z raw); an ion-stun projectile then appends 24 bytes: uint32 stun frames, int64 speed and shot rate reductions raw, uint32 stacks (0 or 1) |
-| optional | With queued delayed damage (WAD-17/21/26, U-04 project policy): ASCII `BLST`, uint32 version 3, uint32 zero, uint64 count; per queued delivery in retained due-frame/creation order, a fixed 48-byte record: uint64 due frame and recipient ID, int64 amount and delay raw, uint32 secondary hardpoint route (`0xffffffff` for hull), owner, damage type and internal-damage-kind flag (1 for misc, 0 otherwise). Unlike version 2, which appended the complete source projectile after the hardpoint route, version 3 retains only these delivery fields and appends no source projectile. This block follows `PROJ` and precedes `FRMN`. |
+| optional | With queued delayed damage (WAD-17/21/26, EUS-15): ASCII `DDMG`, uint32 version 1, uint32 zero, uint64 count; per queued delivery in retained due-frame/creation order: uint64 due frame and recipient ID, int64 raw amount, uint32 owner, damage type, internal-damage-kind flag (1 for misc, 0 otherwise), and contacted-mesh byte length followed by that many mesh-name bytes. Empty names resolve to hull; names resolve against the current recipient type at delivery. No source projectile, routing flags or original delay survives. This block follows `PROJ` and precedes `FRMN`; `BLST` is reserved for charged-ability state. |
 | optional | With group members waiting to plan (formation slot assignment, FM-08): ASCII `FRMN`, a uint64 count and per waiting unit in ascending ID the uint64 unit, uint64 planning frame, int64 x, y and z raw of its slot, int64 raw planning speed, the group command's uint64 tick, uint32 player and uint64 sequence, and a uint32 rank |
 | optional | With approach mappings (attack closing, attack-move and guard, [space orders](behaviour/space-orders.md) OR-05 to OR-07): ASCII `APPR`, a uint64 count and per unit with one, in ascending ID, the uint64 unit and its uint64 prediction frame |
 | optional | With squadron craft that fly by a craft profile: ASCII `CRFT`, a uint64 count and per craft in ascending ID the uint64 ID, int64 roll, pitch and yaw raw (degrees), int64 velocity x, y and z raw, uint32 flipping (0 or 1) and uint32 zero |
@@ -672,27 +690,44 @@ SHA-256 consumes, without padding:
 | optional | With active arrival vulnerability timers (WR-41): ASCII `AVUL`, uint32 block version 1, uint32 zero, uint64 count, then per unit in ascending ID the uint64 unit and uint64 expiry tick. Expiry is independent of the frame-150 arrival completion; the default data expires at frame 150. |
 | optional | With upgrade state (WPR-02/22/51/52): ASCII `UPGD`, uint32 block version 1, uint32 zero; the account and unit records specified below. Reserved for station-upgrade state. |
 | optional | Once the battle is decided (battle victory handling, [space victory](behaviour/space-victory.md)): the outcome block, ASCII `VICT`, uint32 block version 1, uint32 condition (1 enemy star base destroyed, 2 all enemy units destroyed, 3 intentional quit), uint32 winner and winner team, uint64 deciding frame, deciding object (zero for quit) and end frame |
-| optional | With units whose type has abilities (space ability handling, [space abilities](behaviour/space-abilities.md)): ASCII `ABIL`, a uint64 count and per unit in ascending ID the uint64 unit, a uint32 ability count and per ability (`Unit_Abilities_Data` order) uint32 flags (bit 0 on, bit 1 autofire, bit 2 holds a target, ion weapon handling), uint64 start, end-of-duration (zero: none) and end-of-recharge ticks, and with bit 2 the uint64 target and uint32 target hardpoint; then int64 window damage and damage rate raw and uint32 replan due (0 or 1) |
+| optional | With units whose type has abilities (space ability handling, [space abilities](behaviour/space-abilities.md)): ASCII `ABIL`, a uint64 count and per unit in ascending ID the uint64 unit, a uint32 ability count and per ability (`Unit_Abilities_Data` order) uint32 flags (bit 0 on, bit 1 autofire, bit 2 holds a target, ion weapon handling), uint64 start, end-of-duration (zero: none) and end-of-recharge ticks, and with bit 2 the uint64 target and uint32 target hardpoint; then uint32 replan due (0 or 1). The window damage and damage rate moved to `DTRK` with damage tracking for every unit (WCC-82) |
+| optional | While a cloak is on (STEALTH, [abilities walk](behaviour/walks/abilities.md) WST-03 to WST-09): ASCII `STLH`, a uint64 count and per cloaked unit in ascending ID the uint64 unit and uint64 last detection frame |
+| optional | While a cloak runs on its own count (WST-03/04: a `Stealth_Duration_Multiplier` upgrade made trunc(`Expiration_Seconds` x m x 30) differ from the slot's countdown; m is computed from the exact Q24 product and truncated, not in floating point): ASCII `STLX`, a uint64 count and per such unit in ascending ID the uint64 unit and uint64 end frame |
+| optional | Once a live unit's Krayt object script has run (WSD-09, WSD-10): coordinator-reserved ASCII `KSCR`, a uint64 count and per such unit in ascending ID the uint64 unit, int64 LastService on the script clock (units of 2^-28 s, WFO-22), uint32 enemy objects counted at the end of its last service, int64 their summed combat rating raw and uint32 human autofire state (0 or 1). Written after the cloak block; absent otherwise, so a session without such a unit hashes as before. Not part of the snapshot. |
 | optional | While a live unit is ion stunned (ion weapon handling, [space damage](behaviour/space-damage.md) IS-03): ASCII `IONS`, a uint64 count and per stunned unit in ascending ID the uint64 unit, uint64 end frame, int64 speed and shot rate reductions raw |
 | optional | With cached asteroid contact (WHZ-13): ASCII `ASTD`, uint32 version 1, uint32 reserved zero, uint64 count, then ascending uint64 unit ID and uint64 last contact frame pairs |
-| optional | While any live unit has a temporary engine-disable deadline (EN-08, EN-09): ASCII `EDIS`, uint64 count, then ascending-ID records of uint64 unit ID and uint64 recovery frame. Absent otherwise; the snapshot's existing engine-online flag and speed factor expose the current state. |
+| optional | While any live unit has an engine-disable deadline (EN-08, EN-09): ASCII `EDIS`, uint64 count, then ascending-ID records of uint64 unit ID and uint64 recovery frame; `UINT64_MAX` means no expiry. Absent otherwise; the snapshot's existing engine-online flag and speed factor expose the current state. |
 | optional | With live nebula contact state (WHZ-20/21): ASCII `NEBC`, uint64 count, then ascending-ID records of uint64 unit ID, uint8 present, uint8 has-frame and uint64 last contact frame (zero when has-frame is zero). Absent when empty. |
 | optional | With cached ion-storm contact (WHZ-30/31): ASCII `STMC`, uint64 count, then ascending-ID records of uint64 unit ID and uint64 last shield-service contact frame. Absent when empty. |
-| optional | With converted hero purchases (WHE-02/06/07/49): coordinator-reserved ASCII `HERO`, uint64 carrier count, then ascending carrier-ID records of uint64 carrier ID, uint64 logical purchase type and uint64 contained count. Each contained record stores uint64 identity ID, uint64 type, uint64 parent, uint8 flags and uint64 member count followed recursively by its ordered members. Flag bits 0–7 mean named, generic, limbo, model visible, collidable, selected, movement coordinated and preserved combat. Riders and team members retain authored creation order. The block is absent without converted purchases; initial replay units cannot carry this derived state. |
+| optional | While a live unit's damage tracking holds damage (WCC-82, AB-42): coordinator-reserved ASCII `DTRK`, uint64 count, then ascending-ID records of uint64 unit ID, int64 window damage raw (hull and shield lost since the rate window last closed) and int64 damage rate raw (per second). Absent when every window and rate is zero. |
+| optional | With converted hero purchases (WHE-02/06/07/49): coordinator-reserved ASCII `HERO`, uint64 carrier count, then ascending carrier-ID records of uint64 carrier ID, uint64 logical purchase type and uint64 contained count. Each contained record stores uint64 identity ID, uint64 type, uint64 parent, uint8 flags and uint64 member count followed recursively by its ordered members. Flag bits 0â€“7 mean named, generic, limbo, model visible, collidable, selected, movement coordinated and preserved combat. Riders and team members retain authored creation order. The block is absent without converted purchases; initial replay units cannot carry this derived state. |
 | optional | While jammer-only sources are registered: coordinator-reserved ASCII `PDEF`, uint64 source count, then uint64 source IDs in registration order. Static shield/passive declarations register at creation; jammer-only owners append on activation and leave on termination/death. The block is absent with no active jammer-only sources; static creation order then follows stable IDs. Staged changes commit only after a successful tick. |
 | optional | With nested special-handler state (WHE-09/10/12): coordinator-reserved ASCII `SPAB`, uint64 owner count, then ascending owner-ID records of uint64 owner ID, uint32 service-cancelled, uint32 zero and uint64 slot count. Declared-order slots store uint32 flags (bits 0 enabled, 1 cancelled, 2 successful despawn), uint32 context-present, uint64 next service frame, optional context (uint64 owner and target, uint32 mode: 0 space/1 ground/2 galactic, uint32 flags: owner exists/type exists/death clone/map editor), uint64 tracked-target count and ascending uint64 target IDs. Activation clears its context after Apply; ordinary committed slots therefore have no context. The block is absent with no nested slots. |
 | optional | With spawned hero ability objects or timed recipients: ASCII `HABL`, uint64 count; ascending shared-projectile-ID records of uint64 ID and spawned type, uint32 ability kind and owner, uint64 source, three int64 position and four int64 quaternion components, uint64 detonation deadline, uint32 detonated (0 or 1), uint64 recipient count, then recipient-query-order pairs of uint64 target and expiry tick. Empty sessions omit this block; the ordinary `PROJ` block holds the live stationary projectile until detonation. |
+| optional | With live buzz-droid objects (WAB-71 to WAB-74): ASCII `BUZZ`, uint64 count; ascending droid-entity-ID records of uint64 droid ID, uint64 activating type, three int64 Q24 creation-point components and uint64 first acting frame. The droids' health and position are their ordinary unit records. |
 | optional | While killed craft spin away (fighter spin-away deaths, [space fighter deaths](behaviour/space-fighter-deaths.md)): ASCII `SPIN`, a uint64 count and per spin in ascending craft ID the uint64 craft ID and type, uint32 owner, uint32 path (0 or 1), int64 position x, y and z raw, int64 roll, pitch and yaw raw (degrees), int64 velocity x, y and z raw, int64 accumulated roll raw, int64 x, y and z raw of the four control points, int64 raw length of the three segments and int64 raw distance travelled |
 
 The optional state blocks come in one fixed order, which is part of the format: the purchasing blocks
 (`ECON`, `ARRV`, `PADS`, `POPS`, station purchasing and WBP-01..19, then `AVUL`, WR-41, and `UPGD` for station upgrades) follow the collection block, then come the outcome and ability blocks
-(`VICT`, `ABIL`), then `IONS` (ion weapon handling), `ASTD` (asteroid contact), `EDIS` (temporary engine disable), `NEBC` (nebula contact), `STMC` (ion-storm contact), `HBON` (hero command sources), `HERO` (converted hero identity), `PDEF` (projectile-defence registration), `SPAB` (nested special handlers), `CFIR` (concentrate-fire recipients), `HABL` (spawned hero abilities), and the spin-away block (`SPIN`, fighter spin-away deaths). The order is a
+(`VICT`, `ABIL`), then `STLH` and `STLX` (cloaks), `IONS` (ion weapon handling), `ASTD` (asteroid contact), `EDIS` (temporary engine disable), `NEBC` (nebula contact), `STMC` (ion-storm contact), `DTRK` (damage tracking), `HBON` (hero command sources), `HERO` (converted hero identity), `PDEF` (projectile-defence registration), `SPAB` (nested special handlers), `CFIR` (concentrate-fire recipients), `HABL` (spawned hero abilities), `BUZZ` (buzz droids), and the spin-away block (`SPIN`, fighter spin-away deaths). The order is a
 deliberate choice: the purchasing blocks sit with the economy's other per-player state before the battle outcome, and
 the later blocks keep the order they landed on the integration branch. A session with none of them hashes
 as before, and a battle with several hashes in this order. The snapshot bytes carry `IONS`, then `ASTD`, `NEBC`, `STMC`, then `SPIN`; the
 economy views of a snapshot are presentation only and not in its canonical bytes.
 
 The optional snapshot `NEBC` and `STMC` blocks each contain a uint64 count and ascending uint64 instance IDs whose public nebula or ion-storm predicate is true. They omit the session's contact-frame records and are absent when no instance has the corresponding public state.
+
+The conditional session-state block `PHST` follows the other session blocks and is absent
+when no target position history is retained. It contains uint32 version 1, uint32 reserved
+zero, uint64 record count, then records in ascending unit ID: uint64 unit ID and six int64
+Q24 position raws, previous x/y/z followed by before-previous x/y/z. The current position
+remains in the ordinary unit record. A target profile starts retaining history on its first
+position change, repeating its initial position for the missing older sample. The existing
+partitioned gather rotates retained history; the ordered component commit preserves it across ticks and
+registry reorder. It supports the circular interception rule WWP-51, adds no command opcode,
+and is omitted from presentation snapshots. Targets that have never moved keep the block absent.
+The tactical checkpoint's child-state (since raw domain 6) saves the same two positions, so a restored session leads
+a moving target as the saved run did.
 
 `UPGD` is omitted when every account retains its initial lobby tech, has no
 completed upgrade lifetime counts or held objects, and every unit has zero bonuses
@@ -763,7 +798,9 @@ A unit whose type has a profile in the bound combat table then appends its
 combat record: uint64 ship-level target (zero for none), uint32 player-ordered flag (bit 0; an
 ordered hardpoint's index plus one in the bits above it, specific-hardpoint attack orders), uint32
 weapon count, uint64 next ship-level scan frame, and per weapon uint64 opportunity target,
-uint64 last opportunity scan frame, uint32 fire countdown and uint32 shots left in the burst. A
+uint64 last opportunity scan frame, uint32 fire countdown and uint32 shots left in the burst; after the last
+weapon, one uint32 pair (weapon index plus one, index) for each object weapon past its first muzzle bone
+(round-robin muzzle index, WWP-47), so a unit that has not fired from a second muzzle hashes as before. A
 session bound to no combat table hashes as before weapon targeting was added. The same holds for the optional blocks:
 a session without squadrons or fog rules hashes as before squadron reveal and fog-cell contacts were added, and one in which no
 unit is banked hashes as before ship turn banking was added. The unit record's rotation stays the level heading; the
@@ -778,6 +815,11 @@ for a position destination), and uint32 flags: bit 0 completed, bit 1 reached co
 previously, and bit 2 autonomous attack override. Completion history survives an individual
 split; a completed single-team position base is reset to the team's current position.
 Records without a formation omit the marker and its payload.
+When the formation attack target differs from the shared team target, marker `0xf04e`
+and a uint64 destination target follow. When the retained destination hardpoint differs
+from the team's ordered hardpoint, marker `0xf04f` and its uint32 index follow; the
+all-ones index means no attachment. An ordinary attack can retain an implicit attachment
+without changing the explicit team order.
 
 ## Snapshot and events
 
@@ -956,7 +998,7 @@ One immutable grid for one opaque fixture team. The header is exactly 76 bytes.
 | 48 | 8 | cell_y_raw | int64 Q24, strictly positive; rectangular cells allowed |
 | 56 | 4 | encoding | Exactly 1 = linear u8 attenuation (0 dark RGB, 255 unchanged RGB) |
 | 60 | 8 | revision | At least 1 (stream rules below) |
-| 68 | 8 | byte_count | Exactly width × height |
+| 68 | 8 | byte_count | Exactly width Ã— height |
 | 76 | byte_count | cells | Row-major `y*width+x`; +x is source +X, +y is source +Y |
 
 Cell `(x,y)` covers the half-open Q24 rectangle `origin + (x,y)*cell` to
@@ -1173,7 +1215,170 @@ u64 source ID, u64 carrier/host ID, u64 source type, u32 declared bonus slot, u6
 count, and ascending u64 recipient IDs. The recipient index and category totals are derived
 from these source rows and immutable content. Station-upgrade state encoding is unchanged.
 
-Ordinary ability command kind values 15 (`MISSILE_SHIELD`) and 16
-(`SENSOR_JAMMING`) are coordinator-reserved append-only extensions. They use
+Ordinary ability command kind values 15 (`MISSILE_SHIELD`), 16
+(`SENSOR_JAMMING`), 19 (`FULL_SALVO`), 21 (`SELF_DESTRUCT`), 23 (`LEECH_SHIELDS`) and 24 (`LURE`) are coordinator-reserved append-only extensions. They use
 existing opcode 8 and ordinary activation/deactivation/autofire payloads; no
-projectile optional bit or synchronized random stream is added.
+projectile optional bit or synchronized random stream is added. The `SELF_DESTRUCT` blast object is
+an ordinary ability spawn (WSD-05, WSD-06): it appears in the `HABL` block of the tick its countdown
+ends and detonates the next tick. Shield leech uses the existing object-target
+extension and ordinary slot target/duration/recharge state; its outgoing damage contribution is derived. `LURE`
+adds no state: its pulse schedule derives from the slot's switch-on tick, and its lure orders are ordinary unit orders.
+
+# Corrupt Systems point and recipient state
+
+Coordinator-reserved ability kind **22** (`CORRUPT_SYSTEMS`) uses opcode 8 with
+extension 2 and three int64 Q24 point components. WHE-33/34 preserve one status
+per recipient; refresh replaces its deadline and parameters without stacking drain.
+
+The optional coordinator-reserved `CRPT` state block is appended after `QIDS`
+(when present). It appears while any recipient is corrupted or any ability slot
+retains a cast point. After the tag are uint32 version 1 and uint64 recipient
+count. Each recipient, in ascending entity order, stores four uint64 values
+(entity, source type, start tick, expiry tick), then two int64 Q24 values
+(shield drain per frame and inaccuracy radius). A uint64 cast-point count follows;
+each point, ordered by entity and authored ability slot, stores uint64 entity,
+uint32 slot index and three int64 Q24 coordinates. The ordinary ability slot
+already stores its start and recharge ticks.
+
+The snapshot's optional `CRPT` block sits after `ABIL` and before `IONS`. It
+contains the same version, recipient count and recipient rows, without the
+cast-point count or rows. Cast points are presentation metadata outside snapshot
+canonical bytes. A world with neither statuses nor retained cast points emits no
+state block; a snapshot with no statuses emits no snapshot block.
+
+# Combined match identity
+
+Skirmish recording attaches the coordinator-reserved header extension **7**
+(`MTID`) using the existing v4/v5 tagged-header format. Legacy v2/v3/v4/v5
+recordings without MTID retain their bytes and loading contract. No simulation
+state block is added, and MTID is excluded from world and snapshot hashes.
+
+The extension body is the ASCII separator `eawr-match-identity`, uint32 version
+1, uint32 domain count (1..64), then domains in strictly increasing name order.
+Each domain is uint32 name length (1..128), its lowercase ASCII name (letters,
+digits and hyphens), uint32 nonzero domain version, and 32 digest bytes.
+All integers are little endian. The body ends with SHA-256 of all preceding
+body bytes. Unsorted, duplicate, unsupported outer versions and corrupt hashes
+are refused with `EAWR-MATCH-0002`.
+
+Tactical domains are `rules`, `numeric-abi`, `sandbox`, `units`, `map-path`,
+`map-digest`, `script-manifest` and `ai-data`, each at domain version 1.
+Units retain their canonical unit-table digest. Other domains hash their
+canonical text: the tactical/math/Q24/tick contract, active numeric ABI name
+and version, sandbox policy, canonical VFS map path, lowercase map SHA-256,
+module-manifest hex digest, and XML-list hex digest respectively.
+The script manifest covers every effective mounted Lua file under `data/scripts/`.
+The conservative AI-data closure covers every effective mounted XML file under
+`data/xml/`, including constants and referenced definitions. Its listing is
+sorted canonical paths, each encoded as uint32 byte length, path bytes, then
+SHA-256 of the effective file bytes. Mount paths and provenance are excluded.
+Unused XML/Lua changes can therefore require a new agreement too.
+
+Playback compares local domains after resolving the recorded fleet's full unit
+closure, before activating the session. `EAWR-MATCH-0001` names the first differing
+domain; the same comparison accepts additional named/versioned campaign and story
+domains for galactic setup callers. Headless MTID playback requires mounted game
+data to verify its content. Legacy pinned builders remain on their old encoding;
+live and CLI skirmish recording use MTID.
+Seed, player slots, factions and match options remain in the replay setup rather
+than the content identity; LAN offers must agree on those setup bytes separately.
+
+Build agreement stays outside replay content: `core::build_identity()` exposes
+the configure-time project version and Git HEAD, with `+dirty` for tracked
+changes. Reconfigure after a commit to refresh it. Package and test builds can
+set the portable `EAWR_BUILD_IDENTITY` CMake override. `MatchAgreement` compares
+this build string and the content domains before LAN activation; differing builds
+name `build` in the same typed mismatch diagnostic.
+
+# Special weapon requests
+
+Coordinator-reserved opcode **27** records `SpecialFirePayload` (WSW-15/40/41).
+It carries a uint64 target ID, uint32 admission route (0 player, 1 AI object,
+2 AI taskforce), and a zero uint32 reserved word, followed by exactly one source
+in the ordinary unit list. Its order kind is **22**. The target must be nonzero;
+unknown admission values and nonzero reserved words are rejected. AI routes
+require an authoritative AI issuer during simulation admission.
+
+The optional `SWPN` state block is absent when no planetary source is registered and no player has a disabled required-hardpoint flag.
+Its version header is uint32 1 and uint32 zero, followed by a uint64 source count. Version 2 uses the same source rows and appends a uint64 disabled-player count followed by ascending uint32 player IDs (WSW-48). Version 1 retains its bytes when all required-hardpoint permissions have their default enabled value.
+Ascending source rows carry uint64 source ID, recharge-start frame, ready frame,
+next-pulse frame and remembered target, then uint32 remaining pulses and instance
+count. Immutable selectors and timing are bound by content identity. The matching
+snapshot block adds the uint32 weapon/action selectors, uint64 category mask and
+int64 Q24 readiness to each source row (WSW-19/20/27).
+
+Event **18** reports every planetary wrapper pulse, including shared construction
+rejection. Its ordinary sequence field contains the weapon index and an appended
+uint32 `special_pulse` identifies initial pulse 0 or continuation 1 through N.
+Event **19** reports the one-shot ready notification, with the same source/index
+fields (WSW-22/33/34). Other event encodings retain their existing bytes. Player
+permission and manual admission metadata are derived frozen-view inputs; their
+authoritative sources remain the held upgrade identities and ordinary gun state.
+
+
+### Multiplayer departure policy
+
+Tactical header extension tag 8 opts into multiplayer departure handling. Its
+little-endian body is `version:u32=1, human_count:u32, humans:u32[human_count]`.
+Human faction IDs are strictly increasing, unique and commandable in the setup.
+Absence preserves legacy local quit behavior and canonical bytes. Quit remains
+the existing replayable input; a network disconnect agreement installs that same
+input at its agreed tick. The simulation records controller assignments in the
+optional `MPDP` state block: version, human count/list, assignment count, then
+`departed_player:u32, controller:u32, tick:u64, basic_ai:u32` per assignment.
+Assignments follow executed quit order. AI takeover keeps the departed faction's
+ownership; allied human and allied AI recipients receive its objects instead
+(MP-36â€“38). The LAN MVP owner policy ends the network match when fewer than two human
+players remain, even with AI slots present; the remaining opposing human wins
+by departure. This human-count override is specific to the opt-in policy.
+Local quit presentation does not change the shared simulation result.
+The engine-side AI commands generated after takeover are ordinary recorded
+commands; replay does not need an AI host to reproduce them.
+
+## Combined campaign and tactical identifiers
+
+The tactical tagged header retains shared allocator 6, match identity 7, multiplayer
+departure 8 and beacon rules 9. Campaign setup, carried-object metadata and cinematic
+seats use tags 10, 11 and 12 respectively. Writers emit every enabled tag in
+increasing order; the existing replay container versions 2/3/4/5 are unchanged.
+
+Tag 13, `ATRC` (MAT-15, coordinator-reserved), marks the main-menu demo battle's pool return
+(docs/behaviour/main-menu-attract.md). Its body is a uint32 version (1), a uint32 count and
+that many strictly increasing nonzero uint64 type IDs: the types whose destruction returns
+them to their owner's reinforcement pool. The record exists only in an attract session; a
+campaign setup cannot carry it. Absent, the replay keeps its exact bytes and hashes.
+
+Campaign credit release retains opcode 29, retreat retains 28 and retreat cinematic
+input retains 30. Player beacon input uses opcode 31 and OrderKind 25; its payload
+and HCB-12 semantics are unchanged. These IDs have distinct meanings in the combined
+build; pre-1.0 recordings using the colliding branch-local IDs are not retained.
+
+## Native campaign scene selection (header tag 15)
+
+The optional native-scene record identifies a campaign child that can be reopened as a
+standalone tactical replay. Ordinary skirmish and LAN recordings omit it and retain their
+existing bytes. SKSU still supplies the native map path, map SHA-256, player slots and
+victory setting; native loading never submits those players to skirmish lobby admission.
+
+The body is little endian: `u32 version` (1), `u32 flags` (bit 0 selects multiplayer
+campaign content), then three vectors in order: the original unit-loader type roots,
+the original obstacle roots, and the battle's reachable type roots. Each vector has a
+`u32 count`; each name has a `u16 byte length` followed by its UTF-8 bytes. The original
+loader order is retained. Names are nonempty, fit their u16 byte length, contain no NUL, and
+are unique ignoring ASCII case within each vector. The record requires a native map,
+a shared allocator boundary, nonempty source and battle type vectors, and fits the
+existing 65535-byte replay header limit. Unknown versions/flags, oversized counts,
+duplicate names, truncation and trailing bytes are rejected.
+
+Standalone loading reads the original campaign profiles from the mounted data, narrows
+them through the same reachable-content selector as live entry, and verifies the recorded
+content identity and map digest. Actors are projected from their recorded state; placement
+and default starting fleets are never rerun. Campaign combat, fog, map bounds, reserves,
+economy and victory use the same native binding as the live child. This is load metadata,
+not an additional simulation state block.
+
+Native scene metadata does not carry the full parent conflict's retreat/script context.
+Standalone playback binds the recorded combat and scene content; restoring a campaign
+with its borrowed native child remains the route for parent-owned return and retreat
+services. The native file header's size limits apply at file export/load, never to live
+campaign admission.

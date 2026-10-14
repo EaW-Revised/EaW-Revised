@@ -86,5 +86,13 @@ cmake --workflow --preset linux-x64-gcc      # or windows-msvc, windows-clang, l
 
 ## Questions and ideas
 
-Open an issue with the bug report or feature request template. For a larger change, open
-an issue first so we can agree on the approach before you spend time on it.
+- **Ideas and feature requests** go on the
+  [Ideas board](https://github.com/EaW-Revised/EaW-Revised/discussions/categories/ideas), where
+  everyone can upvote them. Search and upvote before posting a new one.
+  [docs/ideas.md](docs/ideas.md) explains how ideas are reviewed, labelled and turned into work.
+- **Questions** go to [Q&A](https://github.com/EaW-Revised/EaW-Revised/discussions/categories/q-a).
+- **Bugs**, and places where EaW Revised behaves differently from the original game, are
+  issues: use the bug report or behaviour difference template.
+
+For a larger change, start with an idea or an issue so we can agree on the approach before
+you spend time on it. If you want to build an idea yourself, say so on its post.

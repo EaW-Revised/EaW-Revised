@@ -1,0 +1,3 @@
+# Canonical replay pins must retain LF bytes on Windows as well as Linux.
+*.hashes.csv text eol=lf
+*.eawr-gcreplay binary

@@ -88,6 +88,19 @@ inline constexpr Family families[]{
     const Family* family = find_family(material);
     return family != nullptr && family->reads_wind;
 }
+
+// A-12/AVC-05: these programmable additive passes read the scene's TIME.
+// Offset-only additive materials and lit hulls have no effect-clock input.
+// A zero XY rate needs no per-tick write, including unused nonzero Z/W.
+[[nodiscard]] inline bool reads_effect_time(const MaterialDescription& material) noexcept {
+    const Family* family = find_family(material);
+    if (family == nullptr || material.pass_name != family->pass_name || !admits_pass(*family, material.pass)
+        || (family->program != mesh_additive::family.program && family->program != mesh_additive_vcolor::family.program)) {
+        return false;
+    }
+    const auto rate = bindings::vector_or(material, "UVScrollRate", {0.0F, 0.0F, 0.0F, 0.0F});
+    return rate[0] != 0.0F || rate[1] != 0.0F;
+}
 [[nodiscard]] inline std::vector<Uniform> uniforms(const MaterialDescription& material) {
     const Family* family = find_family(material);
     return family == nullptr ? std::vector<Uniform>{} : family->uniforms(material);

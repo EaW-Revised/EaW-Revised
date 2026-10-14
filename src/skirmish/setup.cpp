@@ -62,12 +62,14 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
         entry.path = record.canonical_path;
         entry.name = fallback_name(entry.path);
         entry.metadata = map.value().lobby;
+        entry.context_name = map.value().context_name;
         {
             // WSS-06: capacity prefixes the authored display name (including an
             // untranslated key); an absent display name keeps the bare map stem.
             if (map.value().display_name_key && !map.value().display_name_key->empty()) {
                 const auto* text = texts ? texts.value().find(*map.value().display_name_key) : nullptr;
                 entry.name = text ? data::ui::to_utf8(text->value) : *map.value().display_name_key;
+                entry.display_name = entry.name;
                 entry.name = "(" + std::to_string(*entry.metadata.capacity) + ") " + entry.name;
             }
             const auto slash = entry.path.rfind('/');
@@ -233,6 +235,12 @@ core::Result<FixtureOptions> setup_options(const SetupSelection& selection, std:
     options.map = selection.map;
     options.slots = std::vector<LobbySlot>(selection.slots.begin(), selection.slots.end());
     options.match = selection.match;
+    // WSS-31: the copied record's space victory choice, when it names one of the two evidenced conditions;
+    // any other text leaves the data's own default (the start reads it, WBF-08).
+    if (selection.match) {
+        if (auto condition = sim::tactical::parse_victory_condition(selection.match->space_win_condition))
+            options.victory_condition = condition.value();
+    }
     return Result::success(std::move(options));
 }
 

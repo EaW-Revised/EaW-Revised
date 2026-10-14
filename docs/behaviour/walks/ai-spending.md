@@ -45,7 +45,7 @@ describe inputs, authored desires, reservation and spending-plan lifetime.
 | WAS-07 | Population room is the requesting player's company cap minus current company count, clamped from **0** to that cap. Reinforcement power is the sum of its own non-null skirmish pool entries' combat power matching the category parameter, default all categories. Ordinary research requires **fewer than 8** available population points; it does not require eight credits or eight ships. Reinforcements are not deployed friendly force. Population admission and pool reservation remain production/reinforcement interfaces. | data: research equation; debug build ASP-E15/16; SAE-02; PE-21 |
 | WAS-08 | `BaseLevel` can come from a live allied station; a human-owned shared station is eligible. Enemy stations do not qualify. Lua `Get_Tech_Level` reads the player's account; shared completion changes the relevant allies through WPR-22/52. Base level and tech level have distinct consumers. | debug build ASP-E30; interface SAE-02; WPR-22/52 |
 | WAS-09 | The resource equation sums `TacticalBuiltStructureCount` for Empire, Rebel and Underworld mineral extractors. Allied pads are registered in the querying AI's view, including a human teammate's pad and mine. The querying player need not personally own a completed mine. | data; debug build ASP-E01..03; SAE-12 |
-| WAS-10 | That typed resource count has **no completed-only state filter**. A registered matching pending reservation, construction or completed structure can qualify; a reserved constructor can match through its constructed type. If the reservation has no stored type, the lookup checks the actual completed and under-construction children. This is a pad-view count, not a census of station queues or undeployed ships. Type parameters are summed; unknown types make evaluation fail. | debug build ASP-E01/02/04 |
+| WAS-10 | That typed resource count has **no completed-only state filter**. A registered matching pending reservation, construction or completed structure can qualify; a reserved constructor can match through its constructed type. If the reservation has no stored type, the lookup checks the actual completed and under-construction children. This is a pad-view count, not a census of station queues or undeployed ships. Type parameters are summed; an unknown type is reported and skipped, while known types still contribute. With only unknown types the result is zero and evaluation succeeds. | debug build ASP-E01/02/04; unknown-type branch rechecked, private evidence S3397-E03 |
 | WAS-11 | `OpenBuildPadCount` is valid on the requesting AI's self context. Enumerate its registered allied pads with no reserved/built type, a live construction-capable pad, construction currently allowed and cooldown satisfied. Without a type filter return the count. With type parameters, count a pad once if its own type matches **or** its faction menu can build any requested type. This is not limited to exact-owner empty pads. | debug build ASP-E03/13/14 |
 | WAS-12 | Save for refineries when the open mineral-pad count is positive and credits are **strictly below 1500**. This suppresses general units, research and ordinary structure purchases. The pad walk owns refinery desire **50**, local enemy-share threshold **0.2**, enemy-base distance **2500**, the plan's separate distance **2000**, and its construction/refund handling. | data; WBP-39/41/47/48 interfaces |
 | WAS-13 | Station demand requires skirmish mode, resource count at least **1**, and noncapital friendly raw force **strictly greater than 1000**. Age conditions are strict: level 1 after **60 s**, level 2 after **180 s**, level 3 after **600 s**, level 4 after **1200 s**. Equality does not activate an age branch. | data: station equation; SAE-06 |
@@ -68,6 +68,13 @@ describe inputs, authored desires, reservation and spending-plan lifetime.
 | WAS-30 | The cash plan has a required TaskForce without a purchase roster, is magic and does not steal units. It calls `Give_Money` with **6000**, sleeps **120 s**, then exits. The Lua grant calls positive-credit addition, giving **3000 / 6000 / 7200** on Easy/Normal/Hard for the stock AI multipliers. Desire/active-goal service still determines when another cash plan can begin; the sleep is not a guaranteed periodic payment. | data: shared cash plan; debug build ASP-E28/36; WPR-12 interface |
 | WAS-31 | Positive AI credit changes, including refunds and bonuses, multiply by `Credit_Multiplier` **0.5 / 1.0 / 1.2**. Debits do not. AI station production time uses `Space_Build_Time_Multiplier` **1.5 / 1.0 / 0.9**, together with ordinary queue time rules. Difficulty changes the wallet, queue duration and proposal-cycle sleep separately. Skirmish balances have no lobby starting-credit cap. | debug build ASP-E36; interfaces WPR-12/33, WTA-45; difficulty data |
 | WAS-32 | Admission reserves shared research/level-up limits using all allies' relevant queued and owned counts. Completion applies team upgrades and station/tech changes through WPR-22/51/52. Players retain individual credits, population, goal instances and Lua wait state, so teammate progress and purchase counts can differ despite shared tech. Shared state does not promise equal purchase rates or a research-by-minute-five rule. | debug build production interfaces; data limits; journal comparison |
+
+The WAS-10 unknown-type branch was rechecked in the debug build
+(S3397-E03). In a valid self context, the reader starts at zero and resolves
+each requested type. A missing type is reported and skipped; a known type adds
+its registered pad-view count. The reader returns success after the loop,
+including when every requested type was missing. This corrects the earlier
+interpretation that the reported error aborts evaluation.
 
 ## Comparison with existing notes and the remake
 
@@ -157,7 +164,11 @@ base; it is not a claim that those three differences remain open.
 WAS-10 sums typed registered allied pad states. A pending constructor reservation
 also matches its resulting type; without a stored reservation, actual completed
 and construction children supply their own types. This query remains separate
-from station queues, reinforcement pools and production-limit ownership.
+from station queues, reinforcement pools and production-limit ownership. Without
+type parameters it counts every registered reservation or live child. Unknown
+types emit an error through the AI journal and are skipped; a supplied filter
+containing only unknown names still counts zero. Built-count evaluation rejects
+a player different from the evaluation context's player.
 WAS-11 uses allied eligibility, construction permission, pending reservations,
 cooldown and the querying faction's build menu. Several matching filters count
 one open pad. Both queries prepare independent pad rows on workers and reduce

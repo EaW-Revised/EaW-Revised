@@ -3,7 +3,7 @@
 
 The universe is every (object class, tag path) of the FoC XML the game loads, taken from the committed tag
 inventory (plan/inventories/xml-tags.json) with data-defined names collapsed to `*`. The registry
-(docs/tag-coverage/statuses.json, schema_version 2) gives each pair exactly one status. This module loads and
+(docs/tag-coverage/statuses.json and its shards, schema_version 2) gives each pair exactly one status. This module loads and
 validates it, renders its Markdown view and reports on it; tag_coverage.py joins it with the M2 load trace.
 
 check    the gate without game data: every universe pair has a row, every row has what its status needs,
@@ -43,10 +43,36 @@ OUT_OF_SCOPE = ("land-or-galactic", "multiplayer", "presentation-later", "deferr
 AREAS = ("movement", "combat", "fighters", "ai", "presentation", "economy", "data")
 BASES = ("auto", "reviewed")
 ROW_FIELDS = {"applied", "area", "basis", "classes", "evidence", "missing_types", "note", "status", "tag", "ticket",
-              "trace"}
+              "trace", "engine_default", "no_targets", "scene"}
+NO_TARGET_FIELDS = {"types", "status", "evidence"}
+UNIT_KINDS = {"station", "ship", "squadron", "craft"}
 TRACES = ("unrecorded",)
-APPLIED_FIELDS = {"code", "rules", "types"}
+APPLIED_FIELDS = {"code", "rules", "types", "trace_scope"}
+TRACE_SCOPE_FIELDS = {"ability_types", "exclude_behaviors", "exclude_space_behaviors", "object_types"}
 RULE_ID = re.compile(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d+[a-z]?$")
+GENERIC_IDENTIFIERS = {"own", "id", "name", "list", "node", "box", "rules", "curve", "result", "config", "buffer", "number", "params"}
+MIN_IDENTIFIER_LENGTH = 6
+# Remaining documentation gaps tracked in #2566; lower this as notes are resolved.
+TODO_NOTE_CEILING = 0
+TODO_MARKER = re.compile(r"\bTODO(?: #([1-9][0-9]*))?:")
+
+# Keep literals intact so their comment markers do not consume subsequent code.
+CPP_TOKEN = re.compile(
+    r'R"(?P<delimiter>[^ ()\\\t\r\n]{0,16})\(.*?\)(?P=delimiter)"'
+    r'|\b[0-9][\w.\']*'
+    r'|"(?:\\.|[^"\\\r\n])*"|\'(?:\\.|[^\'\\\r\n])*\''
+    r'|(?P<comment>//[^\n]*|/\*.*?(?:\*/|\Z))', re.DOTALL)
+
+
+def uncomment_cpp(body: str) -> str:
+    """Remove C/C++ comments without joining tokens or mistaking literals for comments."""
+    # Translation-phase line splicing precedes recognition of // comments.
+    body = re.sub(r"\\\r?\n", "", body)
+    return CPP_TOKEN.sub(lambda match: " " if match.group("comment") else match.group(), body)
+
+
+def identifier_pattern(identifier: str) -> re.Pattern[str]:
+    return re.compile(r"(?<!\w)" + re.escape(identifier) + r"(?!\w)")
 
 
 class RegistryError(RuntimeError):
@@ -134,11 +160,78 @@ def load_universe(inventory: dict[str, Any], profile: str = "foc") -> dict[tuple
 
 # --- The registry ---------------------------------------------------------------------------------
 
-def load_registry(path: Path) -> dict[str, Any]:
+def load_shard(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if value.get("schema_version") != SCHEMA_VERSION:
         raise RegistryError(f"{path}: not a schema_version {SCHEMA_VERSION} tag registry")
     return value
+
+
+def registry_shards(paths: Path | Sequence[Path]) -> list[tuple[Path, dict[str, Any]]]:
+    """Read explicit shards and relative shard lists; reject cycles and repeated files."""
+    result: list[tuple[Path, dict[str, Any]]] = []
+    seen: set[Path] = set()
+
+    def visit(path: Path) -> None:
+        path = path.resolve()
+        if path in seen:
+            raise RegistryError(f"{path}: repeated registry shard or cycle")
+        seen.add(path)
+        shard = load_shard(path)
+        result.append((path, shard))
+        children = shard.get("shards", [])
+        if not isinstance(children, list) or any(not isinstance(p, str) or not p for p in children):
+            raise RegistryError(f"{path}: shards must be a list of relative file names")
+        for child in children:
+            relative = Path(child)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise RegistryError(f"{path}: shard paths must stay below the registry directory")
+            visit(path.parent / relative)
+
+    for path in [paths] if isinstance(paths, Path) else paths:
+        visit(path)
+    return result
+
+
+def load_registry(paths: Path | Sequence[Path]) -> dict[str, Any]:
+    """Combine shards for all registry consumers, preserving every pair and its status."""
+    merged: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "evidence": {}, "rows": []}
+    for path, shard in registry_shards(paths):
+        unknown = set(shard) - {"schema_version", "evidence", "rows", "note", "shards"}
+        if unknown:
+            raise RegistryError(f"{path}: unknown top-level fields {sorted(unknown)}")
+        for name, text in shard.get("evidence", {}).items():
+            if name in merged["evidence"] and merged["evidence"][name] != text:
+                raise RegistryError(f"{path}: conflicting evidence {name!r}")
+            merged["evidence"][name] = text
+        merged["rows"].extend(shard["rows"])
+    merged["rows"].sort(key=row_order)
+    return merged
+
+
+def write_registry(path: Path, registry: dict[str, Any]) -> None:
+    """Update existing shards without moving their pairs; new pairs belong to the root."""
+    if not path.exists():
+        write_text(path, dumps_registry(registry))
+        return
+    shards = registry_shards(path)
+    owners = {pair_key(c, tag): index for index, (_path, shard) in enumerate(shards)
+              for c, tag, _row in expand(shard)}
+    for _path, shard in shards:
+        shard["rows"] = []
+    for row in registry["rows"]:
+        groups: dict[int, list[str]] = defaultdict(list)
+        for object_class in row["classes"]:
+            groups[owners.get(pair_key(object_class, row["tag"]), 0)].append(object_class)
+        for index, classes in groups.items():
+            shards[index][1]["rows"].append(dict(row, classes=classes))
+    for target, shard in shards:
+        shard["rows"].sort(key=row_order)
+        for row in shard["rows"]:
+            name = row.get("evidence")
+            if name in registry.get("evidence", {}):
+                shard.setdefault("evidence", {})[name] = registry["evidence"][name]
+        write_text(target, dumps_registry(shard))
 
 
 def pair_key(object_class: str, tag: str) -> tuple[str, str]:
@@ -171,21 +264,57 @@ _RULES: dict[Path, set[str]] = {}
 
 
 def known_rules(root: Path) -> set[str]:
-    """Every rule ID that appears in a docs/behaviour note."""
+    """Leading rule declarations in headings, table cells, list items or bold paragraphs."""
     if root not in _RULES:
         found: set[str] = set()
-        token = re.compile(r"\b([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d+[a-z]?)\b")
+        token = re.compile(r"^\s*(?:\*\*|__|`)?([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d+[a-z]?)(?=$|[\s:.(\-\u2014|*`_])")
         for path in sorted((root / "docs" / "behaviour").rglob("*.md")):
-            found.update(token.findall(path.read_text(encoding="utf-8", errors="replace")))
+            fenced = False
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.lstrip().startswith(("```", "~~~")):
+                    fenced = not fenced
+                    continue
+                if fenced:
+                    continue
+                heading = re.match(r"^ {0,3}#{1,6}\s+(.+)", line)
+                cell = re.match(r"^\s*\|\s*([^|]+)\|", line)
+                bullet = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)", line)
+                bold = re.match(r"^\s*((?:\*\*|__).+)", line)
+                declaration = next((match[1] for match in (heading, cell, bullet, bold) if match), None)
+                if declaration:
+                    match = token.match(declaration)
+                    if match:
+                        found.add(match[1])
         _RULES[root] = found
     return _RULES[root]
+
+
+def reviewed_campaign_scene(row: dict[str, Any]) -> bool:
+    """A reviewed campaign-only application, with a sourced rule for every consumer."""
+    targets = row.get("applied")
+    note = row.get("note")
+    return (row.get("scene") == "campaign" and row.get("status") == "applied"
+            and row.get("basis") == "reviewed" and isinstance(note, str) and bool(note.strip())
+            and isinstance(targets, list) and bool(targets)
+            and all(isinstance(target, dict) and isinstance(target.get("rules"), list)
+                    and bool(target["rules"]) and all(isinstance(rule, str) and RULE_ID.fullmatch(rule)
+                                                    for rule in target["rules"])
+                    for target in targets))
 
 
 def registry_problems(registry: dict[str, Any], universe: dict[tuple[str, str], UniverseRow] | None,
                       root: Path | None) -> list[str]:
     """Everything the gate checks. `universe` None skips the coverage check, `root` None the code locations."""
     problems: list[str] = []
+    todo_rows = [row for row in registry["rows"] if "TODO" in row.get("note", "")]
+    if len(todo_rows) > TODO_NOTE_CEILING:
+        problems.append(f"TODO note count {len(todo_rows)} exceeds ceiling {TODO_NOTE_CEILING}")
+    for row in todo_rows:
+        markers = list(TODO_MARKER.finditer(row["note"]))
+        if not markers or any(not marker[1] for marker in markers):
+            problems.append(f"row {row.get('tag')!r}: TODO note needs a tracking ticket (TODO #issue:)")
     seen: dict[tuple[str, str], str] = {}
+    engine_defaults: set[tuple[str, str]] = set()
     unknown_top = set(registry) - {"schema_version", "evidence", "rows", "note"}
     if unknown_top:
         problems.append(f"registry: unknown top-level fields {sorted(unknown_top)}")
@@ -198,8 +327,23 @@ def registry_problems(registry: dict[str, Any], universe: dict[tuple[str, str], 
     def text_of(relative: str) -> str | None:
         if relative not in file_text:
             path = root / relative if root else None
-            file_text[relative] = path.read_text(encoding="utf-8", errors="replace") if path and path.is_file() else None
+            file_text[relative] = uncomment_cpp(path.read_text(encoding="utf-8", errors="replace")) if path and path.is_file() else None
         return file_text[relative]
+
+    moved: dict[str, list[str]] = {}
+
+    def other_files(identifier: str, relative: str) -> str:
+        if identifier not in moved:
+            pattern = identifier_pattern(identifier)
+            moved[identifier] = []
+            for directory in ("src", "include", "apps"):
+                for candidate in sorted((root / directory).rglob("*")):
+                    if candidate.suffix in (".cpp", ".hpp", ".h", ".cc", ".c", ".cxx", ".hxx"):
+                        name = candidate.relative_to(root).as_posix()
+                        if pattern.search(text_of(name) or ""):
+                            moved[identifier].append(name)
+        matches = [name for name in moved[identifier] if name != relative]
+        return "; also found in: " + ", ".join(matches) if matches else "; not found in other source files"
 
     for row in registry["rows"]:
         tag = row.get("tag", "")
@@ -228,12 +372,74 @@ def registry_problems(registry: dict[str, Any], universe: dict[tuple[str, str], 
             problems.append(f"{where}: trace {row['trace']!r} is not one of {', '.join(TRACES)}")
         if row.get("basis", "reviewed") not in BASES:
             problems.append(f"{where}: basis {row.get('basis')!r} is not one of {', '.join(BASES)}")
+        if "scene" in row and not reviewed_campaign_scene(row):
+            problems.append(f"{where}: scene must be campaign with an applied, explicitly reviewed row, "
+                            "a scope note and rule IDs for every consumer")
         ticket = row.get("ticket")
         if ticket is not None and (not isinstance(ticket, int) or isinstance(ticket, bool) or ticket <= 0):
             problems.append(f"{where}: ticket must be an issue number")
         text = resolve_evidence(registry, row)
+        if "engine_default" in row:
+            # Unauthored type defaults still need a recognized parser owner and sourced consumer.
+            try:
+                from .engine_tags import EngineTags
+            except ImportError:
+                from engine_tags import EngineTags
+            object_type = row["engine_default"]
+            catalog_path = (root / "docs/tag-coverage/engine-tags.json") if root else Path(__file__).resolve().parents[2] / "docs/tag-coverage/engine-tags.json"
+            try:
+                catalog = EngineTags.load(catalog_path)
+                valid = (object_type == "GameObjectType" and status == "applied"
+                         and catalog.recognizes("foc", object_type, tag)
+                         and any(entry["table_kind"] == "object-definition"
+                                 and entry["evidence"] == row.get("evidence")
+                                 for entry in catalog.tags.get(ascii_fold(tag), [])))
+            except (OSError, ValueError, KeyError):
+                valid = False
+            if not valid:
+                problems.append(f"{where}: engine default needs an applied object-definition tag and matching catalog evidence")
+            else:
+                engine_defaults.update(pair_key(c, tag) for c in classes)
         if row.get("evidence") and row["evidence"] not in evidence and " " not in row["evidence"]:
             problems.append(f"{where}: evidence {row['evidence']!r} is not defined in the evidence table")
+        if "no_targets" in row:
+            exclusions = row["no_targets"]
+            if status not in ("applied", "partial"):
+                problems.append(f"{where}: only an applied or partial row has no_targets")
+            if not isinstance(exclusions, list) or not exclusions:
+                problems.append(f"{where}: no_targets must be a nonempty array")
+                exclusions = []
+            excluded = set()
+            applications = row.get("applied", [])
+            if not isinstance(applications, list):
+                applications = []
+            applied_types = {kind for target in applications for kind in target.get("types", [])}
+            for exclusion in exclusions:
+                if not isinstance(exclusion, dict) or set(exclusion) != NO_TARGET_FIELDS:
+                    problems.append(f"{where}: no_targets entry needs types, status and evidence only")
+                    continue
+                kinds = exclusion["types"]
+                if (not isinstance(kinds, list) or not kinds
+                        or any(not isinstance(kind, str) or kind not in UNIT_KINDS for kind in kinds)
+                        or kinds != sorted(set(kinds), key=ascii_fold)):
+                    problems.append(f"{where}: no_targets types must be sorted distinct unit kinds")
+                    continue
+                if (excluded.intersection(kinds) or applied_types.intersection(kinds)
+                        or set(row.get("missing_types", [])).intersection(kinds) or any(
+                        not target.get("types") for target in applications)):
+                    problems.append(f"{where}: no_targets kinds overlap an applied target, missing kind or another exclusion")
+                excluded.update(kinds)
+                if exclusion["status"] != "foc-ignores":
+                    problems.append(f"{where}: no_targets status must be foc-ignores")
+                source = exclusion["evidence"]
+                if not isinstance(source, str) or not source.strip():
+                    problems.append(f"{where}: no_targets evidence must be nonempty")
+                elif source not in evidence and " " not in source:
+                    problems.append(f"{where}: no_targets evidence {source!r} is not defined in the evidence table")
+                else:
+                    resolved = evidence.get(source, source)
+                    if not isinstance(resolved, str) or "debug build" not in resolved:
+                        problems.append(f"{where}: no_targets evidence must cite the debug build")
         if status in ("applied", "partial"):
             targets = row.get("applied")
             if not isinstance(targets, list) or not targets:
@@ -243,16 +449,30 @@ def registry_problems(registry: dict[str, Any], universe: dict[tuple[str, str], 
                 extra = set(target) - APPLIED_FIELDS
                 if extra:
                     problems.append(f"{where}: unknown applied fields {sorted(extra)}")
+                if "trace_scope" in target:
+                    scope = target["trace_scope"]
+                    if not isinstance(scope, dict) or not scope or set(scope) - TRACE_SCOPE_FIELDS:
+                        problems.append(f"{where}: trace_scope needs explicit XML selectors {sorted(TRACE_SCOPE_FIELDS)}")
+                    else:
+                        for selector, values in scope.items():
+                            if (not isinstance(values, list) or not values
+                                    or any(not isinstance(value, str) or not value.strip() for value in values)
+                                    or values != sorted(set(values), key=ascii_fold)):
+                                problems.append(f"{where}: trace_scope {selector} must be a sorted nonempty list of names")
                 location = target.get("code", "")
                 path, identifier = code_location(location)
                 if not path or not identifier:
                     problems.append(f"{where}: code location {location!r} is not path#identifier")
+                elif len(identifier) < MIN_IDENTIFIER_LENGTH or identifier.lower() in GENERIC_IDENTIFIERS:
+                    problems.append(f"{where}: TODO code location {location}: generic or too-short identifier; "
+                                    "cite a specific identifier or enclosing function")
                 elif root is not None:
                     body = text_of(path)
                     if body is None:
-                        problems.append(f"{where}: code location {location}: {path} does not exist")
-                    elif identifier not in body:
-                        problems.append(f"{where}: code location {location}: {identifier!r} is not in {path}")
+                        problems.append(f"{where}: code location {location}: {path} does not exist" + other_files(identifier, path))
+                    elif not identifier_pattern(identifier).search(body):
+                        problems.append(f"{where}: TODO code location {location}: {identifier!r} is not in {path} "
+                                        "as a whole word outside comments" + other_files(identifier, path))
                 rules = target.get("rules", [])
                 for rule in rules:
                     if not RULE_ID.match(rule):
@@ -296,7 +516,7 @@ def registry_problems(registry: dict[str, Any], universe: dict[tuple[str, str], 
             problems.append(f"loaded tag {row.object_class}/{row.tag} has no registry row")
         if len(missing) > 40:
             problems.append(f"... and {len(missing) - 40} more loaded tags without a row")
-        stale = sorted(set(seen) - set(universe))
+        stale = sorted(set(seen) - set(universe) - engine_defaults)
         for pair in stale[:40]:
             problems.append(f"registry row {pair[0]}/{pair[1]} is not in the loaded XML; drop it")
         if len(stale) > 40:
@@ -311,6 +531,8 @@ def dumps_registry(registry: dict[str, Any]) -> str:
     lines = ["{", f'  "schema_version": {registry["schema_version"]},']
     if "note" in registry:
         lines.append(f'  "note": {json.dumps(registry["note"], ensure_ascii=False)},')
+    if "shards" in registry:
+        lines.append(f'  "shards": {json.dumps(registry["shards"], ensure_ascii=False)},')
     evidence = registry.get("evidence", {})
     lines.append('  "evidence": {')
     items = sorted(evidence.items())
@@ -351,7 +573,7 @@ def render(registry: dict[str, Any], universe: dict[tuple[str, str], UniverseRow
     lines = [
         "# Tag registry",
         "",
-        "Generated from `docs/tag-coverage/statuses.json` by `python tools/inventory/tag_registry.py render`; "
+        "Generated from `docs/tag-coverage/statuses.json` and its shards by `python tools/inventory/tag_registry.py render`; "
         "edit the JSON, never this file.",
         "What the registry is and how a PR that applies a tag updates its row: docs/tag-coverage.md.",
         "",
@@ -413,12 +635,15 @@ def load_inventory(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def gate_problems(statuses: Path, inventory: Path, root: Path | None) -> tuple[list[str], dict[str, Any], dict]:
+def gate_problems(statuses: Path | Sequence[Path], inventory: Path, root: Path | None) -> tuple[list[str], dict[str, Any], dict]:
     registry = load_registry(statuses)
     universe = load_universe(load_inventory(inventory))
     problems = registry_problems(registry, universe, root)
-    if not problems and statuses.read_text(encoding="utf-8") != dumps_registry(registry):
-        problems.append(f"{statuses.name} is not in its canonical layout; run format")
+    for path, shard in registry_shards(statuses):
+        if shard["rows"] != sorted(shard["rows"], key=row_order):
+            problems.append(f"{path.name}: rows are not sorted; run format")
+        if path.read_text(encoding="utf-8") != dumps_registry(shard):
+            problems.append(f"{path.name} is not in its canonical layout; run format")
     if not problems:
         try:
             render(registry, universe)
@@ -437,6 +662,12 @@ def print_problems(problems: Sequence[str], limit: int = 60) -> None:
 def check_command(args: argparse.Namespace) -> int:
     problems, registry, _universe = gate_problems(args.statuses, args.inventory, args.repo)
     print_problems(problems)
+    if registry is not None:
+        for row in registry["rows"]:
+            note = row.get("note", "")
+            marker = TODO_MARKER.search(note)
+            if marker:
+                print(f"tag_registry: TODO row {row['tag']!r} {row['classes']}: " + note[marker.end():].strip())
     if not problems:
         by_status, _ = counts(registry)
         print("tag_registry: ok " + json.dumps(by_status, sort_keys=True))
@@ -502,9 +733,9 @@ def render_command(args: argparse.Namespace) -> int:
 
 
 def format_command(args: argparse.Namespace) -> int:
-    registry = load_registry(args.statuses)
-    registry["rows"].sort(key=row_order)
-    write_text(args.statuses, dumps_registry(registry))
+    for path, shard in registry_shards(args.statuses):
+        shard["rows"].sort(key=row_order)
+        write_text(path, dumps_registry(shard))
     return 0
 
 
@@ -513,7 +744,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("check", "check-data", "render", "format"):
         sub = commands.add_parser(name)
-        sub.add_argument("--statuses", type=Path, default=DEFAULT_STATUSES)
+        sub.add_argument("--statuses", type=Path, action="append",
+                         help="registry shard or root with a relative shards list; repeat for multiple roots")
         sub.add_argument("--inventory", type=Path, default=DEFAULT_INVENTORY)
         sub.add_argument("--repo", type=Path, default=ROOT, help="the repository root the applied code locations are under")
         if name == "render":
@@ -522,6 +754,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         if name == "check-data":
             sub.add_argument("--game-root", required=True, type=Path)
     args = parser.parse_args(list(argv) if argv is not None else None)
+    args.statuses = args.statuses or [DEFAULT_STATUSES]
     handlers = {"check": check_command, "check-data": check_data_command, "render": render_command,
                 "format": format_command}
     try:

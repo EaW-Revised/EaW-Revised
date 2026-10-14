@@ -40,6 +40,7 @@
 | TM-11 | While paused the tactical camera's smoothed distance, field of view, height and spline position jump straight to their targets instead of easing towards them. | research TE-11 |
 | TM-12 | No key drives pause, play or fast forward: the default key map has no time command, and only the two buttons (and restoring a saved game) call them. The Escape menu has a pause of its own (the in-game menu, battle dialogs). | research TE-12 |
 | TM-13 | Pausing also pauses movies, positional and looping sound, speech and weather audio; playing resumes them. | research TE-04 |
+| TM-14 | Button hover art is an additional quad only when a rollover texture is present. An absent or empty `Mouse_Over_Texture_Name` adds no hover quad; existing base art and text remain. The Resume component `attack_button` in effective `CommandBarComponents.xml` names `i_attack_mode_rollover.tga`; the loader exposes state texture names as token lists and the viewer uses the first entry. | debug build reread of button and text-button drawing, 2026-10-10; effective XML and component field table |
 
 ### Project choices
 

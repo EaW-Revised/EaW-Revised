@@ -8,8 +8,7 @@
 #include "ai_engine_internal.hpp"
 
 #include <algorithm>
-#include <bit>
-#include <cstdio>
+#include "eawr/script/numeric/decimal.hpp"
 
 namespace eawr::script::foc::ai {
 namespace engine_internal {
@@ -45,9 +44,10 @@ std::optional<Real> number_of(const Value& value) {
 }
 
 std::string show(Real value) {
-    char buffer[64];
-    std::snprintf(buffer, sizeof buffer, "%.3f", std::bit_cast<double>(value.repr));
-    return buffer;
+    numeric::decimal::FormatSpec spec;
+    spec.conversion = 'f';
+    spec.precision = 3;
+    return numeric::decimal::format(value.repr, spec);
 }
 
 Real xy_distance_squared(const math::Vec3& a, Real x, Real y) {
@@ -111,6 +111,7 @@ std::optional<Real> Engine::global_value(const std::string& name) const {
 }
 
 PlayerAi* Engine::player_ai(tactical::PlayerId player) {
+    mark_native_state_changed();
     for (PlayerAi& entry : players_) {
         if (entry.player == player) return &entry;
     }
@@ -125,6 +126,7 @@ const PlayerAi* Engine::player_ai(tactical::PlayerId player) const {
 }
 
 Goal* Engine::find_goal(PlayerAi& player, std::uint64_t id) {
+    mark_native_state_changed();
     for (Goal& goal : player.active) {
         if (goal.id == id) return &goal;
     }
@@ -136,14 +138,30 @@ Goal* Engine::find_goal(PlayerAi& player, std::uint64_t id) {
 bool Engine::in_freestore(const ViewUnit& unit, tactical::PlayerId player) const {
     if (unit.owner != player || unit.craft) return false;
     // EX-13: arrival registers the ship with AI freestore, even after its plan times out.
-    if (host_->world != nullptr && host_->world->arrivals().contains(unit.id)) return false;
+    if (host_->ai_world->available() && host_->ai_world->arriving(unit.id)) return false;
     const AiType* type = host_->type(unit.type);
-    if (type == nullptr || !type->locomotor || type->star_base) return false;
+    if (type == nullptr || (!type->locomotor && !type->space_special_weapon) || type->star_base) return false;
     const PlayerAi* ai = player_ai(player);
     // SAE-11: an admitted purchase stays reserved until its TaskForce attaches it.
     if (ai != nullptr && unit.purchase_token != 0 && ai->reserved_pool_tokens.contains(unit.purchase_token)) return false;
     return ai == nullptr || !ai->assigned.contains(unit.id);
 }
+
+bool Engine::unit_service(const ViewUnit& unit, tactical::PlayerId player) const {
+    if (!in_freestore(unit, player)) return false;
+    const PlayerAi* ai = player_ai(player);
+    return ai == nullptr || !ai->reserved.contains(unit.id);
+}
+
+bool Engine::execution_due(tactical::PlayerId player, std::int64_t frame) const {
+    const PlayerAi* ai = player_ai(player);
+    if (ai == nullptr) return true;
+    const auto service_frame = staggered() && frame >= 0
+        ? static_cast<std::int64_t>(staggered_clock_.enabled_frame(static_cast<std::uint64_t>(frame))) : frame;
+    return ai->next_execution <= service_frame;
+}
+
+bool Engine::runs_player(tactical::PlayerId player) const { return player_ai(player) != nullptr; }
 
 // PG-08: the combat power metric of an object's company type.
 Real Engine::power(const ViewUnit& unit) const {
@@ -183,6 +201,7 @@ sim::EntityId Engine::deadly_enemy(const std::vector<sim::EntityId>& objects) co
 
 
 void Engine::record(const Plan* plan, tactical::PlayerId player, std::string event, std::string detail) {
+    mark_native_state_changed();
     PlanRecord line;
     line.tick = static_cast<std::uint64_t>(frame_);
     line.player = player;

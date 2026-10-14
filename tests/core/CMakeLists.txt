@@ -6,6 +6,21 @@ target_compile_features(tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tests)
 
 add_test(NAME core_contracts COMMAND tests)
+add_executable(core_sha256_tests sha256_tests.cpp)
+target_link_libraries(core_sha256_tests PRIVATE eawr::core)
+target_compile_features(core_sha256_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(core_sha256_tests)
+add_test(NAME core_sha256_contracts COMMAND core_sha256_tests)
+add_test(NAME core_sha256_scalar_contracts COMMAND core_sha256_tests)
+set_tests_properties(core_sha256_scalar_contracts PROPERTIES ENVIRONMENT "EAWR_SHA256_BACKEND=scalar")
+add_executable(core_sha256_live_tests sha256_live_tests.cpp)
+target_link_libraries(core_sha256_live_tests PRIVATE eawr::platform eawr::script_authoritative)
+target_compile_features(core_sha256_live_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(core_sha256_live_tests)
+add_test(NAME core_sha256_live_pair COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sha256_pair.py" --program "$<TARGET_FILE:core_sha256_live_tests>"
+    --out "${PROJECT_BINARY_DIR}/sha256-profile.json")
+set_tests_properties(core_sha256_live_pair PROPERTIES RUN_SERIAL TRUE LABELS "long;batch-only" TIMEOUT 2400)
 add_test(NAME sim_headless_help COMMAND sim_headless --help)
 set_tests_properties(sim_headless_help PROPERTIES PASS_REGULAR_EXPRESSION "Usage: sim_headless")
 
@@ -135,6 +150,15 @@ if(EAWR_ENABLE_SIM_BOUNDARY_CHECK)
             set(_eawr_sim_boundary_clangxx "${_eawr_candidate}")
             break()
         endif()
+        if(WIN32 AND _eawr_probe_output MATCHES "simulation boundary rejected"
+           AND NOT _eawr_probe_output MATCHES "SIM_BOUNDARY_COMPILE_ERROR")
+            # Clang parsed the project; the source tree itself violates the boundary.
+            message(FATAL_ERROR
+                "The simulation-boundary check ran with ${_eawr_candidate} and rejected the "
+                "source tree (not a Clang problem; fix the violation, do not set EAWR_CLANGXX):\n"
+                "${_eawr_probe_output}"
+            )
+        endif()
         string(REGEX MATCH "[^\n]*error[^\n]*" _eawr_probe_error "${_eawr_probe_output}")
         if(NOT _eawr_probe_error)
             set(_eawr_probe_error "${_eawr_probe_result} ${_eawr_probe_output}")
@@ -236,6 +260,11 @@ endif()
 # Tier labels (cmake/EawrTestTiers.cmake).
 add_test(NAME headless_missing_replay_contract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py"
+            --program "$<TARGET_FILE:sim_headless>")
+
+# #793: sim_headless acts on the catalog load health (a failed hardpoint include or registry fails the run, a missing include warns).
+add_test(NAME headless_catalog_health
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_catalog_health.py"
             --program "$<TARGET_FILE:sim_headless>")
 
 eawr_label_tests()

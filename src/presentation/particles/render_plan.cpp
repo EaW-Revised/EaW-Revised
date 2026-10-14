@@ -87,6 +87,7 @@ EmitterRenderPlan plan_emitter(const EmitterDefinition& emitter, const std::size
     plan.texture = emitter.color_texture;
     plan.tail_size = emitter.tail_size;
     plan.legacy_kite_motion = emitter.legacy_kite_motion;
+    plan.legacy_slot_order = emitter.legacy_slot_order;
     plan.inherit_emitter_motion = emitter.inherit_emitter_motion;
     const auto& velocity = emitter.velocity;
     Vec3 maximum = velocity.point;

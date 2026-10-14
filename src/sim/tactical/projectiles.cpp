@@ -341,6 +341,8 @@ core::Result<Projectile> redirect_projectile(Projectile& original,
     auto created = launch_projectile(shot, profile, request.source->owner, true, request.new_id, {});
     if (!created) return created;
     auto& redirected = created.value();
+    redirected.profile_key = original.profile_key;
+    redirected.reflected = original.profile_key.has_value();
     redirected.internal_damage_misc = false; // WPJ-42: redirected damage bypasses the misc gate
     redirected.max_travel = projectile_type.max_travel;
     redirected.yaw = facing.yaw; redirected.pitch = facing.pitch;
@@ -348,6 +350,60 @@ core::Result<Projectile> redirect_projectile(Projectile& original,
     if (!calc.ok()) return core::Result<Projectile>::failure(calc.error("projectile redirect facing"));
     if (rocket) original.max_travel = whole(300);
     return created;
+}
+
+core::Result<RedirectReaction> redirect_blaster_reaction(const Projectile& original, const ShotProfile& shot,
+    const SpecialAbilityProfile& handler, const CombatUnit& defender, const CombatUnit& attacker,
+    const std::uint64_t new_id, CombatRandom& random, CombatRandom& direction_random, const bool defender_moving) {
+    using Result = core::Result<RedirectReaction>;
+    RedirectReaction reaction;
+    if (!shot.redirect_blockable || handler.kind != SpecialAbilityKind::redirect_blaster) return Result::success(reaction);
+    motion_detail::Calc calc;
+    // WRB-07: the shot's heading against the defender's. With the arc at 360 degrees the margin is zero and
+    // every shot is reacted to; a narrower arc ignores shots that travel within the margin of its facing.
+    const auto margin = calc.div(calc.sub(whole(360), handler.reaction_arc), whole(2));
+    if (margin.raw() > 0) {
+        const auto shot_yaw = facing_toward(calc, {}, original.step).yaw;
+        const auto forward = math::Vec3{defender.transform.rows[0][0], defender.transform.rows[1][0], Fixed{}};
+        const auto defender_yaw = facing_toward(calc, {}, forward).yaw;
+        const auto difference = wrap_difference(calc.sub(defender_yaw, shot_yaw));
+        if (!calc.ok()) return Result::failure(calc.error("redirect blaster arc"));
+        if (difference.raw() > -margin.raw() && difference.raw() < margin.raw()) return Result::success(reaction);
+    }
+    if (!calc.ok()) return Result::failure(calc.error("redirect blaster arc"));
+    const auto roll = [&](const Fixed chance) {
+        // A uniform Q24 value in [0, 1): the shot is deflected when it falls below the chance. WRB-09: the
+        // roll is always drawn, so a zero chance still consumes its draw.
+        const auto draw = random.uniform(0, static_cast<std::uint32_t>(Fixed::scale - 1));
+        return static_cast<std::int64_t>(draw) < chance.raw();
+    };
+    ProjectileRedirect request;
+    request.new_id = new_id;
+    request.source = &defender;
+    Projectile at_contact = original;
+    // WRB-10: Redirect_Projectile with a target aims at its position, extrapolated over the flight time.
+    if (roll(handler.redirect_chance)) {
+        request.target = &attacker;
+        auto created = redirect_projectile(at_contact, shot, request);
+        if (!created) return Result::failure(created.error());
+        reaction.blocked = !defender_moving; // WRB-03/08: creation precedes the movement failure
+        reaction.created = std::move(created.value());
+        return Result::success(std::move(reaction));
+    }
+    if (!roll(handler.block_chance)) return Result::success(reaction);
+    // WRB-10: a block turns the shot around, its yaw spread up to the authored angle either way, and half of
+    // them pitch it between -60 and 30 degrees.
+    request.yaw_spread_draw = Fixed::from_raw(direction_random.symmetric_raw(handler.max_redirect_angle.raw()));
+    request.add_pitch = direction_random.uniform(0, static_cast<std::uint32_t>(Fixed::scale - 1)) < static_cast<std::uint32_t>(Fixed::scale / 2);
+    if (request.add_pitch) {
+        request.pitch_draw = Fixed::from_raw(-60 * Fixed::scale
+            + static_cast<std::int64_t>(direction_random.uniform(0, static_cast<std::uint32_t>(90 * Fixed::scale))));
+    }
+    auto created = redirect_projectile(at_contact, shot, request);
+    if (!created) return Result::failure(created.error());
+    reaction.blocked = !defender_moving; // WRB-03/08: the shot still flies; damage and sound are not cancelled
+    reaction.created = std::move(created.value());
+    return Result::success(std::move(reaction));
 }
 
 core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Projectile& projectile,
@@ -372,7 +428,8 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
         ++flight.age_frames;
         if (flight.profile.kind == FlightKind::rocket) {
             if (!flight.path_initialized) {
-                auto prepared = prepare_rocket_path(result.projectile);
+                CombatRandom random(world.seed, world.frame, projectile.id, rocket_path_slot);
+                auto prepared = prepare_rocket_path(result.projectile, &random);
                 if (!prepared) return core::Result<ProjectileStep>::failure(prepared.error());
             }
             flight.path_distance = q.take(math::add(flight.path_distance, projectile.speed));
@@ -602,6 +659,8 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
 }
 
 void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& projectile) {
+    const bool retained_profile = projectile.profile_key && (projectile.reflected
+        || projectile.profile_key->kind != ProjectileProfileKind::ordinary);
     sim::detail::append_u64(bytes, projectile.id);
     sim::detail::append_u64(bytes, projectile.shooter);
     sim::detail::append_u64(bytes, projectile.target);
@@ -621,7 +680,8 @@ void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& proje
             | (projectile.disable_engines_frames ? 4096U : 0U)
             | (projectile.damage_delay.raw() > 0 ? 8192U : 0U)
             | (!projectile.homing && projectile.turn_rate.raw() != 0 ? 16384U : 0U)
-            | (projectile.flight && projectile.flight->shield_redirected ? 32768U : 0U)); // reserved bits 14/15, WPJ-17/RFL-07
+            | (projectile.flight && projectile.flight->shield_redirected ? 32768U : 0U)
+            | (retained_profile ? 65536U : 0U)); // reserved bit16, WRB-10
     sim::detail::append_u32(bytes, 0);
     for (const auto& point : {projectile.position, projectile.step}) {
         sim::detail::append_i64(bytes, point.x.raw());
@@ -689,6 +749,11 @@ void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& proje
     }
     if (projectile.flight && projectile.flight->shield_redirected) {
         sim::detail::append_i64(bytes, projectile.flight->shield_allowance.raw());
+    }
+    if (retained_profile) {
+        sim::detail::append_u64(bytes, projectile.profile_key->type);
+        sim::detail::append_u32(bytes, projectile.profile_key->weapon);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(projectile.profile_key->kind));
     }
 }
 

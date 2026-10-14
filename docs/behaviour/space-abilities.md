@@ -53,7 +53,7 @@
 | AB-13 | An ability is ready when the unit has it, it is not recharging and its gate holds (AB-14, AB-16). A ready ability stays ready while it is on. This is what the Lua `Is_Ability_Ready` reports, and `Activate_Ability` acts only on a ready ability. | research AB-R02, AB-R13 |
 | AB-14 | `DEFEND` may switch on only on a shielded unit whose shield generators are online and whose shield is not in its depletion effect ([space damage](space-damage.md) DG-08). It is also refused while the unit is ion stunned ([space damage](space-damage.md) IS-07, ion weapons, energy drain and stun), and in retail in an ion storm, which M2 does not have. | research AB-R02, IR-04 |
 | AB-15 | A squadron container passes a non-team ability command to its live craft, and each craft uses its own type's ability data, not the squadron's: the X-wing craft's `SPOILER_LOCK` multiplies its speed by 1.3, not by the squadron's 2. The remake switches the craft on only when every live craft has the ability ready and off, and off together, so a squadron never runs split (**unverified**). A container has no ability status of its own. | research AB-R09; data; project |
-| AB-16 | When a unit's engines go offline (space-hardpoints HD-11), its `TURBO` and `SPOILER_LOCK` end, early (AB-12). The remake also keeps them from switching on while the engines are offline (**unverified**: the least visible choice; the other order would switch the mode on for one frame). | research AB-R14; project |
+| AB-16 | When a unit's engines go offline (space-hardpoints HD-11), its `TURBO` and `SPOILER_LOCK` end, early (AB-12). The remake also keeps them from switching on while the engines are offline (**unverified**: the least visible choice; the other order would switch the mode on for one frame). The shared hardpoint gate retains this engine-online policy (WHD-05). | research AB-R14; project |
 | AB-17 | Any shield set to zero or below ends an active `DEFEND` (early, AB-12). A shield generator loss drops the shield to zero (DG-17), so it ends `DEFEND` too (HD-12). | research AB-R06, AB-R14 |
 
 ### Multipliers while on
@@ -66,7 +66,10 @@
 | AB-23 | **Energy regeneration.** The energy pool's recharge amount is multiplied by the energy regen multiplier and its interval by the energy interval multiplier, rounded as AB-22 (`DEFEND`: 5 x 0.1 gives 15 frames). | research AB-R07 |
 | AB-24 | **Speed.** Maximum speed, acceleration and deceleration are multiplied by the speed multiplier; minimum speed is not (retail computes it and discards the result). A craft's locomotor reads the same maximum. A move under way plans again from the tick the multiplier changes, so the new speed takes effect with a move's usual two-tick latency: in S-17 `TURBO` at tick 60 changes the corvette's motion from tick 62, and it cruises at 7.44 instead of 3.72. | research AB-R08; recording S-17 |
 | AB-25 | No modelled ability changes the diminishing-firepower gate ([space damage](space-damage.md) DG-05): only a `MAXIMUM_FIREPOWER`-style ability turns the shooter's flag off, and none is in the M2 fleet. The flag stays on for every M2 shooter. | research AB-R04; data |
-| AB-26 | A multiplier name outside AB-20 to AB-24 fails the ability table load (EAWR-UNITS-0006), so new data cannot slip in unmodelled. The M2 fleet authors none. | project |
+| AB-26 | **Modifier vocabulary.** The ability table retains twelve `Mod_Multiplier` names, matched without regard to case: `WEAPON_DELAY_MULTIPLIER`, `SHIELD_REGEN_MULTIPLIER`, `SHIELD_REGEN_INTERVAL_MULTIPLIER`, `ENERGY_REGEN_MULTIPLIER`, `ENERGY_REGEN_INTERVAL_MULTIPLIER` and `SPEED_MULTIPLIER` (AB-21 to AB-24), `FIRE_RATE_MULTIPLIER` (AB-27), `SCATTER_RADIUS_MULTIPLIER` (AB-28), `CAUSE_DAMAGE_MULTIPLIER` and `TAKE_DAMAGE_MULTIPLIER` (AB-29), plus `TARGET_SPEED_MULTIPLIER` and `TARGET_TAKE_DAMAGE_MULTIPLIER`. A multiplier not authored is 1. It also retains the three `Mod_Flag` names: `WEAPONS_ENABLED_FLAG`, `CAN_BE_SQUASHED` and `ALLOW_TARGET_DIMINISHING_FIREPOWER`, preserving authored false values. Unknown names are ignored with a load note, and a supported ability keeps its remaining modifiers (legacy EAWR-2194). **Retail** matches names without regard to case against its table of these twelve multipliers and three flags, stores nothing for an unknown name and still loads the rest of the ability. The remake applies the ten existing multiplier names; the two target multipliers and three flags are stored with pending-consumer load notes, but their victim/land consumers remain unmodelled. Duplicate flags and multipliers use the last authored value as an **inferred host choice**, with retail precedence **unverified** (see Unknowns). Stock FoC XML authors only one of the extra names, `ALLOW_TARGET_DIMINISHING_FIREPOWER` (false), on the land `MAXIMUM_FIREPOWER` ability (AB-25); no stock ability authors the others, and none is in the M2 fleet. **Company-copy exception:** HeroCompany containers skip the ability loader (`src/units/unit_tables_decode.cpp:254`), so the `General_Veers_Team` company's own `Unit_Abilities_Data`, including its multiplier and flag copy, is neither retained nor diagnosed. The walker and its inherited death clones carry the retained flag. Checked against the Focumentation wiki (Ability Modifiers; Ability modifier types), which lists the same names under different counts; the debug build's tables are authoritative. | debug build (F2165-E01, E02, E04); stock XML; project; unverified duplicate precedence |
+| AB-27 | **Fire rate.** An object weapon's full recharge and pulse gap are divided by the fire rate multiplier, and the refilled pulse count is scaled by it ([barrage](barrage.md): `BARRAGE` authors 3). | data; project |
+| AB-28 | **Scatter radius.** While the shooter's scatter radius multiplier differs from 1, the blast radius of the projectiles it launches is multiplied by it. No stock M2 ability authors it; it is read so that data using it stays modelled. Retail applies the same factor to the blast radius of an area projectile, from the object that fired it. | debug build (F2165-E04); project |
+| AB-29 | **Damage modes.** `CAUSE_DAMAGE_MULTIPLIER` multiplies the damage the unit deals, and `TAKE_DAMAGE_MULTIPLIER` the damage it takes, in the damage service ([space damage](space-damage.md) DG-02). A product of 0 makes the unit immune to that damage (the Falcon's invulnerability); `LURE` authors 0.7 take damage (WLU-08). Privileged script damage skips take damage but not cause damage (WHE-51 in [the heroes walk](walks/heroes.md)). | data; project |
 
 ### Presentation
 
@@ -83,7 +86,7 @@
 |---|---|---|
 | AB-40 | Autofire is a per-ability flag. A command sets or clears it only for an ability with `Supports_Autofire`; for any other it is rejected. The flag itself switches nothing on (AB-10). | research AB-R01, AB-R13; data |
 | AB-41 | **The `DEFEND` stand-in.** The Nebulon-B's and the MC80's object script (`ObjectScript_PowerToShields`) runs once a second. For an owner that is not human, or for a human owner while `DEFEND` is on autofire, it switches `DEFEND` on when the unit's rate of damage taken exceeds 20 and `DEFEND` is ready. The remake runs this rule natively for every unit whose type runs that script and has `DEFEND`, at each close of the rate window (AB-42). A human owner's unit without autofire never switches `DEFEND` on by itself. | data (the script); research AB-R13, AB-R15 |
-| AB-42 | The rate of damage taken is serviced every 30 frames: the hull and shield the unit lost since the last service, times 30 / 30, per second. The remake closes the window when the tick is a multiple of 30 (**unverified** phase; see AB-U1). | research AB-R12 |
+| AB-42 | The rate of damage taken is serviced every 30 frames: the hull and shield the unit lost since the last service, times 30 / 30, per second. The remake closes the window when the tick is a multiple of 30 (**unverified** phase; see AB-U1). The rate is the unit's damage tracking (capital-combat walk WCC-82), kept for every type with the `DAMAGE_TRACKING` behaviour, the Nebulon-B and the MC80 among them; a type without it has a rate of 0. | research AB-R12; debug build |
 | AB-43 | When `DEFEND` switches on, the unit's next shield and energy recharges come due in the next frame, and run at `DEFEND`'s intervals from there. | research AB-R02; recording S-15 |
 | AB-44 | The Lua object calls: `Has_Ability(name)` is true when the unit (or a squadron container's craft) authors the ability, cut ones included; `Is_Ability_Ready`, `Is_Ability_Active` and `Is_Ability_Autofire` read AB-13, AB-11 and AB-40 (a container: all its craft), and are false for a cut ability; `Activate_Ability(name, on)` issues the ability command when the ability is ready. | research AB-R13 |
 | AB-45 | **Creation preference.** A fresh player profile defaults to enabling ability autofire. When a local player's unit is created, that enabled preference arms each authored ability with `Supports_Autofire`, including the secondary ability; it activates none. A disabled preference leaves those flags off. The preference also applies to units created during the battle. The remake binds the enabled owners in `AbilityTable.autofire_defaults` as session content; the unit-table binder enables its human owners by default and offers a disabled preference. Each human slot supplies its own profile in a multiplayer session. Toggling an existing unit does not change the creation preference. | research AF-R01 (creation), AF-R02 (fresh profile); project (session binding) |
@@ -117,6 +120,14 @@ knocks shields down and stuns ([space damage](space-damage.md) IS-01 to IS-07).
 |---|---|---|
 | AB-50 | Each snapshot instance carries one status per ability: its kind; whether it is on, ready (AB-13) and on autofire; whether it supports autofire; and its timer: while a timed ability is on, the frames left of its duration and the duration; while it recharges, the frames left and the recharge; otherwise both zero. A command bar switches abilities with ability commands on the selected units (a squadron container stands for its craft, AB-15) and reads the result from the next snapshot; a rejected command reports `ability_unavailable`. The live view implements ability buttons and recharge dials's `AbilityState` and `AbilityCommands` this way (foc-ability-buttons.md, "Interface to the simulation"). | project |
 
+<a id="ability-kinds-the-build-knows"></a>
+
+### Ability kinds the build knows (Focumentation cross-check)
+
+| Rule | Behaviour | Source |
+|---|---|---|
+| AB-70 | **The kind list.** The FoC build recognises 75 authorable ability kinds by name, plus an internal "none" and one internal garrison placeholder that has no XML name. The Focumentation page "Unit ability types" lists 64 of them, a list that stops short of the expansion. Kinds the build has that the wiki list lacks: `HARASS`, `BARRAGE`, `HUNT`, `LURE`, `AVOID_DANGER`, `DEPLOY_TROOPERS`, `SELF_DESTRUCT`, `CLUSTER_BOMB`, `INFECTION`, `BUZZ_DROIDS` and `CORRUPT_SYSTEMS`. Every wiki kind is in the build. The stock data authors `HUNT`, `LURE`, `BARRAGE`, `SELF_DESTRUCT`, `CLUSTER_BOMB` and `BUZZ_DROIDS` on space units (AB-03 and the ability walk cover them), `DEPLOY_TROOPERS` on land units, and `INFECTION` and `CORRUPT_SYSTEMS` on one Underworld hero; no stock object authors `HARASS` or `AVOID_DANGER`. A kind name outside the 75 is not an ability (it maps to none); the loader likewise skips kinds it does not model (unit census M141 to M156). Use the build's list, not the wiki list, as the source of kind names. | debug build F2166-E12; stock XML; Focumentation: Unit ability types |
+
 ## Cases
 
 | Case | Input | Expected |
@@ -131,7 +142,34 @@ knocks shields down and stuns ([space damage](space-damage.md) IS-01 to IS-07).
 `tactical_ability_contracts` runs these with 1, 2 and 4 workers and replays them; the S-17
 scenario trace checks ABC-01 against the recording and the S-15 duel trace runs with the stand-in.
 
-## Unknowns
+## Ability geometry during banking
+
+| Rule | Behaviour | Evidence |
+|---|---|---|
+| ABF-01 | Energy-beam fallback selects standing target hardpoints at their current world bone positions. Buzz Droids likewise choose the nearest standing world hardpoint for damage reach and routing. Both positions include the victim's bank (BK-05, WWP-73). The ordinary energy fallback's targeting-priority policy is unchanged. | debug build: energy lock fallback, ordinary hardpoint selection, Buzz victim selection and world bone placement |
+| ABF-02 | Corrupt Systems and space automatic healing first accept inclusive planar centre reach. Outside-centre sphere overlap uses the current oriented hull box, including bank. Collection bounds enclose that same rolled model box; otherwise the broad phase can discard a recipient that the narrow phase would accept. | debug build: both abilities' collidable queries, outside-centre matrix overlap and model world bounds |
+| ABF-03 | The beam range's planar facing axis and redirect-blaster yaw gate are roll-invariant. They retain level heading. Movement placement scratch warms a level-heading cache for locomotion; it does not supply collision bounds or hardpoint positions. Healing's footprint-only approximation, when no model box exists, retains the separately named inferred WSH-05 seam. | debug build: targeted range and redirect yaw gate; BK-05; project cache ownership and WSH-05 fallback policy |
+
+`tactical_ability_contracts` distinguishes level and rolled nearest hardpoints for energy beams
+and Buzz Droids, includes a hull that enters the area sphere only when rolled, excludes a hull
+that overlaps only when level, and heals a rolled box outside centre reach. Each case compares
+state and snapshot hashes on 1/2/4/8 workers. Shared victim scans use immutable placement
+reads; only each owning partition may update a unit's derived caches.
+
+## Remaining ability unknowns
+
+The [hardpoint walk](walks/abilities.md#hardpoint-dependencies-legacy-2420)
+records typed dependencies (WHD-01..04), named owner/type locks (WHD-05) and HUD
+admission (WHD-06). Missing or disabled required points refuse activation; a
+surviving alternative permits it. Named locks and station comm-array radar remain
+unimplemented; the existing supply-dock income predicate is not a general lock.
+
+WHD-07 distinguishes ordinary stun from ion stun. The ordinary-stun lifecycle
+refuses tractor, energy weapon, superlaser and lucky shot. M2 models only ion stun,
+which does not set ordinary stun; tractor and energy weapon stay available under
+ion stun when their other gates hold. DEFEND retains its distinct ion-stun refusal
+(AB-14, IS-07). Ordinary-stun availability must be wired when that lifecycle is
+implemented, without reusing the ion-stun gate.
 
 | ID | Unknown | Effect |
 |---|---|---|
@@ -143,3 +181,5 @@ scenario trace checks ABC-01 against the recording and the S-15 duel trace runs 
 | AB-U6 | `DEFEND` blocking hangar launches (space-hardpoints HD-13). | No M2 type has both a hangar and `DEFEND`; not modelled. |
 | AB-U7 | The exact frame FoC asks an autofire ion shot to lock on (AB-68). The matched S-48 archive contains six ion contacts, so the earlier claim that quick-loaded non-human recordings never fired ion shots is withdrawn. The debug build notifies nested targeted abilities from an attack command (AF-R04), but the complete retry cadence remains unverified. | The remake may lock on earlier after a recharge than FoC; the Rebel AI's Y-wings use the shot on autofire (AB-68). |
 | AB-U8 | A Lua `Activate_Ability` with a target (AB-69). | No M2 script issues one; the remake reports it. |
+
+Duplicate `Mod_Flag` and `Mod_Multiplier` precedence (AB-26) is unverified in retail. For abilities read by the loader, the remake retains every authored occurrence for content identity and uses the last value in the ability profile as an inferred host choice. Conflicting duplicate flags or multipliers in mod data may therefore differ from retail; stock data has no duplicate flags.

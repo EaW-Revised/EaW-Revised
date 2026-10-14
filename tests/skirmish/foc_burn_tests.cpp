@@ -397,7 +397,11 @@ int main(int argc, char** argv) {
     const auto hidden_order = std::find_if(unscouted->plans.plans.begin(), unscouted->plans.plans.end(),
         [](const auto& event) { return event.plan == "burnunits" && event.event == "order"; });
     expect(hidden_order == unscouted->plans.plans.end(), "the burn plan issues no order at an unscouted station");
-    expect(unscouted->diagnostics.empty(), "the unscouted burn control has no script diagnostics");
+    // FH-27/WSW-40: this level-one station has no manual special gun. The stock
+    // freestore's readiness query warns and returns nil, without ending the script.
+    // Require that precise warning and reject any additional diagnostic.
+    expect(unscouted->diagnostics == std::set<std::string>{"EAWR-SCRIPT-0216 Station has no manual special gun"},
+        "the unscouted burn control has only the expected no-manual-gun warning");
     std::cout << "FH-20: unscouted burn starts with zero mobile force and issues "
               << (hidden_order == unscouted->plans.plans.end() ? "no order" : "an unexpected order") << '\n';
 

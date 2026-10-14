@@ -8,3 +8,4 @@ not links.
 - [Phase 1: Render the world](phase-1/README.md)
 - [Phase 2: FoC space skirmish](phase-2/README.md)
 - [M2 skirmish lock](phase-2/m2-skirmish.md)
+- [M3 galactic conquest: dependency plan](m3-galactic-conquest.md)

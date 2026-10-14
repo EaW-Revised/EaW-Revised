@@ -1,5 +1,7 @@
 #include "unit_tables_decode.hpp"
 
+#include "eawr/data/retail_values.hpp"
+
 namespace eawr::units::unit_tables_detail {
 
 void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames* owner) {
@@ -33,6 +35,7 @@ void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames*
         hardpoint.collision_mesh = object->text("Collision_Mesh");
         hardpoint.special_ability_name = object->text("Special_Ability_Name");
         hardpoint.requires_manual_target = flag(*object, "Requires_Manual_Target_Assignment", false).value_or(false);
+        hardpoint.allows_special_weapon_use = flag(*object, "Allows_Special_Weapon_Use", false).value_or(false);
         hardpoint.fighter_bay_flyout_distance = object->fixed("Fighter_Bay_Flyout_Distance", report_, false);
 
         hardpoint.attachment = point(object->text("Attachment_Bone"), owner, owner_id, "Attachment_Bone");
@@ -90,11 +93,14 @@ void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames*
                 report_.missing(owner_id, "Fire_Projectile_Type", {}, "weapon hardpoint names no projectile");
             }
             want_projectile(weapon.projectile);
+            weapon.charged_projectile = object->text("Blast_Ability_Fire_Projectile_Type");
+            if (!weapon.charged_projectile.empty()) want_projectile(weapon.charged_projectile);
             weapon.min_recharge_seconds = object->fixed("Fire_Min_Recharge_Seconds", report_, true);
             weapon.max_recharge_seconds = object->fixed("Fire_Max_Recharge_Seconds", report_, true);
             weapon.pulse_count = count(*object, "Fire_Pulse_Count", true);
             weapon.pulse_delay_seconds = object->fixed("Fire_Pulse_Delay_Seconds", report_, false);
             weapon.appearance_delay_frames = count(*object, "Projectile_Appearance_Delay_Frames", false);
+            weapon.full_salvo_delay_multiplier = object->fixed("Full_Salvo_Weapon_Delay_Multiplier", report_, false);
             weapon.range = object->fixed("Fire_Range_Distance", report_, true);
             weapon.cone_width_degrees = object->fixed("Fire_Cone_Width", report_, true);
             weapon.cone_height_degrees = object->fixed("Fire_Cone_Height", report_, true);
@@ -116,7 +122,12 @@ std::vector<SpawnEntry> Loader::spawn_list(Object& object, const std::string_vie
         std::vector<SpawnEntry> result;
         for (const auto* node : object.list(tag, report_)) {
             const auto row = tokens(node->raw_text);
-            const auto value = row.size() == 2 ? number(row[1]) : std::nullopt;
+            // AU-82: each occurrence reads its first type and count pair only.
+            const auto value = row.size() >= 2 ? number(row[1]) : std::nullopt;
+            if (row.size() > 2) {
+                report_.note(object.effective.object_id, std::string(tag), trim(node->raw_text),
+                             "only the first type and count pair of an occurrence is read (AU-82)");
+            }
             const auto whole = value ? value->raw() / Fixed::scale : 0;
             if (!value || value->raw() % Fixed::scale != 0 || whole < std::numeric_limits<std::int32_t>::min() ||
                 whole > std::numeric_limits<std::int32_t>::max()) {
@@ -134,10 +145,12 @@ void Loader::load_spawner(Object& object, UnitType& unit) {
         bool spawns = false;
         for (const auto& token : tokens(object.text("SpaceBehavior"))) spawns = spawns || iequals(token, "SPAWN_SQUADRON");
         const bool has_list = !object.list("Starting_Spawned_Units_Tech_0", report_).empty();
-        for (const auto tag : {"Starting_Spawned_Units_Tech_1", "Starting_Spawned_Units_Tech_2",
-                               "Starting_Spawned_Units_Tech_3", "Starting_Spawned_Units_Tech_4"}) {
-            if (!object.list(tag, report_).empty()) {
-                report_.note(unit.id, tag, {}, "spawn list for a tech level other than Tech_0; not loaded (SK-23)");
+        if (!input_.campaign_scene) {
+            for (const auto tag : {"Starting_Spawned_Units_Tech_1", "Starting_Spawned_Units_Tech_2",
+                                   "Starting_Spawned_Units_Tech_3", "Starting_Spawned_Units_Tech_4"}) {
+                if (!object.list(tag, report_).empty()) {
+                    report_.note(unit.id, tag, {}, "spawn list for a tech level other than Tech_0; not loaded (SK-23)");
+                }
             }
         }
         if (!spawns) {
@@ -146,11 +159,19 @@ void Loader::load_spawner(Object& object, UnitType& unit) {
         }
         Spawner spawner;
         spawner.starting = spawn_list(object, "Starting_Spawned_Units_Tech_0", true);
-        if (spawner.starting.empty()) {
+        if (spawner.starting.empty() && !input_.campaign_scene) {
             report_.missing(unit.id, "Starting_Spawned_Units_Tech_0", {}, "SPAWN_SQUADRON without a starting list");
         }
         spawner.delay_seconds = object.fixed("Spawned_Squadron_Delay_Seconds", report_, true);
-        spawner.reserves = spawn_list(object, "Reserve_Spawned_Units_Tech_0", false);
+        spawner.reserves = spawn_list(object, "Reserve_Spawned_Units_Tech_0", input_.campaign_scene);
+        if (input_.campaign_scene) {
+            spawner.campaign_starting[0] = spawner.starting;
+            spawner.campaign_reserves[0] = spawner.reserves;
+            for (unsigned tech = 1; tech < 6; ++tech) {
+                spawner.campaign_starting[tech] = spawn_list(object, "Starting_Spawned_Units_Tech_" + std::to_string(tech), true);
+                spawner.campaign_reserves[tech] = spawn_list(object, "Reserve_Spawned_Units_Tech_" + std::to_string(tech), true);
+            }
+        }
         unit.spawner = std::move(spawner);
     }
 
@@ -164,7 +185,7 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
                     if (!iequals(child.name, "Type")) return false;
                     const auto kind = trim(child.raw_text);
                     return iequals(kind, "CONCENTRATE_FIRE") || iequals(kind, "WEAKEN_ENEMY")
-                        || iequals(kind, "MISSILE_SHIELD") || iequals(kind, "SENSOR_JAMMING");
+                        || iequals(kind, "MISSILE_SHIELD") || iequals(kind, "SENSOR_JAMMING") || iequals(kind, "LURE");
                 });
                 for (const auto& child : node.children) {
                     const auto value = trim(child.raw_text);
@@ -197,15 +218,49 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
                             report_.missing(unit.id, "Mod_Multiplier", value, "expected modifier, decimal");
                         } else {
                             ability.modifiers.push_back({row[0], *factor});
+                            // AB-26: unknown names keep the ability; retained names with no
+                            // current consumer also produce a load note.
+                            const auto name = upper(row[0]);
+                            if (name == "TARGET_SPEED_MULTIPLIER" || name == "TARGET_TAKE_DAMAGE_MULTIPLIER") {
+                                report_.note(unit.id, child.name, value, "retained modifier has no consumer (AB-26)");
+                            } else if (name != "WEAPON_DELAY_MULTIPLIER" && name != "SCATTER_RADIUS_MULTIPLIER"
+                                && name != "FIRE_RATE_MULTIPLIER" && name != "SHIELD_REGEN_MULTIPLIER"
+                                && name != "SHIELD_REGEN_INTERVAL_MULTIPLIER" && name != "ENERGY_REGEN_MULTIPLIER"
+                                && name != "ENERGY_REGEN_INTERVAL_MULTIPLIER" && name != "SPEED_MULTIPLIER"
+                                && name != "CAUSE_DAMAGE_MULTIPLIER" && name != "TAKE_DAMAGE_MULTIPLIER") {
+                                ability.modifiers.pop_back();
+                                report_.note(unit.id, child.name, value, "unknown modifier ignored; ability retained (AB-26)");
+                            }
+                        }
+                    } else if (iequals(child.name, "Mod_Flag")) {
+                        data::tag_trace::used(child);
+                        const auto row = tokens(value);
+                        const auto flag = row.size() == 2 ? boolean(row[1]) : std::nullopt;
+                        if (!flag) {
+                            report_.missing(unit.id, child.name, value, "expected modifier, boolean");
+                        } else {
+                            const auto name = upper(row[0]);
+                            if (name == "WEAPONS_ENABLED_FLAG" || name == "CAN_BE_SQUASHED"
+                                || name == "ALLOW_TARGET_DIMINISHING_FIREPOWER") {
+                                ability.modifier_flags.push_back({row[0], *flag});
+                                report_.note(unit.id, child.name, value, "retained flag has no consumer (AB-26)");
+                            } else {
+                                report_.note(unit.id, child.name, value, "unknown modifier flag ignored; ability retained (AB-26)");
+                            }
                         }
                     } else if (iequals(child.name, "Supports_Autofire")) {
                         data::tag_trace::used(child);
                         ability.supports_autofire = boolean(value).value_or(false);
+                    } else if ((ability.type == "INTERDICT" || ability.type == "MISSILE_SHIELD")
+                        && iequals(child.name, "Disable_Movement")) {
+                        data::tag_trace::used(child);
+                        ability.disable_movement = boolean(value).value_or(false);
                     } else if (iequals(child.name, "Projectile_Types_Override")) {
                         data::tag_trace::used(child);
                         ability.projectile_override = value;
                         want_projectile(value);
-                    } else if ((ability.type == "HARMONIC_BOMB" || ability.type == "WEAKEN_ENEMY")
+                    } else if ((ability.type == "HARMONIC_BOMB" || ability.type == "WEAKEN_ENEMY" || ability.type == "SELF_DESTRUCT"
+                        || ability.type == "FOW_REVEAL_PING")
                         && iequals(child.name, "Spawned_Object_Type")) {
                         data::tag_trace::used(child);
                         ability.spawned_object = value;
@@ -216,6 +271,10 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
                     } else if (ability.type == "WEAKEN_ENEMY" && iequals(child.name, "Target_Position_Z_Offset")) {
                         data::tag_trace::used(child);
                         ability.target_position_z_offset = number(value);
+                    } else if (ability.type == "CORRUPT_SYSTEMS" && iequals(child.name, "Area_Effect_Decal_Distance")) {
+                        data::tag_trace::used(child);
+                        ability.effective_radius = number(value);
+                        if (!ability.effective_radius) report_.missing(unit.id, child.name, value, "not a decimal");
                     } else if (iequals(child.name, "Targeting_Fire_Inaccuracy_Fixed_Radius_Override")) {
                         data::tag_trace::used(child);
                         ability.fixed_inaccuracy = number(value);
@@ -227,6 +286,29 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
                     } else if (ability.type == "REPLENISH_WINGMEN" && iequals(child.name, "Particle_Effect")) {
                         data::tag_trace::used(child);
                         ability.replenish_particle = value;
+                    } else if (ability.type == "LURE" && iequals(child.name, "Target_Types")) {
+                        // WLU-04: exact type names, in authored order (the service looks each one up).
+                        data::tag_trace::used(child);
+                        for (auto& name : tokens(value)) ability.target_types.push_back(std::move(name));
+                    } else if (ability.type == "LURE" && iequals(child.name, "Pulse_Frequency_Secs")) {
+                        data::tag_trace::used(child);
+                        ability.pulse_frequency_seconds = number(value);
+                        if (!ability.pulse_frequency_seconds) report_.missing(unit.id, child.name, value, "not a decimal");
+                    } else if (ability.type == "LURE" && iequals(child.name, "Max_Number_Of_Pulses")) {
+                        data::tag_trace::used(child);
+                        const auto count = number(value);
+                        if (!count || count->raw() < 0 || count->raw() % Fixed::scale != 0) {
+                            report_.missing(unit.id, child.name, value, "not a whole number");
+                        } else {
+                            ability.max_pulses = static_cast<std::uint32_t>(std::min<std::int64_t>(count->raw() / Fixed::scale, 0xffffffffLL));
+                        }
+                    } else if (ability.type == "LURE" && iequals(child.name, "Is_Pulsing")) {
+                        // WLU-03: read for the registry; the lure service pulses whatever it says.
+                        data::tag_trace::used(child);
+                        ability.is_pulsing = boolean(value);
+                    } else if (ability.type == "LURE" && iequals(child.name, "Particle_Effect")) {
+                        data::tag_trace::used(child);
+                        ability.lure_particle = value;
                     }
                 }
                 if (ability.type.empty()) report_.missing(unit.id, "Unit_Ability", {}, "ability has no Type");
@@ -262,11 +344,75 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
                     }
                     return {};
                 };
+                if (input_.campaign_scene && iequals(node.name, "Bounty_On_Faction_Ability")) {
+                    Production::Bounty bounty;
+                    bounty.percentage = std::max(Fixed{}, number(child_text("Bounty_Percentage_Amount")).value_or(Fixed{}));
+                    const auto category = number(child_text("Stacking_Category"));
+                    if (category && category->trunc_to_integer() >= std::numeric_limits<std::int32_t>::min()
+                        && category->trunc_to_integer() <= std::numeric_limits<std::int32_t>::max())
+                        bounty.category = static_cast<std::int32_t>(category->trunc_to_integer());
+                    bounty.factions = tokens(child_text("Target_Faction_Names"));
+                    bounty.all_allies = boolean(child_text("Apply_To_All_Allies")).value_or(false);
+                    unit.production.bounties.push_back(std::move(bounty));
+                }
+                if (iequals(node.name, "Cluster_Bomb_Ability")) {
+                    ClusterBomb cluster;
+                    cluster.name = name;
+                    cluster.style = sim::tactical::special_activation_style(child_text("Activation_Style"));
+                    cluster.bomb_type = child_text("Bomb_Type");
+                    const auto count = number(child_text("Number_Of_Bombs"));
+                    const auto seconds = number(child_text("Detonation_Time_In_Secs"));
+                    // WCB-03: invalid nonpositive inputs fall back to one bomb / one second.
+                    if (count && count->raw() > 0 && count->raw() / Fixed::scale <= 65536)
+                        cluster.count = static_cast<std::uint32_t>(std::max<std::int64_t>(1, count->raw() / Fixed::scale));
+                    else report_.missing(unit.id, "Number_Of_Bombs", {}, "expected a positive bounded count; using one");
+                    if (seconds && seconds->raw() > 0) cluster.detonation_seconds = *seconds;
+                    else report_.missing(unit.id, "Detonation_Time_In_Secs", {}, "expected positive seconds; using one");
+                    if (cluster.bomb_type.empty()) report_.missing(unit.id, "Bomb_Type", {}, "cluster bombs need a projectile type");
+                    else want_projectile(cluster.bomb_type);
+                    unit.cluster_bomb = std::move(cluster);
+                }
+                if (iequals(node.name, "Buzz_Droids_Ability")) {
+                    // WAB-70/71: the nested data Apply copies onto the droid object it creates.
+                    BuzzDroids buzz;
+                    buzz.name = name;
+                    const auto read = [&](const std::string_view tag) -> std::optional<Fixed> {
+                        const auto value = child_text(tag);
+                        const auto parsed = number(value);
+                        if (!parsed) report_.missing(unit.id, std::string(tag), value, "not a decimal");
+                        return parsed;
+                    };
+                    buzz.min_range = read("Activation_Min_Range");
+                    buzz.max_range = read("Activation_Max_Range");
+                    buzz.chase_radius = read("Chase_Radius");
+                    buzz.damage_radius = read("Damage_Radius");
+                    buzz.enemy_damage_per_second = read("Enemy_Damage_Per_Second");
+                    buzz.own_damage_per_second = read("Own_Damage_Per_Second");
+                    buzz.activation_seconds = read("Activation_Time_In_Seconds");
+                    buzz.object_type = child_text("Object_Type");
+                    buzz.activate_sfx = child_text("Activate_SFX");
+                    if (buzz.object_type.empty()) report_.missing(unit.id, "Object_Type", {}, "buzz droids need an object type");
+                    else enqueue(buzz.object_type, UnitKind::ship);
+                    unit.buzz_droids = std::move(buzz);
+                }
                 const auto special_kind = sim::tactical::special_ability_kind(node.name);
+                // WSH-01: only authored automatic space healers belong to this consumer.
+                if (special_kind == sim::tactical::SpecialAbilityKind::force_healing
+                    && std::none_of(node.children.begin(), node.children.end(), [](const auto& child) {
+                        return iequals(child.name, "Activation_Style") && iequals(trim(child.raw_text), "Space_Automatic");
+                    })) continue;
                 if (special_kind != sim::tactical::SpecialAbilityKind::none) {
                     sim::tactical::SpecialAbilityProfile special;
                     special.name = name;
                     special.kind = special_kind;
+                    if (special_kind == sim::tactical::SpecialAbilityKind::enable_radar) {
+                        const auto allies = child_text("Affects_All_Allies");
+                        if (!allies.empty()) {
+                            const auto parsed = boolean(allies);
+                            if (!parsed) report_.missing(unit.id, "Affects_All_Allies", allies, "not a boolean");
+                            else special.affects_all_allies = *parsed;
+                        }
+                    }
                     special.style = sim::tactical::special_activation_style(child_text("Activation_Style"));
                     special.service_interval = sim::tactical::special_service_interval(special_kind);
                     const auto enabled = child_text("Initially_Enabled");
@@ -293,6 +439,55 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
                         unit.id, "Applicable_Unit_Categories", report_);
                     special.filter.excluded_categories = enum_bits(tables_.categories, mask(child_text("Excluded_Unit_Categories")),
                         unit.id, "Excluded_Unit_Categories", report_);
+                    if (special_kind == sim::tactical::SpecialAbilityKind::force_healing) {
+                        const auto read = [&](const std::string_view tag, const Fixed fallback = {}) {
+                            const auto value = child_text(tag);
+                            if (value.empty()) return fallback;
+                            const auto parsed = number(value);
+                            if (!parsed) report_.missing(unit.id, std::string(tag), value, "not a decimal");
+                            return parsed.value_or(fallback);
+                        };
+                        const auto frame_count = [&](const Fixed seconds) {
+                            const auto bounded = std::clamp<std::int64_t>(seconds.raw(), 0,
+                                static_cast<std::int64_t>(sim::tactical::max_ability_frames) * Fixed::scale
+                                    / sim::tactical::logical_frames_per_second);
+                            return static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+                                (bounded * sim::tactical::logical_frames_per_second + Fixed::scale / 2) / Fixed::scale,
+                                0, sim::tactical::max_ability_frames));
+                        };
+                        special.heal_range = std::max(read("Heal_Range"), Fixed{});
+                        special.heal_percent = std::max(read("Heal_Percent"), Fixed{});
+                        special.heal_amount = read("Heal_Amount");
+                        auto interval = read("Heal_Interval_In_Secs");
+                        if (interval.raw() <= 0) interval = Fixed::from_raw(10 * Fixed::scale); // WSH-06
+                        special.heal_interval_frames = frame_count(interval);
+                        special.single_target_heal = boolean(child_text("Single_Target_Heal")).value_or(false);
+                        special.initially_enabled = special.initially_enabled.value_or(true);
+                        special.heal_sfx = child_text("SFXEvent_Target_Affected");
+                        special.heal_particle = child_text("Target_Particle_Effect");
+                        special.heal_target_bones = tokens(child_text("Target_Particle_Bone_Name"));
+                        special.heal_owner_bone = child_text("Owner_Particle_Bone_Name");
+                        special.heal_lightning = child_text("Lighting_Effect_Name");
+                        const auto colour = [&](const std::string_view tag) {
+                            std::array<Fixed, 3> result{};
+                            const auto values = tokens(child_text(tag));
+                            for (std::size_t i = 0; i < std::min(values.size(), result.size()); ++i)
+                                result[i] = number(values[i]).value_or(Fixed{});
+                            return result;
+                        };
+                        if (iequals(child_text("Target_Light_Effect_Type"), "Color_Flash")) {
+                            special.heal_target_colour = colour("Target_Light_Effect_Color");
+                            special.heal_target_light_frames = frame_count(read("Target_Light_Effect_Duration"));
+                            special.heal_target_light_pulses = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+                                read("Target_Light_Effect_Pulse_Count", Fixed::from_raw(Fixed::scale)).raw() / Fixed::scale, 1, 65535));
+                        }
+                        if (iequals(child_text("Owner_Light_Effect_Type"), "Color_Flash")) {
+                            special.heal_owner_colour = colour("Owner_Light_Effect_Color");
+                            special.heal_owner_light_frames = frame_count(read("Owner_Light_Effect_Duration"));
+                            special.heal_owner_light_pulses = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+                                read("Owner_Light_Effect_Pulse_Count", Fixed::from_raw(Fixed::scale)).raw() / Fixed::scale, 1, 65535));
+                        }
+                    }
                     if (special_kind == sim::tactical::SpecialAbilityKind::concentrate_fire
                         || special_kind == sim::tactical::SpecialAbilityKind::tractor_beam
                         || special_kind == sim::tactical::SpecialAbilityKind::energy_weapon) {
@@ -321,7 +516,229 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
                             special.concentrate_stacking_category = static_cast<std::uint32_t>(category->raw() / Fixed::scale);
                         } else if (!text.empty()) report_.missing(unit.id, "Stacking_Category", text, "not an unsigned integer");
                     }
-                    unit.special_abilities.push_back(std::move(special));
+                    if (special_kind == sim::tactical::SpecialAbilityKind::blast) {
+                        // WHE-35/36, FC-62: the handler's admitted-service charge and direct multiplier.
+                        sim::tactical::ChargedBlastProfile blast;
+                        const auto read = [&](const std::string_view tag, const Fixed fallback) {
+                            const auto value = child_text(tag);
+                            if (value.empty()) {
+                                report_.missing(unit.id, std::string(tag), value, "required BLAST field is absent");
+                                return fallback;
+                            }
+                            const auto parsed = number(value);
+                            if (!parsed) report_.missing(unit.id, std::string(tag), value, "not a decimal");
+                            return parsed.value_or(fallback);
+                        };
+                        const auto charge = read("Charge_Up_Seconds", Fixed{});
+                        if (charge.raw() < 0 || charge.raw() > 3600 * Fixed::scale)
+                            report_.missing(unit.id, "Charge_Up_Seconds", child_text("Charge_Up_Seconds"), "outside supported charge range");
+                        blast.charge_frames = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+                            charge.raw(), 0, 3600 * Fixed::scale) * sim::tactical::logical_frames_per_second / Fixed::scale);
+                        blast.damage_multiplier = read("Damage_Multiplier", Fixed::from_raw(Fixed::scale));
+                        blast.charging_effect = child_text("Charging_Effect");
+                        blast.charged_effect = child_text("Charged_Effect");
+                        blast.activate_sfx = child_text("SFXEvent_Activate");
+                        special.charged_blast = std::move(blast);
+                    }
+                    if (special_kind == sim::tactical::SpecialAbilityKind::stealth) {
+                        // WST-12: the cloak's presentation, its fade time and end colour.
+                        const auto transition = child_text("Stealth_Transition_Time");
+                        if (!transition.empty()) {
+                            const auto parsed = number(transition);
+                            if (parsed && parsed->raw() >= 0) special.stealth_transition = *parsed;
+                            else report_.missing(unit.id, "Stealth_Transition_Time", transition, "not a non-negative decimal");
+                        }
+                        const auto colour = tokens(child_text("Stealth_Color"));
+                        for (std::size_t channel = 0; channel < colour.size() && channel < special.stealth_colour.size(); ++channel) {
+                            const auto parsed = number(colour[channel]);
+                            if (!parsed) { report_.missing(unit.id, "Stealth_Color", colour[channel], "not a decimal"); continue; }
+                            special.stealth_colour[channel] = static_cast<std::uint8_t>(
+                                std::clamp<std::int64_t>(parsed->raw() / Fixed::scale, 0, 255));
+                        }
+                    }
+                    if (special_kind == sim::tactical::SpecialAbilityKind::leech_shields) {
+                        // WLS-01..05: the named handler owns its range, duration, drain and beam.
+                        const auto read = [&](const std::string_view tag) {
+                            const auto value = child_text(tag);
+                            const auto parsed = number(value);
+                            if (!value.empty() && !parsed) report_.missing(unit.id, std::string(tag), value, "not a decimal");
+                            return parsed.value_or(Fixed{});
+                        };
+                        special.beam_min_range = read("Activation_Min_Range");
+                        special.beam_max_range = read("Activation_Max_Range");
+                        const auto duration = read("Duration_In_Secs");
+                        const auto bounded_duration = std::clamp<std::int64_t>(duration.raw(), 0,
+                            static_cast<std::int64_t>(sim::tactical::max_ability_frames) * Fixed::scale
+                                / sim::tactical::logical_frames_per_second);
+                        special.leech_duration_frames = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+                            bounded_duration * sim::tactical::logical_frames_per_second / Fixed::scale,
+                            0, sim::tactical::max_ability_frames));
+                        const auto damage = read("Shield_Damage_Per_Second");
+                        special.damage_per_frame = Fixed::from_raw(damage.raw() / 30 + (damage.raw() % 30 + 15) / 30);
+                        special.leech_damage_bonus = read("Damage_Multiplier");
+                        special.beam_owner_bone = child_text("Beam_Bone_Name");
+                        special.leech_beam_frames = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+                            read("Beam_Frames").raw() / Fixed::scale, 0, sim::tactical::max_ability_frames));
+                        special.leech_beam_width = read("Beam_Width");
+                        special.leech_texture = child_text("Beam_Texture_Name");
+                        special.leech_lightning = child_text("Beam_Effect_Name");
+                        special.leech_effect = child_text("Leech_Effect");
+                        const auto colour = tokens(child_text("Beam_Color"));
+                        for (std::size_t channel = 0; channel < colour.size() && channel < special.leech_colour.size(); ++channel) {
+                            const auto parsed = number(colour[channel]);
+                            if (!parsed) { report_.missing(unit.id, "Beam_Color", colour[channel], "not a decimal"); continue; }
+                            special.leech_colour[channel] = static_cast<std::uint8_t>(
+                                std::clamp<std::int64_t>(parsed->raw() / Fixed::scale, 0, 255));
+                        }
+                    }
+                    if (special_kind == sim::tactical::SpecialAbilityKind::corrupt_systems) {
+                        const auto read = [&](const std::string_view tag) {
+                            const auto value = child_text(tag);
+                            const auto parsed = number(value);
+                            if (!parsed || parsed->raw() < 0) report_.missing(unit.id, std::string(tag), value, "expected a nonnegative decimal");
+                            return parsed.value_or(Fixed{});
+                        };
+                        special.corrupt_min_range = read("Activation_Min_Range");
+                        special.corrupt_max_range = read("Activation_Max_Range");
+                        const auto duration = std::min(read("Duration_In_Seconds"), Fixed::from_raw(
+                            static_cast<std::int64_t>(sim::tactical::max_ability_frames) * Fixed::scale
+                                / sim::tactical::logical_frames_per_second));
+                        special.corrupt_duration_frames = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+                            duration.raw() / Fixed::scale * sim::tactical::logical_frames_per_second
+                                + duration.raw() % Fixed::scale * sim::tactical::logical_frames_per_second / Fixed::scale, 1,
+                            sim::tactical::max_ability_frames));
+                        special.corrupt_drain_per_frame = Fixed::from_raw(read("Shield_Drain_Per_Second").raw()
+                            / sim::tactical::logical_frames_per_second);
+                        special.corrupt_inaccuracy = read("Inaccuracy_Radius");
+                        special.corrupt_target_particle = child_text("Target_Particle_Effect");
+                        special.corrupt_owner_particle = child_text("Owner_Particle_Effect");
+                        special.corrupt_activate_sfx = child_text("SFXEvent_Activate");
+                    }
+                    if (special_kind == sim::tactical::SpecialAbilityKind::laser_defense) {
+                        // WLD-02..WLD-09, WLD-12: the point-defence handler's own timing, reach and look.
+                        const auto read_number = [&](const std::string_view tag) {
+                            const auto value = child_text(tag);
+                            const auto parsed = number(value);
+                            if (!value.empty() && !parsed) report_.missing(unit.id, std::string(tag), value, "not a decimal");
+                            return parsed.value_or(Fixed{});
+                        };
+                        // The engine counts whole frames of 1/30 s: trunc(seconds x 30), as AB-04.
+                        const auto read_frames = [&](const std::string_view tag) {
+                            const auto seconds = read_number(tag);
+                            if (seconds.raw() <= 0) return std::uint32_t{0};
+                            const auto product = static_cast<std::uint64_t>(seconds.raw()) * sim::tactical::logical_frames_per_second;
+                            return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                                product / Fixed::scale, sim::tactical::max_ability_frames));
+                        };
+                        special.defence_duration_frames = read_frames("Defense_Duration_In_Secs");
+                        special.defence_look_frames = read_frames("Recharge_Time_In_Secs");
+                        special.defence_radius = read_number("Protection_Radius");
+                        special.defence_min_travel = read_number("Projectile_Dist_Travelled");
+                        special.defence_beam_width = read_number("Laser_Beam_Width");
+                        const auto beam_frames = child_text("Laser_Beam_Frames");
+                        if (!beam_frames.empty()) {
+                            const auto parsed = number(beam_frames);
+                            if (parsed && parsed->raw() > 0 && parsed->raw() % Fixed::scale == 0
+                                && parsed->raw() / Fixed::scale <= sim::tactical::max_ability_frames)
+                                special.defence_beam_frames = static_cast<std::uint32_t>(parsed->raw() / Fixed::scale);
+                            else report_.missing(unit.id, "Laser_Beam_Frames", beam_frames, "expected a positive whole frame count");
+                        }
+                        bool every_category_known = true;
+                        for (const auto& category : tokens(child_text("Projectile_Types_Targeted"))) {
+                            if (iequals(category, "MISSILE")) special.defence_categories |= sim::tactical::defence_category_missile;
+                            else if (iequals(category, "ROCKET")) special.defence_categories |= sim::tactical::defence_category_rocket;
+                            else if (iequals(category, "MPTL_ROCKET")) special.defence_categories |= sim::tactical::defence_category_mptl_rocket;
+                            else {
+                                every_category_known = false;
+                                report_.missing(unit.id, "Projectile_Types_Targeted", category, "projectile category is not modelled");
+                            }
+                        }
+                        // AB-26: a handler with a category the sim cannot match stays out of the table.
+                        if (!every_category_known) special.defence_categories = 0;
+                        const auto colour = tokens(child_text("Laser_Color"));
+                        for (std::size_t channel = 0; channel < colour.size() && channel < special.defence_colour.size(); ++channel) {
+                            const auto parsed = number(colour[channel]);
+                            if (!parsed) { report_.missing(unit.id, "Laser_Color", colour[channel], "not a decimal"); continue; }
+                            special.defence_colour[channel] = static_cast<std::uint8_t>(
+                                std::clamp<std::int64_t>(parsed->raw() / Fixed::scale, 0, 255));
+                        }
+                        special.defence_bones = tokens(child_text("Bone_Names"));
+                        special.defence_beam_texture = child_text("Laser_Beam_Texture");
+                        special.defence_lightning_effect = child_text("Lightning_Effect_Name");
+                        special.defence_zap_sfx = child_text("Zap_SFXEvent");
+                    }
+                    if (special_kind == sim::tactical::SpecialAbilityKind::redirect_blaster) {
+                        // WRB-01..WRB-04: Validate_Data's ranges; a value outside them is reported and cleared.
+                        const auto read_range = [&](const std::string_view tag, const std::int64_t whole_max, const Fixed fallback,
+                                                    const bool clamp = false) {
+                            const auto value = child_text(tag);
+                            const auto parsed = number(value);
+                            if (value.empty()) return fallback;
+                            if (!parsed) { report_.missing(unit.id, std::string(tag), value, "not a decimal"); return fallback; }
+                            if (parsed->raw() < 0 || parsed->raw() > whole_max * Fixed::scale) {
+                                report_.missing(unit.id, std::string(tag), value, "outside the authored range");
+                                return clamp ? Fixed::from_raw(std::clamp<std::int64_t>(parsed->raw(), 0, whole_max * Fixed::scale)) : Fixed{};
+                            }
+                            return *parsed;
+                        };
+                        special.redirect_chance = read_range("Redirect_Chance", 1, Fixed{});
+                        special.block_chance = read_range("Block_Chance", 1, Fixed{});
+                        special.reaction_arc = read_range("Reaction_Arc_In_Degrees", 360, Fixed{});
+                        special.max_redirect_angle = read_range("Max_Projectile_Redirection_Angle_In_Degrees", 180,
+                            Fixed::from_raw(180 * Fixed::scale), true);
+                        const auto turn = child_text("Turn_To_Face_Unblockable_Shots");
+                        if (!turn.empty()) {
+                            const auto parsed = boolean(turn);
+                            if (!parsed) report_.missing(unit.id, "Turn_To_Face_Unblockable_Shots", turn, "not a boolean");
+                            else special.turn_to_face_unblockable = *parsed;
+                        }
+                        special.redirect_activate_sfx = child_text("SFXEvent_Activate");
+                    }
+                    // WRB-01: only SpaceUnit carriers; the hero and structure objects that author it (Darth_Vader,
+                    // IG-88, Urai_Fen, the ground structures) are land objects, out of scope.
+                    if (special_kind != sim::tactical::SpecialAbilityKind::redirect_blaster || iequals(unit.xml_type, "SpaceUnit"))
+                        unit.special_abilities.push_back(std::move(special));
+                }
+                if (input_.campaign_scene && (iequals(node.name, "Enhance_Defense_Ability") || iequals(node.name, "Battlefield_Modifier_Ability"))
+                    && iequals(child_text("Activation_Style"), "Space_Automatic")) {
+                    BattlefieldBonus bonus; bonus.name = name;
+                    bonus.enabled = boolean(child_text("Initially_Enabled")).value_or(true);
+                    bonus.all_allies = boolean(child_text("Apply_To_All_Allies")).value_or(false);
+                    const auto category = number(child_text("Stacking_Category"));
+                    if (category && category->raw() >= 0 && category->trunc_to_integer() <= std::numeric_limits<std::uint32_t>::max())
+                        bonus.category = static_cast<std::uint32_t>(category->trunc_to_integer());
+                    if (iequals(node.name, "Enhance_Defense_Ability")) bonus.defence = number(child_text("Enhancement_Percentage")).value_or(Fixed{});
+                    else if (const auto multiplier = number(child_text("FOW_Reveal_Range_Multiplier"))) {
+                        const auto delta = sim::math::subtract(*multiplier, Fixed::from_raw(Fixed::scale));
+                        if (delta) bonus.reveal_delta = delta.value();
+                        else report_.missing(unit.id, "FOW_Reveal_Range_Multiplier", {}, "range multiplier overflows");
+                    }
+                    if (bonus.defence != Fixed{} || bonus.reveal_delta != Fixed{}) unit.production.battlefield_bonuses.push_back(std::move(bonus));
+                }
+                if (iequals(node.name, "Battlefield_Modifier_Ability") && iequals(child_text("Activation_Style"), "Space_Automatic")) {
+                    // WST-03: the debug build adds (multiplier - 1) to the cloak-duration list only when
+                    // the multiplier is not 1 (its default).
+                    const auto text = child_text("Stealth_Duration_Multiplier");
+                    const auto multiplier = number(text);
+                    if (!text.empty() && !multiplier) {
+                        report_.missing(unit.id, "Stealth_Duration_Multiplier", text, "not a decimal");
+                    } else if (multiplier && multiplier->raw() != Fixed::scale) {
+                        StealthDurationBonus bonus;
+                        bonus.multiplier = *multiplier;
+                        bonus.all_allies = boolean(child_text("Apply_To_All_Allies")).value_or(false);
+                        const auto category = number(child_text("Stacking_Category"));
+                        if (category && category->raw() >= 0
+                            && category->raw() / Fixed::scale <= std::numeric_limits<std::uint32_t>::max()) {
+                            bonus.stacking_category = static_cast<std::uint32_t>(category->raw() / Fixed::scale);
+                        }
+                        unit.production.stealth_duration_bonuses.push_back(bonus);
+                    }
+
+                    UnitType::SpecialUnlock unlock;
+                    unlock.enable = boolean(child_text("Enable_Special_Weapons")).value_or(false);
+                    unlock.all_allies = boolean(child_text("Apply_To_All_Allies")).value_or(false);
+                    unlock.reverse = boolean(child_text("Reverse_Application_Logic")).value_or(false);
+                    if (unlock.enable) unit.special_unlocks.push_back(unlock);
                 }
                 if (iequals(node.name, "Combat_Bonus_Ability") && iequals(child_text("Activation_Style"), "Space_Automatic")) {
                     CombatBonus bonus;
@@ -346,6 +763,15 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
                         bonus.percentages[index] = number(child_text(tags[index])).value_or(Fixed{});
                     }
                     unit.production.combat_bonuses.push_back(std::move(bonus));
+                } else if (iequals(node.name, "Enable_Ability")) {
+                    // WRB-05: the upgrade object's switch for a nested ability of its holder's units.
+                    AbilityEnable enable;
+                    enable.ability_name = child_text("Ability_Name");
+                    enable.types = tokens(child_text("Applicable_Unit_Types"));
+                    enable.categories = mask(child_text("Applicable_Unit_Categories"));
+                    enable.all_allies = boolean(child_text("Affects_All_Allies")).value_or(false);
+                    if (enable.ability_name.empty()) report_.missing(unit.id, "Ability_Name", name, "an Enable_Ability needs a name");
+                    else unit.production.ability_enables.push_back(std::move(enable));
                 } else if (iequals(node.name, "Starbase_Upgrade_Ability")
                     && iequals(child_text("Activation_Style"), "Skirmish_Automatic")) {
                     unit.production.level_up = true;
@@ -384,6 +810,10 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
     // #530 (docs/behaviour/space-purchasing.md PU-10 to PU-21, PU-31): what a station builds for
     // each faction, and what a type costs, takes and counts in a skirmish.
 void Loader::load_production(Object& object, UnitType& unit) {
+        if (input_.campaign_scene) {
+            unit.bounty_sp = object.fixed("Override_Bounty_SP", report_, false);
+            unit.bounty_mp = object.fixed("Override_Bounty_MP", report_, false);
+        }
         auto& production = unit.production;
         const auto list = tokens(object.text("Tactical_Buildable_Objects_Multiplayer"));
         for (const auto& token : list) {
@@ -397,6 +827,16 @@ void Loader::load_production(Object& object, UnitType& unit) {
             }
         }
         production.build_cost_multiplayer = object.fixed("Tactical_Build_Cost_Multiplayer", report_, false);
+        // WGT-26: campaign menus are independent of multiplayer menus.
+        for (const auto& token : tokens(object.text("Tactical_Buildable_Objects_Campaign"))) {
+            const auto* definition = input_.catalog->find(token, data::Category::faction);
+            if (definition != nullptr && iequals(definition->type_name, "Faction")) {
+                production.buildable_campaign.push_back(BuildGroup{definition->id, {}});
+            } else if (production.buildable_campaign.empty()) {
+                report_.missing(unit.id, "Tactical_Buildable_Objects_Campaign", token, "type before any faction");
+            } else production.buildable_campaign.back().types.push_back(token);
+        }
+        production.build_cost_campaign = object.fixed("Tactical_Build_Cost_Campaign", report_, false);
         production.build_time_seconds = object.fixed("Tactical_Build_Time_Seconds", report_, false);
         production.production_queue = object.text("Tactical_Production_Queue");
         // WPR-33 and WPR-22: production limits and completion side effects.
@@ -415,10 +855,48 @@ void Loader::load_production(Object& object, UnitType& unit) {
         }
         // WPR-50/52: load the authored station chain and every menu entry, once.
         for (const auto& group : production.buildable) for (const auto& name : group.types) production_ids_.push_back(name);
+        for (const auto& group : production.buildable_campaign) for (const auto& name : group.types) production_ids_.push_back(name);
         if (!production.next_level.empty()) production_ids_.push_back(production.next_level);
         production.population_value = count(object, "Population_Value", false);
+        production.space_override_population_value = count(object, "Space_Override_Population_Value", false, true);
         production.reinforcement_prevention_radius = object.fixed("Reinforcement_Prevention_Radius", report_, false);
     }
+
+void Loader::load_planetary_weapon(Object& object, UnitType& unit) {
+    // WSW-01/14/21: this hidden source uses object firing data, not ground
+    // locomotion, durability or muzzle/appearance data in the space simulation.
+    UnitType::PlanetaryWeapon special;
+    special.index = count(object, "Special_Weapon_Index", true).value_or(no_index);
+    special.target_action = count(object, "Special_Weapon_Target_Action_Index", true).value_or(no_index);
+    special.valid_targets = enum_bits(tables_.categories, mask(object.text("Special_Weapon_Valid_Targets")),
+        unit.id, "Special_Weapon_Valid_Targets", report_);
+    unit.planetary_weapon = special;
+    mask_flags(object, unit);
+    unit.movement.layer_z_adjust = object.fixed("Layer_Z_Adjust", report_, false);
+    unit.targeting_max_attack_distance = object.fixed("Targeting_Max_Attack_Distance", report_, false);
+    unit.damage_type = object.text("Damage_Type");
+    unit.ai_combat_power = object.fixed("AI_Combat_Power", report_, false);
+    unit.has_space_evaluator = flag(object, "Has_Space_Evaluator", false).value_or(false);
+    Weapon weapon;
+    const auto projectiles = tokens(object.text("Projectile_Types"));
+    if (projectiles.empty()) report_.missing(unit.id, "Projectile_Types", {}, "planetary source needs a projectile");
+    else { weapon.projectile = projectiles.front(); want_projectile(weapon.projectile); }
+    weapon.min_recharge_seconds = object.fixed("Projectile_Fire_Recharge_Seconds", report_, true);
+    weapon.max_recharge_seconds = weapon.min_recharge_seconds;
+    weapon.pulse_count = count(object, "Projectile_Fire_Pulse_Count", true);
+    weapon.pulse_delay_seconds = object.fixed("Projectile_Fire_Pulse_Delay_Seconds", report_, true);
+    weapon.damage_type = unit.damage_type;
+    weapon.damage = object.fixed("Projectile_Damage", report_, false);
+    weapon.inaccuracy = inaccuracy(object, "Targeting_Fire_Inaccuracy");
+    // WSW-45: the source's unauthored object turret extents default to 360/180.
+    if (!flag(object, "Fires_Forward", false).value_or(false)) {
+        weapon.cone_width_degrees = object.fixed("Turret_Rotate_Extent_Degrees", report_, false)
+            .value_or(Fixed::from_raw(360 * Fixed::scale));
+        weapon.cone_height_degrees = object.fixed("Turret_Elevate_Extent_Degrees", report_, false)
+            .value_or(Fixed::from_raw(180 * Fixed::scale));
+    }
+    unit.weapon = std::move(weapon);
+}
 
 void Loader::load_body(Object& object, UnitType& unit) {
         const bool station = unit.kind == UnitKind::station;
@@ -432,6 +910,29 @@ void Loader::load_body(Object& object, UnitType& unit) {
             unit.model_path = model_path(unit.model);
             model = frames(unit.model_path, unit.id);
             if (model == nullptr) unit.model_path.clear();
+        }
+        if (has_behavior(object, "TURRET")) {
+            auto& turret = unit.object_turret.emplace(UnitType::ObjectTurret{});
+            turret.turret = point(object.text("Turret_Bone_Name"), model, unit.id, "Turret_Bone_Name");
+            turret.barrel = point(object.text("Barrel_Bone_Name"), model, unit.id, "Barrel_Bone_Name");
+            turret.speed = object.fixed("Turret_Rotate_Speed", report_, true);
+            // FC-61, EFSB-06: the stock-unauthored delay defaults to two seconds.
+            turret.rest_delay = object.fixed("Turret_Rotate_To_Rest_Delay_Sec", report_, false)
+                .value_or(sim::tactical::default_object_turret_rest_delay);
+            // WSW-45: type defaults apply when these extents are unauthored.
+            turret.yaw_extent = object.fixed("Turret_Rotate_Extent_Degrees", report_, false)
+                .value_or(Fixed::from_raw(360 * Fixed::scale));
+            turret.pitch_extent = object.fixed("Turret_Elevate_Extent_Degrees", report_, false)
+                .value_or(Fixed::from_raw(180 * Fixed::scale));
+            turret.xy_only = flag(object, "Turret_XY_Only", false).value_or(false);
+            const auto authored = tokens(object.text("Turret_Rest_Angle"));
+            if (!authored.empty()) {
+                const auto x = authored.size() == 3 ? number(authored[0]) : std::nullopt;
+                const auto y = authored.size() == 3 ? number(authored[1]) : std::nullopt;
+                const auto z = authored.size() == 3 ? number(authored[2]) : std::nullopt;
+                if (x && y && z) turret.rest = {*x, *y, *z};
+                else report_.missing(unit.id, "Turret_Rest_Angle", object.text("Turret_Rest_Angle"), "expected three decimal angles");
+            }
         }
         unit.scale_factor = object.fixed("Scale_Factor", report_, false);
         unit.hull = object.fixed("Tactical_Health", report_, true);
@@ -458,6 +959,7 @@ void Loader::load_body(Object& object, UnitType& unit) {
         movement.acceleration = object.fixed("OverrideAcceleration", report_, false);
         movement.deceleration = object.fixed("OverrideDeceleration", report_, false);
         movement.space_layer = object.text("Space_Layer");
+        if (input_.campaign_scene) unit.campaign_ship_class = trim(object.text("Ship_Class"));
         unit.footprint = read_footprint(object, model);
         movement.layer_z_adjust = object.fixed("Layer_Z_Adjust", report_, false);
 
@@ -489,9 +991,28 @@ void Loader::load_body(Object& object, UnitType& unit) {
         unit.has_space_evaluator = flag(object, "Has_Space_Evaluator", false).value_or(false);
         unit.tech_level = count(object, "Tech_Level", false).value_or(0);
         unit.base_level = count(object, "Base_Level", false).value_or(0);
+        if (unit.star_base) {
+            // SAE-02: only level metadata is needed for the AI's surviving-station query;
+            // predecessor references do not add physical unit or model entries.
+            std::set<std::string> seen{lower(unit.id)};
+            std::string previous_name = trim(object.text("Prev_Level_Base"));
+            while (!previous_name.empty()) {
+                if (!seen.insert(lower(previous_name)).second) {
+                    report_.missing(unit.id, "Prev_Level_Base", previous_name, "reference cycle");
+                    break;
+                }
+                auto previous = resolve(*input_.catalog, previous_name, data::Category::game_object,
+                    unit.id, "Prev_Level_Base", report_);
+                if (!previous) break;
+                record_layers(*previous);
+                unit.previous_base_levels.push_back(count(*previous, "Base_Level", false).value_or(0));
+                previous_name = trim(previous->text("Prev_Level_Base"));
+            }
+        }
         unit.space_fow_reveal_range = object.fixed("Space_FOW_Reveal_Range", report_, has_reveal(object));
         unit.reveal = has_reveal(object);
         unit.force_sensitive = flag(object, "Is_Force_Sensitive", false).value_or(false);
+        unit.target_stealth_units = flag(object, "Target_Stealth_Units", false).value_or(false); // WST-07
         unit.dense_fow_multiplier = object.fixed("Dense_FOW_Reveal_Range_Multiplier", report_, false)
             .value_or(Fixed::from_raw(Fixed::scale / 2));
         unit.multisample_fow = flag(object, "Multisample_FOW_Check", false).value_or(false);
@@ -504,6 +1025,7 @@ void Loader::load_body(Object& object, UnitType& unit) {
         unit.ranged_target_z_adjust = object.fixed("Ranged_Target_Z_Adjust", report_, false);
         unit.powered = has_behavior(object, "POWERED"); // #361: the energy pool
         unit.ion_stun_effect = has_behavior(object, "ION_STUN_EFFECT"); // #561: IS-02
+        unit.damage_tracking = has_behavior(object, "DAMAGE_TRACKING"); // WCC-82
         if (model != nullptr) unit.collision = collision_bounds(*model->model, model->frames);
         const auto victory = flag(object, "Victory_Relevant", station);
         unit.victory_relevant = victory.value_or(false);
@@ -560,6 +1082,16 @@ void Loader::load_body(Object& object, UnitType& unit) {
                     .value_or(Fixed::from_raw(180 * Fixed::scale));
             }
             unit.weapon = std::move(weapon);
+            // WWP-47: enumerate the muzzle bones in turn; the first absent suffix ends the list, and an
+            // absent _00 leaves it empty (the shot then leaves the unit's origin). Not reported as
+            // unresolved: many object weapons author no muzzle bone.
+            const auto prefix_tokens = tokens(object.text("Muzzle_Bone_Name"));
+            const std::string prefix = prefix_tokens.empty() ? std::string{"MUZZLEA"} : prefix_tokens.front();
+            for (std::uint32_t suffix = 0; model != nullptr && suffix < 100; ++suffix) {
+                const auto name = prefix + (suffix < 10 ? "_0" : "_") + std::to_string(suffix);
+                if (!bone_index(*model->model, name)) break;
+                unit.muzzle_bones.push_back(point(name, model, unit.id, "Muzzle_Bone_Name"));
+            }
         }
         const bool armed = unit.weapon || std::any_of(unit.hardpoints.begin(), unit.hardpoints.end(),
             [](const Hardpoint& hardpoint) { return hardpoint.weapon.has_value(); });
@@ -574,7 +1106,9 @@ void Loader::load_squadron(Object& object, UnitType& unit) {
         unit.homogeneous = flag(object, "Is_Homogeneous", false).value_or(true);
         unit.footprint = read_footprint(object, nullptr);
         std::vector<std::string> members;
-        for (const auto* node : object.list("Squadron_Units", report_)) {
+        // ML-26: retain every authored variant occurrence, or inherit when all are placeholders.
+        for (const auto* node : data::retail::list(object.layers, "Squadron_Units",
+                                                 data::retail::ListRule::replace_by_variant_all)) {
             for (auto& id : tokens(node->raw_text)) members.push_back(std::move(id));
         }
         if (members.empty()) report_.missing(unit.id, "Squadron_Units", {}, "squadron has no members");
@@ -604,6 +1138,7 @@ void Loader::load_squadron(Object& object, UnitType& unit) {
         load_team(object, unit);
         unit.guard_chase_range = object.fixed("Guard_Chase_Range", report_, false);
         unit.idle_chase_range = object.fixed("Idle_Chase_Range", report_, false);
+        unit.autonomous_move_extension_vs_attacker = object.fixed("Autonomous_Move_Extension_Vs_Attacker", report_, false);
         unit.attack_move_response_range = object.fixed("Attack_Move_Response_Range", report_, false);
         unit.formation_error_tolerance = object.fixed("Squadron_Formation_Error_Tolerance", report_, false);
     }
@@ -612,6 +1147,11 @@ void Loader::load_squadron(Object& object, UnitType& unit) {
 const std::vector<std::string>& Loader::mask_flags(Object& object, UnitType& unit) {
         unit.category_mask = mask(object.text("CategoryMask"));
         unit.category_bits = enum_bits(tables_.categories, unit.category_mask, unit.id, "CategoryMask", report_);
+        if (const auto restrictions = mask(object.text("Attack_Category_Restrictions")); !restrictions.empty())
+            unit.attack_category_restrictions = enum_bits(tables_.categories, restrictions, unit.id, "Attack_Category_Restrictions", report_);
+        // WAB-73: the buzz-droid victim filter reads the droid type's own mask.
+        if (const auto targets = mask(object.text("Special_Weapon_Valid_Targets")); !targets.empty())
+            unit.special_weapon_targets = enum_bits(tables_.categories, targets, unit.id, "Special_Weapon_Valid_Targets", report_);
         unit.property_flags = mask(object.text("Property_Flags"));
         unit.property_bits = enum_bits(tables_.properties, unit.property_flags, unit.id, "Property_Flags", report_);
         return unit.category_mask;
@@ -622,9 +1162,16 @@ void Loader::load_team(Object& object, UnitType& unit) {
         unit.team_type = object.text("Create_Team_Type");
         if (unit.team_type.empty()) unit.team_type = "Team";
         auto team = resolve(*input_.catalog, unit.team_type, data::Category::game_object, unit.id, "Create_Team_Type", report_);
+        // SOS-01: an unresolved team stays an unresolved row and attaches no object
+        // script; the purchase type's own Lua_Script is not substituted (no retail
+        // fallback is established).
         if (!team) return;
         record_layers(*team);
         unit.team_type = team->effective.object_id;
+        unit.team_movement.max_speed = team->fixed("Max_Speed", report_, false);
+        unit.team_movement.deceleration = team->fixed("OverrideDeceleration", report_, false);
+        unit.lua_script = team->text("Lua_Script"); // SOS-01/19: inherited runtime attachment; a blank override keeps the parent's (ML-24)
+        unit.unit_ai = has_behavior(*team, "UNIT_AI"); // WTA-29: the runtime container, not the purchase template
         // WBP-51: the runtime squadron object is this team, not the purchase template.
         // Its craft retain their own effective collision flags.
         unit.living_projectile_collision = flag(*team, "Collidable_By_Projectile_Living", false).value_or(false);
@@ -643,6 +1190,7 @@ void Loader::load_team(Object& object, UnitType& unit) {
         load_abilities(*team, container);
         unit.team_abilities = std::move(container.abilities);
         unit.team_special_abilities = std::move(container.special_abilities);
+        unit.team_buzz_droids = std::move(container.buzz_droids);
         team->note_duplicates(report_);
     }
 

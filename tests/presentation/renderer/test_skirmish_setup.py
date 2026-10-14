@@ -3,6 +3,7 @@
 import csv
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import subprocess
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from capture_replay_cases import canonical_replay_header
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
 
 
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),
@@ -364,6 +366,132 @@ class SkirmishSetupGpu(unittest.TestCase):
             self.assertEqual(replay_hashes.read_bytes(), hashes.read_bytes())
             self.assertEqual(reproduced.read_bytes(), replay.read_bytes())
 
+    def test_staging_columns_keep_authored_rectangles_and_advanced_dialog(self):
+        """#3167: the player columns keep the resource's rectangles, the row list and the advanced
+        dialog (credits slider, win condition) draw, and each state is captured for the eye check."""
+        with tempfile.TemporaryDirectory(prefix="setup-layout-") as temporary:
+            output = Path(os.environ.get("EAWR_SETUP_EYECHECK", temporary)).resolve()
+            output.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run([
+                os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-skirmish-setup",
+                "--eawr-setup-test", "--eawr-setup-layout-test",
+                "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                "--eawr-capture", str(output / "layout.png"), "--eawr-font-cache",
+                os.environ.get("EAWR_FONT_CACHE", str(ROOT / "out/fonts")), "--eawr-audio", "off"],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
+            (output / "layout.log").write_text(result.stdout, encoding="utf-8")
+            self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+            for name in ("layout.png", "layout.popup.png", "layout.options.png", "layout.wincondition.png"):
+                self.assertGreater((output / name).stat().st_size, 10000, name)
+            number = r"(-?\d+(?:\.\d+)?)"
+            pattern = re.compile(r"EAWR setup layout (IDC_\w+) authored=" + ",".join([number] * 4)
+                                 + r" actual=" + ",".join([number] * 4) + r" visible=(\d)")
+            staging = {}
+            options = {}
+            for line in result.stdout.splitlines():
+                found = pattern.search(line)
+                if not found:
+                    continue
+                values = [float(item) for item in found.groups()[1:9]]
+                (staging if found.group(1).startswith("IDC_PLAYER_") else options)[found.group(1)] = (
+                    values[:4], values[4:], found.group(10) == "1")
+            # Every row's four controls sit on the rectangle the resource gives them (no growth to their
+            # longest item), and the columns keep the resource's gaps.
+            self.assertEqual(len(staging), 32, sorted(staging))
+            for name, (authored, actual, visible) in staging.items():
+                self.assertTrue(visible, name)
+                for index, axis in enumerate(("x", "y", "width", "height")):
+                    self.assertAlmostEqual(authored[index], actual[index], delta=0.75, msg=name + " " + axis)
+            for row in range(8):
+                columns = [staging["IDC_PLAYER_%s_%d" % (kind, row)][1]
+                           for kind in ("NAME", "FACTION", "COLOR", "TEAM")]
+                for left, right in zip(columns, columns[1:]):
+                    self.assertGreaterEqual(right[0] - (left[0] + left[2]), 2.0, "row %d columns touch" % row)
+            # The advanced dialog: the disabled credits slider displays the authored value, is
+            # disabled with its reason, and the win condition offers the two space choices.
+            for name in ("IDC_SKIRMISH_CREDITS_SLIDER", "IDC_SKIRMISH_CREDITS_VALUE", "IDC_WIN_CONDITION_COMBO"):
+                self.assertIn(name, options)
+                self.assertTrue(options[name][2], name)
+                authored, actual, _ = options[name]
+                self.assertTrue(all(abs(a - b) <= 0.75 for a, b in zip(authored, actual)), (name, authored, actual))
+            credits = re.search(r"EAWR setup credits: min=" + number + " max=" + number + " step=" + number
+                                + " value=" + number + " caption=" + number + " enabled=(\d)", result.stdout)
+            self.assertIsNotNone(credits, result.stdout[-3000:])
+            low, high, step, value = (float(credits.group(i)) for i in range(1, 5))
+            self.assertLess(low, high)
+            self.assertEqual(step, 0.0, "displaying data must not round it to a slider-edit bucket")
+            self.assertTrue(low <= value <= high, (low, value, high))
+            self.assertEqual(float(credits.group(5)), value)
+            self.assertEqual(credits.group(6), "0", "the credits slider is disabled until a battle applies it")
+            slots = re.findall(r"EAWR setup slot (\d+): active=(\d) faction=(.*?) team=(.*)", result.stdout)
+            open_rows = [row for row in slots if row[1] == "0"]
+            self.assertTrue(open_rows, result.stdout[-6000:])
+            self.assertTrue(all(not faction and not team for _, _, faction, team in open_rows), open_rows)
+            reopened = [row for row in slots if row[0] == "1"]
+            self.assertEqual([row[1] for row in reopened], ["1", "0", "1"], reopened)
+            self.assertTrue(reopened[-1][2] and reopened[-1][3], reopened)
+            alpha = re.search(r"EAWR setup popup alpha: " + number, result.stdout)
+            self.assertIsNotNone(alpha)
+            self.assertTrue(0 < float(alpha.group(1)) < 1, alpha.group(1))
+            self.assertIn("EAWR setup win condition: items=2 selected=1", result.stdout)
+            popup = re.search(r"EAWR setup popup: visible=1 rect=" + ",".join([number] * 4) + " combo="
+                              + ",".join([number] * 4), result.stdout)
+            self.assertIsNotNone(popup, result.stdout[-3000:])
+            list_width, combo_width = float(popup.group(3)), float(popup.group(7))
+            # A window's width is whole pixels, so the list may be a pixel narrower than its box.
+            self.assertGreaterEqual(list_width, combo_width - 1.0, "the row list is as wide as its box")
+            self.assertRegex(result.stdout, r"EAWR setup win list: visible=1 width=" + number + " combo=" + number)
+
+            # Derive the fixture from the loaded constants, with a value halfway between edit buckets.
+            from tools.inventory.corpus import Corpus
+            constants = ET.fromstring(Corpus(os.environ["EAWR_EAW_GAME_ROOT"]).read_effective(
+                "foc", "data/xml/gameconstants.xml").data)
+            authored = int(low) + 501
+            self.assertLess(authored, high)
+            node = constants.find(".//MP_Default_Credits")
+            self.assertIsNotNone(node)
+            node.text = str(authored)
+            xml = output / "mod/Data/XML"
+            xml.mkdir(parents=True)
+            (xml.parent / "MegaFiles.xml").write_text(
+                "<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+            ET.ElementTree(constants).write(xml / "GameConstants.xml", encoding="utf-8")
+            command = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1600x900",
+                       "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-skirmish-setup",
+                       "--eawr-setup-test", "--eawr-setup-layout-test", "--eawr-game-root",
+                       os.environ["EAWR_EAW_GAME_ROOT"], "--eawr-mod-root", str(xml.parents[1]),
+                       "--eawr-capture", str(output / "modded.png"), "--eawr-font-cache",
+                       os.environ.get("EAWR_FONT_CACHE", str(ROOT / "out/fonts")), "--eawr-audio", "off"]
+            modded = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, timeout=240)
+            (output / "modded.log").write_text(modded.stdout, encoding="utf-8")
+            self.assertEqual(modded.returncode, 0, modded.stdout[-6000:])
+            mod_credits = re.search(r"EAWR setup credits: .* value=" + number + " caption=" + number
+                                    + r" enabled=0", modded.stdout)
+            self.assertIsNotNone(mod_credits, modded.stdout[-6000:])
+            self.assertEqual(float(mod_credits.group(1)), authored)
+            self.assertEqual(float(mod_credits.group(2)), authored)
+            scale = re.search(r"EAWR setup popup scale: " + number + " combo=" + number, modded.stdout)
+            self.assertIsNotNone(scale, modded.stdout[-6000:])
+            self.assertGreater(float(scale.group(2)), 1.0)
+            self.assertAlmostEqual(float(scale.group(1)), float(scale.group(2)), places=3)
+
+            node.text = str(int(high) + 500)
+            ET.ElementTree(constants).write(xml / "GameConstants.xml", encoding="utf-8")
+            bounded_capture = output / "bounded.png"
+            command[command.index("--eawr-capture") + 1] = str(bounded_capture)
+            bounded = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, timeout=240)
+            (output / "bounded.log").write_text(bounded.stdout, encoding="utf-8")
+            self.assertEqual(bounded.returncode, 0, bounded.stdout[-6000:])
+            bound_credits = re.search(r"EAWR setup credits: .* value=" + number + " caption=" + number
+                                      + r" enabled=0", bounded.stdout)
+            self.assertIsNotNone(bound_credits, bounded.stdout[-6000:])
+            self.assertEqual(float(bound_credits.group(1)), high)
+            self.assertEqual(float(bound_credits.group(2)), high)
+            self.assertGreater((output / "bounded.options.png").stat().st_size, 10000)
+
     def test_nondefault_policy_replay_binds_recorded_purchase_content(self):
         with tempfile.TemporaryDirectory(prefix="replay-policy-") as temporary:
             output = Path(temporary)
@@ -371,10 +499,11 @@ class SkirmishSetupGpu(unittest.TestCase):
             recorded = (ROOT / "tests/skirmish/fixtures/m2-start.eawr-replay").read_bytes()
             header, setup_start = canonical_replay_header(recorded, 3)
             source = bytearray(header + recorded[setup_start:])
-            # Keep recorded setup metadata while replacing the four-flag policy record.
+            # Keep recorded setup metadata, with matching flags in both policy records.
             self.assertEqual(int.from_bytes(source[8:10], "little"), 3)
             source[8:10] = (5).to_bytes(2, "little")
-            extensions = [struct.pack("<HHI", 1, 4, 3)]
+            disabled_flags = 3
+            extensions = [struct.pack("<HHI", 1, 4, disabled_flags)]
             if setup_start > len(header):
                 count = struct.unpack_from("<I", recorded, len(header))[0]
                 offset = len(header) + 4
@@ -382,7 +511,15 @@ class SkirmishSetupGpu(unittest.TestCase):
                     tag, length = struct.unpack_from("<HH", recorded, offset)
                     end = offset + 4 + length
                     if tag != 1:
-                        extensions.append(recorded[offset:end])
+                        extension = bytearray(recorded[offset:end])
+                        if tag == 2:  # SKSU: map and map digest precede the match flags.
+                            flags_offset = 4
+                            for _ in range(2):
+                                text_length = struct.unpack_from("<H", extension, flags_offset)[0]
+                                flags_offset += 2 + text_length
+                            flags = struct.unpack_from("<I", extension, flags_offset)[0]
+                            struct.pack_into("<I", extension, flags_offset, (flags & ~15) | disabled_flags)
+                        extensions.append(extension)
                     offset = end
             metadata = struct.pack("<I", len(extensions)) + b"".join(extensions)
             source[10:12] = (len(header) + len(metadata)).to_bytes(2, "little")
@@ -434,6 +571,8 @@ class SkirmishSetupGpu(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout[-6000:])
             self.assertIn("EAWR skirmish setup returned", result.stdout)
             self.assertEqual(result.stdout.count("EAWR skirmish setup returned"), starts)
+            # Every caption the screen sets itself resolves through the installed text database.
+            self.assertRegex(result.stdout, r"EAWR setup captions: \d+ keys; missing: 0(?!\d)")
             if starts == 1:
                 self.assertIn("EAWR setup custom map list: true; empty: true; start disabled: true", result.stdout)
                 self.assertIn("EAWR setup official map list: true; maps: 24; preview starts: 2", result.stdout)

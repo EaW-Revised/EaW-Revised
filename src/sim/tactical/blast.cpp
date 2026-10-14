@@ -95,6 +95,11 @@ using math::Fixed;
 }
 } // namespace
 
+core::Result<bool> collision_overlaps_sphere(const CombatUnit& unit, const math::Vec3& centre,
+    const Fixed radius) {
+    return overlaps(unit, centre, radius);
+}
+
 math::Fixed primary_damage(const Projectile& projectile) noexcept {
     return projectile.damage.raw() == 0 && projectile.blast.enabled() ? projectile.blast.damage : projectile.damage;
 }
@@ -263,6 +268,34 @@ core::Result<Fixed> projectile_delivery_delay(const Projectile& projectile, cons
     const auto fraction = Fixed::from_raw(static_cast<std::int64_t>(random.uniform(0,
         static_cast<std::uint32_t>(Fixed::scale))) * 3 / 4 + Fixed::scale / 4);
     return math::multiply(projectile.damage_delay, fraction);
+}
+
+std::uint64_t delayed_damage_frames(const Fixed delay) noexcept {
+    // Split seconds first: WAD-17 distance delay can exceed the authored maximum.
+    const auto seconds = delay.raw() / Fixed::scale;
+    const auto fraction = delay.raw() % Fixed::scale;
+    return static_cast<std::uint64_t>(std::max<std::int64_t>(1,
+        seconds * logical_frames_per_second + fraction * logical_frames_per_second / Fixed::scale));
+}
+
+Hit delayed_damage_hit(const Fixed amount, const std::uint32_t damage_type,
+    const bool internal_damage_misc, const std::string_view contacted_mesh, const CombatProfile* recipient) noexcept {
+    Hit hit;
+    hit.amount = amount;
+    hit.damage_type = damage_type;
+    hit.internal_damage_misc = internal_damage_misc;
+    hit.kind = HitKind::delayed;
+    // EUS-15/WAD-26: resolve the retained name against the recipient's current type.
+    // Ordinary routing has no projectile flags, area flag, source or cause multiplier.
+    if (recipient && !contacted_mesh.empty()) {
+        for (std::uint32_t index = 0; index < recipient->hardpoint_meshes.size(); ++index) {
+            if (same_mesh(contacted_mesh, recipient->hardpoint_meshes[index])) {
+                hit.hardpoint = index;
+                break;
+            }
+        }
+    }
+    return hit;
 }
 
 core::Result<Hit> area_hit(const Projectile& projectile, const BlastRecipient& recipient, const Fixed defense,

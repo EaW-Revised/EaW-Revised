@@ -1,11 +1,14 @@
 // Save, load and state hash of the authoritative script scheduler (#248); the
 // format and its rules are in docs/lua-persistence.md. Everything here runs
-// serially at the tick barrier.
+// at the tick barrier; independent sandbox graphs can be encoded by workers.
 
 #include "scheduler_internal.hpp"
+#include "eawr/core/gc_profile.hpp"
 
 #include "eawr/core/sha256.hpp"
+#include "eawr/core/sync_digest.hpp"
 #include "eawr/script/numeric/backend.hpp"
+#include "eawr/sim/world.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -63,12 +66,17 @@ const sf::CFunctionTable* function_table(std::string& error) {
 
 // ---- Session identity ----
 
-void write_identity(ByteWriter& out) {
-    out.text(save_format_identity);
+void write_identity(ByteWriter& out, const SessionConfig& config, const std::optional<ManagedHandlePolicy>& policy) {
+    out.text(config.query_clock ? query_save_format_identity
+        : config.galactic_clock ? galactic_save_format_identity : save_format_identity);
     out.text(sandbox_policy_identity);
     out.text(rng_identity);
     out.text(numeric::numeric_abi().name);
     out.u32(numeric::numeric_abi().version);
+    if (policy) {
+        out.text("managed-handles-wga-471"); out.u32(policy->kind); out.u64(policy->interval);
+        out.text(policy->inventory_query); out.text(policy->release_action);
+    }
 }
 
 void write_config(ByteWriter& out, const SessionConfig& config) {
@@ -258,6 +266,22 @@ void write_instance(ByteWriter& out, const Instance& instance) {
             out.i32(handler.function_reference);
         }
     }
+    out.u32(static_cast<std::uint32_t>(instance.proximities.size()));
+    for (const auto& [object, list] : instance.proximities) {
+        out.u32(object.first);
+        out.u64(object.second);
+        out.u64(list.generation);
+        out.u32(static_cast<std::uint32_t>(list.handlers.size()));
+        for (const ProximityHandler& row : list.handlers) {
+            out.u64(row.handler.id);
+            out.i32(row.handler.function_reference);
+            out.u64(row.query.extent.repr);
+            for (const auto* filter : {&row.query.player, &row.query.type}) {
+                out.u8(filter->has_value() ? 1 : 0);
+                if (*filter) { out.u32((*filter)->kind); out.u64((*filter)->id); }
+            }
+        }
+    }
     const Staging& staging = instance.staging;
     out.u32(static_cast<std::uint32_t>(staging.commands.size()));
     for (const ScriptCommand& command : staging.commands) {
@@ -290,8 +314,9 @@ bool reference_ok(sf::Sandbox& sandbox, int reference, sf::ReferenceKind kind, b
 
 class InstanceReader {
 public:
-    InstanceReader(ByteReader& in, const Shared& shared, const sf::CFunctionTable& functions, std::uint64_t completed_tick) noexcept
-        : in_(in), shared_(shared), functions_(functions), completed_tick_(completed_tick) {}
+    InstanceReader(ByteReader& in, const Shared& shared, const sf::CFunctionTable& functions, std::uint64_t completed_tick,
+        std::uint64_t galactic_frame) noexcept
+        : in_(in), shared_(shared), functions_(functions), completed_tick_(completed_tick), galactic_frame_(galactic_frame) {}
 
     core::Result<std::unique_ptr<Instance>> read() {
         auto instance = std::make_unique<Instance>();
@@ -312,8 +337,11 @@ public:
         const std::string prefix = "instance " + std::to_string(current.id) + ": ";
         if (!in_.ok()) return failure("truncated instance");
         if (current.id == 0) return failure("instance ID 0");
-        if (current.tick < 1 || (current.tick != completed_tick_ && current.tick != completed_tick_ + 1) ||
-            current.time_tick + 1 != current.tick) {
+        const bool bad_clock = shared_.config.query_clock ? current.time_tick > galactic_frame_
+            : shared_.config.galactic_clock
+            ? current.time_tick > current.tick || current.time_tick > galactic_frame_
+            : current.time_tick + 1 != current.tick;
+        if (current.tick < 1 || (current.tick != completed_tick_ && current.tick != completed_tick_ + 1) || bad_clock) {
             return failure(prefix + "instance tick does not match the completed tick");
         }
         current.random = RandomStream(shared_.config.seed, current.tick, current.id, draws);
@@ -363,6 +391,33 @@ public:
             }
             registered += count;
             if (!current.handlers.emplace(std::move(name), std::move(handlers)).second) return failure(prefix + "duplicate event name");
+        }
+        const std::uint32_t proximity_count = in_.count(24);
+        for (std::uint32_t index = 0; index < proximity_count && in_.charge(sizeof(ProximityList)); ++index) {
+            const auto kind = in_.u32();
+            const auto object = in_.u64();
+            ProximityList list;
+            list.generation = in_.u64();
+            const auto count = in_.count(22);
+            if (count > quotas.registrations - registered) return failure(prefix + "proximity quota exceeded");
+            for (std::uint32_t row_index = 0; row_index < count; ++row_index) {
+                auto* row = in_.append(list.handlers);
+                if (row == nullptr) return failure(prefix + "truncated proximity");
+                row->handler.id = in_.u64();
+                row->handler.function_reference = in_.i32();
+                row->query.object = {kind, object};
+                row->query.extent = numeric::LuaNumber::from_repr(in_.u64());
+                for (auto* filter : {&row->query.player, &row->query.type}) {
+                    const auto present = in_.u8();
+                    if (present > 1) return failure(prefix + "proximity filter");
+                    if (present != 0) { const auto filter_kind = in_.u32(); *filter = Handle{filter_kind, in_.u64()}; }
+                }
+                if (row->handler.id == 0 || row->handler.id >= current.next_handler_id ||
+                    !handler_ids.insert(row->handler.id).second) return failure(prefix + "proximity handler ID");
+            }
+            registered += count;
+            if (!current.proximities.emplace(std::pair{kind, object}, std::move(list)).second)
+                return failure(prefix + "duplicate proximity object");
         }
         Staging& staging = current.staging;
         const std::uint32_t command_count = in_.count(32);
@@ -462,6 +517,13 @@ private:
             for (const int reference : slot.callbacks) hold(reference);
             for (const int reference : slot.parameters) hold(reference);
         }
+        for (const auto& [object, list] : instance.proximities) {
+            (void)object;
+            for (const auto& row : list.handlers) {
+                if (!reference_ok(sandbox, row.handler.function_reference, ReferenceKind::function, false, false)) return false;
+                hold(row.handler.function_reference);
+            }
+        }
         for (const auto& [name, handlers] : instance.handlers) {
             for (const Handler& handler : handlers) {
                 if (!reference_ok(sandbox, handler.function_reference, ReferenceKind::function, false, false)) return false;
@@ -475,36 +537,95 @@ private:
     const Shared& shared_;
     const sf::CFunctionTable& functions_;
     std::uint64_t completed_tick_;
+    std::uint64_t galactic_frame_;
 };
 
 } // namespace
 } // namespace detail
 
 core::Result<std::string> ScriptScheduler::save() {
+    const sim::InlineExecutor executor;
+    return save(executor);
+}
+
+core::Result<std::string> ScriptScheduler::save(const sim::PartitionExecutor& executor) {
     if (auto usable = impl_->check_usable(); !usable) return core::Result<std::string>::failure(usable.error());
     const auto refuse = [](std::string message) {
         return core::Result<std::string>::failure(detail::make_error(codes::save_refused, std::move(message)));
     };
+    if (executor.worker_count() == 0) return refuse("executor reports no workers");
     std::string error;
     const detail::sf::CFunctionTable* functions = detail::function_table(error);
     if (functions == nullptr) return refuse(error);
     detail::ByteWriter out;
-    detail::write_identity(out);
+    detail::write_identity(out, impl_->shared->config, impl_->managed_handles);
     detail::write_config(out, impl_->shared->config);
-    out.text(impl_->shared->manifest.digest());
+    out.text(impl_->shared->manifest_digest);
     detail::write_bindings(out, impl_->shared->bindings);
     out.u64(impl_->completed_tick);
+    if (impl_->shared->config.galactic_clock || impl_->shared->config.query_clock) out.u64(impl_->galactic_frame);
+    out.u32(static_cast<std::uint32_t>(impl_->objects.size()));
+    for (const auto& [id, object] : impl_->objects) {
+        out.u64(id);
+        out.u32(object.object.kind);
+        out.u64(object.object.id);
+        out.u64(object.generation);
+        out.text(object.module);
+    }
     out.u32(static_cast<std::uint32_t>(impl_->pending.size()));
     for (const auto& [key, event] : impl_->pending) detail::write_event(out, event);
     out.u32(static_cast<std::uint32_t>(impl_->instances.size()));
-    for (const auto& [id, instance] : impl_->instances) {
-        if (!instance->inbox.empty() || instance->current_thread != -1 || instance->exit_requested ||
-            instance->outcome != InstanceOutcome::running) {
-            return refuse("instance " + std::to_string(id) + " is not at a tick barrier");
+    const auto encode = [&](const detail::Instance& instance, detail::ByteWriter& writer, std::string& reason) {
+        if (!instance.inbox.empty() || instance.current_thread != -1 || instance.exit_requested ||
+            instance.outcome != InstanceOutcome::running) {
+            reason = "instance " + std::to_string(instance.id) + " is not at a tick barrier";
+            return false;
         }
-        detail::write_instance(out, *instance);
-        if (!detail::sf::save_graph(*instance->sandbox, *functions, out, error)) {
-            return refuse("instance " + std::to_string(id) + ": " + error);
+        detail::write_instance(writer, instance);
+        if (!detail::sf::save_graph(*instance.sandbox, *functions, writer, reason)) {
+            reason = "instance " + std::to_string(instance.id) + ": " + reason;
+            return false;
+        }
+        return true;
+    };
+    if (executor.worker_count() == 1 || impl_->instances.size() < 2) {
+        // Keep the direct writer path for one sandbox/worker.
+        for (const auto& [id, instance] : impl_->instances) {
+            static_cast<void>(id);
+            if (!encode(*instance, out, error)) {
+                return refuse(error);
+            }
+        }
+    } else {
+        struct Encoded {
+            detail::Instance* instance{};
+            detail::ByteWriter writer;
+            std::string error;
+            bool valid{};
+        };
+        std::vector<Encoded> encoded;
+        encoded.reserve(impl_->instances.size());
+        for (const auto& [id, instance] : impl_->instances) {
+            static_cast<void>(id);
+            encoded.push_back(Encoded{instance.get(), {}, {}, false});
+        }
+        // ADR-009: each Lua state and output writer belongs to one slot. The
+        // function table and scheduler header are immutable during this phase.
+        const auto prepared = executor.execute_phase("script-save", sim::tick_partition_count,
+            [&](const std::size_t partition) {
+                const auto range = sim::partition_range(partition, encoded.size());
+                for (auto index = range.begin; index < range.end; ++index) {
+                    auto& slot = encoded[index];
+                    slot.valid = encode(*slot.instance, slot.writer, slot.error);
+                }
+            });
+        if (!prepared) return core::Result<std::string>::failure(prepared.error());
+        for (auto& slot : encoded) {
+            if (!slot.valid) {
+                return refuse(slot.error);
+            }
+            if (!slot.writer.ok()) out.fail();
+            out.raw(slot.writer.bytes());
         }
     }
     // submit_event admits no deeper value; this guards the other writers.
@@ -525,18 +646,18 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
         in.expect(expected.bytes());
         return in.ok() ? core::Result<void>::success() : detail::reject(std::string(what));
     };
-    if (auto checked = expect([](detail::ByteWriter& out) { detail::write_identity(out); },
+    const detail::Shared& shared = *impl_->shared;
+    if (auto checked = expect([&](detail::ByteWriter& out) { detail::write_identity(out, shared.config, impl_->managed_handles); },
                               "not a script save of this format, policy, random stream or numeric ABI");
         !checked) {
         return checked;
     }
-    const detail::Shared& shared = *impl_->shared;
     if (auto checked = expect([&](detail::ByteWriter& out) { detail::write_config(out, shared.config); },
                               "the save belongs to a session with other settings or quotas");
         !checked) {
         return checked;
     }
-    if (auto checked = expect([&](detail::ByteWriter& out) { out.text(shared.manifest.digest()); },
+    if (auto checked = expect([&](detail::ByteWriter& out) { out.text(shared.manifest_digest); },
                               "the save belongs to a session with other modules");
         !checked) {
         return checked;
@@ -548,13 +669,35 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
     }
 
     const std::uint64_t completed_tick = in.u64();
+    const std::uint64_t galactic_frame = (shared.config.galactic_clock || shared.config.query_clock) ? in.u64() : 0;
+    if (!in.ok() || galactic_frame >= max_script_tick
+        || (!shared.config.query_clock && galactic_frame > completed_tick + 1))
+        return detail::reject("invalid galactic mode clock");
     if (!in.ok() || completed_tick >= max_script_tick) return detail::reject("completed tick");
+    std::map<std::uint64_t, ObjectScript> objects;
+    std::set<std::pair<std::uint32_t, std::uint64_t>> identities;
+    const std::uint32_t object_count = in.count(32);
+    for (std::uint32_t index = 0; index < object_count; ++index) {
+        if (!in.charge(sizeof(ObjectScript))) return detail::reject("object-script registry");
+        ObjectScript object;
+        object.instance = in.u64();
+        object.object.kind = in.u32();
+        object.object.id = in.u64();
+        object.generation = in.u64();
+        object.module = in.text();
+        if (!in.ok() || object.instance == 0 || (!objects.empty() && object.instance <= objects.rbegin()->first) ||
+            object.object.id == 0 || object.object.id >= (std::uint64_t{1} << 37) || object.generation == 0 ||
+            object.module.empty() || !ModuleManifest::normalise(object.module) ||
+            !identities.emplace(object.object.kind, object.object.id).second) return detail::reject("object-script registry");
+        objects.emplace(object.instance, std::move(object));
+    }
     std::map<EventKey, ScriptEvent> pending;
     const std::uint32_t pending_count = in.count(detail::min_event_bytes);
     for (std::uint32_t index = 0; index < pending_count; ++index) {
         if (!in.charge(sizeof(ScriptEvent) + sizeof(EventKey))) return detail::reject("pending event");
         ScriptEvent event;
-        if (!detail::read_event(in, event) || !detail::valid_producer(event.key.producer) || event.key.tick <= completed_tick) {
+        if (!detail::read_event(in, event) || !detail::valid_producer(event.key.producer)
+            || event.key.tick <= (shared.config.query_clock && event.key.producer == producer_script_timer ? galactic_frame : completed_tick)) {
             return detail::reject("pending event");
         }
         const EventKey key = event.key;
@@ -564,7 +707,7 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
     const std::uint32_t instance_count = in.count(detail::min_instance_bytes);
     for (std::uint32_t index = 0; index < instance_count; ++index) {
         if (!in.charge(sizeof(detail::Instance))) return detail::reject("truncated save or trailing bytes");
-        detail::InstanceReader reader(in, shared, *functions, completed_tick);
+        detail::InstanceReader reader(in, shared, *functions, completed_tick, galactic_frame);
         auto instance = reader.read();
         if (!instance) return core::Result<void>::failure(instance.error());
         const std::uint64_t id = instance.value()->id;
@@ -583,16 +726,73 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
 
     // Publish: nothing above touched the scheduler.
     impl_->instances = std::move(instances);
+    impl_->objects = std::move(objects);
     impl_->pending = std::move(pending);
     impl_->completed_tick = completed_tick;
+    impl_->galactic_frame = galactic_frame;
     impl_->aborted = false;
     return core::Result<void>::success();
 } catch (const std::bad_alloc&) {
     return detail::reject("not enough memory to decode the save");
 }
 
+std::uint64_t ScriptScheduler::sync_graph_encodes() const noexcept {
+    std::uint64_t count{};
+    for (const auto& [id, instance] : impl_->instances) { static_cast<void>(id); count += instance->sync_graph_encodes; }
+    return count;
+}
+core::Result<std::string> ScriptScheduler::sync_hash(bool verify_graphs) {
+    gc_profile::Scope profile_scope(gc_profile::Phase::lua_sync);
+    if (auto usable = impl_->check_usable(); !usable) return core::Result<std::string>::failure(usable.error());
+    const auto refuse = [](std::string message) {
+        return core::Result<std::string>::failure(detail::make_error(codes::save_refused, std::move(message)));
+    };
+    std::string error;
+    const auto* functions = detail::function_table(error);
+    if (!functions) return refuse(error);
+    detail::ByteWriter out;
+    out.text("eawr-script-sync-state-v1");
+    detail::write_identity(out, impl_->shared->config, impl_->managed_handles); detail::write_config(out, impl_->shared->config);
+    out.text(impl_->shared->manifest_digest); detail::write_bindings(out, impl_->shared->bindings);
+    out.u64(impl_->completed_tick);
+    if (impl_->shared->config.galactic_clock || impl_->shared->config.query_clock) out.u64(impl_->galactic_frame);
+    out.u32(static_cast<std::uint32_t>(impl_->objects.size()));
+    for (const auto& [id, object] : impl_->objects) {
+        out.u64(id); out.u32(object.object.kind); out.u64(object.object.id); out.u64(object.generation); out.text(object.module);
+    }
+    out.u32(static_cast<std::uint32_t>(impl_->pending.size()));
+    for (const auto& [key, event] : impl_->pending) { static_cast<void>(key); detail::write_event(out, event); }
+    out.u32(static_cast<std::uint32_t>(impl_->instances.size()));
+    for (const auto& [id, owned] : impl_->instances) {
+        static_cast<void>(id); auto& instance = *owned;
+        if (!instance.inbox.empty() || instance.current_thread != -1 || instance.exit_requested
+            || instance.outcome != InstanceOutcome::running) return refuse("sync digest needs a completed script barrier");
+        detail::write_instance(out, instance);
+        const std::array sandbox_key{instance.sandbox->identity_count(), instance.sandbox->memory_measured(), instance.sandbox->memory_charged()};
+        const bool changed = instance.sync_graph_dirty || instance.sync_graph_digest.empty() || instance.sync_graph_sandbox_key != sandbox_key;
+        if (changed || verify_graphs) {
+            detail::ByteWriter graph;
+            if (!detail::sf::save_graph(*instance.sandbox, *functions, graph, error)) return refuse(error);
+            if (!graph.ok()) return refuse("sync graph exceeds its canonical value bounds");
+            const auto& bytes = graph.bytes();
+            const auto digest = core::sync_state_digest(std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
+            if (!changed && digest != instance.sync_graph_digest) return refuse("cached Lua graph digest differs from full graph oracle");
+            instance.sync_graph_digest = digest; ++instance.sync_graph_encodes;
+            instance.sync_graph_sandbox_key = sandbox_key; instance.sync_graph_dirty = false;
+        }
+        out.text(instance.sync_graph_digest);
+    }
+    if (!out.ok()) return refuse("sync metadata exceeds its canonical value bounds");
+    const auto& bytes = out.bytes();
+    return core::Result<std::string>::success(core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size())));
+}
 core::Result<std::string> ScriptScheduler::state_hash() {
-    auto bytes = save();
+    const sim::InlineExecutor executor;
+    return state_hash(executor);
+}
+
+core::Result<std::string> ScriptScheduler::state_hash(const sim::PartitionExecutor& executor) {
+    auto bytes = save(executor);
     if (!bytes) return core::Result<std::string>::failure(bytes.error());
     std::string framed(state_hash_identity);
     framed.push_back('\0');

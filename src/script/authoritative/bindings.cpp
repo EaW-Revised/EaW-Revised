@@ -73,6 +73,37 @@ bool read_value(Instance& instance, lua_State* state, int index, int depth, Valu
             ++count;
             lua_pop(state, 1);
         }
+        bool sequential = true;
+        for (int position = 1; position <= count && sequential; ++position) {
+            lua_rawgeti(state, index, position);
+            sequential = !lua_isnil(state, -1);
+            lua_pop(state, 1);
+        }
+        if (!sequential) {
+            // SOS-17/WHE-68: an engine call receives a table's values; a set of host
+            // handles (keyed by anything, e.g. an object-keyed sample) crosses as its
+            // handle values in ascending (kind, id) order, independent of traversal.
+            ::std::vector<Handle> handles;
+            lua_pushnil(state);
+            while (lua_next(state, index) != 0) {
+                sf::HostHandle handle;
+                const bool read = instance.sandbox->to_handle(state, -1, handle);
+                lua_pop(state, 1);
+                if (!read) {
+                    lua_pop(state, 1);
+                    error = "only sequential tables or sets of handles cross the binding boundary";
+                    return false;
+                }
+                handles.push_back(Handle{handle.kind, handle.id});
+            }
+            ::std::sort(handles.begin(), handles.end(), [](const Handle& left, const Handle& right) {
+                return ::std::pair{left.kind, left.id} < ::std::pair{right.kind, right.id};
+            });
+            ::std::vector<Value> list;
+            for (const Handle& handle : handles) list.push_back(Value{handle});
+            out.data = ::std::move(list);
+            return true;
+        }
         ::std::vector<Value> list(static_cast<::std::size_t>(count));
         for (int position = 1; position <= count; ++position) {
             lua_rawgeti(state, index, position);
@@ -97,7 +128,8 @@ bool read_value(Instance& instance, lua_State* state, int index, int depth, Valu
 
 class InstanceContext final : public BindingContext {
 public:
-    explicit InstanceContext(Instance& instance) noexcept : instance_(instance) {}
+    explicit InstanceContext(Instance& instance, lua_State* state, bool local_handler) noexcept
+        : instance_(instance), state_(state), local_handler_(local_handler) {}
 
     [[nodiscard]] ::std::uint64_t instance() const noexcept override { return instance_.id; }
     [[nodiscard]] ::std::uint64_t tick() const noexcept override { return instance_.tick; }
@@ -108,6 +140,27 @@ public:
     void issue_command(::std::string verb, ValueList arguments) override {
         instance_.staging.commands.push_back(ScriptCommand{
             instance_.tick, instance_.id, instance_.command_sequence++, ::std::move(verb), ::std::move(arguments)});
+    }
+
+    core::Result<ValueList> apply_immediate(::std::string_view action, const ValueList& arguments) override {
+        if (!instance_.immediate) return core::Result<ValueList>::failure(
+            make_error(codes::missing_api, "immediate effects require an ordered native shadow"));
+        // Action-local copy also protects pcall-caught errors and a provider
+        // that returns failure after changing several native dependencies.
+        auto next = instance_.immediate->clone();
+        if (!next) throw ::std::runtime_error("immediate effect clone is null");
+        auto result = next->apply(action, arguments);
+        if (result) {
+            instance_.immediate = ::std::move(next);
+            instance_.immediate_changed = true;
+        }
+        return result;
+    }
+
+    core::Result<ValueList> query_immediate(::std::string_view name, const ValueList& arguments) const override {
+        if (!instance_.immediate) return core::Result<ValueList>::failure(
+            make_error(codes::missing_api, "immediate queries require an ordered native shadow"));
+        return instance_.immediate->query(name, arguments);
     }
 
     core::Result<void> post_event(ScriptEvent event) override {
@@ -129,8 +182,13 @@ public:
             quota_exhausted = true;
             return core::Result<void>::success();
         }
+        const auto query_clock = instance_.shared->config.query_clock;
+        const auto origin = query_clock ? instance_.time_tick : instance_.tick;
+        if (query_clock && *ticks >= max_script_tick - origin) {
+            return core::Result<void>::failure(make_error(codes::invalid_request, "query timer deadline exceeds clock format"));
+        }
         event.target = instance_.id;
-        event.key = EventKey{instance_.tick + *ticks, producer_script_timer, instance_.id, instance_.timer_sequence++};
+        event.key = EventKey{origin + *ticks, producer_script_timer, instance_.id, instance_.timer_sequence++};
         instance_.staging.timers.push_back(::std::move(event));
         ++instance_.pending_timers;
         return core::Result<void>::success();
@@ -140,10 +198,95 @@ public:
         add_diagnostic(instance_, code, ::std::move(message));
     }
 
+    core::Result<void> register_proximity(ProximityQuery query) override {
+        if (!local_handler_) return bad_handler();
+        if (!lua_isfunction(state_, 2)) return core::Result<void>::failure(
+            make_error(codes::invalid_request, "proximity handler must be a function"));
+        if (instance_.registrations >= instance_.shared->config.quotas.registrations) {
+            quota_exhausted = true;
+            return core::Result<void>::success();
+        }
+        lua_pushvalue(state_, 2);
+        const int reference = luaL_ref(state_, LUA_REGISTRYINDEX);
+        auto& list = instance_.proximities[{query.object.kind, query.object.id}];
+        list.handlers.push_back({{instance_.next_handler_id++, reference}, ::std::move(query)});
+        ++list.generation;
+        ++instance_.registrations;
+        return core::Result<void>::success();
+    }
+
+    core::Result<void> cancel_proximity(Handle object) override {
+        if (!local_handler_) return bad_handler();
+        if (!lua_isfunction(state_, 2)) return core::Result<void>::failure(
+            make_error(codes::invalid_request, "proximity handler must be a function"));
+        const auto found = instance_.proximities.find({object.kind, object.id});
+        if (found == instance_.proximities.end()) return core::Result<void>::success();
+        auto& list = found->second;
+        for (auto it = list.handlers.begin(); it != list.handlers.end();) {
+            lua_rawgeti(state_, LUA_REGISTRYINDEX, it->handler.function_reference);
+            const bool matches = lua_rawequal(state_, 2, -1) != 0;
+            lua_pop(state_, 1);
+            if (matches) {
+                luaL_unref(state_, LUA_REGISTRYINDEX, it->handler.function_reference);
+                it = list.handlers.erase(it);
+                --instance_.registrations;
+                ++list.generation;
+            } else ++it;
+        }
+        return core::Result<void>::success();
+    }
+
+    core::Result<void> service_proximities(Handle object, const ProximityCandidates& candidates) override {
+        const auto found = instance_.proximities.find({object.kind, object.id});
+        if (found == instance_.proximities.end()) return core::Result<void>::success();
+        auto& list = found->second;
+        ::std::vector<::std::uint64_t> completed;
+        ::std::uint64_t invoked = 0;
+        while (!instance_.exit_requested) {
+            const auto it = ::std::find_if(list.handlers.begin(), list.handlers.end(), [&](const ProximityHandler& row) {
+                return ::std::find(completed.begin(), completed.end(), row.handler.id) == completed.end();
+            });
+            if (it == list.handlers.end()) break;
+            // Copy before calling Lua: cancellation/registration may invalidate the row.
+            const ProximityHandler row = *it;
+            const auto generation = list.generation;
+            for (const Handle candidate : candidates(row.query)) {
+                if (++invoked > instance_.shared->config.quotas.queued_events) {
+                    quota_exhausted = true;
+                    return core::Result<void>::success();
+                }
+                const Mark mark = instance_.mark();
+                const int top = lua_gettop(state_);
+                lua_rawgeti(state_, LUA_REGISTRYINDEX, row.handler.function_reference);
+                push_value(state_, Value{object});
+                push_value(state_, Value{candidate});
+                // L-32: direct call at Service_Wrapper, including from a coroutine.
+                const int status = lua_pcall(state_, 2, 0, 0);
+                if (status != 0) {
+                    const char* message = lua_tostring(state_, -1);
+                    const ::std::string text = message != nullptr ? message : "proximity callback failed";
+                    report(text.find(codes::missing_api) != ::std::string::npos ? codes::missing_api : codes::script_error, text);
+                    instance_.rollback(mark);
+                }
+                lua_settop(state_, top);
+                if (instance_.sandbox->fault() != sf::SandboxFault::none) return core::Result<void>::success();
+                if (generation != list.generation || instance_.exit_requested) break;
+            }
+            if (generation == list.generation) completed.push_back(row.handler.id);
+        }
+        return core::Result<void>::success();
+    }
+
     bool quota_exhausted{};
 
 private:
+    static core::Result<void> bad_handler() {
+        return core::Result<void>::failure(make_error(codes::invalid_request,
+            "proximity handler must be a function in the same script instance; cross-instance functions are unsupported"));
+    }
     Instance& instance_;
+    lua_State* state_;
+    bool local_handler_;
 };
 
 int generic_body(lua_State* state, bool drop_self, bool bound = false) {
@@ -156,9 +299,18 @@ int generic_body(lua_State* state, bool drop_self, bool bound = false) {
         lua_insert(state, 1);
     }
     const BindingEntry& entry = instance.shared->bindings[index];
+    const bool local_handler = bound && (entry.name.ends_with(".Event_Object_In_Range") ||
+        entry.name.ends_with(".Cancel_Event_Object_In_Range"));
     ValueList arguments(static_cast<::std::size_t>(lua_gettop(state)));
     ::std::string error;
     for (int position = 1; position <= lua_gettop(state); ++position) {
+        // The handler never enters Value: the context retains/compares it in
+        // this Lua state only. Every other binding still rejects functions.
+        if (local_handler && position == 2 && lua_isfunction(state, position)) continue;
+        // L-54: these numeric APIs diagnose non-numbers but still draw. Do not
+        // reject or traverse an arbitrary Lua graph before the binding sees it.
+        if ((entry.name == "GameRandom" || entry.name == "GameRandom.Get_Float") &&
+            lua_type(state, position) != LUA_TNUMBER) continue;
         if (!read_value(instance, state, position, 0, arguments[position - 1], error)) {
             const ::std::string message = ::std::string(codes::invalid_request) + ": " + entry.name + " argument " +
                 ::std::to_string(position) + ": " + error;
@@ -166,7 +318,7 @@ int generic_body(lua_State* state, bool drop_self, bool bound = false) {
             return error_raised;
         }
     }
-    InstanceContext context(instance);
+    InstanceContext context(instance, state, local_handler);
     auto results = entry.binding(context, arguments);
     if (context.quota_exhausted) return quota_raised;
     if (!results) {
@@ -597,6 +749,18 @@ bool is_infrastructure_name(::std::string_view name) {
     return false;
 }
 
+bool can_extend_infrastructure(::std::string_view name) {
+    const auto dot = name.find('.');
+    if (dot == ::std::string_view::npos) return false;
+    for (const ObjectSpec& spec : infrastructure_objects()) {
+        if (spec.name != name.substr(0, dot)) continue;
+        return ::std::none_of(spec.members.begin(), spec.members.end(), [&](const Member& member) {
+            return member.name == name.substr(dot + 1);
+        });
+    }
+    return false;
+}
+
 ::std::vector<sf::CFunctionEntry> host_functions() {
     using sf::UpvalueShape;
     return {
@@ -635,7 +799,7 @@ InstanceScope::~InstanceScope() { running_instance = previous_; }
 
 void install_bindings(Instance& instance) {
     lua_State* state = instance.sandbox->state();
-    const ::std::vector<ObjectSpec> objects = infrastructure_objects();
+    ::std::vector<ObjectSpec> objects = infrastructure_objects();
     const auto& bindings = instance.shared->bindings;
     ::std::map<::std::string, ObjectSpec> generic;
     for (::std::size_t index = 0; index < bindings.size(); ++index) {
@@ -648,6 +812,16 @@ void install_bindings(Instance& instance) {
             spec.generic_call = static_cast<int>(index);
         } else {
             spec.members.push_back(Member{name.substr(dot + 1), nullptr, static_cast<int>(index)});
+        }
+    }
+    // GC-only registered extensions retain the protected object's call and
+    // existing members. Registration rejects replacing any built-in member.
+    if (instance.shared->config.galactic_clock) {
+        for (ObjectSpec& spec : objects) {
+            const auto found = generic.find(spec.name);
+            if (found == generic.end()) continue;
+            spec.members.insert(spec.members.end(), found->second.members.begin(), found->second.members.end());
+            generic.erase(found);
         }
     }
     for (const ObjectSpec& spec : objects) install_object(instance, state, spec);

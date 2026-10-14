@@ -5,6 +5,7 @@
 #include "pass_submission.hpp"
 #include "submission_plan.hpp"
 #include "particle_texture.hpp"
+#include "particle_prewarm.hpp"
 #include "particle_upload.hpp"
 #include "resource_lease_ledger.hpp"
 #include "shader_adapter.hpp"
@@ -100,10 +101,47 @@ void particle_upload_contracts() {
     stream.vertices.resize(8);
     stream.indices.resize(12);
     upload();
-    check(replacements == 2, "particle surface replaces storage when either buffer size changes");
+    check(replacements == 2, "particle surface grows when demand exceeds retained capacity");
     stream.indices.resize(6);
     upload();
-    check(replacements == 3, "index count changes replace particle storage even at the same vertex count");
+    check(replacements == 2, "shrinking the index stream retains particle storage");
+    for (std::size_t frame = 0; frame < 1000; ++frame) {
+        stream.vertices.resize(frame % 2 == 0 ? 4 : 8);
+        stream.indices.resize(frame % 2 == 0 ? 6 : 12);
+        upload();
+    }
+    check(replacements == 2, "1000 oscillating particle counts allocate no additional surfaces");
+    check(shape.vertices <= 8 + 8 / 2 && shape.indices <= 12 + 12 / 2,
+        "retained storage has at most 50 percent spare capacity at its peak demand");
+}
+
+void particle_prewarm_contracts(){
+    using namespace eawr::presentation::godot_backend::detail;
+    ParticleWarmBudget budget;
+    const ParticleWarmPolicy policy{"colour","normal","shader",1};
+    const std::array charges{ParticleWarmBudget::TextureCharge{"colour",1024},ParticleWarmBudget::TextureCharge{"normal",2048}};
+    check(budget.admits(policy,charges),"authored warm policy fits initial budget");
+    budget.commit(policy,charges);
+    check(budget.texture_bytes()==3072&&budget.emitters()==1,"warm charges include normal texture once");
+    budget.commit(policy,charges);
+    check(budget.texture_bytes()==3072&&budget.emitters()==1,"repeated warm plan cannot charge twice");
+    for(std::int32_t priority=2;priority<=32;++priority){
+        const ParticleWarmPolicy next{"colour","normal","shader",priority};
+        check(budget.admits(next,charges),"shared textures fit the policy-count budget");
+        budget.commit(next,charges);
+    }
+    check(!budget.admits({"colour","normal","shader",33},charges),"warm policy cap stops additional dormant emitters");
+    budget.clear();
+    const std::array repeated{ParticleWarmBudget::TextureCharge{"same",ParticleWarmBudget::max_texture_bytes},ParticleWarmBudget::TextureCharge{"same",ParticleWarmBudget::max_texture_bytes}};
+    check(budget.admits(policy,repeated),"same texture in two bindings is charged once");
+    budget.commit(policy,repeated);
+    check(budget.texture_bytes()==ParticleWarmBudget::max_texture_bytes,"full-budget shared texture has one charge");
+    const std::array extra{ParticleWarmBudget::TextureCharge{"new",1}};
+    check(!budget.admits({"new","","shader",1},extra),"one extra byte cannot exceed warm VRAM cap");
+    const std::array huge{ParticleWarmBudget::TextureCharge{"huge",std::numeric_limits<std::uint64_t>::max()}};
+    budget.clear();
+    check(!budget.admits(policy,huge),"oversized mod texture cannot overflow warm admission");
+    check(budget.texture_bytes()==0&&budget.emitters()==0,"warm release clears all retained-policy charges");
 }
 
 } // namespace eawr_renderer_test
@@ -111,6 +149,7 @@ void particle_upload_contracts() {
 int main() {
     using namespace eawr_renderer_test;
     particle_texture_contracts();
+    particle_prewarm_contracts();
     particle_upload_contracts();
     derived_fog_variant_contracts();
     upload_identity_contracts();
@@ -121,6 +160,8 @@ int main() {
     submission_plan_contracts();
     submission_presence_contracts();
     instance_resource_contracts();
+    gpu_memory_ledger_contracts();
+    texture_budget_contracts();
 
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

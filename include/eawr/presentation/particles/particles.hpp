@@ -3,6 +3,7 @@
 #include "eawr/core/result.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -142,6 +143,7 @@ struct EmitterDefinition final {
     std::string normal_texture;
     bool disable_depth_test{};
     bool depth_sort{};
+    bool legacy_slot_order{}; // V1 unsorted primitives retain emitter-local slot order.
     // PS-31: serialized V1 primitive selector, preserved for fail-closed planning.
     std::uint32_t primitive_mode{1}; // 0 triangle, 1 quad
     bool world_oriented{};
@@ -265,6 +267,10 @@ public:
     // ordinary freeze check, then rebases presentation time to zero. Counts
     // are included in the first advance; a strict freeze crossing latches frozen.
     [[nodiscard]] AdvanceStats advance(float delta_seconds);
+    // Developer profiling only; reset before an advance, never part of state.
+    void measure_phases(bool on) noexcept { measure_phases_ = on; phase_ms_ = {}; }
+    // Emission (including dependent events) and live-particle update CPU time.
+    [[nodiscard]] const std::array<double, 2>& phase_ms() const noexcept { return phase_ms_; }
     // BP-40: a linked particle (the Emitter translater, 26) keeps its position in its
     // emitter's frame, and FoC's renderer places it with the emitter's transform as it is
     // drawn; its velocity stays a world vector. Moves every such particle's position now by the emitter's rigid
@@ -311,6 +317,8 @@ private:
         std::size_t next_slot{};
         std::size_t live{};
         std::vector<std::size_t> free_slots{};
+        // PS-53: RGBA byte caches are built once, independently of live slots.
+        std::array<std::array<std::uint8_t, 32>, 4> color_cache{};
     };
     struct ChildInstance final {
         std::uint64_t id{};
@@ -372,6 +380,8 @@ private:
     float time_{};
     bool detached_{};
     bool prerolled_{};
+    bool measure_phases_{};
+    std::array<double, 2> phase_ms_{};
     // Presentation time at which each emitter's instance started; negative
     // after a pre-roll by that emitter's skip time.
     std::vector<float> emitter_start_;

@@ -1,0 +1,128 @@
+{
+ "comment": "Existing findings of tools/inventory/xml_literal_check.py, each with its ticket. May only shrink: fix the site (read the XML, or mark `// xml-fallback: <Tag>`) and delete the entry. ticket \"false-positive\" needs a reason.",
+ "max_entries": 23,
+ "entries": [
+  {
+   "file": "src/presentation/godot/ui/minimap_view.cpp",
+   "text": "degrees -= 90.0;",
+   "ticket": "false-positive",
+   "reason": "icon art orientation offset (-90 degrees), not an XML value"
+  },
+  {
+   "file": "src/presentation/ui/minimap.cpp",
+   "text": "if (type.show_facing && unit->yaw_degrees != 0.0) blip.rotation_degrees = unit->yaw_degrees - 90.0;",
+   "ticket": "false-positive",
+   "reason": "icon art orientation offset (-90 degrees), not an XML value"
+  },
+  {
+   "file": "src/script/foc/ai_data.hpp",
+   "text": "Real region_size{real(2000)}; // AI_SpaceEvaluatorRegionSize",
+   "ticket": 1861,
+   "reason": "Sourced global fallback; loader has no warning path. Missing-tag diagnostics deferred to a loader warning-channel follow-up (#1861)."
+  },
+  {
+   "file": "src/script/foc/ai_data.hpp",
+   "text": "Real fog_cell_size{real(100)}; // DesiredSpaceFOWCellSize",
+   "ticket": 1861,
+   "reason": "Sourced global fallback; loader has no warning path. Missing-tag diagnostics deferred to a loader warning-channel follow-up (#1861)."
+  },
+  {
+   "file": "src/script/foc/ai_data.hpp",
+   "text": "std::int64_t fog_cells_per_threat_cell{4}; // AI_FogCellsPerThreatCell",
+   "ticket": 1861,
+   "reason": "Sourced global fallback; loader has no warning path. Missing-tag diagnostics deferred to a loader warning-channel follow-up (#1861)."
+  },
+  {
+   "file": "src/script/foc/ai_selection.cpp",
+   "text": "if (info != nullptr) weight = weight + to_single(to_single(real(info->tech_level) / real(5)) * real(2));",
+   "ticket": "false-positive",
+   "reason": "engine formula Tech_Level / 5 * 2, not an XML value"
+  },
+  {
+   "file": "src/units/unit_tables_decode.cpp",
+   "text": "projectile.blast.tiers = signed_count(\"Projectile_Blast_Area_Dropoff_Tiers\", 5);",
+   "ticket": 1861,
+   "reason": "Per-object optional; sourced FoC default; absent tag stays silent by rule (#2540)."
+  },
+  {
+   "file": "src/units/unit_tables_profiles.cpp",
+   "text": "unit.team_hull = team->fixed(\"Tactical_Health\", report_, false).value_or(Fixed::from_raw(100 * Fixed::scale));",
+   "ticket": 1861,
+   "reason": "Per-object optional; sourced FoC default; absent tag stays silent by rule (#2540)."
+  },
+  {
+   "file": "include/eawr/presentation/audio/sfx.hpp",
+   "text": "double saturation_distance{300.0}; // Volume_Saturation_Distance",
+   "ticket": 1860
+  },
+  {
+   "file": "include/eawr/presentation/camera/controller.hpp",
+   "text": "inline constexpr float land_project_pitch_per_mouse_unit = -1.5F;",
+   "ticket": "false-positive",
+   "reason": "documented owner deviation (#337/#348): land map tilts like space"
+  },
+  {
+   "file": "include/eawr/presentation/ui/minimap.hpp",
+   "text": "std::array<float, 2> size{0.05F, 0.05F}; // Radar_Icon_Size: half extents in minimap units",
+   "ticket": 1861,
+   "reason": "Per-object optional; sourced FoC default; absent tag stays silent by rule (#2540)."
+  },
+  {
+   "file": "include/eawr/presentation/ui/selection.hpp",
+   "text": "inline constexpr float minimum_drag_select_distance = 100.0F;",
+   "ticket": 828
+  },
+  {
+   "file": "include/eawr/presentation/ui/world_ui.hpp",
+   "text": "inline constexpr float health_bar_scale = 1500.0F;",
+   "ticket": 828
+  },
+  {
+   "file": "include/eawr/sim/tactical/combat.hpp",
+   "text": "inline constexpr std::int64_t max_sphere_modifier = 256;",
+   "ticket": "false-positive",
+   "reason": "guard limit on a table value, not an XML value"
+  },
+  {
+   "file": "include/eawr/sim/tactical/fighters.hpp",
+   "text": "inline constexpr std::int64_t max_spin_seconds = 60;",
+   "ticket": "false-positive",
+   "reason": "guard limit on a table value, not an XML value"
+  },
+  {
+   "file": "include/eawr/sim/tactical/motion.hpp",
+   "text": "std::uint32_t reevaluation_frames{10};",
+   "ticket": 1858
+  },
+  {
+   "file": "include/eawr/skirmish/start.hpp",
+   "text": "sim::math::Fixed fog_cell_size{sim::math::Fixed::from_raw(std::int64_t{100} * sim::math::Fixed::scale)};",
+   "ticket": 1861,
+   "reason": "Sourced global fallback; loader has no warning path. Missing-tag diagnostics deferred to a loader warning-channel follow-up (#1861)."
+  },
+  {
+   "file": "apps/viewer/src/live_session_death.cpp",
+   "text": "seconds_tag(clone.value(), \"Death_Fade_Time\", 0.25), tactical::logical_frames_per_second).value_or(0U);",
+   "ticket": 1861,
+   "reason": "Per-object optional; sourced FoC default; absent tag stays silent by rule (#2540)."
+  },
+  {
+   "file": "apps/viewer/src/space_environment_probe.cpp",
+   "text": "case 45:",
+   "ticket": "false-positive",
+   "reason": "probe test fixture value"
+  },
+  {
+   "file": "src/presentation/ui/hud_shell.cpp",
+   "text": "std::tuple{\"Encyclopedia_Delay\", &timing.delay, 1000.0},",
+   "ticket": "false-positive",
+   "reason": "milliseconds-to-seconds divisor for the loaded XML value, not an XML default"
+  },
+  {
+   "file": "apps/viewer/src/battle_effects_prepare.cpp",
+   "text": "look.bolts = static_cast<std::uint32_t>(std::clamp(scalar(\"Number_Bolts\"), 0.0F, 128.0F));",
+   "ticket": "false-positive",
+   "reason": "upper safety bound on the loaded bolt count, not an XML default"
+  }
+ ]
+}

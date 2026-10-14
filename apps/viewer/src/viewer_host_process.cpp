@@ -1,7 +1,12 @@
 #include "viewer_host_internal.hpp"
+#include "loading_screen.hpp"
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
+#include "gpu_memory_trace.hpp"
 #include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/classes/viewport.hpp>
+#include <godot_cpp/classes/viewport_texture.hpp>
+#include <godot_cpp/classes/image.hpp>
 
 namespace eawr::presentation::godot_backend {
 
@@ -44,6 +49,94 @@ namespace {
 }
 } // namespace
 
+void ViewerHost::open_skirmish_loading() {
+    const skirmish::SetupMap* map = skirmish_setup_->map(*pending_start_->map);
+    auto* screen = memnew(EawrLoadingScreen);
+    EawrLoadingScreen::Options screen_options;
+    screen_options.content = skirmish_setup_->content();
+    screen_options.map_path = *pending_start_->map;
+    if (map != nullptr) {
+        screen_options.context_name = map->context_name;
+        screen_options.map_name = map->display_name.empty() ? map->name : map->display_name;
+    }
+    if (!screen->build(*skirmish_battle_host_, std::move(screen_options))) {
+        // The battle still starts, behind the HUD's own Begin (WBF-10).
+        UtilityFunctions::printerr(String::utf8(("EAWR loading screen: " + screen->failure()).c_str()));
+        memdelete(screen);
+        return;
+    }
+    skirmish_loading_ = screen;
+}
+
+void ViewerHost::start_skirmish_battle() {
+    auto selected = std::exchange(pending_start_, std::nullopt);
+    const std::string map_path = *selected->map;
+    gpu_memory_trace.sample("battle_start_from_setup");
+    gpu_memory_trace.battle_started();
+    map_mode_ = std::make_unique<MapMode>(MapMode::Options{
+        .game_root = options_->game_root, .mod_root = options_->mod_root,
+        .profile = options_->profile, .map_path = map_path,
+        .report_path = options_->report_path,
+        .capture_path = options_->skirmish_setup_test ? options_->capture_path.parent_path()
+            / (options_->capture_path.stem().string() + ".battle.png") : std::filesystem::path{},
+        .populate = true,
+        .lighting = "sh", .shadows = "on", .environment = "map",
+        .interactive = !options_->skirmish_setup_test, .setup = std::move(selected),
+        .content = options_->cache_content ? skirmish_setup_->content() : nullptr,
+        .shaders = skirmish_setup_->shaders(),
+        .loading = skirmish_loading_, .lan = skirmish_setup_->lan_match()});
+    if (!map_mode_->ready(*skirmish_battle_host_)) {
+        map_mode_.reset();
+        remove_child(skirmish_battle_host_);
+        memdelete(skirmish_battle_host_);
+        skirmish_battle_host_ = nullptr;
+        skirmish_loading_ = nullptr;
+        skirmish_setup_->show("This battle could not start. Check the map and factions or the run report.");
+        if (options_->skirmish_setup_test) stop(2);
+    }
+}
+
+void ViewerHost::start_replay_battle(const UiGalleryMode::ReplayRequest& request, const bool interactive) {
+    // A recording without a map record is a legacy fixture; those were all recorded on this map.
+    const std::string map_path = request.map.empty() ? "data/art/maps/_mp_space_coruscant.ted" : request.map;
+    const auto beside = [](const std::filesystem::path& path, const char* suffix) {
+        if (path.empty()) return std::filesystem::path{};
+        std::filesystem::path name = path.stem(); // keeps a non-ASCII stem; only ASCII is appended
+        name += suffix;
+        return path.parent_path() / name;
+    };
+    // Its own host node, as the skirmish battle has, so a refused recording leaves nothing behind.
+    auto* battle_host = memnew(Node3D);
+    add_child(battle_host);
+    map_mode_ = std::make_unique<MapMode>(MapMode::Options{
+        .game_root = options_->game_root, .mod_root = options_->mod_root,
+        .profile = options_->profile, .map_path = map_path,
+        .report_path = beside(options_->report_path, ".replay.json"),
+        .capture_path = beside(options_->capture_path, ".replay.png"),
+        .populate = true,
+        .lighting = "sh", .shadows = "on", .environment = "map",
+        .interactive = interactive,
+        .shaders = options_->cache_shaders ? std::make_shared<GodotShaderCache>() : nullptr,
+        .replay_input = request.path});
+    if (!map_mode_->ready(*battle_host)) {
+        const std::string reason(map_mode_->failure());
+        map_mode_.reset();
+        remove_child(battle_host);
+        memdelete(battle_host);
+        if (!interactive) {
+            stop(2);
+            return;
+        }
+        // Back to the Load Game page with the reason; the viewer stays up.
+        UiGalleryMode::Options options = UiGalleryMode::from_command_line();
+        options.notice = reason.empty() ? std::string("The recording could not be played.") : reason;
+        ui_gallery_mode_ = std::make_unique<UiGalleryMode>(std::move(options));
+        if (!ui_gallery_mode_->ready(*this)) stop(2);
+        return;
+    }
+    get_viewport()->connect("size_changed", callable_mp(this, &ViewerHost::on_map_viewport_size_changed));
+}
+
 void ViewerHost::_process(const double delta) {
     if (completed_) return;
     if (options_ && options_->window_resize_pending) {
@@ -69,8 +162,41 @@ void ViewerHost::_process(const double delta) {
         if (const std::optional<int> exit_code = font_mode_->process()) stop(*exit_code);
         return;
     }
+    if (options_mode_) {
+        if (const std::optional<int> exit_code = options_mode_->process()) stop(*exit_code);
+        return;
+    }
+    if (attract_runner_) {
+        if (const std::optional<int> exit_code = attract_runner_->standalone_frame(delta, *this)) stop(*exit_code);
+        return;
+    }
     if (ui_gallery_mode_) {
-        if (const std::optional<int> exit_code = ui_gallery_mode_->process()) stop(*exit_code);
+        if (const std::optional<int> exit_code = ui_gallery_mode_->process()) {
+            if (const auto replay = ui_gallery_mode_->take_replay_request(); replay && *exit_code == 0) {
+                ui_gallery_mode_.reset();
+                // A run with a capture is a test: the replay runs its frame window and ends.
+                start_replay_battle(*replay, options_->capture_path.empty());
+            } else {
+                stop(*exit_code);
+            }
+        }
+        return;
+    }
+    if (lan_lobby_mode_) {
+        if (const std::optional<int> exit_code = lan_lobby_mode_->process()) stop(*exit_code);
+        return;
+    }
+    if (galactic_mode_) {
+        sync_modal_holds();
+        if (const std::optional<int> exit_code = galactic_mode_->process(delta)) stop(*exit_code);
+        else if (const auto destination = galactic_mode_->score_destination();
+                 destination && *destination != platform::CampaignScoreDestination::none) {
+            // STAND-IN until the main menu exists (Thom-Ernst/Skirmish): the host owns what a score
+            // destination means, and with no menu or LAN lobby to show it ends the session. The
+            // menu owner replaces this branch with its navigation; the mode never quits itself.
+            UtilityFunctions::print("EAWR score exit: host ends the session (no main menu in this build)");
+            stop(0);
+        }
         return;
     }
     // UI-07: a modal that opened or closed since the last event ends held world input before
@@ -80,16 +206,35 @@ void ViewerHost::_process(const double delta) {
         if (const std::optional<int> exit_code = input_routing_mode_->process()) stop(*exit_code);
         return;
     }
+    if (front_end_ && !map_mode_) {
+        // The menus and the settings screen are the whole frame; the setup screen runs below.
+        if (const std::optional<int> exit_code = front_end_->process()) {
+            stop(*exit_code);
+            return;
+        }
+        if (front_end_->owns_frame()) return;
+    }
     if (map_mode_) {
         if (const std::optional<int> exit_code = map_mode_->process(delta)) {
             if (!skirmish_setup_) stop(*exit_code);
             else {
+                if (skirmish_setup_->lan_match() && !options_->capture_path.empty()) {
+                    const auto path = options_->capture_path.parent_path() / (options_->capture_path.stem().string() + ".battle.png");
+                    const auto image = get_viewport()->get_texture()->get_image();
+                    if (image.is_null() || image->save_png(String::utf8(ViewerPath::utf8(path).c_str())) != OK) {
+                        UtilityFunctions::printerr("EAWR LAN result capture failed: ", String::utf8(ViewerPath::utf8(path).c_str()));
+                        stop(2); return;
+                    }
+                }
+                UtilityFunctions::print("EAWR battle left with exit code ", *exit_code);
                 const auto return_start = StartupTrace::Clock::now();
                 world_capture_.clear();
                 map_mode_.reset();
                 remove_child(skirmish_battle_host_);
                 memdelete(skirmish_battle_host_);
                 skirmish_battle_host_ = nullptr;
+                skirmish_loading_ = nullptr;
+                gpu_memory_trace.battle_released();
                 skirmish_setup_->show(*exit_code == 0 ? "Battle finished. Choose your next battle." : "Battle could not finish; see the run report.");
                 startup_trace.returning(return_start);
                 RenderingServer::get_singleton()->connect("frame_post_draw",
@@ -111,30 +256,21 @@ void ViewerHost::_process(const double delta) {
     }
     if (skirmish_setup_) {
         skirmish_setup_->process();
+        gpu_memory_trace.setup_frame();
         if (options_->skirmish_setup_returned && ++frame_ >= 30) { stop(0); return; }
+        if (pending_start_) {
+            // The screen's Controls draw once in a normal frame before the preparation draws it on the spot.
+            if (skirmish_loading_ == nullptr || skirmish_loading_->frames() >= 2) start_skirmish_battle();
+            return;
+        }
         if (auto selected = skirmish_setup_->take_start()) {
             skirmish_setup_->hide();
             skirmish_battle_host_ = memnew(Node3D);
             add_child(skirmish_battle_host_);
-            map_mode_ = std::make_unique<MapMode>(MapMode::Options{
-                .game_root = options_->game_root, .mod_root = options_->mod_root,
-                .profile = options_->profile, .map_path = *selected->map,
-                .report_path = options_->report_path,
-                .capture_path = options_->skirmish_setup_test ? options_->capture_path.parent_path()
-                    / (options_->capture_path.stem().string() + ".battle.png") : std::filesystem::path{},
-                .populate = true,
-                .lighting = "sh", .shadows = "on", .environment = "map",
-                .interactive = !options_->skirmish_setup_test, .setup = std::move(selected),
-                .content = options_->cache_content ? skirmish_setup_->content() : nullptr,
-                .shaders = skirmish_setup_->shaders()});
-            if (!map_mode_->ready(*skirmish_battle_host_)) {
-                map_mode_.reset();
-                remove_child(skirmish_battle_host_);
-                memdelete(skirmish_battle_host_);
-                skirmish_battle_host_ = nullptr;
-                skirmish_setup_->show("This battle could not start. Check the map and factions or the run report.");
-                if (options_->skirmish_setup_test) { stop(2); return; }
-            }
+            pending_start_ = std::move(selected);
+            // BLD-01: a player's battle always loads behind the screen; a setup test only when it waits for Begin.
+            if (!options_->skirmish_setup_test || options_->live_begin == "manual") open_skirmish_loading();
+            if (skirmish_loading_ == nullptr) start_skirmish_battle();
         }
         return;
     }

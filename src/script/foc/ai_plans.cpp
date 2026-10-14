@@ -67,7 +67,11 @@ core::Result<void> parse_entry(const Host& host, std::string_view text, TaskForc
         taskforce.minimum_force = to_single(real(minimum));
         return core::Result<void>::success();
     }
-    if (key == "DENYHEROATTACH" || key == "DENYSPECIALWEAPONATTACH" || key == "REQUIREUNIQUESTAGE" ||
+    if (key == "DENYSPECIALWEAPONATTACH") {
+        taskforce.deny_special_weapon_attach = true;
+        return core::Result<void>::success();
+    }
+    if (key == "DENYHEROATTACH" || key == "REQUIREUNIQUESTAGE" ||
         key == "REQUIREMATCHINGSTAGE" || (!key.empty() && key.front() == '-')) {
         return core::Result<void>::success();
     }
@@ -155,6 +159,8 @@ core::Result<PlanDef> build_plan(const Host& host, std::string name, std::string
     plan.ignore_target = flag_of(globals[2]).value_or(false);
     plan.magic = flag_of(globals[3]).value_or(false);
     plan.allow_free_store = flag_of(globals[4]).value_or(true);
+    for (const TaskForceDef& taskforce : plan.taskforces)
+        plan.allow_special_weapons = plan.allow_special_weapons || (!taskforce.teams.empty() && !taskforce.deny_special_weapon_attach);
     plan.allow_engaged = flag_of(globals[5]).value_or(true);
     plan.per_failure_contrast_adjust = to_single(number_value(globals[6]).value_or(Real{}));
     plan.min_contrast = to_single(number_value(globals[7]).value_or(Real{}));

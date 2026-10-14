@@ -1,6 +1,10 @@
 {
   "about": "Perturbation hints of the tag perturbation check (docs/tag-applied-check.md), keyed by Class/tag path: perturb (auto, scale:<f>, flip, drop, set:<value>) or skip (why it cannot be checked headless). Rows without a hint use auto.",
   "hints": {
+    "Campaign/Description_Text": {"perturb": "set:TEXT_PERTURB_TEST", "why": "Identity-only negative control: a menu description must not prove a simulation consumer."},
+    "Campaign/Starting_Credits": {"perturb": "scale:2", "why": "Keep faction names while changing authored starting balances."},
+    "Planet/Galactic_Position": {"perturb": "scale:2", "why": "Move authored galactic positions without changing object identities."},
+    "TradeRoute/HS_Speed_Factor": {"perturb": "scale:2", "why": "Select named TradeRoute document records through the shared overlay."},
     "SpaceUnit/Layer_Z_Adjust": {
       "perturb": "set:40",
       "why": "the M2 craft do not author it (their height is the default); set: gives every checked object one"

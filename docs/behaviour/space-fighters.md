@@ -148,6 +148,11 @@
   roll is part of the object's facing, which FoC draws as it is: the bank is simulation state, not
   a presentation animation. With the M2 values (FM-01) the X-wing, TIE fighter and TIE interceptor
   bank up to 40 degrees at 6 degrees a frame, the Y-wing 70 and the TIE bomber 30 at 3.6.
+  Debug-build bank-angle value read and turn-to-roll mapping: the authored bank angle
+  is preserved, including 360 and negative values, with no 0..90 clamp or angle wrap
+  on loading. The turn limit checks the lower bound (minus the bank angle) first,
+  then the upper bound (the bank angle). With a negative bank of -40, a wanted yaw
+  below 40 therefore targets -40 roll; a wanted yaw at or above 40 targets +40 roll.
 - **FM-04** (research E75-13) The pitch changes by at most `Max_Lift` per frame.
 - **FM-05** (research E75-14) The speed moves toward the wanted speed by at most `Max_Thrust` per
   frame; the velocity is the speed along the facing, and the craft moves by its velocity.
@@ -213,7 +218,8 @@
   its leader: in a 40-degree bank the X-wing wingmen 15 units to either side hold slots 10 units
   above and below the leader's level, those 30 out 19 units, and climb or dive to keep them.
   Before the squadron attack-run eye check work the remake turned the slots by the leader's yaw only, and a squadron turned as a
-  flat plate (G-F4).
+  flat plate (G-F4). The container's own rotation and placement take the leader's facing every
+  frame too (walk WSQ-53), so its selection box turns with the squadron.
 - **FM-12** (research E75-18, recording S-28) A follower's speed eases between half and one and a
   half times the wanted speed to close its error along the leader's velocity, once the squadron's
   largest slot error along the leader's facing exceeds `Squadron_Formation_Error_Tolerance`
@@ -231,16 +237,26 @@
   leader that ended a move within a unit of the point then aimed across it every frame and came to
   rest on it, and a wingman far from the point wanted half its distance per frame and flew off at
   up to 1974 times its maximum speed (the nightly soak, long-battle invariant soak). After a fight the leader now holds an
-  idle cell's point (FM-24, exclusive squadron idle cells).
+  idle cell's point (FM-24, exclusive squadron idle cells). The point is the leader's own desired
+  point (debug build: the idle service reads the team leader's locomotor), which a squadron placed
+  by ordinary skirmish creation begins on: its craft are placed and initialized before team
+  attachment, which preserves their desired points (WSQ-58, debug build). The staged teleport
+  reaches the same hold independently (S-97 capture: every leader's desired point is its spawn
+  point at sample zero). The container's point at the formation centre is not that hold.
+  The remake held the container's point
+  there (fighter time-to-kill investigation): each leader, a slot away from it, aimed back past it and turned the wrong way,
+  its banking slots sent the wingmen climbing where the original's dive, and the half-distance
+  speed carried them off at up to six times their maximum speed into the enemy's reach.
 - **FM-21** (research E75-08, recording S-16) An escorting squadron holds its carrier's position at
   the craft's `Layer_Z_Adjust` height, and drifts back to it at idle speed after a fight (S-16:
   the bombers return at about 1.1 units per frame). Once its leader is within a cell's size of the
   carrier it holds an idle cell around it instead (FM-24).
 - **FM-23** (debug build; walk 1 WSQ-08; exclusive squadron idle cells) Idle squadrons are kept apart by an idle grid: cells
   of 120 units, rows along y, odd rows shifted half a cell along x, a cell's point its centre at the
-  craft's `Layer_Z_Adjust` height. A cell holds at most one squadron, of any side. FoC lays the
-  grid from the map bounds' low corner; the remake lays it from the world origin, as the combat
-  grid (foc-battle-world-ui WU-27).
+  craft's `Layer_Z_Adjust` height. A cell holds at most one squadron, of any side. Both grids are
+  laid from the space map box's low corner (walk dogfight WDF-05): the row is the truncated
+  `(y - min_y) / size`, an odd row moves x back half a cell and x is clamped to `min_x`, the column is the
+  truncated `(x - min_x) / size`, and a cell's point is `min + index x size + size / 2` (foc-battle-world-ui WU-27).
 - **FM-24** (debug build; walk 1 WSQ-09, WSQ-11, WSQ-14; exclusive squadron idle cells) A squadron that reverts to idle (its
   move ends, FO-02, or its fight ends without a new target, FD-09) holds an idle cell's point
   instead of the point it was given. It keeps a cell it already holds; otherwise it takes the
@@ -261,9 +277,37 @@
 
 ### Attack runs
 
+The attack destination retains a live hardpoint independently of the team's explicitly
+ordered hardpoint (WSQ-13/15/18; debug build, distant-station evidence EDSH-01 to EDSH-08).
+An explicit hardpoint is used while it stands; an ordinary attack, or a lost attachment,
+selects the standing attachment by the attacker's priority and then distance (OR-24).
+Selection is retained while the craft flies, rather than changing to whichever attachment
+is nearest each frame. A command coordinator and active target share one choice from their
+first member across their formations; independent orders and autonomous singleton teams
+keep separate choices. Its world position supplies the approach destination, the planar
+strafe-distance check and the attack-run nose-cone check. The parent object's soft radius
+still extends the strafe reach. The flight and path-refresh readers use the same attachment;
+the weapon keeps its own firing-range and aim rules. The remake resolves attachment geometry
+in partitioned staging and commits it in squadron order, and checkpoints retain the choice.
+Contracts use two flight profiles against a station whose only live attachment lies outside
+the body's strafe circle: both must reach weapon range and damage it. Explicit attacks,
+rotated station attachments, attachment loss, explicit ion activation, coordinator sharing,
+independent orders, serial retaliation retargets, checkpoint continuation and 1/2/4/8 equality
+are covered by the same session fixture.
+
+Replacement cadence remains a fidelity seam: the debug build reselects an absent/destroyed
+attachment on the movement coordinator's `MovementReevaluationFrameCount` phase and reads
+the object centre in between. The remake's squadron coordinator identity retains a command
+key, but not that allocated coordinator phase. It therefore publishes a shared replacement
+on the next flight frame; post-object path readers use the centre while the retained
+attachment is destroyed. No replacement clock is inferred from the command key.
+
 - **FA-01** (research E75-16, FS-01) While the leader is farther than `Strafe_Distance` plus the
   target's soft radius (in the plane) and the squadron's approach is over (FA-07), every craft heads
-  straight for the target at maximum speed.
+  straight for the target at maximum speed. The soft radius is the one the combat geometry gives
+  (space-targeting WWP-21): ordinary space team containers and craft use their type's radius.
+  The ideal team box belongs to the specialized formation-team locomotor reader; merely having
+  a movement formation does not enable that reader (walk WSQ-15; UFS-35 numeric control).
 - **FA-02** (research E75-17) Within that radius the leader keeps heading for the target while it
   lies within 45 degrees of yaw and of pitch ahead of its nose.
 - **FA-03** (research E75-17, E75-19) Once the target leaves that cone the leader forms up ahead
@@ -297,7 +341,7 @@
 ### Dogfights
 
 The combat cells are the grid of foc-battle-world-ui WU-25 (400-unit cells, odd rows shifted by
-half a cell, from the world origin in the remake, WU-27). The sim owns them since the squadron dogfight pairing and chase work and
+half a cell, from the space map box's low corner, WDF-05, WU-27). The sim owns them since the squadron dogfight pairing and chase work and
 publishes each squadron's cell in the snapshot; the world UI draws the icons from it.
 
 - **FD-01** (debug build: the fighter's directed-combat service) A squadron whose target is a
@@ -314,7 +358,9 @@ publishes each squadron's cell in the snapshot; the world UI draws the icons fro
 - **FD-04** (debug build: the fighter-vs-fighter service; recordings S-97, S-98) Retaliation: once
   a craft of the attacking squadron is within reach of the cell point, the target squadron takes
   the attacker as its target, unless it is on a move or already targets a squadron. The debug
-  build also skips a target using the ion cannon shot or lucky shot ability; M2 has neither. The
+  build also skips a target using the ion cannon shot or lucky shot ability: the remake skips a
+  squadron whose team `ION_CANNON_SHOT` is on (the Y-wing squadron, AB-60 to AB-69); no ability
+  applies `LUCKY_SHOT` yet (fidelity list). The
   cell must be the target's own, so a squadron attacking a ship (no cell) never retaliates: in
   S-98 the TIE bombers keep attacking the corvette while the X-wings shoot them down. An idle
   squadron turns on its attacker through its own scan (FT-02): in S-97 the TIE squadron, given
@@ -398,12 +444,26 @@ publishes each squadron's cell in the snapshot; the world UI draws the icons fro
   copies completion history and resets a completed position base to the team's current position.
   Outside the allowance circle, admission tests attack reach from its edge toward the candidate
   using the team's leader. Formation completion remains separate from the strafe approach.
+- **WMV-18 destination-loss order** (debug build; retail attack-loss control) The
+  coordinator converts a lost object base to the formation path end, or its centre
+  position when that path is empty, before the later formation cancellation.
+  The populated completed formation survives; the next accepted targeting
+  notification can split it and rebase its position destination. The retail control
+  loses its target at sample 61, accepts the other team at 62, and resumes directed
+  combat at 63. Shared targeting still needs an accepted movement destination.
+  Mobile launches and ordinary player escort/guard-of-unit bases acquire
+  completion through WMV-18's generic sole-base producer. The model uses FM-24's
+  arrived escort hold for the missing escort base path, with no completion during
+  an active approach or member path. Loss after arrival preserves history. Loss
+  before arrival retains the last hold point and waits for its cell claim before
+  completing; conversion itself does not mark an unfinished move complete.
+  Shared squadron mode/path state approximates the unmodelled per-member admission.
 - **FT-03** (WSQ-42/45, space-weapon-fire T-05 to T-07) The craft's own priority set,
   suitability and better-target comparison apply in the persistent collection order, with a
   random player start. This includes the damaged-target and nearer-target preferences of T-07;
   it is not a strict priority-then-distance sort from the leader.
-  Suitability and replacement evaluate the held team itself; FO-04 resolves the nearest live
-  craft separately for weapon aim and firing.
+  Suitability and replacement evaluate the held team itself; FO-04 resolves a live craft
+  separately for weapon aim and firing (the nearest for a unit weapon, a random one for a hardpoint).
 - **FT-04** (recording S-16, S-28) The squadron engages a target about 1200 units from its carrier
   at once: the escort's chase range (1000) plus the craft's attack distance (500) covers it.
 - **FT-05** (WSQ-43/47) A member's find is shared with all members, promoting an enemy craft to
@@ -458,12 +518,15 @@ publishes each squadron's cell in the snapshot; the world UI draws the icons fro
   is gone the squadron idles where its leader flies. A face order changes nothing.
 - **FO-04** (debug build: the attack order, the team-member choice, the team's nearest member
   and the turret's aim) An attack on a craft of a squadron targets the squadron's team container.
-  A unit's own weapon fires at the squadron's live craft nearest its muzzle, or nearest the
-  shooter's own squadron centre when the shooter belongs to a squadron (WWP-49), with no aimed
-  hardpoint. Distance is spatial, with the first in team order on a tie. Weapon hardpoints follow
-  the separate WWP-19 selection rule. The craft is chosen afresh
-  at every use: FoC stores the container as the attack target and keeps no chosen craft, so an
-  attacker moves to another craft as soon as that one is nearer (C-12). The one exception is a
+  A unit's own weapon fires at the squadron's live craft nearest its actual muzzle, or nearest the
+  shooter's parent centre only when that parent has ordinary targeting (WWP-49), with no aimed
+  hardpoint. Distance is spatial, with the first in team order on a tie. A **weapon hardpoint**
+  (a ship's turrets, ordered or handed the team) does not take the nearest craft: the container has
+  no hardpoints, so each firing attempt picks a random live craft of the team (one keyed draw:
+  the session seed, frame, unit and weapon slot; never the worker count) and aims at it by the
+  space-targeting R-10 search, not by its nearest hardpoint (WWP-19; random craft selection by ordered hardpoints (legacy EAWR-711)). The craft is chosen
+  afresh at every use: FoC stores the container as the attack target and keeps no chosen craft, so
+  a unit weapon moves to another craft as soon as that one is nearer (C-12). The one exception is a
   shooter's special-ability attack target, which FoC keeps while it is a member of the team; M2
   has no abilities (space-damage DG-02). The target lasts while one of its craft lives and is seen.
   A squadron chasing a squadron heads for the team's position (the formation destination keeps
@@ -492,11 +555,13 @@ publishes each squadron's cell in the snapshot; the world UI draws the icons fro
 - Which code picks the craft (target scan order and formation approach): `CombatWorld::candidates` (space-targeting CO-03) is the
   broad-phase scan that finds attack-worthy objects in the first place, including a squadron's
   team container; it never resolves a container to one of its craft. `CombatWorld::resolve_target`
-  is the only place a team container becomes a craft, run on the already-known attack target right
-  before a weapon fires (`UnitCombat::attempt`, FO-04, C-10, C-12); it does not consult the
-  collection trees. A ship's hardpoint opportunity scan (space-weapon-fire T-05) can still hand
+  and `CombatWorld::random_member` are the only places a team container becomes a craft, run on
+  the already-known attack target right before a weapon fires (`UnitCombat::attempt`: the nearest
+  craft for the unit weapon, a keyed random craft for a hardpoint; FO-04, C-10, C-12); neither
+  consults the collection trees. A ship's hardpoint opportunity scan (space-weapon-fire T-05) can still hand
   different hardpoints different objects because it walks the tree in CO-03 order (G-F7), but once
-  an object is a squadron's team container, FO-04's nearest-craft rule is what fires.
+  an object is a squadron's team container, FO-04's craft choice (random per attempt for a
+  hardpoint) is what fires.
 - **FO-07** (debug build: the space movement coordinator's composition step; squadron group-move separation) One move of
   several squadrons forms them into formations. The squadron farthest from the destination (input
   order on ties) starts one; its box is its formation radius doubled, widened in the plane to at
@@ -635,17 +700,19 @@ fixture's exact starting slots.
   holds the destination; a stop during a second move holds where it stood; an attack on a frigate
   far beyond its chase reach makes the frigate every craft's target and the squadron closes on it;
   the session hashes the same with 1, 2, 4 and 8 workers (FO-01 to FO-03).
-- **C-10** A ship ordered to attack a squadron fires first at its craft nearest the ship, and a
-  squadron ordered to attack it fires at its craft; no shot goes to the team container; 1, 2, 4
-  and 8 workers hash alike (FO-04). This is `CombatWorld::resolve_target`, run once a target is
-  known; it never scans the collection trees (CO-03) itself, so it is unaffected by C-13's
+- **C-10** A ship ordered to attack a squadron of five craft spreads its hardpoints' shots over
+  several of its craft, not only the one nearest the ship, and a squadron ordered to attack it
+  fires its unit weapons at its nearest craft; no shot goes to the team container; 1, 2, 4 and 8
+  workers hash alike (FO-04, WWP-19). This is `CombatWorld::random_member` for hardpoints and
+  `CombatWorld::resolve_target` for unit weapons, run once a target is known; it never scans the collection trees (CO-03) itself, so it is unaffected by C-13's
   approach and by which candidate order found the target in the first place.
 - **C-11** (capital-ship fire against fighters, target collection order and fighter approach) A craft with a -1 out-of-combat adjustment carries it while idle and on
   the approach beyond its strafe reach plus the target's radius, and 0 on a straight dive beyond
   that reach after the approach and inside the reach; a type without the tag carries 0
   (space-damage DG-26).
-- **C-12** A gunship attacking a squadron that flies past it fires every shot at the craft nearest
-  it at that frame, so its shots move from one craft to the other; 1, 2, 4 and 8 workers hash
+- **C-12** A fighter whose unit weapon attacks a squadron that flies past it fires every shot at the
+  craft nearest it at that frame (a gunship's hardpoints instead pick a random craft each attempt,
+  C-10), so its shots move from one craft to the other; 1, 2, 4 and 8 workers hash
   alike (FO-04).
 - **C-13** (target collection order and fighter approach) Beyond the strafe reach, a follower level with a leader and a target dead ahead
   dives straight at the target without the approach and turns toward its slot on the approach; the
@@ -778,6 +845,11 @@ fixture's exact starting slots.
 
 ## Fidelity list
 
+- FD-04: the retaliation skip for a target squadron using `LUCKY_SHOT` waits for that ability
+  (only the Red Squadron hero authors it); the ion cannon shot is checked.
+- FO-01 / walk WSQ-59: an attack order given to one craft of a squadron still gives that craft its
+  own direct target; what FoC does with it is not traced (a move given to one craft changes
+  nothing on the craft, as in FoC).
 - FT-01 (AI bombing-run departure): a squadron keeps a fogged target until its approach ends at the FA-01 reach; FoC
   keeps it until its planned path ends (G-F8), and its path end is not traced.
 
@@ -819,6 +891,13 @@ fixture's exact starting slots.
   at 0/6. In S-98 it moves bomber deaths from 678/1014/1128 to 678/951/1007, against
   recorded 723/929/1110: the second death improves, but the third is 103 ticks early and
   exceeds the unchanged 100-tick window by three. Native casualty agreement remains open.
+  Those S-98 numbers came from generated tick-zero slots: the remake's bombers flew straight from
+  the tick-30 order while retail's looped first and met the X-wings' order about 225 units further
+  back, so FD-13 compared different intercepts. S-98 now starts at the recording's order frame
+  (legacy EAWR-1617): every craft on its native tick-150 position and yaw, both orders at tick 1, and
+  the recorded deaths counted from that frame (573, 779 and 960). There the remake loses all four
+  bombers, at 403, 620, 694 and 755, with 156 X-wing shots and 112 hits (recorded 162 and 98) and
+  no live-target redirect; the fourth loss and the early first three are open (FD-13).
 - FO-07: the merge box uses the squadron's formation radius for the team container's world bounds;
   squadrons moved with ships are not handed an escort of a ship (space-movement FM-U5).
 - FO-09: the classes are ordered by the craft's attack distance and type ID, not the team

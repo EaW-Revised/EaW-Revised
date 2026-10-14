@@ -6,8 +6,9 @@ the versioned script state hash built on it. It implements the save/hash prerequ
 [multiplayer readiness](multiplayer-readiness.md). This is new-engine persistence for
 checkpoints, resync and hashing; it does not read or write retail save files.
 
-Identities: save format `eawr-script-save-v2` (v2 adds the memory quota and account,
-with Lua pattern metering), state hash `eawr-script-state-v1`, combined
+Identities: save format `eawr-script-save-v4` (v4 adds object attachment identities and completed/rejected lifecycle records;
+v3 added instance-local proximity registrations;
+v2 added the memory quota and account with Lua pattern metering), state hash `eawr-script-state-v1`, combined
 hash `eawr-authoritative-state-v1`. Any change to a rule below needs a new identity.
 
 Code: `ScriptScheduler::save`, `load` and `state_hash`
@@ -20,9 +21,16 @@ Lua 5.0.2 sources stay unmodified; three compile wrappers (`upstream/lbaselib.cp
 
 A save is taken at a tick barrier: between two `service` calls, after the host's own
 barrier work (creating instances, submitting events). Saving reads only; it allocates
-nothing inside a Lua state, so taking one never changes a later tick. It runs serially:
-the per-instance work is a few milliseconds at most and happens only at checkpoints and
-hashes, outside the `script-instances` phase.
+nothing inside a Lua state, so taking one never changes a later tick. The parameterless
+save uses the serial writer. When an executor is supplied, independent sandbox graphs
+are encoded in disjoint slots of the `script-save` phase, then appended in ascending
+instance ID order. A single worker or sandbox keeps the direct writer path. Tactical
+tick hashing supplies its executor, so graph capture can use the same workers as the
+simulation, outside the `script-instances` service phase.
+
+Parallel capture preserves the serial byte stream and selects the first refusal in
+instance order. Encoding identities and graph traversal within each sandbox stay the
+same. An executor failure returns its diagnostic without changing the scheduler.
 
 `load` replaces the whole script state of a scheduler created with the same session
 settings, manifest and bindings. It decodes and validates the complete save before it
@@ -53,6 +61,18 @@ identities; the session settings (seed, tick duration, every quota, script direc
 the module manifest digest; the binding names in registration order; the completed tick.
 A load compares each part with its own session and names the first that differs.
 
+The module sources are pinned when the scheduler is created. Their manifest digest
+is prepared once at that boundary and reused by save and load; adding a module to
+the caller's manifest cannot change the scheduler's identity. The digest remains
+the SHA-256 of the sorted path and source-digest list, and its header bytes are
+unchanged. Capturing a tick performs no module-source hashing.
+
+Then the object attachment registry in instance order (instance ID, object kind/ID,
+allocation generation, logical module). Completed and rejected records have no
+live Lua instance, but remain until object retirement so they cannot restart.
+Fresh initialization events are persisted before service; restore executes no
+extra definitions or main creation.
+
 Then the pending events and timers in key order (key, target, kind, name, thread,
 arguments, parameter), and the instances in ascending ID, each with:
 
@@ -61,6 +81,9 @@ arguments, parameter), and the instances in ascending ID, each with:
   timer counts; every thread slot in slot order (finished slots stay as holes) with its
   flags, registry references and both event queues (callbacks and parameters separately,
   so skewed queues stay skewed); event handlers by name with IDs and function references;
+  proximity lists by object kind/ID, with mutation generation and each registration's
+  stable ID, retained function reference, single-precision query extent and optional
+  player/type handles (the function itself stays in that instance's Lua graph);
   the staged output of an instance created since the last service (commands, posts,
   timers, diagnostics);
 - the Lua graph (below).
@@ -199,3 +222,9 @@ readiness](multiplayer-readiness.md), tick agreement).
   format belongs to the tactical AI host (scripts in the tick) and restorable checkpoints and resync (checkpoints, resync).
 - The save is uncompressed and unbounded apart from the format bounds; galactic checkpoint capacity measures
   checkpoint sizes of real FoC script graphs.
+
+## Managed handle continuation
+
+The optional WGA-471/472 ownership policy adds its managed kind, private inventory/release operation names and deterministic invocation interval to session identity. A default scheduler writes none of these bytes. The completed invocation counter already supplies interval phase; galactic markup uses completed invocations 64, 128, and so on, including after load. No wall clock or allocator state participates.
+
+Saving and hashing remain read-only, and loading never runs native release callbacks. The native component stores contributions/IDs while script graphs and queued host values store aliases. Private caches may still contain old userdata, but they do not provide ownership before or after restore. Replacing a VM, rejecting a partial load or discarding a shadow cannot subtract from the live/restored native owner. An orphan after explicit removal or a rolled-back invocation remains until the next eligible successful service in both uninterrupted and restored runs.

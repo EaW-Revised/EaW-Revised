@@ -295,7 +295,10 @@ void UiGalleryMode::State::build_hud_page(Node3D& parent) {
     // The planet: the map's root field 0x09 and its Planet object (hud_shell.hpp).
     // The HUD keeps reading the objects (the unit cards' Icon_Name and Text_ID), so they live in the state.
     std::optional<eawr::data::Catalog>& objects = hud_objects;
-    if (auto loaded = eawr::data::load_catalog(*filesystem, eawr::data::Profile::foc)) {
+    if (auto loaded = eawr::data::load_catalog_strict(*filesystem, eawr::data::Profile::foc)) {
+        if (!loaded.value().health.clean()) {
+            notes.push_back("objects: catalog load: " + eawr::data::describe_load_health(loaded.value().health));
+        }
         objects.emplace(std::move(loaded.value().catalog));
     } else {
         notes.push_back("objects: " + core::format_diagnostic(loaded.error()));
@@ -324,6 +327,59 @@ void UiGalleryMode::State::build_hud_page(Node3D& parent) {
         } else {
             notes.push_back("--eawr-ui-hud-cards: the shell has no unit card slots");
         }
+    }
+    if (!options.hud_readouts.empty()) {
+        if (options.hud_readouts != "campaign" && options.hud_readouts != "skirmish" && options.hud_readouts != "expired") {
+            failure = "--eawr-ui-hud-readouts expects campaign, skirmish or expired";
+            return;
+        }
+        if (auto* panel = hud->production()) {
+            EawrProductionPanel::View view;
+            view.tactical_population = "7/25";
+            view.tactical_tech = model::TacticalTechView{4, *faction, options.hud_readouts != "campaign", true};
+            view.garrison_progress = model::hud_timer_progress(options.hud_readouts == "expired" ? 600 : 300, 600, 600);
+            view.reinforcement_progress = model::hud_timer_progress(options.hud_readouts == "expired" ? 600 : 150, 600, 600);
+            panel->show(view);
+        }
+    }
+    if (!options.hud_flytext.empty()) {
+        const auto& probe = options.hud_flytext;
+        if (probe != "start" && probe != "hold" && probe != "fade" && probe != "expired"
+            && probe != "behind" && probe != "clear") {
+            failure = "--eawr-ui-hud-flytext expects start, hold, fade, expired, behind or clear";
+            return;
+        }
+        auto components = eawr::data::ui::load_command_bar(*filesystem);
+        if (!components || !(flytext_style = model::hud_flytext_style(components.value().catalog))) {
+            failure = "--eawr-ui-hud-flytext requires a No_Shell generic_flytext TextButton";
+            return;
+        }
+        fonts = std::make_unique<FontProvider>(model::load_font_cache(
+            font_mount ? font_mount.value() : unmounted, ViewerPath::utf8(directory)));
+        const auto& label = flytext_style->text;
+        const auto face = fonts->resolve({label.face, label.point_size}, "ENGLISH");
+        flytext = std::make_unique<HudFlyTextRenderer>();
+        flytext->readout.font = fonts->font(face);
+        flytext->readout.cell = [provider = fonts.get(), face](const std::int32_t pixels) {
+            return model::gdi_text_cell(provider->cache(), face, pixels);
+        };
+        auto* flytext_canvas = memnew(CanvasLayer);
+        flytext_canvas->set_layer(10);
+        parent.add_child(flytext_canvas);
+        auto* owner = memnew(Control);
+        owner->set_size(Vector2(static_cast<float>(width), static_cast<float>(height)));
+        owner->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        flytext_canvas->add_child(owner);
+        const auto space = model::reference_space({width, height},
+            options.rules == "retail" ? model::LayoutRules::retail : model::LayoutRules::aspect_correct);
+        flytext_view = {"+250", 100, {static_cast<float>(width) * 0.5F, static_cast<float>(height) * 0.4F}, false};
+        // Reuse the same component to prove that hidden/expired/empty updates clear old text.
+        flytext->update(*owner, *flytext_style, flytext_view, 100, space);
+        const std::uint64_t age = probe == "hold" ? 30U : probe == "fade" ? 45U : probe == "expired" ? 61U : 0U;
+        flytext_view.behind_camera = probe == "behind";
+        if (probe == "clear") flytext_view.text.clear();
+        flytext->update(*owner, *flytext_style, flytext_view, 100 + age, space);
+        samples.push_back({"flytext", probe, "generic_flytext", owner, flytext->readout.text_rect, 0U});
     }
 }
 

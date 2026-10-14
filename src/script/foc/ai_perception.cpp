@@ -1,9 +1,13 @@
+#include "eawr/core/tick_profile.hpp"
 // FoC tactical AI perception (#449, docs/behaviour/foc-tactical-ai.md "Perception", rules PG-xx
 // and PE-xx): the threat grid, the goal targets and the evaluation of perceptual equations.
 
 #include "ai_engine.hpp"
+#include "tactical_ai_world.hpp"
+#include "eawr/script/numeric/decimal.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <stdexcept>
 
 namespace eawr::script::foc::ai {
@@ -11,11 +15,7 @@ namespace {
 
 Real single(Real value) { return to_single(value); }
 Real fixed(math::Fixed value) { return numeric::from_fixed(value); }
-
-std::int64_t ceiling(Real value) {
-    const std::int64_t whole = truncate(value);
-    return real(whole) < value ? whole + 1 : whole;
-}
+std::atomic<ThreatGrid::QueryObserver> threat_observer{};
 
 template <typename T> T clamp_to(T value, T low, T high) { return value < low ? low : (high < value ? high : value); }
 
@@ -43,28 +43,167 @@ void prepare_rows(const sim::PartitionExecutor& executor, const std::string_view
     if (!prepared) throw std::runtime_error("AI threat preparation failed: " + prepared.error().message);
 }
 
+// SAE-02: one station's exact damage/predecessor calculation. Both the
+// isolated query and worker preparation use the same authored rules.
+Real station_level(const Host& host, const AiType& type, sim::EntityId id) {
+    const auto state = host.world->durability_state(id);
+    if (state && state->hull.raw() <= 0) return Real{};
+    const auto* profile = host.world->durability().find(type.type_id);
+    std::uint64_t total{}, destroyed{};
+    if (profile != nullptr && state) {
+        for (std::size_t index = 0; index < profile->hardpoints.size(); ++index) {
+            if (!profile->hardpoints[index].destroyable) continue;
+            ++total;
+            if (tactical::hardpoint_destroyed(*profile, *state, index)) ++destroyed;
+        }
+    }
+    const std::uint64_t level = type.base_level;
+    if (total == 0 || total < level) return real(static_cast<std::int64_t>(level));
+    if (destroyed == total) return Real{};
+    const auto surviving = level - level * destroyed / total;
+    if (surviving == level) return real(static_cast<std::int64_t>(level));
+    for (const auto previous : type.previous_base_levels) {
+        if (previous == surviving) return real(previous);
+    }
+    return Real{};
+}
+
 } // namespace
+
+// Immutable completed-view identities and session durability are read by
+// independent rows. Only the caller merges qualifying stations in entity order.
+void Engine::prepare_station_levels(const sim::PartitionExecutor* executor) {
+    station_levels_.reset();
+    if (!host_->world || !host_->view) return;
+    const auto& units = host_->view->units;
+    std::vector<std::optional<StationLevel>> rows(units.size());
+    const sim::InlineExecutor inline_executor;
+    prepare_rows(executor ? *executor : inline_executor, "ai-station-levels", units.size(),
+        [&](const std::size_t index) {
+            const auto& unit = units[index];
+            const auto* type = host_->type(unit.type);
+            if (type && type->star_base && type->unit_ai && !type->capture_point)
+                rows[index] = StationLevel{unit.owner, station_level(*host_, *type, unit.id)};
+        });
+    station_levels_.emplace();
+    for (const auto& row : rows) if (row) station_levels_->push_back(*row);
+}
+
+Real Engine::station_base_level(tactical::PlayerId id) const {
+    if (!host_->economy(id) || !host_->world) return real(host_->setup.perception.base_level);
+    // SAE-02: first qualifying station in player order then entity order;
+    // a dead/damaged station still wins over any later, higher station.
+    if (station_levels_) {
+        for (const auto& owner : host_->world->players()) {
+            if (!host_->allied(id, owner.player_id)) continue;
+            for (const auto& station : *station_levels_)
+                if (station.owner == owner.player_id) return station.level;
+        }
+        return Real{};
+    }
+    // Queries outside the ordered barrier retain live semantics. In particular,
+    // a staged removal or content edit cannot leave a stale prepared answer.
+    const auto units = host_->world->units();
+    for (const auto& owner : host_->world->players()) {
+        if (!host_->allied(id, owner.player_id)) continue;
+        for (const auto& unit : units) {
+            if (unit.owner != owner.player_id) continue;
+            const auto* type = host_->type(unit.type_id);
+            if (type && type->star_base && type->unit_ai && !type->capture_point)
+                return station_level(*host_, *type, unit.entity_id);
+        }
+    }
+    return Real{};
+}
 
 // ---- Threat grid ----------------------------------------------------------------------------
 
 void ThreatGrid::clear_queries() noexcept {
     total_queries_.clear();
     force_queries_.clear();
+    contributions_.clear();
 }
 
 ThreatGrid::Preparation::Preparation(ThreatGrid& grid, const sim::PartitionExecutor* executor,
     const Host& host, const WorldView& view) : grid_(grid) {
     grid_.clear_queries();
+    grid_.pending_ = std::move(grid_.requested_);
+    grid_.requested_.clear();
+    grid_.query_counts_ = {};
     grid_.executor_ = executor;
     grid_.preparation_host_ = &host;
     grid_.preparation_view_ = &view;
 }
 
 ThreatGrid::Preparation::~Preparation() {
+    // Opt-in, write-only diagnostics; these counts never enter simulation state.
+    if (core::tick_profile::active) {
+        if (const auto observer = threat_observer.load(std::memory_order_relaxed))
+            observer(grid_.preparation_view_->tick, grid_.requested_.size(), grid_.query_counts_);
+    }
     grid_.executor_ = nullptr;
     grid_.preparation_host_ = nullptr;
     grid_.preparation_view_ = nullptr;
     grid_.clear_queries();
+}
+
+void ThreatGrid::observe_queries(const QueryObserver observer) noexcept {
+    threat_observer.store(observer, std::memory_order_relaxed);
+}
+
+void ThreatGrid::prepare_contributions() {
+    if (!preparation_host_ || !preparation_view_) return;
+    clear_queries();
+    const auto& host = *preparation_host_;
+    const auto& view = *preparation_view_;
+    for (const auto& [key, players] : requested_) pending_.try_emplace(key, players);
+    std::vector<std::tuple<Contribution*, const Tracked*, Real>> rows;
+    for (const auto& [key, players] : pending_) {
+        static_cast<void>(players);
+        auto& prepared = contributions_[key];
+        for (const auto& unit : view.units) {
+            const auto tracked = tracked_.find(unit.id);
+            const auto* company = company_type(host, unit);
+            if (tracked == tracked_.end() || !company || (company->category_bits & key.first) == 0) continue;
+            auto& contribution = prepared[unit.id];
+            contribution.unit = &unit;
+            contribution.entries.resize(tracked->second.entries.size());
+            rows.emplace_back(&contribution, &tracked->second, Real::from_repr(key.second));
+        }
+    }
+    query_counts_.prepared_keys = contributions_.size();
+    const auto prepare = [&](const std::size_t index) {
+        auto& [output, tracked, attenuator] = rows[index];
+        const auto& unit = *output->unit;
+        const Real scale = single(real(1) - attenuator * single(real(1) - unit.health));
+        output->total = single(power_metric(company_type(host, unit)) * scale);
+        for (std::size_t entry = 0; entry < tracked->entries.size(); ++entry)
+            output->entries[entry] = single(tracked->entries[entry].power * scale);
+    };
+    // Dispatch decisions depend only on a fixed work count, never measured time.
+    constexpr std::size_t partition_threshold = 256;
+    if (executor_ && rows.size() >= partition_threshold) {
+        prepare_rows(*executor_, "ai-threat-total", rows.size(), prepare);
+    } else {
+        for (std::size_t index = 0; index < rows.size(); ++index) prepare(index);
+    }
+    pending_.clear();
+}
+
+const ThreatGrid::Contributions* ThreatGrid::contributions(const std::uint64_t category,
+    const Real attenuator, const tactical::PlayerId player) const {
+    const ContributionKey key{category, attenuator.repr};
+    auto& players = requested_[key];
+    ++query_counts_.queries;
+    if (!players.empty()) {
+        ++query_counts_.repeats;
+        if (!players.contains(player)) ++query_counts_.cross_player;
+    }
+    players.insert(player);
+    const auto found = contributions_.find(key);
+    if (found == contributions_.end()) { ++query_counts_.cold; return nullptr; }
+    ++query_counts_.warm;
+    return &found->second;
 }
 
 // PG-01: the grid spans the map with a cell per AI_FogCellsPerThreatCell fog cells (rounded up);
@@ -166,8 +305,13 @@ void ThreatGrid::remove(sim::EntityId object, Tracked& tracked) {
 void ThreatGrid::service(const WorldView& view, const Host& host, std::int64_t frame) {
     clear_queries();
     if (!ready()) return;
+    const auto admitted = [&](const ViewUnit& unit) {
+        const AiType* type = host.type(unit.type);
+        return !unit.planetary_weapon && type != nullptr && type->unit_ai;
+    };
     for (auto iterator = tracked_.begin(); iterator != tracked_.end();) {
-        if (view.find(iterator->first) == nullptr) {
+        const ViewUnit* current = view.find(iterator->first);
+        if (current == nullptr || !admitted(*current)) {
             remove(iterator->first, iterator->second);
             iterator = tracked_.erase(iterator);
         } else {
@@ -175,6 +319,8 @@ void ThreatGrid::service(const WorldView& view, const Host& host, std::int64_t f
         }
     }
     for (const ViewUnit& unit : view.units) {
+        // PG-03/WSW-01: only ordinary UnitAI objects initialize combat tracking.
+        if (!admitted(unit)) continue;
         Tracked& tracked = tracked_[unit.id];
         if (frame < tracked.next_service) continue;
         if (tracked.entries.empty()) add(unit, host, tracked);
@@ -207,90 +353,77 @@ Real ThreatGrid::force(const Host& host, const WorldView& view, const Rect& rect
     const ForceKey key{category, player, friendly, attenuator.repr,
         rect.x.repr, rect.y.repr, rect.width.repr, rect.height.repr, excluded};
     const bool preparation = preparing(host, view);
+    const Contributions* prepared = preparation ? contributions(category, attenuator, player) : nullptr;
     if (preparation) {
-        if (const auto found = force_queries_.find(key); found != force_queries_.end()) return found->second;
+        if (const auto found = force_queries_.find(key); found != force_queries_.end()) {
+            ++query_counts_.scalar_hits;
+            return found->second;
+        }
     }
     const std::int64_t x0 = std::max<std::int64_t>(truncate(single((rect.x - left_) / cell_width_)), 0);
     const std::int64_t x1 = std::min<std::int64_t>(truncate(single((rect.x - left_ + rect.width) / cell_width_)), x_cells_ - 1);
     const std::int64_t y0 = std::max<std::int64_t>(truncate(single((top_ - (rect.y + rect.height)) / cell_height_)), 0);
     const std::int64_t y1 = std::min<std::int64_t>(truncate(single((top_ - rect.y) / cell_height_)), y_cells_ - 1);
-    if (preparation) {
-        const auto columns = x1 < x0 ? std::size_t{} : static_cast<std::size_t>(x1 - x0 + 1);
-        const auto rows = y1 < y0 ? std::size_t{} : static_cast<std::size_t>(y1 - y0 + 1);
-        std::vector<Real> cells(rows * columns);
-        prepare_rows(*executor_, "ai-threat-cells", cells.size(), [&](const std::size_t offset) {
-            const auto row = y0 + static_cast<std::int64_t>(offset / columns);
-            const auto column = x0 + static_cast<std::int64_t>(offset % columns);
-            Real cell{};
-            // PG-05: keep covering entries in insertion order, including each rounding step.
-            for (const auto& [object, index] : cells_[static_cast<std::size_t>(row * x_cells_ + column)]) {
-                const ViewUnit* unit = view.find(object);
-                if (unit == nullptr || object == excluded) continue;
-                if (fogged_for(host, view, *unit, player)) continue;
-                const AiType* company = company_type(host, *unit);
-                if (company == nullptr || (company->category_bits & category) == 0) continue;
-                if (unit->owner == 0 || host.neutral(unit->owner)) continue;
-                if (host.allied(unit->owner, player) != friendly) continue;
-                const auto found = tracked_.find(object);
-                if (found == tracked_.end() || index >= found->second.entries.size()) continue;
-                const Real threat = found->second.entries[index].power;
-                cell = single(cell + single(threat * single(real(1) - attenuator * single(real(1) - unit->health))));
-            }
-            cells[offset] = cell;
-        });
-        Real total{};
-        // Fold the prepared cell scalars in the original row/column order, not partition order.
-        for (const Real cell : cells) total = single(total + cell);
-        const Real result = single(total * constants_.area_threat_scale);
-        force_queries_.emplace(key, result);
-        return result;
-    }
+    core::tick_profile::Scope scope(prepared ? "serial.goal.threat-cells" : "serial.goal.threat-cold-cells");
     Real total{};
     for (std::int64_t row = y0; row <= y1; ++row) {
         for (std::int64_t column = x0; column <= x1; ++column) {
             Real cell{};
             for (const auto& [object, index] : cells_[static_cast<std::size_t>(row * x_cells_ + column)]) {
-                const ViewUnit* unit = view.find(object);
+                const Contribution* contribution{};
+                if (prepared) {
+                    const auto found = prepared->find(object);
+                    if (found == prepared->end()) continue;
+                    contribution = &found->second;
+                }
+                const ViewUnit* unit = contribution ? contribution->unit : view.find(object);
                 if (unit == nullptr || object == excluded) continue;
                 if (fogged_for(host, view, *unit, player)) continue;
-                const AiType* company = company_type(host, *unit);
-                if (company == nullptr || (company->category_bits & category) == 0) continue;
+                if (!prepared) {
+                    const AiType* company = company_type(host, *unit);
+                    if (company == nullptr || (company->category_bits & category) == 0) continue;
+                }
                 if (unit->owner == 0 || host.neutral(unit->owner)) continue;
                 if (host.allied(unit->owner, player) != friendly) continue;
-                const auto found = tracked_.find(object);
-                if (found == tracked_.end() || index >= found->second.entries.size()) continue;
-                const Real threat = found->second.entries[index].power;
-                cell = single(cell + single(threat * single(real(1) - attenuator * single(real(1) - unit->health))));
+                if (contribution) {
+                    if (index < contribution->entries.size()) cell = single(cell + contribution->entries[index]);
+                } else {
+                    const auto found = tracked_.find(object);
+                    if (found == tracked_.end() || index >= found->second.entries.size()) continue;
+                    const Real threat = found->second.entries[index].power;
+                    cell = single(cell + single(threat * single(real(1) - attenuator * single(real(1) - unit->health))));
+                }
             }
             total = single(total + cell);
         }
     }
-    return single(total * constants_.area_threat_scale);
+    const Real result = single(total * constants_.area_threat_scale);
+    if (preparation) force_queries_.emplace(key, result);
+    return result;
 }
 
 // PG-06.
 Real ThreatGrid::total_force(const Host& host, const WorldView& view, std::uint64_t category,
     tactical::PlayerId player, bool friendly, Real attenuator) const {
-    if (preparing(host, view)) {
-        const TotalKey key{category, player, friendly, attenuator.repr};
-        if (const auto found = total_queries_.find(key); found != total_queries_.end()) return found->second;
-        std::vector<std::optional<Real>> contributions(view.units.size());
-        prepare_rows(*executor_, "ai-threat-total", view.units.size(), [&](const std::size_t index) {
-            const ViewUnit& unit = view.units[index];
-            if (!tracked_.contains(unit.id)) return;
-            const AiType* company = company_type(host, unit);
-            if (company == nullptr || (company->category_bits & category) == 0) return;
-            contributions[index] = single(power_metric(company) * single(real(1) - attenuator * single(real(1) - unit.health)));
-        });
+    const bool preparation = preparing(host, view);
+    const TotalKey key{category, player, friendly, attenuator.repr};
+    const Contributions* prepared = preparation ? contributions(category, attenuator, player) : nullptr;
+    if (preparation) {
+        if (const auto found = total_queries_.find(key); found != total_queries_.end()) {
+            ++query_counts_.scalar_hits;
+            return found->second;
+        }
+    }
+    core::tick_profile::Scope scope(prepared ? "serial.goal.threat-total" : "serial.goal.threat-cold-total");
+    if (prepared) {
         Real total{};
-        // PG-06: the copied view and tracked map both have ascending IDs. Keep the player-first
-        // fold and its rounding; an entity-only fold or a sum per partition changes the result.
+        // PG-06: keep player order, ascending entity order and every rounding step.
         for (const detail::ViewPlayer& owner : view.players) {
             if (player != 0 && (host.neutral(player) || host.allied(player, owner.id) != friendly)) continue;
-            for (std::size_t index = 0; index < view.units.size(); ++index) {
-                if (view.units[index].owner == owner.id && contributions[index]) {
-                    total = single(total + *contributions[index]);
-                }
+            for (const auto& [object, contribution] : *prepared) {
+                static_cast<void>(object);
+                if (contribution.unit->owner == owner.id && contribution.total)
+                    total = single(total + *contribution.total);
             }
         }
         total_queries_.emplace(key, total);
@@ -307,10 +440,11 @@ Real ThreatGrid::total_force(const Host& host, const WorldView& view, std::uint6
             total = single(total + single(power_metric(company) * single(real(1) - attenuator * single(real(1) - unit->health))));
         }
     }
+    if (preparation) total_queries_.emplace(key, total);
     return total;
 }
 
-// PG-07.
+// PG-07. No object of the category: fully visible (project choice, unverified), never 0/0.
 Real ThreatGrid::force_visibility(const Host& host, const WorldView& view, std::uint64_t category,
     tactical::PlayerId player) const {
     std::int64_t seen = 0;
@@ -323,6 +457,7 @@ Real ThreatGrid::force_visibility(const Host& host, const WorldView& view, std::
         ++all;
         if (!fogged_for(host, view, *unit, player)) ++seen;
     }
+    if (all == 0) return real(1);
     return single(real(seen) / real(all));
 }
 
@@ -377,11 +512,20 @@ std::optional<Real> Engine::pad_count(const tactical::PlayerId player,
     std::vector<tactical::TypeId> types;
     for (const auto& name : names) {
         const auto found = host_->types_by_name.find(name);
-        if (found == host_->types_by_name.end()) return std::nullopt;
+        if (found == host_->types_by_name.end()) {
+            // WAS-10: an unknown built-count type contributes nothing; the
+            // remaining filters still count. Open-pad validation is separate.
+            if (open) return std::nullopt;
+            if (host_->setup.journal) {
+                host_->setup.journal->plans.push_back(PlanEvent{static_cast<std::uint64_t>(frame_),
+                    player, {}, {}, {}, "error", "TacticalBuiltStructureCount: unknown type " + name});
+            }
+            continue;
+        }
         types.push_back(found->second->type_id);
     }
-    if (host_->world == nullptr || host_->view == nullptr) return Real{};
-    const auto& world = *host_->world;
+    if (!host_->ai_world->available() || host_->view == nullptr) return Real{};
+    const auto& world = *host_->ai_world;
     const auto& view = *host_->view;
     const auto players = world.players();
     const auto owner = std::find_if(players.begin(), players.end(),
@@ -408,13 +552,20 @@ std::optional<Real> Engine::pad_count(const tactical::PlayerId player,
             const auto* profile = world.economy().pads.point(pad->type);
             if (reservation != 0 || profile == nullptr || !profile->build_pad
                 || view.tick < state.cooldown_until
-                || !tactical::pad_construction_allowed(*profile, state, player, players,
-                    view.capture_candidates, world.economy().pads, object, pad->position)) return;
+                || !world.construction_allowed(player, object)) return;
             const auto* menu = world.economy().menu(pad->type, owner->faction_id);
             if (types.empty() || std::any_of(types.begin(), types.end(), [&](const auto type) {
                 return type == pad->type || (menu != nullptr && menu->find(type) != nullptr);
             })) counts[index] = 1; // WAS-11: multiple matching filters still count once
         } else {
+            if (names.empty()) {
+                // WAS-10: no filter counts each registered reservation or live child.
+                if (reservation != 0) counts[index] = 1;
+                else for (const auto id : {state.constructed, state.under_construction}) {
+                    if (view.find(id) != nullptr) ++counts[index];
+                }
+                return;
+            }
             for (const auto type : types) {
                 if (reservation != 0) {
                     const auto* child = world.economy().pads.child(reservation);
@@ -434,7 +585,7 @@ std::optional<Real> Engine::pad_count(const tactical::PlayerId player,
     return real(total);
 }
 
-struct Engine::Evaluator final : LookupResolver {
+struct TacticalWorld::Evaluator final : LookupResolver {
     const Engine& engine;
     const Context& context;
     AiRandom& random;
@@ -455,6 +606,25 @@ struct Engine::Evaluator final : LookupResolver {
     [[nodiscard]] const WorldView& view() const { return *engine.host_->view; }
 
     std::optional<Real> resolve(const Lookup& lookup, const std::vector<Binding>& bindings) override {
+        const auto value = resolve_value(lookup, bindings);
+        if (context.proposal_trace) {
+            *context.proposal_trace += " [";
+            for (std::size_t index = 0; index < lookup.tokens.size(); ++index) {
+                if (index) *context.proposal_trace += '.';
+                *context.proposal_trace += lookup.tokens[index];
+            }
+            for (const auto& binding : bindings) {
+                *context.proposal_trace += " " + binding.parameter + "=";
+                if (const auto* number = std::get_if<Real>(&binding.value))
+                    *context.proposal_trace += numeric::decimal::format_lua_number(number->repr);
+                else *context.proposal_trace += std::get<std::string>(binding.value);
+            }
+            *context.proposal_trace += "=" + (value ? numeric::decimal::format_lua_number(value->repr) : "unavailable") + "]";
+        }
+        return value;
+    }
+
+    std::optional<Real> resolve_value(const Lookup& lookup, const std::vector<Binding>& bindings) {
         if (lookup.tokens.empty()) return std::nullopt;
         const Parameters parameters = read_parameters(bindings);
         const std::string& head = lookup.tokens.front();
@@ -559,24 +729,18 @@ struct Engine::Evaluator final : LookupResolver {
         if (token == "ENEMYFORCE") return normalised(force(false), game_force());
         if (token == "FORCENBTD") return normalised(force(true), force(true));
         const AiPerception& fixture = host().setup.perception;
-        if (token == "ISDEFENDER") return real(fixture.defender ? 1 : 0);
-        if (token == "CANRETREAT") return real(0);            // SK-43: retreat is not allowed
+        if (token == "ISDEFENDER") return real(fixture.campaign_defender
+            ? id == *fixture.campaign_defender : fixture.defender);
+        if (token == "CANRETREAT") {
+            const auto& setup = host().setup;
+            const bool allowed = setup.perception.campaign_game && setup.campaign_can_retreat
+                && setup.campaign_retreat_order && host().snapshot && setup.campaign_can_retreat(*host().snapshot, id);
+            return real(allowed ? 1 : 0);
+        }
         const auto* account = host().economy(id);
         if (token == "BASELEVEL") {
-            if (account == nullptr || host().world == nullptr) return real(fixture.base_level);
-            std::uint32_t level = 0;
-            for (const auto& type : host().setup.content.types) {
-                if (!type.star_base) continue;
-                // SAE-02: the shared team station supplies every teammate's base level.
-                for (const auto& owner : host().world->players()) {
-                    if (host().allied(id, owner.player_id)
-                        && host().world->production_counts(owner.player_id, type.type_id).owned_player != 0) {
-                        level = std::max(level, type.base_level);
-                        break;
-                    }
-                }
-            }
-            return real(level);
+            core::tick_profile::Scope scope("serial.goal.base-level");
+            return engine.station_base_level(id);
         }
         if (token == "CREDITSUNNORMALIZED") return fixed(host().credits(id));
         if (token == "UNITSPACEAVAILABLE") {
@@ -591,6 +755,7 @@ struct Engine::Evaluator final : LookupResolver {
             return total;
         }
         if (token == "TACTICALBUILTSTRUCTURECOUNT") {
+            if (id != context.player) return std::nullopt; // WAS-10: self context only
             return engine.pad_count(id, parameters.types, false);
         }
         if (token == "OPENBUILDPADCOUNT") {
@@ -772,17 +937,25 @@ struct Engine::Evaluator final : LookupResolver {
     }
 };
 
+std::optional<Real> TacticalWorld::perception(const Engine& engine, const Equation& equation, const Context& context, AiRandom& random) const {
+    Evaluator evaluator(engine, context, random);
+    return run(equation, evaluator, random);
+}
+
 std::optional<Real> Engine::run_equation(const Equation& equation, const Context& context) const {
+    core::tick_profile::Scope scope("serial.goal.equation");
     // PE-12: every function evaluation reseeds the AI random from the game seed, the player,
     // the function name and the target name.
     AiRandom random;
-    std::uint32_t seed = game_seed_;
-    seed += (static_cast<std::uint32_t>(context.player) + 1U) * 0x83U + 0x12345678U;
-    seed += crc32(equation.name);
-    seed += crc32(target_name(context.target));
-    random.set_seed(seed);
-    Evaluator evaluator(*this, context, random);
-    return run(equation, evaluator, random);
+    {
+        core::tick_profile::Scope seed_scope("serial.goal.seed");
+        std::uint32_t seed = game_seed_;
+        seed += (static_cast<std::uint32_t>(context.player) + 1U) * 0x83U + 0x12345678U;
+        seed += crc32(equation.name);
+        seed += crc32(target_name(context.target));
+        random.set_seed(seed);
+    }
+    return host_->ai_world->perception(*this, equation, context, random);
 }
 
 std::string Engine::target_name(const Target* target) const { return target == nullptr ? std::string() : target->name; }
@@ -804,14 +977,7 @@ std::optional<Real> Engine::evaluate(std::string_view equation, tactical::Player
 // PE-06: Self is the AI player; Enemy the first enemy player (by ID) that is not neutral;
 // Human the first human player.
 Context Engine::context_of(const PlayerAi& player, const Target* target) const {
-    Context context;
-    context.player = player.player;
-    context.target = target;
-    for (const AiPlayer& other : host_->setup.players) {
-        if (!context.enemy && !other.neutral && !host_->allied(other.player, player.player)) context.enemy = other.player;
-        if (!context.human && !other.ai && !other.neutral) context.human = other.player;
-    }
-    return context;
+    return host_->ai_world->goal_context(player, target);
 }
 
 // ---- Targets (GS-10) ------------------------------------------------------------------------
@@ -819,52 +985,21 @@ Context Engine::context_of(const PlayerAi& player, const Target* target) const {
 // Every object whose type has Has_Space_Evaluator, in object order, then a region per
 // AI_SpaceEvaluatorRegionSize square over the map, columns outer and rows inner.
 void Engine::build_targets(PlayerAi& player) {
-    for (const ViewUnit& unit : host_->view->units) {
-        const AiType* type = host_->type(unit.type);
-        if (type == nullptr || !type->space_evaluator) continue;
-        if (const Target* existing = target_of_object(unit.id)) {
-            player.targets.push_back(existing->id);
-            continue;
+    mark_native_state_changed();
+    for (auto candidate : host_->ai_world->targets(*this, player)) {
+        const Target* existing = candidate.object != 0 ? target_of_object(candidate.object) : nullptr;
+        if (candidate.object == 0) for (const auto& [id, target] : targets_) {
+            static_cast<void>(id);
+            if (target.object == 0 && target.name == candidate.name) existing = &target;
         }
-        Target target;
-        target.id = next_target_id_++;
-        target.object = unit.id;
-        target.name = "OBJECT_" + std::to_string(unit.id);
-        player.targets.push_back(target.id);
-        targets_.emplace(target.id, std::move(target));
-    }
-    if (!host_->setup.bounds) return;
-    const AiBounds& bounds = *host_->setup.bounds;
-    const Real size = data_.constants.region_size;
-    const std::int64_t columns = ceiling(to_single((bounds.right - bounds.left) / size));
-    const std::int64_t rows = ceiling(to_single((bounds.top - bounds.bottom) / size));
-    for (std::int64_t column = 0; column < columns; ++column) {
-        for (std::int64_t row = 0; row < rows; ++row) {
-            const std::string name = "CELL_" + std::to_string(column) + "_" + std::to_string(row);
-            const Target* existing = nullptr;
-            for (const auto& [id, target] : targets_) {
-                if (target.object == 0 && target.name == name) existing = &target;
-            }
-            if (existing != nullptr) {
-                player.targets.push_back(existing->id);
-                continue;
-            }
-            Target target;
-            target.id = next_target_id_++;
-            target.cell_x = static_cast<std::int32_t>(column);
-            target.cell_y = static_cast<std::int32_t>(row);
-            target.region.x = to_single(bounds.left + real(column) * size);
-            target.region.y = to_single(bounds.bottom + real(row) * size);
-            target.region.width = clamp_to(size, Real{}, to_single(bounds.right - target.region.x));
-            target.region.height = clamp_to(size, Real{}, to_single(bounds.top - target.region.y));
-            target.x = to_single(target.region.x + size / real(2));
-            target.y = to_single(target.region.y + size / real(2));
-            target.name = name;
-            player.targets.push_back(target.id);
-            targets_.emplace(target.id, std::move(target));
-        }
+        if (existing) { player.targets.push_back(existing->id); continue; }
+        candidate.id = next_target_id_++;
+        player.targets.push_back(candidate.id);
+        targets_.emplace(candidate.id, std::move(candidate));
     }
 }
+
+const WorldView* Engine::completed_view() const { return host_->view.get(); }
 
 const Target* Engine::target(std::uint64_t id) const {
     const auto found = targets_.find(id);
@@ -899,22 +1034,22 @@ namespace eawr::script::foc::ai {
 // GS-10: an object created with Has_Space_Evaluator joins the end of every list; a dead one
 // leaves them (its record stays for the plans that name it).
 void Engine::update_targets() {
-    const WorldView& view = *host_->view;
+    mark_native_state_changed();
     std::vector<std::uint64_t> fresh;
-    for (const ViewUnit& unit : view.units) {
-        const AiType* type = host_->type(unit.type);
-        if (type == nullptr || !type->space_evaluator || target_of_object(unit.id) != nullptr) continue;
-        Target target;
+    auto candidates = [&] {
+        core::tick_profile::Scope scope("serial.ai.target-inputs");
+        return host_->ai_world->new_targets(*this);
+    }();
+    core::tick_profile::Scope commit("serial.ai.target-commit");
+    for (auto target : candidates) {
         target.id = next_target_id_++;
-        target.object = unit.id;
-        target.name = "OBJECT_" + std::to_string(unit.id);
         fresh.push_back(target.id);
         targets_.emplace(target.id, std::move(target));
     }
     for (PlayerAi& player : players_) {
         std::erase_if(player.targets, [&](std::uint64_t id) {
             const Target* target = this->target(id);
-            return target == nullptr || (target->object != 0 && view.find(target->object) == nullptr);
+            return target == nullptr || !host_->ai_world->target_alive(*target);
         });
         player.targets.insert(player.targets.end(), fresh.begin(), fresh.end());
         if (player.next_target > player.targets.size()) player.next_target = player.targets.size();

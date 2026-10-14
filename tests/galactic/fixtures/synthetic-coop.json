@@ -1,0 +1,11 @@
+{
+  "name": "synthetic-coop",
+  "seed": 11,
+  "planets": 40,
+  "players": 3,
+  "fleets_per_player": 3,
+  "members_per_fleet": 4,
+  "coop_seat": true,
+  "debug_commands": true,
+  "fiscal_cycle_seconds": 2.5
+}

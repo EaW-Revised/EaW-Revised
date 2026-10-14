@@ -159,6 +159,11 @@ void SpaceEnvironment::camera_viewport(const float width, const float height) {
     }
 }
 
+std::string SpaceEnvironment::failure() const {
+    if (state_->view) return state_->view->failure();
+    return state_->failure;
+}
+
 std::optional<int> SpaceEnvironment::process(const double delta) {
     State& state = *state_;
     if (state.view) return state.view->process(delta);

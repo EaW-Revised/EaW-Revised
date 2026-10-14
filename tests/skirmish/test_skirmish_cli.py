@@ -6,7 +6,8 @@ tables alone (docs/replay-format.md, replay v3/v5: squadrons and optional GSPN/G
 with the frozen EAWRTST encoding. That independent hash must equal the pinned value and the
 census sim_headless writes from the replay, with 1, 2 and 4 workers. With
 EAWR_EAW_GAME_ROOT set, `sim_headless --skirmish m2` must also rebuild the same replay bytes
-from the installation, and its census must agree with the replay census.
+from the installation, and its census must agree with the replay census. MTID recordings
+require that installation for playback; legacy recordings still play without it.
 """
 
 from __future__ import annotations
@@ -22,9 +23,9 @@ import sys
 import tempfile
 
 FIXTURE = "m2-start.eawr-replay"
-FIXTURE_SHA256 = "4f8925a9b650f2539895047ccffd0338c57a5926ef8eb214f297e7cad0c3e4aa"
-TICK_ZERO_STATE = "8e6f2dbdb28a4ede544df23ab6550b7e6ee837ca9040e2a2b2d8760dcb74fa8a"
-CONTENT_IDENTITY = "9736d7d8e41e66b5a5ee2a74a8b5b3e3d08d6c794365ab3dc419ce5100eae559"
+FIXTURE_SHA256 = "0950c1fc37694268440909146ada690d142dd9cf49f23f58a83cc1e6f883b6a9"
+TICK_ZERO_STATE = "78697a3cd28322cd6f19b659de3b131a7cb8d6cf312e7dcfb684d63689cdaeda"
+CONTENT_IDENTITY = "86cc028edddd02a1805cd1f89d5f73d9ad511f61baecfbf7d1042d722ecad496"
 FINAL_TICKS = 30
 
 
@@ -50,6 +51,8 @@ def decode_setup(data: bytes) -> dict:
         raise ValueError("unexpected replay setup header")
     disabled_garrisons = []
     free_garrisons = []
+    beacon_rules = []
+    match_identity = False
     if version == 3 and header_size == 104:
         pass
     elif version == 5 and 108 <= header_size <= len(data):
@@ -61,8 +64,8 @@ def decode_setup(data: bytes) -> dict:
                 raise ValueError("truncated replay header extension")
             tag, length = struct.unpack_from("<HH", data, offset)
             offset += 4
-            # Frozen M2 supports only GSPN (FL-13) and GARR (FL-14).
-            if tag <= previous_tag or tag not in (3, 5) or length == 0 or offset + length > header_size:
+            # Frozen M2 supports SKSU, GSPN, GARR, MTID and BeaconRules.
+            if tag <= previous_tag or tag not in (2, 3, 5, 7, 9) or length == 0 or offset + length > header_size:
                 raise ValueError("unexpected garrison header extension")
             if tag == 3:
                 if length % 8:
@@ -70,7 +73,7 @@ def decode_setup(data: bytes) -> dict:
                 disabled_garrisons = list(struct.unpack_from(f"<{length // 8}Q", data, offset))
                 if disabled_garrisons[0] == 0 or any(a >= b for a, b in zip(disabled_garrisons, disabled_garrisons[1:])):
                     raise ValueError("garrison IDs must be nonzero and strictly increasing")
-            else:
+            elif tag == 5:
                 end = offset + length
                 cursor = offset
                 def read(fmt):
@@ -97,6 +100,30 @@ def decode_setup(data: bytes) -> dict:
                     previous_player = player
                 if cursor != end:
                     raise ValueError("trailing GARR bytes")
+            elif tag == 9:
+                if length < 8:
+                    raise ValueError("truncated BeaconRules header")
+                beacon_version, rows = struct.unpack_from("<II", data, offset)
+                if beacon_version != 1 or not 1 <= rows <= 64 or length != 8 + 16 * rows:
+                    raise ValueError("invalid BeaconRules header")
+                beacon_rules = [struct.unpack_from("<IIQ", data, offset + 8 + 16 * index)
+                                for index in range(rows)]
+                if (any(player == 0 or not 1 <= lifetime <= 1_000_000 or kind == 0
+                        for player, lifetime, kind in beacon_rules)
+                        or any(left[0] >= right[0] for left, right in zip(beacon_rules, beacon_rules[1:]))):
+                    raise ValueError("invalid BeaconRules row or player order")
+            elif tag == 2:
+                # Opaque recording metadata; the C++ decoder validates its full body.
+                pass
+            else:
+                body = data[offset:offset + length]
+                prefix = b"eawr-match-identity"
+                if len(body) < len(prefix) + 8 + 32 or not body.startswith(prefix):
+                    raise ValueError("invalid MTID header")
+                identity_version, domains = struct.unpack_from("<II", body, len(prefix))
+                if identity_version != 1 or not 1 <= domains <= 64 or hashlib.sha256(body[:-32]).digest() != body[-32:]:
+                    raise ValueError("invalid MTID version, domain count or digest")
+                match_identity = True
             previous_tag = tag
             offset += length
         if count == 0 or offset != header_size:
@@ -123,6 +150,8 @@ def decode_setup(data: bytes) -> dict:
         squadron_rows.append((container, list(struct.unpack_from(f"<{count}Q", data, offset))))
         offset += 8 * count
     commandable = {row[0] for row in player_rows if row[3] & 1}
+    if any(player not in commandable for player, _, _ in beacon_rules):
+        raise ValueError("BeaconRules references a noncommandable player")
     owners = {row[0]: row[2] for row in unit_rows}
     containers = {row[0] for row in squadron_rows}
     for player, _, _, registered in free_garrisons:
@@ -132,12 +161,14 @@ def decode_setup(data: bytes) -> dict:
         raise ValueError("the replay holds more than its header and setup")
     return {"seed": seed, "final_ticks": final_ticks, "identity": identity, "players": player_rows,
             "units": unit_rows, "squadrons": squadron_rows, "disabled_garrisons": disabled_garrisons,
-            "free_garrisons": free_garrisons}
+            "free_garrisons": free_garrisons, "match_identity": match_identity,
+            "beacon_rules": beacon_rules}
 
 
 def tick_zero_state(setup: dict) -> str:
     """EAWRTST at completed tick 0: the setup, next ID max+1, random state = seed, no orders."""
     data = b"EAWRTST\x00" + struct.pack("<IIIIII", 1, 1, 1, 24, 1, 30)
+    # BeaconRules authorize future commands; BECN state exists only after placement.
     next_id = max((row[0] for row in setup["units"]), default=0) + 1
     data += struct.pack("<QQQ", 0, next_id, setup["seed"]) + setup["identity"]
     data += struct.pack("<Q", len(setup["players"]))
@@ -216,20 +247,27 @@ def check_fixture(fixtures: pathlib.Path) -> list[str]:
         errors.append("SK-04, #272: 23 map objects, 15 Neutral and 8 Hutts")
     # #75: the five squadron companies (2, 3, 4, 9, 10) are their squadrons' containers; their craft
     # follow the map objects in company order.
-    craft = [row[0] for row in setup["units"][35:]]
+    craft = [row[0] for row in setup["units"][35:62]]
     if [container for container, _ in setup["squadrons"]] != [2, 3, 4, 9, 10] or             [member for _, members in setup["squadrons"] for member in members] != craft or             craft != list(range(36, 36 + len(craft))):
         errors.append("#75: each squadron company's craft after the map objects, one squadron per company")
     return errors
 
 
-def check_replay_runs(program: str, fixtures: pathlib.Path, work: pathlib.Path) -> tuple[list[str], dict | None]:
+def check_replay_runs(program: str, fixtures: pathlib.Path, work: pathlib.Path,
+                      expected_state: str = TICK_ZERO_STATE) -> tuple[list[str], dict | None]:
     errors = []
     outputs = {}
+    metadata = decode_setup((fixtures / FIXTURE).read_bytes())["match_identity"]
+    root = os.environ.get("EAWR_EAW_GAME_ROOT")
+    if metadata and not root:
+        print("FoC MTID replay: skipped (set EAWR_EAW_GAME_ROOT for content verification)")
+        return errors, None
+    game_arguments = ("--game-root", root) if metadata else ()
     for workers in ("1", "2", "4"):
         hashes, snapshots, census = (work / f"{name}-{workers}.{ext}" for name, ext in
                                      (("hashes", "csv"), ("snapshots", "csv"), ("census", "json")))
         completed = run(program, "--replay", str(fixtures / FIXTURE), "--hash-out", str(hashes),
-                        "--snapshot-out", str(snapshots), "--census-out", str(census), "--workers", workers)
+                        "--snapshot-out", str(snapshots), "--census-out", str(census), "--workers", workers, *game_arguments)
         if completed.returncode != 0:
             errors.append(f"workers {workers}: exit {completed.returncode}: {completed.stdout}")
             continue
@@ -242,12 +280,15 @@ def check_replay_runs(program: str, fixtures: pathlib.Path, work: pathlib.Path) 
     if hash_rows[0] != "tick,sha256" or len(hash_rows) != FINAL_TICKS + 1:
         errors.append("hash output has a header and 30 rows")
     census = json.loads(outputs["1"][2])
-    if census["source"] != "replay" or census["tick_zero"]["state_sha256"] != TICK_ZERO_STATE:
+    if census["source"] != "replay" or census["tick_zero"]["state_sha256"] != expected_state:
         errors.append(f"the replay census carries the tick-zero hash (found {census['tick_zero']['state_sha256']})")
     if census["tick_zero"]["sensor_profiles"] != 0:
         errors.append("a replay run binds no sensor table")
     snapshot_rows = outputs["1"][1].decode("utf-8").splitlines()
-    if snapshot_rows[1] != f"0,{census['tick_zero']['snapshot_sha256']}":
+    # MTID playback binds installed sensors/fog; census describes the unbound setup.
+    # Both modes still compare every snapshot byte across workers and sim_fields
+    # against the installed fixture in check_game; legacy bindings also match here.
+    if not metadata and snapshot_rows[1] != f"0,{census['tick_zero']['snapshot_sha256']}":
         errors.append("the census snapshot digest is row 0 of the snapshot output")
     return errors, census
 
@@ -279,6 +320,54 @@ def check_arguments(program: str, fixtures: pathlib.Path, work: pathlib.Path) ->
     return errors
 
 
+def check_recording_identity(program: str, replay: pathlib.Path, work: pathlib.Path, root: str) -> list[str]:
+    """Exercise real recording metadata, including the MTID-without-SKSU path."""
+    data = replay.read_bytes()
+    metadata = work / "metadata"
+    metadata.mkdir()
+    (metadata / FIXTURE).write_bytes(data)
+    decoded = decode_setup(data)
+    if not decoded["match_identity"]:
+        return ["CLI recording lacks MTID"]
+    errors, _ = check_replay_runs(program, metadata, metadata, tick_zero_state(decoded))
+    header_size = struct.unpack_from("<H", data, 10)[0]
+    offset = 108
+    extensions = []
+    for _ in range(struct.unpack_from("<I", data, 104)[0]):
+        tag, length = struct.unpack_from("<HH", data, offset)
+        body = data[offset + 4:offset + 4 + length]
+        if tag != 2:
+            extensions.append((tag, body))
+        offset += 4 + length
+    for mismatch in (False, True):
+        encoded = bytearray()
+        for tag, body in extensions:
+            if mismatch and tag == 7:
+                body = bytearray(body)
+                # First canonical domain's digest: valid encoding, different content.
+                name_length = struct.unpack_from("<I", body, len(b"eawr-match-identity") + 8)[0]
+                digest_offset = len(b"eawr-match-identity") + 8 + 4 + name_length + 4
+                body[digest_offset] ^= 1
+                body[-32:] = hashlib.sha256(body[:-32]).digest()
+            encoded += struct.pack("<HH", tag, len(body)) + body
+        stripped = bytearray(data[:108])
+        struct.pack_into("<H", stripped, 10, 108 + len(encoded))
+        struct.pack_into("<I", stripped, 104, len(extensions))
+        stripped += encoded + data[header_size:]
+        path = work / ("no-sksu-mismatch.eawr-replay" if mismatch else "no-sksu-match.eawr-replay")
+        path.write_bytes(stripped)
+        completed = run(program, "--replay", str(path), "--game-root", root,
+                        "--hash-out", str(path.with_suffix(".csv")))
+        if mismatch:
+            if completed.returncode != 3 or "EAWR-MATCH-0001" not in completed.stdout or "ai-data" not in completed.stdout:
+                errors.append(f"MTID without SKSU must refuse the differing ai-data domain: {completed.stdout}")
+        elif completed.returncode != 0:
+            errors.append(f"matching MTID without SKSU must replay: {completed.stdout}")
+    if not errors:
+        print("MTID recording: 1/2/4-worker outputs agree; matching no-SKSU replay accepted; ai-data mismatch refused")
+    return errors
+
+
 def check_game(program: str, fixtures: pathlib.Path, work: pathlib.Path, replay_census: dict | None) -> list[str]:
     root = os.environ.get("EAWR_EAW_GAME_ROOT")
     if not root:
@@ -291,6 +380,11 @@ def check_game(program: str, fixtures: pathlib.Path, work: pathlib.Path, replay_
                     "--replay-out", str(replay_path), "--ticks", str(FINAL_TICKS))
     if completed.returncode != 0:
         return [f"--skirmish m2: exit {completed.returncode}: {completed.stdout}"]
+    errors += check_recording_identity(program, replay_path, work, root)
+    played = run(program, "--replay", str(replay_path), "--game-root", root,
+                 "--hash-out", str(work / "recorded.hashes.csv"))
+    if played.returncode != 0:
+        errors.append(f"CLI recording cannot replay with its own match identity: {played.stdout}")
     if replay_path.read_bytes() != (fixtures / FIXTURE).read_bytes():
         errors.append("--skirmish m2 does not rebuild the committed replay")
     census = json.loads(census_path.read_bytes())
@@ -319,14 +413,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--program", required=True)
     parser.add_argument("--fixtures", required=True, type=pathlib.Path)
+    parser.add_argument("--installed", action="store_true")
     args = parser.parse_args()
+    if args.installed and not os.environ.get("EAWR_EAW_GAME_ROOT"):
+        return 77
     errors = check_fixture(args.fixtures)
     with tempfile.TemporaryDirectory(prefix="eawr-skirmish-cli-") as temporary:
         work = pathlib.Path(temporary)
-        run_errors, replay_census = check_replay_runs(args.program, args.fixtures, work)
-        errors += run_errors
-        errors += check_arguments(args.program, args.fixtures, work)
-        errors += check_game(args.program, args.fixtures, work, replay_census)
+        if args.installed:
+            run_errors, replay_census = check_replay_runs(args.program, args.fixtures, work)
+            errors += run_errors
+            errors += check_game(args.program, args.fixtures, work, replay_census)
+        else:
+            errors += check_arguments(args.program, args.fixtures, work)
     for error in errors:
         print(f"FAIL: {error}")
     if errors:

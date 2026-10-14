@@ -22,6 +22,7 @@
 #include "eawr/data/ui/shell_anchors.hpp"
 #include "eawr/presentation/ui/hud.hpp"
 #include "eawr/presentation/ui/layout.hpp"
+#include "eawr/presentation/ui/encyclopedia_timing.hpp"
 
 #include <array>
 #include <cstdint>
@@ -50,6 +51,18 @@ enum class HudFaction : std::uint8_t { empire, rebel, underworld };
 [[nodiscard]] std::string_view to_string(HudFaction faction) noexcept;
 [[nodiscard]] std::optional<HudFaction> hud_faction_from(std::string_view text) noexcept;
 
+// GHUD-S63: the galactic planet block's allegiance emblem is entry `allegiance_emblem_index` of the component's
+// `Icon_Alternate_Texture_Name` list. The three side names are GameConstants `Good_Side_Name`, `Evil_Side_Name` and
+// `Corrupt_Side_Name` (entries 0, 1, 2, so a mod that renames a side keeps its emblem); the engine's own literal
+// "Pirates" is entry 3 and every other faction entry 4. An empty side name matches nothing.
+struct SideNames {
+    std::string good;
+    std::string evil;
+    std::string corrupt;
+};
+inline constexpr std::string_view pirates_faction_name = "Pirates";
+[[nodiscard]] std::size_t allegiance_emblem_index(std::string_view faction, const SideNames& sides) noexcept;
+
 // The tactical HUD's shell component and the model it names. Retail:
 // `i_main_skirmish`, `i_tactical_controls.alo`.
 inline constexpr std::string_view tactical_shell_component = "i_main_skirmish";
@@ -69,6 +82,8 @@ struct HudShellMesh {
     std::string texture;
     float z{};
     std::vector<data::ui::ShellTriangle> triangles;
+    // Set only by hud_shell(..., keep_alternates): the mesh's authored _ALT<n> index.
+    std::optional<std::uint32_t> alternate;
 };
 
 // TM-09: the mounted pause shell held at the final frame of its first idle clip.
@@ -81,6 +96,9 @@ struct PauseShell final {
 };
 [[nodiscard]] core::Result<PauseShell> pause_shell(const vfs::Vfs& filesystem,
     const data::ui::CommandBarCatalog& catalog);
+// HCB-11c: validated authored fraction for each movie letterbox band.
+[[nodiscard]] core::Result<float> movie_letterbox_height(const vfs::Vfs& filesystem);
+[[nodiscard]] std::optional<double> beacon_place_delay(const vfs::Vfs& filesystem);
 
 struct HudShellButton {
     std::string name;
@@ -103,6 +121,9 @@ struct HudShellButton {
     std::vector<std::string> alternates; // Icon_Alternate_Texture_Name (a card border's pieces)
 };
 
+// WSW-28: the tactical button uses its HUD alternate, independently of weapon/build icons.
+[[nodiscard]] std::string_view special_weapon_icon(const HudShellButton& button, HudFaction faction) noexcept;
+
 // #425: a Bar component (a unit card's health or shield). The engine draws the level's back and
 // overlay quads at their textures' size times Scale around the bone plus Offset; a smooth bar
 // narrows the overlay to its percent and keeps its left edge.
@@ -113,7 +134,7 @@ struct HudBar {
     float scale{1.0F};
     std::vector<std::string> back;    // Bar_Texture_Name per level
     std::vector<std::string> overlay; // Bar_Overlay_Name per level
-    std::int32_t max_level{10};       // Max_Bar_Level: levels 0 to max_level
+    std::int32_t max_level{10};       // xml-fallback: Max_Bar_Level: levels 0 to max_level; load: src/presentation/ui/hud_shell.cpp#shell_bar
     bool smooth{};
 };
 
@@ -186,12 +207,45 @@ struct HudQueueSlot {
 // around the bone, the text right-justified at the bone plus Text_Offset when Right_Justified.
 struct HudIconText {
     HudShellText text;
+    assets::Vec2f origin;
     std::string icon;
     data::ui::Vec2 text_offset;
     bool right_justified{};
     double blink_duration{};
     double blink_rate{};
+    data::ui::Vec2 icon_offset{};
+    bool left_justified{};
 };
+
+// HCB-61: the caller supplies the highest allied, same-faction displayed
+// level (including any campaign adjustment), independently of this presenter.
+struct TacticalTechView {
+    std::int32_t displayed_level{};
+    HudFaction faction{HudFaction::rebel};
+    bool multiplayer{true};
+    bool space{true};
+    bool operator==(const TacticalTechView&) const = default;
+};
+[[nodiscard]] std::string tactical_tech_text(std::string_view localized_label, const TacticalTechView& view);
+
+// HCB-62: independent no-shell timer art, reusable by tactical/campaign callers.
+// Admission, deadline and placement belong to the caller; these are not card counts.
+struct HudTimerStyle {
+    HudShellButton button;
+    std::string build;
+    data::ui::Rgba8 colour{255, 255, 255, 255};
+    double blink_duration{};
+    double blink_rate{};
+    bool blink_fade{};
+};
+// Shared XML text/icon style, with caller-owned placement for No_Shell controls.
+[[nodiscard]] std::optional<HudIconText> hud_readout_style(
+    const data::ui::CommandBarCatalog& catalog, std::string_view component,
+    const data::ui::ShellAnchor& anchor = {});
+[[nodiscard]] std::optional<HudTimerStyle> hud_timer_style(
+    const data::ui::CommandBarCatalog& catalog, std::string_view component);
+[[nodiscard]] std::optional<double> hud_timer_progress(std::uint64_t frame,
+    std::optional<std::uint64_t> due_frame, std::uint32_t duration_frames) noexcept;
 
 struct HudShell {
     std::string model;
@@ -201,10 +255,14 @@ struct HudShell {
     std::vector<HudShellMesh> meshes;
     std::optional<data::ui::ReferenceRect> minimap;
     std::optional<HudShellButton> options;
+    std::optional<HudShellButton> movie_camera; // HCB-11: shared tactical movie control
+    std::optional<HudShellButton> beacon; // HCB-12: point-placement control.
     // The time panel's buttons in shell order, drawn as art only (their
     // behaviour is decision D7 and later tickets).
     std::vector<HudShellButton> panel_buttons;
     std::vector<HudShellButton> order_buttons;
+    std::optional<HudAbilityButton> special_weapon; // WSW-28/29: one tactical slot
+    std::optional<HudAbilityButton> retreat;        // HCB-15: b_retreat, its lockout dial art in `build`
     std::optional<HudShellText> planet_name;
     // #425: the unit card slots in component order (s_select_00, 01, ...; a column is two slots)
     // and the column borders (special_border_00, 01, ...). Empty when the shell has none.
@@ -216,6 +274,10 @@ struct HudShell {
     // and the reinforcements button (b_reinforcement), which opens the reinforcement pane.
     std::vector<HudQueueSlot> queue_slots;
     std::optional<HudIconText> credits;
+    std::optional<HudIconText> population;
+    std::optional<HudIconText> tactical_tech;
+    std::optional<HudTimerStyle> reinforcement_counter;
+    std::optional<HudTimerStyle> garrison_respawn_counter;
     std::optional<HudShellButton> reinforcement;
     std::vector<core::Diagnostic> diagnostics;
 };
@@ -251,13 +313,16 @@ struct HudReinforcePane {
 // The time panel's buttons, in draw order.
 inline constexpr std::array<std::string_view, 4> tactical_panel_buttons{
     "b_droid_help_tactical", "b_story_arc_t", "b_play_pause_t", "b_fast_forward_t"};
-inline constexpr std::array<std::string_view, 5> tactical_order_buttons{
-    "c_button00", "c_button01", "c_button02", "c_button04", "c_button05"};
+inline constexpr std::array<std::string_view, 6> tactical_order_buttons{
+    "c_button00", "c_button01", "c_button02", "c_button03", "c_button04", "c_button05"};
 
 // Never fails: a part the shell or catalogue lacks is left out with one
 // EAWR-UI-0320 warning.
+// `keep_alternates` (GHUD-S rows for the focused organize shell): the shell's alternate index is chosen by the
+// caller at run time (the planet's Zoomed_Terrain_Index), not by faction, so every _ALT<n> mesh is kept and
+// carries its index in HudShellMesh::alternate instead of being filtered by the faction's variant.
 [[nodiscard]] HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
-                                 HudFaction faction);
+                                 HudFaction faction, bool keep_alternates = false);
 
 // A button's state art at its texture's size, not the mesh's: the engine sizes
 // each state quad to the texture's texel width and height times the
@@ -303,8 +368,43 @@ struct UnitCardLooks {
     // session does not build (an upgrade object in M2, PU-20).
     std::optional<std::int64_t> build_cost;
     std::string description;
+    std::string unit_class;
+    // P-4: unresolved entries occupy their slot; at most three entries per column.
+    std::vector<std::string> good_against_icons;
+    std::vector<std::string> vulnerable_to_icons;
+    std::vector<std::string> ability_icons;
+    std::int32_t population{}; // negative usage, positive added capacity (CARD-17)
+    // WGUI-166 fleet encyclopedia: the header icon sits on `icon_back` (the
+    // hovered stack texture, tinted), and one cell per unit type follows the
+    // header. A cell without an icon is count-only knowledge: it names no type.
+    struct Cell {
+        std::string icon;
+        std::uint32_t count{};
+        friend bool operator==(const Cell&, const Cell&) = default;
+    };
+    std::string icon_back;
+    std::optional<data::ui::Rgba8> icon_back_tint;
+    float icon_scale{}; // header icon scale; 0 keeps the encyclopedia_icon Size X
+    std::vector<Cell> cells;
 };
+// WGUI-166: the fleet encyclopedia starts a new cell row after six cells.
+inline constexpr std::size_t encyclopedia_cell_columns = 6;
+[[nodiscard]] UnitCardLooks ability_card_looks(std::string_view type, std::uint32_t ability,
+    const data::Catalog* objects, const data::ui::TextDatabase* text);
 [[nodiscard]] UnitCardLooks unit_card_looks(std::string_view type, const data::Catalog* objects,
-                                            const data::ui::TextDatabase* text);
+                                            const data::ui::TextDatabase* text, bool multiplayer = true);
+// CARD-19: one reader for timing and header offsets. Missing/malformed globals
+// warn and retain defaults; incomplete timing still disables hover admission.
+struct EncyclopediaConstants final {
+    std::optional<EncyclopediaTiming> timing;
+    float population_offset{}, name_offset{}, cost_offset{};
+    float icon_x_offset{}, icon_y_offset{}, class_y_offset{};
+    std::vector<core::Diagnostic> diagnostics;
+};
+[[nodiscard]] EncyclopediaConstants encyclopedia_constants(const vfs::Vfs& filesystem);
+[[nodiscard]] std::optional<EncyclopediaTiming> encyclopedia_timing(const vfs::Vfs& filesystem);
+[[nodiscard]] std::optional<data::ui::Rgba8> production_queue_tint(const vfs::Vfs& filesystem);
+// PU-70: debug-build press-overlay timing; no XML duration tag exists.
+inline constexpr double command_bar_press_fade_seconds = 0.2;
 
 } // namespace eawr::presentation::ui

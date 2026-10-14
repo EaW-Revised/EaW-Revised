@@ -64,6 +64,7 @@ constexpr std::string_view file_a = R"(<?xml version="1.0"?>
         <Click_Shift>True</Click_Shift>
         <Click_Shift>False</Click_Shift>
         <Font_Name>Arial   Bold</Font_Name>
+        <Right_Click_SFX>Custom_Right_Click</Right_Click_SFX>
         <Font_Point_Size>7</Font_Point_Size>
         <Text_Color>255 212 33 255</Text_Color>
         <Text_Color2>247 198 0</Text_Color2>
@@ -111,7 +112,7 @@ constexpr std::string_view file_b = R"(<?xml version="1.0"?>
 )";
 
 void schema_contracts() {
-    expect(data::ui::field_count == 88U, "the schema covers the 88 FoC value tags besides Type and Group");
+    expect(data::ui::field_count == 89U, "the schema covers the 88 corpus value tags plus Right_Click_SFX");
     for (std::size_t i = 0; i < data::ui::field_count; ++i) {
         const auto field = static_cast<Field>(i);
         const auto round_trip = data::ui::field_from_tag(data::ui::to_string(field));
@@ -170,6 +171,7 @@ void fixture_contracts() {
     expect(option != nullptr, "find is case-insensitive");
     if (option) {
         expect(option->type == ComponentType::text_button, "TextButton type");
+        expect(option->text(Field::right_click_sfx) == "Custom_Right_Click", "authored right-click sound is typed text");
         expect(!option->flag(Field::click_shift, true), "repeated flag: last value wins");
         expect(option->text(Field::font_name) == "Arial Bold", "text keeps inner spaces, collapsed");
         expect(option->integer(Field::font_point_size) == 7, "integer field");

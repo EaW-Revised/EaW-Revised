@@ -40,13 +40,15 @@ constexpr std::uint64_t plan_seed = 394;
 }
 // Hidden when the object is created: turbo engines, power to weapons, missile shield.
 [[nodiscard]] bool hidden_at_creation(const std::string_view name) {
-    return has_prefix(name, "pte") || has_prefix(name, "pptw") || has_prefix(name, "pgw") || has_prefix(name, "pem");
+    return has_prefix(name, "pte") || has_prefix(name, "pptw") || has_prefix(name, "prs") || has_prefix(name, "pem");
 }
 [[nodiscard]] bool engine_emitter(const std::string_view name) { return has_prefix(name, "pe"); }
 [[nodiscard]] bool turbo_emitter(const std::string_view name) { return has_prefix(name, "pte"); }
 [[nodiscard]] bool power_to_weapons_emitter(const std::string_view name) { return has_prefix(name, "pptw"); }
 [[nodiscard]] bool ion_stun_emitter(const std::string_view name) { return has_prefix(name, "pi"); }
 [[nodiscard]] bool invulnerability_emitter(const std::string_view name) { return has_prefix(name, "pem"); }
+[[nodiscard]] bool gravity_well_emitter(const std::string_view name) { return has_prefix(name, "pgw"); }
+[[nodiscard]] bool missile_shield_emitter(const std::string_view name) { return has_prefix(name, "prs"); }
 
 [[nodiscard]] std::string lower(std::string_view text) {
     std::string result;
@@ -108,6 +110,20 @@ const UnitEmitters::ModelFrames* UnitEmitters::model_frames(const scene::Placeme
     // moves their proxy bones.
     ModelFrames frames;
     frames.bones.resize(model->bones.size());
+    // BP-74/PS-03: a proxy can be on a child bone of the exact charge mesh's bone.
+    // Cache that ancestry once per model; phase replanning only reads the proxy ordinal.
+    frames.blast_phases.resize(model->proxies.size());
+    for (const auto& mesh : model->meshes) {
+        const auto name = lower(mesh.name);
+        if ((name != "buildup" && name != "charged") || mesh.bone < 0) continue;
+        for (std::size_t ordinal = 0; ordinal < model->proxies.size(); ++ordinal) {
+            auto bone = static_cast<std::int32_t>(model->proxies[ordinal].bone);
+            for (std::size_t depth = 0; bone >= 0 && depth < model->bones.size(); ++depth) {
+                if (bone == mesh.bone) { frames.blast_phases[ordinal] = name == "charged"; break; }
+                bone = model->bones[static_cast<std::size_t>(bone)].parent;
+            }
+        }
+    }
     if (auto player = animation::Player::create(*model)) {
         if (auto pose = player.value().sample({}); pose && pose.value().bones.size() == model->bones.size()) {
             frames.bind_pose = true;
@@ -152,7 +168,7 @@ void UnitEmitters::plan(Ship& ship, const SpacePopulation::LiveShipEmitterView& 
                 placement.effects = scene::model_proxy_effects(cache_.access(), *attached);
                 placement.map_logical_path = view.placement->map_logical_path;
                 placement.scene_ordinal = view.placement->scene_ordinal;
-                placement.record_ordinal = index + 1;
+                placement.record_ordinal = static_cast<std::uint32_t>(index + 1);
                 ship.attachments.push_back({index, proxy_base, std::move(placement), *owner_frames->bones[bone_index]});
                 // Identity is independent of which hardpoints are currently destroyed.
                 proxy_base += attached->proxies.size();
@@ -178,7 +194,6 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
         const EffectSystem& system = effect_system(placement.model_path);
         Wanted wanted{proxy_base, placement.model_declared, placement.model_path,
             attachment, static_cast<std::uint32_t>(plan_seed) + static_cast<std::uint32_t>(view.entity), system.capacity};
-        wanted.size_scale = static_cast<float>(placement.scale_raw) / static_cast<float>(sim::math::Fixed::scale);
         if (!system.system) {
             wanted.failed = true;
             ++start_failed_[wanted.effect + ": " + system.cause];
@@ -198,7 +213,15 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
                             system.capacity};
     }
     // BP-41 to BP-43: the hardpoint states decide which damage and engine emitters run.
-    const std::vector<std::uint8_t> hidden = scene::hidden_hardpoint_proxies(*model, hardpoints, states);
+    std::vector<std::uint8_t> hidden = scene::hidden_hardpoint_proxies(*model, hardpoints, states);
+    // BP-74: these are exact charge-state mesh/bone names, not emitter type prefixes.
+    // Their ordinary descendant proxies inherit the owning mesh's visibility (WHE-35/36, FD-55).
+    for (std::size_t ordinal = 0; ordinal < model->proxies.size(); ++ordinal) {
+        const auto phase = frames->blast_phases[ordinal];
+        if (phase && !(*phase ? modes.blast_charged : modes.blast_charging)) {
+            hidden[ordinal] = 1U;
+        }
+    }
     // BP-43, AB-31/32, IS-09: the emitter-type switch clears the same code-hidden flag
     // the model's authored visibility sets. The Tartan's hidden pptw_ptwsa must therefore
     // run while POWER_TO_WEAPONS is active, just like its hidden ion-stun proxy.
@@ -208,6 +231,8 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
         shown[ordinal] = ((modes.ion_stunned && ion_stun_emitter(name))
             || (modes.power_to_weapons && power_to_weapons_emitter(name))
             || (modes.invulnerability && invulnerability_emitter(name))
+            || (modes.gravity_well && gravity_well_emitter(name))
+            || (modes.missile_shield && missile_shield_emitter(name))
             || (modes.turbo && modes.engines_online && turbo_emitter(name))) ? 1U : 0U;
     }
     // Planned in the ship's model space: the identity placement makes each record's frame the
@@ -232,7 +257,9 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
         // The authored-hidden flag is overridden by the same type switch above (BP-43).
         const bool shown_by_ability = (modes.turbo && modes.engines_online && turbo_emitter(record.proxy_name))
             || (modes.power_to_weapons && power_to_weapons_emitter(record.proxy_name))
-            || (modes.invulnerability && invulnerability_emitter(record.proxy_name));
+            || (modes.invulnerability && invulnerability_emitter(record.proxy_name))
+            || (modes.gravity_well && gravity_well_emitter(record.proxy_name))
+            || (modes.missile_shield && missile_shield_emitter(record.proxy_name));
         if (hidden_at_creation(record.proxy_name) && !shown_by_ability) {
             ++not_admitted_[record.proxy_name + ": emitter type hidden at creation"];
             continue;
@@ -247,6 +274,9 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
         wanted.ion_stun = ion_stun_emitter(record.proxy_name);
         wanted.power_to_weapons = power_to_weapons_emitter(record.proxy_name);
         wanted.invulnerability = invulnerability_emitter(record.proxy_name);
+        wanted.gravity_well = gravity_well_emitter(record.proxy_name);
+        wanted.missile_shield = missile_shield_emitter(record.proxy_name);
+        wanted.blast_effect = frames->blast_phases[record.proxy_ordinal].has_value();
         const EffectSystem& system = effect_system(wanted.effect);
         if (!system.system) {
             wanted.failed = true;

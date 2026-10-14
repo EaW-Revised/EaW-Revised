@@ -131,7 +131,7 @@ bool MapMode::State::upload_terrain_surfaces(const terrain::Mesh& mesh, const Ma
     return true;
 }
 
-void MapMode::State::compose_skydome(const assets::Map& map, const assets::ObjectTypeCatalog& catalog,
+void MapMode::State::compose_skydome(const assets::Map& map, const assets::ObjectTypeCatalog& placement_catalog,
     const std::string& catalog_failure, const land_look::TextureLookup& lookup_texture,
     sim::AssetId& next_asset, sim::EntityId& next_entity, std::vector<sim::RenderInstance>& instances) {
     State& state = *this;
@@ -142,7 +142,7 @@ void MapMode::State::compose_skydome(const assets::Map& map, const assets::Objec
         state.skydome_status = "absent";
     } else {
         state.skydome_object = *map.environments[state.environment_record].primary_sky;
-        const assets::ObjectTypeRef* type = assets::find_object_type(catalog, state.skydome_object);
+        const assets::ObjectTypeRef* type = assets::find_object_type(placement_catalog, state.skydome_object);
         if (type == nullptr) {
             state.skydome_status = catalog_failure.empty()
                 ? "object_not_in_catalog" : "catalog_unavailable";

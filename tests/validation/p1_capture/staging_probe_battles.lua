@@ -10,6 +10,7 @@ Failures = {}
 -- A fake call fails (errors) when Fake.fail[name] is set and is refused (returns false) when
 -- Fake.refuse[name] is set.
 function Fake_Call(name)
+	Fake.calls[name] = (Fake.calls[name] or 0) + 1
 	if Fake.fail[name] then
 		error("fake " .. name .. " failure")
 	end
@@ -20,11 +21,11 @@ function Fake_Call(name)
 end
 
 function Fake_Reset()
-	Fake = {posted = {}, abilities = {}, objects = {}, suspend_calls = 0, suspend_args = nil, fail = {}, refuse = {}, time = 0}
+	Fake = {posted = {}, abilities = {}, objects = {}, calls = {}, suspend_calls = 0, suspend_args = nil, fail = {}, refuse = {}, time = 0}
 end
 
 function Fake_Object(type_name, owner)
-	local o = {type_name = type_name, owner = owner, valid = true, hull = 1, health = 500, despawned = false}
+	local o = {type_name = type_name, owner = owner, valid = true, hull = 1, health = (Fake.health and Fake.health[type_name]) or 500, despawned = false}
 	o.Is_Valid = function() return o.valid end
 	o.Get_Hull = function() return o.hull end
 	o.Get_Owner = function() return owner end
@@ -42,6 +43,7 @@ function Fake_Object(type_name, owner)
 		end
 	end
 	o.Despawn = function()
+		if Fake.block_protected_despawn and o.invulnerable then return false end
 		if Fake_Call("despawn") == false then
 			return false
 		end
@@ -57,6 +59,15 @@ function Fake_Object(type_name, owner)
 	o.Prevent_Opportunity_Fire = function(on)
 		o.fire_suppressed = on
 		return Fake_Call("prevent-fire")
+	end
+	o.Make_Invulnerable = function(on)
+		o.invulnerable = on
+		if on then o.was_protected = true end
+		return Fake_Call("invulnerable")
+	end
+	o.Teleport = function(position)
+		o.teleported = position
+		return Fake_Call("teleport")
 	end
 	o.Activate_Ability = function(ability, on)
 		table.insert(Fake.abilities, {o.type_name, ability, on})
@@ -76,7 +87,7 @@ function Fake_Object(type_name, owner)
 	return o
 end
 
-LOCAL = {name = "local"}
+LOCAL = {name = "local", Select_Object = function(object) Fake.selected = object end}
 EMPIRE = {name = "Empire"}
 
 function Game_Message(text)
@@ -109,7 +120,12 @@ function Find_Object_Type(name)
 	return {name = name}
 end
 function Spawn_Unit(object_type, anchor, player)
-	return {Fake_Object(object_type.name, player)}
+	local units = {}
+	for i = 1, (Fake.spawn_count or 1) do
+		units[i] = Fake_Object(object_type.name, player)
+		units[i].spawn_anchor = anchor
+	end
+	return units
 end
 function Create_Position(x, y, z)
 	return {x, y, z}
@@ -231,6 +247,44 @@ function Test_Forced_Kill_Shows_SK()
 	Check(not Posted("ERR"), "a clean forced kill posts no ERR")
 end
 
+-- #1874: a Star Destroyer then a Calamari cruiser, finished by local helpers, each wreck watched
+-- for wreck_after seconds; every line counts the seconds since the kill.
+function Test_Wrecks()
+	Battle("wrecks")
+	Fake.health = {Star_Destroyer = 7500, Calamari_Cruiser = 8500}
+	-- a refused attack order ends the case (its victim would never be shot at)
+	Fake.refuse.attack = true
+	Serve_Until(function() return Posted("ERR attack") end, 400)
+	Check(Posted("ERR attack false"), "wrecks: a refused attack order posts ERR")
+	Check(Fake.objects[1] and Fake.objects[1].despawned, "wrecks: a refused attack order abandons the case")
+	Battle("wrecks")
+	Fake.health = {Star_Destroyer = 7500, Calamari_Cruiser = 8500}
+	Serve(40)
+	Check(table.getn(Fake.objects) == 0, "wrecks: nothing is staged before the first wait")
+	Serve_Until(function() return EaWR_Stage.phase == "damage" end, 400)
+	local victim = Fake.objects[1]
+	Check(victim and victim.type_name == "Star_Destroyer" and victim.owner == EMPIRE, "wrecks: the Star Destroyer is first, for the enemy")
+	Check(table.getn(Fake.objects) == 4 and Fake.objects[2].owner == LOCAL and Fake.objects[3].type_name == "Nebulon_B_Frigate"
+		and Fake.objects[4].type_name == "Corellian_Corvette", "wrecks: three local helpers stand beside the victim")
+	Serve(30)
+	Check(Fake.objects[2].attack_target == victim and Fake.objects[4].attack_target == victim, "wrecks: the helpers are ordered on the victim")
+	Fake.objects[3].attack_target = nil
+	Serve(30)
+	Check(Fake.objects[3].attack_target == victim, "wrecks: the order is repeated")
+	Serve_Until(function() return Posted("WK SD SK dead") end, 2000)
+	Check(Posted("WK SD SK dead"), "wrecks: a victim nobody killed is forced and dated")
+	local killed = Fake.time
+	Serve(700)
+	Check(Fake.objects[2].valid and Fake.objects[3].valid, "wrecks: the helpers stay through the wreck watch")
+	Serve(200)
+	Check(Fake.time - killed > 80 and not Fake.objects[2].valid and Fake.objects[2].despawned, "wrecks: the helpers go after the watch")
+	Serve_Until(function() return table.getn(Fake.objects) > 4 end, 100)
+	Check(Fake.objects[5] and Fake.objects[5].type_name == "Calamari_Cruiser", "wrecks: the Calamari cruiser follows")
+	EaWR_Stage_Reset()
+	Check(Fake.objects[6] and Fake.objects[6].despawned and Fake.objects[7] and Fake.objects[7].despawned,
+		"wrecks: the battle's end despawns the helpers too")
+end
+
 function Test_Failed_Camera_Abandons_The_Case()
 	Battle("bank")
 	Fake.fail.camera = true
@@ -302,6 +356,40 @@ function Test_Abilities()
 	Check(Posted("AB CC on +"), "abilities: the line dates the on phase")
 	Check(Posted("AB CC off +"), "abilities: the line dates the off phase")
 	Check(not Posted("ERR"), "abilities: no ERR")
+end
+
+-- #2279: capture both owners of each ability, and never label failed setup as an active state.
+function Test_Ability_Icons()
+	Battle("ability_icons")
+	Fake.block_protected_despawn = true
+	local done = Serve_Until(function() return table.getn(Fake.abilities) >= 16 end, 4000)
+	Check(done and table.getn(Fake.objects) == 8, "ability icons: four owner/enemy pairs switch on and off")
+	for i = 1, table.getn(Fake.objects) do
+		local object = Fake.objects[i]
+		Check(object.owner == ((i == 2 or i == 4 or i == 6 or i == 8) and EMPIRE or LOCAL), "ability icons: alternating owner/enemy")
+		Check(object.was_protected and object.fire_suppressed and object.spawn_anchor[1] == -2200 and object.spawn_anchor[2] == 1500,
+		      "ability icons: protected subjects at the isolated camera point")
+		if i < 8 then Check(object.despawned and not object.invulnerable, "ability icons: protection is cleared before cleanup") end
+	end
+	Check(Posted("AB OWN-XW on +") and Posted("AB EN-XW on +"), "ability icons: side and active phase are labelled")
+	Check(Posted("AB EN-PW on +") and Posted("AB EN-NB on +") and Posted("AB EN-ST on +"),
+	      "ability icons: timed, defend and Underworld enemy states are reached")
+	Check(not Posted("ERR"), "ability icons: no setup errors")
+	for _, call in ipairs({"invulnerable", "prevent-fire"}) do
+		Battle("ability_icons")
+		Fake.refuse[call] = true
+		Serve(100)
+		Check(Posted("ERR") and not Posted("AB OWN-XW on +"), "ability icons: refused setup is not active evidence")
+		Check(Fake.objects[1] and Fake.objects[1].despawned, "ability icons: refused subject is removed")
+	end
+	Battle("ability_icons")
+	Fake.spawn_count = 3
+	Fake.block_protected_despawn = true
+	Serve_Until(function() return EaWR_Stage.phase == "wait" and EaWR_Stage.next_index == 2 end, 1000)
+	Check(table.getn(Fake.objects) == 3 and table.getn(Fake.abilities) == 6, "ability icons: every returned craft switches on and off")
+	for i = 1, table.getn(Fake.objects) do
+		Check(Fake.objects[i].despawned, "ability icons: every returned craft is cleaned before the next case")
+	end
 end
 
 function Test_Refused_Ability_Abandons_The_Case()
@@ -464,12 +552,14 @@ function Test_Melee()
 end
 
 Test_Abilities()
+Test_Ability_Icons()
 Test_Turbo_Samples()
 Test_Refused_Ability_Abandons_The_Case()
 Test_Pause()
 Test_Find_Mask()
 Test_Find_Mask(true)
 Test_Melee()
+Test_Wrecks()
 Battle("bolts")
 Serve(100)
 local bolt_shooter = EaWR_Stage.ship
@@ -502,6 +592,19 @@ Test_Forced_Kill_Shows_SK()
 Test_Failed_Camera_Abandons_The_Case()
 Test_Refused_Move_Never_Shows_The_Leg()
 Test_Refused_Despawn_Kills_Instead()
+
+Battle("allocation_observe")
+Serve(100)
+Check(Fake.suspend_calls == 1 and EaWR_Stage.ai_suspended, "allocation observer: one successful early hold")
+Check(table.getn(Fake.objects) == 0 and not EaWR_Stage.err, "allocation observer: no staged objects")
+for name, count in pairs(Fake.calls) do
+	Check(name == "suspend" or count == 0, "allocation observer: no fixture/camera/fire mutation " .. name)
+end
+Battle("allocation_observe")
+Fake.refuse["suspend"] = true
+Serve(2)
+Check(not EaWR_Stage.ai_suspended and table.getn(Fake.objects) == 0,
+	"allocation observer: a refused hold never counts as suspended")
 
 if table.getn(Failures) > 0 then
 	return "FAIL: " .. table.concat(Failures, "; ")

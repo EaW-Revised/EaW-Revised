@@ -14,6 +14,7 @@
 #include <vector>
 
 namespace eawr::platform {
+class BattleScoring;
 
 struct LiveAi {
     std::shared_ptr<const LiveScripts> scripts;
@@ -23,6 +24,7 @@ struct LiveAi {
 // The retail freestore of each non-human lobby player (skirmish::ai_setup), its Lua files read
 // from the mounted FoC view (skirmish::ai_modules).
 [[nodiscard]] core::Result<LiveAi> live_ai(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs,
-    const units::UnitTables& tables, const vfs::Vfs& files);
+    const units::UnitTables& tables, const vfs::Vfs& files,
+    std::shared_ptr<const BattleScoring> scoring = {});
 
 } // namespace eawr::platform

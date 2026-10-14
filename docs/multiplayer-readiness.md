@@ -355,10 +355,137 @@ digest, restore an inactive session, and replay sealed commands to the agreed
 barrier. Only swap the live session when state/history agree with the recovery
 source. Publish a new immutable render snapshot and suppress duplicate UI/audio
 events by epoch/tick/sequence. Corruption or failure leaves the old session paused.
-One recovery attempt per incident is the initial policy; recurrent divergence
-stops the match with diagnostics rather than hiding a deterministic defect.
+One recovery attempt per incident is the initial policy; failed re-simulation or
+proof stops the match with diagnostics rather than hiding a deterministic defect.
 
 ### Join in progress and reconnect
+
+The core also provides an opt-in desync recovery policy (`SessionOptions::resync`).
+This is an **intentional remake extension**: walk MP-24/MP-U5 finds no corrective
+transfer on Continue. Before play, participants agree this policy together with
+the reconnect setup, match identity, history budget and recovery timeout.
+Recovery uses reconnect's setup/log envelope and headless replay parser, rather
+than a presentation snapshot or a second restoration format.
+Normal held-seat rejoin retains the agreed recovery option for later incidents;
+repair remains disabled until the held/rejoining incident has completed.
+
+At a diagnosed completed-tick barrier, every active peer votes its state hash
+and a digest of the identical canonical setup and completed sealed input log
+(including retained timing controls). A tick or input-history disagreement ends
+the attempt. The most common state hash is selected; **ties, including a two-peer
+1–1 split, select the hash held by the lowest seat ID**. The lowest seat holding
+that hash supplies the log. This deterministic policy is session authority agreed
+before play, not evidence of cheating or proof that the majority is correct.
+
+Only peers outside the chosen hash group rebuild a tick-zero adapter from verified
+local content into staging. The existing bounded reconnect package parser replays
+all completed inputs and controls without rendering. A custom control callback
+must target the staging adapter; the live callback is never reused there.
+Every active peer proves the selected hash, then sends READY; all READY messages
+precede local publication. Each peer retains its live future batches, pending
+intents and sequence/deduplication cursors, so none are restamped by recovery.
+Callers obtain the published adapter through `active_adapter()` after a swap.
+The typed `TacticalLockstepSession` convenience owner rejects this opt-in until
+it adopts that publication seam; its existing retained adapter cannot follow a swap.
+
+Kinds 58–63 are epoch-bound vote, offer, 64 KiB chunk, proof, ready and abort.
+Abort carries the typed refusal reason, including when overlap or missing history
+prevents opening the incident. Departure start, receive and finalization are
+refused during a diagnosed recovery; they cannot clear or reclassify its report.
+The opt-in admission rule leaves default frozen-session input behavior unchanged.
+One attempt is allowed per diagnosed incident; replay/hash failure, timeout,
+unavailable history, voter loss, or an overlapping departure/reconnect hold fails
+closed. The failed live adapter remains frozen and the diagnostic bundle remains
+available. Successful recovery starts the monitor's next window at the proved
+barrier and retains its latest preceding report in `recovered_report()`; a later incident
+gets a new epoch and a separate attempt. Timing controls use the existing
+retain/replay seam. The LAN viewer negotiates recovery in setup and rebuilds its live adapter from
+verified local content on the simulation owner. The battle HUD shows `Resyncing...`;
+headless replay pumps I/O and leaves the held world readable by presentation.
+Publication replaces the world, controller bindings and snapshot together, without
+emitting catch-up presentation events. `allow_rejoin=false` retains setup/history
+without credentials and rejects new streams while allowing connected-peer resync. Before READY, the agreed incident deadline can abort
+the attempt. After sending READY a voter commits to completion and stops expiring
+on its local deadline, including if other READY streams are delayed; closed voter
+links still fail the session. The transport must bound silent link liveness while
+the caller continues pumping I/O. Buffered next-window monitor traffic is checked
+before the staged adapter is published.
+
+The session core has an opt-in held-seat protocol. It reuses the departure
+frontier agreement, advances the surviving peers through the recovered complete
+prefix, and pauses at its first missing tick. Grace duration, log budget, canonical
+setup, match identity and distinct seat credentials are agreed before play; the
+grace clock remains outside simulation state. A verified early rejoin request
+can itself start the frontier vote if the replacement stream opened before the
+old closure was observed. Delayed gameplay from a held seat is ignored, and
+completed-epoch handshake traffic produces a notice rather than stopping play.
+Expiry is acknowledged by every
+survivor before the ordinary departure vote resumes. A sealed voluntary quit
+continues to use the ordinary departure outcome.
+
+Rejoin kinds 64–71 bind every transfer to an incident epoch. A fresh adapter built
+from locally verified setup receives the same setup and a contiguous completed
+input log, runs catch-up without presentation, and proves its completed-state hash
+to every active peer. The transferred envelope preserves future sealed batches,
+sequence cursors, departed membership and retained session-control events. Each
+survivor resends its own future batches before its ready message. All-peer proofs
+and ready messages precede resume; the desync monitor starts a new window at that
+proved barrier and refuses to clear an existing divergence.
+
+The log has an agreed bounded budget and transfers in 64 KiB chunks. Budget
+exhaustion emits a typed warning and permanently disables reconnect for the live
+session while play continues. A later drop uses ordinary departure. An active
+transfer that cannot fit its envelope also expires through survivor agreement.
+Source transfer buffers and receiver staging can temporarily use roughly two to
+three times the log budget, in addition to simulation and protocol metadata;
+receiver staging capacity is released after restoration.
+
+An authenticated return within the initial grace window starts a progress
+deadline (30 seconds by default). Accepted chunk acknowledgements and completed
+replay ticks refresh it, with progress verified and relayed by the log source to
+the surviving roster. The original incident has an agreed five-minute hard cap
+by default before READY commitment; progress cannot extend it. Duplicate progress
+never refreshes the deadline. A stalled uncommitted transfer or one exceeding the
+cap leads the survivors to agreed departure; a returning peer's own timeout
+rejects its local attempt. A survivor that sent READY stops originating expiry
+on its deadline but still honors a pre-commitment expiry from another survivor.
+An expiring voter never sends READY, so all-peer resume cannot race that departure.
+Without another peer's expiry, committed completion uses the progress deadline
+plus completeness timeout (60 seconds idle by default) and fails closed if a
+committed voter stops responding. The returning peer retries HELLO at bounded
+intervals and cannot submit commands before activation. The viewer must execute catch-up off the
+render thread or in bounded slices while continuing I/O.
+
+Engine-generated inputs are generated by the same adapter during
+catch-up, rather than submitted again as human commands. Timing-policy owners
+retain their agreed control bytes with `retain_reconnect_control` and provide a
+`replay_control` callback at the original completed-tick boundary. A caller must
+rebuild the adapter and its engine/script hooks from verified local content.
+
+The viewer retains TCP endpoints and logical seats for closed-link repair,
+including mesh seat zero. Production LAN matches enable held-seat Rejoin through
+a replaceable credential provider. The host generates a distinct 32-byte key
+with the OS cryptographic random source for each unordered pair of seats in a match. Delivery uses
+only the already-admitted seat streams, before the setup acceptance and Start
+barriers, and binds the keys to the canonical offer digest and recipient seat.
+Seat X receives only K(X,Z) for its remote seats Z. Rejoin and TCP replacement
+proofs use the key shared by the returning seat and its particular verifier;
+an admitted participant cannot authenticate as another seat to a third seat.
+Start waits for every credential acknowledgement. Credential kinds 80/81 are consumed outside the setup,
+monitor and simulation protocols. Tokens never enter discovery, lobby text,
+diagnostics, logs, profiles, canonical setup or replays; owned credential storage
+and delivery buffers are erased on release, and retained secrets are erased when
+the match ends or is cancelled. A peer with a different reconnect policy or no
+provider refuses setup. Crash/relaunch recovery is not supported.
+
+LAN TCP is a trusted-LAN transport and is **plaintext**. A passive eavesdropper
+on the same LAN can capture delivered pair keys and claim a held seat during its grace
+window. This is an accepted LAN risk: admitted streams provide seat routing,
+not cryptographic initial identity or network confidentiality. The provider can
+be replaced by confidential delivery on an encrypted authenticated connection;
+the optional online GNS transport encrypts its connections, but production LAN
+uses TCP. This intentional remake extension does not establish retail reconnect
+availability, which remains unverified in walk MP-46/MP-U7.
 
 A joining peer first passes the same content/policy handshake, receives a retained
 checkpoint plus contiguous sealed log and catches up without rendering or gameplay
@@ -420,6 +547,124 @@ Root CTest and existing headless replay hashes remain gates; a passing local Lua
 smoke or visual capture is not a multiplayer qualification.
 
 ## Engineering follow-ups
+
+### Agreed adaptive input delay
+
+`SessionOptions::adaptive_timing` opts a non-LAN match into host-issued timing
+changes, with `SessionOptions::non_lan` set explicitly by the host. LAN sessions
+retain fixed delay; the debug-build qualification for MP-U1 confirms their
+exclusion from adaptation, while Internet and platform sessions can adapt.
+All peers must agree those options, the host and
+the initial delay as part of their session setup. The host samples the worst
+available RTT over active remote peers; missing samples defer a policy pass.
+The default source is `MessageTransport::link_stats` smoothed RTT, rounded upward
+from microseconds to whole milliseconds, with at least one measurement required.
+A supplied RTT provider overrides that source for qualification.
+RTT and wall-clock timeout inputs stay outside simulation state. Only the sealed
+event's effective tick and delay affect admission.
+
+The [multiplayer walk](behaviour/walks/multiplayer.md) supplies MP-02–MP-05.
+Our mapping uses one logical frame per 30 Hz simulation tick and factor two.
+The host evaluates at completed-tick multiples of `64 * max(1, floor(D/2))`.
+The initial platform pair `R=1/A=2` therefore first evaluates at tick 64;
+policy-selected leads use `R>=2`. Catch-up and transition holds rejoin the next
+global cadence boundary instead of creating an off-cadence policy pass. At logical
+rate 30, it uses MP-05's integer latency estimate
+`floor(2 * floor(floor(120 * RTT_ms / 100) / 33) / 3)`, floor four for broadband
+or six otherwise, then sets `D = 2 * min(floor(latency/2), 32)`.
+RTT at or above 2640 ms already selects the cap; saturating there before
+multiplication preserves that result without integer overflow. This reproduces
+the measured policy constants, but maps lead directly to our admission delay:
+it does not claim MP-03's interval-rounded command targets or variable wall-rate
+latency parity. Logical rate remains fixed; MP-06 speed changes are separate.
+
+Wire kind 56 seals a host proposal and kind 57 confirms readiness. Each carries
+little-endian `effective_tick:u64, delay:u64`; the authenticated stream identifies
+the sender. Readiness is broadcast to every active peer, including the host.
+One event can be outstanding. The host places it at
+`C + 2 * sealed_input_horizon(max(oldD,newD)) + 1`, beyond existing sealed input
+on every peer. Every peer applies at that tick, and holds there while any readiness
+vote is missing. Receiving all votes proves every peer has the proposal even
+when different streams arrive in different orders. A conflicting, late or
+unauthorized event, failed voter stream, or expired vote fails closed.
+Once a departure is agreed, that peer immediately leaves the timing voter and
+RTT roster, even while its immutable inputs await the future departure cutoff.
+Timing may proceed among survivors during that interval. A new failed-voter
+departure overlapping a timing event whose full vote has been retained preserves
+that immutable event and applies it at its original tick among the surviving voters.
+A departure arriving before local timing retention waits for the full timing vote
+or its completeness deadline. No step occurs during that wait. A delayed ready
+on an already closed stream can still complete the vote; a missing vote expires
+without changing the proposed delay or inventing the departed peer's proof.
+At expiry, an unretained receiver reports the timing timeout (`EAWR-NET-0903`),
+while receivers that retained the timing vote report the departure timeout
+(`EAWR-NET-0502`). This diagnostic-code difference is accepted: every surviving
+peer ends in a latched refusal, preserves the same simulation prefix, and neither
+continues nor hangs waiting for another vote.
+Departure acknowledgements settle during receive processing, so a following
+host timing proposal in the same drain sees the agreed roster. When another
+stream still holds a departure acknowledgement, a timing control that follows
+its sender's validated acknowledgement is retained but not voted until the
+departure settles. Controls preceding that proof remain conflicting agreements.
+Late timing frames from already removed peers do not reopen their membership.
+
+A second departure inside the first decision's settle window waits for the first
+roster decision. Controls following their sender's validated acknowledgement are
+deferred in per-sender receive order, within a 1 MiB byte budget and a frame cap
+of `max(1024, (2 * input_horizon + 4) * remote_peer_count)` for retained history,
+sealed lead and vote controls.
+A later target on one stream cannot block another stream's current votes. The first decision
+still needs every original survivor's acknowledgement; losing a voter before it
+sends that proof leads to the bounded agreement timeout. Deferred recovery and
+votes are validated against the settled roster before any further simulation step.
+
+A departure during held-seat recovery has a distinct `EAWR-NET-0503` refusal.
+Both observed survivor closure and a remote departure proposal preserve the held
+epoch, barrier and simulation prefix, then latch the error. Multi-seat recovery
+requires a separate agreed policy; an absent seat is never silently removed from
+the current recovery vote.
+
+At the final simulation tick, departure admission has ended. Late departure
+controls cannot alter the final state or produce a synthetic input beyond the
+recording. A missing final hash voter retains the bounded terminal-hash refusal.
+An unmonitored peer may finish while a lagging survivor cannot settle its final
+departure; uniform terminal consensus remains a separate protocol decision.
+
+MP-04's original vulnerable-target remap is replaced by preserving every sealed
+command's original tick and bytes. An increase expands the reachable window
+after proposal receipt, before any peer can seal with the new lead. A decrease
+drains previously sealed and pending inputs; new admission is no earlier than
+the open seal frontier or the latest pending command, preserving seat sequence
+order. Recovery history and the desync departure guard retain the greater
+transition horizon until `effective_tick + sealed_input_horizon(oldD)`, then
+contract to the active delay. This is a deterministic protocol choice, not an
+assertion that the original remapping algorithm is reproduced.
+The next proposal may arrive while a slower receiver retains that old envelope;
+its activation must lie at or beyond the prior transition boundary. Receipt time
+alone does not make the two activations overlap.
+
+Fake ordered-stream tests cover mid-match increases and decreases with commands
+in flight, duplicate timing frames and asymmetric timing delivery, two and three
+peers, final desync agreement, and identical command streams and every completed
+state hash on one, two, four and eight simulation workers. Adaptive timing is
+currently a core session option; the viewer's LAN setup continues to select its
+qualified fixed delay.
+
+`SessionOptions::retain_timing_event(tick, immutable_bytes)` retains kind 56 once
+all readiness votes arrive, before activation. The reconnect owner binds it to
+its retained-control log. `LockstepSession::replay_timing_control(bytes)` applies
+that verified control before the adapter executes its original tick, preserving
+the active delay and transition envelope without wire voting or gameplay-command
+reinjection. Early, contradictory and malformed replay controls are rejected;
+retention failure stops the session before a new delay is applied. Binding these
+two core seams to the reconnect log is automatic when reconnect and adaptive
+timing are both enabled. No callback capturing the movable session is required.
+Executed controls replay at their original tick, and verified future controls
+restore their already agreed timing state and receive horizon before resuming.
+A dropped voter can enter the reconnect hold during a committed timing change;
+an uncommitted timing vote still fails closed. Tests reconnect before activation
+and across activation/transition drain in both delay directions, preserving the
+uninterrupted replay and state on one, two, four and eight workers.
 
 M2 work must land before the tactical AI host and Lua HUD bridge claim authoritative scripting; M6 work does not
 block their offline fixtures. The dependency order is numeric profile, sandbox

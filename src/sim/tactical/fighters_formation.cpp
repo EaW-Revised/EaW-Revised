@@ -18,6 +18,135 @@
 namespace eawr::sim::tactical {
 using namespace fighters_detail;
 
+bool refresh_squadron_attack_path(SquadronAttackPath& path, const std::uint64_t frame,
+    const SquadronAttackRefresh& observation) {
+    if (frame < path.next_refresh_frame) return false;
+    path.next_refresh_frame = frame + logical_frames_per_second;
+    if (observation.shared_cell || !observation.visible || !observation.repath_permitted
+        || observation.protected_destination || !observation.attack_positioning
+        || (observation.in_attack_reach && !observation.pursuing)) return false;
+    if (path.escorted_destination != observation.escorted_destination) return true;
+    const auto half_reach = Fixed::from_raw(std::max<std::int64_t>(0, observation.effective_reach.raw()) / 2);
+    return observation.completed_or_stopping || !within_range(path.cached_position,
+        observation.target_position, half_reach, RangeMetric::planar);
+}
+
+bool squadron_attack_initialization_due(const SquadronAttackPath& path, const std::uint64_t frame) noexcept {
+    return path.initialization_pending && (!path.failure_frame || (frame > *path.failure_frame
+        && frame - *path.failure_frame > 2 * logical_frames_per_second));
+}
+
+SquadronPathAdmission install_squadron_attack_path(SquadronAttackPath& path,
+    SquadronAttackRoute route, const std::uint64_t frame) {
+    if (route.nodes.size() < 2) return SquadronPathAdmission::refused;
+    if (path.collision_identity != 0 && route.identity != path.collision_identity) {
+        if (route.identity != 0 || path.stack.empty()) return SquadronPathAdmission::refused;
+        // Collision-free geometry stays below the protected top tracker.
+        path.stack.insert(path.stack.end() - 1, std::move(route));
+        return SquadronPathAdmission::inserted;
+    }
+    // Ordinary initialization replaces its stack. Matching collision identity
+    // admits a new top tracker without discarding protected/lower entries.
+    if (path.collision_identity == 0) path.stack.clear();
+    path.stack.push_back(std::move(route));
+    path.stack_changed_frame = frame;
+    return SquadronPathAdmission::active;
+}
+
+std::uint32_t squadron_attack_segment(const SquadronAttackPath& path,
+    const EntityId leader, const Vec3& position) noexcept {
+    if (path.stack.empty()) return 0;
+    const auto& route = path.stack.back();
+    const auto tracker = route.trackers.find(leader);
+    if (tracker == route.trackers.end()) return 0;
+    auto segment = tracker->second.segment;
+    while (route.nodes.size() >= 2 && segment < route.nodes.size() - 1
+        && squadron_move_arrived(route.nodes[segment], route.nodes[segment + 1], position)) ++segment;
+    return segment;
+}
+
+void advance_squadron_attack_path(SquadronAttackPath& path, const EntityId leader,
+    const Vec3& position, const std::span<const EntityId> admitted) {
+    if (path.stack.empty()) return;
+    auto& route = path.stack.back();
+    const auto own = route.trackers.find(leader);
+    const auto segment = std::find(admitted.begin(), admitted.end(), leader) != admitted.end()
+        ? squadron_attack_segment(path, leader, position)
+        : (own != route.trackers.end() ? own->second.segment : 0);
+    for (auto& [id, tracker] : route.trackers) {
+        tracker.segment = segment;
+        if (std::find(admitted.begin(), admitted.end(), id) != admitted.end()) tracker.started = true;
+    }
+}
+
+void squadron_attack_combat_boundary(SquadronState& state, const bool in_strafe_reach, const bool shared_cell) {
+    if (!in_strafe_reach && !shared_cell) return;
+    state.approach = false;
+    if (state.attack_path) state.attack_path->stack.clear();
+}
+
+core::Result<SquadronAttackRoute> plan_squadron_attack_route(const CraftProfile& craft,
+    const MotionRules&, const EntityId container, const std::span<const EntityId> roster,
+    const std::uint64_t, const Vec3& centre, const Fixed yaw, const Fixed,
+    const Vec3& destination, const std::optional<Vec3> current_facing) {
+    SquadronAttackRoute route;
+    route.identity = container;
+    // FSC-71/FD-65 (UFS-35 capture): an unobstructed route has zero mapping. Nonzero side and
+    // lead producers belong to the obstacle/prediction work (UFS-34), which writes them here.
+    route.aside = Fixed{};
+    route.ahead = Fixed{};
+    static_cast<void>(craft);
+    Calc calc;
+    // FS-40/FD-65, UFS-35's unobstructed control: the first facing is
+    // independent of the segment bearing. Ship turn arcs are not team paths.
+    // This producer has no obstacle/prediction inputs; those remain UFS-34.
+    route.start_facing = {calc.cos_deg(yaw), calc.sin_deg(yaw), Fixed{}};
+    if (current_facing) route.start_facing = *current_facing;
+    if (centre != destination) {
+        route.nodes = {centre, destination};
+        // FS-40/UFS-35: the observed node speeds are annotations, including
+        // zero. They are independent of current velocity and craft speed limits.
+        route.node_speeds = {Fixed{}, Fixed{}};
+    }
+    if (!calc.ok()) return core::Result<SquadronAttackRoute>::failure(calc.error("squadron route facing"));
+    if (route.nodes.size() >= 2) {
+        route.trackers.emplace(container, SquadronPathTracker{});
+        for (const auto member : roster) route.trackers.emplace(member, SquadronPathTracker{});
+    }
+    return core::Result<SquadronAttackRoute>::success(std::move(route));
+}
+
+core::Result<std::optional<LaneFlight>> squadron_attack_flight(const SquadronAttackPath& path,
+    const EntityId member, const Vec3& centre, const Fixed speed,
+    const Fixed side_error_min, const Fixed side_error_max) {
+    using Result = core::Result<std::optional<LaneFlight>>;
+    if (path.stack.empty()) return Result::success(std::nullopt);
+    const auto& route = path.stack.back();
+    const auto tracker = route.trackers.find(member);
+    if (tracker == route.trackers.end() || route.nodes.size() < 2
+        || tracker->second.segment >= route.nodes.size() - 1) return Result::success(std::nullopt);
+    Calc calc;
+    const auto& origin = route.nodes[tracker->second.segment];
+    const auto& end = route.nodes[tracker->second.segment + 1];
+    const Vec3 delta{calc.sub(end.x, origin.x), calc.sub(end.y, origin.y), Fixed{}};
+    const Fixed length = calc.length(delta);
+    if (length.raw() == 0) return Result::success(std::nullopt);
+    LaneFlight flight;
+    flight.direction = {calc.div(delta.x, length), calc.div(delta.y, length), Fixed{}};
+    flight.speed = speed;
+    flight.individual_speed = true;
+    // WSQ-17: mapped side error uses the same authored formation bounds as a move.
+    const Fixed side = calc.sub(calc.mul(calc.sub(centre.y, origin.y), flight.direction.x),
+        calc.mul(calc.sub(centre.x, origin.x), flight.direction.y));
+    const Fixed error = calc.sub(route.aside, side);
+    if (side_error_max.raw() > 0 && calc.abs(error) > side_error_min) {
+        flight.shift = calc.div(error.raw() > 0 ? calc.sub(error, side_error_min)
+            : calc.add(error, side_error_min), side_error_max);
+    }
+    if (!calc.ok()) return Result::failure(calc.error("squadron attack segment"));
+    return Result::success(flight);
+}
+
 core::Result<std::vector<GroupSlot>> squadron_group_slots(const std::span<const GroupSquadron> squadrons,
     const Vec3& destination) {
     Calc calc;
@@ -233,6 +362,11 @@ core::Result<std::vector<LaneFlight>> formation_lane_flight(const std::span<cons
         if (off.raw() > 0 && most.raw() > 0) {
             const Fixed share = calc.div(off, std::max(whole(12), most));
             speed = calc.add(calc.mul(share, own), calc.mul(calc.sub(whole(1), share), top));
+            // WMV-42/44: formation upkeep reads the member type's deceleration directly.
+            // The debug-build default is zero, unlike ordinary ship flight's speed fallback.
+            const Fixed limit = calc.add(top, calc.sqrt(calc.mul(
+                calc.mul(whole(2), members[index].deceleration), calc.abs(off))));
+            speed = std::min(speed, limit);
         } else if (off.raw() < 0 && least.raw() < 0) {
             const Fixed share = calc.div(off, std::min(calc.neg(whole(12)), least));
             speed = calc.add(calc.mul(share, floor), calc.mul(calc.sub(whole(1), share), top));
@@ -240,7 +374,21 @@ core::Result<std::vector<LaneFlight>> formation_lane_flight(const std::span<cons
         // FO-11: steering aside it keeps its pace along the path, never faster than its own
         // `Max_Speed`.
         const Fixed shift = flights[index].shift;
-        speed = calc.mul(speed, calc.sqrt(calc.add(whole(1), calc.mul(shift, shift))));
+        const Fixed length = calc.sqrt(calc.add(whole(1), calc.mul(shift, shift)));
+        speed = calc.mul(speed, length);
+        // WMV-42: the sideways bound uses error beyond the dead zone. The debug build
+        // applies it only to a positive normalized sideways component.
+        if (shift.raw() > 0) {
+            const Fixed side_error = calc.abs(calc.mul(shift, side_error_max));
+            const Fixed side_limit = std::min(own, calc.add(top, calc.sqrt(calc.mul(
+                calc.mul(whole(2), members[index].deceleration), side_error))));
+            const Fixed sideways = calc.div(shift, length);
+            // Divide only for a binding ceiling: a tiny steer can have an unrepresentably
+            // large, nonbinding quotient, or a normalized component rounded to zero.
+            if (sideways.raw() > 0 && calc.mul(speed, sideways) > side_limit) {
+                speed = calc.div(side_limit, sideways);
+            }
+        }
         flights[index].speed = std::clamp(speed, Fixed{}, own);
     }
     if (!calc.ok()) {

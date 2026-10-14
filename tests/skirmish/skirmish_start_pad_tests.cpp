@@ -112,16 +112,19 @@ void foc_pad_capture_build(const skirmish::SkirmishStart& start, const skirmish:
     const auto gated_child = std::find_if(gated_tables.units.begin(), gated_tables.units.end(), [](const auto& type) {
         return type.id == "UC_Rebel_Mineral_Extractor";
     });
-    expect(!disabled.empty() && gated_child != gated_tables.units.end(), "WBP-36/RG-04 pad gate fixture resolves");
-    if (!disabled.empty() && gated_child != gated_tables.units.end()) {
-        gated_child->constructed_type = disabled.front().unit;
+    expect(gated_child != gated_tables.units.end(), "WBP-36/RG-04 pad gate fixture resolves");
+    if (gated_child != gated_tables.units.end()) {
+        const std::string completed_type = disabled.empty() ? "Krayt_Class_Destroyer"
+            : std::string(disabled.front().unit);
+        gated_child->constructed_type = completed_type;
         const auto gated_rules = skirmish::economy_rules(start, inputs, gated_tables);
-        expect(static_cast<bool>(gated_rules), "WBP-36/RG-04 gated final-type pad menu binds");
+        expect(static_cast<bool>(gated_rules), "WBP-36/RG-04 reviewed final-type pad menu binds");
         if (gated_rules) {
             const auto* menu = gated_rules.value().menu(skirmish::type_id("Mineral_Extractor_Pad"), skirmish::faction_id("Rebel"));
             const auto* option = menu ? menu->find(skirmish::type_id("UC_Rebel_Mineral_Extractor")) : nullptr;
-            expect(option && !option->available && option->disabled_reason == skirmish::roster_disabled_reason(disabled.front().unit),
-                   "WBP-36/RG-04 a disabled completed type disables its UC entry through the shared policy");
+            expect(option && option->available == disabled.empty()
+                && option->disabled_reason == skirmish::roster_disabled_reason(completed_type),
+                   "WBP-36/RG-04 the UC entry follows the completed type's reviewed admission policy");
         }
     }
     const auto ship = std::find_if(start.units.begin(), start.units.end(), [](const auto& unit) {

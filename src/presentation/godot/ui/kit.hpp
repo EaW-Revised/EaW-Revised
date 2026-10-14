@@ -20,6 +20,8 @@
 // list, combo and edit keep Godot's ItemList, OptionButton and LineEdit
 // behaviour and apply the skin as theme overrides plus a drawn frame.
 
+#include <cstdint>
+
 #include <godot_cpp/classes/base_button.hpp>
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/font.hpp>
@@ -27,6 +29,7 @@
 #include <godot_cpp/classes/item_list.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/option_button.hpp>
+#include <godot_cpp/classes/popup_menu.hpp>
 #include <godot_cpp/classes/range.hpp>
 #include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/texture2d.hpp>
@@ -54,6 +57,7 @@ struct KitTextStyle final {
     bool outline{};
     int cell_ascent{};
     int cell_descent{};
+    float outline_pixels{2.0F};
 };
 
 [[nodiscard]] KitTextStyle kit_text_style(const godot::Control& control, std::string_view role);
@@ -84,6 +88,8 @@ public:
     EawrUiFrame();
     void set_small(bool small);
     [[nodiscard]] bool is_small() const { return small_; }
+    // A small frame without its background fill: the rim alone, as a group box draws.
+    void set_rim_only(bool rim_only);
     void _draw() override;
 
 protected:
@@ -91,7 +97,13 @@ protected:
 
 private:
     bool small_{};
+    bool rim_only_{};
 };
+
+// For a root that is scaled by its transform and has oversampling_with_scale enabled: call it right
+// after the scale changed. Godot computes a node's oversampling from the transform cached before the
+// change, so the text under the root would keep the previous scale's level until the next change.
+void refresh_text_oversampling(godot::CanvasItem& root);
 
 // Draws a small frame (Small_Frame_*) inside `rect` on `control`'s canvas item.
 void draw_small_frame(godot::Control& control, const godot::Rect2& rect, bool background);
@@ -128,6 +140,7 @@ class EawrUiLabel final : public godot::Control {
 public:
     EawrUiLabel();
     void set_text(const godot::String& text);
+    [[nodiscard]] godot::String get_text() const { return text_; }
     void set_role(const godot::String& role);
     void set_alignment(godot::HorizontalAlignment alignment);
     void set_wrap(bool wrap);
@@ -153,6 +166,9 @@ public:
     EawrUiCheck();
     void set_text(const godot::String& text);
     void set_radio(bool radio);
+    // BS_PUSHLIKE: the on/off piece fills the whole rect and the caption is centred in it, as for a
+    // tab button (the keyboard pages' tabs), instead of a box with the caption beside it.
+    void set_pushlike(bool pushlike);
     void set_forced_state(KitState state);
     [[nodiscard]] KitState state() const;
     void _draw() override;
@@ -164,6 +180,7 @@ protected:
 private:
     godot::String text_;
     bool radio_{};
+    bool pushlike_{};
     KitState forced_{KitState::automatic};
     KitText caption_;
 };
@@ -176,6 +193,7 @@ class EawrUiSlider final : public godot::Range {
 public:
     EawrUiSlider();
     void set_forced_states(KitState minus, KitState plus);
+    [[nodiscard]] std::uint64_t edit_revision() const noexcept { return edit_revision_; }
     void _draw() override;
     void _gui_input(const godot::Ref<godot::InputEvent>& event) override;
     void _notification(int what);
@@ -196,6 +214,7 @@ private:
     KitState forced_plus_{KitState::automatic};
     Part hovered_{Part::none};
     Part held_{Part::none};
+    std::uint64_t edit_revision_{}; // actual GUI gestures, including unchanged endpoints
 };
 
 // Progress bar (msctls_progress32): Progress_Bar_Left, Middle_On up to the
@@ -239,6 +258,9 @@ class EawrUiCombo final : public godot::OptionButton {
 public:
     EawrUiCombo();
     void set_forced_state(KitState state);
+    // The drop-down list as the retail rig capture shows it (rim, translucent backing, list font, no radio
+    // mark). Off by default (#3167).
+    void set_retail_list(bool retail);
     void _draw() override;
     void _notification(int what);
 
@@ -247,8 +269,11 @@ protected:
 
 private:
     void apply_skin();
+    void apply_retail_list(godot::PopupMenu& popup);
+    void scale_retail_list();
     KitState forced_{KitState::automatic};
     bool applying_{};
+    bool retail_list_{};
 };
 
 // Edit box: LineEdit inside the small frame, in the Edit_Box font (or

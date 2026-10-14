@@ -169,6 +169,10 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 entry.id = state.entity_id;
                 entry.type_id = state.type_id;
                 entry.owner = state.owner;
+                entry.weapons_enabled = !retreat_holds(state.entity_id) && retreat_state.phase < RetreatPhase::escaping;
+                const auto lobby = std::lower_bound(economy.players.begin(), economy.players.end(), state.owner,
+                    [](const EconomyPlayer& candidate, const PlayerId id) { return candidate.player < id; });
+                entry.ai_owned = lobby != economy.players.end() && lobby->player == state.owner && lobby->ai;
                 const auto player = std::lower_bound(setup.players.begin(), setup.players.end(), state.owner,
                     [](const Player& candidate, const PlayerId id) { return candidate.player_id < id; });
                 entry.team = player->team_id;
@@ -177,7 +181,9 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 // W-10: where the unit stood before this frame's movement (a unit new this frame: here).
                 while (start != starts.end() && start->first < state.entity_id) ++start;
                 entry.previous_position = start != starts.end() && start->first == state.entity_id ? start->second : state.position;
-                auto transform = level_transform(unit);
+                if (unit.position_history) entry.before_previous_position = unit.position_history->before_previous;
+                // WWP-73/74, BK-05: combat reads the same rolled bone placement as the hull.
+                auto transform = unit_transform(unit);
                 if (!transform) {
                     errors[slot] = detail::diagnostic(diagnostic_codes::worker_failure,
                         "tick " + std::to_string(frame) + " unit " + std::to_string(state.entity_id) + ": "
@@ -191,7 +197,8 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 if (published != instances.end() && published->entity_id == state.entity_id) {
                     entry.visible_to = published->visible_to;
                 }
-                entry.profile = combat.find(state.type_id);
+                entry.profile = combat.find_target_type(state.type_id);
+                entry.footprint = combat.footprint(state.type_id);
                 entry.durability_profile = health_profile(unit);
                 entry.durability = unit.durability ? &*unit.durability : nullptr;
                 entry.combat = unit.combat ? &*unit.combat : nullptr;
@@ -214,6 +221,7 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 entry.weapon_delay = ability_factor(unit, AbilityModifier::weapon_delay);
                 entry.fire_rate = ion_fire_rate(unit.ion_stun, world.frame); // IS-06
                 entry.scatter_radius = ability_factor(unit, AbilityModifier::scatter_radius);
+                if (unit.corrupt) entry.corrupt_inaccuracy = unit.corrupt->inaccuracy;
                 entry.in_nebula = unit.nebula && unit.nebula->present;
                 entry.object_fire_rate = ability_factor(unit, AbilityModifier::fire_rate);
                 if (unit.abilities) {
@@ -227,6 +235,15 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                         defence.jamming_radius = profile.abilities[*jammer].effective_radius;
                         defence.active_jamming = unit.abilities->slots[*jammer].active;
                     }
+                    if (const auto salvo = ability_slot(profile, AbilityKind::full_salvo)) {
+                        entry.full_salvo = unit.abilities->slots[*salvo].active;
+                    }
+                    entry.stealth_on = unit.abilities->stealth_on;
+                    if (const auto blast = ability_slot(profile, AbilityKind::blast); blast && unit.abilities->charged_blast) {
+                        entry.charged_blast = unit.abilities->charged_blast;
+                        entry.blast_damage_multiplier = profile.abilities[*blast].charged_blast->damage_multiplier;
+                    }
+                    entry.stealth_invisible = stealth_invisible(*unit.abilities, world.frame, &profile);
                     const auto index = ability_slot(profile, AbilityKind::barrage);
                     if (index && unit.abilities->slots[*index].active) {
                         entry.barrage_target = unit.abilities->slots[*index].target;
@@ -291,7 +308,7 @@ core::Result<std::optional<detail::CollectionTrees::Member>> TacticalSession::Im
         if (profile == nullptr) return core::Result<Member>::success(std::nullopt);
         detail::CullBox bounds;
         if (profile->collision) {
-            auto transform = level_transform(unit);
+            auto transform = unit_transform(unit);
             if (!transform) return core::Result<Member>::failure(transform.error());
             auto box = *profile->collision;
             // DG-36b: attached geometry can extend outside the parent model's box.

@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from tools.inventory.corpus import Corpus, CorpusError
+from tools.inventory.tag_registry import load_registry
 
 
 from tools.inventory.census_catalog import (
@@ -80,7 +81,7 @@ def census(game_root):
                          ". Re-review these consumers and update data/census/mechanic-review.json; "
                          "then regenerate with EAWR_EAW_GAME_ROOT set: " + REGENERATE)
     catalog = Catalog(game_root)
-    registry = json.loads((ROOT / "docs/tag-coverage/statuses.json").read_text(encoding="utf-8"))
+    registry = load_registry(ROOT / "docs/tag-coverage/statuses.json")
     pairs = {(cls.lower(), row["tag"].lower()): row for row in registry["rows"] for cls in row["classes"]}
     rules, titles, gaps, tag_rules = rule_index()
     roster = {}
@@ -226,7 +227,7 @@ def census(game_root):
                     else "station" if "DUMMY_STAR_BASE" in row["behaviours"] else "ship")
             if status == "partial" and entry.get("missing_types") and kind not in entry["missing_types"]:
                 mapped = "implemented"
-            title = family.capitalize() + " — " + titles.get(ticket, area + " application")
+            title = family.capitalize() + " â€” " + titles.get(ticket, area + " application")
             reason = "Registry application evidence, scoped to listed class/tag pairs; missing/partial fields are listed in registry_evidence. This is not a per-unit runtime verdict."
             mechanic(key, title, mapped, reason, code, ids, ticket)
             m = mechanics[key]
@@ -301,7 +302,7 @@ def census(game_root):
 def handler_needs(row, mechanic, need):
     def add(key, title, status, reason, code=(), rules=(), ticket=None, size="M"):
         need(row, mechanic(key, title, status, reason, code, rules, ticket, size), status)
-    generic = {"DEFEND", "TURBO", "POWER_TO_WEAPONS", "SPOILER_LOCK", "ION_CANNON_SHOT", "INVULNERABILITY", "BARRAGE"}
+    generic = {"DEFEND", "TURBO", "POWER_TO_WEAPONS", "SPOILER_LOCK", "ION_CANNON_SHOT", "INVULNERABILITY", "BARRAGE", "LURE"}
     special_rules = {
         "Combat_Bonus_Ability": (["WPR-51", "WHE-11", "WHE-20"], 937),
         "Starbase_Upgrade_Ability": (["WPR-52"], 540),
@@ -332,6 +333,41 @@ def handler_needs(row, mechanic, need):
     for ability in row["unit_abilities"]:
         kind = ability["type"]
         ids, ticket = type_rules.get(kind, (["UC-03"], 760))
+        if kind == "BLAST" and row["id"] == "The_Peacebringer":
+            add("unit-ability:" + kind, kind + " ability", "partial",
+                "RG-03 admits Peacebringer only. Named BLAST initiation starts recharge and counts admitted charge polls; completion snapshots enabled SPECIAL guns, successful shots consume the shared budget and scale direct instance damage only. Empty authored effects remain empty. Broader inter-object firing order FD-56 and exceptional callbacks UFS-30 remain deferred.",
+                ("src/units/unit_abilities.cpp#ability_table", "src/sim/tactical/session_abilities.cpp#service_blast",
+                 "src/sim/tactical/combat_fire.cpp#attempt", "src/sim/tactical/session_step_combat.cpp#fired_charged_shot"),
+                ("RG-03", "WHE-35", "WHE-36", "WAD-31", "WAD-34", "WAD-35", "WAD-36", "WAD-37"), 946)
+            continue
+        if kind in {"CLUSTER_BOMB", "FOW_REVEAL_PING"}:
+            rules = ("WCB-01", "WCB-02", "WCB-03", "FS-29", "FC-57", "FC-58", "FD-47") if kind == "CLUSTER_BOMB" else ("WFP-01", "WFP-02", "WFP-03")
+            reason = ("Named self-targeted handler launches real projectiles in fixed ring order and starts recharge. "
+                      "The MC30 previous-sample self-trigger follows FS-29/FC-57/58 and FD-47; general lifecycle and the "
+                      "post-movement proximity seam remain UFS-27. Travel/countdown fidelity remains separate."
+                      if kind == "CLUSTER_BOMB" else
+                      "Unlimited point activation creates the owner's invisible projectile and starts recharge. "
+                      "Its live reveal source ends on the first flight step (WFP-03), then ordinary fog regrows; "
+                      "WFP-U1 regrowth appearance remains capture-needed.")
+            add("unit-ability:" + kind, kind + " ability", "partial", reason,
+                ("src/units/unit_abilities.cpp#ability_table", "src/sim/tactical/session_step_commands.cpp#apply_ability",
+                 "src/sim/tactical/session_step_combat.cpp#projectile_inputs", "src/sim/tactical/session_step_finish.cpp#projectile-reveal-sources")
+                + (("src/sim/tactical/session_abilities.cpp#service_mc30",) if kind == "CLUSTER_BOMB" else ()), rules)
+            continue
+        if kind == "INTERDICT":
+            add("unit-ability:" + kind, kind + " ability", "partial",
+                "Manual deployment gates on the gravity-well hardpoint, halts movement and applies the authored lock and optional timer; the viewer shows and drains pgw. Generator-loss deactivation and facing lock are inferred, unverified host choices. Radar alerts have no presentation consumer; retreat prevention is not implemented; no verified skirmish consumer (WIN-U1). Active_By_Default structure activation remains separate.",
+                ("src/units/unit_abilities.cpp#ability_table", "src/sim/tactical/abilities.cpp#ability_movement_disabled",
+                 "src/sim/tactical/session_abilities.cpp#ability_gate", "apps/viewer/src/unit_emitters_frame.cpp#modes_of"),
+                ("WIN-01", "WIN-02", "WIN-04", "WIN-U1", "BP-73"), 2190)
+            continue
+        if kind == "MISSILE_SHIELD":
+            add("unit-ability:" + kind, kind + " ability", "partial",
+                "Deployment halts movement, applies the authored lock, radius and optional timer, and shows/drains prs. Facing lock is an inferred, unverified host choice. Existing indexed projectile defence redirects direct flight and repaths rocket entry in source registration order; lasers, zero-turn projectiles and guided missile-path behavior remain unverified (WMS-U1). Deploy/undeploy for deployable types is not implemented (WMS-02); stock Interdictor has no deployment tags.",
+                ("src/units/unit_abilities.cpp#ability_table", "src/sim/tactical/abilities.cpp#ability_movement_disabled",
+                 "src/sim/tactical/projectiles.cpp#repath_rocket", "apps/viewer/src/unit_emitters_frame.cpp#modes_of"),
+                ("WMS-01", "WMS-02", "WMS-03", "WMS-04", "WMS-U1", "WPJ-17", "RFL-07", "BP-73"), 2190)
+            continue
         if kind in generic:
             if kind == "BARRAGE":
                 add("unit-ability:" + kind, kind + " ability", "partial",
@@ -339,6 +375,12 @@ def handler_needs(row, mechanic, need):
                     ("src/units/unit_abilities.cpp#ability_table", "src/sim/tactical/session_step_commands.cpp#apply_area_ability",
                      "src/sim/tactical/combat_fire.cpp#attempt", "src/presentation/ui/command_sink.cpp#command_payload",
                      "apps/viewer/src/battle_input_commands.cpp#BARRAGE"), ("WAD-38", "BARR-01"), 1074)
+            elif kind == "LURE":
+                add("unit-ability:" + kind, kind + " ability", "partial",
+                    "RG-03 admits the squadron and craft buttons. Authored radius, exact target types, pulse timing, enemy-team orders, expiry, recharge and take-damage mode use the WLU service; the viewer shows the team particle. The team-mean particle attachment and integer-frame pulse timing remain documented approximations; the retail comparison is pending.",
+                    ("src/units/unit_abilities.cpp#ability_table", "src/sim/tactical/session_step_commands.cpp#lure",
+                     "apps/viewer/src/battle_effects_prepare.cpp#lure"),
+                    ("RG-03", "WLU-01", "WLU-02", "WLU-03", "WLU-04", "WLU-05", "WLU-06", "WLU-07", "WLU-08", "WLU-09", "WLU-10"), 2060)
             else:
                 add("unit-ability:" + kind, kind + " ability", "implemented",
                     "The supported kind dispatches through the ability table and simulation service; other modifiers and handler-specific paths are separate needs.",
@@ -372,12 +414,36 @@ def handler_needs(row, mechanic, need):
             continue
         handler = ability["handler"]
         ids, ticket = special_rules.get(handler, (["UC-03"], 760))
+        if handler == "Cluster_Bomb_Ability":
+            add("special-handler:" + handler, handler + " handler", "partial",
+                "Named User_Input handler launches the authored ring and countdown; MC30 script autofire cadence remains unsourced.",
+                ("src/units/unit_tables_profiles.cpp#load_abilities", "src/sim/tactical/session_step_commands.cpp#apply_ability"),
+                ("WCB-01", "WCB-02", "WCB-03"))
+            continue
         implemented = handler == "Ion_Cannon_Shot_Attack_Ability"
         partial = handler == "Income_Stream_Ability"
         reason = ("Team ion-shot state and projectile override are applied." if implemented else
                   "Station additive income exists; completed mine live ownership and allied recipient lifecycle are absent." if partial else
                   "The special handler has no complete tactical service for this object. Handler parameters alone do not implement it; UC-03 marks data-only service semantics unverified.")
         code = ["src/units/unit_tables_profiles.cpp#load_abilities", "src/units/unit_abilities.cpp#ability_table"]
+        if handler == "Blast_Ability" and row["id"] == "The_Peacebringer":
+            partial = True
+            reason = "Peacebringer named user-input handler applies charge polls, shared charged-shot count, authored direct multiplier, phase particles and activation audio. Ordinary target, cooldown and health gates remain; empty stock phase effects have no substitutes. FD-56 broader inter-object order and UFS-30 exceptional callback policy remain deferred."
+            code += ["src/sim/tactical/session_abilities.cpp#service_blast", "src/sim/tactical/combat_fire.cpp#attempt",
+                     "apps/viewer/src/battle_effects_impacts.cpp#blast_phase", "apps/viewer/src/battle_audio_events.cpp#blast_activate"]
+        if handler == "Force_Healing_Ability" and styles == ["Skirmish_Automatic"]:
+            reason = ("Skirmish_Automatic mine self-repair has no complete tactical service. "
+                      "The headline missing status rolls up this mine direct unit alongside the partial space automatic satellite service; "
+                      "handler parameters alone do not implement mine repair (UC-03).")
+        if handler == "Force_Healing_Ability" and styles == ["Space_Automatic"]:
+            add("special-handler:" + handler, handler.replace("_", " "), "partial",
+                "Automatic space healing selects eligible allies by healing-health fraction and repairs live hardpoints or hull, "
+                "with authored pulse effects. Stable query ties, competing healers, outside-centre bounds and the late damage phase "
+                "remain inferred adapters; exceptional lifecycle interfaces remain UFS-28. Other activation modes are outside this consumer.",
+                ("src/units/unit_tables_profiles.cpp#load_abilities", "src/sim/tactical/session_abilities.cpp#service_healing",
+                 "src/sim/tactical/durability.cpp#heal_health", "apps/viewer/src/live_session_frame.cpp#healing_lights_"),
+                tuple("WSH-%02d" % index for index in range(1, 9)), 2275)
+            continue
         upgrade = row["class"].lower() == "upgradeobject"
         if upgrade and handler == "Starbase_Upgrade_Ability" and styles == ["Skirmish_Automatic"]:
             implemented = True
@@ -419,6 +485,17 @@ def handler_needs(row, mechanic, need):
         add("special-handler:" + handler, handler.replace("_", " "),
             "implemented" if implemented else "partial" if partial else "missing", reason, tuple(code), ids, ticket)
     behaviours = set(row["behaviours"])
+    if row["id"] == "Krayt_Class_Destroyer":
+        add("special-admission:krayt", "Ordinary Krayt SPECIAL admission", "implemented",
+            "Reviewed carrier admission uses ordinary assigned-target SPECIAL ion/damage profiles without BLAST. SELF_DESTRUCT is independent; the charged projectile override is not selected by ordinary fire.",
+            ("src/units/unit_combat.cpp#weapon_special", "src/sim/tactical/combat_fire.cpp#attempt"),
+            ("RG-02", "WAD-31", "WAD-32", "WAD-33", "WAD-35", "WAD-37"))
+    if row["id"] in {f"Skirmish_Underworld_Star_Base_{level}" for level in range(3, 6)}:
+        add("special-admission:station", "Underworld station SPECIAL admission", "implemented",
+            "Reviewed infrastructure admits the manual cannon profile, retaining enabling-upgrade, manual-target/turret and shared player-clock gates. Level-four/five plasma batteries use ordinary weapon service without BLAST. U-08 retail multi-station/alignment qualification remains separate.",
+            ("src/units/unit_combat.cpp#weapon_special", "src/sim/tactical/combat_fire.cpp#attempt",
+             "src/sim/tactical/session_step_commands.cpp#special_fire"),
+            ("RG-02", "WAD-31", "WAD-32", "WAD-39", "WAD-40", "WSW-09", "WSW-14", "WSW-19"))
     if row["class"].lower() == "herocompany" or "SpaceHero" in row["category"] or any("hero_deployment_candidate" == a["route"] for a in row["acquisition"]):
         add("hero-lifecycle", "Hero purchase, deployment and carried identity", "missing",
             "Company relationships and visible identity require a dedicated lifecycle; WHE U-02 leaves company-to-space deployment policy unverified. Candidate links are a conservative census closure.",
@@ -453,7 +530,11 @@ def handler_needs(row, mechanic, need):
         add("nebula-contact", "Nebula contact, ability and weapon gates", "missing",
             "The hazard walk identifies missing contact windows and weapon/ability cancellation adapters.",
             (), ("WHZ-20", "WHZ-21", "WHZ-24"), 925)
-    for behaviour in behaviours & {"LURE", "SELF_DESTRUCT", "DUMMY_DESTROY_AFTER_SPECIAL_WEAPON_FIRED", "BOMB", "PROXIMITY_MINE"}:
+    if "LURE" in behaviours:
+        add("behaviour:LURE", "LURE service", "implemented",
+            "The partitioned target service stages authored per-craft pulses and commits enemy-team attack orders in ascending craft order.",
+            ("src/sim/tactical/session_step_commands.cpp#lure",), ("WLU-02", "WLU-03", "WLU-04", "WLU-05", "WLU-06", "WLU-07"))
+    for behaviour in behaviours & {"SELF_DESTRUCT", "DUMMY_DESTROY_AFTER_SPECIAL_WEAPON_FIRED", "BOMB", "PROXIMITY_MINE"}:
         add("behaviour:" + behaviour, behaviour.replace("_", " ") + " service", "unknown",
             "Data opts into this behaviour, but the walks do not establish the complete handler service for this roster. Requires a targeted debug-build read before claiming fidelity.", (), ("UC-03",))
     for locomotor in row["locomotors"]:

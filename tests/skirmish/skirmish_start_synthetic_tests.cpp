@@ -1,6 +1,7 @@
 #include "skirmish_start_support.hpp"
 
 #include "eawr/data/tag_trace.hpp"
+#include "eawr/core/build_identity.hpp"
 
 #include <chrono>
 
@@ -87,20 +88,111 @@ skirmish::StartInputs synthetic_inputs(const eawr::units::UnitTables& tables) {
     return inputs;
 }
 
+void synthetic_special_sources() {
+    auto tables = synthetic_tables();
+    auto source = unit_type("Test_Planetary_A", UnitKind::ship, "Rebel", std::nullopt);
+    source.special_weapon = true;
+    source.planetary_weapon = eawr::units::UnitType::PlanetaryWeapon{0, 1, 4};
+    eawr::units::Weapon weapon;
+    weapon.min_recharge_seconds = whole(30); weapon.max_recharge_seconds = whole(30);
+    weapon.pulse_count = 3; weapon.pulse_delay_seconds = Fixed::from_decimal("0.52").value();
+    source.weapon = weapon;
+    tables.units.push_back(source);
+    auto inputs = synthetic_inputs(tables);
+    inputs.factions[0].standalone_special_weapons[0] = source.id;
+    auto fixture = synthetic_fixture();
+    auto fallback = skirmish::build_start(fixture, inputs);
+    expect(fallback && std::count_if(fallback.value().units.begin(), fallback.value().units.end(),
+        [](const auto& unit) { return unit.role == skirmish::UnitRole::special_weapon; }) == 2,
+        "WSW-01: one source per playable Rebel player, no implicit Empire or neutral source");
+    if (!fallback) return;
+    for (const auto& unit : fallback.value().units) if (unit.role == skirmish::UnitRole::special_weapon)
+        expect(unit.state.position == Vec3{} && unit.state.rotation == eawr::sim::math::identity_quat()
+            && !unit.hull && !unit.combat_power && !unit.reveal_range,
+            "WSW-01: absent map source falls back to the origin without ship health, power or sensor");
+    auto backdrop = object(40, "Test_Planet", "SpaceProp", 3, "Neutral", at(700, -900), 90);
+    backdrop.special_weapon_source = true; backdrop.layer_z_adjust = whole(-2500);
+    backdrop.orientation_degrees->x = whole(12);
+    backdrop.orientation_degrees->y = whole(-7);
+    inputs.placements.push_back(backdrop);
+    auto placed = skirmish::build_start(fixture, inputs);
+    expect(static_cast<bool>(placed), "WSW-01: source-bearing planet backdrop creates source objects");
+    if (!placed) return;
+    for (const auto& unit : placed.value().units) if (unit.role == skirmish::UnitRole::special_weapon)
+        expect(unit.state.position == Vec3{whole(700), whole(-900), whole(-2500)}
+            && unit.yaw_degrees == whole(90) && unit.state.rotation.x != Fixed{} && unit.state.rotation.y != Fixed{},
+            "WSW-01: a tilted scenic backdrop supplies height-adjusted position and full orientation");
+    fixture.match = skirmish::MatchOptions{}; fixture.match->allow_superweapons = false;
+    auto denied = skirmish::build_start(fixture, inputs);
+    expect(denied && denied.value().units.size() == placed.value().units.size(),
+        "WSW-01: match purchase denial does not erase persistent source identity");
+    inputs.factions[0].standalone_special_weapons[1] = source.id;
+    expect(!skirmish::build_start(fixture, inputs), "WSW-44: unsupported multi-instance mapping stays gated");
+    const auto combat = eawr::units::combat_table(tables);
+    expect(static_cast<bool>(combat), "WSW-14: planetary content binds");
+    if (!combat) return;
+    const auto* profile = combat.value().find(skirmish::type_id(source.id));
+    expect(profile && profile->planetary_weapon && profile->planetary_weapon->recharge_frames == 900
+        && profile->planetary_weapon->pulse_delay_frames == 16,
+        "WSW-19: planetary timing uses nearest frames, independently of ordinary gun clocks");
+    tactical::TacticalSetup setup;
+    setup.players = placed.value().setup.players;
+    for (const auto& unit : placed.value().units) if (unit.role == skirmish::UnitRole::special_weapon) setup.units.push_back(unit.state);
+    std::vector<std::string> hashes;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto session = tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, combat.value());
+        expect(static_cast<bool>(session), "WSW-14: dormant planetary session creates");
+        if (!session) return;
+        for (const auto& instance : session.value().snapshot()->instances())
+            expect(instance.planetary_weapon && instance.planetary_weapon->readiness == whole(1)
+                && instance.planetary_weapon->state.pulses_left == 0 && !instance.durability,
+                "WSW-14: planetary source starts fully ready without an autonomous burst");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (int frame = 0; frame != 35; ++frame) {
+            auto step = session.value().step(executor);
+            expect(static_cast<bool>(step), "WSW-14: dormant source steps");
+            if (!step) return;
+            if (workers == 1) hashes.push_back(step.value().state_sha256);
+            else expect(hashes[frame] == step.value().state_sha256, "WSW-14: source hashes equal across worker counts");
+            expect(session.value().snapshot()->projectiles().empty(), "WSW-14: dormant source never fires autonomously");
+        }
+        const auto bytes = tactical::write_replay(session.value().record());
+        expect(static_cast<bool>(bytes), "WSW-14: source replay writes");
+        if (!bytes) return;
+        const auto replay = tactical::parse_replay(bytes.value(), "synthetic special source");
+        expect(static_cast<bool>(replay), "WSW-14: source replay round trips");
+        if (!replay) return;
+        auto reproduced = tactical::TacticalSession::from_replay(replay.value(), {}, {}, {}, std::nullopt, combat.value());
+        expect(static_cast<bool>(reproduced), "WSW-14: replay rebuilds source state from content");
+        if (!reproduced) return;
+        for (const auto& hash : hashes) {
+            const auto step = reproduced.value().step(executor);
+            expect(step && step.value().state_sha256 == hash, "WSW-14: every dormant source replay tick matches");
+        }
+    }
+    auto changed = tables;
+    changed.units.back().planetary_weapon->valid_targets ^= 8;
+    expect(eawr::units::content_identity(changed) != eawr::units::content_identity(tables),
+        "WSW-14: planetary admission metadata binds replay content identity");
+}
+
 void synthetic_roster_gate() {
     eawr::units::UnitTables ability_tables;
     auto authored = unit_type("Admonitor_Star_Destroyer", UnitKind::ship, "Empire", 100);
     eawr::units::Ability unsupported;
     unsupported.type = "POWER_TO_WEAPONS";
     unsupported.modifiers.push_back({"UNMODELLED_MULTIPLIER", whole(2)});
+    unsupported.modifiers.push_back({"SPEED_MULTIPLIER", whole(2)});
     eawr::units::Ability supported;
     supported.type = "TURBO";
     authored.abilities = {unsupported, supported};
     ability_tables.units.push_back(authored);
     const auto ordinary = eawr::units::ability_table(ability_tables);
-    expect(ordinary && ordinary.value().profiles.size() == 1 && ordinary.value().profiles[0].abilities.size() == 1
-        && ordinary.value().profiles[0].abilities[0].kind == tactical::AbilityKind::turbo,
-        "AB-26: ordinary loader omits an unmodelled ability while retaining supported abilities");
+    expect(ordinary && ordinary.value().profiles.size() == 1 && ordinary.value().profiles[0].abilities.size() == 2
+        && ordinary.value().profiles[0].abilities[0].kind == tactical::AbilityKind::power_to_weapons
+        && ordinary.value().profiles[0].abilities[0].modifiers.speed == whole(2)
+        && ordinary.value().profiles[0].abilities[1].kind == tactical::AbilityKind::turbo,
+        "AB-26: unknown modifiers retain the ability and known modifiers that follow them");
     ability_tables.units[0].abilities[0].modifiers.clear();
     const auto modelled = eawr::units::ability_table(ability_tables);
     expect(modelled && modelled.value().profiles.size() == 1 && modelled.value().profiles[0].abilities.size() == 2,
@@ -135,6 +227,7 @@ void synthetic_roster_gate() {
     auto inputs = synthetic_inputs(tables);
     tables.units.push_back(unit_type("Kedalbe_Battleship", UnitKind::ship, "Rebel", 10));
     tables.units.push_back(unit_type("Vengeance_Frigate", UnitKind::ship, "Rebel", 10));
+    tables.units.push_back(unit_type("Krayt_Class_Destroyer", UnitKind::ship, "Rebel", 10));
     inputs.faction_forces[0].space_skirmish_default_forces.push_back("Kedalbe_Battleship");
     inputs.faction_forces[0].space_skirmish_default_forces.push_back("Krayt_Class_Destroyer");
     fixture.slots[0].fleet.push_back("Vengeance_Frigate");
@@ -145,21 +238,21 @@ void synthetic_roster_gate() {
     for (const auto& unit : built.value().units) {
         expect(skirmish::roster_disabled_reason(unit.type).empty(), "starting forces contain no gated ship");
     }
-    for (const std::string_view carrier : {"Kedalbe_Battleship", "Vengeance_Frigate"}) {
+    for (const std::string_view carrier : {"Kedalbe_Battleship", "Vengeance_Frigate", "Krayt_Class_Destroyer"}) {
         expect(std::any_of(built.value().units.begin(), built.value().units.end(),
             [&](const auto& unit) { return unit.type == carrier; }),
-            "MD-01, RG-05: supported mass-driver default and authored fleets are deployed");
+            "MD-01, WAD-33, RG-05: supported mass-driver and SPECIAL default/authored fleets are deployed");
     }
     const auto ai = skirmish::ai_setup(built.value(), inputs, tables);
     for (const auto& type : ai.content.types) {
         expect(skirmish::roster_disabled_reason(type.name).empty(), "AI discovery never offers a gated ship");
     }
-    expect(!skirmish::roster_disabled_reason("Krayt_Class_Destroyer").empty()
+    expect(skirmish::roster_disabled_reason("Krayt_Class_Destroyer").empty()
         && skirmish::roster_disabled_reason("kRaYt_cLaSs_dEsTrOyEr") == skirmish::roster_disabled_reason("Krayt_Class_Destroyer"),
-        "ship gate uses case-insensitive XML identity");
-    expect(!skirmish::roster_ability_reason("Kedalbe_Battleship", "LEECH_SHIELDS").empty()
-        && !skirmish::roster_ability_reason("Vengeance_Frigate", "STEALTH").empty(),
-        "RG-03: supported mass-driver ships retain independent optional-ability gates");
+        "WAD-33: reviewed SPECIAL admission uses case-insensitive XML identity");
+    expect(skirmish::roster_ability_reason("Kedalbe_Battleship", "LEECH_SHIELDS").empty()
+        && skirmish::roster_ability_reason("Vengeance_Frigate", "STEALTH").empty(),
+        "RG-03, WLS-01, WST-01: both implemented optional abilities are available");
 }
 
 void synthetic_start() {
@@ -173,6 +266,140 @@ void synthetic_start() {
         return;
     }
     const auto& start = built.value();
+
+    // MPS-6: domains can be extended by GC; order and worker scheduling are irrelevant.
+    const auto identity = skirmish::match_identity(inputs);
+    expect(identity == skirmish::match_identity(inputs), "match identity is stable across two runs");
+    expect(!eawr::core::build_identity().empty(), "configure-time build identity is available to the handshake");
+    auto reordered = identity;
+    std::reverse(reordered.domains.begin(), reordered.domains.end());
+    expect(eawr::sim::compute_match_identity(reordered) == identity, "domain input order has one canonical identity");
+    expect(!eawr::sim::validate_match_identity(reordered), "noncanonical domain order is refused");
+    auto duplicate = identity;
+    duplicate.domains.push_back(duplicate.domains.front());
+    duplicate = eawr::sim::compute_match_identity(std::move(duplicate));
+    expect(!eawr::sim::validate_match_identity(duplicate), "duplicate domain names are refused");
+    auto bad_version = identity;
+    bad_version.version = 2;
+    bad_version = eawr::sim::compute_match_identity(std::move(bad_version));
+    expect(!eawr::sim::validate_match_identity(bad_version), "unsupported match identity versions are refused");
+    for (std::size_t index = 0; index < identity.domains.size(); ++index) {
+        auto changed = identity;
+        changed.domains[index].digest[0] ^= 1U;
+        changed = eawr::sim::compute_match_identity(std::move(changed));
+        const auto mismatch = eawr::sim::describe_mismatch(identity, changed);
+        expect(changed.sha256 != identity.sha256 && mismatch
+            && mismatch->code == eawr::sim::match_identity_mismatch_code
+            && mismatch->message.find(identity.domains[index].name) != std::string::npos,
+            "each changed domain flips the identity and names the mismatch");
+        changed = identity;
+        ++changed.domains[index].version;
+        expect(eawr::sim::compute_match_identity(changed).sha256 != identity.sha256,
+            "each domain version participates in the combined identity");
+    }
+    auto campaign = identity;
+    campaign.domains.push_back(eawr::sim::identity_domain("eawr-campaign-setup", "campaign", 1));
+    campaign = eawr::sim::compute_match_identity(std::move(campaign));
+    const auto additional = eawr::sim::describe_mismatch(identity, campaign);
+    expect(additional && additional->message.find("eawr-campaign-setup") != std::string::npos,
+        "additional GC domains are named");
+    expect(eawr::sim::describe_mismatch(eawr::sim::MatchAgreement{"build-a", identity},
+        eawr::sim::MatchAgreement{"build-b", identity}).has_value(), "handshake rejects a different build");
+
+    const auto recorded_setup = skirmish::recording_setup(fixture, start);
+    const auto encoded = tactical::write_replay({recorded_setup, 8, {}});
+    const auto parsed_identity = encoded ? tactical::parse_replay(encoded.value())
+        : eawr::core::Result<tactical::TacticalReplay>::failure(encoded.error());
+    expect(parsed_identity && parsed_identity.value().setup.match_identity == identity,
+        "MTID round trips in v4/v5 replay metadata");
+    if (parsed_identity) {
+        auto changed_inputs = inputs;
+        changed_inputs.ai_data_digest = "changed AI XML";
+        const auto refused = skirmish::replay_fixture(fixture, changed_inputs, parsed_identity.value().setup);
+        expect(!refused && refused.error().code == eawr::sim::match_identity_mismatch_code
+            && refused.error().message.find("ai-data") != std::string::npos,
+            "playback refuses mismatched installed content before activation");
+    }
+    if (encoded) {
+        auto corrupt = encoded.value();
+        const auto header_size = static_cast<std::size_t>(corrupt[10]) + (static_cast<std::size_t>(corrupt[11]) << 8U);
+        corrupt[header_size - 1] ^= 1U;
+        const auto refused = tactical::parse_replay(corrupt);
+        expect(!refused && refused.error().code == eawr::sim::match_identity_invalid_code,
+            "corrupt MTID digest is refused at parse time");
+    }
+    for (const auto version : {2U, 3U, 4U, 5U}) {
+        auto legacy = start.setup;
+        legacy.match_identity.reset();
+        legacy.free_garrisons.clear();
+        legacy.match_policy.reset();
+        for (auto& unit : legacy.units) unit.garrison_enabled = true;
+        if (version == 2 || version == 4) legacy.squadrons.clear();
+        if (version == 4 || version == 5) legacy.queue_identities = true;
+        const auto bytes = tactical::write_replay({legacy, 8, {}});
+        const auto read = bytes ? tactical::parse_replay(bytes.value())
+            : eawr::core::Result<tactical::TacticalReplay>::failure(bytes.error());
+        expect(bytes && tactical::peek_replay_format_version(bytes.value()) == version
+            && read && read.value().setup == legacy, "old v2/v3/v4/v5 replays still load unchanged");
+    }
+    std::optional<tactical::TacticalReplay> first_record;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto session = tactical::TacticalSession::create(recorded_setup);
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(static_cast<bool>(session), "identity recording session starts");
+        if (!session) continue;
+        for (int tick = 0; tick < 8; ++tick)
+            expect(static_cast<bool>(session.value().step(executor)), "identity session advances");
+        auto record = session.value().record();
+        expect(record.setup.match_identity == identity, "identity is stable on 1/2/4/8 workers");
+        if (!first_record) first_record = record;
+        expect(record == *first_record, "identity replay agrees on 1/2/4/8 workers");
+    }
+    {
+        const auto directory = std::filesystem::temp_directory_path()
+            / ("eawr-match-identity-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(directory / "scripts");
+        std::filesystem::create_directories(directory / "xml");
+        const auto write = [&](const char* path, const char* text) { std::ofstream(directory / path, std::ios::binary) << text; };
+        write("scripts/test.lua", "return 1");
+        write("xml/test.xml", "<AI><Value>1</Value></AI>");
+        const eawr::vfs::MountSpec mount{.layer_id = "identity-test", .data_root = directory,
+            .loose_logical_prefix = "data", .active_archives = {}};
+        const auto read = [&]() {
+            auto files = eawr::vfs::Vfs::mount(std::span<const eawr::vfs::MountSpec>(&mount, 1));
+            return files ? skirmish::read_data_identity(files.value())
+                : eawr::core::Result<skirmish::DataIdentity>::failure(files.error());
+        };
+        const auto base = read();
+        write("scripts/test.lua", "return 2");
+        const auto script = read();
+        write("scripts/test.lua", "return 1");
+        write("xml/test.xml", "<AI><Value>2</Value></AI>");
+        const auto ai = read();
+        expect(base && script && ai
+            && base.value().script_manifest_digest != script.value().script_manifest_digest
+            && base.value().ai_data_digest == script.value().ai_data_digest
+            && base.value().script_manifest_digest == ai.value().script_manifest_digest
+            && base.value().ai_data_digest != ai.value().ai_data_digest,
+            "one Lua byte and one AI XML value change their respective effective data domains");
+        if (base && script && ai) {
+            auto selected = inputs;
+            selected.script_manifest_digest = base.value().script_manifest_digest;
+            selected.ai_data_digest = base.value().ai_data_digest;
+            const auto source_identity = skirmish::match_identity(selected);
+            selected.script_manifest_digest = script.value().script_manifest_digest;
+            const auto script_identity = skirmish::match_identity(selected);
+            selected.script_manifest_digest = base.value().script_manifest_digest;
+            selected.ai_data_digest = ai.value().ai_data_digest;
+            const auto ai_identity = skirmish::match_identity(selected);
+            const auto script_mismatch = eawr::sim::describe_mismatch(source_identity, script_identity);
+            const auto ai_mismatch = eawr::sim::describe_mismatch(source_identity, ai_identity);
+            expect(script_mismatch && script_mismatch->message.find("script-manifest") != std::string::npos
+                && ai_mismatch && ai_mismatch->message.find("ai-data") != std::string::npos,
+                "actual source-byte changes flip and name the right match domains");
+        }
+        std::filesystem::remove_all(directory);
+    }
 
     auto garrison_inputs = inputs;
     for (auto& faction : garrison_inputs.faction_forces) faction.garrison_delay_frames = 600;
@@ -943,6 +1170,8 @@ void setup_contract() {
             "<MP_Default_Pre_Built_Base>yes</MP_Default_Pre_Built_Base>"
             "<MP_Default_Allow_Random_Events>no</MP_Default_Allow_Random_Events>"
             "<MP_Default_Credits>7000</MP_Default_Credits>"
+            "<Min_Skirmish_Credits>2500</Min_Skirmish_Credits>"
+            "<Max_Skirmish_Credits>9000</Max_Skirmish_Credits>"
             "<MP_Default_Start_Tech_Level>2</MP_Default_Start_Tech_Level>"
             "<MP_Default_Max_Tech_Level>7</MP_Default_Max_Tech_Level>"
             "<MP_Default_Game_Timer>23</MP_Default_Game_Timer>"
@@ -986,6 +1215,9 @@ void setup_contract() {
                 && defaults.value().start_tech == 2 && defaults.value().max_tech == 7 && defaults.value().win_integer == -4
                 && defaults.value().win_float == Fixed::from_raw(Fixed::scale * 5 / 2) && defaults.value().auto_resolve == 2,
                 "WSS-22: complete copied defaults come from authored data, including hidden fields");
+            const auto bounds = skirmish::read_credits_bounds(filesystem.value());
+            expect(bounds && bounds.value().minimum == 2500 && bounds.value().maximum == 9000,
+                "WSS-25: the credits slider bounds come from the authored constants");
             const auto palette = skirmish::read_lobby_colours(filesystem.value());
             expect(palette && palette.value().size() == 9 && palette.value()[0].constant == "MP_Color_Blue"
                 && palette.value()[4].constant == "MP_Color_Cyan" && palette.value()[8].constant == "MP_Color_Eight",
@@ -1024,6 +1256,10 @@ void setup_contract() {
             constants("<MP_Default_Allow_Heroes>maybe</MP_Default_Allow_Heroes>");
             auto invalid = eawr::vfs::Vfs::mount(std::span<const eawr::vfs::MountSpec>(&mount, 1));
             expect(invalid && !skirmish::read_match_defaults(invalid.value()), "malformed or incomplete match defaults reject deterministically");
+            expect(invalid && !skirmish::read_credits_bounds(invalid.value()), "WSS-25: missing slider bounds reject deterministically");
+            constants("<Min_Skirmish_Credits>8000</Min_Skirmish_Credits><Max_Skirmish_Credits>2000</Max_Skirmish_Credits>");
+            auto inverted = eawr::vfs::Vfs::mount(std::span<const eawr::vfs::MountSpec>(&mount, 1));
+            expect(inverted && !skirmish::read_credits_bounds(inverted.value()), "WSS-25: an inverted slider range is rejected");
         }
         std::filesystem::remove_all(directory);
     }
@@ -1084,6 +1320,25 @@ void setup_contract() {
     options = skirmish::setup_options(selection, maps);
     expect(options && options.value().slots->at(0).team == 1 && options.value().slots->at(0).faction == "Empire"
         && options.value().slots->at(1).team == 2, "non-default faction and authored team survive mapping");
+    // WSS-31: the copied record's space win condition reaches the start options; text that names neither
+    // evidenced condition leaves the data's default (no victory override).
+    expect(!options.value().victory_condition, "no copied record leaves the data's victory default");
+    auto victory = selection;
+    victory.match = skirmish::MatchOptions{};
+    victory.match->space_win_condition = "SKIRMISH_ALL_ENEMY_UNITS_DESTROYED";
+    auto chosen = skirmish::setup_options(victory, maps);
+    expect(chosen && chosen.value().victory_condition
+        && *chosen.value().victory_condition == eawr::sim::tactical::VictoryCondition::all_enemy_units_destroyed,
+        "WSS-31: all enemy units destroyed is passed to the start");
+    victory.match->space_win_condition = "SKIRMISH_SPACE_ENEMY_STARBASE_DESTROYED";
+    chosen = skirmish::setup_options(victory, maps);
+    expect(chosen && chosen.value().victory_condition
+        && *chosen.value().victory_condition == eawr::sim::tactical::VictoryCondition::enemy_starbase_destroyed,
+        "WSS-31: the starbase condition is passed to the start");
+    victory.match->space_win_condition = "SKIRMISH_ALL_ENEMY_BASE_COMPONENTS_DESTROYED";
+    chosen = skirmish::setup_options(victory, maps);
+    expect(chosen && !chosen.value().victory_condition,
+        "WSS-31: a land condition in the record leaves the data's default");
     auto bad = selection;
     bad.map = "data/art/maps/_mp_land_example.ted";
     expect(!skirmish::setup_options(bad, maps), "unlisted/land maps rejected");
@@ -1222,10 +1477,12 @@ void setup_contract() {
     auto policy_tables = synthetic_tables();
     for (const auto* tag : {"MP_Default_Credits", "Tactical_Build_Time_Multiplier", "Space_Elevated_Vulnerability_Factor",
         "Space_Elevated_Vulnerability_Duration", "Space_Reinforcement_Collision_Check_Distance"})
-        policy_tables.constants.scalars.push_back({tag, whole(std::string_view(tag) == "Space_Elevated_Vulnerability_Factor" ? -1 : 1), {}});
+        policy_tables.constants.scalars.push_back({tag, whole(std::string_view(tag) == "MP_Default_Credits" ? 1000
+            : std::string_view(tag) == "Space_Elevated_Vulnerability_Factor" ? -1 : 1), {}});
     auto special = unit_type("Policy_Upgrade", UnitKind::ship, "Rebel, Empire", 0);
     special.production.upgrade_object = true;
-    special.production.increments_tech = true;
+    special.special_unlocks = {{true, false, false}};
+    special.consume_after_special_fire = true;
     policy_tables.units.push_back(special);
     for (auto& type : policy_tables.units) {
         type.hull = whole(100);
@@ -1251,6 +1508,9 @@ void setup_contract() {
         auto rules = skirmish::economy_rules(policy_start.value(), policy_inputs, policy_tables);
         expect(static_cast<bool>(rules), "shared policy catalog binds");
         if (!rules) { std::cerr << rules.error().message << '\n'; continue; }
+        expect(std::any_of(rules.value().players.begin(), rules.value().players.end(), [](const auto& player) { return player.ai; })
+            && std::any_of(rules.value().players.begin(), rules.value().players.end(), [](const auto& player) { return !player.ai; }),
+            "WSW-07: the production contract covers an AI and a human player");
         expect(std::all_of(rules.value().players.begin(), rules.value().players.end(), [&](const auto& player) {
             return player.start_tech == static_cast<std::uint32_t>(defaults.start_tech)
                 && player.max_tech == static_cast<std::uint32_t>(defaults.max_tech);
@@ -1262,6 +1522,8 @@ void setup_contract() {
         auto session = tactical::TacticalSession::create(policy_start.value().setup, {}, {}, {}, std::nullopt, {}, {}, {}, rules.value());
         expect(static_cast<bool>(session), "policy admission session starts");
         if (!session) continue;
+        std::uint32_t purchase_frames = 0;
+        std::vector<tactical::PlayerId> purchase_players;
         for (const auto& unit : policy_start.value().units) {
             if (unit.role != skirmish::UnitRole::station) continue;
             const auto* menu = rules.value().menu(unit.state.type_id, policy_start.value().setup.players[unit.state.owner - 1].faction_id);
@@ -1271,6 +1533,37 @@ void setup_contract() {
             expect(session.value().build_allowed(unit.state.owner, unit.state.entity_id, skirmish::type_id("Cruiser")) == allowed
                 && session.value().build_allowed(unit.state.owner, unit.state.entity_id, skirmish::type_id("Policy_Upgrade")) == allowed,
                 "WSS-29/30: authoritative eligibility applies to human and AI producers");
+            if (allowed && menu) {
+                const auto* option = menu->find(skirmish::type_id("Policy_Upgrade"));
+                expect(option && option->available, "WSW-07: an unlock-only automatic upgrade is available in both station menus");
+                if (option) purchase_frames = std::max({purchase_frames, option->build_frames, option->ai_build_frames});
+                // The fixture has two stations for player one; buy one enabling object per player.
+                if (std::find(purchase_players.begin(), purchase_players.end(), unit.state.owner) == purchase_players.end()) {
+                    const auto submitted = session.value().submit({{0, unit.state.owner, 1}, {unit.state.entity_id},
+                        tactical::BuyPayload{skirmish::type_id("Policy_Upgrade")}});
+                    expect(static_cast<bool>(submitted), "WSW-07: player and AI purchases submit");
+                    if (!submitted) std::cerr << submitted.error().message << '\n';
+                    purchase_players.push_back(unit.state.owner);
+                }
+            }
+        }
+        std::vector<std::string> hashes;
+        if (allowed) {
+            expect(purchase_players.size() == rules.value().players.size(),
+                "WSW-07: one producer submits the enabling purchase for each human and AI player");
+            const eawr::sim::InlineExecutor executor;
+            for (std::uint32_t frame = 0; frame < purchase_frames + 2; ++frame) {
+                const auto tick = session.value().step(executor);
+                expect(static_cast<bool>(tick), "WSW-07: player and AI unlock purchases complete");
+                if (!tick) break;
+                hashes.push_back(tick.value().state_sha256);
+            }
+            for (const auto& player : rules.value().players) {
+                const auto views = session.value().snapshot()->economy();
+                const auto view = std::find_if(views.begin(), views.end(), [&](const auto& account) { return account.player == player.player; });
+                expect(view != views.end() && view->special_weapons_enabled && view->completed.size() == 1,
+                    "WSW-07/08: player and AI economy views retain the enabling use object after purchase");
+            }
         }
         const auto replay_fixture = skirmish::replay_fixture(policy_fixture, policy_inputs, policy_start.value().setup);
         expect(replay_fixture && replay_fixture.value().slots.size() == policy_fixture.slots.size(),
@@ -1281,7 +1574,6 @@ void setup_contract() {
             : eawr::core::Result<tactical::EconomyRules>::failure(rebuilt.error());
         expect(rebound && rebound.value() == rules.value(), "recorded policy rebuilds the same purchase menus");
         if (!rebound) continue;
-        std::vector<std::string> hashes;
         for (int tick = 0; tick < 4; ++tick) {
             const auto step = session.value().step(eawr::sim::InlineExecutor{});
             expect(static_cast<bool>(step), "copied-policy source tick runs");
@@ -1297,7 +1589,7 @@ void setup_contract() {
         expect(static_cast<bool>(replayed), "non-default policy replay accepts matching purchase content");
         if (replayed) {
             std::vector<std::string> reproduced;
-            for (int tick = 0; tick < 4; ++tick) {
+            for (std::size_t tick = 0; tick < hashes.size(); ++tick) {
                 const auto step = replayed.value().step(eawr::sim::InlineExecutor{});
                 if (step) reproduced.push_back(step.value().state_sha256);
             }

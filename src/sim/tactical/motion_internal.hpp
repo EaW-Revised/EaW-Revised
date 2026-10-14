@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <source_location>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -77,7 +78,15 @@ public:
         const auto turns = div(degrees, whole(360));
         return trig_ != nullptr ? trig_->sample(turns).cosine : math::cos_turn(turns);
     }
-    math::Fixed atan2_deg(math::Fixed y, math::Fixed x) { return mul(take(math::atan2_turn(y, x)), whole(360)); }
+    // A zero vector has no direction: the failure names the call that asked.
+    math::Fixed atan2_deg(math::Fixed y, math::Fixed x, const std::source_location from = std::source_location::current()) {
+        const auto turns = math::atan2_turn(y, x);
+        if (!turns) {
+            if (!error_) record(turns.error(), std::string(from.function_name()) + " line " + std::to_string(from.line()));
+            return math::Fixed{};
+        }
+        return mul(turns.value(), whole(360));
+    }
 
     [[nodiscard]] bool ok() const noexcept { return !error_; }
     [[nodiscard]] core::Diagnostic error(std::string_view what) const;

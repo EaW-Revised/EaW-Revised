@@ -92,6 +92,17 @@ void set_shields(const DurabilityProfile& profile, const DamageRules& rules, Dur
 
 } // namespace
 
+void drain_shields(const DurabilityProfile& profile, const DamageRules& rules, DurabilityState& state,
+    const Fixed amount, const std::uint64_t frame) noexcept {
+    if (amount.raw() <= 0 || in_ion_storm(rules, state, frame)) return;
+    if (shield_depleted(rules, state, frame)) {
+        const auto increment = rules.depleted_increment_seconds.raw() * logical_frames_per_second / Fixed::scale;
+        if (increment > 0) state.depleted_frame = std::min(frame, *state.depleted_frame + static_cast<std::uint64_t>(increment));
+        return;
+    }
+    set_shields(profile, rules, state, Fixed::from_raw(std::max<std::int64_t>(0, state.shields.raw() - amount.raw())), frame);
+}
+
 core::Result<void> validate_damage(const DurabilityTable& table) {
     const auto invalid = [](const std::string& message) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, message));
@@ -170,8 +181,9 @@ core::Result<void> validate_damage(const DurabilityTable& table) {
     }
     if (rules.asteroid_damage.raw() < 0 || rules.asteroid_damage.raw() > health_limit_raw
         || rules.asteroid_rate.raw() < 0 || rules.asteroid_rate.raw() > one_raw
-        || (rules.asteroid_damage_type != no_type_index && rules.asteroid_damage_type >= rules.damage_types)) {
-        return invalid("damage rules: asteroid damage, probability or armor damage type is out of range");
+        || (rules.asteroid_damage_type != no_type_index && rules.asteroid_damage_type >= rules.damage_types)
+        || (rules.default_damage_type != no_type_index && rules.default_damage_type >= rules.damage_types)) {
+        return invalid("damage rules: asteroid damage, probability or armor/default damage type is out of range");
     }
     if (rules.energy_to_shield.raw() < 0 || rules.energy_to_shield.raw() > multiplier_limit_raw) {
         return invalid("damage rules: the energy-to-shield rate must be in [0, " + std::to_string(max_damage_multiplier) + "]");
@@ -276,13 +288,14 @@ core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const Damag
         }
     }
     // DG-06, DG-07: the shield takes the damage first, scaled by the shield armor; what it does
-    // not absorb goes on, scaled back. Scripted damage has no damage type and no multiplier.
+    // not absorb goes on, scaled back. Scripted damage has no projectile, so the shield stage
+    // uses the default damage type's multiplier (WCC-46, DG-20); the hull stage uses none.
     // EN-07: an energy-damage projectile then drains the pool with what the shield left, still
     // scaled by the shield armor, on a unit with a pool whether or not it has a shield.
     const bool drains = hit.projectile && hit.energy_damage && has_energy_pool(profile, rules);
     if ((profile.max_shields.raw() > 0 || drains) && amount.raw() > 0) {
-        const auto modifier = combat_damage ? armor_multiplier(rules, hit.damage_type, profile.shield_armor_type)
-                                             : Fixed::from_raw(one_raw);
+        const auto modifier = armor_multiplier(
+            rules, combat_damage ? hit.damage_type : rules.default_damage_type, profile.shield_armor_type);
         const auto shield_damage = q.mul(amount, modifier);
         Fixed absorbed{};
         if (profile.max_shields.raw() > 0 && (!hit.projectile || hit.shield_damage)) {

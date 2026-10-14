@@ -63,6 +63,258 @@ class PublishScanTests(unittest.TestCase):
                                               {"private-dir": r"/srv/private"}, ["hostx"])
             self.assertEqual(sorted(hit.split(": ")[1] for hit in hits), ["private-dir", "private-name"])
 
+    def test_review_dotted_prefix_hosts_remain_visible_in_allowed_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            for name, text in (
+                ('apps/viewer/src/map_mode_ready.cpp', '// reach gw.options.' + 'lan.'),
+                ('apps/viewer/src/live_session_view.cpp', 'connect(gw.state.' + 'lan, 1);'),
+                ('apps/viewer/src/map_mode_ready.cpp', 'auto x = options.' + 'lan; // gw.options.' + 'lan.')):
+                with self.subTest(source=name, line=text):
+                    path = write(root, name, text + '\n')
+                    hits = publish_scan.security_scan(root, CONFIG, [path])
+                    self.assertEqual(len(hits), text.count('.' + 'lan'), hits)
+                    self.assertIn('lan-host', hits[0])
+
+    def test_review_private_names_keep_camel_glued_and_filename_matches(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            token = 'Thom' + 'Ernst'
+            write(root, 'docs/' + token + 'Notes.md', token + 'Laptop\n')
+            hits = publish_scan.security_scan(root, CONFIG, publish_scan.tree_files(root), extra_terms=[token])
+            self.assertEqual(len(hits), 2, hits)
+            self.assertTrue(all('private-name' in hit for hit in hits))
+
+    def test_review_home_paths_keep_file_uris_and_nested_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            write(root, 'a.md', 'see file:///home/' + 'alice/notes\n'
+                  + 'copied from /srv/backup/home/' + 'alice/notes\n')
+            hits = publish_scan.security_scan(root, CONFIG, publish_scan.tree_files(root))
+            self.assertEqual(len(hits), 2, hits)
+            self.assertTrue(all('home-path' in hit for hit in hits))
+
+    def test_review_new_live_session_file_has_no_identifier_allowance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            path = write(root, 'apps/viewer/src/live_session_scratch.cpp', 'options.' + 'lan.enabled;\n')
+            hits = publish_scan.security_scan(root, CONFIG, [path])
+            self.assertEqual(len(hits), 1, hits)
+            self.assertIn('lan-host', hits[0])
+
+    def test_review_login_hosts_cannot_use_lan_identifier_allowance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            path = write(root, 'apps/viewer/src/map_mode_ready.cpp', '// ssh root@options.' + 'lan.\n')
+            hits = publish_scan.security_scan(root, CONFIG, [path])
+            self.assertEqual(len(hits), 1, hits)
+            self.assertIn('lan-host', hits[0])
+
+    def test_review_url_and_colon_prefixes_cannot_use_lan_identifier_allowance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            for text in ('// see http://state.' + 'lan.', '// (http://entry.' + 'lan)',
+                         '// service:options.' + 'lan.'):
+                with self.subTest(line=text):
+                    path = write(root, 'apps/viewer/src/map_mode_ready.cpp', text + '\n')
+                    hits = publish_scan.security_scan(root, CONFIG, [path])
+                    self.assertEqual(len(hits), 1, hits)
+                    self.assertIn('lan-host', hits[0])
+
+    def test_network_fixture_ip_allowance_covers_only_quoted_match(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            path = write(root, 'tests/net/lan_directory_tests.cpp', 'auto s = 10.0.' + '0.1; // "note"\n')
+            hits = publish_scan.security_scan(root, CONFIG, [path])
+            self.assertEqual(len(hits), 1, hits)
+            self.assertIn('private-ipv4', hits[0])
+
+    def test_review_lan_hosts_in_prose_and_strings_with_trailing_punctuation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            for text in ('// connect to options.' + 'lan.',
+                         'auto h = " options.' + 'lan.";',
+                         '// see http://x.example/?h=state.' + 'lan&p=1',
+                         '// ask state.' + 'lan, then retry',
+                         '// the lab host (state.' + 'lan).'):
+                with self.subTest(line=text):
+                    path = write(root, 'apps/viewer/src/map_mode_ready.cpp', text + '\n')
+                    hits = publish_scan.security_scan(root, CONFIG, [path])
+                    self.assertEqual(len(hits), 1, hits)
+                    self.assertIn('lan-host', hits[0])
+
+    def test_review_quote_char_literals_and_comments_do_not_license_fixture_ips(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            for name, text in (
+                    ('tests/net/lan_directory_tests.cpp',
+                     "auto a = '\"'; auto s = 10.0." + "0.1; auto b = '\"';"),
+                    ('tests/presentation/renderer/test_lan_lobby.py',
+                     "a = '\"Alpha|'; s = 10.0." + "0.5; b = '\"';"),
+                    ('tests/net/lan_directory_tests.cpp', '// gateway "10.0.' + '0.1"')):
+                with self.subTest(source=name, line=text):
+                    path = write(root, name, text + '\n')
+                    hits = publish_scan.security_scan(root, CONFIG, [path])
+                    self.assertEqual(len(hits), 1, hits)
+                    self.assertIn('private-ipv4', hits[0])
+
+    def test_review_additional_round_one_two_three_negative_probes(self):
+        cases = (
+            ('apps/viewer/src/map_mode_ready.cpp', '// reach mybox.options.' + 'lan. for the rig'),
+            ('apps/viewer/src/map_mode_ready.cpp', 'auto h = "mybox.options.' + 'lan";'),
+            ('apps/viewer/src/map_mode_ready.cpp', 'if (options.' + 'lan) { connect(mybox.' + 'lan); }'),
+            ('apps/viewer/src/map_mode_ready.cpp', 'auto p = gw->options.' + 'lan;'),
+            ('apps/viewer/src/live_session_view.cpp', 'connect("http://state.' + 'lan/x");'),
+            ('apps/viewer/src/live_session_view.cpp', 'auto h = "state.' + 'lan";'),
+            ('tests/net/lan_directory_tests.cpp', '"10.0.' + '0.1" "10.0.' + '0.9"'),
+            ('tests/net/lan_directory_tests.cpp', '"10.0.' + '0.1"; x = 192.168.' + '2.133;'),
+            ('tests/net/lan_directory_tests.cpp', 'auto s = "10.0.' + '0.1"; auto t = 10.0.' + '0.2;'),
+            ('tests/presentation/renderer/test_lan_lobby.py', '# "Alpha|" 10.0.' + '0.5'),
+            ('src/b.cpp', 'auto id = PWD' + '11Worker;'),
+            ('docs/PWL' + '12Runbook.md', 'plain text'),
+            ('apps/viewer/src/galactic/galactic_hud.cpp', 'Eawr' + 'BuildQueueDial.Thom' + 'Ernst'),
+            ('apps/viewer/src/galactic/galactic_hud.cpp', 'Eawr' + 'BuildQueueDial_Thom' + 'Ernst'),
+            ('apps/viewer/src/galactic/galactic_hud.cpp', 'Eawr' + 'BuildQueueDial PWD' + '11'),
+            ('apps/viewer/src/galactic/galactic_hud.cpp', 'Eawr' + 'BuildQueueDialX'),
+            ('apps/viewer/src/other.cpp', 'Eawr' + 'BuildQueueDial'),
+            ('apps/viewer/src/galactic/galactic_hud.cpp', 'Eawr' + 'BuildQueueDial_PWD' + '11'),
+            ('apps/viewer/src/galactic/galactic_hud.cpp', '9Eawr' + 'BuildQueueDial'),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            for name, text in cases:
+                with self.subTest(source=name, line=text):
+                    path = write(root, name, text + '\n')
+                    self.assertTrue(publish_scan.security_scan(root, CONFIG, [path],
+                                    extra_terms=['Thom' + 'Ernst', 'PWD' + '11', 'PWL' + '12', 'eawr' + 'build']))
+
+    def test_public_identifier_exception_does_not_start_inside_a_digit_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            path = write(root, 'src/presentation/godot/ui/build_queue_dial.hpp', '9Eawr' + 'BuildQueueDial;\n')
+            hits = publish_scan.security_scan(root, CONFIG, [path], extra_terms=['eawr' + 'build'])
+            self.assertEqual(len(hits), 1, hits)
+            self.assertIn('private-name', hits[0])
+
+    def test_private_terms_keep_substrings_in_identifiers_paths_and_suffixes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            write(root, "src/HostXBuilder.cpp", "HostXBuilder hostx_value; /srv/HostX/file HOSTX\n")
+            hits = publish_scan.security_scan(root, CONFIG, publish_scan.tree_files(root), extra_terms=["hostx"])
+            self.assertEqual(len(hits), 5, hits)
+            self.assertTrue(all('private-name' in hit for hit in hits))
+            self.assertTrue(any(':0:' in hit for hit in hits), hits)
+
+    def test_home_prose_exception_is_scoped_to_its_file_and_match(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            path = write(root, 'docs/behaviour/gc-hud-inventory.md', 'Previous/next/home/' + 'zoom state; '
+                         + 'file:///home/' + 'zoom/private; /srv/backup/home/' + 'zoom/private\n')
+            hits = publish_scan.security_scan(root, CONFIG, [path])
+            self.assertEqual(len(hits), 2, hits)
+            self.assertTrue(all('home-path' in hit for hit in hits))
+            path = write(root, 'a.md', 'Previous/next/home/' + 'zoom state\n')
+            self.assertEqual(len(publish_scan.security_scan(root, CONFIG, [path])), 1)
+
+    def test_public_identifier_exception_is_exact_and_keeps_extra_rules(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            identifier = 'Eawr' + 'BuildQueueDial'
+            term = 'eawr' + 'build'
+            path = write(root, 'src/presentation/godot/ui/build_queue_dial.hpp', identifier + ';\n')
+            self.assertEqual(publish_scan.security_scan(root, CONFIG, [path], extra_terms=[term]), [])
+            path.write_text(identifier + 'Backup;\n', encoding='utf-8')
+            self.assertEqual(len(publish_scan.security_scan(root, CONFIG, [path], extra_terms=[term])), 1)
+            path.write_text(identifier + ';\n', encoding='utf-8')
+            hits = publish_scan.security_scan(root, CONFIG, [path], {'private-extra': identifier}, [term])
+            self.assertEqual(len(hits), 1, hits)
+            self.assertIn('private-extra', hits[0])
+            unknown = write(root, 'src/scratch.cpp', identifier + ';\n')
+            self.assertEqual(len(publish_scan.security_scan(root, CONFIG, [unknown], extra_terms=[term])), 1)
+
+    def test_same_lan_token_in_a_string_is_not_licensed_by_member_access(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            path = write(root, 'apps/viewer/src/map_mode_ready.cpp',
+                         'auto x = options.' + 'lan; const char* host = "options.' + 'lan";\n')
+            hits = publish_scan.security_scan(root, CONFIG, [path])
+            self.assertEqual(len(hits), 2, hits)
+            self.assertIn('lan-host', hits[0])
+
+    def test_new_lan_owner_chain_text_requires_review(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            path = write(root, 'apps/viewer/src/map_mode_ready.cpp',
+                         'state.options.' + 'lan.enabled; state.live_options.' + 'lan.enabled;\n')
+            self.assertEqual(len(publish_scan.security_scan(root, CONFIG, [path])), 2)
+
+    def test_value_allowlist_does_not_hide_a_second_hostname_on_the_same_line(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            config = copy.deepcopy(CONFIG)
+            config['security']['allow'].append({'path': 'src/a.cpp', 'regex': r'options[.]lan',
+                'value_regex': r'options[.]lan', 'patterns': ['lan-host']})
+            write(root, 'src/a.cpp', 'options.' + 'lan.enabled; // box.' + 'lan HostX\n')
+            hits = publish_scan.security_scan(root, config, publish_scan.tree_files(root), extra_terms=['hostx'])
+            self.assertEqual(sorted(hit.split(': ')[1] for hit in hits), ['lan-host', 'lan-host', 'private-name'])
+            self.assertTrue(any('box.' + 'lan' in hit for hit in hits), hits)
+
+    def test_network_fixture_allowance_keeps_unlisted_ips_visible(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            write(root, 'tests/net/port_mapping_tests.cpp', '"192.168.' + '1.1" "192.168.' + '1.99"\n')
+            hits = publish_scan.security_scan(root, CONFIG, publish_scan.tree_files(root))
+            self.assertEqual(len(hits), 2, hits)
+            self.assertTrue(any('1.99' in hit for hit in hits))
+
+    def test_lan_member_allowance_covers_conditions_and_capture_without_hiding_hosts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            write(root, 'apps/viewer/src/live_session_prepare.cpp',
+                  '[lan = options_.' + 'lan](auto tick) {};\n'
+                  + 'return options_.' + 'lan != nullptr; // box.' + 'lan\n')
+            hits = publish_scan.security_scan(root, CONFIG, publish_scan.tree_files(root))
+            self.assertEqual(len(hits), 3, hits)
+            self.assertTrue(any('box.' + 'lan' in hit for hit in hits))
+
+    def test_exact_security_lines_require_matching_path_and_unchanged_full_text(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            for pin in CONFIG['security']['exact_line_allow']:
+                with self.subTest(source=pin['path'], digest=pin['sha256']):
+                    lines = (ROOT / pin['path']).read_text(encoding='utf-8').splitlines()
+                    line = next(line for line in lines
+                                if publish_scan.hashlib.sha256(line.encode('utf-8')).hexdigest() == pin['sha256'])
+                    path = write(root, pin['path'], line + '\n')
+                    self.assertEqual(publish_scan.security_scan(root, CONFIG, [path]), [])
+                    for changed in (line + ' ', line + ' // changed', ' ' + line):
+                        path.write_text(changed + '\n', encoding='utf-8')
+                        self.assertTrue(publish_scan.security_scan(root, CONFIG, [path]))
+                    other = write(root, 'scratch.cpp', line + '\n')
+                    self.assertTrue(publish_scan.security_scan(root, CONFIG, [other]))
+                    path.write_text(line + '\n', encoding='utf-8')
+                    self.assertTrue(publish_scan.security_scan(root, CONFIG, [path],
+                                   extra_regex={name: CONFIG['security']['regex'][name] for name in pin['patterns']}))
+
+    def test_new_campaign_and_installed_replays_have_exact_reviewed_pins(self):
+        names = [name for name in CONFIG['assets']['binary_allowlist_origins']
+                 if name.startswith(('tests/galactic/', 'tests/skirmish/fixtures/installed/'))]
+        self.assertTrue(names)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for name in names:
+                with self.subTest(fixture=name):
+                    data = (ROOT / name).read_bytes()
+                    fixture = write(root, name, data)
+                    self.assertEqual(publish_scan.asset_scan(root, CONFIG, [fixture]), [])
+                    fixture.write_bytes(data + b'changed')
+                    self.assertIn('binary file not on the allowlist',
+                                  publish_scan.asset_scan(root, CONFIG, [fixture])[0])
+                    fixture.write_bytes(data)
+                    self.assertIn(f'{name}: byte-identical to a retail file',
+                                  publish_scan.asset_scan(root, CONFIG, [fixture],
+                                      {publish_scan.hashlib.sha256(data).hexdigest()}))
+
     def test_checker_applies_cleanroom_rules(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = tree(temporary)

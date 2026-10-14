@@ -177,6 +177,11 @@ void hero_deployment() {
                 expect(static_cast<bool>(stepped), "hero frame succeeds");
                 if (!stepped) break;
                 if (world.completed_tick() >= 451) hashes.push_back(stepped.value().state_sha256);
+                for (const auto& squadron : stepped.value().snapshot->squadrons()) {
+                    const auto* view = instance(*stepped.value().snapshot, squadron.container);
+                    expect(view && !view->garrison_unit,
+                        "WU-37: purchased hyperspace teams are unmarked from their birth");
+                }
             }
             const auto live = world.units();
             const auto found = std::find_if(live.begin(), live.end(), [](const auto& unit) { return unit.purchase_type == ship_type; });
@@ -203,6 +208,15 @@ void hero_deployment() {
             if (workers == 1) reference.insert(reference.end(), hashes.begin(), hashes.end());
             else expect(hashes.size() == 4 && std::equal(hashes.begin(), hashes.end(), reference.begin() + baseline_slot),
                 "hero conversion canonical hashes match at 1/2/4/8 workers");
+            if (deployed != ship_type) {
+                step_to(world, 620);
+                expect(!world.snapshot()->squadrons().empty(), "WU-37: purchased team survives its arrival");
+                for (const auto& squadron : world.snapshot()->squadrons()) {
+                    const auto* view = instance(*world.snapshot(), squadron.container);
+                    expect(view && !view->arrival && !view->garrison_unit,
+                        "WU-37: a purchased team stays unmarked after hyperspace completes");
+                }
+            }
             if (deployed == ship_type && found != live.end()) {
                 const auto id = found->entity_id;
                 const auto rider0 = found->contained[0].entity_id;
@@ -312,6 +326,72 @@ void test_arrival_hits() {
     expect(tactical::arrival_hit_defense(&state, value) == Fixed{}, "PU-38: not vulnerable from vulnerability_frames");
 }
 
+// WR-49, PU-31: a drop marks its reveal circle at the drop point at creation and the grid holds it
+// through arrival, so the next drop can follow from the new edge while the ship is in hyperspace.
+void test_arrival_widens_drop_area() {
+    auto initial = setup();
+    const std::vector<tactical::SensorProfile> reveal{{ship_type, units(1100)}, {station_type, units(500)}};
+    const tactical::FogRules fog{units(-6500), units(6500), units(100), 130, 130, 16, 21};
+    const auto first_point = at(-2600, 0);
+    const auto chained_point = at(-1700, 0); // beyond the station's 500 and inside the dropped ship's 1100
+    const auto make = [&]() -> std::optional<tactical::TacticalSession> {
+        auto created = tactical::TacticalSession::create(initial, reveal, {}, motion(), fog, {}, {}, {}, rules());
+        expect(static_cast<bool>(created), "WR-49: create chained-drop fixture");
+        if (!created) return std::nullopt;
+        auto world = std::move(created).value();
+        expect(static_cast<bool>(world.submit(buy(0, human, 0, human_station, ship_type))), "WR-49: buy first ship");
+        expect(static_cast<bool>(world.submit(buy(0, human, 1, human_station, ship_type))), "WR-49: buy second ship");
+        step_to(world, 910);
+        expect(ledger(world, human)->pool.size() == 2, "WR-49: both ships are pooled");
+        return world;
+    };
+    const auto verdict = [](const std::vector<tactical::Event>& events) {
+        const auto event = std::find_if(events.begin(), events.end(), [](const tactical::Event& value) {
+            return value.order == tactical::OrderKind::reinforce;
+        });
+        return event == events.end() ? tactical::RejectReason::none : event->reason;
+    };
+
+    // Control: without a first drop the point lies outside the player's area.
+    auto control = make();
+    if (!control) return;
+    expect(!control->fog_cells()->revealed(0, chained_point), "WR-49: the point is outside the starting area");
+    expect(static_cast<bool>(control->submit(reinforce(910, human, 2, ship_type, chained_point))), "WR-49: submit lone far drop");
+    expect(verdict(step_to(*control, 911)) == tactical::RejectReason::invalid_position && control->arrivals().empty(),
+        "WR-49: a drop beyond the starting area is refused");
+
+    auto world = make();
+    if (!world) return;
+    expect(static_cast<bool>(world->submit(reinforce(910, human, 2, ship_type, first_point))), "WR-49: first drop");
+    step_to(*world, 911);
+    expect(world->arrivals().size() == 1, "WR-49: the first drop is arriving");
+    const auto arriving = world->arrivals().begin()->first;
+    // One tick after the drop, with the ship still hidden in hyperspace: the area has grown.
+    expect(world->fog_cells()->revealed(0, chained_point), "WR-49: the area grows at once after a drop");
+    expect(!world->fog_cells()->revealed(1, first_point) && !world->fog_cells()->revealed(1, chained_point),
+        "WR-49/PU-37: the enemy gets no reveal from the arrival");
+    expect(instance(*world->snapshot(), arriving)->visible_to == 1U, "WR-49/PU-37: the arriving unit stays hidden from the enemy");
+    expect(static_cast<bool>(world->submit(reinforce(911, human, 3, ship_type, chained_point))), "WR-49: chained drop");
+    expect(verdict(step_to(*world, 912)) == tactical::RejectReason::none && world->arrivals().size() == 2,
+        "WR-49: a second drop beyond the old edge is valid the tick after the first");
+    // Hidden through frame 34: the enemy still cannot see the first unit.
+    step_to(*world, 911 + 34);
+    expect(instance(*world->snapshot(), arriving)->arrival == 34U && instance(*world->snapshot(), arriving)->visible_to == 1U,
+        "PU-37: still hidden from the enemy at frame 34");
+
+    // Held through the disabled frames, not carried by the unit: a lone first drop's circle stays put.
+    auto lone = make();
+    if (!lone) return;
+    expect(static_cast<bool>(lone->submit(reinforce(910, human, 2, ship_type, first_point))), "WR-49: lone first drop");
+    for (const std::uint64_t tick : {912ULL, 960ULL, 1030ULL}) { // arrival frames 1, 49, 119
+        step_to(*lone, tick);
+        expect(lone->fog_cells()->revealed(0, chained_point) && !lone->fog_cells()->revealed(0, at(-1200, 0)),
+            "WR-49: the drop-point circle is held while the service is disabled (tick " + std::to_string(tick) + ")");
+    }
+    step_to(*lone, 1062); // past the landing at frame 150: the ship's own position is the drop point again
+    expect(lone->arrivals().empty() && lone->fog_cells()->revealed(0, chained_point), "WR-49/40: the circle follows the landed ship");
+}
+
 // WR-33/36/39/40: privileged script damage bypasses immunity; reveal and visibility differ.
 void test_arrival_services() {
     auto initial = setup();
@@ -345,7 +425,10 @@ void test_arrival_services() {
     }
     step_to(world, 571); // snapshot arrival counter 119
     expect(!instance(*world.snapshot(), id)->reveal_range, "WR-35: arrival sensor disabled through 119");
-    expect(!world.fog_cells()->revealed(0, at(-1800, 0)), "WR-35: early arrival never reveals its target cell");
+    // WR-49: the disabled service keeps the circle the creation frame marked at the drop point; nothing
+    // is marked at the unit's flying position, so the held circle ends 1100 around the drop point.
+    expect(world.fog_cells()->revealed(0, at(-1800, 0)) && !world.fog_cells()->revealed(0, at(-1200, 0)),
+        "WR-35/49: the disabled sensor holds the drop-point circle and marks nothing else");
     step_to(world, 572);
     expect(instance(*world.snapshot(), id)->reveal_range == units(1100), "WR-39: sensor enables at exactly 120");
     expect(world.fog_cells()->revealed(0, at(-1800, 0)), "WR-39: frame-120 revealer enters ordinary fog service");
@@ -644,6 +727,49 @@ void test_arrival_placement() {
     }
     expect(apart, "PL-04: no craft's placement box overlaps another's");
     expect(raised, "LZ-01: each craft is raised by its own Layer_Z_Adjust");
+}
+
+// The rotated +X axis is exactly vertical, with no rounding residue in its planar components.
+// Squadron reinforcement must still use the blocker, rather than fail or silently omit it.
+void test_vertical_arrival_blocker() {
+    const auto half = Fixed::from_raw(one / 2);
+    const auto negative_half = Fixed::from_raw(-one / 2);
+    for (const auto z : {half, negative_half}) {
+        auto initial = setup();
+        initial.units.front().rotation = {half, half, z, z == half ? negative_half : half};
+        const auto rotated = math::to_matrix(initial.units.front().rotation, math::Vec3{});
+        expect(rotated && rotated.value().rows[0][0].raw() == 0 && rotated.value().rows[1][0].raw() == 0,
+            "arrival blocker fixture has an exactly vertical heading");
+        auto created = tactical::TacticalSession::create(initial, sensors, {}, motion(), std::nullopt,
+            {}, {}, {}, rules());
+        expect(static_cast<bool>(created), "vertical arrival blocker fixture starts without game data");
+        if (!created) return;
+        auto world = std::move(created).value();
+        expect(static_cast<bool>(world.submit(buy(0, human, 0, human_station, squadron_type))),
+            "buy the squadron for the vertical blocker contract");
+        step_to(world, 511);
+        expect(ledger(world, human) && ledger(world, human)->pool == std::vector<tactical::TypeId>{squadron_type},
+            "the vertical blocker fixture has its completed squadron");
+        const auto point = initial.units.front().position;
+        expect(static_cast<bool>(world.submit(reinforce(511, human, 1, squadron_type, point))),
+            "submit squadron reinforcement on the vertical blocker");
+        const auto events = step_to(world, 512);
+        expect(std::any_of(events.begin(), events.end(), [](const auto& event) {
+            return event.order == tactical::OrderKind::reinforce && event.kind == tactical::EventKind::order_accepted;
+        }), "an exactly vertical blocker does not fail the reinforcement step");
+        const auto teams = world.snapshot()->squadrons();
+        expect(!teams.empty() && teams.back().members.size() == 3, "the reinforced squadron has all its craft");
+        if (teams.empty()) return;
+        for (const auto member : teams.back().members) {
+            const auto* craft = instance(*world.snapshot(), member);
+            expect(craft && craft->arrival_exit, "each reinforced craft has an arrival destination");
+            if (!craft || !craft->arrival_exit) continue;
+            const auto dx = std::llabs(craft->arrival_exit->x.raw() - point.x.raw());
+            const auto dy = std::llabs(craft->arrival_exit->y.raw() - point.y.raw());
+            expect(dx >= units(120).raw() || dy >= units(120).raw(),
+                "the vertical station still displaces each craft outside its placement box");
+        }
+    }
 }
 
 // Determinism: one script, every executor, scrambled storage and a replay round trip.

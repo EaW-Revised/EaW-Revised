@@ -1,6 +1,7 @@
 #include "viewer_host_internal.hpp"
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
+#include "gpu_memory_trace.hpp"
 #include <godot_cpp/classes/rendering_server.hpp>
 
 namespace eawr::presentation::godot_backend {
@@ -45,8 +46,14 @@ ViewerHost::~ViewerHost() { shutdown_trace::mark("viewer host freed (members fol
 
 void ViewerHost::_bind_methods() {}
 
-void ViewerHost::on_battle_frame_drawn() { startup_trace.drawn(); }
-void ViewerHost::on_setup_frame_drawn() { startup_trace.setup_drawn(); }
+void ViewerHost::on_battle_frame_drawn() {
+    if (startup_trace.pending()) gpu_memory_trace.sample("battle_first_frame");
+    startup_trace.drawn();
+}
+void ViewerHost::on_setup_frame_drawn() {
+    gpu_memory_trace.sample("setup_after_battle");
+    startup_trace.setup_drawn();
+}
 
 
 
@@ -60,7 +67,8 @@ void ViewerHost::on_setup_frame_drawn() { startup_trace.setup_drawn(); }
 
 void ViewerHost::stop(const int exit_code) {
     completed_ = true;
-    if (get_tree()) get_tree()->quit(exit_code);
+    const int result = front_end_ && !front_end_->close() ? 2 : exit_code;
+    if (get_tree()) get_tree()->quit(result);
 }
 
 } // namespace eawr::presentation::godot_backend

@@ -1,12 +1,13 @@
 #include "eawr/platform/live_ai.hpp"
 
 #include "eawr/platform/live_scripts.hpp"
+#include "eawr/platform/battle_scoring.hpp"
 #include "eawr/skirmish/ai.hpp"
 
 namespace eawr::platform {
 
 core::Result<LiveAi> live_ai(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs, const units::UnitTables& tables,
-    const vfs::Vfs& files) {
+    const vfs::Vfs& files, std::shared_ptr<const BattleScoring> scoring) {
     auto setup = skirmish::ai_setup(start, inputs, tables);
     // #449: the goal system runs the retail space plans beside the freestore.
     if (auto enabled = skirmish::enable_goal_system(files, setup); !enabled) return core::Result<LiveAi>::failure(enabled.error());
@@ -17,8 +18,16 @@ core::Result<LiveAi> live_ai(const skirmish::SkirmishStart& start, const skirmis
         if (player.ai) out.players.push_back(player.player);
     }
     auto scripts = std::make_shared<platform::LiveScripts>();
-    scripts->wrap = [setup = std::move(setup), modules = std::move(modules).value()](sim::tactical::TacticalSession world) {
-        return script::foc::create_session(std::move(world), setup, modules);
+    scripts->wrap = [setup = std::move(setup), modules = std::move(modules).value(), scoring = std::move(scoring)](sim::tactical::TacticalSession world) {
+        auto owned = setup;
+        // Each initial/rebuild session owns a fresh scorer; staging cannot mutate
+        // the live provider or the viewer's separate results instance.
+        if (scoring) {
+            auto fresh = scoring->fresh();
+            if (!fresh) return core::Result<script::authoritative::ScriptedTacticalSession>::failure(fresh.error());
+            owned.scoring = std::move(fresh).value();
+        }
+        return script::foc::create_session(std::move(world), owned, modules);
     };
     out.scripts = std::move(scripts);
     return core::Result<LiveAi>::success(std::move(out));

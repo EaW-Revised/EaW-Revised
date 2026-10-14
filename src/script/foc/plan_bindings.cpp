@@ -1,10 +1,11 @@
 // The engine APIs of the FoC space plans (#449, docs/behaviour/foc-tactical-ai.md "Plans and
 // TaskForces"): TaskForce objects, blocking objects, AI targets and the global functions the
-// plans and their libraries call. Bindings run during the partitioned script service: they
-// read the host and the engine and only stage commands; the engine applies them after the
-// service (ai::Engine::after_service).
+// plans and their libraries call. Default bindings stage commands for after_service.
+// Qualified GC magic uses the bounded native shadow for request-time creation;
+// block completion remains owned by the later execution service (GFD-A08).
 
 #include "ai_engine.hpp"
+#include "galactic_ai_actions.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -98,6 +99,20 @@ Binding taskforce_move(HostPtr host, std::string kind, bool position_only) {
         const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
         if (taskforce == nullptr) return none();
         if (arguments.size() < 2) return fail("TaskForce order: no destination");
+        if (host->ai_world && host->ai_world->goal_mode() == "GALACTIC") {
+            if (kind != "move" || taskforce->units.empty() || !taskforce->galactic_fleet) return none();
+            const auto* plan = host->engine->plan(taskforce->plan);
+            if (!plan || !host->engine->galactic_movement_reach(plan->id)) return fail("galactic Move_To requires retained goal reachability");
+            const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host->galactic_execution.get());
+            if (!actions || !actions->supports(galactic_ai::ActionKind::move)) return fail("galactic Move_To requires its rebuilt movement owner");
+            std::optional<sim::EntityId> destination;
+            if (const auto* target = target_of(*host, arguments[1])) destination = target->object;
+            else if (const auto* object = as_handle(arguments[1], handle_game_object)) destination = object->id;
+            if (!destination || !*destination || !host->view || !host->view->find(*destination)) return none();
+            const auto sequence = context.command_sequence();
+            stage(context, "galactic_move", {arguments[0], handle(handle_game_object, *destination)});
+            return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
+        }
         Value destination;
         const ViewUnit* object = nullptr;
         if (as_handle(arguments[1], ai::handle_ai_target) != nullptr) {
@@ -145,26 +160,69 @@ Binding taskforce_move(HostPtr host, std::string kind, bool position_only) {
     };
 }
 
+Binding taskforce_produce(HostPtr host) {
+    return [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto* taskforce = taskforce_of(*host, arguments[0]);
+        if (!taskforce) return none();
+        const auto sequence = context.command_sequence();
+        if (host->ai_world && host->ai_world->goal_mode() == "GALACTIC") {
+            const auto* plan = host->engine->plan(taskforce->plan);
+            if (!plan || plan->definition >= host->engine->plans().size()) return none();
+            if (arguments.size() > 3) return fail("Produce_Force accepts only staging and synchronized staging");
+            sim::EntityId requested_stage{};
+            if (arguments.size() > 1 && !std::holds_alternative<std::monostate>(arguments[1].data)) {
+                if (const auto* target = target_of(*host, arguments[1])) requested_stage = target->object;
+                else if (const auto* object = as_handle(arguments[1], handle_game_object)) requested_stage = object->id;
+                const auto* world = dynamic_cast<const ai::GalacticWorld*>(host->ai_world.get());
+                if (!requested_stage || !world || world->containing_planet(requested_stage) != requested_stage)
+                    return fail("Produce_Force staging must resolve to a live planet");
+            }
+            bool synchronized{};
+            if (arguments.size() > 2) {
+                const auto* supplied = std::get_if<bool>(&arguments[2].data);
+                if (!supplied) return fail("Produce_Force synchronized staging must be Boolean");
+                synchronized = *supplied;
+            }
+            if (!host->engine->plans()[plan->definition].magic) {
+                if (!host->galactic_execution || !host->engine->galactic_goal_for_plan(plan->player, plan->id)
+                    || taskforce->types.size() != taskforce->sources.size()
+                    || taskforce->types.size() != taskforce->producers.size()
+                    || std::find(taskforce->sources.begin(), taskforce->sources.end(), 1) != taskforce->sources.end())
+                    return core::Result<ValueList>::failure(make_error(authoritative::codes::missing_api,
+                        "galactic paid production requires selected retained sources and the native goal owner"));
+                stage(context, "produce", {arguments[0], handle(handle_game_object, requested_stage), Value{synchronized}});
+                return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
+            }
+            sim::EntityId staging = plan->target_object;
+            if (arguments.size() > 1 && !std::holds_alternative<std::monostate>(arguments[1].data)) {
+                if (const auto* target = target_of(*host, arguments[1])) staging = target->object;
+                else if (const auto* object = as_handle(arguments[1], handle_game_object)) staging = object->id;
+                else return fail("magic Produce_Force requires a live staging planet");
+            }
+            std::vector<Value> types;
+            for (const auto type : taskforce->types) if (type) types.push_back(handle(handle_type, type));
+            auto made = context.apply_immediate("galactic.magic_force", {handle(handle_player, plan->player),
+                handle(handle_game_object, staging), Value{std::move(types)}, arguments[0]});
+            if (!made) return made;
+            if (made.value().size() != 1 || !std::holds_alternative<std::vector<Value>>(made.value()[0].data))
+                return fail("native magic provider returned no actor list");
+            // This command adopts already-created identities. It cannot spawn
+            // again, and is rolled back alongside the private native writes.
+            stage(context, "native_magic", {arguments[0], std::move(made).value()[0],
+                handle(handle_game_object, requested_stage), Value{synchronized}});
+        } else stage(context, "produce", {handle(ai::handle_taskforce, taskforce->id)});
+        return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
+    };
+}
+
 void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors) {
     const auto method = [&](std::string_view name, Binding binding) {
         if (auto added = scripts.register_method(ai::handle_taskforce, name, std::move(binding)); !added) errors.push_back(added.error());
     };
     // EX-10 Produce_Force: a block over one build task per selected unit.
-    method("Produce_Force", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
-        const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
-        if (taskforce == nullptr) return none();
-        const std::uint64_t sequence = context.command_sequence();
-        stage(context, "produce", {handle(ai::handle_taskforce, taskforce->id)});
-        return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
-    });
+    method("Produce_Force", taskforce_produce(host));
     method("Attack_Move", taskforce_move(host, "attack_move", false));
-    method("Build_All", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
-        const auto* taskforce = taskforce_of(*host, arguments[0]);
-        if (taskforce == nullptr) return none();
-        const auto sequence = context.command_sequence();
-        stage(context, "produce", {handle(ai::handle_taskforce, taskforce->id)});
-        return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
-    });
+    method("Build_All", taskforce_produce(host));
     method("Get_Reserved_Build_Pads", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const auto* taskforce = taskforce_of(*host, arguments[0]);
         const auto* plan = taskforce != nullptr && host->engine != nullptr ? host->engine->plan(taskforce->plan) : nullptr;
@@ -239,10 +297,46 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
         stage(context, "reinforce", {handle(ai::handle_taskforce, taskforce->id), position_value(*position)});
         return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
     });
-    method("Get_Stage", [](BindingContext&, const ValueList&) { return none(); });
-    method("Form_Units", [](BindingContext&, const ValueList&) { return none(); });
-    method("Withdraw_Units", [](BindingContext&, const ValueList&) { return none(); });
-    method("Launch_Units", [](BindingContext&, const ValueList&) { return none(); });
+    method("Get_Stage", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.empty()) return none();
+        const auto* force = taskforce_of(*host, arguments[0]);
+        if (!force || !force->galactic_stage || !host->ai_world || host->ai_world->goal_mode() != "GALACTIC") return none();
+        if (const auto* target = host->engine->target_of_object(force->galactic_stage)) return one(handle(ai::handle_ai_target, target->id));
+        return host->view && host->view->find(force->galactic_stage) ? one(handle(handle_game_object, force->galactic_stage)) : none();
+    });
+    const auto containment = [host](std::string operation, galactic_ai::ActionKind kind) -> Binding {
+        return [host, operation, kind](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+            if (arguments.empty() || !host->ai_world || host->ai_world->goal_mode() != "GALACTIC") return none();
+            const auto* force = taskforce_of(*host, arguments[0]);
+            if (!force || force->units.empty()) return none();
+            if (!host->galactic_execution || !host->galactic_execution->supports(kind)) return fail("galactic containment requires its live world owner");
+            if (kind == galactic_ai::ActionKind::land && !force->galactic_fleet) return none();
+            const auto sequence = context.command_sequence(); stage(context, operation, {arguments[0]});
+            return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
+        };
+    };
+    method("Form_Units", containment("galactic_form", galactic_ai::ActionKind::regroup));
+    method("Land_Units", containment("galactic_land", galactic_ai::ActionKind::land));
+    method("Invade", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.empty() || !host->ai_world || host->ai_world->goal_mode() != "GALACTIC") return none();
+        const auto* force = taskforce_of(*host, arguments[0]);
+        if (!force || !force->galactic_fleet) return none();
+        if (!host->galactic_execution || !host->galactic_execution->supports(galactic_ai::ActionKind::invade)) return fail("Invade requires its retained campaign queue owner");
+        const auto sequence = context.command_sequence(); stage(context, "galactic_invade", {arguments[0]});
+        return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
+    });
+    method("Withdraw_Units", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.empty()) return none();
+        const auto* force = taskforce_of(*host, arguments[0]);
+        const auto* plan = force ? host->engine->plan(force->plan) : nullptr;
+        const auto& setup = host->setup;
+        if (!plan || !setup.perception.campaign_game || !setup.campaign_can_retreat
+            || !setup.campaign_retreat_order || !host->snapshot || !setup.campaign_can_retreat(*host->snapshot, plan->player))
+            return none();
+        context.issue_command(std::string(verb_campaign_retreat), {number(LuaNumber(plan->player))});
+        return one(boolean(true));
+    });
+    method("Launch_Units", containment("galactic_launch", galactic_ai::ActionKind::launch));
     // EX-52: the largest combat power metric of the members.
     method("Get_Self_Threat_Max", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
@@ -255,21 +349,33 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
         }
         return one(number(top));
     });
-    method("Get_Force_Count", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+    method("Get_Force_Count", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
-        return one(number(LuaNumber(static_cast<std::int64_t>(taskforce == nullptr ? 0 : taskforce->units.size()))));
+        auto immediate = galactic_immediate_query(context, *host, "galactic.taskforce_units", {arguments[0]});
+        if (!immediate) return immediate;
+        const auto extra = immediate.value().empty() ? 0 : std::get<std::vector<Value>>(immediate.value()[0].data).size();
+        return one(number(LuaNumber(static_cast<std::int64_t>((taskforce ? taskforce->units.size() : 0) + extra))));
     });
-    method("Is_Valid", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+    method("Is_Valid", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
-        return one(boolean(taskforce != nullptr && !taskforce->units.empty()));
+        auto immediate = galactic_immediate_query(context, *host, "galactic.taskforce_units", {arguments[0]});
+        if (!immediate) return immediate;
+        const bool created = !immediate.value().empty() && !std::get<std::vector<Value>>(immediate.value()[0].data).empty();
+        return one(boolean(taskforce != nullptr && (!taskforce->units.empty() || created)));
     });
-    method("Get_Unit_Table", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+    method("Get_Unit_Table", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
         std::vector<Value> units;
         if (taskforce != nullptr) {
             for (const sim::EntityId member : taskforce->units) {
                 if (host->view->find(member) != nullptr) units.push_back(handle(handle_game_object, member));
             }
+        }
+        auto immediate = galactic_immediate_query(context, *host, "galactic.taskforce_units", {arguments[0]});
+        if (!immediate) return immediate;
+        if (!immediate.value().empty()) {
+            auto& created = std::get<std::vector<Value>>(immediate.value()[0].data);
+            units.insert(units.end(), created.begin(), created.end());
         }
         return one(list_of(std::move(units)));
     });
@@ -345,13 +451,45 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
         const std::string ability = upper(*as_text(arguments[1]));
         for (const sim::EntityId id : taskforce->units) {
             if (const ViewUnit* unit = host->view->find(id)) {
-                request_ability(context, *host, *unit, ability, arguments.size() >= 3 ? &arguments[2] : nullptr);
+                static_cast<void>(request_ability(context, *host, *unit, ability, arguments.size() >= 3 ? &arguments[2] : nullptr));
             }
         }
         return none();
     });
-    // No targeting priority sets or attack positioning in the M2 simulation.
-    for (const char* name : {"Enable_Attack_Positioning", "Set_Targeting_Priorities", "Lock_Current_Orders"}) {
+    method("Fire_Special_Weapon", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 3 || as_text(arguments[1]) == nullptr)
+            return fail("Fire_Special_Weapon expects a type name and an object target");
+        const auto found = host->types_by_name.find(upper(*as_text(arguments[1])));
+        if (found == host->types_by_name.end()) return fail("Fire_Special_Weapon: unknown type");
+        const ViewUnit* target = destination_object(*host, arguments[2]);
+        if (as_handle(arguments[2], handle_game_object) == nullptr &&
+            as_handle(arguments[2], ai::handle_ai_target) == nullptr)
+            return fail("Fire_Special_Weapon: expected an object or AI target");
+        const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
+        const ai::Plan* plan = taskforce != nullptr ? host->engine->plan(taskforce->plan) : nullptr;
+        // WSW-41: unavailable weapon/permission/category answers false, successful fire its handle.
+        if (plan == nullptr || target == nullptr || !found->second->space_special_weapon) return one(boolean(false));
+        for (const sim::EntityId member : taskforce->units) {
+            const ViewUnit* source = host->view->find(member);
+            if (source == nullptr || source->type != found->second->type_id ||
+                !planetary_fire_ready(*host, *source, *target, plan->player)) continue;
+            issue_special_fire(context, *source, *target, plan->player, tactical::SpecialFireAdmission::ai_taskforce);
+            return one(handle(handle_game_object, source->id));
+        }
+        return one(boolean(false));
+    });
+    // WTA-23: Enable_Attack_Positioning(on) sets the members' attack-positioning flag (Lua truth).
+    method("Enable_Attack_Positioning", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
+        if (taskforce == nullptr) return none();
+        const Value* flag = arguments.size() >= 2 ? &arguments[1] : nullptr;
+        const bool on = flag != nullptr && !std::holds_alternative<std::monostate>(flag->data)
+            && !(std::holds_alternative<bool>(flag->data) && !std::get<bool>(flag->data));
+        stage(context, "attack_positioning", {handle(ai::handle_taskforce, taskforce->id), boolean(on)});
+        return none();
+    });
+    // No targeting priority sets or order locks in the M2 simulation.
+    for (const char* name : {"Set_Targeting_Priorities", "Lock_Current_Orders"}) {
         method(name, [](BindingContext&, const ValueList&) { return none(); });
     }
 }
@@ -362,10 +500,25 @@ void register_blocks(ScriptScheduler& scripts, const HostPtr& host, std::vector<
     };
     // EX-20: a block the engine has not taken yet (staged this service) is not finished; a
     // movement block also finishes when its TaskForce has no units left.
-    method("IsFinished", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+    method("IsFinished", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const Handle* found = as_handle(arguments[0], ai::handle_block);
         const ai::Block* block = found == nullptr || host->engine == nullptr ? nullptr : host->engine->block(found->id);
         if (block == nullptr) return one(boolean(false));
+        if (block->kind == ai::Block::Kind::galactic_invade && block->galactic_request) {
+            const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host->galactic_execution.get());
+            const auto* invasion = actions ? actions->invasion_status(block->galactic_request) : nullptr;
+            if (!invasion) return fail("invasion block lost its retained queue owner");
+            if (invasion->state == sim::galactic::GalacticSession::NativeInvasion::State::completed)
+                stage(context, "galactic_retire_invasion", {arguments[0]});
+            return one(boolean(invasion->state == sim::galactic::GalacticSession::NativeInvasion::State::completed));
+        }
+        if (block->galactic_request) {
+            const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host->galactic_execution.get());
+            if (!actions || !actions->movements().contains(block->galactic_request)) return fail("galactic block lost its native movement owner");
+            const auto& movement = actions->movements().at(block->galactic_request);
+            if (!movement.finished) stage(context, "galactic_poll", {arguments[0]});
+            return one(boolean(movement.finished || !movement.actor || !actions->movement_actor_exists(movement.actor)));
+        }
         bool finished = block->finished;
         if (block->kind == ai::Block::Kind::move) {
             const ai::TaskForce* taskforce = host->engine->taskforce(block->taskforce);
@@ -377,6 +530,24 @@ void register_blocks(ScriptScheduler& scripts, const HostPtr& host, std::vector<
         const Handle* found = as_handle(arguments[0], ai::handle_block);
         const ai::Block* block = found == nullptr || host->engine == nullptr ? nullptr : host->engine->block(found->id);
         if (block == nullptr) return none();
+        if (block->kind == ai::Block::Kind::galactic_invade && !block->galactic_request) return one(boolean(block->result));
+        if (block->kind == ai::Block::Kind::galactic_invade && block->galactic_request) {
+            const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host->galactic_execution.get());
+            const auto* invasion = actions ? actions->invasion_status(block->galactic_request) : nullptr;
+            if (!invasion) return fail("invasion result lost its retained queue owner");
+            return one(boolean(invasion->success));
+        }
+        const bool galactic = host->ai_world && host->ai_world->goal_mode() == "GALACTIC";
+        if (galactic && (block->kind == ai::Block::Kind::move || block->kind == ai::Block::Kind::galactic_land
+            || block->kind == ai::Block::Kind::galactic_launch || block->kind == ai::Block::Kind::galactic_form)) {
+            auto actor = block->galactic_actor;
+            if (block->galactic_request) {
+                const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host->galactic_execution.get());
+                if (!actions || !actions->movements().contains(block->galactic_request)) return fail("galactic result lost its native movement owner");
+                actor = actions->movements().at(block->galactic_request).actor;
+            }
+            return actor ? one(handle(handle_game_object, actor)) : none();
+        }
         if (block->kind == ai::Block::Kind::move) return none();
         if (block->kind == ai::Block::Kind::ambush) return one(boolean(block->ready));
         return one(boolean(block->result));
@@ -475,74 +646,165 @@ core::Result<ValueList> project_by_unit_range(const Host& host, BindingContext& 
     return one(Value{std::move(out)});
 }
 
-// FT-01 to FT-03 FindTarget(taskforce, function, application flags, fraction[, max distance]):
-// the targets the flags match (within the distance of the TaskForce) are scored by the
-// function; the best scoring one is kept apart, the others weigh their score in a draw, and the
-// best joins the draw with the others' total over the fraction. Without another entry above 0,
-// or with a zero fraction, the best is the answer; no score above 0 answers nil (FT-03,
-// ai::choose_target). An object target answers with its game object.
+// FT-07/13: a single policy; manager selection is independent of source.
+enum class TargetReach { friendly, ignore_threat, enemy_destination, enemy_undefended, single_hop,
+    any, no_threat, low, medium, high, any_threat };
+std::optional<TargetReach> target_reach(std::string_view text) {
+    const std::string name = ai::upper_case(ai::trimmed(text));
+    static const std::map<std::string, TargetReach, std::less<>> names{
+        {"FRIENDLY_ONLY", TargetReach::friendly}, {"FRIENDLY_IGNORE_THREAT", TargetReach::ignore_threat},
+        {"ENEMY_DESTINATION", TargetReach::enemy_destination}, {"ENEMY_UNDEFENDED", TargetReach::enemy_undefended},
+        {"SINGLE_HOP_DISCONNECTED", TargetReach::single_hop}, {"ANY", TargetReach::any},
+        {"NO_THREAT", TargetReach::no_threat}, {"LOW_THREAT", TargetReach::low},
+        {"MEDIUM_THREAT", TargetReach::medium}, {"HIGH_THREAT", TargetReach::high},
+        {"ANY_THREAT", TargetReach::any_threat}};
+    const auto found = names.find(name);
+    return found == names.end() ? std::nullopt : std::optional{found->second};
+}
+bool galactic_reach(TargetReach reach) { return reach <= TargetReach::any; }
+
+// FT-08/09/15: decoded execution cost is only a reachability gate; never a score.
+Real target_path_cost(const ai::FindTargetPath& path, TargetReach reach, const ai::Constants& constants) {
+    const Real unreachable = ai::to_single(ai::real(1000000000000000000LL));
+    if (!path.source_valid || (path.service == ai::FindTargetService::land && galactic_reach(reach))) return unreachable;
+    if (path.same_target && path.service == ai::FindTargetService::galactic) return Real{};
+    const Real strict = path.service == ai::FindTargetService::galactic
+        ? ai::to_single(ai::real(1) / ai::real(10000)) : Real{};
+    Real tolerance = strict;
+    switch (reach) {
+    case TargetReach::ignore_threat: case TargetReach::any: case TargetReach::any_threat: tolerance = unreachable; break;
+    case TargetReach::low: tolerance = ai::to_single(constants.low_threat_tolerance); break;
+    case TargetReach::medium: tolerance = ai::to_single(constants.medium_threat_tolerance); break;
+    case TargetReach::high: tolerance = ai::to_single(constants.high_threat_tolerance); break;
+    default: break;
+    }
+    const Real threat = path.empty ? ai::real(6553500)
+        : ai::to_single(reach == TargetReach::single_hop ? path.prefix_threat : path.threat);
+    if (!(threat <= tolerance)) return unreachable;
+    return path.empty ? ai::to_single(ai::real(65535) / ai::real(10)) : ai::to_single(path.distance);
+}
+
+// FT-01..09/12..15: selected-manager goal targets, optional resolved source,
+// execution-path safety, perception evaluation, source radius, then score draw.
 core::Result<ValueList> find_target(const Host& host, BindingContext& context, const ValueList& arguments, bool reachable) {
-    if (host.engine == nullptr) {
+    if (host.engine == nullptr && !(reachable && host.find_target_queries)) {
+        if (reachable) return fail("FindTarget -- selected manager is unavailable");
         context.report(authoritative::codes::unsupported_api, "FindTarget returned nil: the goal system is not hosted");
         return none();
     }
-    const std::size_t function_index = 1;
-    const std::size_t flags_index = 2;
-    const std::size_t fraction_index = reachable ? 4 : 3;
-    if (arguments.size() <= fraction_index) return fail("FindTarget -- invalid number of parameters");
+    if ((reachable && (arguments.size() < 4 || arguments.size() > 7))
+        || (!reachable && (arguments.size() < 4 || arguments.size() > 5)))
+        return fail("FindTarget -- invalid number of parameters");
     const ai::TaskForce* taskforce = reachable ? nullptr : taskforce_of(host, arguments[0]);
     tactical::PlayerId player{};
     if (taskforce != nullptr) {
         if (const ai::Plan* plan = host.engine->plan(taskforce->plan)) player = plan->player;
-    } else if (const Handle* owner = as_handle(arguments[0], handle_player)) {
+    } else if (reachable) {
+        const Handle* owner = as_handle(arguments[0], handle_player);
+        if (!owner || owner->id > std::numeric_limits<tactical::PlayerId>::max()) return fail("FindTarget -- invalid player");
         player = static_cast<tactical::PlayerId>(owner->id);
-    } else {
-        return fail("FindTarget -- invalid type for parameter 1.  Expected taskforce.");
-    }
-    const std::string* function = as_text(arguments[function_index]);
-    const std::string* flag_text = as_text(arguments[flags_index]);
-    const auto* fraction = std::get_if<LuaNumber>(&arguments[fraction_index].data);
-    if (function == nullptr || flag_text == nullptr || fraction == nullptr) return fail("FindTarget -- invalid parameters");
+    } else return fail("FindTarget -- invalid taskforce");
+    const std::string* function = as_text(arguments[1]);
+    const std::string* flag_text = as_text(arguments[2]);
+    if (!function || !flag_text) return fail("FindTarget -- invalid function or application");
     std::set<std::string> flags;
     for (const std::string& name : ai::split_names(*flag_text, "|")) flags.insert(upper(name));
-    Real max_distance{};
-    if (!reachable && arguments.size() > 4) {
-        if (const auto* value = std::get_if<LuaNumber>(&arguments[4].data)) max_distance = ai::to_single(*value * *value);
+    const ai::Engine* engine = host.engine;
+    std::optional<TargetReach> reach;
+    if (reachable) {
+        const auto* text = as_text(arguments[3]);
+        if (!text || !(reach = target_reach(*text))) return fail("FindTarget -- unknown reach policy");
+        const auto selected = galactic_reach(*reach) ? ai::FindTargetManager::galactic : ai::FindTargetManager::current;
+        engine = host.find_target_queries ? host.find_target_queries->manager(selected)
+            : (selected == ai::FindTargetManager::current ? host.engine : nullptr);
+        if (!engine) return fail("FindTarget -- selected manager is unavailable");
+        static const std::set<std::string> applications{"ENEMY", "FRIENDLY", "NEUTRAL", "TACTICAL_LOCATION",
+            "ENEMY_UNIT", "FRIENDLY_UNIT", "ENEMY_STRUCTURE", "FRIENDLY_STRUCTURE",
+            "ENEMY_BUILD_PAD", "FRIENDLY_BUILD_PAD", "ENEMY_REINFORCEMENT_POINT", "FRIENDLY_REINFORCEMENT_POINT"};
+        if (flags.empty() || !std::all_of(flags.begin(), flags.end(), [](const auto& flag) { return applications.contains(flag); }))
+            return fail("FindTarget -- unknown or global application");
+        if (!engine->target_list(player)) return fail("FindTarget -- player has no AI manager");
+        if (!engine->data().equations.find(*function)) return fail("FindTarget -- unknown perception function");
     }
-    const std::vector<std::uint64_t>* targets = host.engine->target_list(player);
-    if (targets == nullptr) return none();
-    const math::Vec3 origin = taskforce != nullptr ? taskforce_position(host, *taskforce) : math::Vec3{};
+    Real ratio{};
+    const std::size_t probability_index = reachable ? 4 : 3;
+    if (arguments.size() > probability_index) {
+        const auto* probability = std::get_if<LuaNumber>(&arguments[probability_index].data);
+        if (!probability || !(Real{} < *probability && *probability <= ai::real(1)))
+            return fail("FindTarget -- probability must be in (0, 1]");
+        ratio = ai::to_single(ai::to_single(ai::real(1) / ai::to_single(*probability)) - ai::real(1));
+    }
+    const auto* selected_view = engine->completed_view();
+    const ai::Target* source = nullptr;
+    if (reachable && arguments.size() > 5) {
+        if (const Handle* value = as_handle(arguments[5], ai::handle_ai_target)) {
+            source = engine->target(value->id);
+            if (!source || (source->object && (!selected_view || !selected_view->find(source->object))))
+                return fail("FindTarget -- invalid source target");
+        } else if (const Handle* object_source = as_handle(arguments[5], handle_game_object)) {
+            if (!selected_view || !selected_view->find(object_source->id)) return fail("FindTarget -- invalid source object");
+            source = host.find_target_queries ? host.find_target_queries->source_target(*engine, object_source->id)
+                : engine->target_of_object(object_source->id);
+        } else return fail("FindTarget -- source must be a live object or AI target");
+    }
+    Real max_distance{};
+    const std::size_t distance_index = reachable ? 6 : 4;
+    if (arguments.size() > distance_index) {
+        const auto* distance = std::get_if<LuaNumber>(&arguments[distance_index].data);
+        if (!distance) return fail("FindTarget -- distance must be numeric");
+        const Real single = ai::to_single(*distance);
+        max_distance = ai::to_single(single * single);
+    }
+    if (reachable && max_distance != Real{} && !source) return fail("FindTarget -- nonzero distance requires a source target");
+    const auto* targets = engine->target_list(player);
+    if (!targets) return none();
+    const auto target_position = [selected_view](const ai::Target& target) -> std::optional<math::Vec3> {
+        if (!target.object) return point(target.x, target.y);
+        const auto* unit = selected_view ? selected_view->find(target.object) : nullptr;
+        return unit ? std::optional{unit->position} : std::nullopt;
+    };
+    const auto source_position = source ? target_position(*source) : std::optional<math::Vec3>{};
+    if (reachable && max_distance != Real{} && !source_position) return fail("FindTarget -- source has no position");
+    const math::Vec3 origin = taskforce ? taskforce_position(host, *taskforce) : source_position.value_or(math::Vec3{});
+    const Real unreachable = ai::to_single(ai::real(1000000000000000000LL));
+    const auto in_radius = [&](const ai::Target& target) {
+        if (!(taskforce || source) || max_distance == Real{}) return true;
+        const auto position = target_position(target);
+        if (!position) return false;
+        Real dx = numeric::from_fixed(origin.x) - numeric::from_fixed(position->x);
+        Real dy = numeric::from_fixed(origin.y) - numeric::from_fixed(position->y);
+        Real dz = numeric::from_fixed(origin.z) - numeric::from_fixed(position->z);
+        if (!reachable) return !(max_distance < ai::to_single(dx * dx + dy * dy + dz * dz));
+        dx = ai::to_single(dx); dy = ai::to_single(dy); dz = ai::to_single(dz);
+        const Real square = ai::to_single(ai::to_single(ai::to_single(dx * dx) + ai::to_single(dy * dy)) + ai::to_single(dz * dz));
+        return !(max_distance < square);
+    };
     std::vector<const ai::Target*> candidates;
     std::vector<Real> scores;
-    for (const std::uint64_t id : *targets) {
-        const ai::Target* target = host.engine->target(id);
-        if (!host.engine->target_matches(player, flags, target)) continue;
-        // The distance test comes before the scoring (#957): a target out of reach is dropped
-        // either way, and scoring is the expensive part (a search over every tactical location
-        // took tens of milliseconds); the answer is the same.
-        if (taskforce != nullptr && Real{} < max_distance) {
-            const auto position = extract_position(host, handle(ai::handle_ai_target, target->id));
-            if (!position) continue;
-            const Real dx = numeric::from_fixed(origin.x) - numeric::from_fixed(position->x);
-            const Real dy = numeric::from_fixed(origin.y) - numeric::from_fixed(position->y);
-            const Real dz = numeric::from_fixed(origin.z) - numeric::from_fixed(position->z);
-            if (max_distance < ai::to_single(dx * dx + dy * dy + dz * dz)) continue;
+    for (const auto id : *targets) {
+        const ai::Target* target = engine->target(id);
+        if (!engine->target_matches(player, flags, target)) continue;
+        if (reachable && source && host.find_target_queries) {
+            const auto path = host.find_target_queries->execution_path(*engine, player, *source, *target);
+            if (path && target_path_cost(*path, *reach, engine->data().constants) == unreachable) continue;
         }
-        const auto score = host.engine->evaluate(*function, player, target);
-        if (!score) continue;
+        // Preserve plain FindTarget's early radius optimization; FT-06 places
+        // the reachable form's source-radius test after perception evaluation.
+        if (!reachable && !in_radius(*target)) continue;
+        const auto score = engine->evaluate(*function, player, target);
+        if (!score || (reachable && !in_radius(*target))) continue;
         candidates.push_back(target);
         scores.push_back(*score);
     }
-    // Fidelity list: the draw uses the instance's stream, not the game's synchronized one.
-    const auto chosen = ai::choose_target(scores, *fraction, [&context] {
+    const auto chosen = ai::choose_target(scores, ratio, [&context] {
         return ai::real(static_cast<std::int64_t>(context.random().next_below(std::uint64_t{1} << 24))) /
             ai::real(std::int64_t{1} << 24);
     });
     if (!chosen) return none();
     const ai::Target* answer = candidates[*chosen];
     if (answer->object != 0) {
-        if (host.view->find(answer->object) == nullptr) return none();
-        return one(handle(handle_game_object, answer->object));
+        if (!selected_view || selected_view->find(answer->object) == nullptr) return none();
+        if (!reachable) return one(handle(handle_game_object, answer->object));
     }
     return one(handle(ai::handle_ai_target, answer->id));
 }
@@ -586,22 +848,57 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
     add("Project_By_Unit_Range", [host](BindingContext& context, const ValueList& arguments) {
         return project_by_unit_range(*host, context, arguments);
     });
-    // GR-01: GameRandom(low, high) and GameRandom.Get_Float() draw on the instance's own
+    // L-54 forms/ranges; GR-01: all GameRandom forms draw on the instance's own
     // seeded stream (fidelity list: the retail synchronized generator is shared by the game).
     add("GameRandom", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
-        if (arguments.size() != 2) return fail("GameRandom expects a low and a high value");
-        const auto* low = std::get_if<LuaNumber>(&arguments[0].data);
-        const auto* high = std::get_if<LuaNumber>(&arguments[1].data);
-        if (low == nullptr || high == nullptr) return fail("GameRandom expects numbers");
-        const auto a = static_cast<std::int32_t>(*low);
-        const auto b = static_cast<std::int32_t>(*high);
+        if (arguments.size() > 2) return fail("GameRandom expects zero, one or two numbers");
+        std::int32_t a = 0, b = 65535;
+        bool invalid = false;
+        for (std::size_t index = 0; index < arguments.size(); ++index) {
+            const auto* value = std::get_if<LuaNumber>(&arguments[index].data);
+            if (value == nullptr) {
+                context.report(authoritative::codes::invalid_request, "GameRandom expects numbers");
+                invalid = true;
+            }
+            // Inferred/unverified: a non-number falls back to zero after diagnosing.
+            // Out-of-int32 numeric bounds follow LuaNumber's INT32_MIN conversion;
+            // its use for this API is inferred, not an independently observed L-54 rule.
+            const auto bound = value == nullptr ? 0 : static_cast<std::int32_t>(*value);
+            if (arguments.size() == 2 && index == 0) a = bound;
+            else b = bound;
+        }
         const std::int64_t lo = std::min(a, b), hi = std::max(a, b);
-        const std::uint64_t span = static_cast<std::uint64_t>(hi - lo) + 1U;
+        if (lo == hi && !invalid) return one(number(LuaNumber(lo)));
+        // L-54: supplied ranges have at most 32766 steps; the default draw is 16-bit.
+        std::int64_t steps = hi - lo;
+        if (!arguments.empty() && steps > 32766) {
+            context.report(authoritative::codes::invalid_request, "GameRandom range exceeds 32766 steps; clamped");
+            steps = 32766;
+        }
+        const std::uint64_t span = static_cast<std::uint64_t>(steps) + 1U;
         return one(number(LuaNumber(lo + static_cast<std::int64_t>(context.random().next_below(span)))));
     });
-    add("GameRandom.Get_Float", [](BindingContext& context, const ValueList&) -> core::Result<ValueList> {
-        const std::uint64_t draw = context.random().next_below(std::uint64_t{1} << 24);
-        return one(number(ai::real(static_cast<std::int64_t>(draw)) / ai::real(std::int64_t{1} << 24)));
+    add("GameRandom.Get_Float", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() > 2) return fail("GameRandom.Get_Float expects zero, one or two numbers");
+        LuaNumber low(0), high(1);
+        bool invalid = false;
+        for (std::size_t index = 0; index < arguments.size(); ++index) {
+            const auto* value = std::get_if<LuaNumber>(&arguments[index].data);
+            if (value == nullptr) {
+                context.report(authoritative::codes::invalid_request, "GameRandom.Get_Float expects numbers");
+                invalid = true;
+            }
+            // Inferred/unverified: use zero for a non-number after diagnosing.
+            const LuaNumber bound = value == nullptr ? LuaNumber(0) : *value;
+            if (arguments.size() == 2 && index == 0) low = bound;
+            else high = bound;
+        }
+        // Inferred/unverified from the shared range path: floats swap reversed
+        // bounds and return a valid equal bound without consuming a draw.
+        if (high < low) std::swap(low, high);
+        if (low == high && !invalid) return one(number(low));
+        const std::uint64_t draw = context.random().next_below(std::uint64_t{1} << 15);
+        return one(number(low + (high - low) * LuaNumber(draw) / LuaNumber(32767)));
     });
     add("Find_All_Objects_Of_Type", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const Handle* player = arguments.empty() ? nullptr : as_handle(arguments[0], handle_player);

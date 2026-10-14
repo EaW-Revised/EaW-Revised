@@ -116,17 +116,27 @@ struct Angles {
 
 } // namespace
 
-bool map_prop_fog_bound(const std::span<const std::string> behavior,
-                        const std::span<const std::string> space_behavior) noexcept {
-    const auto fog_bound = [](const std::string& entry) {
+bool map_prop_fog_bound(const std::string_view behavior,
+                        const std::string_view space_behavior) noexcept {
+    const auto fog_bound = [](const std::string_view entry) {
         const auto matches = [&](const std::string_view expected) {
             return entry.size() == expected.size() && std::equal(entry.begin(), entry.end(), expected.begin(),
                 [](const char a, const char b) { return (a >= 'a' && a <= 'z' ? a - 'a' + 'A' : a) == b; });
         };
         return matches("HIDE_WHEN_FOGGED") || matches("TEAM");
     };
-    return std::any_of(behavior.begin(), behavior.end(), fog_bound)
-        || std::any_of(space_behavior.begin(), space_behavior.end(), fog_bound);
+    for (auto list : {behavior, space_behavior}) {
+        while (!list.empty()) {
+            const auto first = list.find_first_not_of(" ,\t\r\n");
+            if (first == std::string_view::npos) break;
+            list.remove_prefix(first);
+            const auto end = list.find_first_of(" ,\t\r\n");
+            if (fog_bound(list.substr(0, end))) return true;
+            if (end == std::string_view::npos) break;
+            list.remove_prefix(end);
+        }
+    }
+    return false;
 }
 
 void map_prop_draw_visibility(const std::span<const sim::EntityId> visible,
@@ -166,6 +176,14 @@ double instance_pitch_degrees(const sim::math::Mat3x4& transform) noexcept {
         * degrees_per_radian;
 }
 
+std::array<double, 3> instance_unit_facing(const sim::math::Mat3x4& transform) noexcept {
+    if (transform.rows[2][0].raw() == 0) {
+        return {instance_yaw_degrees(transform), 0.0, instance_roll_degrees(transform)};
+    }
+    const auto angles = angles_of(rotation_of(transform));
+    return {angles.yaw, angles.pitch, angles.roll};
+}
+
 std::vector<LiveUnitPose> interpolate_units(const sim::tactical::TacticalSnapshot& previous,
                                             const sim::tactical::TacticalSnapshot& latest,
                                             const double alpha,
@@ -200,16 +218,9 @@ bool interpolate_visible_units(const sim::tactical::TacticalSnapshot& previous,
     const auto interpolate = [&](const std::size_t index) {
         const auto& instance = *poses[index].instance;
 
-        const Angles latest_angles = angles_of(rotation_of(instance.fixed_transform));
+        const auto facing = instance_unit_facing(instance.fixed_transform);
         LiveUnitPose pose{instance.entity_id, instance.type_id, instance.owner,
-                          translation(instance.fixed_transform), instance_yaw_degrees(instance.fixed_transform),
-                          instance_roll_degrees(instance.fixed_transform), 0.0, &instance};
-        if (instance.fixed_transform.rows[2][0].raw() != 0) {
-            // #506: a pitched craft (FM-02) draws its whole rotation.
-            pose.yaw_degrees = latest_angles.yaw;
-            pose.pitch_degrees = latest_angles.pitch;
-            pose.roll_degrees = latest_angles.roll;
-        }
+                          translation(instance.fixed_transform), facing[0], facing[2], facing[1], &instance};
         // Both lists ascend by ID.
         const auto earlier = std::lower_bound(before.begin(), before.end(), instance.entity_id,
             [](const sim::tactical::TacticalInstance& item, const sim::EntityId id) { return item.entity_id < id; });

@@ -47,10 +47,33 @@ const CombatProfile* CombatTable::find(const TypeId type_id) const noexcept {
     return found != profiles.end() && found->type_id == type_id ? &*found : nullptr;
 }
 
+const CombatProfile* CombatTable::find_target_type(const TypeId type_id) const noexcept {
+    if (const auto* active = find(type_id)) return active;
+    const auto found = std::lower_bound(retaliation_team_types.begin(), retaliation_team_types.end(), type_id,
+        [](const CombatProfile& profile, const TypeId id) { return profile.type_id < id; });
+    return found != retaliation_team_types.end() && found->type_id == type_id ? &*found : nullptr;
+}
+
+const TargetFootprint* CombatTable::footprint(const TypeId type_id) const noexcept {
+    const auto found = std::lower_bound(footprints.begin(), footprints.end(), type_id,
+        [](const TargetFootprint& entry, const TypeId id) { return entry.type_id < id; });
+    return found != footprints.end() && found->type_id == type_id ? &*found : nullptr;
+}
+
 core::Result<void> validate_combat(const CombatTable& table) {
     const auto invalid = [](const std::string& message) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "combat table: " + message));
     };
+    if (!std::is_sorted(table.unit_ai_types.begin(), table.unit_ai_types.end())
+        || std::adjacent_find(table.unit_ai_types.begin(), table.unit_ai_types.end()) != table.unit_ai_types.end()) {
+        return invalid("unit-AI types must be strictly ascending");
+    }
+    TypeId previous_team_type{};
+    for (const auto& team : table.retaliation_team_types) {
+        if (team.type_id <= previous_team_type || table.find(team.type_id) || !team.weapons.empty())
+            return invalid("retaliation team metadata must be strictly ascending and have no active combat profile");
+        previous_team_type = team.type_id;
+    }
     if (!std::is_sorted(table.pad_neutral_factions.begin(), table.pad_neutral_factions.end())
         || std::adjacent_find(table.pad_neutral_factions.begin(), table.pad_neutral_factions.end())
             != table.pad_neutral_factions.end()) {
@@ -60,6 +83,14 @@ core::Result<void> validate_combat(const CombatTable& table) {
         return value.raw() >= 0 && value.raw() <= max_combat_distance * one_raw;
     };
     const auto cone_ok = [](const math::Fixed value) { return value.raw() >= 0 && value.raw() <= 720 * one_raw; };
+    if (!distance_ok(table.melee_cutoff)) return invalid("melee cutoff out of range");
+    for (std::size_t index = 0; index < table.footprints.size(); ++index) {
+        const auto& footprint = table.footprints[index];
+        if ((index != 0 && table.footprints[index - 1].type_id >= footprint.type_id)
+            || !distance_ok(footprint.radius) || !distance_ok(footprint.x_extent) || !distance_ok(footprint.y_extent)) {
+            return invalid("invalid target footprint");
+        }
+    }
     // W-07's yaw and pitch assume an orthonormal frame: each axis of unit length and each pair
     // perpendicular, every dot product within frame_tolerance_raw of 1 or 0. Bounded components
     // keep the dot products in range.
@@ -104,6 +135,12 @@ core::Result<void> validate_combat(const CombatTable& table) {
         if (profile.weapons.size() > max_weapons_per_type) {
             return invalid(name + "too many weapons");
         }
+        if (profile.planetary_weapon && (!profile.special_weapon || profile.star_base
+            || profile.planetary_weapon->index >= 2 || profile.planetary_weapon->target_action >= 2
+            || profile.planetary_weapon->recharge_frames > 108000
+            || profile.planetary_weapon->pulse_delay_frames > 108000 || profile.weapons.size() != 1
+            || profile.weapons.front().hardpoint != object_weapon))
+            return invalid(name + "invalid planetary weapon profile");
         for (const auto& weapon : profile.weapons) {
             if ((weapon.hardpoint != object_weapon && weapon.hardpoint >= max_hardpoints_per_type)
                 || !distance_ok(weapon.range) || !cone_ok(weapon.cone_width) || !cone_ok(weapon.cone_height)
@@ -113,8 +150,23 @@ core::Result<void> validate_combat(const CombatTable& table) {
                 || !point_in_bounds(weapon.fire_b) || !axes_ok(weapon.fire_axes)
                 || !distance_ok(weapon.manual_min_range) || weapon.manual_min_range > weapon.range
                 || weapon.manual_cooldown_frames > 108000
+                || weapon.full_salvo_delay.raw() < 0 || weapon.full_salvo_delay.raw() > max_ability_multiplier * one_raw
                 || weapon.ai_combat_power.raw() < 0 || weapon.ai_combat_power.raw() > max_weapon_combat_power * one_raw) {
                 return invalid(name + "invalid weapon " + std::to_string(weapon.hardpoint));
+            }
+            if (!weapon.muzzles.empty() && (weapon.hardpoint != object_weapon || weapon.muzzles.size() > 100
+                    || !std::all_of(weapon.muzzles.begin(), weapon.muzzles.end(), point_in_bounds))) {
+                return invalid(name + "invalid muzzle bones of weapon " + std::to_string(weapon.hardpoint));
+            }
+            if (weapon.object_turret) {
+                const auto& turret = *weapon.object_turret;
+                if (!weapon.object_turret_required || weapon.hardpoint != object_weapon
+                    || weapon.object_turret_rest_delay.raw() < 0 || weapon.object_turret_rest_delay.raw() > 3600 * one_raw
+                    || !point_in_bounds(turret.pivot) || !axes_ok(turret.axes)
+                    || !cone_ok(turret.speed) || !cone_ok(turret.yaw_extent) || !cone_ok(turret.pitch_extent)
+                    || !within_distance(turret.rest.y, 720) || !within_distance(turret.rest.z, 720)
+                    || (turret.barrel && (!point_in_bounds(turret.barrel_pivot) || !axes_ok(turret.barrel_axes))))
+                    return invalid(name + "invalid object turret");
             }
             if (weapon.manual_turret) {
                 const auto& turret = *weapon.manual_turret;
@@ -130,7 +182,7 @@ core::Result<void> validate_combat(const CombatTable& table) {
                     return invalid(name + "invalid manual turret");
                 }
             }
-            for (const auto* candidate : {&weapon.shot, &weapon.ability_shot, &weapon.barrage_shot}) {
+            for (const auto* candidate : {&weapon.shot, &weapon.ability_shot, &weapon.barrage_shot, &weapon.charged_shot}) {
                 if (!*candidate) continue;
                 const auto& shot = **candidate;
                 const auto damage_ok = shot.damage.raw() >= 0 && shot.damage.raw() <= max_durability_health * one_raw;
@@ -143,7 +195,6 @@ core::Result<void> validate_combat(const CombatTable& table) {
                 if (shot.damage_delay.raw() > 3600 * one_raw || shot.appearance_delay_frames > 108000 || !damage_ok || !blast_ok || shot.speed.raw() <= 0 || !distance_ok(shot.speed) || !distance_ok(shot.max_travel)
                     || !cone_ok(shot.turn_rate)
                     || !inaccuracy_ok || (shot.ion_stun && !valid_ion_stun(*shot.ion_stun))
-                    || (shot.disable_engines_frames && *shot.disable_engines_frames > 30U * 3600U)
 
                     || (shot.flight && (!detail::valid_flight(*shot.flight)
                         || (shot.homing && shot.flight->kind == FlightKind::rocket)))) {
@@ -284,6 +335,9 @@ CombatState initial_combat(
         WeaponState weapon_state;
         weapon_state.countdown = random.uniform(0, limit);
         weapon_state.pulses_left = weapon.pulse_count;
+        if (weapon.object_turret_required) {
+            weapon_state.turret.emplace(WeaponState::TurretState{}); // FC-60: fresh current/desired angles are zero.
+        }
         if (weapon.requires_manual_target) {
             weapon_state.manual.emplace();
             if (weapon.manual_turret) {
@@ -303,6 +357,8 @@ std::string_view to_string(const CombatEventKind kind) noexcept {
     case CombatEventKind::weapon_fired: return "weapon_fired";
     case CombatEventKind::projectile_hit: return "projectile_hit";
     case CombatEventKind::projectile_expired: return "projectile_expired";
+    case CombatEventKind::point_defence_zap: return "point_defence_zap";
+    case CombatEventKind::heal_pulse: return "heal_pulse";
     }
     return "unknown";
 }
@@ -322,6 +378,13 @@ void append_combat(std::vector<std::uint8_t>& bytes, const CombatState& state) {
         sim::detail::append_u64(bytes, weapon.opportunity.last_scan_frame);
         sim::detail::append_u32(bytes, weapon.countdown);
         sim::detail::append_u32(bytes, weapon.pulses_left);
+    }
+    // WWP-47: the round-robin muzzle index follows as (weapon index + 1, index) pairs, only for a
+    // weapon past its first muzzle, so a session without muzzle state hashes as before.
+    for (std::size_t slot = 0; slot < state.weapons.size(); ++slot) {
+        if (state.weapons[slot].next_muzzle == 0) continue;
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(slot + 1));
+        sim::detail::append_u32(bytes, state.weapons[slot].next_muzzle);
     }
 }
 

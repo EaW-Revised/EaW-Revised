@@ -7,6 +7,7 @@ EawrUiButton::EawrUiButton() {
     set_theme_type_variation("EawrUi");
     set_texture_repeat(CanvasItem::TEXTURE_REPEAT_DISABLED);
     set_focus_mode(FOCUS_NONE);
+    track_oversampling(*this);
 }
 
 void EawrUiButton::set_text(const String& text) {
@@ -59,6 +60,7 @@ EawrUiCheck::EawrUiCheck() {
     set_texture_repeat(CanvasItem::TEXTURE_REPEAT_DISABLED);
     set_toggle_mode(true);
     set_focus_mode(FOCUS_NONE);
+    track_oversampling(*this);
 }
 
 void EawrUiCheck::set_text(const String& text) {
@@ -69,6 +71,12 @@ void EawrUiCheck::set_text(const String& text) {
 
 void EawrUiCheck::set_radio(const bool radio) {
     radio_ = radio;
+    queue_redraw();
+}
+
+void EawrUiCheck::set_pushlike(const bool pushlike) {
+    pushlike_ = pushlike;
+    update_minimum_size();
     queue_redraw();
 }
 
@@ -93,6 +101,14 @@ void EawrUiCheck::_draw() {
         box = icon(*this, is_pressed() ? "Check_On" : "Check_Off");
     }
     const float alpha = current == KitState::disabled ? disabled_alpha : 1.0F;
+    if (pushlike_) {
+        const Rect2 whole(Vector2(), get_size());
+        draw_piece(*this, box, whole, Color(1, 1, 1, alpha));
+        const KitTextStyle tab_style = kit_text_style(*this, "Global_Default");
+        caption_.draw(*this, tab_style, text_, whole, HORIZONTAL_ALIGNMENT_CENTER, true, false, piece_scale(*this),
+                      alpha);
+        return;
+    }
     const Vector2 size = size_of(box);
     const float height = get_size().y;
     draw_piece(*this, box, Rect2(0.0F, std::round((height - size.y) / 2.0F), size.x, size.y), Color(1, 1, 1, alpha));
@@ -103,6 +119,9 @@ void EawrUiCheck::_draw() {
 }
 
 Vector2 EawrUiCheck::_get_minimum_size() const {
+    // Pushlike tabs stretch their skin and centre text inside the authored RC
+    // rectangle; ordinary radio icon-plus-caption sizing would widen each tab.
+    if (pushlike_) return {};
     const Vector2 box = size_of(icon(*this, radio_ ? "Radio_Off" : "Check_Off"));
     const KitTextStyle style = kit_text_style(*this, "Global_Default");
     if (style.font.is_null()) return box;

@@ -20,10 +20,10 @@ namespace eawr::presentation::ui {
 // and adds one EAWR-UI-0323 warning.
 struct BattleMessageLooks {
     std::string font{"EmpireAtWar-Bold"};           // Win_Lose_Message_Font
-    std::int32_t point_size{24};                    // Win_Lose_Message_Font_Size
-    data::ui::Rgba8 win{223, 243, 255, 255};        // Win_Message_Color
-    data::ui::Rgba8 lose{255, 244, 223, 255};       // Lose_Message_Color
-    data::ui::Rgba8 pending{255, 32, 32, 240};      // Battle_Pending_Message_Color: the pause text
+    std::int32_t point_size{24};                    // xml-fallback: Win_Lose_Message_Font_Size; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
+    data::ui::Rgba8 win{223, 243, 255, 255};        // xml-fallback: Win_Message_Color; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
+    data::ui::Rgba8 lose{255, 244, 223, 255};       // xml-fallback: Lose_Message_Color; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
+    data::ui::Rgba8 pending{255, 32, 32, 240};      // xml-fallback: Battle_Pending_Message_Color: the pause text; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
     std::vector<core::Diagnostic> diagnostics;
 };
 

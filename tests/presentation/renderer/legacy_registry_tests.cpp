@@ -138,7 +138,7 @@ void source_contracts() {
             && additive.find("ALPHA") == std::string_view::npos
             && additive.find("source_color") == std::string_view::npos,
         "MeshAdditive is ONE/ONE (alpha 1), writes no depth and samples stored texels");
-    check(additive.find("eawr_scrolled_uv = UV + eawr_time * eawr_uv_scroll_rate;") != std::string_view::npos
+    check(additive.find("eawr_scrolled_uv = UV + eawr_effect_time * eawr_uv_scroll_rate;") != std::string_view::npos
             && additive.find("instance uniform vec3 eawr_unit_light_scale = vec3(1.0)") != std::string::npos
             && additive.find("clamp(eawr_color * eawr_light_scale.rgb * eawr_unit_light_scale * eawr_light_scale.a, 0.0, 1.0)")
                 != std::string_view::npos,
@@ -146,7 +146,7 @@ void source_contracts() {
     const auto& offset = legacy::mesh_additive_offset::shader_source;
     check(offset.find("render_mode unshaded, fog_disabled, blend_add, depth_draw_never,") != std::string_view::npos
             && offset.find("eawr_offset_uv = UV + eawr_uv_offset;") != std::string_view::npos
-            && offset.find("eawr_time") == std::string_view::npos,
+            && offset.find("eawr_effect_time") == std::string_view::npos,
         "MeshAdditiveOffset offsets the first UV with no time term");
     const auto& solid = legacy::mesh_solid_color::shader_source;
     check(solid.find("render_mode unshaded, fog_disabled, depth_draw_never, depth_test_default, cull_back;")

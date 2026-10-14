@@ -57,7 +57,7 @@ class SpaceSourceCases:
         # #157 shares the glue (idle_clips.hpp) with the land path.
         mode = mode_source("map_mode")
         population = read("apps/viewer/src/space_populate.cpp")
-        environment = mode_source("space_environment")
+        environment = read("apps/viewer/src/space_environment_view.cpp")
         glue = read("apps/viewer/src/idle_clips.hpp")
         self.assertIn(".live_clock = state.options.interactive", mode)
         self.assertIn(".real_time_clock = state.options.interactive", mode)
@@ -66,8 +66,18 @@ class SpaceSourceCases:
         self.assertIn("placement_start_frame(placement, clips_[clip]->playable_frames())", population)
         self.assertIn("animation::sample_idle(*clips_[idle.clip], idle.playback", population)
         self.assertIn("animation::idle_start_frame(", glue)
-        self.assertIn("tick = options_.real_time_clock ? live_idle_tick(clock_seconds_, delta) : frame_;",
-                      environment)
+        # Standalone views use real time when requested, otherwise the held
+        # frame. Tactical views replace that fallback with the admitted frame.
+        self.assertRegex(environment,
+                         r"const\s+bool\s+admitted_clock\s*=\s*"
+                         r"populate_result_\s*&&\s*populate_result_->render_clock\s*;")
+        self.assertRegex(environment,
+                         r"std::uint32_t\s+tick\s*=\s*admitted_clock\s*\?\s*0U\s*:\s*"
+                         r"options_\.real_time_clock\s*\?\s*"
+                         r"live_idle_tick\s*\(\s*clock_seconds_\s*,\s*delta\s*\)\s*:\s*frame_\s*;")
+        self.assertRegex(environment,
+                         r"if\s*\(\s*admitted_clock\s*\)\s*\{\s*"
+                         r"tick\s*=\s*populate_result_->render_clock->sample\s*\(\s*\)\s*;")
         playback = read("src/presentation/animation/idle_playback.cpp")
         self.assertIn("player.sample_position(position->position, position->subdivisions, output)", playback)
         rule = read("include/eawr/presentation/animation/idle_playback.hpp")

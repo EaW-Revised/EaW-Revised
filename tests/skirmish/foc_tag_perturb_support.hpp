@@ -47,6 +47,8 @@ using soak::json_number;
 using soak::json_string;
 
 struct Options {
+    std::string galactic;
+    std::uint64_t max_seconds{600};
     std::filesystem::path plan;
     std::filesystem::path out;
     std::string game_root;
@@ -151,6 +153,9 @@ struct ObjectChange {
 };
 
 struct RowResult {
+    std::string campaigns_json{"[]"};
+    bool hash_changed{};
+    bool facts_changed{};
     PlanRow row;
     std::string verdict; // changes, no change, not checkable
     std::string reason;
@@ -187,5 +192,6 @@ struct Baseline {
 [[nodiscard]] std::string row_json(const RowResult& result);
 void check_row(Installation& installation, const Baseline& baseline, const Options& options, const bool compare,
     RowResult& result);
+[[nodiscard]] int run_galactic_perturb(Installation&, const Options&, const std::vector<PlanRow>&, Clock::time_point);
 
 } // namespace foc_tag_perturb_test_support

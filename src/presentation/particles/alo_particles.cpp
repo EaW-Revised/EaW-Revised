@@ -351,6 +351,7 @@ core::Result<SystemDefinition> parse_v1(const Chunk& root,const std::string& pat
         emitter.inherit_parent_velocity=emitter.inherited_velocity_scale!=0.0F;
         emitter.inherit_emitter_motion=read_bool(props,0x43);
         emitter.legacy_kite_motion=true;
+        emitter.legacy_slot_order=true;
         emitter.bursting=read_bool(props,0x07);emitter.particles_per_interval=static_cast<float>(emitter.bursting?read_u32(props,0x26,1):read_u32(props,0x2a,1));
         emitter.spawn_interval=emitter.bursting?read_float(props,0x25,1.0F):1.0F;
         emitter.start_delay=read_float(props,0x24);auto bursts=read_u32(props,0x27);if(bursts==std::numeric_limits<std::uint32_t>::max())bursts=0;emitter.stop_time=emitter.bursting?static_cast<float>(bursts)*emitter.spawn_interval:0.0F;

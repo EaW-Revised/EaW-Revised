@@ -182,6 +182,15 @@ void append_squadron_state(std::vector<std::uint8_t>& bytes, const SquadronState
         sim::detail::append_u64(bytes, state.formation->base_target);
         sim::detail::append_u32(bytes, (state.formation->complete ? 1U : 0U)
             | (state.formation->has_reached_done ? 2U : 0U) | (state.formation->attack_override ? 4U : 0U));
+        // WDF-03: preserve the existing encoding when sharing and movement agree.
+        if (state.formation->attack_target != state.target) {
+            sim::detail::append_u32(bytes, 0xf04eU); // coordinator-reserved: formation/team target mismatch
+            sim::detail::append_u64(bytes, state.formation->attack_target);
+        }
+        if (state.formation->attack_hardpoint != state.target_hardpoint) {
+            sim::detail::append_u32(bytes, 0xf04fU); // coordinator-reserved: retained destination hardpoint
+            sim::detail::append_u32(bytes, state.formation->attack_hardpoint);
+        }
     }
 }
 
@@ -250,13 +259,28 @@ TacticalSnapshot::TacticalSnapshot(
     std::shared_ptr<const std::vector<BattleProduction>> productions,
     std::vector<std::pair<PlayerId, ManualPlayerClock>> manual_clocks,
     std::shared_ptr<const std::vector<BattleEconomyCue>> economy_cues,
-    std::vector<AbilitySpawnState> ability_spawns)
+    std::vector<AbilitySpawnState> ability_spawns,
+    std::vector<RetreatView> retreat_views,
+    std::vector<GarrisonTimerView> garrison_timers,
+    std::vector<BeaconState> beacons)
     : completed_tick_(completed_tick), players_(std::move(players)), instances_(std::move(instances)),
       events_(std::move(events)), combat_events_(std::move(combat_events)), projectiles_(std::move(projectiles)),
       outcome_(outcome), spinning_(std::move(spinning)), squadron_targets_(std::move(squadron_targets)),
       squadrons_(std::move(squadrons)), economy_(std::move(economy)), pads_(std::move(pads)), quits_(std::move(quits)),
       losses_(std::move(losses)), productions_(std::move(productions)), manual_clocks_(std::move(manual_clocks)),
-      economy_cues_(std::move(economy_cues)) { ability_spawns_ = std::move(ability_spawns); }
+      economy_cues_(std::move(economy_cues)) {
+    retreat_views_ = std::move(retreat_views);
+    ability_spawns_ = std::move(ability_spawns);
+    garrison_timers_ = std::move(garrison_timers);
+    beacons_ = std::move(beacons);
+}
+
+std::vector<BeaconState> TacticalSnapshot::visible_beacons(const PlayerId observer) const {
+    std::vector<BeaconState> result;
+    for (const auto& beacon : beacons_)
+        if (players_allied(players_, beacon.player, observer)) result.push_back(beacon);
+    return result;
+}
 
 std::uint64_t TacticalSnapshot::completed_tick() const noexcept { return completed_tick_; }
 std::span<const SnapshotPlayer> TacticalSnapshot::players() const noexcept { return players_; }
@@ -271,6 +295,7 @@ std::span<const SpinningCraft> TacticalSnapshot::spinning() const noexcept { ret
 std::span<const SquadronTarget> TacticalSnapshot::squadron_targets() const noexcept { return squadron_targets_; }
 std::span<const Squadron> TacticalSnapshot::squadrons() const noexcept { return squadrons_; }
 std::span<const EconomyView> TacticalSnapshot::economy() const noexcept { return economy_; }
+std::span<const GarrisonTimerView> TacticalSnapshot::garrison_timers() const noexcept { return garrison_timers_; }
 std::span<const PadView> TacticalSnapshot::pads() const noexcept { return pads_; }
 std::span<const PlayerQuit> TacticalSnapshot::quits() const noexcept { return quits_; }
 std::span<const BattleLoss> TacticalSnapshot::losses() const noexcept {
@@ -294,6 +319,8 @@ std::vector<EntityId> TacticalSnapshot::visible_entities(const PlayerId player) 
     }
     const auto bit = std::uint64_t{1} << static_cast<unsigned>(found - players_.begin());
     for (const auto& instance : instances_) {
+        // WST-13 (WSU-03): a stealth-invisible enemy fades out of the player's sight.
+        if (instance.stealth_invisible && players_hostile(players_, player, instance.owner)) continue;
         if ((instance.visible_to & bit) != 0U) {
             result.push_back(instance.entity_id);
         }
@@ -364,12 +391,17 @@ std::vector<std::uint8_t> TacticalSnapshot::canonical_bytes() const {
     // the (possibly empty) combat events and then the projectiles; any other encodes exactly as
     // before.
     // WAD-07: expiry poses are presentation events; they add no canonical bytes.
+    // WLD-12: a point-defence zap is presentation too; the shot it removed is the canonical effect.
+    const auto presentation_only = [](const CombatEvent& event) {
+        return event.kind == CombatEventKind::projectile_expired || event.kind == CombatEventKind::point_defence_zap
+            || event.kind == CombatEventKind::heal_pulse;
+    };
     const auto canonical_combat_events = std::count_if(combat_events_.begin(), combat_events_.end(),
-        [](const CombatEvent& event) { return event.kind != CombatEventKind::projectile_expired; });
+        [&](const CombatEvent& event) { return !presentation_only(event); });
     if (canonical_combat_events != 0 || !projectiles_.empty()) {
         sim::detail::append_u64(bytes, static_cast<std::uint64_t>(canonical_combat_events));
         for (const auto& event : combat_events_) {
-            if (event.kind == CombatEventKind::projectile_expired) continue;
+            if (presentation_only(event)) continue;
             detail::append_combat_event(bytes, event);
         }
     }
@@ -404,6 +436,20 @@ std::vector<std::uint8_t> TacticalSnapshot::canonical_bytes() const {
         }
     }
     // Ion-stunned instances (#561), ascending ID, as a tagged block only when any is stunned.
+    const auto corrupt_count = std::count_if(instances_.begin(), instances_.end(), [](const auto& instance) { return instance.corrupt.has_value(); });
+    if (corrupt_count != 0) {
+        bytes.insert(bytes.end(), corrupt_tag.begin(), corrupt_tag.end());
+        sim::detail::append_u32(bytes, 1);
+        sim::detail::append_u64(bytes, static_cast<std::uint64_t>(corrupt_count));
+        for (const auto& instance : instances_) if (instance.corrupt) {
+            sim::detail::append_u64(bytes, instance.entity_id);
+            sim::detail::append_u64(bytes, instance.corrupt->source_type);
+            sim::detail::append_u64(bytes, instance.corrupt->started_tick);
+            sim::detail::append_u64(bytes, instance.corrupt->expires_tick);
+            append_fixed(bytes, instance.corrupt->drain_per_frame);
+            append_fixed(bytes, instance.corrupt->inaccuracy);
+        }
+    }
     std::uint64_t stunned = 0;
     for (const auto& instance : instances_) stunned += instance.ion_stun_frames != 0 ? 1 : 0;
     if (stunned != 0) {
@@ -472,6 +518,23 @@ std::vector<std::uint8_t> TacticalSnapshot::canonical_bytes() const {
         }
     }
     std::uint64_t manual_count = 0;
+    const auto turret_count = std::count_if(instances_.begin(), instances_.end(),
+        [](const auto& instance) { return instance.object_turret.has_value(); });
+    if (turret_count != 0) {
+        bytes.insert(bytes.end(), {'O', 'T', 'U', 'R'});
+        sim::detail::append_u64(bytes, static_cast<std::uint64_t>(turret_count));
+        for (const auto& instance : instances_) {
+            if (!instance.object_turret) continue;
+            const auto& turret = *instance.object_turret;
+            sim::detail::append_u64(bytes, instance.entity_id);
+            sim::detail::append_u64(bytes, turret.target);
+            for (const auto angle : {turret.yaw, turret.pitch, turret.desired_yaw, turret.desired_pitch}) append_fixed(bytes, angle);
+            bytes.push_back(turret.ready ? 1 : 0);
+            bytes.push_back(turret.rest_started_frame ? 1 : 0);
+            sim::detail::append_u64(bytes, turret.rest_started_frame.value_or(0));
+            bytes.push_back(turret.returning_to_rest ? 1 : 0);
+        }
+    }
     for (const auto& instance : instances_) manual_count += instance.manual_weapons.size();
     if (manual_count != 0 || !manual_clocks_.empty()) {
         bytes.insert(bytes.end(), manual_tag.begin(), manual_tag.end());
@@ -492,6 +555,29 @@ std::vector<std::uint8_t> TacticalSnapshot::canonical_bytes() const {
             sim::detail::append_u32(bytes, player);
             sim::detail::append_u32(bytes, clock.cooldown_frames);
             sim::detail::append_u64(bytes, clock.last_fired_frame);
+        }
+    }
+    const auto planetary_count = std::count_if(instances_.begin(), instances_.end(),
+        [](const auto& instance) { return instance.planetary_weapon.has_value(); });
+    if (planetary_count != 0) {
+        bytes.insert(bytes.end(), {'S', 'W', 'P', 'N'});
+        sim::detail::append_u32(bytes, 1);
+        sim::detail::append_u32(bytes, 0);
+        sim::detail::append_u64(bytes, static_cast<std::uint64_t>(planetary_count));
+        for (const auto& instance : instances_) {
+            if (!instance.planetary_weapon) continue;
+            const auto& view = *instance.planetary_weapon;
+            sim::detail::append_u64(bytes, instance.entity_id);
+            sim::detail::append_u32(bytes, view.index);
+            sim::detail::append_u32(bytes, view.target_action);
+            sim::detail::append_u64(bytes, view.valid_targets);
+            sim::detail::append_u64(bytes, view.state.recharge_started);
+            sim::detail::append_u64(bytes, view.state.recharge_until);
+            sim::detail::append_u64(bytes, view.state.next_pulse_frame);
+            sim::detail::append_u64(bytes, view.state.target);
+            sim::detail::append_u32(bytes, view.state.pulses_left);
+            sim::detail::append_u32(bytes, view.state.instances);
+            append_fixed(bytes, view.readiness);
         }
     }
     return bytes;

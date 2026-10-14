@@ -61,23 +61,32 @@ void test_formation_catch_up();
 void test_coordinate_limit();
 void test_out_of_combat();
 void test_approach();
+void test_installed_attack_segment();
+void test_attack_path_boundary();
+void test_attack_path_refresh();
 void test_launch_state();
 void test_launch();
 void test_launched_squadron();
+void test_garrison_provenance();
 void test_priority_scan();
 void test_launch_idle();
 void test_worker_equality();
 void test_squadron_orders();
 void test_squadron_attack_move();
+void test_squadron_hunt();
 void test_idle_cell_claim();
+void test_map_box_grids();
 void test_idle_grid();
 void test_squadron_guard();
 void test_attack_order_approach();
+void test_attack_path_checkpoint();
 void test_team_attack();
+void test_placed_idle_hold();
 void test_team_retarget();
 void test_squadron_hardpoint_attack();
 void test_empty_table();
 void test_staged_flight_rollback();
+void test_attract_pool_return();
 
 
 } // namespace fighter_test_support

@@ -37,7 +37,7 @@ namespace eawr::presentation::godot_backend {
 //   Tartan's pe_tartanengine_*) run while the unit's engines are online and stop for good once
 //   they are off-line (its last engine hardpoint destroyed). While online they draw at FoC's
 //   brightness, 0.2 + 0.8 x speed / maximum speed: dim at rest, full at top speed.
-// - Turbo engine ("pte"), power-to-weapons ("pptw") and missile-shield ("pgw") emitters are
+// - Turbo engine ("pte"), power-to-weapons ("pptw") and missile-shield ("prs") emitters are
 //   hidden when the object is created. While TURBO or SPOILER_LOCK runs the turbo engines
 //   replace the engine emitters, and POWER_TO_WEAPONS shows its effect (#76, AB-31, AB-32); a
 //   proxy the model authors hidden is shown by the same emitter-type switch (BP-43).
@@ -85,6 +85,10 @@ public:
         bool power_to_weapons{};
         bool ion_stunned{};  // IS-09: the stun shows the ion-stun ("pi") emitters
         bool invulnerability{}; // WHE-52: the active Falcon mode shows "pem" emitters
+        bool gravity_well{}; // BP-73: INTERDICT shows "pgw"
+        bool missile_shield{}; // BP-73: MISSILE_SHIELD shows "prs"
+        bool blast_charging{}; // BP-74/WHE-35: the buildup mesh's proxies
+        bool blast_charged{}; // WHE-36/FD-55: retain until the published cleanup poll
         friend bool operator==(const Modes&, const Modes&) = default;
     };
 
@@ -107,7 +111,8 @@ public:
     using FadeOpacity = std::function<float(sim::EntityId entity)>;
     using ProjectileOpacity = std::function<float(std::size_t ship)>;
     // One presentation frame, after SpacePopulation::pose_live. The emitter clock follows
-    // `presented_tick` (one 30 Hz sample per session tick), as the battle effects' does, and
+    // `presented_tick`: projectile proxies use elapsed pose time (PS-42), while
+    // other owners keep one 30 Hz sample per session tick, as battle effects do, and
     // starts like theirs at the first frame or at the birth of the oldest tick in `reached`.
     // False (failure() set) when the particle backend failed.
     // `previous`/`latest` are the snapshots the frame interpolates between: the engines' state
@@ -127,6 +132,8 @@ public:
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
+    void measure_particles(bool on) noexcept { registry_->begin_measurement(on); }
+    [[nodiscard]] const particles::RegistryTimings& particle_timings() const noexcept { return registry_->timings(); }
     [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
         return registry_->set_detail(detail);
     }
@@ -141,6 +148,7 @@ public:
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "unit_emitters" member, followed by ",\n".
     void write_report(std::ostream& output) const;
+    void collect_axis_diagnostics(bool enabled) noexcept { collect_axis_diagnostics_ = enabled; }
     // --eawr-perf-trace (#601): the running emitters' particles after the last clock sample.
     [[nodiscard]] std::uint64_t particles() const noexcept { return particles_; }
 
@@ -165,7 +173,9 @@ private:
         bool ion_stun{};  // an ion-stun ("pi") emitter (IS-09)
         bool power_to_weapons{};  // AB-32: drains when the ability hides it (BP-48)
         bool invulnerability{};
-        float size_scale{1.0F}; // root particle model Scale_Factor
+        bool gravity_well{};
+        bool missile_shield{};
+        bool blast_effect{};
     };
     struct Running final {
         std::size_t proxy{};
@@ -182,6 +192,10 @@ private:
         // particles are drawn until they are gone, then it is released.
         bool draining{};
         std::uint64_t drain_from{};  // the clock sample it began draining at
+        bool gravity_well{};
+        bool missile_shield{};
+        bool blast_effect{};
+        bool elapsed_clock{}; // PS-42: projectile proxies share the drawn pose's elapsed clock.
     };
     // One started emitter: the unit, the proxy, the session tick whose state started it, the
     // clock sample it was born at, its origin then, its age when a frame first drew it, and how
@@ -241,6 +255,7 @@ private:
         std::vector<CloneProxy> clone;
     };
     struct ModelFrames final {
+        std::vector<std::optional<bool>> blast_phases; // BP-74: proxy ancestors' charge mesh, false=buildup
         std::vector<std::optional<sim::math::Mat3x4>> bones;
         bool bind_pose{};
     };
@@ -269,8 +284,10 @@ private:
                 std::uint64_t born);
     // Stands every running emitter of ship `index` at its bone on model transform `pose`.
     void place(std::size_t index, const sim::math::Mat3x4& pose);
-    // Advances every running emitter by one 30 Hz sample.
+    // Advances nonprojectile emitters and clones by one 30 Hz sample.
     [[nodiscard]] bool advance_sample();
+    [[nodiscard]] bool advance_running(float delta_seconds, bool projectiles);
+    [[nodiscard]] bool advance_projectiles(double presented_tick);
     // #433: draws every running emitter again at the frame last set, without advancing.
     [[nodiscard]] bool present_running();
     // #421: a death clone's proxies, from the model its placement draws.
@@ -301,7 +318,9 @@ private:
     std::vector<Ship> ships_;
     particles::CameraFrame camera_frame_{};
     std::optional<double> clock_start_;
+    std::optional<double> projectile_clock_tick_;
     std::uint64_t samples_{};
+    std::uint64_t sampled_particles_{};
     // Report counters.
     std::uint64_t frames_count_{};
     std::uint64_t max_running_{};
@@ -338,6 +357,7 @@ private:
     std::uint64_t power_to_weapons_drains_finished_{};
     std::uint64_t power_to_weapons_drains_cut_short_{};
     std::uint64_t invulnerability_drains_started_{};
+    std::map<std::string, std::uint64_t> deployment_drains_started_{};
     std::uint64_t invulnerability_drains_finished_{};
     std::uint64_t invulnerability_drains_cut_short_{};
     std::uint64_t clone_drains_released_{};
@@ -353,6 +373,12 @@ private:
     std::map<sim::EntityId, double> engine_brightness_;
     std::string failure_;
     bool released_{};
+    bool collect_axis_diagnostics_{};
+    struct AxisStats final {
+        std::uint64_t samples{}, reversed{};
+        double max_sine_error{};
+    };
+    std::map<std::string, AxisStats> model_axis_;
 };
 
 } // namespace eawr::presentation::godot_backend

@@ -634,7 +634,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args(argv)
     registry = build(args)
-    tr.write_text(args.out, tr.dumps_registry(registry))
+    tr.write_registry(args.out, registry)
     by_status, _ = tr.counts(registry)
     print(json.dumps(by_status, sort_keys=True), f"{len(registry['rows'])} rows")
     return 0

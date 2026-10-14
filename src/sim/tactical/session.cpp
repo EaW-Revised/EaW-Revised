@@ -38,6 +38,24 @@
 
 namespace eawr::sim::tactical {
 
+std::span<const DepartureControl> TacticalSession::departure_controls() const noexcept { return impl_->departure_controls; }
+
+std::span<const PlayerId> TacticalSession::basic_ai_players() const noexcept { return impl_->basic_ai; }
+
+core::Result<AdmittedSeatCommand> TacticalSession::submit_human(const SeatBinding& binding,
+    const SeatCommand& command, const std::uint64_t faction_sequence) {
+    if (impl_->setup.departure_policy && std::any_of(impl_->quits.begin(), impl_->quits.end(),
+        [&](const PlayerQuit& quit) { return quit.player == binding.player; }))
+        return core::Result<AdmittedSeatCommand>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            "departed human controller cannot submit"));
+    auto admitted = admit_human_command(binding, command);
+    if (!admitted) return admitted;
+    admitted.value().command.key.sequence = faction_sequence;
+    const auto submitted = submit(admitted.value().command);
+    if (!submitted) return core::Result<AdmittedSeatCommand>::failure(submitted.error());
+    return admitted;
+}
+
 core::Result<void> TacticalSession::submit(const PlayerCommand& command) {
     const auto context = command_context(command.key);
     const auto shape = detail::validate_command_shape(command, impl_->setup.players, context, {});
@@ -112,6 +130,7 @@ const MotionTable& TacticalSession::motion() const noexcept { return impl_->moti
 const CombatTable& TacticalSession::combat() const noexcept { return impl_->combat; }
 const VictoryRules& TacticalSession::victory() const noexcept { return impl_->victory; }
 const EconomyRules& TacticalSession::economy() const noexcept { return impl_->economy; }
+const MapBox& TacticalSession::map_box() const noexcept { return impl_->map_box; }
 std::span<const PlayerEconomy> TacticalSession::ledgers() const noexcept { return impl_->ledgers; }
 ProductionCounts TacticalSession::production_counts(const PlayerId player, const TypeId type) const {
     if (impl_->player_of(player) == nullptr) return {};
@@ -266,6 +285,13 @@ std::optional<CombatState> TacticalSession::combat_state(const EntityId unit) co
 }
 
 std::size_t TacticalSession::pending_command_count() const noexcept { return impl_->pending.size(); }
+
+std::vector<PlayerCommand> TacticalSession::pending_commands() const {
+    std::vector<PlayerCommand> commands;
+    commands.reserve(impl_->pending.size());
+    for (const auto& [key, command] : impl_->pending) commands.push_back(command);
+    return commands;
+}
 std::vector<std::uint8_t> TacticalSession::canonical_state_bytes() const { return impl_->canonical_bytes(); }
 
 std::string TacticalSession::state_sha256() const {

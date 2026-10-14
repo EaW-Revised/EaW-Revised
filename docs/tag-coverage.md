@@ -1,5 +1,8 @@
 # XML tag registry
 
+Browse the [human-readable coverage report](tag-coverage/report/README.md) for status totals
+and tables by area and object class family. It is generated only from the registry below.
+
 XML tag coverage (legacy EAWR-628). FoC is data-driven: very little is hardcoded, and
 a tag the remake does not apply is a behaviour it cannot have. Owner rule (2026-09-30): every XML definition has a target
 in the code, or it is known to have none. The registry (`docs/tag-coverage/statuses.json`) gives every (object class, tag
@@ -28,6 +31,39 @@ inventory is regenerated.
 
 ## The registry
 
+### Engine names absent from stock authoring
+
+[`engine-tags.json`](tag-coverage/engine-tags.json) is a separate catalog of debug-build
+XML table entries, with descriptive table kinds, value types and opaque evidence IDs.
+It also carries reviewed nested ability dispatch names. The sound-event seed names
+use their full `SFXEvent_` XML spelling, not the abbreviated event labels. A name may
+have multiple rows when several tables
+read it with different owners or value types. It contains no binary locations.
+
+The full headless `engine-tags` query reads typed table symbols, stops at the next
+table boundary or null key, and dumps the parser-type enums. Raw output stays in
+ignored research folders. `tools/inventory/engine_tag_catalog.py` generates the public
+catalog from that dump and a private review mapping of owners/types to descriptive
+names and evidence IDs; missing translations fail generation.
+
+`xml_inventory.py` reports an element as `known-engine` only when the pinned
+schema has no row for its (object type, tag) pair and the catalog lists that tag
+under a table kind belonging to that object type. Table kinds match canonical
+schema type names without hyphens, with explicit owner aliases in `engine_tags.py`
+(for example, `object-definition` belongs to `GameObjectType`). File-registry
+hints supply canonical types for concrete unit definitions. A tag owned only by
+another object type, or an owner without a matching canonical type, remains
+`unknown` and unresolved. Schema matches and deprecation retain precedence.
+FoC and the FoC-compatible Remake profile use this evidence; attributes and the
+EaW profile do not. Table-scoped recognition does not establish acceptance in a
+particular nested context or application by the remake. ML-28's context and
+warning distinctions still apply. Misspellings remain `unknown`.
+The inventory manifest fingerprints the catalog and classifier source.
+
+The authored-pair registry below still covers exactly the stock inventory. A catalog
+entry adds no status row: application coverage needs a row only when authored data
+introduces that pair. Recognition alone never implies `applied` or `foc-ignores`.
+
 `docs/tag-coverage/statuses.json`, `schema_version` 2, one row per line, sorted by tag then first class. A row covers every
 class it lists:
 
@@ -53,6 +89,18 @@ an unrecorded trace (see below).
 
 ### What each status rests on
 
+An `applied` or `partial` row may also contain `no_targets`, an array of explicit per-kind exclusions:
+`{"types": ["ship"], "status": "foc-ignores", "evidence": "rule or debug build evidence"}`.
+The kinds are `station`, `ship`, `squadron` or `craft`; each exclusion cites the debug build,
+directly or through the registry's evidence table. Excluded kinds cannot overlap an applied
+consumer, a missing kind or another exclusion. The row remains `applied` when every relevant kind has either
+a consumer or a sourced exclusion. A remaining implementation gap still uses `partial` and
+`missing_types`; authoring a value on a kind alone does not establish that FoC consumes it.
+The public report shows each excluded kind, its status and its resolved evidence.
+An exclusion may cover ordinary flight while a distinct consumer remains missing on that kind;
+its evidence states the flight scope and `missing_types` names the separate consumer explicitly.
+For example, ignored ship thrust in ordinary flight does not cover optional attack positioning.
+
 - **`foc-ignores`** normally rests on a whole-image scan of the debug build for the tag name (`Invoke-GhidraQuery.ps1 -Query tag-tables`,
   the `DB-NOTAG` evidence): the name is in no tag table row, string or format template. about 250 pairs (`python tools/inventory/tag_registry.py render` prints the count; mostly typos and stale
   authoring: `Autoresolve_Health`, `Facing_Adjust`, `Sensor_Range`). The scan does not assign tables to classes, so
@@ -68,7 +116,9 @@ an unrecorded trace (see below).
   loader parses a tag literal, the field it stores the value in, and where else the code uses that field. A use outside the
   loader that is not the identity hash or a test counts as applying it. `partial` rows come from the per-kind split of
   `src/units/unit_motion.cpp` (ship profiles and craft profiles fill different tags) against the kinds that author the tag
-  in the FoC data; FoC's own per-type read is not verified in the debug build for those, which each note says.
+  in the FoC data. Unreviewed rows state that FoC's per-type read is unverified. Reviewed motion rows cite
+  WMV-40..WMV-44: ordinary-flight exclusions are explicit, while optional attack positioning and formation
+  upkeep retain their distinct implementation gaps.
 - The M2 load trace (below) corrects the scan for classes in the scene: a tag the traced loaders read for other classes
   but never for this class' scene objects is `todo`, not applied.
 
@@ -84,21 +134,80 @@ while craft preserve the debug build's default of no layer (AV-21). Neither defa
 `SpaceUnit/Victory_Relevant` is deferred with combat tag coverage (legacy EAWR-650) for other victory conditions: the M2 default uses only stations
 (VT-01 to VT-03). The station row remains applied even though the perturbation run did not change its result.
 
+## Galactic shard
+
+`docs/tag-coverage/statuses.json` lists `statuses-galactic.json` in its `shards` array. Shard names
+are relative to the containing file. Registry readers combine the rows and evidence before checking coverage,
+so every (class, tag) pair still has exactly one status across all files. Conflicting evidence definitions,
+duplicate pairs, missing shards and repeated shard references fail the gate.
+
+The galactic shard owns Campaign, Planet and TradeRoute pairs and the GameConstants and Faction pairs
+already identified by `SCOPE-GALACTIC`. This split preserves every status, target, ticket and evidence value;
+it does not claim that a deferred mechanic is applied. Shared tactical or land rows stay in the root file.
+When applying a galactic tag, edit its existing row in `statuses-galactic.json`.
+
+`check`, `check-data`, `render` and `format` follow the shard list by default. Each file retains its own
+canonical layout, and `format` sorts each shard without changing ownership. For independent registry files,
+repeat `--statuses path` to supply a list of roots. Report and census readers use the same combined view.
+
 ## The gate
+
+- **Public report** (`docs/tag-coverage/report/`, generated, no game data): not a per-PR gate. Many PRs edit
+  `statuses.json` at once, so the generated pages are refreshed in the batch on main:
+  `python tools/inventory/tag_report.py`, then `python tools/inventory/tag_report.py --check`.
 
 - **`ci_tag_registry`** (label `ci-tools`, runs everywhere, no game data): every pair of the universe has a row, no row is
   stale, no pair has two rows, each status has what its table row above requires, every `applied` code location exists
   (the file, and the identifier in it), every rule ID is in a `docs/behaviour` note, rows are sorted and
   `statuses.json` is in its canonical layout. A defective row is reported by name with what it lacks; the gate does not
   stop at the first. `inventory_contracts` runs the same checks on synthetic fixtures.
+- **`ci_xml_literal_gate`** (label `ci-tools`, no game data): `tools/inventory/xml_literal_check.py` fails when code under `src/`,
+  `include/` or `apps/` names a registry tag (in a string, a trailing comment, or the comment block directly above a
+  declaration) next to a numeric literal. Read the value from the XML; a default that stands in for a missing tag carries
+  `// xml-fallback: <Tag>` next to a load that reports the missing tag (the gate accepts the marker only when <Tag> is a
+  registry tag and the code within 20 lines names it as a string next to a log/warn/report/error call).
+  For defaults declared in headers, append `; load: src/path.cpp#function` to the marker. The referenced definition must
+  use the exact tag as a load key and connect its missing branch to a diagnostic call, directly or through a same-file
+  helper. The heuristic follows local lambda parameters and range-loop tag tables; command-bar field keys resolve
+  through the ordered XML schema. Missing paths/functions and unsupported or unconnected load patterns fail.
+  This checks supported source patterns rather than proving runtime control flow; loader contracts verify
+  that missing tags trigger the diagnostic and stock data triggers none. Optional per-object tags with sourced FoC
+  defaults stay silent and retain reasoned allowlist entries (legacy EAWR-2540). Existing findings sit in
+  `config/xml-literal-allowlist.json`, each with its issue number (or `false-positive` and a reason); the list may only
+  shrink: an entry whose finding is gone fails the gate until it is deleted, and more than `max_entries` fails too. The gate compares the list with the one at the merge base with `origin/Thom-Ernst/Skirmish`: a
+  new entry fails unless the list carries a reviewed `growth_override` (`ticket` + `reason`); an unused override fails.
+  Known limits: a tag on a continuation line of a multi-line declaration is missed, and an identical line elsewhere in the
+  same file is covered by the same entry (the key is file + line text).
+  `ci_xml_literal_check` tests the checker.
 - **`tag_coverage_m2_scene`** (game data, `EAWR_EAW_GAME_ROOT`): runs the M2 start with the trace on and off, joins the trace
   with the registry, and fails when a scene tag has no row, when an `applied` row citing traced code (`src/units`,
   `src/skirmish`, `src/sim`, `src/data`) is for a tag the scene never reads, or when the trace does not join. It then runs
   `tag_registry.py check-data`.
 
+Applied targets may declare `trace_scope` with `object_types` (resolved object IDs from the trace),
+`ability_types` (the enclosing `Unit_Ability/Type` names), or
+`exclude_behaviors` (tokens from the object's `Behavior`), or
+`exclude_space_behaviors` (tokens from the object's `SpaceBehavior`). These explicit XML selectors refine the scene
+read requirement; the descriptive `types` text is not parsed as a selector. A scoped target is checked separately
+for each represented object and ability handler, so a read on another handler or object cannot hide a missing read.
+An absent consumer has no read requirement. Unscoped targets retain the class/tag check. For ordinary
+`SpecialStructure` body fields, `SPECIAL_WEAPON` sources are excluded under WSW-01/14/21; ordinary orbital bodies
+retain their coverage and their read requirement. The `CORRUPT_SYSTEMS` decal distance uses an ability selector
+under WHE-33, preserving its application without requiring another area's handler to read it.
+The WST-03 upgrade stacking category is scoped to the cloak-duration upgrade types; unrelated battlefield
+modifiers retain their partial coverage without an irrelevant cloak-duration read requirement.
+For `MiscObject` affiliation, behavior and health fields, `MULTIPLAYER_BEACON` is excluded by its
+`Behavior` token under HCB-12a..12f: setup resolves only the authored beacon type and lifetime.
+Other MiscObjects, including mod objects without that behavior, retain their read requirement.
+
 The gate does not run the code. It cannot see a PR that starts applying a tag whose row still says `todo` (the row goes
 stale until a reviewer or the perturbation check notices), and it cannot tell whether an `applied` location is the
-right one: the identifier check is a substring test in the file; the registry code check needs a more robust match (legacy EAWR-855).
+right one: the identifier check matches whole words outside C/C++ comments, with a minimum length of six and a
+stoplist for generic names. Cite a specific consumer or its enclosing function. Missing identifiers report other
+source files containing the same whole word. Rule IDs must be declared in a behaviour-note heading or the first
+cell of a rule table, a list item or a bold paragraph; only the leading rule ID counts. Unresolved legacy citations carry a
+`TODO #2566:` note, printed by the gate for follow-up without guessing a consumer or rule.
+The gate caps these notes at 30 rows and requires a tracking ticket on each TODO note; lower the ceiling as gaps close.
 
 ### Changing a row
 
@@ -113,9 +222,9 @@ A PR that starts applying a tag (or stops):
 4. Keep `todo` rows honest: a mechanic you find missing gets one issue and its rows link it.
 
 **Open PRs.** A PR that applies a tag updates that tag's row in the same PR; the gate will not tell you if you forget.
-Rows are one per line and sorted, so two PRs conflict only when they edit the same tag. The counts and tables are not
-committed: `render` writes them on demand to `out/tag-coverage/statuses.md` (ignored), so nothing but the rows
-themselves can turn the integration head red after two clean merges. Whoever merges second re-runs `format` and `check`.
+Rows are one per line and sorted, so two PRs conflict only when they edit the same tag. After
+changing the registry, leave `docs/tag-coverage/report/` alone: the batch on main regenerates it. Whoever merges
+second re-runs `format` and `check`. The older `tag_registry.py render` remains an optional ignored summary.
 
 A new FoC tag (a regenerated inventory) needs a row: add it to the registry, `todo` with its subsystem ticket if nothing
 reads it.
@@ -146,11 +255,36 @@ the source of each scope or deferral decision. It is a static consumer audit, no
 
 ## Running it
 
+**Campaign-only scene consumers.** An applied row may declare `scene: "campaign"`
+when every listed consumer belongs to campaign scenes and the standalone M2
+skirmish start cannot observe its loader. This requires explicit `basis: "reviewed"`,
+a note explaining the scene boundary, and behaviour rule IDs on every applied
+target. The registry still checks each code location and rule declaration. Review
+must establish that those rules source the campaign boundary; the annotation is
+not inferred from a tag name or a code directory. Invalid annotations fail the
+registry gate and do not exempt an applied/partial target from the M2 read check.
+
+The six `Default_Bounty_By_Category_SP/MP` and SpaceUnit/Squadron
+`Override_Bounty_SP/MP` pairs use this exception under WGCH-65/WGP-189: both
+loaders require a campaign scene, and campaign battle economy resolves the current
+victim type's bounty. Their real application remains `applied`. The exception
+affects only the M2 skirmish trace requirement, not galactic scene coverage,
+inventory coverage or source/rule validation. `trace: "unrecorded"` remains reserved
+for loaders running under `tag_trace::Unrecorded`.
+
+An applied row may declare `engine_default: "GameObjectType"` for a recognized
+object-definition tag absent from the effective FoC XML. The gate checks the tag
+and its evidence ID against `docs/tag-coverage/engine-tags.json`, and still checks
+the consumer's code and rule references. Its note states the engine default when
+absent; engine recognition alone does not establish an applied consumer.
+
 ```sh
 python tools/inventory/tag_registry.py check                 # the gate, no game data
 python tools/inventory/tag_registry.py check-data --game-root <install>
 python tools/inventory/tag_registry.py format                # canonical layout of statuses.json
 python tools/inventory/tag_registry.py render                # out/tag-coverage/statuses.md: counts, partial rows, top todo
+python tools/inventory/tag_report.py                         # committed public report
+python tools/inventory/tag_report.py --check                 # report freshness gate
 python tools/inventory/tag_registry_reclassify_ground.py --game-xml <effective Data/XML> [--write]  # todo rows only ground/galactic objects carry -> land-or-galactic
 sim_headless --skirmish m2 --game-root <install> --tag-trace-out <abs>/out/tag-coverage/m2-tag-trace.json
 python tools/inventory/tag_coverage.py scene --game-root <install> --trace <abs>/out/tag-coverage/m2-tag-trace.json \

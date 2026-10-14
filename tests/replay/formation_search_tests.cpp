@@ -1,5 +1,8 @@
 #include "formation_support.hpp"
 
+#include <array>
+#include <atomic>
+
 namespace formation_test_support {
 
 class PhaseRecorder final : public eawr::sim::PartitionExecutor {
@@ -160,6 +163,291 @@ void test_search_budget() {
     const auto base = trace(foc_table(), plain);
     const std::vector<eawr::sim::EntityId> all{1, 2, 3, 7};
     expect(base.size() == 6 && base[0] == all && base[1] == all, "the default budget plans every single move in its tick");
+}
+
+// FSC-70/FD-64: exhausted initialization retains B/C and admits a retry at t+61 only.
+void test_failed_path_retry() {
+    class SearchCounter final : public tactical::PathSearchProbe {
+    public:
+        std::uint64_t now() noexcept override { return 0; }
+        void searched(const tactical::PathSearchStats& stats) noexcept override {
+            if (!stats.slot && stats.entity == 1) ++calls;
+        }
+        std::atomic<std::uint64_t> calls{};
+        ~SearchCounter() override { tactical::set_path_search_probe(nullptr); }
+    };
+    constexpr tactical::TypeId wall_type = 9001;
+    constexpr std::array<std::uint8_t, 4> retry_tag{'R', 'T', 'R', 'Y'};
+    const auto contains_retry = [&](const tactical::TacticalSession& session,
+                                    const std::optional<std::uint64_t> failure = std::nullopt,
+                                    std::uint64_t* const captured_failure = nullptr) {
+        const auto bytes = session.canonical_state_bytes();
+        const auto found = std::search(bytes.begin(), bytes.end(), retry_tag.begin(), retry_tag.end());
+        if (found == bytes.end()) return false;
+        const auto offset = static_cast<std::size_t>(found - bytes.begin());
+        expect(bytes.size() - offset >= 96, "FSC-70: RTRY includes the retained failure history");
+        if (bytes.size() - offset < 96) return true;
+        const auto read = [&](const std::size_t relative, const std::size_t count) {
+            std::uint64_t value = 0;
+            for (std::size_t i = 0; i < count; ++i)
+                value |= static_cast<std::uint64_t>(bytes[offset + relative + i]) << (8U * i);
+            return value;
+        };
+        expect(read(4, 4) == 1 && read(8, 8) == 1 && read(16, 8) == 1,
+            "FSC-70: versioned RTRY contains the failed unit only");
+        expect(read(24, 8) == read(88, 8) + 61,
+            "FSC-70: canonical state retains failure frame and strict retry deadline");
+        if (captured_failure) *captured_failure = read(88, 8);
+        if (failure) expect(read(88, 8) == *failure,
+            "FSC-70: engine disable/recovery does not reset the failure frame");
+        return true;
+    };
+    for (const std::uint64_t budget : {std::uint64_t{100000}, std::uint64_t{1}}) {
+        auto table = foc_table();
+        table.rules.max_waypoints = 6;
+        table.avoidance->search_budget = budget;
+        table.avoidance->max_expansions = 128;
+        // AV-11 permits blocked bounded steps near the start at a penalty. Make the
+        // enclosing shell thicker than even the later attempts' first forward step,
+        // while leaving the start and both destinations clear.
+        table.footprints.push_back({.type_id = wall_type, .layer = tactical::SpaceLayer::static_object,
+            .radius = units(800), .obstacle = true});
+        tactical::TacticalReplay replay;
+        replay.setup = setup({{1, corvette_type, 1, at(0, 0, 0), yaw(0), {}},
+            {9, wall_type, 1, at(1000, 0, 0), yaw(0), {}},
+            {10, wall_type, 1, at(-1000, 0, 0), yaw(0), {}},
+            {11, wall_type, 1, at(0, 1000, 0), yaw(0), {}},
+            {12, wall_type, 1, at(0, -1000, 0), yaw(0), {}}});
+        std::vector<tactical::TrackedLeaf> cage;
+        for (std::size_t i = 1; i < replay.setup.units.size(); ++i) {
+            const auto& obstacle = replay.setup.units[i];
+            const tactical::Prediction still{obstacle.position, {}};
+            const auto leaf = tactical::tracking_leaf(obstacle.entity_id, *table.footprint(wall_type), still, still);
+            expect(static_cast<bool>(leaf), "FSC-70: cage obstacles have valid tracking leaves");
+            if (leaf) cage.push_back(leaf.value());
+        }
+        bool exhausted = false;
+        tactical::PathSearchStats blocked_stats;
+        const auto blocked = tactical::plan_space_move(table, *table.find(corvette_type), *table.footprint(corvette_type),
+            tactical::CollisionWorld{90, {}, &cage}, 1, 0, at(0, 0, 0), {}, {}, at(2400, 0, 0), &blocked_stats,
+            tactical::PathSearchMode::bounded, false, std::nullopt, &exhausted);
+        expect(blocked && exhausted && blocked_stats.tries == table.avoidance->tries,
+            "FSC-70: shell exhausts every planner attempt before testing retained state");
+        bool control_exhausted = true;
+        const auto control = tactical::plan_space_move(table, *table.find(corvette_type), *table.footprint(corvette_type),
+            tactical::CollisionWorld{90, {}, nullptr}, 1, 0, at(0, 0, 0), {}, {}, at(2400, 0, 0), nullptr,
+            tactical::PathSearchMode::bounded, false, std::nullopt, &control_exhausted);
+        expect(control && !control_exhausted && control.value().kind == tactical::MotionKind::path,
+            "FSC-70: the same unblocked route succeeds");
+        // AV-14 can accept a half-speed later attempt. Leave enough travel time for B
+        // after the cooldown; the retry boundary assertions below remain at +60/+61.
+        replay.final_tick_count = 2000;
+        replay.commands = {{{0, 1, 0}, {1}, tactical::MovePayload{at(0, 0, 0), false, true}},
+            {{0, 1, 1}, {1}, tactical::MovePayload{at(2400, 0, 0), false, true}},
+            {{0, 1, 2}, {1}, tactical::MovePayload{at(3000, 0, 0), false, true}}};
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+            auto created = tactical::TacticalSession::from_replay(replay, {}, {}, table);
+            expect(static_cast<bool>(created), "FSC-70: blocked route starts");
+            if (!created) continue;
+            auto session = std::move(created).value();
+            SearchCounter counter;
+            tactical::set_path_search_probe(&counter);
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::optional<std::uint64_t> failed;
+            bool retried = false, reached_c = false;
+            std::vector<std::string> hashes;
+            for (std::uint64_t tick = 0; tick < replay.final_tick_count; ++tick) {
+                counter.calls = 0;
+                const auto stepped = session.step(executor);
+                expect(static_cast<bool>(stepped), "FSC-70: exhaustion never fails the battle step");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                const auto state = session.units().front();
+                if (!failed && contains_retry(session)) {
+                    failed = tick;
+                    expect(budget == 1 ? tick > 1U : tick == 1U,
+                        "FSC-70: close A completes without failure; only B exhaustion stamps the clock");
+                    expect(state.order.destination == at(2400, 0, 0), "FSC-70: A completed; failed B is current");
+                    for (const auto obstacle : {9U, 10U, 11U, 12U})
+                        expect(static_cast<bool>(session.stage_remove(obstacle)), "FSC-70: remove obstruction during cooldown");
+                }
+                if (failed && tick <= *failed + 60) {
+                    expect(contains_retry(session) && state.order.destination == at(2400, 0, 0)
+                        && state.position == at(0, 0, 0), "FSC-70: B is retained through equality t+60");
+                    if (tick > *failed) expect(counter.calls == 0,
+                        "FSC-70: no centre-path attempt at t+1, t+2 or t+60");
+                }
+                if (failed && tick == *failed + 61) {
+                    retried = !contains_retry(session);
+                    expect(retried && counter.calls > 0 && state.order.destination == at(2400, 0, 0),
+                        "FSC-70: t+61 admits B, preserving pending C");
+                    if (budget == 1) expect(session.sliced_searches().searches == 1,
+                        "FSC-70: budgeted retry starts sliced at t+61");
+                    else expect(session.motion_state(1) && session.motion_state(1)->kind == tactical::MotionKind::path,
+                        "FSC-70: unbudgeted retry installs B at t+61");
+                }
+                reached_c |= state.order.destination == at(3000, 0, 0);
+                session.scramble_storage_for_testing();
+            }
+            expect(failed.has_value() && retried, "FSC-70: failed B is retained and retries");
+            expect(reached_c, "FSC-70: successful B eventually continues to C");
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "FSC-70: retained retries equal on 1/2/4/8 workers");
+        }
+        // EN-08/09 + UFS-33: a real draining hit and its expiry preserve the failed B wait.
+        constexpr tactical::TypeId shooter_type = 9002;
+        tactical::DurabilityTable health;
+        tactical::DamageRules damage;
+        damage.shield_recharge_frames = 90;
+        damage.depleted_disable_seconds = units(5);
+        damage.depleted_regen_cap = decimal("0.25");
+        damage.diminishing = {{units(0), units(1)}, {units(2), units(1)}};
+        damage.damage_types = 1;
+        damage.armor_types = 1;
+        damage.armor_mods = {units(1)};
+        damage.energy_recharge_frames = 150;
+        damage.energy_to_shield = units(5);
+        health.damage = damage;
+        health.rules.engines_disabled_speed = decimal("0.4");
+        tactical::DurabilityProfile durable;
+        durable.type_id = corvette_type;
+        durable.max_hull = units(1000);
+        durable.max_speed = table.find(corvette_type)->max_speed;
+        durable.powered = true;
+        durable.max_energy = units(300);
+        durable.armor_type = 0;
+        health.profiles = {durable};
+        tactical::WeaponProfile weapon;
+        weapon.range = units(700);
+        weapon.min_recharge_hundredths = 100;
+        weapon.max_recharge_hundredths = 100;
+        weapon.pulse_count = 1;
+        weapon.cone_width = units(360);
+        weapon.cone_height = units(180);
+        weapon.opportunity_when_idle = true;
+        weapon.opportunity_when_targeting = true;
+        weapon.shot = tactical::ShotProfile{units(15), 0, units(100), units(700), true, false, {}};
+        weapon.shot->energy_damage = true;
+        weapon.shot->disable_engines_frames = 10;
+        tactical::CombatProfile target;
+        target.type_id = corvette_type;
+        target.category_bits = 1;
+        target.collision = tactical::CollisionBox{at(-20, -10, -10), at(20, 10, 10)};
+        tactical::CombatProfile shooter;
+        shooter.type_id = shooter_type;
+        shooter.category_bits = 2;
+        shooter.max_attack_distance = units(700);
+        shooter.weapons = {weapon};
+        shooter.collision = target.collision;
+        tactical::CombatTable combat;
+        combat.profiles = {target, shooter};
+        const std::vector<tactical::SensorProfile> sensors{{shooter_type, units(3000)}};
+        auto engine_replay = replay;
+        engine_replay.setup.players.push_back({2, 2, 2, tactical::player_flag_commandable});
+        reference.clear();
+        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+            auto created = tactical::TacticalSession::from_replay(engine_replay, sensors, health, table,
+                std::nullopt, combat);
+            expect(static_cast<bool>(created), "FSC-70: engine cooldown session starts");
+            if (!created) continue;
+            auto session = std::move(created).value();
+            SearchCounter counter;
+            tactical::set_path_search_probe(&counter);
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::optional<std::uint64_t> failed, shooter_id, recovery;
+            std::uint64_t failure_frame{};
+            bool disabled = false, recovered = false, retried = false;
+            std::vector<std::string> hashes;
+            for (std::uint64_t tick = 0; tick < 1000; ++tick) {
+                counter.calls = 0;
+                const auto stepped = session.step(executor);
+                expect(static_cast<bool>(stepped), "FSC-70: engine cooldown steps successfully");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                if (!failed && contains_retry(session, std::nullopt, &failure_frame)) {
+                    failed = tick;
+                    for (const auto obstacle : {9U, 10U, 11U, 12U})
+                        expect(static_cast<bool>(session.stage_remove(obstacle)), "FSC-70: clear cage before engine hit");
+                    const auto spawned = session.stage_spawn({0, shooter_type, 2, at(-100, 0, 0), yaw(0), {}});
+                    expect(static_cast<bool>(spawned), "FSC-70: spawn ion shooter during cooldown");
+                    if (spawned) shooter_id = spawned.value();
+                }
+                const auto durability = session.durability_state(1);
+                if (durability && durability->engines_disabled_until && !disabled) {
+                    disabled = true;
+                    recovery = durability->engines_disabled_until;
+                    expect(failed && tick > *failed && tick < *failed + 60 && durability->energy < units(300),
+                        "EN-08: positive projectile drain disables engines inside the failure cooldown");
+                    if (shooter_id) expect(static_cast<bool>(session.stage_remove(*shooter_id)),
+                        "FSC-70: remove shooter after one disabling hit");
+                }
+                if (recovery && tick == *recovery) {
+                    recovered = durability && !durability->engines_disabled_until;
+                    expect(recovered && failed && tick < *failed + 60,
+                        "EN-09: engines recover inside the failure cooldown");
+                }
+                if (failed && tick <= *failed + 60) {
+                    const auto state = session.units().front();
+                    const auto motion = session.motion_state(1);
+                    expect(contains_retry(session, failure_frame) && motion && motion->kind == tactical::MotionKind::none
+                            && state.position == at(0, 0, 0) && state.order.destination == at(2400, 0, 0),
+                        "FSC-70: disabling hit and recovery retain B and its rest state through t+60");
+                    if (tick > *failed) expect(counter.calls == 0,
+                        "FSC-70: engine transitions admit no search before t+61");
+                }
+                if (failed && tick == *failed + 61) {
+                    const auto state = session.units().front();
+                    retried = counter.calls > 0 && !contains_retry(session);
+                    expect(retried && state.order.destination == at(2400, 0, 0),
+                        "FSC-70: disabled/recovered B retries at the original failure +61");
+                    break;
+                }
+                session.scramble_storage_for_testing();
+            }
+            expect(failed && disabled && recovered && retried,
+                "FSC-70: both engine transitions are exercised before the strict retry");
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "FSC-70: engine cooldown retries equal on 1/2/4/8 workers");
+        }
+        // An ordinary initial Move shares the producer; a second exhausted attempt renews it.
+        replay.commands = {{{0, 1, 0}, {1}, tactical::MovePayload{at(2400, 0, 0)}}};
+        auto repeated = tactical::TacticalSession::from_replay(replay, {}, {}, table);
+        expect(static_cast<bool>(repeated), "FSC-70: repeated failure control starts");
+        if (repeated) {
+            auto& session = repeated.value();
+            SearchCounter counter;
+            tactical::set_path_search_probe(&counter);
+            const eawr::sim::InlineExecutor executor;
+            std::optional<std::uint64_t> first_failure, second_failure;
+            bool retry_started = false, renewed_retry = false;
+            for (std::uint64_t tick = 0; tick < 1000U; ++tick) {
+                counter.calls = 0;
+                const auto stepped = session.step(executor);
+                expect(static_cast<bool>(stepped), "FSC-70: repeated exhausted searches step successfully");
+                if (!stepped) break;
+                if (!first_failure && contains_retry(session)) first_failure = tick;
+                if (first_failure && tick == *first_failure + 61U) {
+                    retry_started = counter.calls > 0;
+                    expect(retry_started, "FSC-70: blocked route attempts again at first failure +61");
+                }
+                if (first_failure && !second_failure && tick >= *first_failure + 61U && contains_retry(session)) {
+                    second_failure = tick;
+                    for (const auto obstacle : {9U, 10U, 11U, 12U})
+                        expect(static_cast<bool>(session.stage_remove(obstacle)), "FSC-70: clear obstruction after second failure");
+                }
+                if (second_failure && tick > *second_failure && tick <= *second_failure + 60U)
+                    expect(counter.calls == 0 && contains_retry(session), "FSC-70: renewed cooldown remains strict");
+                if (second_failure && tick == *second_failure + 61U) {
+                    renewed_retry = counter.calls > 0 && !contains_retry(session);
+                    expect(renewed_retry, "FSC-70: renewed cooldown retries at +61");
+                    break;
+                }
+            }
+            expect(first_failure && second_failure && retry_started && renewed_retry,
+                "FSC-70: two actual exhausted searches renew the retained failure clock");
+        }
+    }
 }
 
 // FM-10: a new move, face or stop replaces a waiting member's staggered plan.

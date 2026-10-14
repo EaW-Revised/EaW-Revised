@@ -4,7 +4,7 @@
   "id": "S-98",
   "label": "xwing-intercepts-bombers",
   "title": "X-wings intercept TIE bombers",
-  "intent": "TIE bombers attack a held, invulnerable corvette at tick 30; X-wings attack the bombers at tick 150. Observe whether the bombers turn on the X-wings.",
+  "intent": "TIE bombers attack a held, invulnerable corvette; X-wings attack the bombers. The run starts at the recording's X-wing order frame (native tick 150) and both orders are given at tick 1. Observe whether the bombers turn on the X-wings.",
   "behaviour": {
     "note": "docs/behaviour/space-fighters.md",
     "cases": [],
@@ -139,11 +139,11 @@
       "type": "TIE_Bomber_Squadron",
       "owner": "empire",
       "position": [
-        -500,
-        -1500,
+        -292,
+        -1307,
         0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 353,
       "spawn": "start",
       "staging": []
     },
@@ -152,11 +152,11 @@
       "type": "Rebel_X-Wing_Squadron",
       "owner": "rebel",
       "position": [
-        -500,
-        -2300,
+        -499,
+        -2312,
         0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 266,
       "spawn": "start",
       "staging": []
     },
@@ -165,135 +165,144 @@
       "type": "TIE_Bomber",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        -248.96044921875,
+        -1318.24072265625,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 353.1545715332031,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "bomber.2",
       "type": "TIE_Bomber",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        -325.123779296875,
+        -1260.7489013671875,
+        -21.208480834960938
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 14.230331420898438,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "bomber.3",
       "type": "TIE_Bomber",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        -305.1324462890625,
+        -1283.174072265625,
+        -26.068456649780273
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 30.767534255981445,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "bomber.4",
       "type": "TIE_Bomber",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        -300.7126159667969,
+        -1354.442138671875,
+        -1.592093586921692
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 344.37054443359375,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "xwing.1",
       "type": "X-Wing",
       "owner": "rebel",
       "position": [
-        0,
-        0,
-        0
+        -535.9171752929688,
+        -2344.970458984375,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 267.54949951171875,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "xwing.2",
       "type": "X-Wing",
       "owner": "rebel",
       "position": [
-        0,
-        0,
-        0
+        -469.7193298339844,
+        -2296.095458984375,
+        -82.34423828125
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 220.32351684570312,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "xwing.3",
       "type": "X-Wing",
       "owner": "rebel",
       "position": [
-        0,
-        0,
-        0
+        -501.6390075683594,
+        -2281.751708984375,
+        83.30323791503906
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 232.5660400390625,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "xwing.4",
       "type": "X-Wing",
       "owner": "rebel",
       "position": [
-        0,
-        0,
-        0
+        -469.5957336425781,
+        -2299.4033203125,
+        -66.74037170410156
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 207.29708862304688,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "xwing.5",
       "type": "X-Wing",
       "owner": "rebel",
       "position": [
-        0,
-        0,
-        0
+        -515.58837890625,
+        -2295.63720703125,
+        -2.1104893684387207
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 208.60409545898438,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     }
   ],
   "hardpoints": [],
   "events": [
     {
-      "tick": 30,
+      "tick": 1,
       "action": "attack",
       "unit": "bomber",
       "target": "corvette"
     },
     {
-      "tick": 150,
+      "tick": 1,
       "action": "attack",
       "unit": "xwing",
       "target": "bomber"
     }
   ],
-  "duration_ticks": 1200,
+  "duration_ticks": 1050,
   "tolerances": {
     "alive": 0,
     "hull": 128,
@@ -307,8 +316,9 @@
   },
   "expect": [],
   "notes": [
-    "#457/#607: the TIE bombers attack a held, invulnerable, silent corvette at tick 30 and the X-wings attack the bombers at tick 150. Fog revealed, AI suspended.",
-    "The squadrons start as their team containers with their craft on the Squadron_Offsets slots; observed slots bind the craft in creation order (<label>.<k> from 1, as the recorder labels them)."
+    "#457/#607: in the recording the TIE bombers attack a held, invulnerable, silent corvette at tick 30 and the X-wings attack the bombers at tick 150. Fog revealed, AI suspended.",
+    "The squadrons start as their team containers; observed slots bind the craft in creation order (<label>.<k> from 1, as the recorder labels them).",
+    "#1617: the run starts at the recording's order frame. Every observed craft takes its native world position and yaw at native tick 150 (apply_initial_pose), and both team containers its rounded plane position and yaw; scenario tick t is native tick 150 + t, so both attack orders are given at tick 1 and the run ends with the recording (1,050 ticks). Recording: the 2026-09-29 S-98 capture (1,200 samples, no gaps or errors; raw SHA256 88b58d9a21fd075abee44412b335fed891f1297a1e182876af56660cf630dd63). Before this the craft started on generated Squadron_Offsets slots at tick 0, so the remake's bombers flew straight from the tick-30 order while retail's looped and reached the order about 225 units behind; seeding tick-zero poses alone (the S-97 method) still left them about 185 units ahead. Velocity, pitch, roll, reload and pursuit state were not recorded and are not seeded; the bombers' pursuit restarts at tick 1."
   ],
   "record_only": true
 }

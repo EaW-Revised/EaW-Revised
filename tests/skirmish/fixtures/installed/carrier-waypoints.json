@@ -1,0 +1,100 @@
+{
+  "format": "eawr-scenario",
+  "format_version": 1,
+  "id": "carrier-waypoints",
+  "label": "carrier-waypoints",
+  "duration_ticks": 2001,
+  "content": [],
+  "players": [
+    {
+      "label": "source",
+      "faction": "Empire"
+    },
+    {
+      "label": "target",
+      "faction": "Rebel"
+    }
+  ],
+  "units": [
+    {
+      "label": "source",
+      "type": "Acclamator_Assault_Ship",
+      "owner": "source",
+      "position": [
+        -2500,
+        -3000,
+        0
+      ],
+      "facing_degrees": 0,
+      "spawn": "start",
+      "staging": []
+    },
+    {
+      "label": "target",
+      "type": "Nebulon_B_Frigate",
+      "owner": "target",
+      "position": [
+        -1500,
+        -2800,
+        0
+      ],
+      "facing_degrees": 0,
+      "spawn": "start",
+      "staging": []
+    },
+    {
+      "label": "fighter",
+      "type": "TIE_Fighter_Squadron",
+      "owner": "source",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "facing_degrees": 0,
+      "spawn": "observed",
+      "staging": []
+    }
+  ],
+  "events": [
+    {
+      "tick": 1,
+      "action": "move",
+      "unit": "source",
+      "position": [
+        -2500,
+        -2600,
+        0
+      ]
+    },
+    {
+      "tick": 2,
+      "action": "move",
+      "unit": "source",
+      "position": [
+        -2100,
+        -2600,
+        0
+      ],
+      "append": true
+    },
+    {
+      "tick": 3,
+      "action": "move",
+      "unit": "source",
+      "position": [
+        -2100,
+        -3000,
+        0
+      ],
+      "append": true
+    },
+    {
+      "tick": 150,
+      "action": "attack",
+      "unit": "fighter",
+      "target": "target"
+    }
+  ],
+  "installed_replay_audit": true
+}

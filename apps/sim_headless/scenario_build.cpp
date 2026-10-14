@@ -50,6 +50,12 @@ namespace sim_headless::scenario_detail {
         return fail<Scenario>("not an eawr-scenario version 1 file", path);
     }
     Scenario scenario;
+    if (const auto audit = root.get("installed_replay_audit")) {
+        if (audit->kind != Json::Kind::boolean) {
+            return fail<Scenario>("installed_replay_audit must be a boolean", path);
+        }
+        scenario.installed_replay_audit = audit->flag;
+    }
     const auto duration = natural(root.get("duration_ticks"));
     if (!duration || *duration == 0 || *duration > tactical::max_ticks) {
         return fail<Scenario>("duration_ticks must be a positive tick count", path);
@@ -128,6 +134,12 @@ namespace sim_headless::scenario_detail {
             return fail<Scenario>("an event tick must be inside the scenario", path);
         }
         entry.tick = *tick;
+        if (const auto* append = event.get("append"); append != nullptr) {
+            if (entry.action != "move" || append->kind != Json::Kind::boolean) {
+                return fail<Scenario>("append is a boolean for move events only", path);
+            }
+            entry.append = append->flag;
+        }
         if (entry.action == "move" || entry.action == "face") {
             const auto at = position(event.get("position"));
             if (!at) return fail<Scenario>(entry.action + " needs a position", path);
@@ -275,8 +287,11 @@ core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_p
                 + pin.sha256, path);
         }
     }
-    auto catalog = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+    auto catalog = eawr::data::load_catalog_strict(filesystem.value(), eawr::data::Profile::foc);
     if (!catalog) return core::Result<ScenarioRun>::failure(catalog.error());
+    if (!catalog.value().health.clean()) {
+        std::cerr << "sim_headless: catalog load: " << eawr::data::describe_load_health(catalog.value().health) << '\n';
+    }
     eawr::scene::VfsAssetCache cache(filesystem.value());
     const auto access = cache.access();
     eawr::units::LoadInput unit_input;
@@ -359,7 +374,18 @@ core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_p
         const auto found = protection.find(profile.type_id);
         if (found != protection.end()) profile.scenario_invulnerable = found->second;
     }
-    return execute_scenario(scenario, path, bytes, tables, sensors, durability, motion, combat, workers, build_sha256);
+    // WDF-05: the fighter grids start from the pinned space map's box (the world origin when the
+    // scenario pins no map).
+    tactical::MapBox map_box;
+    for (const auto& pin : scenario.content) {
+        const auto name = lower(pin.path);
+        if (!name.starts_with("data/art/maps/") || !name.ends_with(".ted")) continue;
+        auto box = eawr::skirmish::map_box_of(filesystem.value(), catalog.value().catalog, name);
+        if (!box) return core::Result<ScenarioRun>::failure(box.error());
+        map_box = box.value();
+        break;
+    }
+    return execute_scenario(scenario, path, bytes, tables, sensors, durability, motion, combat, map_box, workers, build_sha256);
 }
 
 } // namespace sim_headless::scenario_detail

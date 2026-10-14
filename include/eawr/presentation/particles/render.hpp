@@ -13,6 +13,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 // Engine-free render planning for CPU particle output. Nothing here names a
@@ -74,6 +75,7 @@ struct EmitterRenderPlan final {
     std::string normal_texture;
     float tail_size{};
     bool legacy_kite_motion{};
+    bool legacy_slot_order{};
     bool inherit_emitter_motion{};
     float kite_speed_limit{};
     bool drawable{};
@@ -90,6 +92,7 @@ struct CameraFrame final {
     Vec3 position{};
     Vec3 right{1.0F, 0.0F, 0.0F};
     Vec3 up{0.0F, 0.0F, 1.0F};
+    bool collect_axis_diagnostics{};
 };
 
 // PS-39: scene culling precedes stream preparation. Planes use the particle
@@ -133,21 +136,34 @@ struct VertexStream final {
     std::vector<std::uint32_t> indices;
     std::size_t quads{};
     std::size_t triangles{};
-    // Retained, emitter-local scratch; unused by modes that omit sorting.
+    // Retained, emitter-local scratch for depth sorting or V1 alpha slot order.
     std::vector<const Particle*> sorted_particles;
     std::size_t sort_candidates{};
     Vec3 bounds_min{};
     Vec3 bounds_max{};
+    std::uint64_t axis_samples{};
+    double axis_max_sine_error{};
+    std::uint64_t axis_reversed{};
     void clear();
 };
 
+struct StreamBuildTimings final {
+    double sort_ms{};
+};
+
 // Appends the authored primitive per eligible particle, farthest first only
-// when PS-32 requests sorting. A non-drawable plan appends nothing. A particle whose consumed fields
+// when PS-32 requests sorting; otherwise V1 alpha follows primitive slot order.
+// A non-drawable plan appends nothing. A particle whose consumed fields
 // or computed positions, UVs, color, or bounds are nonfinite is skipped as a
 // whole quad; earlier stream contents remain intact. Camera axes are consumed
 // only by camera-facing families (or a kite using the no-direction fallback).
 void build_stream(const EmitterRenderPlan& plan, std::span<const Particle> particles,
-                  const CameraFrame& camera, VertexStream& stream);
+                  const CameraFrame& camera, VertexStream& stream, StreamBuildTimings* timing = nullptr);
+
+// The same geometry from an emitter-local selection, in the input system's
+// particle order. Selections remain valid until that system advances again.
+void build_stream_subset(const EmitterRenderPlan& plan, std::span<const Particle* const> particles,
+                         const CameraFrame& camera, VertexStream& stream, StreamBuildTimings* timing = nullptr);
 
 // FNV-1a over the exact float bits of the stream. Equal hashes across runs are
 // the determinism evidence; the hash is not a security primitive.
@@ -171,6 +187,9 @@ public:
     // Returns zero when the backend cannot create the resource; the emitter is
     // then reported as not drawn rather than drawn some other way.
     [[nodiscard]] virtual std::uint64_t create_emitter(const EmitterRenderPlan& plan) = 0;
+    // Worker-safe buffer preparation: independent resources may prepare concurrently.
+    // No engine/scene calls here; update_emitter commits the prepared data in caller order.
+    virtual void prepare_emitter(std::uint64_t, const VertexStream&) {}
     virtual void update_emitter(std::uint64_t resource, const VertexStream& stream) = 0;
     virtual void destroy_emitter(std::uint64_t resource) = 0;
     // Why the most recent create_emitter returned zero, for the per-emitter cause.
@@ -203,6 +222,9 @@ struct EmitterFrameStats final {
     // Largest vertex colour alpha in the emitter's stream this frame (zero with
     // no quads). A heat emitter's screen offset scales with it.
     float maximum_alpha{};
+    std::uint64_t axis_samples{};
+    double axis_max_sine_error{};
+    std::uint64_t axis_reversed{};
 };
 
 struct EffectFrameStats final {
@@ -255,6 +277,20 @@ struct RegistryWorkCounts final {
     std::uint64_t groups_visible{};
     std::uint64_t groups_prepared{};
     std::uint64_t updates_deferred{};
+    std::uint64_t particle_bucket_visits{}; // one system scan when multiple drawable emitters share it
+    std::uint64_t stream_particle_visits{}; // candidates consumed by stream builders, before sorting
+};
+
+// Opt-in timings: worker CPU sums and caller elapsed intervals are separate.
+struct RegistryTimings final {
+    double spawn_cpu_ms{}, spawn_backend_ms{};
+    double scalar_step_ms{}, scalar_build_ms{};
+    double batch_step_cpu_ms{}, batch_build_cpu_ms{};
+    double executor_ms{}, executor_wait_dispatch_ms{}, commit_ms{};
+    // Mutually exclusive CPU sums: emission, update, sorting, stream/statistics,
+    // backend buffer packing. Caller work overlaps executor_ms; worker work can
+    // overlap other worker work. Upload/backend commits remain caller-only.
+    std::array<double, 5> main_stages_ms{}, worker_stages_ms{};
 };
 
 // Outcome of EffectRegistry::detach. `draining` keeps the instance and its
@@ -269,6 +305,9 @@ enum class EffectDetachState : std::uint8_t { draining, released };
 class EffectRegistry final {
 public:
     explicit EffectRegistry(RenderBackend& backend);
+    // Developer comparison switch, configured before spawning systems. The
+    // reference path retains the full-system stream input for paired profiling.
+    static void set_stream_bucketing_default(bool on) noexcept;
     ~EffectRegistry();
     EffectRegistry(const EffectRegistry&) = delete;
     EffectRegistry& operator=(const EffectRegistry&) = delete;
@@ -312,6 +351,8 @@ public:
     // hashes are zero and every other statistic is unchanged (#638: the live battle's registries
     // leave them off, as nothing there reads them).
     void set_stream_hashes(bool on) noexcept;
+    void begin_measurement(bool on) noexcept;
+    [[nodiscard]] const RegistryTimings& timings() const noexcept { return timings_; }
     // PS-34..PS-37: applies to existing and future effects; caller-thread only.
     [[nodiscard]] core::Result<void> set_detail(ParticleDetail detail);
     [[nodiscard]] const RegistryWorkCounts& work() const noexcept;
@@ -343,6 +384,13 @@ private:
         SystemDefinition system, std::uint32_t seed, std::size_t max_particles,
         std::optional<MeshBinding> mesh_binding);
     struct Instance;
+    bool measure_{};
+    RegistryTimings timings_;
+    // Caller-owned dispatch scratch keeps worker callbacks within std::function's
+    // inline storage. Workers read it only until the synchronous barrier returns.
+    std::thread::id measurement_caller_{};
+    double caller_work_ms_{};
+    std::size_t batch_task_count_{};
     // The live instance of `handle`, or null.
     [[nodiscard]] Instance* find(EffectHandle handle) const noexcept;
     // Records and returns the unknown-handle diagnostic.

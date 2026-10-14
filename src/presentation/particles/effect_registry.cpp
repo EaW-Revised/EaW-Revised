@@ -1,8 +1,11 @@
 #include "render_internal.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
+#include <chrono>
+#include <thread>
 #include <limits>
 #include <utility>
 
@@ -15,18 +18,34 @@
 
 namespace eawr::presentation::particles {
 using namespace render_detail;
+namespace {
+using TimingClock = std::chrono::steady_clock;
+std::atomic<bool> default_stream_bucketing{true};
+struct Measure final {
+    explicit Measure(double* destination):destination_(destination),start_(destination?TimingClock::now():TimingClock::time_point{}){}
+    ~Measure(){if(destination_)*destination_+=std::chrono::duration<double,std::milli>(TimingClock::now()-start_).count();}
+    double* destination_;
+    TimingClock::time_point start_;
+};
+}
 
 struct EffectRegistry::Instance final {
     Instance(EffectHandle id, SystemDefinition definition, const std::uint32_t seed,
              const std::size_t capacity, std::optional<MeshBinding> mesh_binding)
         : handle(id), leave_particles(definition.leave_particles), plans(plan_system(definition)),
-          cpu(std::move(definition), seed, capacity, std::move(mesh_binding)), streams(plans.size()) {
+          cpu(std::move(definition), seed, capacity, std::move(mesh_binding)), streams(plans.size()),
+          particle_buckets(plans.size()) {
+        bucket_particles = default_stream_bucketing.load(std::memory_order_relaxed) && std::count_if(plans.begin(), plans.end(), [](const auto& plan) {
+            return plan.drawable;
+        }) > 1;
         for (std::size_t index = 0; index < plans.size(); ++index) {
             if (!plans[index].drawable) continue;
             const auto count = cpu.emitter_capacities()[index].reserved;
             streams[index].vertices.reserve(count * (plans[index].triangles ? 3U : 4U));
             streams[index].indices.reserve(count * (plans[index].triangles ? 3U : 6U));
-            if (plans[index].sort_particles) streams[index].sorted_particles.reserve(count);
+            if (plans[index].sort_particles || plans[index].legacy_slot_order)
+                streams[index].sorted_particles.reserve(count);
+            if (bucket_particles) particle_buckets[index].reserve(count);
         }
     }
 
@@ -38,6 +57,11 @@ struct EffectRegistry::Instance final {
     // One stream per plan, kept between frames so a grown stream allocates nothing (#439); the
     // batched calls build them on the executor and upload them afterwards (#638).
     std::vector<VertexStream> streams;
+    // Disjoint instance-local scratch: one scan replaces one full-system scan
+    // per drawable emitter. Pointers keep particle bits and input order intact.
+    std::vector<std::vector<const Particle*>> particle_buckets;
+    bool bucket_particles{};
+    std::uint64_t bucket_visits{}, stream_visits{};
     float brightness{1.0F};
     bool visible{true};
     bool prepared{true};
@@ -47,9 +71,17 @@ struct EffectRegistry::Instance final {
     bool was_rendered{};
     bool backend_visible{true};
     float accumulated{};
+    double step_ms{}, build_ms{};
+    StreamBuildTimings stream_timing;
+    double packing_ms{};
+    bool measured_on_main{};
 };
 
 EffectRegistry::EffectRegistry(RenderBackend& backend) : backend_(&backend) {}
+
+void EffectRegistry::set_stream_bucketing_default(const bool on) noexcept {
+    default_stream_bucketing.store(on, std::memory_order_relaxed);
+}
 
 EffectRegistry::~EffectRegistry() {
     while (!instances_.empty()) static_cast<void>(release(instances_.back()->handle));
@@ -85,6 +117,7 @@ core::Result<EffectHandle> EffectRegistry::spawn(
 core::Result<EffectHandle> EffectRegistry::spawn_impl(
     SystemDefinition system, const std::uint32_t seed, const std::size_t max_particles,
     std::optional<MeshBinding> mesh_binding) {
+    const auto spawn_start=measure_?TimingClock::now():TimingClock::time_point{};
     const auto fail_mesh=[&](const std::string& message){
         core::Diagnostic diagnostic{std::string(diagnostic_codes::mesh_binding),
             core::Severity::error,message,{},{},{},{}};
@@ -140,6 +173,9 @@ core::Result<EffectHandle> EffectRegistry::spawn_impl(
     auto instance = std::make_unique<Instance>(next_handle_++, std::move(system), seed,
         max_particles, std::move(mesh_binding));
     static_cast<void>(instance->cpu.set_detail(detail_));
+    const auto backend_start=measure_?TimingClock::now():TimingClock::time_point{};
+    if(measure_)timings_.spawn_cpu_ms+=std::chrono::duration<double,std::milli>(backend_start-spawn_start).count();
+    Measure backend_time(measure_?&timings_.spawn_backend_ms:nullptr);
     instance->resources.assign(instance->plans.size(), 0U);
     for (std::size_t index = 0; index < instance->plans.size(); ++index) {
         EmitterRenderPlan& plan = instance->plans[index];
@@ -223,8 +259,12 @@ core::Result<EffectFrameStats> EffectRegistry::advance(
     if (instance == nullptr) return core::Result<EffectFrameStats>::failure(unknown(handle));
     EffectFrameStats stats;
     culling_ = backend_->culling_frame();
-    step(*instance, delta_seconds, stats);
-    build(*instance, camera, &stats);
+    instance->measured_on_main = true;
+    instance->cpu.measure_phases(measure_);
+    instance->step_ms = instance->build_ms = 0;
+    { Measure timer(measure_?&instance->step_ms:nullptr); step(*instance, delta_seconds, stats); }
+    { Measure timer(measure_?&instance->build_ms:nullptr); build(*instance, camera, &stats); }
+    if (measure_) { timings_.scalar_step_ms += instance->step_ms; timings_.scalar_build_ms += instance->build_ms; }
     upload(*instance, true, stream_hashes_);
     return core::Result<EffectFrameStats>::success(std::move(stats));
 }
@@ -232,9 +272,13 @@ core::Result<EffectFrameStats> EffectRegistry::advance(
 core::Result<void> EffectRegistry::present(const EffectHandle handle, const CameraFrame& camera) {
     Instance* const instance = find(handle);
     if (instance == nullptr) return core::Result<void>::failure(unknown(handle));
-    instance->cpu.follow_emitter();
     culling_ = backend_->culling_frame();
-    build(*instance, camera, nullptr);
+    instance->measured_on_main = true;
+    instance->cpu.measure_phases(measure_);
+    instance->step_ms = instance->build_ms = 0;
+    { Measure timer(measure_?&instance->build_ms:nullptr);
+      instance->cpu.follow_emitter(); build(*instance, camera, nullptr); }
+    if (measure_) timings_.scalar_build_ms += instance->build_ms;
     upload(*instance, false, false);
     return core::Result<void>::success();
 }
@@ -261,32 +305,53 @@ core::Result<void> EffectRegistry::advance_batch(const std::span<const EffectHan
     if (auto resolved = resolve(handles); !resolved) return resolved;
     culling_ = backend_->culling_frame();
     stats.resize(batch_.size());
-    auto ran = run_batch([&](const std::size_t index) {
+    measurement_caller_ = measure_ ? std::this_thread::get_id() : std::thread::id{};
+    struct Inputs final {
+        float uniform_delta;
+        std::span<const float> deltas;
+        const CameraFrame& camera;
+        std::vector<EffectFrameStats>& stats;
+    };
+    const Inputs inputs{uniform_delta, deltas, camera, stats};
+    auto ran = run_batch([this, &inputs](const std::size_t index) {
         // The slot keeps its per-emitter vector's storage; every field starts over.
-        EffectFrameStats& slot = stats[index];
+        EffectFrameStats& slot = inputs.stats[index];
         std::vector<EmitterFrameStats> emitters = std::move(slot.emitters);
         emitters.clear();
         slot = EffectFrameStats{};
         slot.emitters = std::move(emitters);
         Instance& instance = *batch_[index];
-        step(instance, deltas.empty() ? uniform_delta : deltas[index], slot);
-        build(instance, camera, &slot);
+        instance.measured_on_main = measure_ && std::this_thread::get_id() == measurement_caller_;
+        instance.cpu.measure_phases(measure_);
+        instance.step_ms=instance.build_ms=0.0;
+        { Measure timer(measure_?&instance.step_ms:nullptr); step(instance, inputs.deltas.empty() ? inputs.uniform_delta : inputs.deltas[index], slot); }
+        { Measure timer(measure_?&instance.build_ms:nullptr); build(instance, inputs.camera, &slot); }
     });
     if (!ran) return ran;
-    for (Instance* const instance : batch_) upload(*instance, true, stream_hashes_);
+    for (Instance* const instance : batch_) {
+        if(measure_){timings_.batch_step_cpu_ms+=instance->step_ms;timings_.batch_build_cpu_ms+=instance->build_ms;}
+        upload(*instance, true, stream_hashes_);
+    }
     return core::Result<void>::success();
 }
 
 core::Result<void> EffectRegistry::present_all(const std::span<const EffectHandle> handles, const CameraFrame& camera) {
     if (auto resolved = resolve(handles); !resolved) return resolved;
     culling_ = backend_->culling_frame();
-    auto ran = run_batch([&](const std::size_t index) {
+    measurement_caller_ = measure_ ? std::this_thread::get_id() : std::thread::id{};
+    auto ran = run_batch([this, &camera](const std::size_t index) {
         Instance& instance = *batch_[index];
-        instance.cpu.follow_emitter();
-        build(instance, camera, nullptr);
+        instance.measured_on_main = measure_ && std::this_thread::get_id() == measurement_caller_;
+        instance.cpu.measure_phases(measure_);
+        instance.step_ms=instance.build_ms=0.0;
+        Measure timer(measure_?&instance.build_ms:nullptr);
+        instance.cpu.follow_emitter(); build(instance, camera, nullptr);
     });
     if (!ran) return ran;
-    for (Instance* const instance : batch_) upload(*instance, false, false);
+    for (Instance* const instance : batch_) {
+        if(measure_){timings_.batch_step_cpu_ms+=instance->step_ms;timings_.batch_build_cpu_ms+=instance->build_ms;}
+        upload(*instance, false, false);
+    }
     return core::Result<void>::success();
 }
 
@@ -327,11 +392,21 @@ core::Result<void> EffectRegistry::run_batch(const std::function<void(std::size_
     // workers claim; no two slices share an instance.
     constexpr std::size_t max_tasks = 64;
     const std::size_t tasks = std::min(count, max_tasks);
-    const bool ran = executor_->run(tasks, [&](const std::size_t slice) {
-        const std::size_t first = count * slice / tasks;
-        const std::size_t last = count * (slice + 1) / tasks;
+    batch_task_count_ = tasks;
+    const auto start=measure_?TimingClock::now():TimingClock::time_point{};
+    caller_work_ms_ = 0.0;
+    const bool ran = executor_->run(tasks, [this, &task](const std::size_t slice) {
+        Measure caller_timer(measure_&&std::this_thread::get_id()==measurement_caller_?&caller_work_ms_:nullptr);
+        const std::size_t first = batch_.size() * slice / batch_task_count_;
+        const std::size_t last = batch_.size() * (slice + 1) / batch_task_count_;
         for (std::size_t index = first; index < last; ++index) task(index);
     });
+    if(measure_){
+        const double elapsed=std::chrono::duration<double,std::milli>(TimingClock::now()-start).count();
+        timings_.executor_ms+=elapsed;
+        // Includes dispatch/barrier overhead, not an exclusive OS wait counter.
+        timings_.executor_wait_dispatch_ms+=std::max(0.0,elapsed-caller_work_ms_);
+    }
     ++work_.batches;
     work_.tasks += tasks;
     if (!ran) {
@@ -342,6 +417,8 @@ core::Result<void> EffectRegistry::run_batch(const std::function<void(std::size_
     }
     return core::Result<void>::success();
 }
+
+void EffectRegistry::begin_measurement(const bool on) noexcept { measure_=on; timings_={}; }
 
 void EffectRegistry::set_executor(const StepExecutor* const executor) noexcept { executor_ = executor; }
 void EffectRegistry::set_stream_hashes(const bool on) noexcept { stream_hashes_ = on; }
@@ -376,6 +453,9 @@ void EffectRegistry::step(Instance& instance, const float delta_seconds, EffectF
 }
 
 void EffectRegistry::build(Instance& instance, const CameraFrame& camera, EffectFrameStats* const stats) const {
+    instance.bucket_visits = instance.stream_visits = 0;
+    instance.stream_timing = {};
+    instance.packing_ms = 0;
     const std::span<const Particle> live = instance.cpu.particles();
     const ParticleBounds bounds = particle_bounds(instance.plans, live);
     instance.visible = intersects(bounds, culling_);
@@ -401,12 +481,30 @@ void EffectRegistry::build(Instance& instance, const CameraFrame& camera, Effect
         }
         return;
     }
+    if (instance.bucket_particles) {
+        for (auto& bucket : instance.particle_buckets) bucket.clear();
+        for (const Particle& particle : live) {
+            ++instance.bucket_visits;
+            if (particle.emitter_index >= instance.plans.size() || !particle.draw_eligible) continue;
+            const auto& plan = instance.plans[particle.emitter_index];
+            if (!plan.drawable || (!detail_.heat && plan.phase == DrawPhase::heat)) continue;
+            instance.particle_buckets[particle.emitter_index].push_back(&particle);
+        }
+    }
     for (std::size_t index = 0; index < instance.plans.size(); ++index) {
         VertexStream& stream = instance.streams[index];
         stream.clear();
         // PS-34: heat phase admission is independent of the ordinary slot mask.
-        if (detail_.heat || instance.plans[index].phase != DrawPhase::heat)
-            build_stream(instance.plans[index], live, camera, stream);
+        if (instance.plans[index].drawable && (detail_.heat || instance.plans[index].phase != DrawPhase::heat)) {
+            if (instance.bucket_particles) {
+                const auto& selected = instance.particle_buckets[index];
+                instance.stream_visits += selected.size();
+                build_stream_subset(instance.plans[index], selected, camera, stream, measure_ ? &instance.stream_timing : nullptr);
+            } else {
+                instance.stream_visits += live.size();
+                build_stream(instance.plans[index], live, camera, stream, measure_ ? &instance.stream_timing : nullptr);
+            }
+        }
         if (instance.brightness != 1.0F) {
             // PS-23/BP-45: byte channels receive brightness independently.
             // Out-of-range caller brightness saturates as a presentation safety policy.
@@ -416,9 +514,16 @@ void EffectRegistry::build(Instance& instance, const CameraFrame& camera, Effect
                 vertex.color = {channel(vertex.color.x),channel(vertex.color.y),channel(vertex.color.z),channel(vertex.color.w)};
             }
         }
+        if (instance.resources[index] != 0U) {
+            Measure timer(measure_ ? &instance.packing_ms : nullptr);
+            backend_->prepare_emitter(instance.resources[index], stream);
+        }
         if (stats == nullptr) continue;
         const bool drawn = instance.resources[index] != 0U;
         EmitterFrameStats& emitter = stats->emitters[index];
+        emitter.axis_samples = stream.axis_samples;
+        emitter.axis_max_sine_error = stream.axis_max_sine_error;
+        emitter.axis_reversed = stream.axis_reversed;
         emitter.quads = stream.quads;
         emitter.triangles = stream.triangles;
         for (const ParticleVertex& vertex : stream.vertices) {
@@ -450,6 +555,18 @@ void EffectRegistry::build(Instance& instance, const CameraFrame& camera, Effect
 }
 
 void EffectRegistry::upload(Instance& instance, const bool stepped, const bool hashed) {
+    Measure commit_time(measure_?&timings_.commit_ms:nullptr);
+    work_.particle_bucket_visits += instance.bucket_visits;
+    work_.stream_particle_visits += instance.stream_visits;
+    if (measure_) {
+        auto& stages = instance.measured_on_main ? timings_.main_stages_ms : timings_.worker_stages_ms;
+        stages[0] += instance.cpu.phase_ms()[0];
+        stages[1] += instance.cpu.phase_ms()[1];
+        stages[2] += instance.stream_timing.sort_ms;
+        stages[3] += std::max(0.0, instance.build_ms - instance.stream_timing.sort_ms - instance.packing_ms
+            - (stepped ? 0.0 : instance.cpu.phase_ms()[1]));
+        stages[4] += instance.packing_ms;
+    }
     backend_->record_group_work(instance.visible, instance.prepared, stepped && instance.stepped);
     work_.groups_visible += instance.visible ? 1U : 0U;
     work_.groups_prepared += instance.prepared ? 1U : 0U;

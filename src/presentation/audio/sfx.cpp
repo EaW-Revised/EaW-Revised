@@ -238,6 +238,44 @@ std::optional<WavPcm> parse_wav(const std::span<const std::byte> bytes, std::str
     return std::nullopt;
 }
 
+std::optional<Space3D> space_3d(const std::span<const Field> fields, std::vector<std::string>& problems) {
+    Space3D result;
+    bool valid = true;
+    for (const auto& [tag, destination] : std::array{
+        std::pair{"Audio_Space_3D_Saturation_Distance_Mod", &result.saturation_factor},
+        std::pair{"Audio_Space_3D_Rolloff_Distance_Mod", &result.rolloff_factor},
+        std::pair{"Audio_Space_3D_Listener_Z_Pullback_Dist", &result.listener_z}}) {
+        std::optional<double> value;
+        for (const auto& [name, text] : fields) if (upper(name) == upper(tag)) {
+            const auto raw = trim(text);
+            double parsed{};
+            const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), parsed);
+            value = error == std::errc{} && end == raw.data() + raw.size() && !raw.empty()
+                ? std::optional<double>(parsed) : std::nullopt;
+        }
+        if (!value || !std::isfinite(*value) || *value < 0.0) {
+            problems.push_back("EAWR-AUDIO-0301: " + std::string(tag) + ": missing/invalid; spatial playback uses 2D");
+            valid = false;
+        } else *destination = *value;
+    }
+    return valid ? std::optional<Space3D>(result) : std::nullopt;
+}
+
+std::optional<std::array<int, 2>> ambient_moving_delays(const std::string_view minimum,
+    const std::string_view maximum, const std::string_view context, std::vector<std::string>& problems) {
+    const auto delay = [](const std::string_view text, const int fallback) {
+        if (trim(text).empty()) return fallback;
+        return leading_integer(text).value_or(0);
+    };
+    const int low = delay(minimum, 5);
+    const int high = delay(maximum, 10);
+    if (low <= 0 || high < low || high > std::numeric_limits<int>::max() / 30) {
+        problems.push_back("EAWR-AUDIO-0302: " + std::string(context) + ": invalid ambient moving delay range");
+        return std::nullopt;
+    }
+    return std::array{low * 30, high * 30};
+}
+
 double falloff_gain(const double distance, const double saturation_distance, const Space3D& space) {
     const double minimum = std::max(1.0, saturation_distance * space.saturation_factor);
     if (distance <= minimum) return 1.0;
@@ -768,6 +806,8 @@ MusicEvent parse_music_event(const std::string_view name, const std::span<const 
             if (const auto parsed = number(value)) event.fade_out_previous_seconds = std::max(0.0, *parsed);
         } else if (key == "LOOP") {
             event.loop = boolean(value).value_or(false);
+        } else if (key == "MSS_INTERNAL_LOOP") {
+            event.internal_loop = boolean(value).value_or(false);
         }
     }
     return event;

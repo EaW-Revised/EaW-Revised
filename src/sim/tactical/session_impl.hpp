@@ -6,15 +6,54 @@
 #include "staging.hpp"
 #include "../../../third_party/entt/single_include/entt/entt.hpp"
 
+#include <algorithm>
+#include <set>
+
 namespace eawr::sim::tactical {
 
 using namespace session_detail;
 
+// Engine-synthesised, unrecorded commands (the autofired CONCENTRATE_FIRE, WAB-36): bit 63 of the
+// sequence marks them and the low bits name the source entity. Coordinator-reserved range in the
+// numbers registry (out/coord/numbers.md); every recorded command's sequence is a small counter.
+inline constexpr std::uint64_t synthesised_command_bit = std::uint64_t{1} << 63;
+[[nodiscard]] constexpr CommandKey synthesised_command_key(const std::uint64_t tick, const PlayerId owner,
+    const EntityId source) noexcept {
+    return {tick, owner, synthesised_command_bit | source};
+}
+[[nodiscard]] constexpr bool synthesised_command(const CommandKey& key) noexcept {
+    return (key.sequence & synthesised_command_bit) != 0;
+}
+
+// WAB-36: the unit ability served by a nested handler whose own admission accepts an enemy attack
+// target, so that it can switch on through the attack-state pass. The other handlers refuse that
+// target: BUZZ_DROIDS and CORRUPT_SYSTEMS admit only a MARKER object; STEALTH, SENSOR_JAMMING,
+// LASER_DEFENSE, BLAST and the cluster bomb only no target or the unit itself. The ion shot's
+// team path is AB-68.
+[[nodiscard]] inline std::optional<AbilityKind> attack_target_ability(const SpecialAbilityKind kind) noexcept {
+    switch (kind) {
+    case SpecialAbilityKind::tractor_beam: return AbilityKind::tractor_beam;
+    case SpecialAbilityKind::energy_weapon: return AbilityKind::energy_weapon;
+    case SpecialAbilityKind::leech_shields: return AbilityKind::leech_shields;
+    case SpecialAbilityKind::concentrate_fire: return AbilityKind::concentrate_fire;
+    default: return std::nullopt;
+    }
+}
+
 class TacticalSession::Impl final {
 public:
+    std::optional<RetreatConfig> retreat;
+    RetreatState retreat_state;
+    std::optional<PlayerId> midbattle_solve;
+    [[nodiscard]] RetreatGate retreat_gate(PlayerId player) const;
+    [[nodiscard]] std::vector<RetreatView> retreat_views() const;
+    [[nodiscard]] std::vector<RetreatActor> retreat_actors(const UnitStage* staged = nullptr) const;
+    [[nodiscard]] bool retreat_holds(EntityId id) const;
+    [[nodiscard]] bool retreat_escape(EntityId id) const;
     Impl(const TacticalSetup& source, const std::span<const SensorProfile> sensor_table, const DurabilityTable& table,
         const MotionTable& motion_table, const std::optional<FogRules>& fog_rules, const CombatTable& combat_table,
-        const VictoryRules& victory_rules, const AbilityTable& ability_table, const EconomyRules& economy_rules);
+        const VictoryRules& victory_rules, const AbilityTable& ability_table, const EconomyRules& economy_rules,
+        const MapBox& box);
 
     // A counted star base (#77, VT-03) joins the ascending-ID list the victory evaluation walks.
     // Tick lifecycle notifications reconcile destruction and ownership conversion (WBF-31).
@@ -27,6 +66,14 @@ public:
         const DurabilityProfile* profile, const EntityId unit, const std::uint64_t frame) const;
 
     [[nodiscard]] LiveUnit new_unit(const UnitState& unit, const std::uint64_t frame) const;
+
+    NamedAbilityLocks named_ability_locks;
+    // Derived from canonical unit types; sparse lifecycle hooks maintain it during a battle.
+    using RadarRoster = std::map<EntityId, std::vector<std::size_t>>;
+    RadarRoster radar_roster;
+    [[nodiscard]] std::vector<std::size_t> radar_slots(TypeId type) const;
+    [[nodiscard]] core::Result<std::vector<SnapshotPlayer>> publish_named_abilities(
+        std::vector<LiveUnit>& units, const NamedAbilityLocks&, const RadarRoster&, const PartitionExecutor&) const;
 
     [[nodiscard]] const DurabilityProfile* health_profile(const LiveUnit& unit) const noexcept;
 
@@ -50,8 +97,24 @@ public:
     struct CommandLedger {
         std::vector<CommandSource> sources;
         std::map<EntityId, std::vector<std::size_t>> recipients;
+        std::map<PlayerId, std::vector<std::pair<std::uint32_t, math::Fixed>>> battlefield_defence;
+        std::vector<std::pair<PlayerId, math::Fixed>> reveal_multipliers;
     };
     CommandLedger command_ledger;
+    // WGT-50: last multiplier consumed by fog, indexed by bounded setup player order.
+    std::array<math::Fixed, max_players> last_fog_multipliers{};
+    bool fog_modifiers_dirty{}; // derived event hint; no checkpoint field
+    [[nodiscard]] std::array<math::Fixed, max_players> fog_multipliers(const CommandLedger& ledger) const {
+        std::array<math::Fixed, max_players> values{};
+        for (std::size_t i = 0; i < setup.players.size(); ++i) {
+            const auto player = setup.players[i].player_id;
+            const auto found = std::lower_bound(ledger.reveal_multipliers.begin(), ledger.reveal_multipliers.end(), player,
+                [](const auto& row, const PlayerId id) { return row.first < id; });
+            values[i] = found != ledger.reveal_multipliers.end() && found->first == player
+                ? found->second : math::Fixed::from_raw(math::Fixed::scale);
+        }
+        return values;
+    }
     std::optional<core::Diagnostic> initialization_error;
     [[nodiscard]] core::Result<CommandLedger> update_command_ledger(const std::vector<LiveUnit>& live,
         const EntityId first_new, const PartitionExecutor& executor) const;
@@ -127,14 +190,28 @@ public:
     mutable bool impact_bonus_containers_ready{};
     std::vector<EntityId> beam_replans;
     std::vector<AbilitySpawnState> ability_spawns; // ascending shared projectile IDs; HABL
+    std::vector<BuzzDroidState> buzz_droids; // WAB-71..74: ascending droid entity IDs; BUZZ
+    [[nodiscard]] const BuzzDroidsProfile* buzz_profile(TypeId source) const;
     [[nodiscard]] const SpawnedAbilityProfile* spawn_profile(TypeId) const;
     [[nodiscard]] core::Result<void> service_weaken(std::vector<LiveUnit>&, std::uint64_t, const PartitionExecutor&);
     [[nodiscard]] const SpecialAbilityProfile* beam_profile(const LiveUnit&, AbilityKind) const;
-    [[nodiscard]] bool beam_target_valid(const LiveUnit&, const LiveUnit&, const SpecialAbilityProfile&) const;
+    [[nodiscard]] bool beam_target_valid(const LiveUnit&, const LiveUnit&, const SpecialAbilityProfile&, bool admission = true) const;
     [[nodiscard]] bool beam_in_range(const LiveUnit&, const LiveUnit&, const SpecialAbilityProfile&) const;
+    // The source-side gates of a targeted beam's switch-on: handler live and user-input, slot ready.
+    [[nodiscard]] bool beam_usable(const LiveUnit&, AbilityKind, std::uint64_t) const;
+    // Switches a targeted beam on and locks it onto `target` (a command or autofire, WAB-36).
+    [[nodiscard]] AbilitySwitch lock_beam(LiveUnit&, EntityId target, AbilityKind, std::uint64_t) const;
     void release_beam(LiveUnit&, AbilityKind, std::uint64_t) const;
+    // WHE-59: an energy beam locked without a chosen hardpoint aims at the target's nearest standing
+    // targetable hardpoint (authored order on ties), else the hull (no_hardpoint).
+    [[nodiscard]] std::uint32_t energy_hardpoint(const LiveUnit& source, const LiveUnit& target) const;
     void register_tractor(const LiveUnit&, const LiveUnit*);
     [[nodiscard]] core::Result<void> service_beams(std::vector<LiveUnit>&, std::uint64_t, const PartitionExecutor&);
+    [[nodiscard]] bool buzz_request_ready(const LiveUnit&, math::Vec3, std::uint64_t) const;
+    [[nodiscard]] LiveUnit create_buzz_droids(LiveUnit&, math::Vec3, std::uint64_t, EntityId& allocated_next_id);
+    // WLD-03..WLD-05: active LASER_DEFENSE looks for a hostile shot to shoot down before the shots fly.
+    [[nodiscard]] core::Result<void> service_laser_defence(const std::vector<LiveUnit>&, std::uint64_t,
+        const PartitionExecutor&, std::vector<CombatEvent>& zaps);
     [[nodiscard]] const SpecialAbilityProfile* concentrate_profile(const LiveUnit& unit) const;
     [[nodiscard]] core::Result<void> service_concentrate(std::vector<LiveUnit>& units,
         std::uint64_t tick, const PartitionExecutor& executor);
@@ -170,6 +247,7 @@ public:
     // AB-43: DEFEND switched on brings the unit's next shield and energy recharges forward to the
     // next tick, from where they run at DEFEND's intervals.
     void defend_switched_on(LiveUnit& unit, const std::uint64_t tick) const;
+    void service_blast(LiveUnit&, std::uint64_t tick) const; // FS-34: before hardpoint fire
 
     // AB-42: the hull and shield a hit took from a unit that runs the DEFEND stand-in.
     void track_damage(LiveUnit& unit, const math::Fixed hull_before, const math::Fixed shields_before) const;
@@ -177,6 +255,17 @@ public:
     // IS-01 to IS-04, IS-07 (#561): an ion shot stuns the unit it hit; the stun ends an active
     // DEFEND (early, AB-12). Speed changes wait for the next tick's ability phase (IS-05, AB-24).
     void ion_stun_unit(LiveUnit& unit, const IonStunShot& shot, const std::uint64_t tick) const;
+    // WST-03 to WST-08: the cloak's switch-on, its end and its per-frame detection.
+    // `factor` scales the cloak's own count (WST-03); see stealth_duration_factor.
+    void stealth_switched_on(LiveUnit& unit, std::uint64_t tick, math::Fixed factor) const;
+    // WST-03: 1 plus the cloak-duration modifiers of the completed upgrades that reach `owner`:
+    // the largest per stacking category, the categories summed. Read when the cloak switches on.
+    [[nodiscard]] math::Fixed stealth_duration_factor(PlayerId owner, const std::vector<PlayerEconomy>& accounts) const;
+    static void clear_stealth(LiveUnit& unit) noexcept;
+    void detect_stealth(LiveUnit& unit, std::span<const LiveUnit> units, std::uint64_t tick) const;
+    // WST-11: `target` is a stealth-invisible enemy (a squadron: every live craft is) and the
+    // attacker's type (a squadron: its craft's) cannot target stealth units.
+    [[nodiscard]] bool hidden_from(const UnitStage& staged, EntityId target, const LiveUnit& attacker, std::uint64_t tick) const;
 
     // IS-03: a unit's stun ends at its end frame. IS-05: neither its start nor its end plans a
     // move under way again; a move planned while it lasts keeps its cut speed.
@@ -189,6 +278,25 @@ public:
     // One unit's ability service at `tick` (the ability phase, AB-11, AB-16, AB-41, AB-42).
     // Returns whether its speed multiplier changed since its move was planned.
     [[nodiscard]] bool service_abilities(LiveUnit& unit, const std::uint64_t tick) const;
+
+    // WSD-02: switching SELF_DESTRUCT on or off clears the unit's attack target, as every behaviour
+    // ability does (WAB-04); the move under way is kept.
+    static void self_destruct_switched(LiveUnit& unit);
+
+    // WSD-04, WSD-09, WSD-10: one unit's SELF_DESTRUCT at `tick`, in the ability phase. A unit whose
+    // countdown has run out reports true (it detonates this tick's impact phase); a unit that runs the
+    // Krayt object script services it when due and switches the ability on when it meets its trigger.
+    // `units` are read-only here except `units[index]`; `craft_squadron` maps each craft to its squadron
+    // container; `boxes` holds this tick's unit boxes (the proximity query, WSD-10).
+    [[nodiscard]] bool service_self_destruct(std::vector<LiveUnit>& units, std::size_t index,
+        const std::map<EntityId, EntityId>& craft_squadron, const detail::CollectionTrees& boxes,
+        std::uint64_t tick) const;
+
+    // FS-29/FD-47: disjoint update and nested sample; true stages a direct ring creation
+    // in the same ability phase's ordered commit, never a future command.
+    [[nodiscard]] bool service_mc30(LiveUnit& unit, std::span<const UnitState> inputs,
+        const std::map<EntityId, EntityId>& craft_squadron, const detail::CollectionTrees& boxes,
+        std::uint64_t tick) const;
 
     // AB-50: the unit's abilities as the snapshot shows them, ready as of `tick`.
     [[nodiscard]] std::vector<AbilityStatus> ability_statuses(const LiveUnit& unit, const std::uint64_t tick) const;
@@ -212,6 +320,7 @@ public:
 
     // #530: each ledger with its owner's population (PU-21) for presentation.
     [[nodiscard]] std::vector<PadView> pad_views() const;
+    [[nodiscard]] std::vector<GarrisonTimerView> garrison_timer_views() const;
     [[nodiscard]] std::vector<std::pair<PlayerId, ManualPlayerClock>> manual_clock_views() const {
         return {manual_clocks.begin(), manual_clocks.end()};
     }
@@ -220,6 +329,13 @@ public:
         const std::vector<PlayerEconomy>& staged_ledgers, const std::map<EntityId, PopulationShare>& staged_shares) const;
 
     [[nodiscard]] bool allied(const PlayerId left, const PlayerId right) const;
+
+    // WRB-05, WRB-06: the enabled Redirect_Blaster handlers of `defender` that react to a shot from `attacker`,
+    // in authored order. A handler is enabled when its authored Initially_Enabled holds (true when absent) or an
+    // Enable_Ability of a completed upgrade names it for the defender's type: held by the defender's owner, or
+    // by an ally when the upgrade affects all allies.
+    [[nodiscard]] std::vector<const SpecialAbilityProfile*> redirect_blaster_handlers(const LiveUnit& defender,
+        const LiveUnit& attacker, const std::vector<PlayerEconomy>& staged_ledgers) const;
 
     [[nodiscard]] const Player* player_of(const PlayerId id) const noexcept;
 
@@ -272,9 +388,16 @@ public:
         UnitStage& staged, EconomyStage& stage, std::vector<Event>& events,
         const CollisionWorld* collisions = nullptr, const bool executing_pad = false);
 
-    // Live units with a sensor profile, in the order of `units` (ascending ID).
+    // WR-43: an arrival whose reveal service is disabled keeps the circle it marked at creation, at
+    // the drop point, until the service enables again (WR-39).
+    struct HeldReveal {
+        EntityId id{};
+        math::Vec3 position{};
+    };
+    // Live units with a sensor profile, in the order of `units` (ascending ID). A unit in `held`
+    // (ascending ID) reveals from its held point instead of its position.
     [[nodiscard]] static std::vector<FogRevealer> revealers(const SensorField& field, const std::span<const UnitState> units,
-        const std::span<const EntityId> disabled = {});
+        const std::span<const HeldReveal> held = {});
 
     // Own-team players always see a unit (V-04). Other players see it by the retail fog cells
     // when the session is bound to fog rules (V-11 to V-17), else by the exact range test.
@@ -282,9 +405,12 @@ public:
         const math::Vec3& position, TypeId type = {}, math::Quat rotation = math::identity_quat()) const;
 
     // `now`: the tick the snapshot's readers act at (the completed tick it is published with).
-    [[nodiscard]] TacticalInstance instance_for(const LiveUnit& unit, const math::Mat3x4& transform, const std::uint64_t now) const;
+    [[nodiscard]] TacticalInstance instance_for(const LiveUnit& unit, const math::Mat3x4& transform,
+        const std::uint64_t now, const std::map<EntityId, SpecialWeaponState>* staged_special = nullptr) const;
 
     [[nodiscard]] LiveUnit live_at(const EntityId id, const entt::entity handle) const;
+    // WU-37: whether the committed unit carries the garrison birth mark (false for an unknown ID).
+    [[nodiscard]] bool garrison_marked(EntityId id) const;
 
     [[nodiscard]] std::vector<LiveUnit> sorted_live() const;
 
@@ -317,6 +443,7 @@ public:
 
     // plan_path's last step: the unit takes `plan`.
     static void take_plan(LiveUnit& unit, MotionState plan);
+    static void retain_path_failure(LiveUnit& unit, math::Vec3 target, std::uint64_t frame, math::Fixed max_speed);
 
     // plan_path, whose path search (a tracked unit with a world) is given up once it has counted
     // `budget` expansions (PC-08): false then, and the unit is unchanged.
@@ -353,6 +480,11 @@ public:
     // unit. Zero otherwise, and for a unit without a motion profile.
     [[nodiscard]] static EntityId approach_target(const LiveUnit& unit) noexcept;
 
+    // WMV-13 (#719): the unit the order in force names (attack, attack-move, guard), whether or
+    // not T-01 still holds it as the unit's target. Zero otherwise, and for a unit without a
+    // motion profile.
+    [[nodiscard]] static EntityId order_unit(const LiveUnit& unit) noexcept;
+
     // OR-06: an approach is checked every reevaluation interval after the order's tick.
     [[nodiscard]] bool approach_due(const LiveUnit& unit, const std::uint64_t tick) const noexcept;
 
@@ -364,10 +496,10 @@ public:
     [[nodiscard]] bool target_hardpoint_standing(const LiveUnit& target, const std::uint32_t index) const;
 
     // OR-04, OR-14: the point the in-range test measures to: a guarded unit's position, else the
-    // aim point of A-04 seen from `from`; OR-25: an attack on a hardpoint measures to that
-    // hardpoint while it stands.
-    [[nodiscard]] static math::Vec3 approach_point(const bool guard, const LiveUnit& target,
-        const detail::CombatUnit* target_view, const math::Vec3& from, const std::uint32_t hardpoint = attack_hull);
+    // aim point of A-04 seen from `unit` (its best hardpoint, WCC-18); OR-25: an attack on a
+    // hardpoint measures to that hardpoint while it stands.
+    [[nodiscard]] math::Vec3 approach_point(const LiveUnit& unit, const bool guard, const LiveUnit& target,
+        const detail::CombatUnit* target_view, const std::uint32_t hardpoint = attack_hull) const;
 
     // Where the unit's current movement leaves it (OR-06): the tracked prediction of its path at
     // the path's end (where the last frame before the last node puts it, MV-32), else where it is.
@@ -379,9 +511,15 @@ public:
     [[nodiscard]] static core::Result<math::Vec3> predicted_position(
         const LiveUnit& target, const std::uint64_t frame, const std::uint64_t at);
 
+    // OR-07: footprinted none/static layers predict from their resolved aim; moving
+    // layers and footprint-less movers retain parent tracking. Guards pass the parent.
+    [[nodiscard]] core::Result<math::Vec3> predicted_approach_position(const LiveUnit& target,
+        const math::Vec3& aim, const std::uint64_t frame, const std::uint64_t at) const;
+
     // OR-05, OR-07: a new approach towards `target` from where the unit is at `frame`.
     [[nodiscard]] core::Result<ApproachPlan> approach_mapping(
-        const LiveUnit& unit, const LiveUnit& target, const math::Fixed range, const std::uint64_t frame) const;
+        const LiveUnit& unit, const LiveUnit& target, const math::Fixed range, const std::uint64_t frame,
+        const std::optional<math::Vec3>& aim = std::nullopt) const;
 
     // OR-06: nullopt while the unit keeps its movement (in range of the target now, or at the end
     // of its movement in range of the target's predicted position), else its new approach.
@@ -418,15 +556,19 @@ public:
         LiveUnit& unit, bool projectile = false) const;
 
     [[nodiscard]] std::vector<std::uint8_t> canonical_bytes() const;
+    [[nodiscard]] bool special_weapons_enabled(PlayerId player, const std::vector<PlayerEconomy>& accounts,
+        const UnitStage* live = nullptr, const std::set<PlayerId>* staged_disabled = nullptr) const;
 
     TacticalSetup setup;
     std::vector<SensorProfile> sensors;
     DurabilityTable durability;
     MotionTable motion;
     CombatTable combat;
+    std::map<std::pair<TypeId, std::uint32_t>, std::shared_ptr<const WeaponProfile>> manual_admission_profiles;
     VictoryRules victory;
     AbilityTable abilities;
     EconomyRules economy;                           // #530
+    MapBox map_box;                                 // WDF-05: the fighter grids' low corner
     std::map<EntityId, PadState> pads;
     std::map<EntityId, ConstructionState> construction;
     ObjectStage<PadState> pad_stage;
@@ -436,6 +578,17 @@ public:
     std::array<CaptureScratch, tick_partition_count> capture_scratch;
     AsteroidScratch asteroid_scratch; // retained scratch, never canonical state
     NebulaScratch nebula_scratch;
+    struct HealingPulse { std::size_t source{}, target{}, slot{}; std::uint32_t hardpoint{hull_target}; };
+    struct HealingJob { std::size_t target{}, begin{}, end{}; };
+    struct HealingScratch {
+        std::vector<math::Fixed> fractions;
+        std::array<std::vector<HealingPulse>, tick_partition_count> outputs;
+        std::vector<HealingPulse> pulses;
+        std::vector<HealingJob> jobs;
+        std::vector<std::optional<core::Diagnostic>> errors;
+    } healing_scratch;
+    core::Result<void> service_healing(std::vector<LiveUnit>& units, const std::map<EntityId, ArrivalState>& arrivals,
+        std::uint64_t tick, const PartitionExecutor& executor, std::vector<CombatEvent>& events);
     std::vector<PlayerEconomy> ledgers;             // #530: per economy player, ascending ID
     std::map<EntityId, ArrivalState> arrivals;      // #530: arriving units (PU-35)
     std::map<EntityId, PopulationShare> shares;     // #530: reinforced units' population (PU-21)
@@ -444,7 +597,10 @@ public:
     std::map<EntityId, RespawnBatch> respawns; // due frame -> creation requests, in death order
     std::vector<StarbaseEntry> starbases;   // counted star bases standing, ascending ID (#77)
     std::optional<BattleOutcome> outcome;   // hashed once decided (#77)
+    std::vector<DepartureControl> departure_controls;
+    std::vector<PlayerId> basic_ai; // MP-37: departed factions retaining ownership under an AI controller
     std::vector<PlayerQuit> quits; // WBF-48: committed departure status, ascending player ID
+    std::vector<BeaconState> beacons; // HCB-12: at most one active beacon per issuer.
     // WBF-45: immutable history is shared by snapshots between sparse notification commits.
     std::shared_ptr<const std::vector<BattleLoss>> losses = std::make_shared<const std::vector<BattleLoss>>();
     std::shared_ptr<const std::vector<BattleProduction>> productions = std::make_shared<const std::vector<BattleProduction>>();
@@ -457,6 +613,7 @@ public:
     // every tracking interval from there.
     std::array<std::uint64_t, 4> tracking_anchor{};
     std::map<CommandKey, TacticalSession::ReinforcementSearch> reinforcement_searches;
+    std::array<std::uint8_t, 32> campaign_binding{}; // derived from the sealed initial replay setup
     std::map<std::pair<PlayerId, std::uint64_t>, TacticalSession::ReinforcementSearchResult> reinforcement_search_results;
     // Path searches running in slices (PC-08, #520), by unit; each unit waits for its search
     // with a sliced FormationWait of the same frame. A search's copied views and progress are a
@@ -468,7 +625,9 @@ public:
         PlayerId owner{};
         std::uint32_t damage_type{no_type_index};
         bool internal_damage_misc{true};
-        detail::BlastRecipient recipient;
+        EntityId recipient{};
+        math::Fixed amount{};
+        std::string contacted_mesh;
     };
     std::vector<PendingBlastDamage> pending_blast_damage;
     // #636: the projectile phase's candidate buffers, one per partition, kept from tick to tick
@@ -503,7 +662,10 @@ public:
     std::map<PlayerId, std::pair<std::uint64_t, std::uint64_t>> last_submitted;
     std::vector<PlayerCommand> executed;
     std::map<PlayerId, ManualPlayerClock> manual_clocks; // WAD-40: shared across stations
+    std::map<EntityId, SpecialWeaponState> special_weapons; // WSW-14/19: persistent planetary sources.
+    std::set<PlayerId> special_disabled_by_hardpoint; // WSW-48: absence is the default enabled permission
     std::vector<EntityId> projectile_defence_order; // coordinator-reserved PDEF; empty implies static creation order
+    bool waypoint_queues_present{}; // Derived component-commit gate, outside canonical state.
     std::shared_ptr<const TacticalSnapshot> current_snapshot;
     std::uint64_t registry_emplacement_count{};
     std::function<void(std::string_view, bool)> commit_observer;

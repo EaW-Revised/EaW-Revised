@@ -19,6 +19,7 @@ namespace fs = std::filesystem;
 using eawr::platform::PublishedFile;
 using eawr::platform::PublishFault;
 using eawr::platform::publish_files;
+using eawr::platform::publish_path_files;
 
 int failures = 0;
 
@@ -118,6 +119,40 @@ void test_failed_steps_keep_targets(const fs::path& base) {
     }
 }
 
+void test_unicode_publication(const fs::path& base) {
+    const auto root = base / fs::path(std::u8string(u8"\u03a3\u03b1\u03b2-\U0001f600"));
+    fs::create_directories(root);
+    const auto target = root / "save.eawrsave";
+    const auto encoded = target.u8string();
+    const std::string name(encoded.begin(), encoded.end());
+    auto report = publish_path_files({{"save", target, "first"}});
+    expect(!report.failure && fs::exists(target), "UTF-8 publication names the intended file");
+    report = publish_path_files({{"save", target, "second"}}, [&](std::string_view step, const std::string& path) {
+        expect(path.find(name) == 0, "fault paths preserve UTF-8");
+        return step == "publish" ? std::make_error_code(std::errc::permission_denied) : std::error_code{};
+    });
+    expect(report.failure && report.failure->path == name && report.leftovers.empty(), "UTF-8 failure keeps its path and rolls back");
+    std::ifstream input(target, std::ios::binary);
+    const std::string contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    expect(contents == "first", "failed Unicode overwrite preserves the previous file");
+}
+
+void test_native_narrow_publication(const fs::path& base) {
+    const auto root = fresh(base, "native-narrow");
+    const auto target = root / "ansi-output.csv";
+    const auto name = target.string();
+    const auto report = publish_files({{"native output", name, "native caller"}},
+        [&](std::string_view step, const std::string& path) {
+            expect(path.find(name) == 0, "native caller fault paths retain native separators and encoding");
+            return step == "publish" ? std::make_error_code(std::errc::permission_denied) : std::error_code{};
+        });
+    expect(report.failure && report.failure->path == name && report.leftovers.empty(),
+        "native caller failure retains its original narrow path");
+    expect(!fs::exists(target), "failed native publication leaves an absent target absent");
+    const auto success = publish_files({{"native output", name, "native caller"}});
+    expect(!success.failure && fs::exists(target), "native narrow caller still publishes an ASCII target");
+}
+
 // Finding 4: a failed restore or removal is reported, and a backup that could not be put
 // back is never removed.
 void test_cleanup_failures_are_reported(const fs::path& base) {
@@ -161,6 +196,8 @@ int main() {
                       / ("eawr-publish-files-tests-" + std::to_string(device()));
     fs::create_directories(base);
     test_success(base);
+    test_unicode_publication(base);
+    test_native_narrow_publication(base);
     test_failed_steps_keep_targets(base);
     test_cleanup_failures_are_reported(base);
     std::error_code ignored;

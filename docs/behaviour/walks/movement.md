@@ -133,6 +133,42 @@
   lacks a formation scans its attack distance only; a present formation contributes the allowance
   when WMV-17 admits diversion. Splitting a completed formation for one team copies completion
   history and resets a position base destination to that team's current position.
+  Losing the coordinator's object base destination converts it to a position and
+  clears its target attachment, preserving the populated formation and completion
+  history. The fallback is the formation path's final node, or its centre position
+  when the path has no nodes. Normal target loss and later diversion can therefore
+  accept another attack destination. The squadron model uses its retained accepted
+  route for that lost base, or the current team centre otherwise; retention of a separate
+  base path beyond the fighter combat boundary remains an unmodelled seam.
+  A mobile launch creates an ordinary escort destination. In the debug build, the
+  moving formation enters done when its team and live members admit movement and no active team path
+  remains; done service records completion history when the sole base destination
+  remains. Team service copies the leader's movement state and clears its path only
+  after every live member's path is gone. Physical idle velocity is not an unfinished path.
+  The model approximates movement-start eligibility with the squadron's shared
+  movement/approach state and live member path trackers; it has no per-member
+  locomotor admission state. It stages sole-base completion after ordinary flight
+  in the partitioned squadron service and commits the existing fields in order.
+  An active approach or member path prevents completion; an override cannot create
+  base history. This applies to ordinary position/attack bases and every escort,
+  including player guard-of-unit and attack-move-of-unit orders, not just launches.
+  **Named escort-path seam:** FM-24's arrived idle-cell hold stands in for the
+  escort's base path. A remote launch remains incomplete until that arrival. If its
+  unit is lost first, the existing idle transition keeps the last hold point;
+  completion still waits for reaching that point and successfully claiming a cell.
+  Ending combat while that hold is pending preserves it and cannot claim the
+  team's current position instead. The existing escorted identity retains this
+  provenance until completion or a replacement order. Ordinary attack orders
+  still hold where combat ends under FD-09. Newly claimed holds use the existing ordered
+  FM-24 allocation and FM-26 publication; on the claim tick, the team container
+  snaps to the claimed cell point while its members retain their ordinary flight.
+  Full escort path copying, per-member admission and the completed-destination reset
+  remain unmodelled. Conversion preserves history; a subsequent arrived sole-base
+  done service can establish it, admitting later idle diversion and retaliation.
+  Until that service completes,
+  the existing diversion/retaliation refusal and out-of-reach member-target clearing
+  still apply. This producer is sourced from a debug-build reading; no fresh-launch
+  retail runtime capture was made.
 - **WMV-19** (debug build, EMV-13; WSQ-12) A formation's override maximum speed is set when the
   coordinator maps its layers (FM-09's planning speed) and when it finds an updated path, and
   reset (none) when it re-plans (WMV-15).
@@ -190,12 +226,87 @@ Our code: `src/sim/tactical/motion.cpp` (the locomotor and the search), `session
 | WMV-06 | LZ rules, authored ship flight heights | same once authored ship flight heights merges |
 | WMV-10, WMV-11, WMV-19 | FM and OR rules | same |
 | WMV-12 | none for squadron escorts (FM-21: the carrier's exact position at `Max_Speed`) | **differs**, filed as squadron escort formation moves (legacy EAWR-692) |
-| **WMV-13** | OR-08: a fogged target ends the approach and the ship keeps its movement | **differs**: FoC flies to the last seen position and drops the target within 40 units |
+| WMV-13 | OR-08: the unit flies to its lost target's last observed position and drops the target within 40 units (`session_step_targets.cpp`). Project choice: the move there starts once the unit's current movement ends | same |
 | WMV-14 | none | same for FoC's disabled default; enabled idle drift is not implemented |
 | **WMV-15, WMV-16, WMV-17** | squadrons: FT-01 keeps a target, FO-05 measures from the leader, no cancel check | **differs** (squadron diversions) |
 | **WMV-18** | optional formation presence, base destination and completion history; member scans add allowance only when diversion is admitted | same for creation/presence and completed position bases; full destination stacks and attack-move tethers remain incomplete |
 | WMV-20, WMV-21 | `session_world.cpp` destination snapshot; `combat_aim.cpp` A-04/A-06 | destination centre and combat aim are separate; the team-member choice follows FO-04 |
 | WMV-30, WMV-31 | OR rules, planned attack-approach paths | same once planned attack-approach paths merges |
+
+### Per-kind motion tag consumers
+
+The debug-build tag-table and accessor cross-reference review distinguishes a parsed value
+from a flight consumer (motion tag coverage (legacy EAWR-843)). Evidence E843-01 is the parser
+table review, E843-02 the accessor cross-references, and E843-03 the branch review; the raw
+receipts remain private. The kinds below mean the ordinary layered ship flight and craft
+flight described by WMV-01..WMV-03 and FM-01..FM-08.
+
+- **WMV-40** (debug build, E843-01..E843-03) Ship path flight does not consume `Max_Thrust`
+  or `Max_Lift`. Craft flight uses thrust for its speed step and lift for its pitch step.
+  An alternate locomotor's thrust/lift reads do not establish a consumer in ordinary ship
+  path flight. Separately, attack positioning reads `Max_Thrust` when `Keep_Moving_In_Battle`
+  is enabled, to derive a stopping-distance threshold from maximum speed squared divided by
+  twice thrust. That flag defaults to false and is not authored in the effective FoC XML;
+  this optional AI consumer is distinct from ship acceleration.
+- **WMV-41** (debug build, E843-02, E843-03) The movement coordinator fetches `Min_Speed`
+  before assigning the object to a layer. Its minimum-speed ratios affect merging objects
+  with no layer; the layered ship branch does not use the fetched value. A ship's path
+  speed has no `Min_Speed` floor. Craft flight and formation speed use the minimum speed
+  as documented by FM-01 and WMV-12.
+- **WMV-42** (debug build, E843-01..E843-03) Ordinary ship acceleration and deceleration
+  use `OverrideAcceleration` and `OverrideDeceleration`, falling back to maximum speed
+  when the corresponding override is zero. Craft flight changes speed by `Max_Thrust`,
+  not either override. Generic formation upkeep has a separate read of each formation
+  member type's `OverrideDeceleration` for speed limits based on forward and sideways
+  error; a craft flight exclusion does not establish absence of that formation consumer.
+  The type default is zero (E2675-01, debug-build type initialization), and the formation
+  read does not replace zero with maximum speed. For a member behind its row, its forward
+  speed is capped at formation maximum speed plus `sqrt(2 * deceleration * abs(deviance))`.
+  The sideways ceiling is the smaller of member maximum speed and formation maximum
+  speed plus `sqrt(2 * deceleration * abs(shift * maximum-side-error))`. Upkeep normalizes
+  `(1, shift)`, divides the forward speed by its forward component, and, only when the
+  signed sideways component is positive, caps the result by the sideways ceiling divided
+  by that component; finally it clamps to `[0, member maximum speed]`. Thus an absent or
+  zero override bounds positive correction at formation speed. Ordinary layered ships
+  use their separate slot/path locomotor, not this no-layer formation upkeep.
+- **WMV-43** (debug build, E843-01, E843-02; WSQ-33, DG-26) `Minimum_Follow_Distance`
+  is read by craft following, and `Out_Of_Combat_Defense_Adjustment` by craft moving,
+  idle and stopped flight. Ordinary ship flight reads neither value. The defense
+  adjustment is a damage modifier maintained by craft flight, not a ship speed value.
+- **WMV-44** (debug build, E843-03; data) Formation upkeep's deceleration read is on the
+  formation member type, not necessarily on each child craft. Stock standalone
+  `Millennium_Falcon` has the craft locomotor, no space layer and `OverrideDeceleration`
+  0.3. The no-layer coordinator can include it in a group formation, whose upkeep reads
+  this authored value to bound speed when forward or sideways slot error is present.
+  Squadron containers supply their resolved `Create_Team_Type` data, rather than the
+  purchase template, to this formation routine;
+  a deceleration authored only on their child craft does not prove that route consumes it.
+  The type getter scales the override by actual maximum speed over authored maximum
+  speed only when the type maximum is nonzero; with an explicitly zero maximum it returns
+  the raw authored override directly, without `Object_Max_Speed_Multiplier_Space` or live
+  speed modifiers: E2675-01's debug-build getter returns the stored override in its zero
+  branch, discarding the computed actual speed; the multiplier enters through the actual
+  speed ratio in the nonzero branch. It never substitutes a child's maximum or deceleration. An omitted
+  `Max_Speed` retains the nonzero type default (0.25, E2675-01), so it still uses the ratio.
+  Actual base speed is the smaller of the member type maximum and its live team
+  roster minimum; speed modifiers belong to the formation member itself. The remake
+  gathers that minimum in its existing roster pass and uses its existing movement
+  ability, upgrade and disabled-engine inputs.
+  This is static debug-build reachability, not a retail measurement of the resulting trace.
+  The remake applies this through the squadron profile of the member, including standalone
+  craft profiles. Craft flight still changes speed with `Max_Thrust`. The stock Falcon
+  group contract traces slot error before and after binding correction limits; original-game
+  group settling remains unverified against retail.
+
+| Tag | Ordinary ship flight | Craft flight | Other reviewed consumer |
+|---|---|---|---|
+| `Max_Thrust` | ignored | speed step (FM-05) | optional attack positioning, WMV-40 |
+| `Min_Speed` | no speed floor | minimum speed (FM-01) | no-layer formation merging and upkeep, WMV-41 |
+| `Max_Lift` | ignored | pitch step (FM-04) | alternate locomotor, WMV-40 |
+| `OverrideAcceleration` | acceleration (MV-01) | ignored | generic locomotion outside craft flight |
+| `OverrideDeceleration` | deceleration (MV-01) | ignored | formation upkeep, WMV-42 |
+| `Minimum_Follow_Distance` | ignored | following separation (WSQ-33) | none in ship flight |
+| `Out_Of_Combat_Defense_Adjustment` | ignored | defense modifier (DG-26) | projectile damage reads the maintained modifier |
 
 ### XML tags this subsystem reads
 

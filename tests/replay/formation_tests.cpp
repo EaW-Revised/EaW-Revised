@@ -174,6 +174,7 @@ int main(int argc, char** argv) {
     test_plan_searches_phase();
     test_single_lanes();
     test_search_budget();
+    test_failed_path_retry();
     test_wait_replaced();
     test_disabled_engine_group_session();
     test_block_slots();

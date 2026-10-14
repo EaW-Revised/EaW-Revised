@@ -47,17 +47,24 @@ class BattleAudio final {
 public:
     struct Options final {
         bool muted{};
+        // MAT-18: the demo battle queues no speech, advisor, announcement or GUI event, starts no
+        // 3D sound event (retail plays them at multiplier 0) and no tactical music, so nothing of it
+        // reaches the shared buses; no bus is muted, because the front end's menu music, clicks and
+        // slider previews play on the same SFX and music buses. The refusals are counted
+        // (attract_silenced()).
+        bool attract_silent{};
         audio::MixLevels levels{};
         audio::Admission admission{};
     };
-    BattleAudio(godot::Node3D& host, const vfs::Vfs& filesystem, const data::Catalog& catalog, Options options);
+    BattleAudio(godot::Node3D& host, std::shared_ptr<const vfs::Vfs> filesystem, const data::Catalog& catalog, Options options);
     ~BattleAudio();
     BattleAudio(const BattleAudio&) = delete;
     BattleAudio& operator=(const BattleAudio&) = delete;
 
     // Reads the SFXEvents, audio.xml, the command rankings, the music events and each unit type's
     // sound events. Never fails the view: what does not resolve is reported.
-    void prepare(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, std::string_view local_faction);
+    void prepare(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, std::string_view local_faction,
+                 std::set<sim::tactical::TypeId> first_types);
     // One presentation frame: the events of the ticks the frame reached, the gestures the player
     // made, the camera it renders and the frame's duration in seconds.
     void frame(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
@@ -66,6 +73,8 @@ public:
                std::vector<BattleEffects::TerminalSound> terminal_sounds = {});
     void release();
     void loading_complete();
+    [[nodiscard]] bool briefing_queue_empty() const { return speech_queue_.size() == 0; }
+    [[nodiscard]] bool campaign_briefing(std::string_view event_name);
     void set_mix_levels(const audio::MixLevels& levels);
     void set_admission(const audio::Admission& admission) { options_.admission = admission; }
     void set_attached_silent(sim::EntityId source, bool silent) {
@@ -77,6 +86,20 @@ public:
         double age{};
     };
     [[nodiscard]] std::span<const RadarWarning> radar_warnings() const noexcept { return radar_warnings_; }
+    // MAT-18: what the attract gate refused (speech, GUI and announcement events, queued speech) and
+    // what started on the voice path anyway (queued speech played, a speech-class event allocated).
+    // `started` stays 0 while Options::attract_silent holds. The 3D members are the same for the
+    // positional events: refused before the queue, and any that started anyway.
+    struct AttractSilence final {
+        std::uint64_t refused{};
+        std::uint64_t queued{};
+        std::uint64_t started{};
+        std::uint64_t sfx_3d_refused{};
+        std::uint64_t sfx_3d_started{};
+    };
+    [[nodiscard]] AttractSilence attract_silenced() const noexcept {
+        return {attract_refused_, speech_queued_, speech_class_starts_, attract_3d_refused_, spatial_starts_};
+    }
     // The report's "battle_audio" member, followed by ",\n".
     void write_report(std::ostream& output) const;
 
@@ -87,6 +110,13 @@ private:
         std::map<std::uint32_t, const audio::SfxEvent*> fire;          // by weapon slot key
         std::map<std::uint32_t, const audio::SfxEvent*> detonate;      // Projectile_SFXEvent_Detonate
         std::map<std::uint32_t, const audio::SfxEvent*> detonate_armor; // ..._Reduced_By_Armor
+        std::map<std::uint32_t, const audio::SfxEvent*> ability_detonate;
+        std::map<std::uint32_t, const audio::SfxEvent*> ability_detonate_armor;
+        std::map<std::uint32_t, const audio::SfxEvent*> barrage_detonate;
+        std::map<std::uint32_t, const audio::SfxEvent*> barrage_detonate_armor;
+        std::map<std::uint32_t, const audio::SfxEvent*> charged_detonate;
+        std::map<std::uint32_t, const audio::SfxEvent*> charged_detonate_armor;
+        const audio::SfxEvent* blast_activate{};
         const audio::SfxEvent* death{};
         const audio::SfxEvent* spin_death{};
         const audio::SfxEvent* asteroid_damage{};
@@ -98,6 +128,7 @@ private:
         int ambient_max_delay{300};
         const audio::SfxEvent* build_started{};
         const audio::SfxEvent* build_complete{};
+        const audio::SfxEvent* special_ready{}; // WSW-34: source preference before faction fallback
         const audio::SfxEvent* build_cancelled{};
         struct SpeechEvent final {
             std::string name;
@@ -140,9 +171,17 @@ private:
         };
         std::map<sim::tactical::AbilityKind, AbilityVoice> ability_voices;
         std::map<sim::tactical::AbilityKind, const audio::SfxEvent*> ability_targets;
+        const audio::SfxEvent* leech_loop{};
+        const audio::SfxEvent* corrupt_activate{};
+        // WLD-12: LASER_DEFENSE's Zap_SFXEvent, started on the Crusader at each shot it shoots down.
+        const audio::SfxEvent* point_defence_zap{};
+        std::vector<const audio::SfxEvent*> heal_pulses;
+        // WSD-11: the countdown's start sound (Selt_Destruct_SFXEvent_Start_Die) of a type with SELF_DESTRUCT.
+        const audio::SfxEvent* self_destruct_start{};
+        // WRB-12: a Redirect_Blaster handler's SFXEvent_Activate, played where it deflects a shot.
+        const audio::SfxEvent* redirect_block{};
     };
-    // A faction's toggle sounds for one ability (BA-50): what its own and its allies' switches play,
-    // and what an enemy's play.
+    // BA-50 faction data; SND-26 owner policy only requests the local seat's on/off cues.
     struct Toggle final {
         const audio::SfxEvent* on{};
         const audio::SfxEvent* off{};
@@ -152,6 +191,13 @@ private:
     // BA-85: countdown-spawned projectiles retain their own detonation cue.
     std::map<sim::tactical::TypeId, const audio::SfxEvent*> projectile_detonations_;
     std::map<sim::tactical::TypeId, const audio::SfxEvent*> terminal_detonations_;
+    struct DecodedSample final {
+        std::uint32_t rate{};
+        std::uint16_t channels{};
+        std::vector<std::byte> pcm;
+        std::string cause;
+    };
+    [[nodiscard]] DecodedSample decode_sample(const std::string& name) const;
     struct Sample final {
         godot::Ref<godot::AudioStream> stream;
         std::string cause;  // why it did not load
@@ -197,6 +243,11 @@ private:
     std::array<const audio::SfxEvent*, 4> reinforcement_sounds_{};
     std::array<const audio::SfxEvent*, static_cast<std::size_t>(audio::CommandCue::count)> command_cues_{};
     std::map<sim::EntityId, audio::EventQueue::Handle> pad_loops_;
+    std::map<sim::EntityId, audio::EventQueue::Handle> leech_loops_;
+    // WSD-02/WSD-08: each running countdown's start sound; it stops when the countdown stops (a cancel
+    // or the unit's end), as the debug build's disable path does.
+    std::map<sim::EntityId, audio::EventQueue::Handle> self_destruct_sounds_;
+    std::uint64_t self_destruct_sound_stops_{};
     void respond(const BattleInput::Acknowledgement& acknowledgement, const LiveSessionView& live);
     // BA-50, BA-51: the toggle sound of an ability the snapshot at `tick` shows switched on or off.
     void toggle_abilities(const sim::tactical::TacticalSnapshot& snapshot, const LiveSessionView& live);
@@ -204,7 +255,8 @@ private:
     void voice_ability(const LiveSessionView::AbilityClick& click, const LiveSessionView& live);
     void target_ability(const LiveSessionView::AbilityClick& click, const LiveSessionView& live);
     void spawned_ability(const sim::tactical::TacticalInstance& instance, const sim::tactical::AbilityStatus& status,
-                         bool hidden);
+                         bool hidden, const LiveSessionView& live);
+    void arm_droids(const sim::tactical::TacticalSnapshot& snapshot, const LiveSessionView& live);
     [[nodiscard]] const std::map<sim::tactical::AbilityKind, Toggle>& toggles_of(const std::string& faction);
     void cue_music(const audio::MusicDirector::Cue& cue);
     void update_voices(const audio::Vec3& listener, const LiveSessionView& live);
@@ -264,6 +316,10 @@ private:
     [[nodiscard]] const SpeechEvent* speech_event(std::string_view name);
     void production_cue(const SpeechEvent* speech, const audio::SfxEvent* fallback, std::string_view reason);
     void update_speech(bool paused);
+    // MAT-18: true for the event classes the demo battle keeps off the voice path.
+    [[nodiscard]] static bool speech_class(const audio::SfxEvent& event) noexcept {
+        return event.localized || event.hud_vo || event.unit_response_vo || event.ambient_vo || event.gui;
+    }
     std::map<std::string, SpeechEvent> speech_events_;
     audio::SpeechQueue<SpeechEvent> speech_queue_;
     audio::SpeechStream speech_stream_;
@@ -275,24 +331,45 @@ private:
     std::uint64_t speech_completed_{};
     std::uint64_t speech_failed_{};
     std::uint64_t speech_overflow_{};
+    std::uint64_t attract_refused_{};
+    std::uint64_t attract_3d_refused_{};
+    std::uint64_t speech_class_starts_{};
     audio::SightingAnnouncements sightings_;
     const audio::SfxEvent* enemy_spotted_{};
-    std::uint64_t sighting_tick_{};
+    // WST-14: SFX_Stealth_Reveal, a 2D cue when a cloaked unit's detection reveals it; the units
+    // whose cloak hid them in the last presented snapshot.
+    const audio::SfxEvent* stealth_reveal_{};
+    std::set<sim::EntityId> stealth_hidden_;
+    audio::SightingService sighting_service_;
+    space::UnitFade sighting_fade_;
+    std::uint64_t sighting_pruned_at_{};
     std::uint64_t ducked_starts_{};
     std::uint64_t ducked_updates_{};
     bool gui_dialog_{};
 
     godot::Node3D* host_;
-    const vfs::Vfs* filesystem_;
+    // Own the mounted input through release and member teardown.
+    std::shared_ptr<const vfs::Vfs> filesystem_;
     const data::Catalog* catalog_;
+    std::map<sim::tactical::TypeId, const audio::SfxEvent*> beacon_sounds_;
+    std::map<sim::tactical::PlayerId, std::uint64_t> beacon_heard_;
     Options options_;
     audio::SfxRegistry registry_;
     audio::Space3D space_;
+    bool spatial_audio_available_{};
+    std::uint64_t spatial_starts_{};
+    std::uint64_t two_d_starts_{};
     audio::Voices voices_;
     audio::Random random_{0x84};
     std::vector<std::string> rankings_;
     std::map<sim::tactical::TypeId, TypeSounds> types_;
+    // WSW-33/34: own-ready, own-fire, enemy-ready, enemy-fire; blanks retain their indices.
+    std::array<std::vector<const audio::SfxEvent*>, 4> special_speech_;
     std::map<std::string, Sample> samples_;
+    std::set<std::string> preloaded_samples_;
+    bool samples_prepared_{};
+    std::uint64_t synchronous_runtime_loads_{};
+
     std::vector<audio::MusicEvent> music_events_;
     std::vector<audio::Field> tactical_music_fields_;
     std::array<const audio::MusicEvent*, 2> summary_events_{}; // WBF-47: resolved win, lose
@@ -355,6 +432,8 @@ private:
     // A dead unit's entry stays here until its destruction event reaches the report (BA-16 needs its
     // last position), so `respond()` checks `live_entities_`, not this map, for liveness.
     std::map<sim::EntityId, Seen> last_seen_;
+    // WSD-11: the tick each unit the local player saw die was destroyed (its blast sounds when it was seen).
+    std::map<sim::EntityId, std::uint64_t> seen_deaths_;
     // Every entity this tick's snapshot still carries (BA-24): a squadron's dead craft leave this
     // set the tick they leave the instances, ahead of last_seen_'s own, event-driven pruning.
     std::set<sim::EntityId> live_entities_;
@@ -372,8 +451,17 @@ private:
         bool timed{};
         std::uint32_t remaining{};
         std::uint64_t started{};
+        bool positioned{};
     };
     std::map<std::pair<sim::EntityId, sim::tactical::AbilityKind>, AbilityMemory> ability_memory_;
+    // WAB-75: a buzz-droid object type's own arming cue (Activate_SFX) and arming delay in frames,
+    // and each live droid's first presented tick, so the cue starts once at its arming frame.
+    struct DroidArming final {
+        const audio::SfxEvent* cue{};
+        std::uint64_t frames{};
+    };
+    std::map<sim::tactical::TypeId, DroidArming> droid_arming_;
+    std::map<sim::EntityId, std::pair<std::uint64_t, bool>> droid_seen_;
     bool ability_memory_started_{};
     std::map<std::string, std::map<sim::tactical::AbilityKind, Toggle>> toggles_;
     std::vector<std::string> ability_log_;

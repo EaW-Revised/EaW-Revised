@@ -780,20 +780,20 @@ void test_large_distance_delay() {
             "WAD-17: large-box delay witness detonates once");
         if (!step) continue;
         const auto bytes = session.canonical_state_bytes();
-        constexpr std::array<std::uint8_t, 4> tag{'B', 'L', 'S', 'T'};
+        constexpr std::array<std::uint8_t, 4> tag{'D', 'D', 'M', 'G'};
         const auto block = std::search(bytes.begin(), bytes.end(), tag.begin(), tag.end());
-        expect(block != bytes.end() && bytes.end() - block >= 68,
+        expect(block != bytes.end() && bytes.end() - block >= 60,
             "WAD-17: overlapping box admits one queued delivery outside the tiny radius");
-        if (block == bytes.end() || bytes.end() - block < 68) continue;
+        if (block == bytes.end() || bytes.end() - block < 60) continue;
         const auto read = [&](const std::size_t offset, const std::size_t width) {
             std::uint64_t value{};
             for (std::size_t byte = 0; byte < width; ++byte)
                 value |= static_cast<std::uint64_t>(block[static_cast<std::ptrdiff_t>(offset + byte)]) << (byte * 8);
             return value;
         };
-        expect(read(4, 4) == 3 && read(12, 8) == 1 && read(28, 8) == 2,
-            "WAD-17: BLST v3 retains the large-box recipient");
-        expect(read(44, 8) == (std::uint64_t{1} << 60),
+        expect(read(4, 4) == 1 && read(12, 8) == 1 && read(28, 8) == 2,
+            "WAD-17: DDMG v1 retains the large-box recipient");
+        expect(d::delayed_damage_frames(Fixed::from_raw(std::int64_t{1} << 60)) == 2061584302080ULL,
             "WAD-17: admitted centre distance produces representable delay raw 2^60");
         expect(read(20, 8) == detonation_frame + 2061584302080ULL,
             "WAD-26: large delay truncates to 2061584302080 frames without overflow");
@@ -801,6 +801,160 @@ void test_large_distance_delay() {
         expect(health && health->hull == q(1000), "WAD-17: distant delivery remains pending");
         if (workers == 1) reference = bytes;
         else expect(bytes == reference, "WAD-17: large-delay canonical queue matches on 1/2/4/8 workers");
+    }
+}
+
+void test_delayed_canonical_order() {
+    std::vector<std::uint8_t> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        Battle battle(false, false);
+        battle.replay.setup.units = {{1, 1, 1, at(0)}, {2, 2, 2, at(100)}, {3, 1, 1, at(90)}};
+        battle.replay.commands = {{{9, 1, 0}, {1}, t::DamagePayload{q(1000)}},
+            {{11, 1, 1}, {3}, t::DamagePayload{q(1000)}}};
+        battle.combat.profiles[0].weapons.clear();
+        battle.combat.profiles[1].collision.reset();
+        t::ShotProfile shot;
+        shot.speed = Fixed::from_raw(1);
+        shot.max_travel = q(1000);
+        shot.blast = payload().blast;
+        shot.blast.dropoff = false;
+        shot.blast.max_delay = q(1);
+        death_payloads(battle.combat.profiles[0], {shot}, Fixed{});
+        auto session = battle.make();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (std::uint64_t tick = 0; tick <= 12; ++tick) {
+            if (tick == 10 || tick == 12) {
+                expect(session.projectiles().size() == 1,
+                    "DDMG: each source death creates one stationary payload");
+                if (!session.projectiles().empty())
+                    expect(session.request_projectile_explosion(session.projectiles().front().id),
+                        "DDMG: request payload at tick 10 or 12");
+            }
+            expect(static_cast<bool>(session.step(executor)), "DDMG: canonical order witness steps");
+        }
+        const auto bytes = session.canonical_state_bytes();
+        constexpr std::array<std::uint8_t, 4> tag{'D', 'D', 'M', 'G'};
+        const auto block = std::search(bytes.begin(), bytes.end(), tag.begin(), tag.end());
+        expect(block != bytes.end() && bytes.end() - block >= 100,
+            "DDMG: two deliveries remain queued after tick 12");
+        if (block == bytes.end() || bytes.end() - block < 100) continue;
+        const auto read = [&](const std::size_t offset, const std::size_t width) {
+            std::uint64_t value{};
+            for (std::size_t byte = 0; byte < width; ++byte)
+                value |= static_cast<std::uint64_t>(block[static_cast<std::ptrdiff_t>(offset + byte)]) << (byte * 8);
+            return value;
+        };
+        expect(read(12, 8) == 2 && read(56, 4) == 0 && read(96, 4) == 0,
+            "DDMG: two hull deliveries with empty mesh names");
+        expect(read(20, 8) == 13 && read(60, 8) == 25,
+            "DDMG: B queued at tick 12 due 13 precedes A queued at tick 10 due 25");
+        expect(bytes == session.canonical_state_bytes(), "DDMG: repeated encoding is stable");
+        if (workers == 1) reference = bytes;
+        else expect(bytes == reference, "DDMG: due-order canonical bytes equal on 1/2/4/8 workers");
+    }
+}
+
+void test_delayed_value_routing() {
+    expect(d::delayed_damage_frames(Fixed::from_raw(Fixed::scale / 25)) == 1,
+        "WAD-26: 1.2 logical frames truncates to one");
+    expect(d::delayed_damage_frames(Fixed::from_raw(1)) == 1,
+        "WAD-26: a positive subframe delay clamps to one");
+    expect(d::delayed_damage_frames(Fixed::from_raw(Fixed::scale / 10)) == 2,
+        "WAD-26: Q24 value just below 0.1 seconds truncates before three frames");
+    t::CombatProfile current;
+    current.hardpoint_meshes = {"other", "engine", "ENGINE"};
+    const auto hit = d::delayed_damage_hit(q(20), 7, false, "EnGiNe", &current);
+    expect(hit.hardpoint == 1 && hit.amount == q(20) && hit.damage_type == 7 && !hit.internal_damage_misc,
+        "EUS-15: retained mesh name resolves case-insensitively against current recipient layout");
+    expect(!hit.projectile && !hit.area && !hit.energy_damage && hit.shield_damage && hit.hitpoint_damage
+        && hit.source == eawr::sim::invalid_entity_id && hit.cause_damage_multiplier == q(1)
+        && hit.kind == t::HitKind::delayed,
+        "EUS-15: delayed delivery has ordinary flags and no source effect inputs");
+    expect(d::delayed_damage_hit(q(20), 7, true, "missing", &current).hardpoint == t::hull_target
+        && d::delayed_damage_hit(q(20), 7, true, "", &current).hardpoint == t::hull_target,
+        "EUS-15: absent or unmatched contacted mesh uses ordinary hull routing");
+}
+
+std::vector<std::string> delayed_weapon_order_trace(const eawr::sim::PartitionExecutor& executor,
+    const Fixed max_delay, const bool lethal) {
+    Battle battle(false, false);
+    battle.replay.setup.units = {{1, 1, 1, at(0)}, {2, 2, 2, at(80)}};
+    auto& shot = *battle.combat.profiles[0].weapons[0].shot;
+    shot.blast.max_delay = max_delay;
+    shot.speed = q(1); // keep the source projectile alive while both initial scans become ready
+    battle.combat.profiles[1].collision.reset();
+    battle.combat.profiles[1].max_attack_distance = q(500);
+    auto weapon = battle.combat.profiles[0].weapons[0];
+    // A hardpoint has no object-weapon recharge jitter: this gun is ready every tick.
+    weapon.hardpoint = 0;
+    weapon.cone_width = q(360); weapon.cone_height = q(180);
+    weapon.min_recharge_hundredths = weapon.max_recharge_hundredths = 0;
+    weapon.shot->blast = {};
+    weapon.shot->damage = q(1);
+    battle.combat.profiles[1].weapons = {weapon};
+    battle.combat.profiles[1].hardpoints = {{0, at(0), false}};
+    battle.combat.profiles[1].hardpoint_meshes = {"gun"};
+    battle.health.profiles[1].hardpoints = {{t::HardpointRole::weapon, false, Fixed{}}};
+    const auto initial_hull = lethal ? q(150) : q(1000);
+    battle.health.profiles[1].max_hull = initial_hull;
+    battle.replay.commands.push_back({{0, 2, 0}, {2}, t::AttackPayload{1}});
+    auto session = battle.make();
+    std::vector<std::string> rows;
+    std::optional<std::uint64_t> queued;
+    bool requested{}, delivered{}, fired_before{}, target_ready{};
+    for (std::uint64_t frame = 0; frame < 70; ++frame) {
+        if (!requested && target_ready && !session.projectiles().empty()) {
+            const auto projectile = std::find_if(session.projectiles().begin(), session.projectiles().end(),
+                [](const auto& value) { return value.shooter == 1; });
+            if (projectile != session.projectiles().end()) requested = session.request_projectile_explosion(projectile->id);
+        }
+        const auto step = session.step(executor);
+        expect(static_cast<bool>(step), "WFO-14: delayed weapon-order witness steps");
+        if (!step) break;
+        const auto& combat = step.value().snapshot->combat_events();
+        const auto fired = std::any_of(combat.begin(), combat.end(), [](const auto& event) {
+            return event.kind == t::CombatEventKind::weapon_fired && event.shooter == 2;
+        });
+        target_ready = target_ready || fired;
+        if (step.value().blast_detonations) {
+            queued = frame;
+            fired_before = fired;
+            expect(session.durability_state(2) && session.durability_state(2)->hull == initial_hull,
+                "WAD-26: positive delay never lands in the queueing tick");
+        }
+        if (queued && frame == *queued + 1) {
+            delivered = true;
+            expect(fired_before, "WFO-14: recipient weapon fires in the queueing tick");
+            if (lethal) {
+                expect(!session.durability_state(2), "WAD-26: lethal delayed damage destroys recipient on exact due tick");
+                expect(!fired, "WFO-14: due destruction prevents recipient weapon firing on this tick");
+                expect(std::any_of(step.value().snapshot->losses().begin(), step.value().snapshot->losses().end(), [](const auto& loss) {
+                    return loss.owner == 2 && loss.type == 2 && loss.killer == 1;
+                }), "EUS-15: delayed destruction retains source owner attribution");
+            } else {
+                expect(session.durability_state(2) && session.durability_state(2)->hull == q(850),
+                    "WAD-26: surviving control receives damage on exact due tick");
+                expect(fired, "WFO-14: surviving control fires its ready weapon on the due tick");
+            }
+        }
+        rows.push_back(step.value().state_sha256 + step.value().snapshot->sha256());
+    }
+    expect(requested && queued && delivered, "WAD-26: exact one-tick delayed delivery observed (requested=" + std::to_string(requested)
+        + ", queued=" + std::to_string(queued.has_value()) + ", delivered=" + std::to_string(delivered) + ")");
+    return rows;
+}
+
+void test_delayed_weapon_order() {
+    const eawr::sim::InlineExecutor inline_executor;
+    for (const auto delay : {Fixed::from_raw(Fixed::scale / 10), Fixed::from_raw(Fixed::scale / 1000)}) {
+      for (const bool lethal : {false, true}) {
+        const auto reference = delayed_weapon_order_trace(inline_executor, delay, lethal);
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(delayed_weapon_order_trace(executor, delay, lethal) == reference,
+                "WFO-14: exact due tick, owner and weapon-order witness equal on 1/2/4/8 workers");
+        }
+      }
     }
 }
 
@@ -832,6 +986,9 @@ int main() {
     test_rocket_blast_determinism();
     test_death_payloads();
     test_delayed_metadata();
+    test_delayed_value_routing();
+    test_delayed_canonical_order();
+    test_delayed_weapon_order();
     test_large_distance_delay();
     if (failures) return 1;
     std::cout << "blast contracts passed (WAD, workers 1/2/4/8, detonation-only work)\n";

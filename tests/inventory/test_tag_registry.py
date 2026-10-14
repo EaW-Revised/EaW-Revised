@@ -73,7 +73,7 @@ class Fixture(unittest.TestCase):
         (self.root / "src" / "sim").mkdir(parents=True)
         (self.root / CODE).write_text(CODE_TEXT, encoding="utf-8")
         (self.root / "docs" / "behaviour").mkdir(parents=True)
-        (self.root / "docs" / "behaviour" / "movement.md").write_text("MV-11 a rule\n", encoding="utf-8")
+        (self.root / "docs" / "behaviour" / "movement.md").write_text("## MV-11 a rule\n", encoding="utf-8")
         self.universe = tr.load_universe(INVENTORY)
 
     def tearDown(self) -> None:
@@ -105,6 +105,153 @@ class UniverseTests(unittest.TestCase):
 
 
 class RegistryRuleTests(Fixture):
+    def test_campaign_scene_requires_reviewed_sourced_consumers(self) -> None:
+        rows = full_rows()
+        row = next(row for row in rows if row["tag"] == "Max_Speed")
+        row.update(scene="campaign", basis="reviewed", note="Campaign scene application only.")
+        self.assertEqual(self.problems(registry(*rows)), "")
+        for change in ({"scene": "skirmish"}, {"basis": "auto"}, {"basis": None},
+                       {"status": "partial"}, {"status": "todo"}, {"note": ""},
+                       {"applied": []}, {"applied": [applied(rules=[])]}):
+            with self.subTest(change=change):
+                changed = [{**item, **change} if item is row else item for item in rows]
+                self.assertIn("scene must be campaign", self.problems(registry(*changed)))
+        # Scope cannot hide a dead source or an undeclared rule.
+        row["applied"] = [applied("absent_identifier")]
+        self.assertIn("'absent_identifier' is not in", self.problems(registry(*rows)))
+        row["applied"] = [applied(rules=["WGCH-999999"])]
+        self.assertIn("WGCH-999999", self.problems(registry(*rows)))
+
+    def test_identifier_matches_whole_words_outside_comments(self) -> None:
+        value = registry(*full_rows())
+        for body in ("void longer_max_speed() {}", "void max_speed_extra() {}",
+                     "// max_speed\nvoid other_code() {}", "/* max_speed */ void other_code() {}",
+                     "int count = 1'000; // max_speed ' ignored",
+                     "// continued \\\nmax_speed\nvoid other_code() {}"):
+            with self.subTest(body=body):
+                (self.root / CODE).write_text(body + "\nint layer_z;", encoding="utf-8")
+                self.assertIn("'max_speed' is not in", self.problems(value))
+        for body in ('void max_speed() {}', 'const char* url = "https://host"; int max_speed;',
+                     'const char* raw = R"tag(/* //)tag"; int max_speed;',
+                     'int max_speed/* comment */;'):
+            with self.subTest(body=body):
+                (self.root / CODE).write_text(body + "\nint layer_z;", encoding="utf-8")
+                self.assertEqual(self.problems(value), "")
+        self.assertEqual(tr.uncomment_cpp("max_/* comment */speed"), "max_ speed")
+
+    def test_generic_and_short_identifiers_require_specific_targets(self) -> None:
+        for identifier in ("own", "id", "name", "list", "node", "box", "rules", "curve", "short", "RULES", "result", "config", "buffer", "number", "params"):
+            rows = full_rows()
+            rows[0]["applied"] = [applied(identifier)]
+            self.assertIn("TODO code location", self.problems(registry(*rows), root=False))
+        rows = full_rows()
+        rows[0]["applied"] = [applied("apply_motion")]
+        (self.root / CODE).write_text("void apply_motion() {} int max_speed; int layer_z;", encoding="utf-8")
+        self.assertEqual(self.problems(registry(*rows)), "")
+
+    def test_rule_ids_require_declarations(self) -> None:
+        (self.root / "docs/behaviour/movement.md").write_text(
+            "Prose references XX-99 and CRC-32.\n"
+            "## MV-11 movement\n"
+            "### C-08: UTF-16 units\n"
+            "- **AV-05** (research example) footprint\n"
+            "- AV-12: step costs\n"
+            "* __UA-07 Death clone.__ example\n"
+            "1. `SP-02` death completion\n"
+            "**BOLD-01** paragraph declaration\n"
+            "| Rule | Meaning |\n| --- | --- |\n"
+            "| **TAB-02** | references REF-03 |\n"
+            "| `TAB-04` | hash SHA-256 |\n"
+            "| Logical path | SHA-256 |\n"
+            "```\n## FAKE-01\n| FAKE-02 | example |\n```\n", encoding="utf-8")
+        self.assertEqual(tr.known_rules(self.root), {"MV-11", "TAB-02", "TAB-04", "C-08", "AV-05", "AV-12", "UA-07", "SP-02", "BOLD-01"})
+        rows = full_rows()
+        rows[0]["applied"][0]["rules"] = ["XX-99", "CRC-32", "SHA-256", "REF-03", "UTF-16"]
+        problems = self.problems(registry(*rows))
+        for identifier in rows[0]["applied"][0]["rules"]:
+            self.assertIn(f"rule {identifier} is in no docs/behaviour note", problems)
+
+    def test_missing_identifier_reports_other_source_files(self) -> None:
+        (self.root / CODE).write_text("int layer_z; // max_speed", encoding="utf-8")
+        moved = self.root / "src/sim/moved.cpp"
+        moved.write_text("int max_speed;", encoding="utf-8")
+        (self.root / "src/sim/comment.cpp").write_text("// max_speed", encoding="utf-8")
+        (self.root / "src/sim/substring.cpp").write_text("int max_speed_extra;", encoding="utf-8")
+        problems = self.problems(registry(*full_rows()))
+        self.assertIn("also found in: src/sim/moved.cpp", problems)
+        self.assertNotIn("comment.cpp", problems)
+        self.assertNotIn("substring.cpp", problems)
+        (self.root / CODE).unlink()
+        self.assertIn("also found in: src/sim/moved.cpp", self.problems(registry(*full_rows())))
+
+    def test_unresolved_notes_are_reported_by_the_gate(self) -> None:
+        directory = self.root / "docs/tag-coverage"
+        directory.mkdir(parents=True)
+        statuses = directory / "statuses.json"
+        inventory = self.root / "tags.json"
+        inventory.write_text(json.dumps(INVENTORY), encoding="utf-8")
+        rows = full_rows()
+        rows[0]["note"] = "TODO #855: identify the declared movement rule."
+        statuses.write_text(tr.dumps_registry(registry(*rows)), encoding="utf-8")
+        output = io.StringIO()
+        from unittest.mock import patch
+        # Exercise diagnostic reporting independently of the production zero-TODO policy.
+        with patch.object(tr, "TODO_NOTE_CEILING", 1), contextlib.redirect_stdout(output):
+            result = tr.main(["check", "--statuses", str(statuses), "--inventory", str(inventory),
+                              "--repo", str(self.root)])
+        self.assertEqual(result, 0)
+        self.assertIn("TODO row 'Max_Speed' ['SpaceUnit']: identify the declared movement rule", output.getvalue())
+
+    def test_todo_note_ceiling_and_tracking_ticket(self) -> None:
+        rows = full_rows()
+        rows[0]["note"] = "TODO: identify the declared movement rule."
+        self.assertIn("TODO note needs a tracking ticket", self.problems(registry(*rows)))
+        rows[0]["note"] = "TODO #2566: identify the declared movement rule."
+        from unittest.mock import patch
+        with patch.object(tr, "TODO_NOTE_CEILING", 1):
+            self.assertEqual(self.problems(registry(*rows)), "")
+            rows[1]["note"] = "TODO #2566: identify the declared layer rule."
+            self.assertIn("TODO note count 2 exceeds ceiling 1", self.problems(registry(*rows)))
+            rows[0].pop("note")
+            self.assertEqual(self.problems(registry(*rows)), "")
+        with patch.object(tr, "TODO_NOTE_CEILING", 0):
+            self.assertIn("TODO note count 1 exceeds ceiling 0", self.problems(registry(*rows)))
+
+    def test_unauthored_engine_default_requires_catalog_owner_tag_and_evidence(self) -> None:
+        catalog = self.root / "docs/tag-coverage/engine-tags.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(json.dumps({"schema_version": 1, "evidence": {"ET-T053": "debug build"},
+            "rows": [{"tag": "Turret_XY_Only", "table_kind": "object-definition",
+                      "value_type": "boolean", "evidence": "ET-T053"}]}), encoding="utf-8")
+        row = {"tag": "Turret_XY_Only", "classes": ["SpaceUnit"], "status": "applied", "area": "combat",
+               "applied": [applied()], "engine_default": "GameObjectType", "evidence": "ET-T053"}
+        value = registry(*full_rows(), row, evidence={"DB-NOTAG": "debug build", "ET-T053": "debug build catalog"})
+        self.assertEqual(self.problems(value), "")
+        for field, replacement in (("tag", "Unknown_Turret_Flag"), ("engine_default", "GameConstants"),
+                                   ("evidence", "DB-NOTAG"), ("status", "todo")):
+            changed = copy.deepcopy(value)
+            target = next(r for r in changed["rows"] if r["tag"] == "Turret_XY_Only")
+            target[field] = replacement
+            changed["rows"].sort(key=tr.row_order)
+            self.assertIn("engine default needs", self.problems(changed))
+
+    def test_explicit_trace_scopes_are_validated(self) -> None:
+        for scope in ({"ability_types": ["CORRUPT_SYSTEMS"]},
+                      {"object_types": ["Cloaking_Upgrade"]},
+                      {"exclude_behaviors": ["MULTIPLAYER_BEACON"]},
+                      {"exclude_space_behaviors": ["SPECIAL_WEAPON"]}):
+            rows = full_rows()
+            rows[0]["applied"][0]["trace_scope"] = scope
+            self.assertEqual(self.problems(registry(*rows)), "")
+        for scope in ({}, "craft", {"unknown": ["X"]}, {"ability_types": []},
+                      {"ability_types": "X"}, {"ability_types": [1]},
+                      {"ability_types": ["X", "X"]}, {"ability_types": [" "]},
+                      {"exclude_behaviors": []}, {"exclude_behaviors": ["X", "X"]}):
+            with self.subTest(scope=scope):
+                rows = full_rows()
+                rows[0]["applied"][0]["trace_scope"] = scope
+                self.assertIn("trace_scope", self.problems(registry(*rows)))
+
     def test_a_complete_registry_passes(self) -> None:
         self.assertEqual(self.problems(registry(*full_rows())), "")
 
@@ -256,7 +403,134 @@ class LayoutTests(Fixture):
         self.assertEqual(tr.dumps_registry(copy.deepcopy(value)), tr.dumps_registry(value))
 
 
+class ShardTests(Fixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.statuses = self.root / "statuses.json"
+        self.galactic = self.root / "statuses-galactic.json"
+        self.inventory = self.root / "tags.json"
+        self.inventory.write_text(json.dumps(INVENTORY), encoding="utf-8")
+        rows = full_rows()
+        self.main = registry(*rows[:3])
+        self.main["shards"] = [self.galactic.name]
+        self.child = registry(*rows[3:])
+        self.save()
+
+    def save(self) -> None:
+        tr.write_text(self.statuses, tr.dumps_registry(self.main))
+        tr.write_text(self.galactic, tr.dumps_registry(self.child))
+
+    def gate(self) -> list[str]:
+        return tr.gate_problems(self.statuses, self.inventory, self.root)[0]
+
+    def test_split_preserves_coverage_counts_and_report(self) -> None:
+        whole = registry(*full_rows())
+        combined = tr.load_registry(self.statuses)
+        self.assertEqual(combined, whole)
+        self.assertEqual(self.gate(), [])
+        self.assertEqual(tr.render(combined, self.universe), tr.render(whole, self.universe))
+        # A list of independent roots is equivalent to the referenced split.
+        self.main.pop("shards")
+        self.save()
+        self.assertEqual(tr.load_registry([self.statuses, self.galactic]), whole)
+        self.assertEqual(tr.main(["check", "--statuses", str(self.statuses), "--statuses", str(self.galactic),
+                                  "--inventory", str(self.inventory), "--repo", str(self.root)]), 0)
+
+    def test_unreferenced_evidence_survives_loading_writing_and_formatting(self) -> None:
+        self.main["evidence"]["UNUSED-ROOT"] = "debug build: retained root evidence"
+        self.child["evidence"]["UNUSED-CHILD"] = "debug build: retained shard evidence"
+        self.save()
+        expected = {**self.main["evidence"], **self.child["evidence"]}
+        combined = tr.load_registry(self.statuses)
+        self.assertEqual(combined["evidence"], expected)
+        tr.write_registry(self.statuses, combined)
+        self.assertEqual(tr.load_registry(self.statuses)["evidence"], expected)
+        self.assertEqual(tr.main(["format", "--statuses", str(self.statuses)]), 0)
+        self.assertEqual(tr.load_registry(self.statuses)["evidence"], expected)
+        self.assertEqual(tr.load_shard(self.statuses)["evidence"], self.main["evidence"])
+        self.assertEqual(tr.load_shard(self.galactic)["evidence"], self.child["evidence"])
+
+    def test_duplicate_and_missing_pairs_cross_shards(self) -> None:
+        self.child["rows"].append(copy.deepcopy(self.main["rows"][0]))
+        self.child["rows"].sort(key=tr.row_order)
+        self.save()
+        self.assertTrue(any("is also in the row" in p for p in self.gate()))
+        self.child["rows"] = []
+        self.save()
+        self.assertTrue(any("has no registry row" in p for p in self.gate()))
+
+    def test_each_shard_is_canonical_and_format_preserves_ownership(self) -> None:
+        self.child["rows"].reverse()
+        self.galactic.write_text(json.dumps(self.child), encoding="utf-8")
+        self.assertTrue(any("statuses-galactic.json" in p and "canonical" in p for p in self.gate()))
+        self.assertTrue(any("rows are not sorted" in p for p in self.gate()))
+        before = self.statuses.read_bytes()
+        self.assertEqual(tr.main(["format", "--statuses", str(self.statuses)]), 0)
+        self.assertEqual(self.statuses.read_bytes(), before)
+        self.assertEqual(self.gate(), [])
+
+    def test_missing_repeated_and_cyclic_shards_fail(self) -> None:
+        self.galactic.unlink()
+        with self.assertRaises(OSError):
+            tr.load_registry(self.statuses)
+        self.save()
+        self.main["shards"] *= 2
+        self.save()
+        with self.assertRaisesRegex(tr.RegistryError, "repeated"):
+            tr.load_registry(self.statuses)
+        self.main["shards"] = [self.galactic.name]
+        self.child["shards"] = [self.statuses.name]
+        self.save()
+        with self.assertRaisesRegex(tr.RegistryError, "cycle"):
+            tr.load_registry(self.statuses)
+
+    def test_conflicting_evidence_and_unknown_shard_fields_fail(self) -> None:
+        self.child["evidence"]["DB-NOTAG"] = "different evidence"
+        self.save()
+        with self.assertRaisesRegex(tr.RegistryError, "conflicting evidence"):
+            tr.load_registry(self.statuses)
+        self.child = registry(*full_rows()[3:])
+        self.child["unexpected"] = True
+        # dumps_registry intentionally only emits recognized fields.
+        self.galactic.write_text(json.dumps(self.child), encoding="utf-8")
+        with self.assertRaisesRegex(tr.RegistryError, "unknown top-level"):
+            tr.load_registry(self.statuses)
+
+    def test_update_preserves_shard_ownership_and_new_rows_go_to_root(self) -> None:
+        old_main = {tr.pair_key(c, t) for c, t, _r in tr.expand(self.main)}
+        old_child = {tr.pair_key(c, t) for c, t, _r in tr.expand(self.child)}
+        combined = tr.load_registry(self.statuses)
+        for row in combined["rows"]:
+            if row["tag"] == "Abilities/Stun_Ability/Stun_Range":
+                row["ticket"] = 777
+        combined["rows"].append(dict(tag="New_Tag", classes=["Planet"], status="todo", area="data", ticket=888))
+        tr.write_registry(self.statuses, combined)
+        main, child = tr.load_shard(self.statuses), tr.load_shard(self.galactic)
+        self.assertEqual({tr.pair_key(c, t) for c, t, _r in tr.expand(child)}, old_child)
+        self.assertEqual({tr.pair_key(c, t) for c, t, _r in tr.expand(main)}, old_main | {("planet", "new_tag")})
+        self.assertEqual(main["shards"], [self.galactic.name])
+        self.assertEqual(next(r for r in child["rows"] if r["tag"].startswith("Abilities/"))["ticket"], 777)
+
+
 class CheckedInRegistryTests(unittest.TestCase):
+    def test_galactic_shard_owns_campaign_planet_and_trade_route(self) -> None:
+        root = tr.load_shard(tr.DEFAULT_STATUSES)
+        child = tr.load_shard(tr.DEFAULT_STATUSES.with_name("statuses-galactic.json"))
+        self.assertEqual(root["shards"], ["statuses-galactic.json"])
+        classes = {"Campaign", "Planet", "TradeRoute"}
+        self.assertFalse(any(classes.intersection(row["classes"]) for row in root["rows"]))
+        self.assertTrue(classes.issubset({c for c, _t, _r in tr.expand(child)}))
+        registry = tr.load_registry(tr.DEFAULT_STATUSES)
+        universe = tr.load_universe(tr.load_inventory(tr.DEFAULT_INVENTORY))
+        registered = {tr.pair_key(c, tag) for c, tag, _row in tr.expand(registry)}
+        # The tactical registry also reviews the two mod-authorable turret tags
+        # absent from the pinned authored stock inventory. Retain exact coverage
+        # and reject any other unexplained extra class/tag pair.
+        extra = {tr.pair_key(c, tag) for c in ("SpaceBuildable", "SpaceUnit", "SpecialStructure")
+                 for tag in ("Turret_Rotate_To_Rest_Delay_Sec", "Turret_XY_Only")}
+        self.assertEqual(registered - set(universe), extra)
+        self.assertEqual(sum(tr.counts(registry)[0].values()), len(universe) + len(extra))
+
     def test_gate(self) -> None:
         """The gate itself: the committed registry against the committed FoC tag inventory and the sources."""
         self.assertEqual(tr.main(["check"]), 0)

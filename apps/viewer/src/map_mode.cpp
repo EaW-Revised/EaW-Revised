@@ -89,8 +89,16 @@ namespace map_mode_detail {
 
 MapMode::MapMode(Options options) : state_(std::make_unique<State>(std::move(options))) {}
 MapMode::~MapMode() = default;
+std::string_view MapMode::failure() const noexcept { return state_->failure; }
 MapMode::MapMode(MapMode&&) noexcept = default;
 MapMode& MapMode::operator=(MapMode&&) noexcept = default;
+bool MapMode::briefing_queue_empty() const {
+    return !state_->battle_audio || state_->battle_audio->briefing_queue_empty();
+}
+bool MapMode::campaign_briefing(const std::string_view event_name) {
+    return state_->battle_audio && state_->battle_audio->campaign_briefing(event_name);
+}
+TacticalHud* MapMode::tactical_hud() const noexcept { return state_->hud.get(); }
 
 
 

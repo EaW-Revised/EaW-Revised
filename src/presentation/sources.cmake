@@ -7,6 +7,7 @@ set(EAWR_PRESENTATION_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/animation/idle_playback.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation/unit_clips.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/audio/sfx.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/audio/galactic.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/camera/camera.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/camera/constants_source.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/camera/controller.cpp"

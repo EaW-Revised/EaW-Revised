@@ -27,6 +27,10 @@ void test_speed_steps() {
            "TMC-01: the default step runs at the nominal 30");
     expect(ui::TimeControls(9).speed_step() == 4, "a step past 4 is clamped");
     expect(defaults.state() == ui::TimeState::play && defaults.track().empty(), "the panel starts at play");
+    ui::TimeControls agreed;
+    expect(agreed.set_speed_step(4, 23) && agreed.target_rate() == 60, "MP-06: observe agreed speed");
+    expect(!agreed.set_speed_step(5, 24) && !agreed.set_speed_step(4, 24), "invalid and unchanged choices do nothing");
+    expect(agreed.track().size() == 1 && agreed.track().front().tick == 23, "speed track uses its agreed tick");
 }
 
 void test_fast_forward() {

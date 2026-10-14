@@ -109,11 +109,69 @@ OpportunityOutcome service_opportunity(
 namespace detail {
 using namespace combat_detail;
 
-math::Fixed target_soft_radius(const MotionTable* motion, const CombatUnit& target) noexcept {
-    if (const auto* footprint = motion != nullptr ? motion->footprint(target.type_id) : nullptr) return footprint->radius;
-    if (target.profile == nullptr || !target.profile->collision) return {};
-    const auto& box = *target.profile->collision;
+namespace {
+
+// WWP-21: a type's soft radius outside a formation: its loaded combat geometry, else its
+// movement footprint, else the larger planar half extent of its collision box.
+[[nodiscard]] math::Fixed type_radius(const TargetFootprint* geometry, const MotionTable* motion, const TypeId type_id,
+    const CombatProfile* profile) noexcept {
+    if (geometry != nullptr) return geometry->radius;
+    if (const auto* footprint = motion != nullptr ? motion->footprint(type_id) : nullptr) return footprint->radius;
+    if (profile == nullptr || !profile->collision) return {};
+    const auto& box = *profile->collision;
     return math::Fixed::from_raw(std::max(box.max.x.raw() - box.min.x.raw(), box.max.y.raw() - box.min.y.raw()) / 2);
+}
+
+// WWP-21: the ideal team box over `count` roster slots; `extents(slot)` gives a live member's
+// planar hard half extents, or nothing for a slot without a member.
+template <typename Extents>
+[[nodiscard]] core::Result<TargetFootprint> ideal_team_footprint(const std::size_t count, const SquadronProfile& profile,
+    Extents&& extents) {
+    motion_detail::Calc calc;
+    math::Fixed low_x{}, low_y{}, high_x{}, high_y{};
+    // WWP-21: the ideal team box includes the origin and live members' compacted base slots,
+    // widened by each member's hard extents. Actual scattered flight positions do not enter it.
+    for (std::size_t slot = 0; slot < count; ++slot) {
+        const std::optional<std::pair<math::Fixed, math::Fixed>> half = extents(slot, calc);
+        if (!half) continue;
+        const auto offset = slot < profile.offsets.size() ? profile.offsets[slot] : math::Vec3{};
+        const auto [x, y] = *half;
+        low_x = std::min(low_x, calc.sub(offset.x, x));
+        high_x = std::max(high_x, calc.add(offset.x, x));
+        low_y = std::min(low_y, calc.sub(offset.y, y));
+        high_y = std::max(high_y, calc.add(offset.y, y));
+    }
+    const auto x = math::Fixed::from_raw(calc.sub(high_x, low_x).raw() / 2);
+    const auto y = math::Fixed::from_raw(calc.sub(high_y, low_y).raw() / 2);
+    const auto radius = calc.length(x, y);
+    if (!calc.ok()) return core::Result<TargetFootprint>::failure(calc.error("team target footprint"));
+    return core::Result<TargetFootprint>::success({profile.type_id, radius, x, y});
+}
+
+// A member's planar hard half extents from its combat geometry, else its movement footprint,
+// else half its collision box.
+[[nodiscard]] std::pair<math::Fixed, math::Fixed> member_extents(const TargetFootprint* geometry,
+    const MotionTable* motion, const TypeId type_id, const CombatProfile* profile, motion_detail::Calc& calc) {
+    const auto* movement = motion != nullptr ? motion->footprint(type_id) : nullptr;
+    auto x = geometry != nullptr ? geometry->x_extent : movement != nullptr ? movement->x_extent : math::Fixed{};
+    auto y = geometry != nullptr ? geometry->y_extent : movement != nullptr ? movement->y_extent : math::Fixed{};
+    if (geometry == nullptr && movement == nullptr && profile != nullptr && profile->collision) {
+        const auto& box = *profile->collision;
+        x = math::Fixed::from_raw(calc.sub(box.max.x, box.min.x).raw() / 2);
+        y = math::Fixed::from_raw(calc.sub(box.max.y, box.min.y).raw() / 2);
+    }
+    return {x, y};
+}
+
+} // namespace
+
+math::Fixed target_soft_radius(const MotionTable* motion, const CombatUnit& target) noexcept {
+    if (target.formation_footprint) return target.formation_footprint->radius;
+    return type_radius(target.footprint, motion, target.type_id, target.profile);
+}
+
+math::Fixed type_soft_radius(const CombatTable& table, const MotionTable* motion, const TypeId type_id) noexcept {
+    return type_radius(table.footprint(type_id), motion, type_id, table.find_target_type(type_id));
 }
 
 bool has_aim_hardpoint(const CombatUnit& target) noexcept {
@@ -128,6 +186,43 @@ bool has_aim_hardpoint(const CombatUnit& target) noexcept {
     return false;
 }
 
+core::Result<TargetFootprint> formation_target_footprint(const CombatWorld& world,
+    const std::span<const EntityId> members, const SquadronProfile& profile) {
+    return ideal_team_footprint(members.size(), profile,
+        [&](const std::size_t slot, motion_detail::Calc& calc) -> std::optional<std::pair<math::Fixed, math::Fixed>> {
+            const auto* member = world.find(members[slot]);
+            if (member == nullptr) return std::nullopt;
+            return member_extents(member->footprint, world.motion, member->type_id, member->profile, calc);
+        });
+}
+
+core::Result<TargetFootprint> formation_target_footprint(const CombatTable& table, const MotionTable* motion,
+    const std::span<const std::optional<TypeId>> member_types, const SquadronProfile& profile) {
+    return ideal_team_footprint(member_types.size(), profile,
+        [&](const std::size_t slot, motion_detail::Calc& calc) -> std::optional<std::pair<math::Fixed, math::Fixed>> {
+            const auto type_id = member_types[slot];
+            if (!type_id) return std::nullopt;
+            return member_extents(table.footprint(*type_id), motion, *type_id, table.find_target_type(*type_id), calc);
+        });
+}
+
+core::Result<math::Fixed> projectile_target_radius(const CombatWorld& world,
+    const CombatUnit& shooter, const CombatUnit* target) {
+    auto radius = target != nullptr ? target_soft_radius(world.motion, *target) : math::Fixed{};
+    // WWP-27: a craft contributes its own radius and its team's, except for a melee shooter.
+    const bool melee = shooter.profile != nullptr && shooter.profile->max_attack_distance
+        && world.table != nullptr && *shooter.profile->max_attack_distance <= world.table->melee_cutoff;
+    if (target != nullptr && !melee) {
+        const auto parent_id = world.container_of(target->id);
+        if (parent_id != target->id) {
+            if (const auto* parent = world.find(parent_id)) {
+                return math::add(radius, target_soft_radius(world.motion, *parent));
+            }
+        }
+    }
+    return core::Result<math::Fixed>::success(radius);
+}
+
 core::Result<math::Fixed> target_attack_distance(const MotionTable* motion, const CombatUnit& target,
     const math::Vec3 from, const math::Fixed distance, const bool hardpoint_aim) {
     motion_detail::Calc calc;
@@ -135,7 +230,11 @@ core::Result<math::Fixed> target_attack_distance(const MotionTable* motion, cons
     if (!hardpoint_aim) {
         const auto* footprint = motion != nullptr ? motion->footprint(target.type_id) : nullptr;
         math::Fixed x{}, y{};
-        if (footprint != nullptr) {
+        const auto* geometry = target.formation_footprint ? &*target.formation_footprint : target.footprint;
+        if (geometry != nullptr) {
+            x = geometry->x_extent;
+            y = geometry->y_extent;
+        } else if (footprint != nullptr) {
             x = footprint->x_extent;
             y = footprint->y_extent;
         } else if (target.profile != nullptr && target.profile->collision) {
@@ -207,6 +306,20 @@ const CombatUnit* CombatWorld::resolve_target(const CombatUnit* target, const ma
     return nearest;
 }
 
+const CombatUnit* CombatWorld::random_member(const CombatUnit* target, CombatRandom& random) const {
+    if (target == nullptr) return nullptr;
+    const auto team = std::lower_bound(teams.begin(), teams.end(), target->id,
+        [](const std::pair<EntityId, std::vector<EntityId>>& entry, const EntityId value) { return entry.first < value; });
+    if (team == teams.end() || team->first != target->id) return target;
+    std::vector<const CombatUnit*> live;
+    live.reserve(team->second.size());
+    for (const auto member : team->second) {
+        if (const auto* craft = find(member)) live.push_back(craft);
+    }
+    if (live.empty()) return nullptr;
+    return live[random.uniform(0, static_cast<std::uint32_t>(live.size() - 1))];
+}
+
 std::vector<EntityId> CombatWorld::candidates(const math::Vec3& centre, const math::Fixed half, const PlayerId owner) const {
     if (collection == nullptr) return index.box(centre, math::Vec3{half, half, half}, owner);
     const auto low = [&](const math::Fixed value) { return math::Fixed::from_raw(value.raw() - half.raw()); };
@@ -215,6 +328,47 @@ std::vector<EntityId> CombatWorld::candidates(const math::Vec3& centre, const ma
         {high(centre.x), high(centre.y), high(centre.z)}});
 }
 
+
+core::Result<bool> formation_can_attack(const CombatWorld& world, const CombatUnit& target,
+    const math::Fixed divert, const math::Vec3 anchor, const FormationAttackContext& formation) {
+    if (!formation.present || !formation.allows_divert) return core::Result<bool>::success(false);
+    if (formation.unbounded || within_range(anchor, target.position, divert, RangeMetric::planar))
+        return core::Result<bool>::success(true);
+    const auto* leader = formation.leader;
+    if (leader == nullptr || leader->profile == nullptr || !leader->profile->max_attack_distance)
+        return core::Result<bool>::success(false);
+    // WMV-17: test attack reach from the allowance circle, using the formation's leader.
+    motion_detail::Calc calc;
+    auto direction = math::normalize(math::Vec2{
+        calc.sub(target.position.x, anchor.x), calc.sub(target.position.y, anchor.y)});
+    if (!direction) return core::Result<bool>::failure(direction.error());
+    const math::Vec3 edge{calc.add(anchor.x, calc.mul(direction.value().x, divert)),
+        calc.add(anchor.y, calc.mul(direction.value().y, divert)), anchor.z};
+    if (!calc.ok()) return core::Result<bool>::failure(calc.error("formation attack admission"));
+    auto reach = target_attack_distance(world.motion, target, edge, *leader->profile->max_attack_distance, false);
+    if (!reach) return core::Result<bool>::failure(reach.error());
+    return core::Result<bool>::success(within_range(edge, target.position, reach.value(), RangeMetric::planar));
+}
+
+core::Result<CombatState> finish_squadron_target(const CombatWorld& world, const CombatUnit& unit,
+    CombatState state, const FormationAttackContext& formation, const EntityId formation_target, const bool same_cell) {
+    if (!formation.present || state.attack_target == invalid_entity_id || state.direct || same_cell
+        || state.attack_target == formation_target) return core::Result<CombatState>::success(std::move(state));
+    const auto* target = world.find(state.attack_target);
+    bool in_reach = false;
+    if (target != nullptr && unit.profile != nullptr && unit.profile->max_attack_distance) {
+        // WDF-14: reach reads the held container's position and extent, not an aimed member.
+        auto reach = target_attack_distance(world.motion, *target, unit.position, *unit.profile->max_attack_distance, false);
+        if (!reach) return core::Result<CombatState>::failure(reach.error());
+        in_reach = within_range(unit.position, target->position, reach.value(), RangeMetric::planar);
+    }
+    if (!in_reach) {
+        state.attack_target = invalid_entity_id;
+        state.attack_hardpoint = no_hardpoint;
+        state.direct = false;
+    }
+    return core::Result<CombatState>::success(std::move(state));
+}
 
 namespace combat_detail {
 
@@ -229,6 +383,32 @@ CombatState UnitCombat::target_state(const math::Fixed divert, const EntityId fo
     // base is not a base attack and must not be promoted to player-direct here.
     ship_target();
     return std::move(state_);
+}
+
+void UnitCombat::point_object_turret_target() {
+    for (std::size_t slot = 0; slot < profile_.weapons.size(); ++slot) {
+        const auto& weapon = profile_.weapons[slot];
+        auto& state = state_.weapons[slot];
+        if (!state.turret) continue;
+        auto& turret = *state.turret;
+        turret.ready = false;
+        const auto* target = world_.resolve_target(world_.find(state_.attack_target), unit_.position);
+        if (!target || !hostile(*target)) { turret.target = invalid_entity_id; continue; }
+        turret.target = target->id;
+        // FC-60: retained range loss holds the last pose; only target clear starts FC-61 idle.
+        if (!profile_.max_attack_distance) continue;
+        const auto reach = take(target_attack_distance(world_.motion, *target, unit_.position,
+            *profile_.max_attack_distance, has_aim_hardpoint(*target)));
+        if (!within_range(unit_.position, target->position, reach, RangeMetric::planar)) continue;
+        if (profile_.min_attack_distance.raw() > 0 && within_range(unit_.position, target->position,
+                math::Fixed::from_raw(profile_.min_attack_distance.raw() - 1), RangeMetric::planar)) continue;
+        // FS-33/FC-60/FD-51: geometry refusal clears; aiming keeps the target for later calls.
+        if (!point_object_turret(weapon, turret, *target)) {
+            state_.attack_target = turret.target = invalid_entity_id;
+            state_.attack_hardpoint = no_hardpoint;
+            state_.direct = false;
+        }
+    }
 }
 
 [[nodiscard]] math::Fixed UnitCombat::member_attack_reach(const CombatUnit& target, const math::Vec3& from) {
@@ -250,7 +430,8 @@ CombatState UnitCombat::target_state(const math::Fixed divert, const EntityId fo
             [](const auto& entry, const EntityId id) { return entry.first < id; });
         const bool container = team != world_.teams.end() && team->first == target.id;
         if ((!container && (!target.profile->living_projectile_collision || !target.profile->valid_target))
-            || target.in_limbo || (target.profile->special_weapon && !target.profile->star_base)) return result;
+            || target.in_limbo || (target.durability && target.durability->hull.raw() <= 0)
+            || (target.profile->special_weapon && !target.profile->star_base)) return result;
         bool armed = false;
         for (const auto& weapon : profile_.weapons) {
             if (weapon_up(weapon) && !restricted(weapon, target)) {
@@ -272,24 +453,7 @@ CombatState UnitCombat::target_state(const math::Fixed divert, const EntityId fo
         result.suitable = own_held || formation_held || in_attack_range(target);
         if (!result.suitable && diversion_anchor_ && profile_.max_attack_distance && formation_context_ != nullptr
             && formation_context_->present && formation_context_->allows_divert) {
-            if (formation_context_->unbounded || within_range(*diversion_anchor_, target.position, scan_divert_, RangeMetric::planar)) {
-                result.suitable = true;
-            } else {
-                // WMV-17: outside the allowance, test attack reach from its circle toward the
-                // candidate, using the team's leader rather than the scanning member's type.
-                const auto direction = take(math::normalize(math::Vec2{
-                    take(math::subtract(target.position.x, diversion_anchor_->x)),
-                    take(math::subtract(target.position.y, diversion_anchor_->y))}));
-                const math::Vec3 edge{take(math::add(diversion_anchor_->x, take(math::multiply(direction.x, scan_divert_)))),
-                    take(math::add(diversion_anchor_->y, take(math::multiply(direction.y, scan_divert_)))), diversion_anchor_->z};
-                auto reach = member_attack_reach(target, edge);
-                const auto* leader = formation_context_->leader;
-                if (leader != nullptr && leader->profile != nullptr && leader->profile->max_attack_distance) {
-                    reach = math::Fixed::from_raw(reach.raw() - profile_.max_attack_distance->raw()
-                        + leader->profile->max_attack_distance->raw());
-                    result.suitable = within_range(edge, target.position, reach, RangeMetric::planar);
-                }
-            }
+            result.suitable = take(formation_can_attack(world_, target, scan_divert_, *diversion_anchor_, *formation_context_));
         } else if (!result.suitable && diversion_anchor_ && profile_.max_attack_distance && formation_context_ == nullptr) {
             const auto reach = math::Fixed::from_raw(profile_.max_attack_distance->raw() + scan_divert_.raw());
             result.suitable = within_range(*diversion_anchor_, target.position, reach, RangeMetric::planar)
@@ -299,11 +463,51 @@ CombatState UnitCombat::target_state(const math::Fixed divert, const EntityId fo
         return result;
     }
 
+core::Result<CombatState> UnitCombat::retaliation_state(const CombatUnit& attacker,
+    const math::Fixed divert, const math::Vec3 anchor, const FormationAttackContext* formation) {
+    formation_context_ = formation;
+    scan_divert_ = divert;
+    diversion_anchor_ = anchor;
+    if (state_.direct || !unit_.weapons_enabled || (profile_.attack_category_restrictions & categories(attacker)) != 0
+        || (attacker.profile && attacker.profile->special_weapon)
+        || (unit_.durability && unit_.durability->hull.raw() <= 0)
+        || (formation && formation->present && !formation->allows_divert)) {
+        return core::Result<CombatState>::success(std::move(state_));
+    }
+    const auto admitted = ship_suitable(attacker);
+    if (error_) return core::Result<CombatState>::failure(*error_);
+    const auto* current = world_.find(state_.attack_target);
+    const auto held_priority = current ? priority(*current) : std::nullopt;
+    // WTA-29: strictly lower priority wins; neither damage nor distance breaks a tie.
+    if (admitted.suitable && admitted.priority && (!current || !held_priority
+        || *admitted.priority < *held_priority)) {
+        state_.attack_target = attacker.id;
+        state_.attack_hardpoint = no_hardpoint;
+        state_.direct = false;
+    }
+    return core::Result<CombatState>::success(std::move(state_));
+}
+
 [[nodiscard]] bool UnitCombat::damaged(const CombatUnit& target) {
         if (target.durability_profile == nullptr || target.durability == nullptr) return false;
         // hull / max hull <= Health_Low_Percent_Threshold, exactly: hull <= fraction x max hull.
         const auto limit = take(math::multiply(world_.rules->damaged_fraction, target.durability_profile->max_hull));
-        return target.durability->hull <= limit;
+        if (target.durability->hull <= limit) return true;
+        // WCC-16: a type that dies with its hardpoints shows the lesser of the hull fraction and the
+        // combined destroyable-hardpoint fraction S/T, so a low S/T also counts as damaged.
+        if (!target.durability_profile->destroyed_with_hardpoints) return false;
+        std::int64_t maximum = 0;
+        std::int64_t current = 0;
+        const auto& profile_hardpoints = target.durability_profile->hardpoints;
+        for (std::size_t index = 0; index < profile_hardpoints.size() && index < target.durability->hardpoints.size();
+             ++index) {
+            if (!profile_hardpoints[index].destroyable) continue;
+            maximum += profile_hardpoints[index].max_health.raw();
+            current += target.durability->hardpoints[index].raw();
+        }
+        if (maximum <= 0) return false;
+        const auto hardpoint_limit = take(math::multiply(world_.rules->damaged_fraction, math::Fixed::from_raw(maximum)));
+        return current <= hardpoint_limit.raw();
     }
 
 [[nodiscard]] bool UnitCombat::better(const CombatUnit& candidate, const std::optional<math::Fixed> candidate_priority,
@@ -325,6 +529,8 @@ CombatState UnitCombat::target_state(const math::Fixed divert, const EntityId fo
 
 [[nodiscard]] std::pair<const CombatUnit*, std::optional<math::Fixed>> UnitCombat::scan() {
         if (world_.frame < state_.next_scan_frame) return {nullptr, std::nullopt};
+        // WST-10: a cloaked unit does not scan, and its next scan frame stays as it was.
+        if (unit_.stealth_on) return {nullptr, std::nullopt};
         CombatRandom random(world_.seed, world_.frame, unit_.id, ship_slot);
         state_.next_scan_frame = world_.frame + logical_frames_per_second
             + random.uniform(0, logical_frames_per_second / 2U);
@@ -359,15 +565,66 @@ CombatState UnitCombat::target_state(const math::Fixed divert, const EntityId fo
         return {found, carried};
     }
 
+namespace {
+
+// WCC-15: a tracked unit's estimated time to death (durability.hpp).
+[[nodiscard]] std::optional<math::Fixed> time_to_death(const CombatUnit& unit) noexcept {
+    return tactical::time_to_death(*unit.durability_profile, *unit.durability);
+}
+
+[[nodiscard]] bool damage_tracked(const CombatUnit& unit) noexcept {
+    return unit.durability_profile != nullptr && unit.durability != nullptr && unit.durability_profile->damage_tracking;
+}
+
+} // namespace
+
+bool UnitCombat::sticky(const CombatUnit& target) const {
+    // A squadron's team container sums its tracked craft (an untracked craft adds nothing); any
+    // other target without damage tracking is never sticky.
+    std::optional<math::Fixed> time{math::Fixed{}};
+    const auto team = std::lower_bound(world_.teams.begin(), world_.teams.end(), target.id,
+        [](const auto& entry, const EntityId id) { return entry.first < id; });
+    if (team != world_.teams.end() && team->first == target.id) {
+        for (const auto member_id : team->second) {
+            const auto* member = world_.find(member_id);
+            if (member == nullptr || !damage_tracked(*member)) continue;
+            const auto member_time = time_to_death(*member);
+            // Both are at least 0: a sum beyond Fixed's range is "never" too.
+            if (!member_time || member_time->raw() > std::numeric_limits<std::int64_t>::max() - time->raw()) return false;
+            time = math::Fixed::from_raw(time->raw() + member_time->raw());
+        }
+    } else {
+        if (!damage_tracked(target)) return false;
+        time = time_to_death(target);
+        if (!time) return false;
+    }
+    // The threshold is the scanner's type's (a squadron craft: its leader's type); a runtime
+    // override from Lua is not bound. A type that authors none has 0 (debug build).
+    const auto* threshold_profile = &profile_;
+    if (formation_context_ != nullptr && formation_context_->leader != nullptr
+        && formation_context_->leader->profile != nullptr) threshold_profile = formation_context_->leader->profile;
+    return *time <= threshold_profile->stickiness;
+}
+
 void UnitCombat::ship_target() {
         const CombatUnit* current = nullptr;
         if (state_.attack_target != invalid_entity_id) {
             // WSQ-45: suitability and replacement read the held object. FO-04's nearest
             // live member is resolved separately when the weapon aims and fires.
             current = world_.find(state_.attack_target);
-            if (current == nullptr || !hostile(*current) || !visible_to_me(*current)) {
+            // FS-09/FD-06: discovering a dead held target clears and ends this
+            // targeting turn. Detachment never makes the retained scan due.
+            if (current == nullptr || (current->durability && current->durability->hull.raw() <= 0)) {
                 state_.attack_target = invalid_entity_id;
+                state_.attack_hardpoint = no_hardpoint;
                 state_.direct = false;
+                return;
+            }
+            if (!hostile(*current) || !visible_to_me(*current)) {
+                state_.attack_target = invalid_entity_id;
+                state_.attack_hardpoint = no_hardpoint;
+                state_.direct = false;
+                return;
             }
         }
         // FT-07: an idle craft holds fire; target-only member preparation bypasses this gate.
@@ -391,7 +648,10 @@ void UnitCombat::ship_target() {
         }
         if (state_.direct) return;
         const auto current_state = ship_suitable(*current);
-        if (current_state.suitable && current_state.priority && current_state.priority->raw() == one_raw) return;
+        // WCC-14: a suitable target is kept without a scan at priority 1.0 or while sticky (WCC-15).
+        // Stickiness is only read when a scan is due: before that the scan finds nothing anyway.
+        if (current_state.suitable && current_state.priority && (current_state.priority->raw() == one_raw
+            || (world_.frame >= state_.next_scan_frame && sticky(*current)))) return;
         const auto [found, found_priority] = scan();
         if (found == nullptr || found->id == current->id) return;
         if (current_state.suitable && !better(*found, found_priority, current, current_state.priority)) return;
@@ -404,6 +664,14 @@ CombatState target_combat(const CombatWorld& world, const CombatUnit& unit, cons
     const EntityId formation_target, const math::Vec3 diversion_anchor, const FormationAttackContext* formation) {
     if (unit.profile == nullptr || unit.combat == nullptr) return unit.combat != nullptr ? *unit.combat : CombatState{};
     return combat_detail::UnitCombat(world, unit).target_state(divert, formation_target, diversion_anchor, formation);
+}
+
+core::Result<CombatState> retaliate_combat(const CombatWorld& world, const CombatUnit& unit,
+    const CombatUnit& attacker, const math::Fixed divert, const math::Vec3 anchor,
+    const FormationAttackContext* formation) {
+    if (!unit.profile || !unit.combat) return core::Result<CombatState>::success(
+        unit.combat ? *unit.combat : CombatState{});
+    return combat_detail::UnitCombat(world, unit).retaliation_state(attacker, divert, anchor, formation);
 }
 
 } // namespace detail

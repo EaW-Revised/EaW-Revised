@@ -1,11 +1,128 @@
 # Work estimate: standalone remake
 
-Date: 2026-10-02. Current forecast: "Measured recalibration 2026-10-02" below.
-Earlier dated sections are historical records. This revision replaces the October 1
-scope-based estimates with delivery measurements; it does not change milestone bookings.
-Phase 2 sign-off precedes Phase 3 implementation.
+Date: 2026-10-11. Current forecast: "Re-estimate 2026-10-11" below.
+Earlier dated sections are historical records. This revision replaces the October 2
+calendar with the pace measured since then; it does not change milestone bookings.
+Galactic conquest has run in parallel with Phase 2 since October 7.
+
+## Re-estimate 2026-10-11
+
+**Phase 2 sign-off: central November 3**, October 21 if workers return to Phase 2 from
+October 12. Neither meets the October 13 M2 booking. The October 2 forecast (sign-off
+October 11, galactic conquest starting October 12) is missed, and the assumption behind
+it no longer holds: galactic conquest did not wait for Phase 2 sign-off. It started on
+October 7 and now takes most of the workers. Phase 2 closures fell from about 42 a day to
+about 6 a day from October 8.
+
+Source: GitHub counts taken on 2026-10-11 at 18:45 UTC, with every day counted against the
+labels and milestones as of then. Board Estimate fields were not re-priced in this
+revision, so the 652.25-hour figure below is the October 2 cohort's and is not updated.
+
+### Phase 2 pace since October 2
+
+"Core" means the M2 milestone or the `phase-2` label, excluding `nice-to-have` and
+excluding not-planned closures. Labels are as of the count, so issues classified later
+are counted on the day they opened or closed.
+
+| UTC day | Core opened | Core closed | All issues opened | All issues closed |
+|---|---:|---:|---:|---:|
+| October 3 | 6 | 51 | 53 | 77 |
+| October 4 | 52 | 37 | 147 | 77 |
+| October 5 | 35 | 60 | 91 | 102 |
+| October 6 | 17 | 26 | 50 | 50 |
+| October 7 | 18 | 34 | 106 | 45 |
+| October 8 | 16 | 7 | 110 | 31 |
+| October 9 | 0 | 7 | 81 | 86 |
+| October 10 | 0 | 3 | 111 | 92 |
+| October 11 (to 18:45) | 8 | 3 | 64 | 54 |
+
+- **116 core items are open**: 50 on the M2 milestone, including the owner sign-off
+  (legacy EAWR-85), and 66 labelled `phase-2` with no milestone. The October 2 calendar
+  assumed 257 children draining at 42.2 a day with no new scope. 128 core items opened
+  between October 3 and October 7 alone, and 8 more on October 11.
+- **Delivery did not stop; it moved.** Repository-wide closures on October 8 to 11 were
+  263. Of those, 20 were core Phase 2, 50 galactic conquest (the M3 milestone or the
+  `phase-3` label) and 144 issues with no milestone, phase label or `nice-to-have`. On
+  October 8 to 10, Phase 2 work merged into its own feature branch (30, 43 and 68 PRs)
+  and galactic conquest into another (81, 75 and 225). On October 11 both landed on
+  `main`, which is now the only trunk: 38 PRs merged into it that day.
+- **The open backlog grows.** Open issues went from 325 on October 2 to 588, about
+  +29 a day. 175 open issues (30%) have no milestone, phase label or `nice-to-have`, and
+  any count built from milestones or labels misses them. They include bugs and 49 of the
+  67 open `eye-check` issues, many of them Phase 2.
+- **The remaining core items are not small.** They include hero services G7 to G13
+  (legacy EAWR-940, EAWR-941, EAWR-943, EAWR-944, EAWR-946, EAWR-2188), fighter dogfight fidelity (legacy EAWR-1617,
+  EAWR-1881), AI targeting and damage-tracking rules (legacy #729-#787), battle audio
+  (legacy #801-#804) and superweapon AI (legacy EAWR-1933, EAWR-1943). The October 2 ability
+  table put the hero and area cohort at 48 to 96 elapsed hours.
+
+### Phase 2 calendar
+
+Delivery days count from October 12, the first full day after this revision. Two gate
+days follow feature-complete for the regression batch and owner play-test, as before.
+
+| Scenario | Core rate used | Feature-complete | Phase 2 sign-off |
+|---|---|---|---|
+| Workers return to Phase 2 | net 16.0/day (October 3 to 7: 208 closed, 128 opened) | 2026-10-19 | 2026-10-21 |
+| **Current split continues** | **5.7/day (October 8 to 10), no new core scope** | **2026-11-01** | **2026-11-03** |
+| Current split, October 8 to 11 inflow continues | about net -1/day (20 closed, 24 opened) | does not converge | none |
+
+The central case assumes the current split of workers between Phase 2 and galactic
+conquest holds and no core items are added, as on October 9 and 10. That assumption
+already failed again on October 11 (8 core items opened). Either moving workers or moving
+scope out of Phase 2 (for example the hero G-series, audio and superweapon items to
+`nice-to-have` or a later milestone) brings the date forward; both are owner choices that
+this document does not make.
+
+**Owner acceptance is now the likely real gate.** 67 `eye-check` issues wait on the owner,
+the oldest from September 26. The 12-hour acceptance reserve covers worker follow-up, not
+owner time. A booked eye-check session is a precondition for every date in the table.
+
+### Galactic conquest and later phases
+
+Galactic conquest (M3) is owned outside this plan; its numbers here are input only. On
+GitHub its milestone has 94 open and 19 closed issues; counting the `phase-3` label too,
+137 are open. On October 8 to 11 it closed 50 and opened 79, so its open count grew. Its
+work has merged into `main` since October 11, so Phase 2 and galactic conquest now share
+one trunk and one merge queue.
+
+Its effect on this schedule:
+
+- Running GC in parallel is why the Phase 2 rate fell, so GC staffing sets the Phase 2
+  date more than Phase 2 scope does.
+- The October 2 later-phase windows (land October 22 to November 4, mods November 5 to
+  December 30, multiplayer November 26 to December 30) were keyed off a GC window of
+  October 12 to 21 after Phase 2. That sequence no longer exists, so all three windows
+  are void.
+- The calibrated worker-hour roll-ups for land, mods and multiplayer (600.75, 829.75 and
+  739.00 hours) and the dependency offsets still stand: land takes about fourteen
+  calendar days after both Phase 2 and GC exit, mod feedback about eight weeks after
+  land, and multiplayer joins three weeks into the mod window. Their dates follow from the
+  later of the Phase 2 and GC exits, and the GC exit comes from GC's own plan.
+
+| Milestone | GitHub due | Open / closed | Forecast now |
+|---|---|---|---|
+| M1.5 Phase 2 prerequisites | 2026-10-12 | 0 / 36 | done |
+| M2 Space skirmish | 2026-10-13 | 92 / 204 | sign-off November 3 central, October 21 at best |
+| M3 Galactic conquest | 2026-12-18 | 94 / 19 | started October 7; see GC's own plan |
+| M4 Land skirmish | 2027-01-29 | 13 / 0 | about 14 days after the later of P2 and GC exit |
+| M5 Mod compatibility | 2027-04-23 | 22 / 4 | about 8 weeks after land |
+| M6 Multiplayer | 2027-05-07 | 14 / 3 | joins 3 weeks into the mod window |
+
+The booked dates are unchanged. Near term they are too early (M2); M4 to M6 keep months
+of slack against any plausible GC exit. `plan/backlog.md` still gives M1.5 as due
+September 30, against October 12 on GitHub.
+
+### Next re-estimate
+
+Re-estimate when the split of workers changes, when Phase 2 scope is cut or re-dated, or
+at Phase 2 exit, whichever comes first. Count the unclassified issues first, or the counts
+above will understate the remaining work again.
 
 ## Measured recalibration 2026-10-02
+
+This calendar is superseded by the October 11 re-estimate above. Its delivery
+measurements, planning rates and worker-hour roll-ups are still the latest.
 
 **Phase 2 remaining: 652.25 worker-hours / 27.177 agent-days**, including a 12-hour bundled
 acceptance/fix reserve. Likely feature-complete: **October 9**; sign-off: **October 11**;

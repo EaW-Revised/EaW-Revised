@@ -1,0 +1,33 @@
+# The game session library (ADR-012, ADR-014): the only component that knows both simulation
+# layers. Paths are absolute so the root build and, later, the viewer can include this list.
+
+set(EAWR_CAMPAIGN_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_runtime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_stock_runtime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_usability.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_services.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ai_selection_content.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ai_perception_content.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/game_session.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical_return.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical_return_live.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/control.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/fleets.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galaxy.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/setup.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/live_setup.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/live_conflict.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/starting_forces.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/synthetic.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/planet_economy.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/corruption_setup.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/conflict_entry.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/space_entry.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/space_entry_stock.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/space_rules.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/conflict_policy.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/auto_resolve_strength.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/auto_resolve_round.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/auto_resolve_outcome.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/auto_resolve_live.cpp"
+)

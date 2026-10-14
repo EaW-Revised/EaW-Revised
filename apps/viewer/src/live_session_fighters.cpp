@@ -43,11 +43,12 @@ namespace tactical = sim::tactical;
 using namespace live_session_detail;
 
 bool LiveSessionView::squadron_launched(const sim::EntityId container) const {
-    // A squadron the setup does not list came out of a hangar (#518); with no setup to compare
-    // with, none is known to have (the least visible answer).
-    return setup_ && squadrons_.contains(container)
-        && std::none_of(setup_->squadrons.begin(), setup_->squadrons.end(),
-                        [&](const tactical::Squadron& start) { return start.container == container; });
+    // WU-37: use published launch provenance, independent of when the team first appeared.
+    if (!battle_frame_.latest) return false;
+    const auto instances = battle_frame_.latest->instances();
+    const auto found = std::lower_bound(instances.begin(), instances.end(), container,
+        [](const tactical::TacticalInstance& instance, const sim::EntityId id) { return instance.entity_id < id; });
+    return found != instances.end() && found->entity_id == container && found->garrison_unit;
 }
 
 void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog) {
@@ -56,13 +57,14 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
     if (!start_ || !tables_) return;
     const auto add_slot = [&](const std::string& model, const skirmish::StartUnit& near,
                               const std::optional<skirmish::LobbyColour>& colour,
-                              const tactical::TypeId required_station = 0) {
+                              const tactical::TypeId required_station = 0, const bool ability_proxy_owner = false) {
         SpacePopulation::Options::PlacedShip ship;
         ship.object_id = model;
         ship.position = {to_float(near.state.position.x), to_float(near.state.position.y), to_float(near.state.position.z)};
         ship.yaw_degrees = to_float(near.yaw_degrees);
         ship.live_entity = first_slot_entity + launch_slots_.size();
         ship.launch_slot = true;
+        ship.ability_proxy_owner = ability_proxy_owner;
         if (const auto* type = tables_->find(model); type && type->under_construction) {
             ship.construction = true;
             if (auto object = catalog.resolve(type->id, data::Category::game_object); object) {
@@ -73,7 +75,8 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
                 if (!paths.empty()) ship.clip = paths.front();
             }
         }
-        if (colour) ship.team_colour = colour->rgb;
+        if (!colorization_enabled_) ship.team_colour = model_colour(near.state.owner, model);
+        else if (colour) ship.team_colour = colour->rgb;
         launch_slots_.push_back({skirmish::type_id(model), placed_ships_.size(), false, std::nullopt,
                                  required_station, near.state.owner});
         placed_ships_.push_back(std::move(ship));
@@ -178,7 +181,7 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
                         preview.live_entity = std::numeric_limits<sim::EntityId>::max() / 8U + placement_clones_.size();
                         preview.placement_preview = true;
                         preview.launch_slot = true; // starts hidden until an explicit preview pose
-                        if (owner->colour) preview.team_colour = owner->colour->rgb;
+                        preview.team_colour = model_colour(owner->player.player_id, craft);
                         const auto* footprint = economy_.footprint_of(skirmish::type_id(craft));
                         placement_clones_.push_back({option.type, placed_ships_.size(), offset, footprint ? footprint->layer_z : sim::math::Fixed{}});
                         placed_ships_.push_back(std::move(preview));
@@ -192,6 +195,39 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
                     for (const units::SquadronMember& member : named->members) add_slot(member.craft, *near, owner->colour);
                 }
             }
+        }
+    }
+    // WAB-71/75: ability-created units already reach the snapshot. Reserve reusable visual
+    // owners too, including proxy-only models, so their ordinary fog/pose/emitter path runs.
+    std::set<std::string> ability_objects;
+    for (const auto& type : tables_->units) {
+        for (const auto* buzz : {&type.buzz_droids, &type.team_buzz_droids}) {
+            if (*buzz && !(*buzz)->object_type.empty()) ability_objects.insert((*buzz)->object_type);
+        }
+    }
+    for (const auto& owner : start_->players) {
+        const auto near = std::find_if(start_->units.begin(), start_->units.end(),
+            [&](const skirmish::StartUnit& unit) { return unit.state.owner == owner.player.player_id; });
+        if (near == start_->units.end()) continue;
+        for (const auto& object : ability_objects) {
+            std::size_t holders = 0;
+            const auto holds = [&](const std::string& id) {
+                const auto* type = tables_->find(id);
+                if (!type) return false;
+                return (type->buzz_droids && type->buzz_droids->object_type == object)
+                    || (type->team_buzz_droids && type->team_buzz_droids->object_type == object);
+            };
+            for (const auto& unit : start_->units) {
+                if (unit.state.owner == owner.player.player_id && holds(unit.type)
+                    && economy_.pads.replacement(unit.state.type_id) == nullptr) ++holders;
+            }
+            // Include purchased and hangar-spawned holders whose slots were prepared above.
+            const auto existing_slots = launch_slots_.size();
+            for (std::size_t index = 0; index < existing_slots; ++index) {
+                const auto& slot = launch_slots_[index];
+                if (slot.station_owner == owner.player.player_id && holds(placed_ships_[slot.ship].object_id)) ++holders;
+            }
+            for (std::size_t index = 0; index < holders; ++index) add_slot(object, *near, owner.colour, 0, true);
         }
     }
     // #458: each slot's death clone, set up like a start unit's (the clones used to be planned

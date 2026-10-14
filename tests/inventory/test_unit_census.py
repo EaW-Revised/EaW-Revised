@@ -102,7 +102,7 @@ class UnitCensusTests(unittest.TestCase):
 
     def test_unsupported_ability_never_claims_implemented(self):
         row = {"id": "unit", "class": "SpaceUnit", "category": [], "acquisition": [], "behaviours": [],
-               "locomotors": [], "unit_abilities": [{"type": "MISSILE_SHIELD", "fields": {}}], "special_abilities": []}
+               "locomotors": [], "unit_abilities": [{"type": "UNSUPPORTED_TEST_ABILITY", "fields": {}}], "special_abilities": []}
         statuses = []
         def mechanic(key, title, status, *args):
             statuses.append(status)
@@ -129,6 +129,40 @@ class UnitCensusTests(unittest.TestCase):
                 else:
                     self.assertEqual(statuses["ability-damage-modifiers"], "implemented")
                     self.assertNotIn("ability-other-modifiers", statuses)
+
+    def test_blast_evidence_is_peacebringer_scoped_and_keeps_deferred_policies(self):
+        for name, status in (("The_Peacebringer", "partial"), ("Other_Carrier", "missing")):
+            row = {"id": name, "class": "UniqueUnit", "category": [], "acquisition": [],
+                   "behaviours": [], "locomotors": [],
+                   "special_abilities": [{"handler": "Blast_Ability", "fields": {"Activation_Style": ["User_Input"]}}],
+                   "unit_abilities": [{"type": "BLAST", "fields": {}}]}
+            evidence = {}
+            def mechanic(key, title, current, reason, code=(), rules=(), *args):
+                evidence[key] = (current, reason, rules)
+                return key
+            census.handler_needs(row, mechanic, lambda *args: None)
+            self.assertEqual(evidence["unit-ability:BLAST"][0], status)
+            self.assertEqual(evidence["special-handler:Blast_Ability"][0], status)
+            if name == "The_Peacebringer":
+                self.assertIn("WAD-36", evidence["unit-ability:BLAST"][2])
+                self.assertIn("FD-56", evidence["unit-ability:BLAST"][1])
+                self.assertIn("UFS-30", evidence["special-handler:Blast_Ability"][1])
+
+    def test_lure_census_cites_service_and_preserves_presentation_limits(self):
+        row = {"id": "A-Wing", "class": "SpaceUnit", "category": [], "acquisition": [],
+               "behaviours": ["LURE"], "locomotors": [], "special_abilities": [],
+               "unit_abilities": [{"type": "LURE", "fields": {"Mod_Multiplier": ["TAKE_DAMAGE_MULTIPLIER, 0.7"]}}]}
+        evidence = {}
+        def mechanic(key, title, status, reason, code=(), rules=(), *args):
+            evidence[key] = (status, reason, rules)
+            return key
+        census.handler_needs(row, mechanic, lambda *args: None)
+        self.assertEqual(evidence["unit-ability:LURE"][0], "partial")
+        self.assertIn("WLU-09", evidence["unit-ability:LURE"][2])
+        self.assertIn("retail comparison is pending", evidence["unit-ability:LURE"][1])
+        self.assertEqual(evidence["behaviour:LURE"][0], "implemented")
+        self.assertIn("WLU-06", evidence["behaviour:LURE"][2])
+        self.assertEqual(evidence["ability-damage-modifiers"][0], "implemented")
 
     def test_upgrade_admission_preserves_deferred_effects(self):
         def statuses(handler, fields, cls="UpgradeObject", collision=True):
@@ -161,6 +195,11 @@ class UnitCensusTests(unittest.TestCase):
         self.assertEqual(statuses("Income_Stream_Mod_Ability", {"Income_Multiplier": ["1.2"],
             "Target_Stream_Source": ["Empire_Mineral_Extractor"]}, cls="StarBase", collision=False), "missing")
         self.assertEqual(statuses("Battlefield_Modifier_Ability", {}), "missing")
+        self.assertEqual(statuses("Force_Healing_Ability", {"Activation_Style": ["Space_Automatic"]},
+            cls="SpaceBuildable", collision=False), "partial")
+        self.assertEqual(statuses("Force_Healing_Ability", {"Activation_Style": ["Skirmish_Automatic"]},
+            cls="SpaceBuildable", collision=False), "missing")
+        self.assertEqual(statuses("Force_Healing_Ability", {}, cls="SpaceBuildable", collision=False), "missing")
         self.assertEqual(statuses("Combat_Bonus_Ability", {"Activation_Style": ["Space_Automatic"]},
             cls="UniqueUnit", collision=False), "missing")
 

@@ -138,6 +138,8 @@ orders, as next-tick commands.
   count toward the overview; `Tactical_Overview_Clicks` of them within
   `Tactical_Overview_Click_Time` seconds enter it (FoC space: 10 clicks within 1.8 s). A zoom out
   that still moved the camera restarts the count, and clicks within 26 frames of it do not count.
+  CAM-1/CAM-2 show a fixed frame-count threshold in the debug build, rather than an XML scalar;
+  the conversion of that counter to seconds remains unverified (see below).
 - V-1a (owner, overview wheel-step adjustment). The project space map and live battle use five outward clicks within the
   same 1.8 s window for each overview stage. Owner: "you have to scroll a bit too much out to get
   into the X1 and X2 zoom out stages. maybe half it's requirement." Both space camera configs

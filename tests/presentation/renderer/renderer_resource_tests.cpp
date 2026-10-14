@@ -1,5 +1,9 @@
 #include "renderer_test_support.hpp"
 #include "upload_identity_pool.hpp"
+#include "gpu_memory_ledger.hpp"
+#include "texture_budget.hpp"
+#include "resource_residency.hpp"
+#include "mesh_rest_pose.hpp"
 
 namespace eawr_renderer_test {
 
@@ -409,6 +413,334 @@ void instance_resource_contracts() {
     check(presentation::godot_backend::detail::uploaded_triangle_index(partial, 3) == 3
             && presentation::godot_backend::detail::uploaded_triangle_index(partial, 4) == 4,
         "indices after the last complete triangle must stay in bounds and unchanged");
+}
+
+// #2856: the GPU ledger counts duplicate uploads of one content once as unique.
+void gpu_memory_ledger_contracts() {
+    using namespace eawr;
+    namespace detail = presentation::godot_backend::detail;
+    detail::GpuMemoryLedger ledger;
+    assets::Texture texture;
+    texture.format = assets::PixelFormat::bc1;
+    texture.width = 4;
+    texture.height = 4;
+    texture.mips.push_back({.width = 4, .height = 4, .bytes = std::vector<std::byte>(8, std::byte{7})});
+    assets::Texture other = texture;
+    other.mips[0].bytes[0] = std::byte{8};
+    const detail::GpuItem first = detail::texture_item(texture);
+    const detail::GpuItem copy = detail::texture_item(texture);
+    const detail::GpuItem distinct = detail::texture_item(other);
+    check(first.key == copy.key && first.key != distinct.key && first.bytes == 8 && first.compressed,
+        "texture content keys follow the uploaded bytes");
+    check(first.check == copy.check && first.check != distinct.check && first.check != first.key,
+        "the second texture digest is independent of the first");
+    ledger.add(first);
+    ledger.add(copy);
+    ledger.add(distinct);
+    auto totals = ledger.totals()[static_cast<std::size_t>(detail::GpuCategory::texture)];
+    check(totals.live == 3 && totals.live_bytes == 24 && totals.unique == 2 && totals.unique_bytes == 16
+            && totals.compressed_bytes == 24 && totals.uploads == 3,
+        "duplicate texture uploads count as live but not unique");
+    ledger.reuse(copy);
+    check(ledger.totals()[static_cast<std::size_t>(detail::GpuCategory::texture)].reuses == 1,
+        "a request served by a resident copy counts as a reuse");
+    ledger.remove(first);
+    ledger.remove(distinct);
+    totals = ledger.totals()[static_cast<std::size_t>(detail::GpuCategory::texture)];
+    check(totals.live == 1 && totals.unique == 1 && totals.unique_bytes == 8 && totals.uploads == 3,
+        "a key stays unique while one upload still holds it");
+    ledger.remove(copy);
+    ledger.remove(copy);
+    totals = ledger.totals()[static_cast<std::size_t>(detail::GpuCategory::texture)];
+    check(totals.live == 0 && totals.live_bytes == 0 && totals.unique == 0 && totals.unique_bytes == 0,
+        "released uploads leave nothing live and an extra release is ignored");
+    assets::Texture rgb = texture;
+    rgb.format = assets::PixelFormat::bgr8;
+    rgb.mips[0].bytes.assign(48, std::byte{1});
+    check(detail::texture_item(rgb).bytes == 64 && !detail::texture_item(rgb).compressed,
+        "three-channel textures are padded to four channels on the GPU");
+    const std::array<assets::Texture, 2> layers{texture, other};
+    check(detail::texture_array_item(layers, 16).bytes == 2U * (16U * 16U * 4U * 4U / 3U),
+        "texture array layers are RGBA8 at the array edge with a full mip chain");
+}
+
+// #3027 GM-04: the texture budget drops mips only when the device's memory is known and full.
+void texture_budget_contracts() {
+    using namespace eawr;
+    namespace detail = presentation::godot_backend::detail;
+    {
+        detail::ResourceResidency residency;
+        residency.pressure();
+        residency.budget(1000, 0);
+        residency.add(7, false);
+        residency.add(8, false);
+        const std::array<std::uint64_t, 2> demand{7, 8};
+        const auto before = detail::ResourceResidency::facts();
+        std::uint64_t attempts{};
+        detail::TextureBudget changing_budget;
+        changing_budget.set_override(1000);
+        changing_budget.add(500);
+        for (unsigned frame = 0; frame < 120; ++frame) {
+            check(!residency.eager(1000 + frame, 2, 1000),
+                "GM-05: changing device usage keeps pressure active without clearing refusals");
+            changing_budget.measure(600 + frame % 2 * 100, frame);
+            const auto state = changing_budget.state();
+            check(state.other_bytes == 100 + frame % 2 * 100,
+                "GM-05: fixture varies measured non-texture usage every frame");
+            residency.budget(state.device_bytes, state.drop);
+            for (const auto asset : residency.plan(demand).admit) {
+                ++attempts;
+                if (asset == 7) residency.admission_failed(asset); // forced allocator refusal
+                else residency.resident(asset, true);
+            }
+        }
+        check(attempts == 2 && detail::ResourceResidency::facts().admission_failures == before.admission_failures + 1,
+            "GM-05: a forced refusal is counted once and never retried on unchanged frames");
+        check(detail::ResourceResidency::facts().admissions == before.admissions + 1,
+            "GM-05: a refused asset does not block other admissions");
+        const std::array<std::uint64_t, 1> absent{8};
+        static_cast<void>(residency.plan(absent));
+        check(residency.plan(demand).admit == std::vector<std::uint64_t>{7},
+            "GM-05: demand re-entry permits a new admission attempt");
+        residency.admission_failed(7);
+        residency.budget(2000, 0);
+        check(residency.plan(demand).admit == std::vector<std::uint64_t>{7},
+            "GM-05: device budget changes permit a new attempt");
+
+        residency.admission_failed(7);
+        residency.budget(2000, 1);
+        check(residency.plan(demand).admit == std::vector<std::uint64_t>{7},
+            "GM-05: changed mip detail permits a smaller admission");
+        residency.admission_failed(7);
+        residency.remove(7);
+        residency.add(7, false);
+        check(residency.plan(demand).admit == std::vector<std::uint64_t>{7},
+            "GM-05: a released asset cannot leave a refusal on a replacement");
+    }
+    {
+        assets::Model model;
+        model.bones.resize(2);
+        model.bones[0].parent = 1;
+        model.bones[1].parent = -1;
+        for (auto& bone : model.bones) bone.relative_transform = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        model.meshes.resize(1);
+        model.meshes[0].bone = 0;
+        model.meshes[0].visible = true;
+        model.meshes[0].submeshes.resize(1);
+        const auto upload_rest = [&](const bool eager) {
+            detail::ResourceResidency residency;
+            const bool resident = residency.eager(0, 2, eager ? 100 : 1);
+            check(resident == eager, "GM-05: parity fixture selects eager and dormant upload");
+            std::optional<presentation::animation::Pose> rest;
+            // The production mesh uploader calls this shared validation before its residency split.
+            return detail::prepare_rigid_rest_pose(model, model.meshes[0].bone >= 0, rest);
+        };
+        const bool eager = upload_rest(true);
+        const bool dormant = upload_rest(false);
+        check(!eager && !dormant, "GM-05: child-before-parent rigid upload is refused in both residency modes");
+        model.bones[0].parent = -1;
+        model.bones[1].parent = 0;
+        check(upload_rest(true) && upload_rest(false),
+            "GM-05: parent-first rigid upload validates in both residency modes");
+    }
+    {
+        detail::ResourceResidency residency;
+        check(residency.eager(400, 600, 1000), "GM-05: exactly fitting content stays eager");
+        residency.add(1, true);
+        const std::array<std::uint64_t, 1> demand{2};
+        check(residency.plan(demand).evict.empty() && residency.plan(demand).admit.empty(),
+            "GM-05: fitting cards never evict unused content");
+        check(!residency.eager(1000, 1, 1000), "GM-05: projected pressure defers before allocation");
+        residency.add(2, false);
+        const auto changes = residency.plan(demand);
+        check(changes.evict == std::vector<std::uint64_t>{1} && changes.admit == std::vector<std::uint64_t>{2},
+            "GM-05: unused content leaves before demanded reserve content enters");
+        residency.resident(1, false);
+        residency.resident(2, true);
+        check(residency.plan(demand).evict.empty() && residency.plan(demand).admit.empty(),
+            "GM-05: unchanged demand does not churn uploads");
+        residency.remove(1);
+        const std::array<std::uint64_t, 2> duplicate{2, 2};
+        check(residency.plan(duplicate).admit.empty(), "GM-05: duplicate instances share residency");
+        detail::ResourceResidency unknown;
+        check(unknown.eager(UINT64_MAX, UINT64_MAX, 0), "GM-05: unknown device memory is unconstrained");
+        check(!unknown.eager(UINT64_MAX, 1, UINT64_MAX), "GM-05: admission comparison cannot overflow");
+        detail::ResourceResidency measured;
+        measured.add(1, true);
+        measured.add(2, true);
+        measured.pressure();
+        const std::array<std::uint64_t, 1> visible{1};
+        check(measured.plan(visible).evict == std::vector<std::uint64_t>{2},
+            "GM-05: measured pressure evicts unused content without another upload");
+    }
+    using Budget = detail::TextureBudget;
+    assets::Texture texture;
+    for (std::uint32_t edge = 1024; edge >= 1; edge /= 2) texture.mips.push_back({.width = edge, .height = edge, .row_pitch = 0, .bytes = {}});
+    const Budget::MipEdges edges = Budget::mip_edges(texture);
+    check(Budget::usable_drop(edges, 0) == 0 && Budget::usable_drop(edges, 2) == 2,
+        "a drop removes the asked number of top mips");
+    check(Budget::usable_drop(edges, 9) == 4, "a drop stops before the top edge falls under 64");
+    const Budget::MipEdges single{{2048, 2048}};
+    check(Budget::usable_drop(single, 3) == 0, "a texture without a stored chain is never dropped");
+    const Budget::MipEdges small{{64, 64}, {32, 32}, {16, 16}};
+    check(Budget::usable_drop(small, 2) == 0, "a small texture keeps its top mip");
+
+    Budget budget;
+    budget.add(1ULL << 40U);
+    check(!budget.constrained() && !budget.over() && budget.drop() == 0, "an unknown device is never over budget");
+    budget.set_device(1000, "test device");
+    check(budget.probed() && budget.state().texture_budget == 900, "the process may fill nine tenths of the device");
+    check(budget.over(), "the pool is over a known budget");
+    budget.remove(1ULL << 40U, 0);
+    budget.add(400);
+    budget.measure(700, 10);
+    check(budget.state().other_bytes == 300 && budget.state().texture_budget == 600 && !budget.over(),
+        "memory outside the pool leaves the pool the rest, and a pool that fits drops nothing");
+    budget.add(300);
+    check(budget.over() && budget.raise() && budget.drop() == 1, "over budget, the drop rises one level");
+    budget.downsized(700, 175, 10);
+    check(!budget.over() && budget.state().resident_bytes == 175 && budget.state().downsized == 1,
+        "a rebuilt texture frees the difference");
+    budget.measure(1000, 11);
+    check(budget.state().other_bytes == 300 && !budget.over(),
+        "freed copies the device still holds are not memory outside the pool");
+    budget.measure(475, 10 + Budget::release_frames);
+    check(budget.state().other_bytes == 300 && budget.state().texture_budget == 600,
+        "once the engine has released them the counter is taken as it is");
+    budget.set_override(4000);
+    budget.set_device(100, "late device");
+    check(budget.state().device_bytes == 4000 && budget.state().source == "override"
+            && budget.state().texture_budget == 3300,
+        "an override wins over the device's figure");
+    budget.set_minimum_drop(7);
+    check(budget.drop() == Budget::max_drop && budget.state().minimum_drop == Budget::max_drop,
+        "the detail setting clamps to the deepest drop and sets the floor");
+    check(!budget.raise() && budget.state().over_budget == 1, "the deepest drop cannot rise further");
+    budget.set_minimum_drop(1);
+    check(budget.drop() == Budget::max_drop, "lowering the floor keeps a raised drop while textures are resident");
+    budget.remove(175, 20);
+    check(budget.drop() == 1, "an empty pool starts over from the detail setting");
+
+    // Releases are stamped with the frame they happen in, not the last measure's.
+    Budget timed;
+    timed.set_device(1000, "test device");
+    timed.add(400);
+    timed.measure(500, 100);
+    check(timed.state().other_bytes == 100 && timed.state().constrained, "the first measure sees the rest of the device");
+    // No submit (no measure, no frame note) between the last measure and the release: the
+    // release still carries its own frame.
+    timed.remove(200, 129);
+    timed.measure(500, 130);
+    check(timed.state().other_bytes == 100,
+        "a texture released one frame before a measure is still left out of the memory outside the pool");
+    timed.measure(300, 129 + Budget::release_frames);
+    check(timed.state().other_bytes == 100, "once the engine has released it the counter is taken as it is");
+    timed.add(300);
+    timed.measure(600, 200);
+    timed.downsized(300, 100, 230);
+    timed.remove(50, 228);
+    timed.measure(600, 231);
+    check(timed.state().other_bytes == 100, "an earlier release in the window keeps the latest release's frame");
+
+    // A renderer's progress through the drop: a fake pool of eight textures, each with the drop
+    // it was rebuilt at. Nothing here shrinks the pool's bytes, so the budget stays over.
+    struct FakePool final {
+        Budget& budget;
+        std::array<std::uint32_t, 8> dropped{};
+        std::size_t calls{};
+        bool operator()(const std::size_t limit) {
+            ++calls;
+            std::size_t rebuilt = 0;
+            for (std::uint32_t& drop : dropped) {
+                if (drop >= budget.drop()) continue;
+                if (rebuilt == limit) return false;
+                ++rebuilt;
+                drop = budget.drop();
+            }
+            return true;
+        }
+        [[nodiscard]] bool at(const std::uint32_t drop) const {
+            return std::ranges::all_of(dropped, [&](const std::uint32_t level) { return level == drop; });
+        }
+    };
+    Budget shared;
+    shared.set_device(1000, "test device");
+    shared.add(2000);
+    FakePool pool{.budget = shared};
+    detail::TextureDropProgress progress;
+    const auto in_use = [] { return std::uint64_t{2000}; };
+    for (std::uint32_t level = 0; level < Budget::max_drop; ++level) static_cast<void>(shared.raise());
+    progress.at_frame(shared, 1, in_use, pool);
+    check(pool.calls == 1 && static_cast<std::size_t>(std::ranges::count(pool.dropped, Budget::max_drop)) == Budget::rebuilds_per_frame
+            && progress.behind(Budget::max_drop),
+        "a drop raised elsewhere reaches the renderer's textures a few per frame");
+    progress.at_upload(shared, pool);
+    check(pool.at(Budget::max_drop) && !progress.behind(Budget::max_drop),
+        "an upload at the deepest drop finishes an unfinished in-frame rebuild before marking it reached");
+    const std::size_t calls = pool.calls;
+    check(progress.at_frame(shared, 2, in_use, pool),
+        "measured pressure at the deepest drop requests demand residency");
+    check(pool.calls == calls, "a reached drop starts no rebuild in the next frame");
+
+    Budget fitting;
+    fitting.set_device(1000, "fitting device");
+    fitting.add(100);
+    detail::TextureDropProgress fit_progress;
+    std::size_t reads = 0, rebuilds = 0;
+    const auto read_fitting = [&] { ++reads; return std::uint64_t{100}; };
+    const auto rebuild_fitting = [&](std::size_t) { ++rebuilds; return true; };
+    check(!fit_progress.at_frame(fitting, 1, read_fitting, rebuild_fitting),
+        "a fitting measurement leaves demand residency inactive");
+    check(!fit_progress.at_frame(fitting, 2, read_fitting, rebuild_fitting) && reads == 1 && rebuilds == 0,
+        "a fitting frame between measurements does no counter or drop work");
+
+    Budget loading;
+    loading.set_device(1000, "test device");
+    loading.add(2000);
+    FakePool loaded{.budget = loading};
+    detail::TextureDropProgress fresh;
+    fresh.at_upload(loading, loaded);
+    check(loaded.at(Budget::max_drop) && !fresh.behind(Budget::max_drop) && loading.state().over_budget == 1,
+        "an upload over budget rises to the deepest drop with every texture rebuilt");
+
+    // The counter is read once per measure_frames frames for the whole process.
+    Budget cadence;
+    check(!cadence.due(1), "an unknown device is never measured");
+    cadence.set_device(1000, "test device");
+    check(cadence.due(1), "the first frame with a known device is due");
+    cadence.measure(0, 1);
+    check(cadence.due(2), "until the counter reads nonzero it is read every frame");
+    cadence.measure(400, 2);
+    check(!cadence.due(3) && !cadence.due(1 + Budget::measure_frames) && cadence.due(2 + Budget::measure_frames),
+        "a live counter is read once per measure_frames frames");
+
+    Budget off;
+    off.disable();
+    off.set_device(1000, "late device");
+    off.add(1ULL << 40U);
+    check(off.probed() && !off.constrained() && !off.over() && !off.due(10) && off.state().source == "off",
+        "the off switch keeps every texture and never probes or measures");
+    off.rebuild_failed();
+    check(off.state().rebuild_failures == 1, "refused rebuilds are counted");
+
+    detail::GpuMemoryLedger ledger;
+    assets::Texture bc;
+    bc.format = assets::PixelFormat::bc1;
+    bc.width = 4;
+    bc.height = 4;
+    bc.mips.push_back({.width = 4, .height = 4, .bytes = std::vector<std::byte>(64, std::byte{3})});
+    const detail::GpuItem item = detail::texture_item(bc);
+    ledger.add(item);
+    ledger.resize(item, 16);
+    const auto totals = ledger.totals()[static_cast<std::size_t>(detail::GpuCategory::texture)];
+    check(totals.live == 1 && totals.live_bytes == 16 && totals.unique_bytes == 16 && totals.compressed_bytes == 16
+            && totals.uploads == 1,
+        "a resized upload keeps its identity and holds the new bytes");
+    detail::GpuItem resized = item;
+    resized.bytes = 16;
+    ledger.remove(resized);
+    const auto after = ledger.totals()[static_cast<std::size_t>(detail::GpuCategory::texture)];
+    check(after.live == 0 && after.live_bytes == 0 && after.unique_bytes == 0, "a resized upload releases cleanly");
 }
 
 } // namespace eawr_renderer_test

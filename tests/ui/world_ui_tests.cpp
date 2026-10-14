@@ -18,8 +18,39 @@ using test::ui::expect;
 
 bool close_to(const float a, const float b) { return std::abs(a - b) <= 1.0e-3F; }
 
+void waypoints() {
+    using Fixed = sim::math::Fixed;
+    const sim::math::Vec3 point{Fixed::from_raw(-4700 * Fixed::scale + 1),
+        Fixed::from_raw(4800 * Fixed::scale + 3), Fixed::from_raw(25 * Fixed::scale + 7)};
+    auto expected = sim::math::identity_matrix();
+    expected.rows[0][3] = point.x;
+    expected.rows[1][3] = point.z;
+    expected.rows[2][3] = Fixed::from_raw(-point.y.raw());
+    expect(ui::waypoint_flag_transform(point) == expected,
+        "OF-05: flag translation changes basis exactly, preserving authored identity scale and height");
+
+    ui::WaypointDashClock slow, fast;
+    expect(slow.sample(true, 100.0, 2.0, 30.0) == 0.0
+        && fast.sample(true, 100.0, 2.0, 30.0) == 0.0, "OF-05: display starts at zero phase");
+    for (int frame = 1; frame <= 120; ++frame)
+        static_cast<void>(fast.sample(true, 100.0 + frame / 4.0, 2.0, 30.0));
+    expect(slow.sample(true, 130.0, 2.0, 30.0) == fast.sample(true, 130.0, 2.0, 30.0),
+        "OF-05: sparse and frequent redraws have equal phase at the same presented time");
+    const auto held = fast.sample(true, 133.25, 2.0, 30.0);
+    expect(held == 6.5, "OF-05: fractional presented time drives dash distance and period wrapping");
+    for (int frame = 0; frame < 100; ++frame)
+        expect(fast.sample(true, 133.25, 2.0, 30.0) == held, "OF-05: paused redraws hold the phase");
+    expect(fast.sample(true, 136.25, 2.0, 30.0) == 12.5,
+        "OF-05: resume and speed changes follow presented progress");
+    expect(fast.sample(false, 140.0, 2.0, 30.0) == 0.0
+        && fast.sample(true, 150.0, 2.0, 30.0) == 0.0, "OF-05: hiding resets display phase");
+    expect(fast.sample(true, 1.0, 2.0, 30.0) == 0.0, "OF-05: a new earlier timeline restarts display phase");
+    expect(fast.sample(true, 2.0, 2.0, 0.0) == 0.0, "OF-05: zero dash period is safe");
+}
+
 void ability_overlays() {
     const auto foils = ui::ability_index("SPOILER_LOCK");
+    const auto power = ui::ability_index("POWER_TO_WEAPONS");
     const auto defend = ui::ability_index("DEFEND");
     const auto turbo = ui::ability_index("TURBO");
     struct State final : ui::AbilityState {
@@ -32,16 +63,33 @@ void ability_overlays() {
         }
     } state;
     ui::WorldOverlayUnit unit{2, {foils, turbo}, true, true, true, true, false};
-    for (const auto status : {ui::AbilityStatus::ready, ui::AbilityStatus::active,
-                              ui::AbilityStatus::recharging, ui::AbilityStatus::disabled}) {
-        for (const bool autofire : {false, true}) {
-            state.value = {status, 0.5, autofire};
-            auto shown = ui::world_ability_overlays(unit, state);
-            expect(shown[0] == (status == ui::AbilityStatus::active ? foils : ui::ability_none)
-                       && shown[1] == ui::ability_none,
-                   "WSU-33: only active, including timed active, shows; autofire alone does not");
+    // #2279: a visible enemy's model may advertise its mode, but its active
+    // world art remains private. Test each retail probe ability in its own
+    // presentation path, including hidden allies as a defensive admission case.
+    for (const auto ability : {foils, power, defend}) {
+        unit = {2, {ability, ui::ability_none}, true, true, true, ability == foils, ability != foils};
+        for (const auto status : {ui::AbilityStatus::ready, ui::AbilityStatus::active,
+                                ui::AbilityStatus::recharging, ui::AbilityStatus::disabled}) {
+            for (const bool autofire : {false, true}) {
+                state.value = {status, 0.5, autofire};
+                for (const bool ally : {false, true}) {
+                    for (const bool visible : {false, true}) {
+                        unit.ally = ally;
+                        unit.visible = visible;
+                        state.queries = 0;
+                        const auto shown = ui::world_ability_overlays(unit, state);
+                        const auto expected = ally && visible && status == ui::AbilityStatus::active
+                            ? ability : ui::ability_none;
+                        expect(shown[0] == expected && shown[1] == ui::ability_none,
+                               "#2279: S-foils, Power to Weapons and Defend show active art only to a visible ally");
+                        expect(state.queries == (ally && visible ? 1U : 0U),
+                               "#2279: enemy and fogged modes are not queried, including ready/recharge/autofire");
+                    }
+                }
+            }
         }
     }
+    unit = {2, {foils, turbo}, true, true, true, true, false};
     state.value.status = ui::AbilityStatus::active;
     unit.abilities[0] = ui::ability_none;
     expect(ui::world_ability_overlays(unit, state)[1] == turbo, "an active second slot substitutes on a squadron icon");
@@ -107,7 +155,7 @@ void group_numbers() {
     selection.replace(squadron);
     selection.add_to_group(3, 1.0, {});
     expect(selection.group_of(2) == 3 && selection.group_of(6) == 3, "Alt+3 updates the same membership index");
-    selection.retain(frigate);
+    selection.retain_sorted(frigate);
     expect(!selection.group_of(2) && selection.group_of(6) == 3, "a lost squadron leaves no stale group number");
 }
 
@@ -178,7 +226,43 @@ void bars() {
            "the bars sit at the bounds' top along the camera's up");
     expect(close_to(ui::bar_anchor_lift({3.0F, 4.0F, 0.0F}, {0.0F, 1.0F, 0.0F}, 0.5F), 2.5F),
            "another GUI_Bounds_Scale scales the bounds' half diagonal");
-    expect(close_to(ui::squadron_health(150.0F, 200.0F), 0.75F), "a squadron's health is its craft's sum over their maximum");
+    // WSU-32 (#766): the mean display health of the craft still standing.
+    const std::array<float, 2> two_full{1.0F, 1.0F};
+    expect(close_to(ui::squadron_health(two_full), 1.0F) && ui::bar_level(ui::squadron_health(two_full)) == 10,
+           "a squadron that lost one of three craft at full hull shows a full icon bar");
+    const std::array<float, 3> mixed{1.0F, 0.5F, 0.0F};
+    expect(close_to(ui::squadron_health(mixed), 0.5F), "the icon's health is the mean of its live craft");
+    expect(ui::squadron_health(std::span<const float>{}) == 0.0F, "no craft shows an empty bar");
+
+    // WSU-52 (#766, HD-21): the display health.
+    using sim::tactical::DurabilityProfile;
+    using sim::tactical::HardpointProfile;
+    using sim::tactical::HardpointStatus;
+    using sim::tactical::InstanceDurability;
+    const auto fixed = [](const int value) { return sim::math::Fixed::from_raw(static_cast<std::int64_t>(value) * sim::math::Fixed::scale); };
+    InstanceDurability durable;
+    durable.max_hull = fixed(1000);
+    durable.hull = fixed(800);
+    DurabilityProfile capital;
+    capital.destroyed_with_hardpoints = true;
+    for (int index = 0; index < 4; ++index) {
+        capital.hardpoints.push_back(HardpointProfile{.destroyable = true, .max_health = fixed(100)});
+        durable.hardpoints.push_back(HardpointStatus{.health = index < 2 ? fixed(0) : fixed(100)});
+    }
+    capital.hardpoints.push_back(HardpointProfile{.destroyable = false});
+    durable.hardpoints.push_back(HardpointStatus{});
+    expect(close_to(ui::display_health(durable, &capital), 0.5F) && ui::bar_level(ui::display_health(durable, &capital)) == 5,
+           "a capital ship with half its destroyable hardpoints gone at 80 % hull shows level 5");
+    expect(close_to(ui::display_health(durable, nullptr), 0.8F), "without a profile the display health is the hull");
+    DurabilityProfile survivor = capital;
+    survivor.destroyed_with_hardpoints = false;
+    expect(close_to(ui::display_health(durable, &survivor), 0.8F), "a type that survives its hardpoints shows its hull (HD-22)");
+    durable.hull = fixed(300);
+    expect(close_to(ui::display_health(durable, &capital), 0.3F), "the lesser of hull and hardpoints: a low hull wins");
+    DurabilityProfile undefended;
+    undefended.destroyed_with_hardpoints = true;
+    undefended.hardpoints.push_back(HardpointProfile{.destroyable = false});
+    expect(close_to(ui::display_health(durable, &undefended), 0.3F), "no destroyable hardpoints: the hull alone");
 
     // WU-24 (#500): the icon's Y offset is 4.8 % of the screen height, so it hovers below the
     // squadron's projected centre instead of covering it (never over 5 % even at a tall viewport).
@@ -243,11 +327,15 @@ void dogfight_grid() {
     const auto unsnapped = ui::squadron_icon_rect({100.1F, 200.1F}, 33.75F, false);
     expect(close_to(unsnapped.x, 83.225F) && unsnapped.width == 33.75F, "Pixel_Align false retains fractional placement");
     expect(ui::combat_cell_of({100.0F, 100.0F}, {0.0F, 0.0F}) == ui::CombatCell{0, 0}, "a point in the first cell");
-    expect(ui::combat_cell_of({100.0F, 500.0F}, {0.0F, 0.0F}) == ui::CombatCell{-1, 1}, "an odd row is shifted half a cell");
+    expect(ui::combat_cell_of({300.0F, 500.0F}, {0.0F, 0.0F}) == ui::CombatCell{0, 1}, "an odd row is shifted half a cell");
+    expect(ui::combat_cell_of({100.0F, 500.0F}, {0.0F, 0.0F}) == ui::CombatCell{0, 1}, "WDF-05: an odd row's x clamps to the box's low x");
+    expect(ui::combat_cell_of({500.0F, -1500.0F}, {-6500.0F, -6500.0F}) == ui::CombatCell{17, 12}, "WDF-05: the box's low corner anchors the grid");
+    const auto recorded = ui::combat_cell_point({17, 12}, {-6500.0F, -6500.0F});
+    expect(close_to(recorded[0], 500.0F) && close_to(recorded[1], -1500.0F), "WDF-05: the recorded cell point lies on the box grid");
     const auto centre = ui::combat_cell_point({0, 0}, {0.0F, 0.0F});
     expect(close_to(centre[0], 200.0F) && close_to(centre[1], 200.0F), "a cell's point is its centre");
-    const auto odd = ui::combat_cell_point({-1, 1}, {0.0F, 0.0F});
-    expect(close_to(odd[0], 0.0F) && close_to(odd[1], 600.0F), "an odd row's point is half a cell further along x");
+    const auto odd = ui::combat_cell_point({0, 1}, {0.0F, 0.0F});
+    expect(close_to(odd[0], 400.0F) && close_to(odd[1], 600.0F), "an odd row's point is half a cell further along x");
 
     const auto lone = ui::combat_grid_slot(0, 1);
     expect(close_to(lone[0], -15.0F) && close_to(lone[1], 0.0F), "one icon: half a step left of the cell point");
@@ -410,15 +498,16 @@ void reticle_size() {
             if (previous_hull > 0.0F) expect(hull < previous_hull, "the hull shrinks as the camera backs off");
             previous_hull = hull;
             const auto centre = project({0.0F, 40.0F, 10.0F}, distance, viewport);
-            const ui::ReticleRect rect = ui::hardpoint_reticle_rect(centre, viewport);
+            const ui::ReticleRect rect = ui::hardpoint_reticle_rect(centre, viewport, 0.03F);
             expect(close_to(rect.width, 0.03F * viewport[0]), "the width is 0.03 of the screen width");
             expect(close_to(rect.height, 0.04F * viewport[1]), "the height is 0.04 of the screen height");
             expect(close_to(rect.x + rect.width * 0.5F, centre[0]) && close_to(rect.y + rect.height * 0.5F, centre[1]),
                    "the reticle is centred on the hardpoint's screen point");
         }
     }
-    const ui::ReticleRect hd = ui::hardpoint_reticle_rect({960.0F, 540.0F}, {1920.0F, 1080.0F});
-    expect(close_to(hd.width, 57.6F) && close_to(hd.height, 43.2F), "57.6 x 43.2 pixels at 1920 x 1080");
+    const ui::ReticleRect hd = ui::hardpoint_reticle_rect({960.0F, 540.0F}, {1920.0F, 1080.0F}, 0.03F);
+    expect(close_to(hd.x, 931.2F) && close_to(hd.y, 518.4F) && close_to(hd.width, 57.6F) && close_to(hd.height, 43.2F),
+           "stock reticle remains at 931.2/518.4 with 57.6 x 43.2 pixels at 1920 x 1080");
 }
 
 void reticle_anchor() {
@@ -447,6 +536,34 @@ void reticle_anchor() {
            "the ship's +Y goes where the model's rotation sends it");
 }
 
+void reticle_xml() {
+    test::ui::TempTree tree("reticle-constants");
+    const std::array mounts{vfs::MountSpec{"base", tree.root, "data", {}}};
+    for (const auto& [enemy, friendly] : std::array{std::pair{0.03F, 0.03F}, std::pair{0.06F, 0.09F}}) {
+        test::ui::write_text(tree.root / "XML/GameConstants.xml", "<GameConstants>"
+            "<HardPoint_Target_Reticle_Enemy_Screen_Size>" + std::to_string(enemy) + "</HardPoint_Target_Reticle_Enemy_Screen_Size>"
+            "<HardPoint_Target_Reticle_Friendly_Screen_Size>" + std::to_string(friendly) + "</HardPoint_Target_Reticle_Friendly_Screen_Size>"
+            "</GameConstants>");
+        auto mounted = vfs::Vfs::mount(mounts);
+        expect(static_cast<bool>(mounted), "reticle fixture mounts");
+        if (!mounted) continue;
+        const auto sizes = ui::hardpoint_reticle_sizes(mounted.value());
+        expect(sizes && close_to(sizes->enemy, enemy) && close_to(sizes->friendly, friendly), "WU-31: independent authored shares load");
+        if (!sizes) continue;
+        const auto ongoing = ui::hardpoint_reticle_rect({512.5F, 384.5F}, {1024, 768}, sizes->enemy);
+        const auto first = ui::hardpoint_reticle_rect({512.5F, 384.5F}, {1024, 768}, sizes->friendly);
+        expect(close_to(ongoing.width, enemy * 1024) && close_to(first.width, friendly * 1024),
+            "WU-31: XML perturbation changes enemy service and friendly appearance sizes");
+    }
+    for (const auto raw : {"", "NaN", "-1", "0.03 trailing"}) {
+        test::ui::write_text(tree.root / "XML/GameConstants.xml", "<GameConstants>"
+            "<HardPoint_Target_Reticle_Enemy_Screen_Size>" + std::string(raw) + "</HardPoint_Target_Reticle_Enemy_Screen_Size>"
+            "<HardPoint_Target_Reticle_Friendly_Screen_Size>0.03</HardPoint_Target_Reticle_Friendly_Screen_Size></GameConstants>");
+        auto mounted = vfs::Vfs::mount(mounts);
+        expect(mounted && !ui::hardpoint_reticle_sizes(mounted.value()), "invalid reticle constants have no unsourced fallback");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -468,6 +585,7 @@ int main() {
     expect(ui::hero_world_identity(true, false), "WU-47: a named space hero needs no explicit head tag");
     expect(ui::hero_world_identity(false, true), "WU-47: an explicit head admits an unnamed hero");
     expect(!ui::hero_world_identity(false, false), "WU-47: ordinary ships and generic identity alone get no head");
+    waypoints();
     ability_overlays();
     group_numbers();
     circles();
@@ -477,6 +595,7 @@ int main() {
     stable_icon_grid();
     reticles();
     reticle_size();
+    reticle_xml();
     reticle_anchor();
     if (test::ui::failures() != 0) {
         std::cerr << test::ui::failures() << " world UI contract(s) failed\n";

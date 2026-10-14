@@ -1,0 +1,72 @@
+title: "[Idea] "
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. Before posting, please
+        [search the Ideas board](https://github.com/EaW-Revised/EaW-Revised/discussions/categories/ideas?discussions_q=category%3AIdeas+sort%3Atop)
+        and upvote an existing post instead of opening a duplicate: votes on one post count, the same idea split
+        over three posts does not. One idea per post. How ideas are triaged: [docs/ideas.md](https://github.com/EaW-Revised/EaW-Revised/blob/main/docs/ideas.md).
+
+        Describe the original game in your own words only. Please do not paste or attach game files, screenshots
+        of the original game, decompiler output, binary addresses or original source code
+        ([clean-room rules](https://github.com/EaW-Revised/EaW-Revised/blob/main/CONTRIBUTING.md#the-clean-room-rules)).
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Space battles
+        - Land battles
+        - Galactic conquest
+        - Multiplayer
+        - Modding and mod compatibility
+        - Graphics and visual effects
+        - Audio
+        - Interface, controls and camera
+        - Performance
+        - Launcher, installation and platforms
+        - Tools and documentation
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of idea
+      options:
+        - Something the original game has that EaW Revised is missing
+        - An improvement beyond the original game
+        - Something for mod authors
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What you would like, from a player's or mod author's point of view.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters
+      description: The problem it solves or what it makes possible. Who benefits (players, modders, a particular mod)?
+    validations:
+      required: true
+  - type: textarea
+    id: original
+    attributes:
+      label: How the original game handles this (if relevant)
+      description: What you observed while playing, or what the game's XML data says, in your own words.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before posting
+      options:
+        - label: I searched the Ideas board and this is not a duplicate.
+          required: true
+        - label: This post contains no game files, decompiler output or original source code.
+          required: true

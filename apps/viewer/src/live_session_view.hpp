@@ -1,6 +1,7 @@
 #pragma once
 
 #include "presentation_constants.hpp"
+#include "lan_match.hpp"
 
 #include "battle_effects.hpp"
 #include "battle_scoring.hpp"
@@ -11,7 +12,9 @@
 #include "eawr/core/result.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/live_session.hpp"
+#include "eawr/platform/tactical_feed.hpp"
 #include "eawr/presentation/animation/unit_clips.hpp"
+#include "eawr/presentation/effects/light_effect.hpp"
 #include "eawr/presentation/space/unit_fade.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
 #include "eawr/presentation/space/live_units.hpp"
@@ -74,6 +77,15 @@ namespace eawr::presentation::godot_backend {
 // enemy cannot be selected or ordered.
 class LiveSessionView final {
 public:
+    struct PreparedBattle {
+        sim::tactical::TacticalReplay replay;
+        skirmish::SessionContent content;
+        sim::tactical::VictoryRules victory;
+        sim::tactical::EconomyRules economy;
+        units::UnitTables tables;
+        std::optional<skirmish::SkirmishStart> start;
+    };
+    [[nodiscard]] std::shared_ptr<const PreparedBattle> prepared_battle() const;
     // #76 for the command bar (#454, docs/behaviour/foc-ability-buttons.md): the ability state of a
     // card unit from the latest snapshot's ability status (space-abilities AB-50; a squadron's
     // container stands for its craft, AB-15), and requests issued as ability commands through the
@@ -103,6 +115,30 @@ public:
         std::uint64_t issued_{};
         std::uint64_t refused_{};
     };
+    [[nodiscard]] bool multiplayer() const noexcept { return options_.lan != nullptr; }
+    [[nodiscard]] LanView lan_view() const {
+        auto view = options_.lan ? options_.lan->view() : LanView{};
+        if (session_ && view.phase != LanPhase::ended)
+            if (const auto notice = session_->submission_notice()) {
+                view.message = lan_message(view) + "\n" + notice->message;
+                view.diagnostic_code = notice->code;
+            }
+        if (!recovery_input_feedback_.empty() && view.phase != LanPhase::ended && !lan_gameplay_enabled(view)) view.input_feedback = recovery_input_feedback_;
+        return view;
+    }
+    [[nodiscard]] ui::CommandScheduler::IntentEpochScope input_epoch() {
+        return options_.lan && session_ && scheduler_ ? scheduler_->capture_intent_epoch()
+            : ui::CommandScheduler::IntentEpochScope{};
+    }
+    void note_native_input(std::uint64_t epoch) {
+        if (options_.lan_acceptance && options_.lan && session_)
+            options_.lan->note_native_input(session_->completed_tick(), epoch);
+    }
+    void note_lan_input(std::optional<std::uint64_t> epoch = {}) {
+        if (options_.lan_acceptance && options_.lan && session_)
+            options_.lan->note_input(epoch.value_or(session_->completed_tick()), frames_, order_tick());
+    }
+    [[nodiscard]] std::uint64_t order_sequence() const { return scheduler_ ? scheduler_->next_sequence() : 0U; }
     [[nodiscard]] Abilities& abilities() noexcept { return abilities_; }
 
     struct ScheduledOrder final {
@@ -176,8 +212,15 @@ public:
         bool neutral{}; // WSU-63: owner-directed neutral-prop presentation policy
     };
     struct Options final {
+        std::shared_ptr<const PreparedBattle> borrowed_battle;
+        std::shared_ptr<platform::TacticalFeed> borrowed_feed;
+        std::shared_ptr<LanMatch> lan;
         std::string fixture;                                  // --eawr-live-session (m2|skirmish|replay|melee)
         skirmish::FixtureOptions skirmish;                    // --eawr-skirmish-* (#908)
+        // `attract` (MAT-08): the main-menu demo battle. `skirmish.map` names the demo map; the
+        // forces are its placed objects and `attract_ai` names the AI player type each editor
+        // player index runs (MAT-09). There is no lobby, no victory condition and no local player.
+        std::vector<std::pair<std::uint32_t, std::string>> attract_ai;
         std::filesystem::path replay_input;                   // --eawr-live-replay <file> (replay)
         // #601: --eawr-live-melee s|m|l and --eawr-live-melee-seed <n> (melee, skirmish/melee.hpp).
         std::optional<skirmish::MeleeSize> melee_size;
@@ -220,6 +263,8 @@ public:
         // --eawr-live-capture-frames a,b,...: captures by shown frame after the warm-up (#459: a
         // paused battle shows one tick on many frames), named _f<frame>.
         std::vector<std::uint64_t> capture_frames;
+        std::optional<std::uint64_t> lan_quit_tick;
+        bool lan_acceptance{};
         std::optional<std::uint64_t> end_tick;                // --eawr-live-ticks
         double ticks_per_frame{0.5};                          // --eawr-live-step
         std::optional<std::size_t> workers;                   // --eawr-live-workers
@@ -227,6 +272,8 @@ public:
         std::optional<std::size_t> particle_workers;          // --eawr-live-particle-workers (#638)
         // --eawr-live-speed 0..4: the tactical speed setting (#459 TP-05, default 2).
         std::uint32_t speed_step{ui::default_speed_step};
+        // True when --eawr-live-speed chose the step; otherwise a player's saved setting may (#2927).
+        bool speed_step_given{};
         std::filesystem::path hashes_path;                    // --eawr-live-hashes <csv>
         std::filesystem::path replay_path;                    // --eawr-live-replay-out <file>
         // --eawr-live-fault-tick: a test hook that throws on the simulation thread right
@@ -291,11 +338,34 @@ public:
         return placed_ships_;
     }
     [[nodiscard]] const std::vector<std::uint32_t>& session_records() const noexcept { return session_records_; }
+    // Presentation preload seeds: the actual initial force and local reserve bar.
+    [[nodiscard]] std::set<sim::tactical::TypeId> audio_preload_types() const {
+        std::set<sim::tactical::TypeId> types;
+        if (!setup_) return types;
+        for (const auto& unit : setup_->units) types.insert(unit.type_id);
+        if (setup_->campaign) for (const auto& reserve : setup_->campaign->reserves) {
+            if (reserve.owner != player_ || reserve.restricted) continue;
+            types.insert(reserve.type);
+            if (reserve.purchase_type) types.insert(reserve.purchase_type);
+        }
+        return types;
+    }
+
     // The local player's faction as the start names it (Empire, Rebel, ...); for a replay, the playable
     // faction whose ID the player carries. Empty before prepare().
     [[nodiscard]] std::string local_faction() const;
     // #455: a player's lobby colour (SK-12; nothing for a non-lobby player or in a replay), and its team.
     [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> player_colour(sim::tactical::PlayerId player) const;
+    // #3076 (WU-21, WSU-31): the owner's UI tint: its lobby colour in a skirmish, its faction's `Color`
+    // in a campaign battle.
+    [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> owner_ui_colour(sim::tactical::PlayerId player) const;
+    // #3076: a model's Colorization. FoC colorizes units only in a skirmish (lobby colour); a campaign
+    // battle uses the type's nonzero `No_Colorization_Color`, else the owner faction's.
+    [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> model_colour(sim::tactical::PlayerId player,
+                                                                          const std::string& object_id) const;
+    // #3150: model_colour for an instance's type (the pad capture and construction tints).
+    [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> model_colour_of_type(sim::tactical::PlayerId player,
+                                                                                  sim::tactical::TypeId type_id) const;
     [[nodiscard]] std::optional<sim::tactical::TeamId> team_of(sim::tactical::PlayerId player) const;
     // A start player's faction name (Rebel, Neutral, Pirates, ...); empty in a replay or for another ID.
     [[nodiscard]] std::string player_faction(sim::tactical::PlayerId player) const;
@@ -304,8 +374,31 @@ public:
     [[nodiscard]] bool start(std::string& failure);
     // The local player's order input on the view's CommandScheduler (UI-07; selection and
     // clicks come with #82). Main thread only; null before start().
+    [[nodiscard]] ui::CommandSink* command_sink() noexcept { return input_sink_ ? input_sink_.get() : scheduler_.get(); }
     [[nodiscard]] ui::OrderInput* order_input() noexcept { return order_input_.get(); }
     [[nodiscard]] const ui::OrderInput* order_input() const noexcept { return order_input_.get(); }
+    [[nodiscard]] bool beacon_available() const noexcept {
+        return phase_ == Phase::running && scheduler_ && setup_ && std::any_of(setup_->beacon_rules.begin(),
+            setup_->beacon_rules.end(), [this](const auto& rule) { return rule.player == player_; });
+    }
+    bool place_beacon(const sim::math::Vec3& position) {
+        if (!beacon_available()) return false;
+        ui::TacticalIntent intent;
+        intent.verb = ui::TacticalVerb::beacon;
+        intent.destination = position;
+        return static_cast<bool>(command_sink()->issue(intent));
+    }
+    [[nodiscard]] std::vector<sim::tactical::BeaconState> visible_beacons() const {
+        return battle_frame_.latest ? battle_frame_.latest->visible_beacons(player_)
+            : std::vector<sim::tactical::BeaconState>{};
+    }
+    [[nodiscard]] std::string beacon_type(const sim::tactical::TypeId type) const {
+        if (setup_) for (const auto& rule : setup_->beacon_rules) {
+            const auto ship = beacon_ships_.find(rule.player);
+            if (rule.type == type && ship != beacon_ships_.end()) return placed_ships_[ship->second].object_id;
+        }
+        return {};
+    }
     [[nodiscard]] const Options& options() const noexcept { return options_; }
     // The tick an order issued now is stamped for (UI-07 scheduler's open tick; the report's evidence).
     [[nodiscard]] std::uint64_t order_tick() const { return scheduler_ ? scheduler_->open_tick() : 0U; }
@@ -329,6 +422,7 @@ public:
     // when ticks run (TP-01, TP-02); each change enters the time track (TP-04). Main thread.
     [[nodiscard]] const ui::TimeControls& time() const noexcept { return time_; }
     void press_pause();
+    bool request_speed(std::uint32_t step);
     void press_fast_forward();
     void resume();
     enum class Phase : std::uint8_t { loading, ready, running, quitting, results, returning };
@@ -411,6 +505,7 @@ public:
     // Stops the session, checks its hashes against a headless run of its recording and writes
     // the requested hash and replay files. Idempotent.
     void finish();
+    [[nodiscard]] std::vector<std::uint8_t> finished_replay_bytes(std::string& error);
     // #615: once the simulation thread failed, writes the session's replay through the failed
     // tick beside Godot's log, so the failure replays headless. Once per session.
     void save_failure_replay();
@@ -441,7 +536,13 @@ public:
     [[nodiscard]] const space::SnapshotIndex& snapshot_index() const noexcept { return snapshot_index_; }
     void set_pose_workers(const particles::StepExecutor* workers) noexcept { pose_workers_ = workers; }
     [[nodiscard]] const BattleFrame& battle_frame() const noexcept { return battle_frame_; }
+    [[nodiscard]] const RenderClock& render_clock() const noexcept { return render_clock_; }
     [[nodiscard]] std::optional<BattleEffects::UnitFrame> unit_frame(sim::EntityId entity) const;
+    [[nodiscard]] std::optional<std::size_t> composed_ship(sim::EntityId entity) const noexcept {
+        if (const auto found = ship_of_entity_.find(entity); found != ship_of_entity_.end()) return found->second;
+        if (const auto found = launched_ship_of_entity_.find(entity); found != launched_ship_of_entity_.end()) return found->second;
+        return std::nullopt;
+    }
     // The session's snapshot of `tick` while its history still holds it (#406: the unit emitters
     // place each sample a stalled frame catches up on at that sample's own tick); null otherwise.
     [[nodiscard]] std::shared_ptr<const sim::tactical::TacticalSnapshot> snapshot_at(std::uint64_t tick) const;
@@ -454,7 +555,10 @@ public:
     // command bar's buy, cancel and reinforce requests. They go through the order scheduler like any
     // order, so they reach the simulation at a tick boundary and enter the replay.
     [[nodiscard]] const sim::tactical::EconomyRules& economy() const noexcept { return economy_; }
-    [[nodiscard]] const sim::tactical::EconomyView* local_economy() const noexcept;
+    [[nodiscard]] const sim::tactical::EconomyView* local_economy() const;
+    [[nodiscard]] bool command_pending(const ui::TacticalIntent& intent) const { return scheduler_ && scheduler_->consumed(intent); }
+    [[nodiscard]] std::uint64_t pending_revision() const { return scheduler_ ? scheduler_->reservation_revision() : 0; }
+    [[nodiscard]] const sim::tactical::GarrisonTimerView* local_garrison_timer() const noexcept;
     [[nodiscard]] std::uint64_t reinforcement_notifications() const noexcept { return reinforcement_notifications_; }
     [[nodiscard]] double reinforcement_notification_tick() const noexcept { return reinforcement_notification_tick_; }
     [[nodiscard]] bool build_allowed(const sim::tactical::BuildOption& option) const;
@@ -464,6 +568,7 @@ public:
     [[nodiscard]] bool hardpoint_repair_allowed(sim::EntityId station, std::uint32_t hardpoint) const;
     bool repair_hardpoint(sim::EntityId station, std::uint32_t hardpoint);
     bool buy(sim::EntityId station, sim::tactical::TypeId type);
+    bool special_fire(sim::EntityId source, sim::EntityId target);
     [[nodiscard]] bool pad_sale_allowed(sim::EntityId child, bool single_step = false) const;
     bool sell_pad_structure(sim::EntityId child, bool single_step = false);
     bool cancel_build(sim::tactical::BuildQueue queue, std::uint64_t entry_id);
@@ -480,13 +585,14 @@ public:
     [[nodiscard]] std::vector<ReinforcementFeedback> take_reinforcement_feedback() {
         return std::exchange(reinforcement_feedback_, {});
     }
-    [[nodiscard]] bool reinforcement_allowed() const noexcept;
-    [[nodiscard]] bool reinforcement_room(sim::tactical::TypeId type) const noexcept;
+    [[nodiscard]] bool reinforcement_allowed() const;
+    [[nodiscard]] bool reinforcement_room(sim::tactical::TypeId type) const;
     // TM-10: a drop made while paused waits for the next tick that runs. Until the snapshot shows
     // it applied, the reserve pane leaves its unit out and counts its population, so the same
     // reserve unit cannot be dropped twice.
     [[nodiscard]] std::vector<sim::tactical::TypeId> reinforcement_pool() const;
-    [[nodiscard]] std::uint32_t pending_reinforcement_population() const;
+    [[nodiscard]] std::vector<sim::tactical::ReserveView> campaign_reinforcement_pool() const;
+    [[nodiscard]] bool select_campaign_reinforcement(std::uint64_t token);
     [[nodiscard]] std::size_t pending_reinforcements() const;
     // WR-13: preview pose input only; simulation is queried through its nonblocking platform seam.
     void placement_preview(std::optional<sim::tactical::TypeId> type, std::optional<sim::math::Vec3> point);
@@ -500,6 +606,8 @@ public:
     [[nodiscard]] const EconomyRequests& economy_requests() const noexcept { return economy_requests_; }
     // The unit and combat tables the session runs with (prepare() loaded them).
     [[nodiscard]] const units::UnitTables* tables() const noexcept { return tables_ ? &*tables_ : nullptr; }
+    // WDF-05: the space map's box whose low corner starts the fighter grids; the world origin without content.
+    [[nodiscard]] sim::tactical::MapBox map_box() const noexcept { return content_ ? content_->map_box : sim::tactical::MapBox{}; }
     [[nodiscard]] const sim::tactical::CombatTable* combat() const noexcept { return content_ ? &content_->combat : nullptr; }
     [[nodiscard]] const sim::tactical::MotionTable* motion() const noexcept { return content_ ? &content_->motion : nullptr; }
     [[nodiscard]] const sim::tactical::DurabilityTable* durability() const noexcept {
@@ -523,6 +631,8 @@ public:
     void attach_projectile_models(BattleEffects& effects);
 
 private:
+    [[nodiscard]] bool prepare_borrowed(std::string& failure);
+    [[nodiscard]] bool prepare_native(const PreparedBattle& battle, std::string& failure);
     [[nodiscard]] bool prepare_m2(const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string& failure);
     [[nodiscard]] bool prepare_replay(const vfs::Vfs& filesystem, const data::Catalog& catalog,
         std::string_view map_path, std::string& failure);
@@ -537,6 +647,7 @@ private:
     // --eawr-live-ai has no effect outside the live m2/skirmish starts (report row + warning).
     bool ai_flag_ignored_{};
     std::optional<sim::tactical::TacticalSetup> setup_;
+    std::map<sim::tactical::PlayerId, std::size_t> beacon_ships_;
     std::optional<sim::tactical::TacticalReplay> replay_;
     std::optional<units::UnitTables> tables_;
     std::map<sim::tactical::TypeId, const units::UnitType*> presentation_types_;
@@ -551,9 +662,11 @@ private:
     EconomyRequests economy_requests_;
     // The session's command source reads the scheduler on the simulation thread: both are
     // declared before session_, which is stopped and destroyed first.
-    std::unique_ptr<ui::CommandScheduler> scheduler_;
+    std::shared_ptr<ui::CommandScheduler> scheduler_;
     std::unique_ptr<ui::OrderInput> order_input_;
-    std::unique_ptr<platform::LiveSession> session_;
+    std::unique_ptr<ui::CommandSink> input_sink_;
+    std::string recovery_input_feedback_;
+    std::shared_ptr<platform::TacticalFeed> session_;
     std::vector<SpacePopulation::Options::PlacedShip> placed_ships_;
     std::vector<std::uint32_t> session_records_;
     std::vector<sim::EntityId> unfogged_map_props_;
@@ -583,14 +696,13 @@ private:
     std::vector<PlacementClone> placement_clones_;
     std::optional<sim::tactical::TypeId> preview_type_;
     std::optional<sim::math::Fixed> deployment_facing_;
+    std::uint64_t deployment_token_{};
+    [[nodiscard]] const sim::tactical::ReserveView* campaign_reserve(sim::tactical::TypeId type) const noexcept;
     std::optional<sim::math::Vec3> preview_point_;
     bool preview_valid_{};
-    struct PendingReinforcement final {
-        std::uint64_t tick{};  // the tick its command was stamped for
-        sim::tactical::TypeId type{};
-    };
-    std::vector<PendingReinforcement> pending_reinforcements_;
-    [[nodiscard]] bool reinforcement_pending(const PendingReinforcement& drop) const noexcept;
+    mutable std::optional<sim::tactical::EconomyView> pending_economy_;
+    mutable std::optional<std::uint64_t> pending_economy_tick_{};
+    mutable std::uint64_t pending_economy_revision_{};
     [[nodiscard]] std::uint32_t population_of(sim::tactical::TypeId type) const noexcept;
     std::array<std::array<float, 3>, 2> preview_colours_{};
     std::uint64_t preview_frames_{};
@@ -611,6 +723,22 @@ private:
     std::uint64_t shield_flash_samples_{};
     std::array<float, 3> max_shield_flash_scale_{1.0F, 1.0F, 1.0F};
     std::map<sim::EntityId, double> shield_flash_start_;
+    // WSD-02/WSD-08: each SELF_DESTRUCT unit's light effect (a red linear pulse over twice the
+    // countdown, a colour flash for the remaining share on a cancel), from the frozen ability
+    // snapshot only. Dropped with the unit; the report keeps what it showed.
+    struct SelfDestructLight final {
+        light_effect::State state;
+        bool active{};
+        std::uint32_t remaining{};
+        std::uint64_t started{};
+    };
+    std::map<sim::EntityId, SelfDestructLight> self_destruct_lights_;
+    std::map<sim::EntityId, light_effect::State> healing_lights_;
+    std::uint64_t self_destruct_pulses_{};
+    std::uint64_t self_destruct_cancels_{};
+    std::uint64_t self_destruct_light_samples_{};
+    float max_self_destruct_light_red_{};
+
     std::uint64_t shield_flashes_{};
     // #862 (space-abilities AB-63 to AB-65, space-damage IS-03): per frame's newest tick, each
     // squadron container's ION_CANNON_SHOT switch-ons (first and last tick seen on) and each
@@ -628,6 +756,7 @@ private:
     std::map<sim::EntityId, IonShotRow> ion_shot_rows_;
     std::map<sim::EntityId, IonStunRow> ion_stun_rows_;
     BattleFrame battle_frame_;
+    RenderClock render_clock_;
     std::uint64_t reached_tick_{};
     // Ticks whose events the event log had dropped before a frame reached them (report rows).
     std::vector<std::string> event_gap_rows_;
@@ -650,6 +779,11 @@ private:
     std::vector<sim::EntityId> fog_immediate_;
     std::vector<space::FogGhosts::Observation> fog_observations_;
     std::optional<std::array<float, 3>> neutral_fog_colour_;
+    // #3076: Factions.xml `Color` / `No_Colorization_Color`, and the types' own nonzero
+    // `No_Colorization_Color`. Colorization is off outside a skirmish (campaign battles).
+    presentation::ui::MinimapSettings faction_colours_;
+    std::map<std::string, std::array<std::uint8_t, 3>> type_no_colorization_;
+    bool colorization_enabled_{true};
     std::map<sim::tactical::TypeId, std::vector<animation::BonePose>> neutral_fog_poses_;
     std::map<sim::tactical::TypeId, std::pair<bool, bool>> fog_memory_types_;
     std::vector<sim::RenderInstance> fog_ghost_instances_;
@@ -657,6 +791,9 @@ private:
     std::map<sim::EntityId, std::tuple<bool, bool, std::size_t>> fog_ghost_logged_states_;
     std::uint64_t fog_ghost_logged_tick_{std::numeric_limits<std::uint64_t>::max()};
     std::map<sim::EntityId, space::NebulaBlend> nebula_blends_;
+    std::map<sim::EntityId, space::StealthBlend> stealth_blends_;
+    std::optional<std::uint64_t> lan_end_frame_;
+    std::optional<std::chrono::steady_clock::time_point> lan_progress_at_;
     std::optional<std::uint64_t> nebula_blend_tick_;
     std::uint64_t nebula_blend_missing_ticks_{};
     data::ui::Rgba8 nebula_colour_{255, 255, 255, 64};
@@ -704,7 +841,7 @@ private:
     std::optional<std::uint64_t> begin_frame_;
     std::optional<std::chrono::steady_clock::time_point> battle_clock_start_;
     ui::BattleResults results_;
-    std::unique_ptr<BattleScoring> scoring_;
+    std::shared_ptr<BattleScoring> scoring_;
     std::string scoring_failure_;
 
     // #81 (docs/behaviour/unit-animation.md): each start unit's death clone, a placed ship

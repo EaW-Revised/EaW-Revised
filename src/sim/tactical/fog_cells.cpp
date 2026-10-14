@@ -188,13 +188,13 @@ core::Result<void> validate_fog_rules(const FogRules& rules) {
 
 FogCells::FogCells(const FogRules& rules, const std::span<const Player> players)
     : rules_(rules), players_(players.begin(), players.end()) {
-    const auto value_row = std::make_shared<std::vector<std::uint8_t>>(rules.cells_wide, 0U);
+    const auto value_row = std::make_shared<std::vector<std::uint8_t>>(rules.cells_wide, std::uint8_t{0});
     const auto hold_row = std::make_shared<std::vector<std::uint32_t>>(rules.cells_wide, 0U);
     values_.assign(players_.size(), std::vector<ValueRow>(rules.cells_tall, value_row));
     holds_.assign(players_.size(), std::vector<HoldRow>(rules.cells_tall, hold_row));
     flat_values_.resize(players_.size());
     auto dense = std::make_shared<std::vector<std::uint8_t>>(
-        static_cast<std::size_t>(rules.cells_wide) * rules.cells_tall, 0U);
+        static_cast<std::size_t>(rules.cells_wide) * rules.cells_tall, std::uint8_t{0});
     // V-22: initialized once, shared by all players and retained tick views.
     for (const auto& area : rules.dense_circles) {
         const auto column = clamp_cell(cells_from(rules.map_left.raw(), area.centre.x.raw(), rules.cell_size.raw()), rules.cells_wide);
@@ -209,7 +209,7 @@ FogCells::FogCells(const FogRules& rules, const std::span<const Player> players)
 
 core::Result<void> FogCells::advance(const std::uint64_t tick, const bool service,
     const std::span<const FogRevealer> revealers, const PartitionExecutor& executor,
-    const std::span<const FogFlash> flashes) {
+    const std::span<const FogFlash> flashes, const std::span<const PlayerId> force_players) {
     // Re-mark decisions: each worker reads the committed anchors and writes its revealers'
     // slots (V-12). A revealer marks when it has no circle yet or has moved at least one cell
     // width in the plane since it last marked.
@@ -254,7 +254,8 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
                 auto moved = math::detail::multiply_u64(dx, dx);
                 static_cast<void>(math::detail::add_magnitude(moved, math::detail::multiply_u64(dy, dy)));
                 // V-23: ownership transfer refreshes even a stationary reveal source.
-                if (found->second.owner == revealer.owner && math::detail::compare(moved, one_cell) < 0) {
+                if (found->second.owner == revealer.owner && math::detail::compare(moved, one_cell) < 0
+                    && !std::binary_search(force_players.begin(), force_players.end(), revealer.owner)) {
                     continue;
                 }
             }

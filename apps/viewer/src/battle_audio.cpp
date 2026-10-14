@@ -1,6 +1,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "battle_audio.hpp"
 #include "audio_output.hpp"
+#include "audio_buses.hpp"
 
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/skirmish/start.hpp"
@@ -32,9 +33,9 @@ namespace tactical = sim::tactical;
 using namespace battle_audio_detail;
 
 
-BattleAudio::BattleAudio(godot::Node3D& host, const vfs::Vfs& filesystem, const data::Catalog& catalog,
+BattleAudio::BattleAudio(godot::Node3D& host, std::shared_ptr<const vfs::Vfs> filesystem, const data::Catalog& catalog,
                          const Options options)
-    : host_(&host), filesystem_(&filesystem), catalog_(&catalog), options_(options) {
+    : host_(&host), filesystem_(std::move(filesystem)), catalog_(&catalog), options_(options) {
     // #443: Godot's 3D players hear only through a Camera3D of their world, and the renderer draws
     // with a bare camera of its own, so the listener lives in a never-drawn viewport on the same
     // world with a camera that makes it a listener (without one every 3D sound mixed to silence).
@@ -52,34 +53,14 @@ BattleAudio::BattleAudio(godot::Node3D& host, const vfs::Vfs& filesystem, const 
     // at the channel slider into a mix bus at the master slider, which feeds Master; the report
     // meters each (a muted Master still meters the buses that feed it).
     godot::AudioServer* server = godot::AudioServer::get_singleton();
-    buses_ = {BusLevel{.name = "EAWR_SFX"}, BusLevel{.name = "EAWR_Voice"}, BusLevel{.name = "EAWR_Music"},
-              BusLevel{.name = "EAWR_Mix"}};
-    const auto open_bus = [server](BusLevel& bus, const char* send, const bool limit) {
-        bus.index = server->get_bus_index(bus.name);
-        if (bus.index < 0) {
-            bus.index = server->get_bus_count();
-            server->add_bus();
-            server->set_bus_name(bus.index, bus.name);
-        }
-        server->set_bus_send(bus.index, send);
-        server->set_bus_volume_db(bus.index, decibels(audio::default_volume_slider));
-        while (server->get_bus_effect_count(bus.index) > 0) server->remove_bus_effect(bus.index, 0);
-        if (limit) {
-            // A viewer choice, not FoC's (BA-45): a hard limiter just under full scale keeps the
-            // rare peaks of many shots over loud music from clipping the output.
-            godot::Ref<godot::AudioEffectHardLimiter> limiter;
-            limiter.instantiate();
-            limiter->set_ceiling_db(-0.3F);
-            server->add_bus_effect(bus.index, limiter);
-        }
-        // The report's RMS: the bus's signal after its effects, before its own slider.
-        bus.capture.instantiate();
-        bus.capture->set_buffer_length(0.5F);
-        server->add_bus_effect(bus.index, bus.capture);
-    };
-    // A bus sends only to a bus before it: the mix first.
-    open_bus(buses_[3], "Master", true);
-    for (std::size_t index = 0; index < 3; ++index) open_bus(buses_[index], buses_[3].name, false);
+    // The layout is the front end's too (audio_buses.hpp): one set of buses per run.
+    std::array<godot::Ref<godot::AudioEffectCapture>, audio_buses::count> captures;
+    const auto indices = audio_buses::open(&captures);
+    for (std::size_t index = 0; index < buses_.size(); ++index) {
+        buses_[index].name = audio_buses::names[index];
+        buses_[index].index = indices[index];
+        buses_[index].capture = captures[index];
+    }
     set_mix_levels(options_.levels);
     for (std::size_t index = 0; index < audio::Voices::voices_3d; ++index) {
         auto* player = memnew(godot::AudioStreamPlayer3D);
@@ -121,18 +102,16 @@ BattleAudio::BattleAudio(godot::Node3D& host, const vfs::Vfs& filesystem, const 
     host_->add_child(speech_player_);
     // The viewer has no other sound: muting the master bus mutes the battle.
     options_.muted = options_.muted || audio_output_muted();
-    godot::AudioServer::get_singleton()->set_bus_mute(0, options_.muted);
+    // The demo battle shares the front end's output and mutes no bus: its 3D events are refused at
+    // the source (MAT-18). A battle muted by --eawr-audio off or a capture run mutes Master.
+    if (!options_.attract_silent) server->set_bus_mute(0, options_.muted);
 }
 
 BattleAudio::~BattleAudio() { release(); }
 
 void BattleAudio::set_mix_levels(const audio::MixLevels& levels) {
     options_.levels = levels;
-    auto* server = godot::AudioServer::get_singleton();
-    const std::array gains{levels.sfx, levels.speech, levels.music, levels.master};
-    for (std::size_t index = 0; index < buses_.size(); ++index) {
-        server->set_bus_volume_db(buses_[index].index, decibels(std::clamp(gains[index], 0.0, 1.0)));
-    }
+    (void)audio_buses::set_levels(levels);
 }
 
 void BattleAudio::release() {

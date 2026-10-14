@@ -55,7 +55,32 @@ set(EAWR_SCRIPT_AUTHORITATIVE_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/authoritative/tactical_bridge.cpp"
 )
 
+set(EAWR_SCRIPT_GALACTIC_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/authoritative/galactic_bridge.cpp"
+)
+
 set(EAWR_SCRIPT_FOC_SOURCES
+    # WGA-56/139: lane A lifecycle contributor; uses the shared native envelope.
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_lifecycle_state.cpp"
+    # WGA-56: live goal identities and exact native Engine continuation.
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_goal_runtime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_goal_state.cpp"
+    # WGA-56: canonical native AI state and full retained funding DTO.
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_state.cpp"
+    # WGA-57..60: galactic goal/producer/selector components.
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_goals.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_estimates.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_selection.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_selector_runtime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_selection_content.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_plan_materialization.cpp"
+    # WGA-25/38/42: stock plan definition and pacing data.
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_plans.cpp"
+    # WGA-01..05/09: lane A galactic manager, validated data and templates.
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_loading.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_templates.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_funding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/tactical_ai.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/tactical_ai_bindings.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/tactical_ai_orders.cpp"
@@ -71,4 +96,21 @@ set(EAWR_SCRIPT_FOC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/foc/ai_execution.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/ai_plans.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/plan_bindings.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_execution.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_actions.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_economic_replay.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_freestore.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_execution_state.cpp"
+    # WGA-06/62/65/80 and FT-05/08: copied campaign perception providers.
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_world.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_economy.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_perception.cpp"
+    # WGA-181..195: force tokens and owned perception state contributor.
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_forces.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_perception_state.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_markup.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_markup_state.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_markup_bindings.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_reach.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_context.cpp"
 )

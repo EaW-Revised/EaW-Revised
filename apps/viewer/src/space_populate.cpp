@@ -103,7 +103,7 @@ bool SpacePopulation::is_marker(const std::uint64_t scene_ordinal) const {
 
 void SpacePopulation::rebuild_piece_index() {
     piece_index_.rebuild(live_decisions_.size(), pieces_, live_clip_instances_, [](const GatedInstance& piece) {
-        return !piece.shield && (!piece.gate || piece.gate->art != HardpointGate::Art::attached_model);
+        return !piece.shield && !piece.cloak && (!piece.gate || piece.gate->art != HardpointGate::Art::attached_model);
     });
 }
 
@@ -111,6 +111,7 @@ void SpacePopulation::refresh_instances() {
     FrameTimer timer(trace_frames_ ? &refresh_ms_ : nullptr);
     instances_.clear();
     std::uint64_t shells = 0;
+    std::uint64_t cloaks = 0;
     attachment_marks_.clear();
     for (const GatedInstance& piece : pieces_) {
         if (piece.live && *piece.live < live_shown_.size() && !live_shown_[*piece.live]) continue;
@@ -118,6 +119,19 @@ void SpacePopulation::refresh_instances() {
         if (piece.shield) {
             if (!piece.live || *piece.live >= live_defend_.size() || !live_defend_[*piece.live]) continue;
             ++shells;
+        }
+        // WST-12: the cloak swaps the hull and hardpoints for the STEALTH sub-object.
+        const bool cloaked = piece.live && *piece.live < live_stealth_.size() && live_stealth_[*piece.live];
+        if (piece.cloak) {
+            if (!cloaked) continue;
+            ++shells;
+            ++cloaks;
+        }
+        if (piece.cloak_hidden && cloaked) continue;
+        if (piece.blast_charged) {
+            const auto& shown = *piece.blast_charged ? live_blast_charged_ : live_blast_charging_;
+            if (!piece.live || *piece.live >= shown.size() || !shown[*piece.live]) continue;
+            ++blast_meshes_shown_[*piece.blast_charged ? "charged" : "buildup"];
         }
         if (piece.gate) {
             const HardpointGate& gate = *piece.gate;
@@ -132,7 +146,8 @@ void SpacePopulation::refresh_instances() {
     }
     instance_count_ = instances_.size() - shells;
     attachments_drawn_ = attachment_marks_.count();
-    shield_shells_shown_ = std::max(shield_shells_shown_, shells);
+    shield_shells_shown_ = std::max(shield_shells_shown_, shells - cloaks);
+    stealth_shells_shown_ = std::max(stealth_shells_shown_, cloaks);
 }
 
 void SpacePopulation::release(GodotRenderer& renderer) {
@@ -147,7 +162,7 @@ void SpacePopulation::release(GodotRenderer& renderer) {
     fog_models_.clear();
     fog_drawn_entities_.clear();
     pending_unit_sample_.reset();
-    for (const GatedInstance& piece : pieces_) renderer.clear_skin_pose(piece.instance.entity_id);
+    for (const GatedInstance& piece : pieces_) renderer.forget_instance_pose(piece.instance.entity_id);
     for (const sim::AssetId asset : uploaded_) static_cast<void>(renderer.release(asset));
     uploaded_.clear();
     effect_clock_assets_.clear();

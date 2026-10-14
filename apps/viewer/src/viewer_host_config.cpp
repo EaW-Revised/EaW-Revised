@@ -2,6 +2,7 @@
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
 #include "eawr/sim/tactical/replay.hpp"
+#include <charconv>
 #include <godot_cpp/classes/rendering_server.hpp>
 
 namespace eawr::presentation::godot_backend {
@@ -56,6 +57,8 @@ void ViewerHost::read_host_options(const PackedStringArray& arguments) {
                 break;
             }
             options_->render_profile = utf8(arguments[++index]);
+        } else if (argument == "--eawr-settings-file") {
+            if (!take_path(options_->settings_file)) break;
         } else if (argument == "--eawr-scene") {
             if (!take_input(options_->scene_path)) break;
         } else if (argument == "--eawr-replay") {
@@ -81,12 +84,45 @@ void ViewerHost::read_host_options(const PackedStringArray& arguments) {
             }
         } else if (argument == "--eawr-skirmish-setup") {
             options_->skirmish_setup = true;
+        } else if (argument == "--eawr-front-end") {
+            options_->front_end = true;
         } else if (argument == "--eawr-setup-test") {
             options_->skirmish_setup_test = true;
+        } else if (argument == "--eawr-live-begin") {
+            if (index + 1 < arguments.size()) options_->live_begin = utf8(arguments[++index]);
         } else if (argument == "--eawr-content-cache") {
             const auto value = index + 1 < arguments.size() ? utf8(arguments[++index]) : std::string{};
             if (value != "on" && value != "off") options_->profile_error = "--eawr-content-cache expects on or off";
             else options_->cache_content = value == "on";
+        } else if (argument == "--eawr-texture-share") {
+            const auto value = index + 1 < arguments.size() ? utf8(arguments[++index]) : std::string{};
+            if (value != "on" && value != "off") options_->profile_error = "--eawr-texture-share expects on or off";
+            else GodotRenderer::set_texture_sharing(value == "on");
+        } else if (argument == "--eawr-vram-budget") {
+            // GM-04: budget textures as if the device had this many MiB (0: the device's own;
+            // off: no budget at all, for measurement).
+            const auto value = index + 1 < arguments.size() ? utf8(arguments[++index]) : std::string{};
+            std::uint64_t mebibytes{};
+            if (value == "off") {
+                GodotRenderer::disable_texture_budget();
+                continue;
+            }
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), mebibytes);
+            if (value.empty() || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()
+                || mebibytes > (1ULL << 24U)) {
+                options_->profile_error = "--eawr-vram-budget expects whole MiB or off";
+            } else {
+                GodotRenderer::set_device_memory_override(mebibytes << 20U);
+            }
+        } else if (argument == "--eawr-texture-mip-drop") {
+            // GM-04: the texture detail setting, top mips left out of every texture.
+            const auto value = index + 1 < arguments.size() ? utf8(arguments[++index]) : std::string{};
+            if (value.size() != 1 || value[0] < '0' || value[0] > '4') {
+                options_->profile_error = "--eawr-texture-mip-drop expects 0 to 4";
+            } else {
+                GodotRenderer::set_texture_mip_drop(static_cast<std::uint32_t>(value[0] - '0'));
+                options_->texture_mip_drop_explicit = true;
+            }
         } else if (argument == "--eawr-shader-cache") {
             const auto value = index + 1 < arguments.size() ? utf8(arguments[++index]) : std::string{};
             if (value != "on" && value != "off") options_->profile_error = "--eawr-shader-cache expects on or off";

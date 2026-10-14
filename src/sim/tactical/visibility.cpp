@@ -56,13 +56,23 @@ namespace {
 
 } // namespace
 
-core::Result<void> validate_sensors(const std::span<const SensorProfile> sensors) {
+core::Result<void> validate_sensors(const std::span<const SensorProfile> sensors,
+    const std::span<const std::pair<PlayerId, math::Fixed>> player_multipliers) {
+    auto maximum=math::Fixed::from_raw(math::Fixed::scale);
+    for (const auto& [player,multiplier] : player_multipliers) {
+        (void)player;
+        if (multiplier<math::Fixed{}) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,"negative player reveal multiplier"));
+        maximum=std::max(maximum,multiplier);
+    }
     for (std::size_t index = 0; index < sensors.size(); ++index) {
         const auto& sensor = sensors[index];
         if (index != 0 && !(sensors[index - 1].type_id < sensor.type_id)) {
             return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
                 "sensor table: type IDs are not strictly increasing at type " + std::to_string(sensor.type_id)));
         }
+        math::Fixed scaled;
+        if (sensor.reveals && maximum>math::Fixed::from_raw(math::Fixed::scale) && !math::try_multiply(sensor.reveal_range,maximum,scaled))
+            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,"player reveal range multiplication overflows"));
         if (sensor.reveal_range.raw() < 0) {
             return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
                 "sensor table: type " + std::to_string(sensor.type_id) + " has a negative reveal range"));
@@ -80,16 +90,26 @@ core::Result<SensorField> SensorField::build(
     const std::span<const Player> players,
     const std::span<const UnitState> units,
     const std::span<const SensorProfile> sensors,
-    const std::span<const EntityId> disabled) {
+    const std::span<const EntityId> disabled,
+    const std::span<const std::pair<PlayerId, math::Fixed>> player_multipliers) {
     if (players.size() > max_players) {
         return core::Result<SensorField>::failure(detail::diagnostic(diagnostic_codes::resource_limit,
             "sensor field: more than " + std::to_string(max_players) + " players"));
     }
-    const auto valid = validate_sensors(sensors);
+    const auto valid = validate_sensors(sensors,player_multipliers);
     if (!valid) {
         return core::Result<SensorField>::failure(valid.error());
     }
     SensorField field;
+    if (player_multipliers.size()>max_players) return core::Result<SensorField>::failure(detail::diagnostic(diagnostic_codes::resource_limit,"too many player reveal modifiers"));
+    PlayerId previous{};
+    for (const auto& [player,multiplier] : player_multipliers) {
+        if (player<=previous || multiplier<math::Fixed{} || std::none_of(players.begin(),players.end(),[player](const auto& value){return value.player_id==player;}))
+            return core::Result<SensorField>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,"invalid player reveal modifier"));
+        previous=player;
+    }
+    field.player_multiplier_count_=player_multipliers.size();
+    std::copy(player_multipliers.begin(),player_multipliers.end(),field.player_multipliers_.begin());
     std::map<TeamId, std::uint64_t> teams;
     for (std::size_t index = 0; index < players.size(); ++index) {
         if (index != 0 && !(players[index - 1].player_id < players[index].player_id)) {
@@ -111,7 +131,7 @@ core::Result<SensorField> SensorField::build(
                 "sensor field: unit " + std::to_string(unit.entity_id) + " owner "
                     + std::to_string(unit.owner) + " is not a declared player"));
         }
-        if (const auto range = field.reveal_range(unit.type_id);
+        if (const auto range = field.reveal_range(unit.type_id, unit.owner);
             range && !std::binary_search(disabled.begin(), disabled.end(), unit.entity_id)) {
             observers.push_back(SpaceBody{unit.entity_id, unit.owner, unit.position});
             ranges.emplace_back(unit.entity_id, *range);
@@ -139,9 +159,15 @@ std::uint64_t SensorField::team_mask(const PlayerId player) const noexcept {
     return found != team_masks_.end() && found->first == player ? found->second : 0U;
 }
 
-std::optional<math::Fixed> SensorField::reveal_range(const TypeId type_id) const noexcept {
+std::optional<math::Fixed> SensorField::reveal_range(const TypeId type_id, const PlayerId owner) const noexcept {
     const auto* found = profile(type_id);
-    return found != nullptr && found->reveals ? std::optional{found->reveal_range} : std::nullopt;
+    if (!found || !found->reveals) return std::nullopt;
+    const auto end=player_multipliers_.begin()+static_cast<std::ptrdiff_t>(player_multiplier_count_);
+    const auto multiplier = std::lower_bound(player_multipliers_.begin(), end, owner,
+        [](const auto& p, PlayerId id) { return p.first < id; });
+    if (multiplier == end || multiplier->first != owner) return found->reveal_range;
+    math::Fixed range;
+    return math::try_multiply(found->reveal_range, multiplier->second, range) ? std::optional{range} : std::nullopt;
 }
 
 const SensorProfile* SensorField::profile(const TypeId type_id) const noexcept {

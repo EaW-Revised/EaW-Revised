@@ -23,7 +23,8 @@ bool EnvironmentView::initialize_idle() {
 std::optional<int> EnvironmentView::advance_effects(const std::uint32_t tick) {
     // The effects' TIME runs on the same clock as the idle clips: held after
     // the particle frames in a fixed capture, plus the idle offset (#185).
-    const std::uint64_t effect_tick = static_cast<std::uint64_t>(options_.real_time_clock
+    const bool admitted_clock = populate_result_ && populate_result_->render_clock;
+    const std::uint64_t effect_tick = static_cast<std::uint64_t>(options_.real_time_clock || admitted_clock
         ? tick : std::min(tick, options_.clock_hold_ticks - 1U)) + options_.clock_offset;
     if (effect_tick_ != effect_tick) {
         effect_tick_ = effect_tick;

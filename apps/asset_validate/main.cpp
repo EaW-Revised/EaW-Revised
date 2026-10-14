@@ -230,6 +230,9 @@ int inspect_map(const eawr::vfs::Vfs& mounted, const Arguments& args) {
     eawr::assets::ObjectTypeCatalog map_catalog;
     bool catalog_loaded = false;
     if (auto catalog = eawr::data::load_catalog(mounted, data_profile(args.profile))) {
+        if (!catalog.value().health.clean()) {
+            std::cerr << "asset_validate: catalog load: " << eawr::data::describe_load_health(catalog.value().health) << '\n';
+        }
         map_catalog = eawr::assets::object_type_catalog(catalog.value().catalog);
         for (const auto& root : catalog.value().catalog.registry_roots()) {
             if (root.category == eawr::data::Category::game_object && root.outcome == "loaded") {
@@ -237,6 +240,8 @@ int inspect_map(const eawr::vfs::Vfs& mounted, const Arguments& args) {
                 break;
             }
         }
+    } else {
+        std::cerr << "asset_validate: catalog load: " << eawr::core::format_diagnostic(catalog.error()) << '\n';
     }
     auto record = mounted.stat(args.inspect_map);
     if (!record) {
@@ -437,7 +442,14 @@ int validate_corpus(const Arguments& args, const std::vector<Layer>& layers, con
     RawSources raw_sources;
     eawr::assets::ObjectTypeCatalog type_catalog;
     auto loaded_catalog = eawr::data::load_catalog(mounted, data_profile(args.profile));
-    if (loaded_catalog) type_catalog = eawr::assets::object_type_catalog(loaded_catalog.value().catalog);
+    if (loaded_catalog) {
+        if (!loaded_catalog.value().health.clean()) {
+            std::cerr << "asset_validate: catalog load: " << eawr::data::describe_load_health(loaded_catalog.value().health) << '\n';
+        }
+        type_catalog = eawr::assets::object_type_catalog(loaded_catalog.value().catalog);
+    } else {
+        std::cerr << "asset_validate: catalog load: " << eawr::core::format_diagnostic(loaded_catalog.error()) << '\n';
+    }
 
     // References are always probed against the effective mount, in both views:
     // a raw-view accounting question is still "would the running game find this

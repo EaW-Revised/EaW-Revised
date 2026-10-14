@@ -69,6 +69,8 @@ def main() -> int:
             "namespace eawr::assets { struct Input { float value; }; Input mutate(float); }\n"
             "namespace eawr::scene { int fixed_from_binary32(float); }\n", encoding="utf-8")
         cases = (
+            ("src/script/foc/new_host.cpp", "auto decision() { return 1.0; }", False),
+            ("src/script/authoritative/new_host.cpp", "using Scalar = double; Scalar decision();", False),
             ("src/scene/scene.cpp", "int fixed_from_binary32(float value) { return static_cast<int>(std::bit_cast<std::uint32_t>(value)); }", True),
             ("src/scene/scene.cpp", "int fixed_from_binary32(float value) { return static_cast<int>(value * 2); }", False),
             ("src/units/unit_support.cpp", "auto load(assets::Input a) { return scene::fixed_from_binary32(a.value); }", True),
@@ -82,15 +84,31 @@ def main() -> int:
             ("src/skirmish/new_loader.cpp", "auto load() { return 1.0; }", False),
             ("src/data/new_loader.cpp", "using Scalar = double; Scalar load();", False),
             ("src/data/new_loader.cpp", "int load() { int close = 1; return close; }", True),
+            ("src/script/foc/new_host.cpp", "int load() { int values[] = {1, 2}; return *std::remove(values, values + 2, 1); }", True),
         )
         for relative, body, accepted in cases:
             path = sandbox / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             namespace = relative.split("/")[1]
-            path.write_text('#include "input.hpp"\nnamespace eawr::' + namespace + ' { ' + body + ' }\n', encoding="utf-8")
+            path.write_text('#include "input.hpp"\n#include <algorithm>\nnamespace eawr::' + namespace + ' { ' + body + ' }\n', encoding="utf-8")
             result = invoke(checker, sandbox, args.clang, path)
             if (result.returncode == 0) != accepted or (not accepted and "SIM_BOUNDARY_FLOATING" not in result.stdout):
                 print(f"FAIL loader {relative}: {body}\n{result.stdout}", file=sys.stderr)
+                failures += 1
+
+        # Aliases and function pointers cannot hide ambient-locale or decision-clock reads.
+        for relative, body, expected in (
+            ("src/units/new_loader.cpp", '#include <cctype>\nnamespace eawr::units { auto load(int c) { auto f = &std::toupper; return f(c); } }', "SIM_BOUNDARY_LOCALE"),
+            ("src/script/foc/new_host.cpp", '#include <chrono>\nnamespace eawr::script { auto read() { using Clock = std::chrono::steady_clock; return Clock::now(); } }', "SIM_BOUNDARY_CLOCK"),
+            ("src/sim/new_tick.cpp", '#include <ctime>\nnamespace eawr::sim { auto read() { auto f = &std::clock; return f(); } }', "SIM_BOUNDARY_CLOCK"),
+            ("src/script/foc/new_host.cpp", 'extern "C" int remove(const char*);\nnamespace eawr::script { auto erase() { return remove("file"); } }', "SIM_BOUNDARY_DIRECT_IO"),
+        ):
+            path = sandbox / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+            result = invoke(checker, sandbox, args.clang, path)
+            if result.returncode == 0 or expected not in result.stdout:
+                print(f"FAIL authoritative guard {relative}: {result.stdout}", file=sys.stderr)
                 failures += 1
 
     return 0 if failures == 0 else 1

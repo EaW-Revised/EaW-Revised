@@ -4,6 +4,8 @@
 // (tests/presentation/renderer/test_tactical_hud.py and test_battle_input.py).
 
 #include "eawr/presentation/ui/minimap.hpp"
+#include "eawr/presentation/ui/battle_messages.hpp"
+#include "eawr/presentation/space/fog_field.hpp"
 #include "ui_test_support.hpp"
 
 #include <algorithm>
@@ -41,7 +43,9 @@ data::XmlNode tag(std::string name, std::string text) {
 void test_settings() {
     data::XmlNode settings = tag("RadarMapSettings", "");
     settings.children = {tag("Space_Backdrop_Texture_Name", "i_radar_map_grid.tga"),
-                         tag("Space_FOW_Color", "25, 66, 120, 100 "), tag("Space_Is_Guide_Rectangle", "No")};
+                         tag("Space_FOW_Color", "25, 66, 120, 100 "), tag("Space_Is_Guide_Rectangle", "No"),
+                         tag("Space_Asteroid_Field_Color", "103, 130, 139, 127"),
+                         tag("Space_Asteroid_Field_Border_Color", "174, 171, 200, 127")};
     data::XmlNode space_colour = tag("Color", "12, 30, 51, 255");
     space_colour.attributes.push_back(attribute("name", "space"));
     data::XmlNode dirt_colour = tag("Color", "0, 0, 0, 0");
@@ -51,22 +55,39 @@ void test_settings() {
     data::XmlNode radar = tag("RadarMap", "");
     radar.children = {settings};
     data::XmlNode constants = tag("GameConstants", "");
-    constants.children = {tag("Radar_Colorize_Selected_Units", "Yes"), tag("Radar_Selected_Units_Color", "209, 255, 209, 255")};
+    constants.children = {tag("Radar_Colorize_Selected_Units", "Yes"), tag("Radar_Selected_Units_Color", "209, 255, 209, 255"),
+                          tag("Nebula_Effect_Color", "255, 255, 255, 64")};
     const ui::MinimapSettings read = ui::minimap_settings(&radar, &constants);
     expect(read.diagnostics.empty(), "the FoC settings parse without warnings");
     expect(read.backdrop == "i_radar_map_grid.tga" && read.fog == data::ui::Rgba8{25, 66, 120, 100} && !read.guide_rectangle,
            "MM-01 space backdrop, fog colour and trapezoid guide");
     expect(read.colorize_selected && read.selected == data::ui::Rgba8{209, 255, 209, 255}, "MM-05 selected colour");
     expect(read.background == data::ui::Rgba8{12, 30, 51, 255}, "MM-14: the space colour fills the background");
+    // Missing singleton colours diagnose while preserving the same FoC default.
+    for (const auto name : {"Space_FOW_Color", "Space_Asteroid_Field_Color", "Space_Asteroid_Field_Border_Color",
+                           "Radar_Selected_Units_Color", "Nebula_Effect_Color"}) {
+        auto missing_radar = radar;
+        auto missing_constants = constants;
+        std::erase_if(missing_radar.children[0].children, [&](const auto& child) { return child.name == name; });
+        std::erase_if(missing_constants.children, [&](const auto& child) { return child.name == name; });
+        const auto absent = ui::minimap_settings(&missing_radar, &missing_constants);
+        expect(absent.diagnostics.size() == 1 && absent.diagnostics.front().code == "EAWR-UI-0330"
+                   && absent.diagnostics.front().message.find(name) != std::string::npos,
+               "each missing minimap singleton colour is diagnosed");
+        expect(absent.fog == read.fog && absent.field == read.field && absent.field_border == read.field_border
+                   && absent.selected == read.selected && absent.nebula == read.nebula,
+               "missing colours keep the unchanged FoC defaults");
+    }
     data::XmlNode broken_settings = tag("RadarMapSettings", "");
     broken_settings.children = {tag("Space_FOW_Color", "blue"), tag("Space_Is_Guide_Rectangle", "Yes")};
     data::XmlNode broken = tag("RadarMap", "");
     broken.children = {broken_settings};
     const ui::MinimapSettings fallback = ui::minimap_settings(&broken, nullptr);
-    expect(fallback.fog == data::ui::Rgba8{25, 66, 120, 100} && fallback.guide_rectangle && fallback.diagnostics.size() == 1,
-           "a malformed colour keeps FoC's with one warning; a rectangle guide is read");
+    expect(fallback.fog == data::ui::Rgba8{25, 66, 120, 100} && fallback.guide_rectangle && fallback.diagnostics.size() == 5,
+           "malformed and missing colours keep FoC defaults with warnings; a rectangle guide is read");
     const ui::MinimapSettings missing = ui::minimap_settings(nullptr, nullptr);
     expect(missing.backdrop == "i_radar_map_grid.tga" && missing.colorize_selected, "missing files keep FoC's values");
+    expect(missing.diagnostics.size() == 5, "missing roots diagnose all singleton colour fallbacks");
 
     // MM-07: owners without a lobby colour take their faction's Factions.xml colour.
     data::XmlNode factions = tag("Factions", "");
@@ -87,8 +108,11 @@ void test_settings() {
 
 void test_faction_registry() {
     test::ui::TempTree tree("radar-factions");
-    test::ui::write_text(tree.root / "XML/RadarMap.xml", "<RadarMap><RadarMapSettings/></RadarMap>");
-    test::ui::write_text(tree.root / "XML/GameConstants.xml", "<GameConstants/>");
+    test::ui::write_text(tree.root / "XML/RadarMap.xml", "<RadarMap><RadarMapSettings><Space_FOW_Color>25,66,120,100</Space_FOW_Color>"
+        "<Space_Asteroid_Field_Color>103,130,139,127</Space_Asteroid_Field_Color>"
+        "<Space_Asteroid_Field_Border_Color>174,171,200,127</Space_Asteroid_Field_Border_Color></RadarMapSettings></RadarMap>");
+    test::ui::write_text(tree.root / "XML/GameConstants.xml", "<GameConstants><Nebula_Effect_Color>255,255,255,64</Nebula_Effect_Color>"
+        "<Radar_Selected_Units_Color>209,255,209,255</Radar_Selected_Units_Color></GameConstants>");
     test::ui::write_text(tree.root / "XML/FactionFiles.xml",
         "<Faction_Files><File>Factions.xml</File><File>Data/XML/extra.xml</File></Faction_Files>");
     test::ui::write_text(tree.root / "XML/Factions.xml", R"xml(<Factions>
@@ -275,6 +299,34 @@ void test_point_and_scale() {
     unit.type = "Fixed";
     blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
     expect(blips.size() == 1 && near(blips[0].half_size[0], 0.05, 1e-6), "MM-17: fixed-size path ignores world bounds and space scale");
+    unit.radar.model_present.reset();
+    blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.size() == 1, "MM-17: no population or unknown placement preserves ordinary icons");
+    unit.hostile = true;
+    unit.radar.model_hidden = true;
+    unit.radar.radar_faded = true;
+    types["Fixed"].visible_when_fogged = true;
+    blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.size() == 1, "MM-17: admitted fogged enemy with unknown model identity keeps its icon");
+    unit.radar.model_present = true;
+    blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.size() == 1, "MM-17: composed fogged model keeps its icon without a visible pick box");
+    unit.hostile = false;
+    unit.radar.model_present = false;
+    unit.radar.replay = true;
+    blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.empty(), "MM-17: model-free ordinary textured icon stays absent in a revealed replay");
+    unit.hostile = true;
+    blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.empty(), "MM-17: model admission is independent of ownership");
+    unit.hostile = false;
+    unit.team = true;
+    blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.size() == 1, "MM-17: a populated model-free team retains its textured icon");
+    unit.team = false;
+    unit.type = "Point";
+    blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.size() == 1 && blips.front().icon.empty(), "MM-16: model-free empty-icon point remains admitted");
 }
 
 // MM-10, MM-04.
@@ -470,6 +522,14 @@ int main() {
     expect(survivor && survivor->yaw_degrees == 100 && survivor->x == 0,
         "MM-15: deleting members changes the centre and the first live member together");
     if (const auto filesystem = test::ui::foc_corpus("hazard minimap")) {
+        const auto constants = data::load_document(*filesystem, "data/xml/gameconstants.xml");
+        expect(static_cast<bool>(constants), "stock GameConstants load for fallback contracts");
+        if (constants) {
+            expect(presentation::space::fog_looks(constants.value().root).diagnostics.empty(),
+                   "stock FoC fog constants load with zero problems");
+            expect(ui::battle_message_looks(constants.value().root).diagnostics.empty(),
+                   "stock FoC battle-message constants load with zero problems");
+        }
         const auto settings = ui::minimap_settings(*filesystem);
         expect(settings.diagnostics.empty(), "WHZ-71/72: installed FoC hazard settings load without fallback diagnostics");
         expect(settings.nebula == data::ui::Rgba8{255, 255, 255, 64}, "WHZ-71: installed nebula effect RGBA matches FoC");

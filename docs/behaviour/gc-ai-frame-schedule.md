@@ -1,0 +1,323 @@
+# Galactic AI frame service schedule
+
+## Applicability
+
+FoC galactic conquest and campaign-spawned tactical battles, researched on
+2026-10-09. This note specializes the [galactic frame schedule](galactic-frame-service-schedule.md)
+for the S4 opponent. Arithmetic, authored plans and selection rules remain in
+the [galactic AI walk](walks/gc-ai.md). Sources are **debug build**, **XML data**
+and **Lua data**; no runtime capture is claimed. Opaque EGA-S evidence IDs map
+to ignored research receipts, never binary names or locations in this note.
+
+The remake comparison is `c18759d3e23cb9476e56ff2216da363627cc3147`, including
+`src/sim/galactic/session.cpp`, `src/script/authoritative/galactic_bridge.cpp`
+and the shared AI implementation under `src/script/foc/`. A generic script
+scheduler or tactical AI host does not establish a galactic six-system host.
+Historical missing-rule counts in the walk retain their original comparison
+base; the dependency table here describes this inspected tree.
+
+Assistance rows GFS-A13, GFC-A12/13, GFD-A08 and GFSA-09/10 add a
+2026-10-10 qualification at `127e789078143c6b69f557974377e0bfc2d6fd72`.
+MGA-E evidence is read-only **debug build**, MGA-X is effective **XML data**,
+and MGA-L is **Lua data**; their private map is ignored. They specialize the
+existing request/service boundaries and claim no runtime recording.
+
+The 2026-10-10 cache/deadline pass compares
+`7756c8316e036f3a73cfd277d2ab1bb343d98cfe`. GAC-01..08 identify read-only
+**debug build** evidence in ignored research receipts. It adds demand-cache,
+visibility-notification and restore boundaries; the synthetic cases below
+are static predictions, with runtime callback and admission ties still qualified.
+
+## Interface
+
+Inputs are the selected mode manager, synchronization frame, mode-frame time,
+processing gate, six retained service deadlines, planet/world perception,
+credits and fiscal notification, category/goal reservations, Lua plans,
+freestore actors and outstanding build/movement blocks. Outputs include goal
+activation, script writes, build requests and scheduled gameplay events.
+
+Distinguish synchronization frames, retained galactic mode frames, tactical
+child frames and Lua seconds. At ordinary 30 Hz the 0.1-second AI services
+run every three synchronization frames. A child battle selects its own AI;
+querying retained galactic perception does not advance galactic services.
+
+## Service order
+
+| ID | Contract | Source |
+|---|---|---|
+| GFS-A01 | Due synchronized commands precede galaxy object service. Planetary AI queues and actual production run inside objects; fiscal collection and its initialized AI-budget notification follow objects. Outer player service then selects the active-mode AI in ascending player ID. Global gameplay scripts and story are later. | GFS-01/09/11..14; WGA-01; WGEP-36 |
+| GFS-A02 | First AI service initializes its systems. Ordinary due checks are perception, goals, planning, execution, learning, templates. Suppressed ordinary AI admits only due galactic planning during auto-resolve. A final template change cannot affect an earlier reader retroactively. | debug build EGA-S01; WGA-03..05/09 |
+| GFS-A03 | An admitted planning turn visits live plans in their stored service-list order and pumps their threads before testing completion. A nonabandoned plan has no additional object-style Lua service-rate test. Notification, block completion, queued event delivery and actual coroutine resume remain separate boundaries. | debug build EGA-S03; GFS-24/25; WGA-49 |
+| GFS-A04 | Due execution refreshes its path table when separately due, services freestore, then updates build tasks in stored list order, removing finished tasks. Earlier planning writes can reach these later readers in the same player turn. | debug build EGA-S04; WGA-27; GFS-24 |
+| GFS-A05 | Goal proposal advances its rolling cursor. At completed-pass maintenance, reevaluate category shares first, then reevaluate active goals and sort desire, order categories by budget, ignore old potential-plan reservations, cull/sort proposals and maintain categories. This maintenance is not the three-frame Lua plan pump. | debug build EGA-S03/07; WGA-12/16/17 |
+| GFS-A06 | The inspected galactic perception service delegates to shared perception service, which only rearms its service deadline. It does not sweep all planet/world tokens every 300 frames in these paths. Token reads, cached-binding refresh and connectivity notifications have their own consumers; the nominal period is not a universal stale-snapshot lifetime. | debug build EGA-S05; WGA-07/62/65 |
+| GFS-A07 | `Evaluate_In_Galactic_Context` requires a tactical child with a retained parent, exactly an equation-name string and player object, that player's galactic manager, and current conflict information. Bind self, the manager's enemy when present, the human when present, and the parent planet identified by the conflict location. Evaluate immediately in that player's galactic perception context; return its numeric result, or the inspected warning/error path without a number. No galactic AI pump or blanket cache refresh occurs in the call. | debug build EGA-S06; Lua data; WGA-55 |
+| GFS-A08 | Valid plan/freestore movement block initialization registers listeners then advances. Its next-hop branch invokes the movement event directly; that event immediately enters world movement. Freestore regrouping also executes removal/addition events directly. Event object creation does not imply queued synchronized-command admission. Object locomotion has already had its turn before outer AI, so an accepted destination is distinct from same-frame displacement. | debug build EGA-S09; WGA-50/87; GFS-05/06/12 |
+| GFS-A09 | Valid plan invasion calls the world invasion interface before creating/returning its block. The ordinary opposing-player path appends a conflict record immediately. It does not immediately load a child: object conflict-tail arbitration has already preceded this outer AI turn and retains its own gates. | debug build EGA-S10; WGA-51/88; GFS-10/12/18 |
+| GFS-A10 | `Produce_Force` creates a block and appends initialized build tasks to the execution list. Task initialization has state-entry transitions; its galactic task-list path creates/registers a planetary AI build request, with target-specific forcing for special structures and separate tech/freestore branches. Actual queue admission, billing and progress are planetary-queue consumers, not completion of the Lua request. | debug build EGA-S10/11; WGA-29/89; WGEP-36 |
+| GFS-A11 | Native freestore unit admission removes finished movement blocks, then eligible safe stationary nonhuman transports preferring ground are removed from orbit and landed through direct events, in that order. Surface access and landed-transport capacity still gate it. This native work is separate from the misspelled Lua unit-rate branch. | debug build EGA-S11; WGA-30/31/90 |
+| GFS-A12 | Tactical force `Withdraw_Units` requires an active retreat coordinator and a passing preliminary player gate. It invokes a non-UI request: the coordinator revalidates player, allowed countdown, forced retreat and idle state, then queues an outgoing retreat event. The Lua override returns true after invoking the request without inspecting that request's return status; true alone is not proof of queued retreat. The generic force withdrawal path instead calls the auto-resolve interface and returns no Lua value. | debug build EGA-S11; Lua data; WGA-91/92; retreat eligibility stays WR-42..48 |
+| GFS-A13 | Assistance specializes the existing request boundary: magic task initialization takes direct creation before ordinary planetary queue registration; explicit `Give_Money` changes the requesting player's credits inside the Lua call. Ordinary object production/fiscal work has already preceded this outer AI turn. Later readers can observe these writes, while block completion, plan-thread resume and future reproposal remain separate. No extra assistance service or retroactive producer turn is established. | debug build MGA-E02/04; WGA-99..101; GFS-A01/03/10 |
+| GFS-A14 | Production-site membership belongs to the selected player's planet-target reachability state, separately for each of six valid policies. Ordinary staging, site-count, producibility and both producer-estimate readers request a conditional refresh at the read. An explicitly cached reachability query skips that request; a same-target query succeeds before it. Potential-plan freestore selection asks for each TaskForce's stage using its matching/unique restrictions, so it consumes this site list at allocation; subsequent per-unit route-cost checks use the independent execution cache. Execution-time freestore assignment instead checks reservation identity and transit. Initialization forces every planet/policy list; later connectivity rebuilding forces only selected friendly-ignore-threat component representatives. No extra allocation period is established. | debug build GAC-01/02/08; WGA-18/58/59/226; GFC-A14 |
+| GFS-A15 | A qualifying visibility notification synchronously reevaluates every already remembered binding on the affected force evaluator, using the notified player as self and the owning manager's enemy when present. It stores each successful value with the current synchronization frame. Visibility gain marks visible afterward; loss from visible refreshes first, records observation time and then marks hidden. No active-mode or ordinary-AI-processing test is present inside this callback. Delivery to a retained-parent evaluator can therefore change a later child-context query without pumping parent AI; actual child-time notification delivery remains GAI-U02. | debug build GAC-04; WGA-65/116..118/209; GFS-A07 |
+| GFS-A16 | Initialized manager restoration loads six saved service deadlines without a new phase offset. Perception fix-ups restore story-reference state and player/planet token/index mappings; execution fix-up reconstructs a missing derived finder. These inspected fix-ups do not pump plan threads or rearm six-system deadlines. At the next selected manager turn, ordinary checks retain GFS-A02 order and saved inclusive due state; a future deadline stays future, an overdue one services once. Restored-uninitialized managers have the separate initialization branch. Which ordinary turn is actually admitted first after load remains a trace question. | debug build GAC-03/05/06; WGS-103..110; GFC-A15/16/18 |
+| GFS-A17 | For already admitted nonplayback events, insertion appends at the queue tail. Execution scans player-list indices, and scans the live event list from its head separately for each player; eligible events for that player follow retained list order. It saves the next link before execution. An append after a cached null tail is absent from that scan; a later player scan can see it. Playback has its separate recorded order. Due-command effects precede world and outer AI; direct AI movement/landing/invasion remains GFS-A08..12. This is not a network-acceptance or incoming-sequence tie rule. | debug build GAC-07; WFO-03; GFS-A01; GAI-U03 |
+
+## Cadence
+
+Each six-system due test uses `deadline <= synchronization frame`. Rearm from
+the current frame by the truncated single-precision period times logical FPS,
+with a one-frame minimum. Constructor deadlines are zero; skipping a due
+service is not evidence of a reset. The loader's direct stored-deadline restore
+is GFC-34, while complete fix-ups and first resumed consumers remain qualified.
+
+| ID | Service / interval | Start, rearm and gate | Source |
+|---|---|---|---|
+| GFC-A01 | Perception: 10 s, 300 frames at 30 Hz. | Initial 0; shared due/rearm policy. Ordinary AI gate; selected manager only. | GFC-11; WGA-05 |
+| GFC-A02 | Goals: 0 s with one-frame floor. | Initial 0; proposal cursor and post-pass sleep are additional gates. Budget maintenance runs at pass completion, rather than each proposal pair. | debug build EGA-S03; GFC-12; WGA-17 |
+| GFC-A03 | Planning: 0.1 s, three frames at 30 Hz. | Initial 0; live plan pumps at admitted turn. Ordinary gate or auto-resolve planning exception. Lua sleeps do not independently reset this deadline. | debug build EGA-S03; GFC-13/33 |
+| GFC-A04 | Execution: 0.1 s, three frames at 30 Hz. | Initial 0; ordinary gate. Contains path, freestore and build-task work, rather than replacing their admission tests. | debug build EGA-S04; GFC-14 |
+| GFC-A05 | Learning: 10 s, 300 frames at 30 Hz. | Initial 0; ordinary gate. | GFC-15; WGA-05 |
+| GFC-A06 | Templates: 0 s with one-frame floor. | Initial 0; ordinary gate. Rotate bounded template checks; initialize and reverse effects under WGA-09. | GFC-16; WGA-09 |
+| GFC-A07 | Execution path-table refresh: 90 mode frames. | Constructor deadline 0; initialization computes the table and installs the player-dependent first offset in GFC-A16. Test `deadline <= active mode frame` only inside admitted execution; rearm from that mode frame + 90. No asserted catch-up loop. | debug build EGA-S04/GAC-06; WGA-27/137..139 |
+| GFC-A08 | Freestore main and Lua unit callbacks: authored seconds, strict elapsed > rate. | Execution admits the containing service. Separate last stamps start at 0; numeric main/unit rates gate their respective branches. Main precedes unit callbacks, with build-assignment work earlier. Stock `ServiceRate=8` does not fix the nonnumeric unit-rate branch: stock spells `UnitServciceRate`. | GFC-32; WGA-32/61; Lua data |
+| GFC-A09 | Budget fiscal notification: fiscal window, stock 45 s. | Initialized galactic AI budget, positive fiscal duration. Separate from goals/planning deadlines. Goal funding time decreases by the fiscal interval; template redistribution is reconciled here. | debug build EGA-S07; WGA-13..15; WGEP-01/02 |
+| GFC-A10 | Active-goal re-evaluation / allocation pass: proposal-pass completion, not a fixed Lua replan interval. | Proposal/target cursor and per-frame work quota determine when maintenance is requested. Constructor sleep and maintenance-request state start zero/false; positive sleep decrements at admitted goal services, skipping proposal/maintenance. Stock galactic difficulty post-pass sleep is zero. Live plans still pump under GFC-A03 without a second re-evaluation deadline in the inspected plan list. | debug build EGA-S03/08; WGA-17/75/76 |
+| GFC-A11 | Build tasks and native freestore unit work: containing execution turn, with state/readiness gates. | No separately sourced global marketplace period. Planetary AI prequeues/actual producer clocks remain WGEP-35..45 and GFS-09; a new task is not an already completed product. | debug build EGA-S10/11; GFC-A04; GAI-U03/U04 |
+| GFC-A12 | Defence assistance: authored post-block waits, sampled helper max(2400 − Lua time, 60) s and 1 s polling. | Ground and Normal/Hard space first sleep 20 s; ground polls its matching equation, Normal space polls Easy, Hard space polls Normal. Unchanged matching space-plan difficulty makes those lower-difficulty predicates false. Easy space omits the initial sleep and perception exit; structure plans wait 40 s. Live threads pump under GFC-A03; these seconds do not reset its deadline. | Lua data MGA-L01; WGA-97/98; GFS-A03 |
+| GFC-A13 | Cash assistance: one explicit 6000 grant per entered thread, followed by 120 s sleep and exit. | Not an independent repeating timer. Future activation requires goal/plan admission; the inspected stock galactic cash binding is Zero. A forced plan uses its player's positive-credit multiplier and cap, with immediate windfall notification, not the next fiscal boundary. | debug build MGA-E04; XML/Lua data MGA-X01/MGA-L01; WGA-93/95/100; GFC-A03/10 |
+| GFC-A14 | Production-site reuse: code constant 10 seconds × logical FPS, measured in synchronization frames separately per target/policy. At 30 Hz reuse includes age 300; ordinary refresh requires age > 300. | Fresh stamps are −1; that sentinel or a forced request bypasses reuse. Refresh stamps now and replaces ordered sites/membership. Initialization forces all six valid policies at every planet. Connectivity rebuilding forces friendly-ignore-threat only when a new owned disconnected-component representative is admitted. Other ordinary readers retain the age gate; a cached-only reach query never refreshes. No FPS rounding, periodic sweep or universal ownership-change flush is added. | debug build GAC-01/02, including constructor instruction check; GFSA-11/12 |
+| GFC-A15 | Six-system external gate and load writes: processing toggle changes one mode flag; enable-all changes the four processing flags. Neither helper writes a service deadline. | Shared construction writes 0; ordinary admitted service rearms; load reads the stored 32-bit deadline. The inspected six-system initialization bodies and perception/execution fix-ups do not add a common six-system offset. Goal proposal cursor/sleep and execution path offset are separate state. Re-enable leaves a retained overdue deadline eligible for one ordinary turn, subject to manager selection and suppression/auto-resolve rules. Uninspected teardown/recreation or derived writers remain qualified; this is a bounded write audit. | debug build GAC-03/05/06; GFC-A01..06; GFSA-14 |
+| GFC-A16 | Separate execution finder initialization: compute immediately, then first deadline = current mode frame + 90 for fewer than two nonhuman players; otherwise add trunc(single-precision `(90 / nonhuman count) × player index + 0.5`). | Player index is not a dense AI ordinal. Load restores the saved path deadline. Missing-finder post-load reconstruction computes derived paths without replacing that deadline; existing finder skips that reconstruction. Ordinary admitted execution still rearms to current mode frame + 90. This offset is not a six-system load offset or synchronized production-site reuse window. | debug build GAC-06; WGA-137..139; GFSA-14 |
+| GFC-A17 | Remembered force bindings: demand lookup plus synchronous visibility-triggered refresh, rather than the 300-frame perception-service interval. | Cache frame 0 misses; visible interval 0 skips lookup, −1 skips age expiry, and positive expiry equality is retained. Hidden reads use indefinite lookup, with an underlying evaluation/cache insert on a miss. Forced refresh visits existing complete parameter bindings only, not every possible category; the observation stamp is retained on the evaluator, separate from each binding's cache stamp. A visible successful read stamps observation even on a cache hit. No parent-mode-frame increment is required for these synchronization-clock writes. | debug build GAC-04; WGA-65; GFSA-13 |
+| GFC-A18 | Restored production-site stamps, site vectors and membership sets retain saved state. | The local reader restores all eleven stored stamp slots and the six valid policies' site-reference vectors/membership sets, requesting ordinary pointer fix-ups. It does not call a production-site refresh or reset their age there. Perception post-load repairs tokens/indices without this refresh. First later demand uses restored synchronization age under GFC-A14; a separate topology/visibility callback may already have changed relevant state. No complete post-load trace is claimed. | debug build GAC-01/05; WGS-105/106; GFSA-14 |
+
+GFC-A15/16/18 narrow external gate writes and checkpoint fix-ups; actual
+first-service and callback ties remain in the unknowns below. Do not substitute
+tactical staggering SCH-01..03 for this galactic schedule.
+
+## Perception bridge and budget producers
+
+The bridge reads the chosen equation's tokens, rather than manufacturing a
+tactical snapshot with galactic labels. The target is the conflict's parent
+planet, not an arbitrary tactical grid cell or every owned planet. Self selects
+both player binding and the retained galactic perception store. World/planet
+roots are initialized under WGA-06/07; markup and story flags are player/mode
+owned under WGA-62, and remembered bindings follow WGA-65's expiry and
+visibility-triggered refresh rules. These can remain relevant while the parent
+AI is frozen. A query alone does not establish that a cached force binding was
+refreshed by a tactical casualty.
+
+Stock Lua uses this bridge for `Land_Tactical_Budget_Clamped` before explicit
+`Release_Credits_For_Tactical` when tactical credits are zero, and for
+`Want_To_Fire_DS`. The former equation combines target planet value, friendly
+ground strength and ground-base level, then clamps against self credits and
+controlled planets. The latter consumes attack grace, target enemy ground
+strength and human control. Authored values remain XML inputs; these examples
+do not authorize advancing the galactic clock during a child battle.
+
+| Category / state | Producer and first consumer | Source |
+|---|---|---|
+| `Offensive`, `Infrastructure`, `Information` | Selected galactic template names category equations. Ordinary Empire/Rebel defaults supply authored equations; Underworld default uses offensive/infrastructure equations and zero information. Initialization evaluates/normalizes shares; completed proposal passes reevaluate them. | XML data EGA-S07; WGA-10..12 |
+| `Always`, `Defensive`, `Hero`, `StoryArc` | Ordinary defaults explicitly author zero equations. A zero current share does not erase saved category capital or bypass goal admission. Enabled goal categories and budget shares are different template settings. | XML data EGA-S07; WGA-09/24 |
+| `MajorItem` | Empire default and its technology template author this category and priority overrides; do not add a corresponding positive allowance to every faction. Other selected templates can author other enumerated categories. | XML data EGA-S07; WGA-09/10 |
+| Category cash/income and goal funds | Starting player credits seed initial category capital; fiscal payment notifies the initialized ledger, which reconciles actual credits, previous cycle income shares, goal accumulated funding and retained dead-goal obligations. Reservations and spending then mutate that ledger; production estimates determine funding feasibility, not new income. | debug build EGA-S07; WGA-11..15/21..24 |
+| Explicit money windfall | `Give_Money` goes through the credit adder with windfall notification. Positive AI additions apply `Credit_Multiplier`; the actual clamped credited delta is the notification input. Windfall adds delta × current share to category total cash, without locally changing available cash, equations or deadlines. Direct balance assignment and tactical transfer are not automatically this route. | debug build EGA-S07; WGA-64/85; WGEP-16 |
+| Template redistribution | End-of-turn template application changes equations/priority settings; later goal maintenance reevaluates shares and fiscal reconciliation handles changed-equation capital distribution. It is not an immediate category money grant. | WGA-09/12/15/24 |
+| Tactical initial allowance | Template-authored category allowance plus available category cash produces WGA-53's transfer. Ordinary Empire/Rebel examples are comments; the inspected ordinary Underworld default also has no active allowance row. Never turn these comments into a positive default. | XML data EGA-S07; WGA-53 |
+| Tactical additional release / return | Explicit release draws from saved strategic balance, tracks the extra amount, and return restores once under WGA-54. Stock land funding is an explicit caller, separate from ordinary fiscal income and difficulty-adjusted money grants. | Lua data EGA-S06; WGA-54/64 |
+
+The S3 tactical-rule budget input must be produced by this selected galactic
+ledger and transfer boundary. Planet income totals, normalized category desires
+and tactical credits are different values. Template names resolve the registered
+category enumeration; the rows above inventory the inspected ordinary
+templates, not every possible selected template's category equations.
+
+## Decisions and command admission
+
+The inspected native routes distinguish immediate admission from deferred
+locomotion, production progress and conflict arbitration. A blanket rule that
+every AI action is queued for the next synchronized command pass is false for
+the sourced direct movement and invasion interfaces. Equally, a returned block
+does not prove travel or a tactical load has completed.
+
+Already due synchronized player events execute before objects and outer AI
+under GFS-01. Native AI decisions therefore read state left by those earlier
+commands and object/fiscal commits. Direct AI effects may be read by later
+plans, execution, players or global scripts in the same outer frame. GFS-A17
+establishes retained queue traversal and tail insertion. Incoming
+acceptance/sequence ties, the complete paused standalone mutation whitelist and
+callbacks reentering other services remain UFO-01 / GAI-U03; no total order is
+claimed for them.
+
+In the remake, `ScriptedGalacticSession::step` submits current inputs, routes
+previously retained script outputs, steps the world, services admitted AI then
+story, and retains newly generated outputs sorted by issuer/sequence. Routed
+outputs require an AI/script seat and enter the world's canonical
+tick/seat/sequence ordering on the next world step. A shared routing cursor
+prevents treating same-seat input and script orders as unrelated sequences.
+This is the verified generic bridge policy, not evidence for native FoC action
+latency; compare each actual writer and first consumer separately.
+
+The S4 research tracker is the GC AI service map (legacy EAWR-2495), under the
+Galactic AI opponent slice (legacy EAWR-1967). Focused follow-ups cover reset/context
+qualification (legacy EAWR-2496), action/player-event qualification (legacy EAWR-2497)
+and the allocation-marketplace read (legacy EAWR-2498). Existing implementation
+owners below retain their original tickets.
+
+## Same-frame dependencies and remake comparison
+
+These are boundary comparisons, not a request to reproduce internal list loops.
+Implementations retain partitioned immutable inputs, disjoint staged outputs
+and ordered commits. An implementation change needs the named observable case
+and equality on 1, 2, 4 and 8 workers.
+
+| ID | Writer → reader in the debug build | Remake at the comparison base | Verdict / case |
+|---|---|---|---|
+| GFD-A01 | Production and fiscal credit/budget writes → later player AI. | Galaxy production/fiscal precedes generic AI script service, but the category/goal budget notification remains an explicit seam in `session.cpp`. | Broad world-before-AI boundary **same**; ledger consumer **missing**. GFSA-01; reuse category/goal ledger work (legacy EAWR-1122). |
+| GFD-A02 | Selected perception reads → completed-pass category/goal maintenance → plan attachment/pump → later execution/freestore/build tasks. | Shared AI has tactical world input, while the galactic bridge has a generic AI scheduler. Neither supplies this full galactic host. | **Missing**, not proof of a particular stock-plan mismatch. GFSA-02; reuse lifecycle/goal/freestore work (legacy EAWR-1120, EAWR-1123, EAWR-1124). |
+| GFD-A03 | Last template application → future goal-share/activation readers and fiscal redistribution. | Shared tactical AI retains a selected space template; dynamic galactic template transitions are absent in this scope. | **Missing**. GFSA-03; reuse lifecycle and ledger work (legacy EAWR-1120, EAWR-1122). |
+| GFD-A04 | Retained conflict-planet perception → immediate child equation result → explicit additional tactical release. | No binding for `Evaluate_In_Galactic_Context` is present in the inspected shared source; the galactic ledger-to-tactical input producer is also absent. | **Missing**. GFSA-04; reuse perception and battle-rule/ledger work (legacy EAWR-1121, EAWR-1122, EAWR-2007). Token refresh across child callbacks remains qualified. |
+| GFD-A05 | Direct movement/regrouping or invasion admission → later plan/execution/global-script state read. Motion/manager conflict arbitration may be later. | Generic newly generated script orders wait for the next world step; native action-specific world callbacks are not supplied by the inspected galactic AI host. | Admission boundary **differs**; full native consumer **missing**. GFSA-05 distinguishes a same-frame query from first displacement/load. Reuse freestore/event-host work (legacy EAWR-1124, EAWR-1127), rather than file an extra global phase bug. |
+| GFD-A06 | Already due player command → world changes → outer AI decision. Additional queued-event ties are independently qualified. | World command commit precedes object work and generic AI service; canonical keys are a project policy. | Broad boundary **same**; original event tie order **not checkable**. GFSA-06 / GAI-U03; reuse the frame-order command qualification. |
+| GFD-A07 | Plan build request → execution task/planetary prequeue → later planet producer admission. Native freestore landing changes containment before later readers; tactical withdrawal uses outgoing-event admission instead. | The generic bridge's next-step route is present, but these native galactic allocation/landing and action-specific first-reader contracts are absent. | **Missing**; exact request/producer/event ties **not checkable**. GFSA-07/08; reuse production/freestore and tactical transition owners (legacy EAWR-1124, EAWR-1118, EAWR-2007). |
+| GFD-A08 | Magic request state-entry creation or explicit money addition → later plan/player/global-script reads. Earlier ordinary production/fiscal consumers retain their committed inputs. | Complete galactic assistance is absent; the shared tactical money binding emits a command and rejects nonpositive arguments. Generic next-step output routing does not supply the immediate galactic credit/creation path. | **Missing**, with shared numeric/admission behavior **different**. GFSA-09/10; WGA-99..101; reuse magic-assistance work (legacy EAWR-1126). Exact reentrant callback/thread ties remain GAI-U03. |
+| GFD-A09 | Planet apparent-faction change after allegiance → internal/external path-property updates → selective forced production-site refresh → later goal/staging/freestore producer reads. Ordinary demand may retain another policy's older membership but read current producer queue state. | `galactic_ai_reach.cpp` consumes supplied production-site relations; it does not own their stamps, ordered staging selection or refresh producer. `galactic_ai_execution.cpp` has a separate execution cost table. | Site producer **missing**; replacing it with cost-table membership or fresh-every-frame membership changes GFSA-11/12. Reuse production-site freshness work (legacy EAWR-2606), not a seventh-service timer. |
+| GFD-A10 | Qualifying visibility gain/loss → synchronous existing-binding value/cache-stamp writes → later retained-parent equation read. Observation stamp and hidden age are evaluator state. | `galactic_ai_perception.cpp` supplies binding cache lookup and `visibility_changed`, with player/planet observation storage; complete evaluator-specific observation ownership and retained-child notification composition are not established. | Local cache mechanism **partial**; caller/observation equivalence **not checkable**. GFSA-13; retain perception/battle-context qualification, without treating child queries as parent service turns. |
+| GFD-A11 | Saved six deadlines/site stamps → reference and derived-data fix-ups → first admitted selected-manager reader. Missing derived finder reconstruction preserves its independent deadline. | `galactic_ai.cpp` restores lifecycle deadlines and inclusive service order; `galactic_ai_execution.cpp` preserves the path deadline on reconstruction. Complete production-site, plan/listener and remembered-force graph restore is not supplied by those envelopes alone. | Deadline mechanics **same**; full graph and actual first-resume ordering **partial / not checkable**. GFSA-14; WGS-103..110 and existing checkpoint owner. |
+| GFD-A12 | Already admitted queue tail insertion → per-player-index stored-list execution → world/AI read; direct late AI admission has its separate first consumer. | World commands use project tick/seat/sequence keys and generic script output routing; this is not the original linked-list/player-index policy. | Ordering policy **different**; actual incoming acceptance and paused behavior remain **not checkable**. GFSA-15; no new phase defect from an unmeasured network tie. |
+
+## Synthetic frame cases
+
+Cases use synthetic data and explicit clock inputs. They are static predictions
+or qualification recipes, not claimed retail recordings.
+
+| ID | Frame t | t+1 | t+2 / next relevant boundary |
+|---|---|---|---|
+| GFSA-01 | Set the fiscal deadline at t and give an AI a completed production entry. Record placed actor, actual credit delta, budget notification and the later AI's input. Its world input includes committed production/fiscal state; the ledger reconciles once. | No second fiscal notification solely because the prior window was due; a generated event executes at its admitted route boundary. | Verify one purchase/placement and conservation of actual cash versus reserved/marked/dead-goal funds. Include cap-clamped income. |
+| GFSA-02 | Six deadlines zero, known selected manager, one proposal pass completing and one live plan. Due services run in GFS-A02 order; maintenance precedes planning and execution. Pin the proposal cursor so pass completion is an explicit fixture input. | One-frame goal/template services may run. Ordinary three-frame planning/execution are not due. No artificial 300-frame token freeze. | At t+2 planning/execution remain not due; t+3 is their next ordinary turn. Repeat processing suppression with auto-resolve: planning-only exception. |
+| GFSA-03 | Both goal maintenance and template polling due. Start with offensive allocation policy A; final template application switches to policy B. Earlier maintenance/planning used A. | Next qualifying goal maintenance can evaluate B; no retroactive cancellation or spending at t. | At next fiscal reconciliation verify changed-equation category distribution, retained accumulated/dead-goal funds and no invented money grant. Zero-category variants keep saved cash until the verified consumer changes it. |
+| GFSA-04 | Retain a galaxy at parent frame p, enter a tactical child at conflict planet X. Request `Land_Tactical_Budget_Clamped` for player A. Record target X, self A, manager enemy, optional human, actual equation tokens, numeric result and explicit release. | Advance only the child. Requery with unchanged parent inputs: parent deadlines and mode frame stay p; query does not pump galactic plans. A cached token follows its own verified policy. | Change tactical losses and separately signal a parent-visible/cache update; record first changed token/result, credit switch and first returned parent reader. Without this trace, casualty-to-parent-cache refresh is not established. Invalid parameter/no-parent/no-manager variants return no usable number. |
+| GFSA-05 | Two ordered plan threads: the first submits valid invasion at an accessible enemy planet; the second inspects pending invasion state. Native admission has already appended the record before the second reader. A generic next-step translator delays that reader's input. Record callback/block entry separately; no same-frame child load is predicted from this late turn. | First eligible conflict tail can consume the queued invasion, subject to gates. Movement variant records direct accepted route state before the next ordinary locomotion service. | Compare first child/arrival and exact action count. Freestore regrouping variant records container identity before a later plan reader. This tests an observable state query; it does not demand copying a serial traversal. |
+| GFSA-06 | A due player command changes the selected AI's planet ownership, credits or production availability before world/AI service. Pin all AI deadlines and record its later decision input. It reads that committed change. | Record first actual AI action consumer separately from decision time. | Qualification: enqueue competing equal-frame player events in both orders and repeat with nested pause/standalone outer execution. Do not substitute remake seat/sequence order for an unmeasured original tie rule. |
+| GFSA-07 | Planning requests one ordinary product with sufficient ledger funds, one already reserved freestore actor and one special structure at its target. Record task state-entry, planetary registration, execution/freestore assignment, actual purchase and block state independently. Native landing variant has safe stationary ground-preferring transport and one open surface slot: record orbit removal before landing and a later containment read. | First eligible planet queue pass sees registered work; actual producer still applies its own gates/countdown. Do not assert zero-cost or completed production just from a returned block. | Compare cancellation/ownership/base-loss and simultaneous player purchase at last affordable funds. Record exact first billed/placed actor and avoid a duplicate refund/assignment. Complete state-entry/list ties remain a probe. |
+| GFSA-08 | Tactical withdrawal has preliminary player gate passing but positive allowed countdown. The Lua call can return true while the inner request rejects too-soon and queues no retreat event. In the allowed, idle nonlocal variant, one outgoing event is queued; record enqueue separately from execution/countdown start. | Record first outgoing/synchronized event execution and admitted retreat service. Auto-resolve variant uses the generic immediate withdrawal interface and has no tactical Boolean/event-queue contract. | Compare player request ties, nested pause and the retained parent result. No forced tactical event from the auto-resolve branch and no accepted retreat inferred solely from Lua true. |
+| GFSA-09 | Pin an admitted plan turn and explicit player/planet. With zero credits/full population, request one valid magic type and record state-entry creation, owner, ordinary prequeue and balance separately; request its paid counterpart as a control. A later reader sees direct creation's committed state without a paid purchase. | Record first block completion, formation/landing and coroutine resume separately; no invented build countdown or repeat spawn. | Compare surface/blockade/structure/type failures and extra creation types. Sample all requested stock rosters through identified forced plans where bindings are Zero, plus naturally eligible Normal space. Reverse concurrent request order only as a qualification probe under GAI-U03. |
+| GFSA-10 | Enter one cash thread with AI credits 0 and no effective cap: Easy/Normal/Hard immediate additions are 3000/6000/7200. A later explicit balance query sees that balance; record actual delta and windfall separately. Test a negative numeric addition and cap 6500 with prior balance 6400. | The same sleeping thread grants nothing again. Category total cash follows actual delta × share under WGA-85; available cash/deadlines are not reset by this notification. | At the first admitted pump after 120 s, record exit without a second grant; future reproposal still needs positive bound desire and admission. Stock Zero binding produces no cash proposal; any forced binding is identified. Repeat paused/child/load variants as existing scheduling qualifications, not a universal timer assertion. |
+| GFSA-11 | At synchronization t = s + 299, seed one policy's site list at s and change a route so the rebuilt list would differ. Demand staging, potential-plan freestore stage selection and a producer quote: retain old membership/order; the quote still reads current queues at retained sites. Parent mode frame is a separate input. | At s + 300, the ordinary read still reuses the list, including WGA-226's first eligible stage. Freestore candidate route costs still follow the independent execution cache, not a new site-membership refresh. | At s + 301, first ordinary read refreshes/stamps, and later readers of that policy share the result. A cached-only reach query alone does not refresh. Repeat a −1 stamp and a different policy to separate sentinel and policy ownership. These are synthetic static expectations, not a stock route/capture claim. |
+| GFSA-12 | Seed different stale lists for friendly-ignore-threat and another policy; cause a planet apparent-faction change at its admitted service after allegiance. Pin a new owned component representative. Its connectivity reconstruction forces that representative's friendly-ignore-threat list before later AI. | Read both policies inside the reuse window: the refreshed policy remains stamped at t; the other policy is not universally flushed by this caller. Read production capability/queue values separately from membership. | Repeat normal initialization: every planet's six valid policies refresh. A later force change or fiscal notification alone is not this particular force-refresh producer. Record actual producer enumeration to qualify staging ties; do not assert ascending planet ID. |
+| GFSA-13 | Freeze parent mode frame p, advance child synchronization frame t, and prepopulate two complete category bindings on one retained force evaluator. Deliver a qualifying visibility-loss notification from visible: both existing values are reevaluated/stamped at t, observation stamps t, then hidden. A later child-context read sees the committed cache; no parent plan pump occurs. | With no new notification, hidden remembered bindings persist and hidden age uses synchronization time, not p. A third, previously unseen binding takes its own underlying evaluation/cache-insert path; it was not precomputed by the notification. | Deliver visibility gain with changed force and compare refreshed values and visible age zero. Pin expiry equality, interval 0/−1 and cache frame 0 separately. Actual child-time signal production, observers and all faction outputs remain a runtime recipe under GAI-U02. |
+| GFSA-14 | Restore initialized AI with six deadlines around synchronization t and site stamps at t − 300; restore a path deadline around parent frame p. Complete WGS-106 fix-ups. No local fix-up is a planning turn or common six-deadline redraw. Missing finder rebuild preserves its restored deadline. | At the first admitted selected-manager turn, run only due services in GFS-A02 order, once each; future planning remains future even if its block completed. Site demand still reuses at synchronization age 300; first age 301 demand refreshes. | Repeat processing disable/re-enable, restored-uninitialized manager, existing finder and an active retained child. Record actual first admitted turn/callback sequence; while child remains selected, parent deadlines are retained. Exact continuation is the remake policy, rather than copying WGS-101/107/111's RNG/handler/queue discontinuities. |
+| GFSA-15 | Insert two already eligible same-player commands A then B with noncommuting balance/ownership effects. Their retained queue order is A then B within that player's scan. Insert a later-index player's command earlier in the queue: player scan order still controls cross-player execution before the AI reader. | In a controlled callback variant append after a cached null next link; that scan omits the append, while a later matching-player scan can consume an eligible appended event. A direct late AI invasion still enters its world record before a later direct query under GFS-A09. | Reverse insertion and player-list fixtures, then qualify actual outgoing/network acceptance, multiplayer resolved-due frame, pause and playback separately. Use the ordinary saved queue control only before load: WGS-111 says session restore discards transport queues. This case sources retained traversal, not an incoming-sequence total order. |
+
+## Unknowns and capture recipes
+
+| ID | Unsupported boundary | Recipe / owner |
+|---|---|---|
+| GAI-U01 | Actual first admitted service after checkpoint fix-ups, uninspected teardown/recreation/derived deadline writes, dynamic thread/list additions and full mixed callback order. Processing toggle/enable writes and local restore/fix-ups are narrowed by GFC-A15/16/18. GLO-E01/E02 qualify pre-save Lua pool stamps and one ordinary pause/resume observation only; neither supplied a restored or returned-child pass. **Native-only, not observable with the current tooling:** the exact first native service, fix-up, notification and thread-resume order. | Extend GFSA-14 and GFSC-24/25: record saved six/path deadlines, site stamps, proposal/template cursors, freestore stamps and exact first notification/callback/thread resume, including active-child and uninitialized loads. Reuse GFS-U06/08 and battle-return/save work (legacy EAWR-1127, EAWR-1983); do not repeat a gate-only reset assertion already settled. A future native trace must record selected/retained mode and synchronization frames, saved six/path deadlines, site stamps, proposal/template cursors, fix-up completion, callback identities and each admitted reader; Lua samples alone cannot supply these boundaries. |
+| GAI-U02 | Actual child-time delivery/observer ownership of GFS-A15's retained force refresh and stock equation outputs for all faction contexts. Binding versus observation stamps and the synchronous existing-binding refresh are narrowed by GFC-A17. | GFSA-13 plus GFSA-04 with fog enabled/disabled, visible/hidden and unseen bindings, interval 0/−1, exact expiry and casualty/credit-release equality. Record callback producer, evaluator/observer identity, synchronization versus parent/child clocks and first returned parent reader. Extend AI U-01/U-07 captures; the static callback alone is not a child casualty-refresh observation. |
+| GAI-U03 | Incoming acceptance/sequence ties, complete paused outer mutation policy and first actual production/landing/withdraw consumers beyond sourced admission. Tail insertion and already admitted nonplayback traversal are GFS-A17. | GFSA-15 plus GFSA-05/06: record outgoing admission, scheduled insertion/resolved frame, direct callbacks, billing, first world effect and block completion. Reverse insertion/player order and repeat pause/playback/load using WGS-111's queue-loss distinction. Reuse UFO-01 and GFSC-24/25; do not assume every event-shaped object is scheduled. |
+| GAI-U04 | No seventh allocation period is established by the six-system and production-site caller audit. GFS-A14/GFC-A14 settle the inspected demand/cache producer; global absence of another service remains unproved. | Run GFSA-11/12 through one ordinary reservation request and compare goal-maintenance, estimate, freestore and planetary-queue mutations. Trace any additional observed service before assigning a deadline. Reuse goal/freestore work (legacy EAWR-1123, EAWR-1124) and production-site freshness work (legacy EAWR-2606); do not infer a global marketplace timer from the site's ten-second reuse gate. |
+
+The seven AI sweep intakes remain capture-needed. Their formula/selector,
+template, producer, magic-production and archive qualifications retain the
+recipes in the owning walk; this note narrows their scheduling subquestions
+without claiming whole-item closure.
+
+The bounded runtime observations WGA-111/112/114 qualify income, slot and
+planet-count outputs for two selected galactic AI managers, including their
+human context.
+These narrow GAI-U02's output matrix; they do not establish cache interval
+overrides, synchronized-frame expiry, hidden binding ownership or retained
+parent refresh during a child battle. GAI-U02 remains capture-needed.
+
+
+WGA-115/116 add bounded mixed-force fog-disabled and scout gain/loss outputs;
+WGA-117 qualifies retained conflict-planet and selected galactic-manager
+queries at child Start and later in the active child. WGA-118 records child
+loading-screen force outputs without assigning a refresh callback or exact
+synchronizer frame. The attempted child quickload supplies no usable
+post-load output. GAI-U02 still owns interval overrides, exact expiry,
+synchronized hidden ages and observation ownership; U-07 retains the load
+qualification. The existing service cadence remains unchanged.
+
+
+WGA-141..146 add bounded initial freestore stamps/rate spelling, current counts
+versus callbacks and natural Normal assistance rosters, credit deltas/clamps,
+and synthetic clock-input tests of the stock wait helper. They add no cadence
+trace or post-load pool sample. U-05/U-06 retain their membership/reservation,
+landing-gate, loaded-script and paid/forced-production matrices.
+
+
+WGA-147 adds a forced Normal ground-defense roster observed at zero credits
+and later in the stock wait phase. WGA-148 records empty forced Normal
+structure TaskForce snapshots without inferring placement failure. These
+narrow GFSA-09's output observations, not billing, landing/success, capacity,
+thread wake times or the existing service cadence; U-06 remains capture-needed.
+
+## Timeline service qualification
+
+This 2026-10-10 append compares `0084667c7598a31819004b272a32310b222ec8fb`.
+Fresh read-only **debug build** TL-E evidence, effective **XML data** TL-X01
+and **Lua data** TL-L01 are mapped privately in ignored research receipts.
+The algorithm and archive contracts are WGA-375..384 in the
+[AI walk](walks/gc-ai.md#active-mode-timeline-producer-and-readers).
+No new retail recording or general service-admission rule is claimed.
+
+| ID | Order contract | Source |
+|---|---|---|
+| GFS-A18 | Shared mode service updates its own timeline after both object managers have returned, including the synchronized manager's conflict/zoom and deletion tail; it is before collision/movement support, fiscal notification and outer player AI. It reduces max(0, current tech of the full shared player list in ascending-ID index view), including listed nonparticipants/inactive/neutral/story players. Ordinary child creation retains those player objects without root tech reassignment, but constructs a separate zero scalar. Outer scripts/story come later. `Game.Timeline` chooses the active mode at the later read, even from retained-parent perception. | debug build TL-E02..04, CT-E01..07 and EGS-01/02; WFO-27; WGM-89; GFS-34; WGA-375..380/390..396 |
+
+| ID | Cadence | Start, writes, skip and reset | Source |
+|---|---|---|---|
+| GFC-A19 | Once per admitted shared-mode invocation; no independent elapsed-time deadline or phase offset. | Each mode constructs scalar 0; update overwrites with max(0, every shared listed player's current tech), allowing decrease/empty-list reset. Child setup does not copy parent scalar or reset the shared tech inputs. Full load restores the shared player current/max tech and each mode's saved scalar independently, without local reduction. The producer/call has no local pause/editor/AI-processing gate; denied outer invocation skips it, while a paused admitted call can refresh. A retained parent has no second service turn during its child. | debug build TL-E01/02/04/05, CT-E01..08; WGA-376..381/390..398; GFS-02/16/34 |
+
+| ID | Dependency | Original read boundary / remake audit | Observable case |
+|---|---|---|---|
+| GFD-A13 | Earlier object/command/conflict-tail tech commit → timeline reduction → later selected AI equation | Completed writes through both manager returns feed GFS-A18. Later outer story tech writes do not retroactively change the scalar. At the comparison base the producer and active-mode publication are missing. WGA-399 requires canonical current tech for every retained player, independently of combatant purchasing accounts, with refreshed immutable inputs and ordered scalar commit. | GFSA-16: tech 2→4 before reduction, including a completed conflict-tail callback, gives timeline 4 to later AI. The same write after reduction leaves timeline 2 until the next update. |
+| GFD-A14 | Shared player restore/active-mode selection → separately retained mode scalar → timeline token | The token reads selected active-mode scalar without updating it; full load restores shared player tech and each scalar independently. Temporary map-player setup is not final tech state, and parent perception does not substitute parent timeline. The per-mode owner/selector are missing at the comparison base. First actual handoff/load service stays GAI-U05/GCT-U01. | GFSA-18: parent 4, fresh child 0 and full-list max 5 yield child token 0 before service, then 5 after reduction, even through parent perception. Returning before parent update reads retained 4; saved unequal scalars restore independently of max tech. |
+
+| ID | Setup at frame t | Expected static contract | Variants |
+|---|---|---|---|
+| GFSA-16 | Begin with all player tech ≤2 and retained scalar 2. Commit tech 4 inside completed earlier command/object work or a conflict-tail callback, then reach the post-manager timeline boundary. Query the strict stock comparison for self tech 2 in later AI. | Scalar 4 and comparison true in this invocation. Move the identical write to later outer story: scalar remains 2 and comparison false until the next admitted update. A pre-conflict reduction would fail the callback variant. | Reorder player storage while keeping the ascending-ID index association; vary human/AI/faction/participation, equality and multiple maxima. Fiscal payment alone, age advance and conquest without a tech write do not change the maximum. Compare 1/2/4/8 workers. |
+| GFSA-17 | With unchanged mode time, admit a paused shared-mode invocation and supply player tech [1,5,3] with old scalar 2. | The locally ungated update writes 5 despite unchanged mode time. Lower the last highest entry to 3 before another admitted invocation: scalar becomes 3. Empty list yields 0. | Construction-before-service returns 0. Supply value 6 only as an assertion-boundary variant; no silent clamp is sourced. Also deny the outer mode invocation: there is no update merely because a token was queried. |
+| GFSA-18 | Retain parent scalar 4, combatant tech 2/3 and a listed nonparticipant tech 5; construct/select child scalar 0. Read `Game.Timeline` through parent perception. Separately full-save parent 4, child 3 and shared tech maximum 5, then reload. | Direct child token is 0 before reduction and 5 after admitted shared service, without parent copy/root tech reassignment. Full load restores both unequal scalars and shared tech independently; queries do not reduce. A later authoritative tech write reaches the next admitted reduction. | Swap combatant slots and reorder sparse player storage; use inactive/neutral/hostile/story highest-tech entries. Fresh unassigned player tech 0 differs from retained nonzero tech; unavailable project provider data must not silently become zero. Return reads retained parent 4 until update. Actual first eligible entry/load/return read remains GAI-U05/GCT-U01. Compare 1/2/4/8 workers. |
+
+| ID | Qualified runtime boundary | Capture recipe |
+|---|---|---|
+| GAI-U05 | Actual first timeline consumer versus update at child initialization, battle return and full load; complete runtime mode-switch/pause admission, and any uninspected tracker reconstruction/writes. Static local producer, selector and archive paths are WGA-375..381; shared player/child ownership and full archive inputs are WGA-390..398, retaining GCT-U01. GLO-E01 read current player tech 2/1/2 and the stock `Empire_Should_Upgrade_Tech` result 1 before save. That compound equation does not identify the retained timeline scalar or its first consumer. Load and child-entry attempts ended before continuation. **Native-only, not observable with the current tooling:** actual tracker update versus first query at those boundaries. | In a controlled debug campaign, record every player identity/current tech and active/retained mode identity; sample the scalar/token before and after the post-object boundary and later AI/story. Raise and lower the unique maximum using an explicit tech reward, repeat paused admitted service, and sample child entry/return. Save a deliberately stale scalar after a late tech change, then reload and record the first query and first admitted shared service. Use an identity timeline equation through the existing equation interfaces; parent-context evaluation must record active-mode selection too. Record the era panel only as corroborating output. Keep raw instrumentation/captures ignored. Extend GAI-U01 and GFSC-24/25; no first-load ordering claim follows from the loader alone. Record active/retained mode identity, scalar before/after the post-object boundary and every first AI/story consumer. A dedicated identity equation could expose a sampled scalar through Lua, but would still not observe the native update or bridge debugger disconnection during load. |
+
+The completed local order above narrows the timeline cadence gap. It does not
+assign a seventh AI deadline, turn the scalar into a fiscal clock, or close
+the broader retained-parent/cache/restore recipes in GAI-U01/02.
+
+## Free-block route and actor-notification qualification
+
+The 2026-10-10 merged-rule pass compares
+`777d8a153f36bf7a7a569c88100b541161ee2419`. Sources are WGA-385..389 and
+WGM-183/184; their read-only **debug build** evidence is FRP-E and GBP-E.
+These specialize GFS-A04/08/11 and the [galactic schedule's](galactic-frame-service-schedule.md)
+GFD-38. They add no freestore timer or plan-thread resume promise.
+
+| ID | Order contract | Source |
+|---|---|---|
+| GFS-A19 | Direct freestore move initialization retains actor, destination, player and threshold 0.0, registers actor listeners and immediately attempts advance. Each later eligible requested advance reconstructs the retained player's cached execution route from the actor's current parent, checks packed threat in range 0..1000 against that retained threshold, then checks only the next hop's live orbital occupant: empty or exactly the retained player admits; another player, including an ally, finishes without alternate search. It does not refresh the matrix on demand or use a TaskForce reachability enum. Due execution refresh precedes freestore under the existing boundary; completion polling/finished-block cleanup remain their existing admissions. Actor begin clears flags; actor end requests advance, but any active manager conflict still defers the hop. | WGA-385..389; WGA-140/307; WGM-183/184; GFS-A04/08/11; GFD-38 |
+
+| ID | Dependency | Remake comparison at this pass's base | Observable case |
+|---|---|---|---|
+| GFD-A15 | Retained execution matrix → each requested advance's route/safety read → live next-hop occupant → direct movement admission | `galactic_ai_actions.cpp` supplies polling and world movement, but its common path uses ordinary world search/configuration and reachability/bribe branches, rather than the sourced direct free-block cache/zero-threshold contract: **differs**. Changing live occupancy can reject without a matrix rebuild; changed restrictions/threat may wait for the existing execution refresh. No new global service phase follows. | GFSA-19; preserve the existing request/cleanup boundary, with actor-subject continuation under GFD-38. Actual first refresh/poll/child-return/load delivery stays FRP-U01/FSP-U01 and GAI-U01. |
+
+| ID | Setup | Expected local contract | Variants / runtime qualification |
+|---|---|---|---|
+| GFSA-19 | Retain player P, threshold 0.0 and a cached A→B→C route with decoded threat 0. Request an advance while the actor is parented to A; separately change B's live occupant without rebuilding the matrix. | Empty/P-owned B admits node 1 directly. Allied Q-owned B rejects and finishes without alternate search. Threat exactly 0 passes; one positive decoded bucket fails. Changed threat/restriction inputs alone do not cause on-demand table rebuild. Another active conflict retains advance-requested without a hop. | On later advance reread the current parent and cache, preserving player/threshold/destination. Actor-only begin/end differs from destination/other-fleet signals. Local stock load restores flags/identities with constructor threshold 0.0 and no initialization advance; first resumed polling/matrix publication remains FRP-U01/FSP-U01. Empty route is not a safe fabricated hop. Compare 1/2/4/8 workers. |
+
+GLO-E01/E02 are bounded observations in the
+[load-order capture qualification](walks/gc-ai.md#load-order-capture-qualification).
+GAI-U01 retains native first-service/fix-up order; GAI-U05 retains the actual
+timeline update/query boundary. The supported paused reoffer/deduplication
+sequence narrows FSP-U01/U02's sampled counts and Lua callbacks, without
+identifying reservation, direct flag writers or native assignment/removal.
+The failed load and child attempts qualify neither free-block continuation nor
+first selected AI service. GFS-U10..12 remain presentation-clock/display seams,
+not evidence for AI cadence. New native trace fields stay with those existing
+unknown rows; no separate schedule is inferred from Lua sample timestamps.

@@ -188,6 +188,7 @@ void ViewerHost::on_skirmish_start() {
 
 void ViewerHost::_input(const Ref<InputEvent>& event) {
     sync_modal_holds();
+    if (front_end_ && !map_mode_) front_end_->input(event);
     if (map_mode_) map_mode_->observe_pointer(event);
     std::uint32_t button{};
     const auto input = input_class(event, button);
@@ -216,7 +217,7 @@ void ViewerHost::on_gui_focus_changed(Control* control) {
 }
 
 void ViewerHost::sync_modal_holds() {
-    if (!input_routing_mode_ && !map_mode_ && !camera_interaction_) return;
+    if (!input_routing_mode_ && !map_mode_ && !galactic_mode_ && !camera_interaction_) return;
     if (!modal_holds_.changed(input_focus(*get_viewport()).modal_open)) return;
     world_capture_.clear();
     cancel_held_world_input();
@@ -226,6 +227,10 @@ void ViewerHost::cancel_held_world_input() {
     DisplayServer* display = DisplayServer::get_singleton();
     const bool window_focused = display != nullptr && display->window_is_focused();
     if (input_routing_mode_) input_routing_mode_->world_cancelled();
+    if (galactic_mode_) {
+        galactic_mode_->cancel_input();
+        galactic_mode_->focus(window_focused);
+    }
     if (map_mode_) {
         map_mode_->focus(false);
         map_mode_->focus(window_focused);
@@ -241,12 +246,20 @@ void ViewerHost::cancel_held_world_input() {
 }
 
 void ViewerHost::route_world_input(const Ref<InputEvent>& event) {
+    if (attract_runner_) {
+        attract_runner_->input(event);
+        return;
+    }
     if (input_routing_mode_) {
         static_cast<void>(input_routing_mode_->world_input(event));
         return;
     }
     if (map_mode_) {
         map_mode_->input(event);
+        return;
+    }
+    if (galactic_mode_) {
+        galactic_mode_->input(event);
         return;
     }
     if (!camera_interaction_ || event.is_null()) return;
@@ -258,24 +271,63 @@ void ViewerHost::route_world_input(const Ref<InputEvent>& event) {
     }
 }
 
+void ViewerHost::close_active_modes() {
+    if (map_mode_) map_mode_->close_requested();
+    if (galactic_mode_) {
+        galactic_mode_->close();
+        // Remove the tactical UI nodes together with their closed providers;
+        // a later process callback must not outlive its MapMode state.
+        galactic_mode_.reset();
+    }
+}
+
 void ViewerHost::_notification(const int what) {
     switch (what) {
+    case NOTIFICATION_EXIT_TREE:
+        // Engine-driven quits (including --quit-after and the preview close driver) still
+        // have a tree here. Persist before predelete, while a failed report can set exit 2.
+        if (front_end_ && !front_end_->close() && get_tree()) get_tree()->quit(2);
+        break;
     case NOTIFICATION_PREDELETE:
         // #961: Godot sends this to the extension before deleting the host's
         // children. Map teardown stops and releases its audio players, which
         // are those children; the extension destructor runs after their deletion.
         // This also covers engine-driven quits such as --quit-after, which do
         // not send a window close request.
+        // The attract's battle (its session and its nodes) goes before the host's children do.
+        attract_runner_.reset();
         map_mode_.reset();
+        if (galactic_mode_) galactic_mode_->close();
+        galactic_mode_.reset();
+        // The front end's settings screen is a child of this host; release it while the children exist.
+        front_end_.reset();
         return;
     case NOTIFICATION_WM_CLOSE_REQUEST:
         shutdown_trace::mark("window close requested");
-        if (map_mode_) map_mode_->close_requested();
+        // Notification propagation locks the child map. Closing a campaign
+        // deletes its tactical and loading children, so wait for traversal
+        // to finish; PREDELETE still releases modes before engine teardown.
+        callable_mp(this, &ViewerHost::close_active_modes).call_deferred();
         break;
     case NOTIFICATION_APPLICATION_FOCUS_OUT:
     case NOTIFICATION_WM_WINDOW_FOCUS_OUT:
     case NOTIFICATION_WM_MOUSE_EXIT: world_capture_.clear(); break;
     default: break;
+    }
+    if (what == NOTIFICATION_APPLICATION_FOCUS_IN || what == NOTIFICATION_WM_WINDOW_FOCUS_IN) {
+        if (attract_runner_) attract_runner_->window_activated(); // MAT-06
+        if (front_end_) front_end_->window_activated();
+    }
+    if (galactic_mode_) {
+        switch (what) {
+        case NOTIFICATION_APPLICATION_FOCUS_OUT:
+        case NOTIFICATION_WM_WINDOW_FOCUS_OUT: galactic_mode_->cancel_input(); break;
+        case NOTIFICATION_APPLICATION_FOCUS_IN:
+        case NOTIFICATION_WM_WINDOW_FOCUS_IN: galactic_mode_->focus(true); break;
+        case NOTIFICATION_WM_MOUSE_EXIT: galactic_mode_->pointer_left(); break;
+        default: break;
+        }
+        return;
     }
     if (map_mode_) {
         switch (what) {

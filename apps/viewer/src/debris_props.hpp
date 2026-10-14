@@ -61,8 +61,10 @@ public:
     // each live prop is appended to `live` at `presented_tick`, and a prop whose lifetime has
     // run out leaves and queues its explosion, in tick order with the spawns. Its ship is only
     // hidden (not listed), so a station hardpoint that is repaired and destroyed again throws
-    // it once more. The first call starts the effect clock. `reveal` (--eawr-live-reveal) throws
-    // props for a hidden ship's hardpoint deaths too.
+    // it once more. A unit's kill throws the props of its hardpoints still standing (WCC-71,
+    // BP-37), from the tick before's snapshot, the last that lists the ship. The first call
+    // starts the effect clock. `reveal` (--eawr-live-reveal) throws props for a hidden ship's
+    // hardpoint deaths too.
     void pose(std::span<const platform::LiveTickEvents> reached, const SnapshotAt& snapshot_at,
               sim::tactical::PlayerId viewer, double presented_tick, std::vector<SpacePopulation::LivePose>& live,
               bool reveal = false);
@@ -72,6 +74,8 @@ public:
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
+    void measure_particles(bool on) noexcept { registry_->begin_measurement(on); }
+    [[nodiscard]] const particles::RegistryTimings& particle_timings() const noexcept { return registry_->timings(); }
     [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
         return registry_->set_detail(detail);
     }
@@ -164,6 +168,9 @@ private:
     std::map<std::string, std::uint64_t> skipped_;       // reason:particle -> ended before a frame reached it
     std::string failure_;
     bool released_{};
+    double prewarm_ms_{};
+    std::size_t warm_emitters_{};
+    std::uint64_t warm_texture_bytes_{};
 };
 
 } // namespace eawr::presentation::godot_backend

@@ -21,7 +21,7 @@
 // background objects, which the space environment composition owns.
 namespace eawr::scene {
 
-// MD-06: a mesh-free projectile model may draw entirely through resolved particle proxies.
+// MD-06/WAB-75: a mesh-free projectile or unit model may draw through resolved particle proxies.
 [[nodiscard]] bool drawable_projectile_effects(const Placement& placement) noexcept;
 
 // One entry of an object's HardPoints list, as the hardpoint's own XML object
@@ -136,9 +136,11 @@ struct SpacePlacementDecision final {
 };
 
 // One decision per scene placement, in scene order. `tags_of` returns the
-// catalog facts of an object id, or nullopt when it has none.
+// catalog facts of an object id, or nullopt when it has none. WAB-75: only
+// a synthetic ability-owner scene opts into mesh-free SpaceUnit proxies.
 [[nodiscard]] std::vector<SpacePlacementDecision> classify_space_placements(
     const Scene& scene,
-    const std::function<std::optional<SpaceObjectTags>(std::string_view object_id)>& tags_of);
+    const std::function<std::optional<SpaceObjectTags>(std::string_view object_id)>& tags_of,
+    bool ability_proxy_owner = false);
 
 } // namespace eawr::scene

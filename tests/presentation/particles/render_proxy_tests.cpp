@@ -226,7 +226,7 @@ void test_proxy_mesh_binding(){
 }
 
 // Recorded with PL-01 post-load ages and PS-11 sphere direction, PS-23 bytes,
-// PS-29 bins and PS-10 residual births, using the same system, seed, step and
+// PS-29 bins and direct radian rendering, and PS-10 residual births, using the same system, seed, step and
 // camera; the no-detach stream remains pinned independently of detach behavior.
 // Sampling uses the platform's sin/cos, so the bits are pinned per C runtime
 // and architecture. Only MSVC x64 and glibc x86-64 (GCC 14 and Clang 18
@@ -235,11 +235,14 @@ void test_proxy_mesh_binding(){
 // baseline it has not recorded.
 void test_no_detach_golden_unchanged() {
 #if defined(_WIN32) && defined(_M_X64) && !defined(_M_ARM64EC)
-    constexpr const char* final_golden = "7f47b45d379a3a4d";
-    constexpr const char* chain_golden = "74ddc93c33a1f5f5";
+    constexpr const char* final_golden = "1b66187c31cbc399";
+    constexpr const char* chain_golden = "bb6e7ece5c5a70c6";
 #elif defined(__GLIBC__) && defined(__x86_64__)
-    constexpr const char* final_golden = "3bc5ad82471fe990";
-    constexpr const char* chain_golden = "016754b07df2448d";
+    // PS-53 byte-cache colour lookup (9607375b) quantizes this legacy
+    // fixture's fading alpha. Remeasured after that sourced correction,
+    // matching the already refreshed MSVC baseline; reuse/prewarm leave it unchanged.
+    constexpr const char* final_golden = "d0d1b016e39b2567";
+    constexpr const char* chain_golden = "369ccad4edde3154";
 #else
     constexpr const char* final_golden = nullptr;
     constexpr const char* chain_golden = nullptr;

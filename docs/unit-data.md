@@ -44,17 +44,49 @@ All eleven stock Underworld duplicate upgrade names retain their parent identity
 
 ## Value rules
 
-- A single-value tag is the catalog's effective value: the last occurrence in the
-  most-derived variant layer that authors it. When one layer authors it more than once,
-  the scan adds a note.
-- A list tag (`Squadron_Units`, `Squadron_Offsets`, `Starting_Spawned_Units_Tech_0`,
-  `Reserve_Spawned_Units_Tech_0`, `Fire_Inaccuracy_Distance`) takes every occurrence, in
-  order, from the most-derived layer that authors it. A base layer that also authors it
-  is noted, not merged. No pinned type authors a list tag in two layers.
+The value rules follow FoC's database parse, read in the debug build
+([audit](behaviour/debug-build-audit.md), AU-80 to AU-83). `eawr::data::retail`
+(`include/eawr/data/retail_values.hpp`) holds them, so the galactic loaders read values the same
+way. The per-type audit of a blank `Space_Layer` and Vader's squadron inheritance (legacy EAWR-2062)
+found no per-type exception in FoC: the rules below hold for every object-type tag. M2
+single/list selection still differs where this section says so.
+
+- Tags apply in document order, base type first: a variant (`Variant_Of_Existing_Type`) starts
+  as a full copy of its base and then applies its own tags (AU-80, AU-83). A single-value tag
+  is the catalog's effective value: the last occurrence in the most-derived variant layer that
+  authors it. When one layer authors it more than once, the scan adds a note.
+- An empty value, or exactly `TBD` (case-sensitive), changes nothing: the earlier or inherited
+  value stays (AU-80, AU-81). That holds for single-value tags and for every occurrence of the
+  list tags below in the shared retail module. Nested records with child nodes are values even
+  when their scalar text is empty. FoC reads object-type files with surrounding whitespace
+  trimmed and makes this check before it looks the tag up, so no tag's own parser sees such a
+  value (ML-24). M2 `Object::single` still keeps an empty authored override: in stock data 43
+  variant tags differ, mostly unit sounds, plus the scenery `Space_Junk_Large_NO_Collision`,
+  whose blank `Space_Layer` keeps its base's `StaticObject` in FoC.
+- Booleans read true for `1` or for a value whose first letter is Y or T, in either case, and
+  false for anything else (AU-82), so a boolean tag never becomes an `Unresolved` row.
+  GameConstants values, whose type the loader does not know, count as booleans only when they
+  are spelled `yes`/`true`/`1` or `no`/`false`/`0`.
+- List tags differ by tag (AU-82, corrected by ML-26). `Squadron_Units` retains every occurrence
+  in order, and a variant's effective occurrences replace its inherited members; an omitted
+  or placeholder-only variant inherits the base. The shared retail module and M2 squadron loader
+  apply this rule. `Starting_Spawned_Units_Tech_0` and `Reserve_Spawned_Units_Tech_0` append with
+  every occurrence, also onto a list a variant inherits; each spawned-unit occurrence reads only
+  its first type and count pair, and further
+  pairs are noted. `Squadron_Offsets` and `Fire_Inaccuracy_Distance` append in a base type, but
+  in a variant each occurrence replaces the list, so only the variant's last occurrence stays.
+  For other lists, M2 `Object::list` keeps every occurrence from the most-derived layer that authors
+  the tag; a base layer that also authors it is noted, not merged. Vader's authored squadron
+  replaces seven inherited fighters with its prototype and six escorts under ML-26.
+  Other list-shaped tags (`Company_Units`,
+  `Faction_Anim_Subindex`) also use the most-derived layer (unverified against the debug build).
+  The string lists `Behavior` and `SpaceBehavior` append in a base type, and each occurrence in
+  a variant replaces the list (ML-27); no stock variant authors either twice.
 - List values split on commas and whitespace; `CategoryMask` also splits on `|`.
-  Decimals use `Fixed::from_decimal`, which accepts one trailing C float suffix (`0.8f`,
-  `-3f`, as in `Mod_Multiplier`). Booleans are `yes`/`true`/`1` and `no`/`false`/`0`,
-  in any case.
+  Unit-table decimals use `Fixed::from_decimal`, which accepts one trailing C float suffix
+  (`0.8f`, `-3f`, as in `Mod_Multiplier`); other trailing text is an `Unresolved` row. FoC reads
+  the leading number and ignores trailing text (AU-82); `retail::leading_number` does that for
+  the galactic loaders, which report the trailing text as a diagnostic.
 - Ability types are upper-cased; `authored_type` keeps the spelling
   (`power_to_weapons` on the Acclamator). Station `Abilities` sub-objects (income, radar)
   are listed as `inactive_abilities` (SK-31).
@@ -64,22 +96,6 @@ All eleven stock Underworld duplicate upgrade names retain their parent identity
   always false (SK-36).
 - A field that a row requires but the data lacks, or a reference that does not resolve,
   becomes an `Unresolved` row. It never becomes a default value.
-
-Retail parse facts from the FoC debug build ([audit](behaviour/debug-build-audit.md), AU-80 to
-AU-83). The value rules above agree with them on every pinned type; the differences below
-matter only for data the M2 fleet does not author.
-
-- Tags apply in document order, so the last occurrence of a single-value tag wins. A variant
-  (`Variant_Of_Existing_Type`) starts as a full copy of its base and then applies its own
-  tags.
-- An empty value, or the value `TBD`, changes nothing: the earlier or inherited value stays.
-- Booleans read true for `1` or for a value whose first letter is Y or T, in either case, and
-  false for anything else. Numbers read the leading number and ignore trailing text.
-- List tags differ by tag. `Squadron_Units`, `Starting_Spawned_Units_Tech_0` and
-  `Reserve_Spawned_Units_Tech_0` append with every occurrence, also onto a list a variant
-  inherits. Each spawned-unit occurrence reads only its first type and count pair.
-  `Squadron_Offsets` and `Fire_Inaccuracy_Distance` append in a base type, but in a variant each
-  occurrence replaces the list, so only the variant's last occurrence stays.
 
 ## Priority sets
 
@@ -159,12 +175,14 @@ object weapon its projectile's `Projectile_Energy_Per_Shot` ([space damage](beha
 
 `units::ability_table(tables, humans)` binds the unit abilities (space ability handling,
 [space abilities](behaviour/space-abilities.md) AB-01 to AB-04): per type with a modelled ability
-(`DEFEND`, `TURBO`, `POWER_TO_WEAPONS`, `SPOILER_LOCK`) its `Expiration_Seconds` and
-`Recharge_Seconds` truncated to frames, `Supports_Autofire` and the six `Mod_Multiplier` kinds of
-AB-20 to AB-24 (1 when not authored), and whether it runs `ObjectScript_PowerToShields` with
-`DEFEND` (AB-41). Squadron types are skipped (their craft's data acts, AB-15), and so are
-`HUNT` and `ION_CANNON_SHOT` (cut, AB-03). Any other multiplier name fails with
-`EAWR-UNITS-0006`. `humans` are the human players of the session. `skirmish::session_content`
+(the kinds of AB-02, AB-03 and [the ability walk](behaviour/walks/abilities.md), including `HUNT`
+and the Y-wing team's `ION_CANNON_SHOT`) its `Expiration_Seconds` and `Recharge_Seconds` truncated
+to frames, `Supports_Autofire` and the ten `Mod_Multiplier` kinds of AB-26 to AB-29 (1 when not
+authored), and whether it runs `ObjectScript_PowerToShields` with `DEFEND` (AB-41). Squadron
+types are skipped (their craft's data acts, AB-15), except a team container's own ion shot and
+buzz droids. A kind the table does not model is skipped, and so is an ability that authors any
+`Mod_Multiplier` name outside those ten or a nested handler it needs but lacks; the skip is
+silent, not a load failure (AB-26). Names match without regard to case. `humans` are the human players of the session. `skirmish::session_content`
 builds it with the lobby's human slots.
 
 ## Hardpoint positions in Q24
@@ -237,6 +255,7 @@ craft fly with the squadron locomotor and have no profile.
   `XYExpansionDistanceSpace`.
 - It fails when one of those six scalars is missing, two types share a type ID or
   `validate_motion` rejects the result.
+- `MovementReevaluationFrameCount` and `Space_Guard_Range` set the rules' approach re-check interval and guard range ([space orders](behaviour/space-orders.md) OR-06, OR-14).
 
 With the path finder's constants loaded (`WaitOperatorSpeedCoefficient`,
 `WaitOperatorBaseFrameTime`, `WaitOperatorCostCoefficient`, `MinObstacleCostSpace`,
@@ -291,6 +310,12 @@ and attachment position. Tables without capture points retain the previous encod
 When any station has a nonzero `Base_Level`, a following `ai-station-levels-v1`
 extension writes the unit count and each unit's ID text and uint32 base level in table
 order (SAE-02). Tables whose base levels are all zero retain their earlier encoding.
+
+When any type authors `Is_Special_Weapon_In_Space`, a `special-weapon-in-space-v1`
+extension writes the unit count and each unit's ID text and flag byte in table order,
+just before the nested special-ability extension. The tactical AI's `Is_Hero` reads this
+flag (WTA-36). FoC's pinned M2 tables load the space-mode Ion Cannon and Hypervelocity
+Gun, which author it, so their identity includes this extension.
 
 Unresolved rows, notes, input files, source layers and host paths are not encoded.
 Relocating an install, or editing a tag the tables do not read, leaves the identity

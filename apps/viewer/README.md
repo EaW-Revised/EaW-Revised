@@ -1,5 +1,8 @@
 # Production Godot viewer
 
+`--eawr-front-end --eawr-game-root <install>` opens the main menu: Single Player > Skirmish and Multiplayer > LAN
+lead to the setup screen below (Back returns through the menus), Options opens the settings screen, and the
+entries for game parts not built yet are shown disabled with their reason (`docs/behaviour/front-end-shell.md`).
 `--eawr-skirmish-setup --eawr-game-root <install>` opens the space setup screen.
 It lists the effective stock and mod space maps with installed names/previews,
 and lets you choose each slot's faction and authored team. This version has
@@ -20,6 +23,10 @@ with GUI events, runs a short driven battle, returns to setup and exits.
 `tests/presentation/renderer/test_skirmish_setup.py` through the private GPU lane
 with the normal runtime environment variables; `EAWR_SETUP_EYECHECK` optionally
 retains its lit captures and report.
+With `--eawr-setup-layout-test` added, the contract instead prints each player
+control's resource rectangle beside its on-screen one, opens a row's drop-down
+list and the advanced dialog, and writes `<stem>.popup.png`, `<stem>.options.png`
+and `<stem>.wincondition.png` before exiting.
 Set `EAWR_RELEASE_VIEWER_ZIP` to a built viewer archive to also exercise its
 relocated launcher, trace rows and replay output at graceful close.
 
@@ -338,8 +345,8 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   `--eawr-live-particle-heat on|off` (default on) separately admits the heat phase.
   The authored graphics presets use detail 0.4/0.6/0.8/1; the first two disable heat.
   Camera zoom does not set local LOD: a native distance producer remains unverified (PS-41).
-- `--eawr-live-particle-workers n` (default a quarter of the hardware threads, 1 to 4, the
-  main thread included): the pool the battle's particle systems (unit emitters, battle effects,
+- `--eawr-live-particle-workers n` (default a quarter of the hardware threads below eight of them,
+  half of them from eight up, 1 to 4 in all, the main thread included): the pool the battle's particle systems (unit emitters, battle effects,
   breakoff props) step and build their streams on; 1 runs them on the main thread alone. The
   streams are the same with any count.
 - `--eawr-live-workers n` (default hardware threads minus two), `--eawr-live-hashes <csv>`,
@@ -512,6 +519,22 @@ A missing cache is not an error; the lines fall back. `tests/presentation/render
 runs a synthetic cache, an empty one and, with `EAWR_EAW_GAME_ROOT`, a cache it extracts on the GPU
 host and deletes after the run.
 
+## LAN screens (`--eawr-lan-lobby`)
+
+`--eawr-lan-lobby --eawr-game-root <FoC install>` opens the LAN lobby, with its host options, staging
+and direct-connect pages, built from the dialog resources over the LAN match transport, with the game
+list behind a `LobbyGameSource` ([docs/ui/lan-lobby.md](../../docs/ui/lan-lobby.md)); the standalone mode
+feeds it from the UDP discovery (`src/lan_broadcast_source.hpp`) unless a fixed list is given. `EawrLanLobby`
+(`src/lan_lobby_screen.hpp`) is the screen object a menu reuses: `build()`, `show(parent)`, the
+`closed` and `started` signals, `take_start()` and `lan_match()`. The standalone mode takes
+`--eawr-lan-name`, `--eawr-lan-colour`, `--eawr-lan-broadcast-port`, `--eawr-lan-broadcast-extra`,
+`--eawr-lan-game-port` (0 picks a free TCP port),
+`--eawr-lan-fake <state>` (the presentation transport), `--eawr-lan-game` and `--eawr-lan-player` (a
+fixed game list and player list) and scripted steps `--eawr-lan-do <action>` (see
+`src/lan_lobby_mode.hpp`), and with `--eawr-report` and `--eawr-capture` writes a report of what each
+screen showed and a PNG. `tests/presentation/renderer/test_lan_lobby.py` runs a fixed list that is
+sorted, filtered and joined, and two viewers that host, find each other over UDP, join and chat.
+
 ## UI kit gallery (`--eawr-ui-gallery`)
 
 `--eawr-ui-gallery --eawr-game-root <FoC install>` shows the UI kit (UI-06) skinned from the
@@ -610,6 +633,35 @@ AI/Lua phase values (legacy EAWR-957), while the optional AI/Lua trace columns (
 The current mean is within the baseline's run-to-run variation and its p95 is lower; the baseline
 itself misses 0.100 ms in two of five runs. The GTX 970 profile budget leaves 0.038 ms above the
 observed baseline p95, without changing production refresh rates or the budget for other profiles.
+
+## Main-menu attract battle (`--eawr-attract`)
+
+The battle behind the main menu (legacy EAWR-2937), rules MAT-01 to MAT-21 in
+[main-menu-attract.md](../../docs/behaviour/main-menu-attract.md)): the stock demo map's placed
+forces fight under the AI through the same live session, battle effects and camera path a
+skirmish uses, with no HUD, no loading screen, no world input and no battle sound, seen through
+the map's saved camera, which `AttractCamera` (`attract_camera.hpp`) keeps slowly alive (a
+placeholder for FoC's battle camera (legacy EAWR-3005)). The maps, their cycle delays and the idle timeout come from
+`GameConstants` (`Main_Menu_Demo_Attract_Mode`, `Demo_Attract_Maps`,
+`Demo_Attract_Map_Cycle_Delay_Seconds`, `Demo_Attract_Start_Timeout_Seconds`), so a mod's
+values apply; with the mode off or no map listed the backdrop stays plain.
+
+`AttractRunner` (`attract_runner.hpp`) is the class the front end owns: `start(parent)` when the
+main menu activates, `process(delta, ...)` every frame, `stop()` for game start, credits and exit,
+which frees the battle and its session. The flag hosts it alone:
+
+```
+Godot --path apps/viewer/project -- --eawr-attract --eawr-game-root <FoC install> \
+  [--eawr-attract off] [--eawr-attract-frames <n>] [--eawr-attract-do <frame>:<step>]... \
+  [--eawr-report <json>] [--eawr-capture <png>]
+```
+
+`--eawr-attract off` runs the plain backdrop (the frame-time baseline). `--eawr-attract-frames`
+ends the run after n frames: the battle is stopped, then the report is written with the
+battle's tick, how many units moved and lost hull, whether a HUD or battle input exists, and
+whether the session was freed. `--eawr-attract-do` scripts a step at a frame: `key:backspace`,
+`key:enter`, `key:escape`, `key:minus` or `key:other` (MAT-07), `click` (a world click the world
+must ignore), `stop`, `start` and `dialog:on|off` (a menu dialog is up).
 
 ## Input routing self-test (`--eawr-input-routing`)
 

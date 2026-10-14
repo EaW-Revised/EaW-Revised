@@ -65,18 +65,183 @@ std::vector<tactical::Event> run_events(tactical::TacticalSession& value, const 
 }
 
 void test_orders_approach() {
+    // OR-07 / OR-25: a static station's last attachment lies beyond its centre.
+    // Admission, mapping and the path-end check must agree on that destination.
+    for (const bool explicit_hardpoint : {false, true}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto combat = table();
+            combat.profiles[0].max_attack_distance = units(600);
+            combat.profiles[0].weapons[0].shot.emplace();
+            auto& shot = *combat.profiles[0].weapons[0].shot;
+            shot.speed = units(20); shot.damage = units(1); shot.max_travel = units(700);
+            combat.profiles[2].hardpoints = {{0, at(-100, 0), true}, {1, at(1000, 0), true}};
+            combat.profiles[2].collision = tactical::CollisionBox{at(-50, -50, -50), at(1050, 50, 50)};
+            combat.footprints = {{bomber_type, units(50), units(50), units(50)}};
+            auto motion = turning_motion_all();
+            motion.profiles.erase(motion.profiles.begin() + 1); // stationary target
+            motion.profiles.front().max_speed = units(20);
+            motion.profiles.front().acceleration = motion.profiles.front().deceleration = units(1);
+            tactical::Footprint station;
+            station.type_id = bomber_type; station.layer = tactical::SpaceLayer::static_object;
+            station.x_extent = station.y_extent = station.radius = units(50);
+            motion.footprints = {station};
+            tactical::HardpointProfile attachment;
+            attachment.destroyable = true; attachment.max_health = units(10000);
+            tactical::DurabilityTable health;
+            health.damage.emplace(); health.damage->shield_recharge_frames = 30;
+            health.profiles.push_back({bomber_type, units(100000), std::nullopt, false, {attachment, attachment}});
+            auto made = tactical::TacticalSession::create(
+                setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, bomber_type, 2, at(1000, 0))}),
+                sensors(5000), health, motion, std::nullopt, combat);
+            expect(static_cast<bool>(made), "far-side station fixture creates");
+            if (!made) continue;
+            auto value = std::move(made).value();
+            expect(static_cast<bool>(value.submit({{0, 2, 0}, {2}, tactical::DamagePayload{units(10000), 0}})),
+                "near attachment destruction queues");
+            expect(static_cast<bool>(value.submit({{1, 1, 0}, {1},
+                tactical::AttackPayload{2, explicit_hardpoint ? 1U : tactical::attack_hull}})),
+                "far-side station attack queues");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            bool fired_at_attachment = false;
+            std::optional<std::uint64_t> first_plan;
+            for (std::uint64_t tick = 0; tick < 400; ++tick) {
+                const auto stepped = value.step(executor);
+                expect(static_cast<bool>(stepped), "far-side station step succeeds");
+                if (!stepped) break;
+                hashes.push_back(value.state_sha256());
+                const auto path = value.motion_state(1);
+                if (tick == 1) {
+                    expect(path && path->kind == tactical::MotionKind::path
+                        && std::abs(coordinate(path->target.x) - 1415.0) < 1e-3,
+                        "first mapping closes to the attachment's slot, not the centre's slot");
+                    if (path) first_plan = path->start_tick;
+                }
+                if (tick > 1 && path && path->kind == tactical::MotionKind::path)
+                    expect(first_plan && path->start_tick == *first_plan,
+                        "attachment-range endpoint retains its original path through reevaluation");
+                for (const auto& event : stepped.value().snapshot->combat_events())
+                    fired_at_attachment = fired_at_attachment || (event.kind == tactical::CombatEventKind::weapon_fired
+                        && event.shooter == 1 && event.target == 2 && event.target_hardpoint == 1);
+            }
+            expect(planar(state_of(value, 1).position, at(2000, 0)) <= 650.0 && fired_at_attachment,
+                "capital reaches its last far-side attachment and fires");
+            const auto remaining = value.durability_state(2);
+            expect(remaining && remaining->hardpoints[1] < units(10000),
+                "the surviving attachment takes damage");
+            expect(state_of(value, 1).order.hardpoint == (explicit_hardpoint ? 1U : tactical::attack_hull),
+                "approach preserves the player's ordinary or explicit hardpoint order");
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "far-side approach matches every tick on 1/2/4/8 workers");
+        }
+    }
+
+    // Static attachment prediction is separate from guard and moving-layer tracking.
+    std::optional<math::Vec3> moving_parent_slot;
+    for (const unsigned mode : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U}) {
+        auto combat = table();
+        combat.profiles[0].max_attack_distance = units(600);
+        combat.profiles[2].hardpoints = {{0, at(1000, 0), true}};
+        if (mode == 4 || mode == 6) combat.profiles[2].hardpoints.clear();
+        combat.footprints = {{bomber_type, units(50), units(50), units(50)}};
+        auto motion = turning_motion_all();
+        tactical::Footprint destination;
+        destination.type_id = bomber_type;
+        destination.layer = mode == 1 || mode >= 6
+            ? tactical::SpaceLayer::frigate : tactical::SpaceLayer::static_object;
+        destination.x_extent = destination.y_extent = destination.radius = units(50);
+        motion.footprints = {destination};
+        tactical::DurabilityTable health;
+        if (mode == 5) {
+            tactical::HardpointProfile attachment;
+            attachment.destroyable = true; attachment.max_health = units(10000);
+            health.rules.hull_vs_hardpoints = units(1);
+            health.profiles.push_back({bomber_type, units(100000), std::nullopt, false, {attachment}});
+        }
+        if (mode >= 6) {
+            motion.profiles[1].max_speed = units(1);
+            motion.profiles[1].acceleration = motion.profiles[1].deceleration = units(1);
+        }
+        auto made = tactical::TacticalSession::create(
+            setup({unit(1, shooter_type, 1, at(mode == 3 ? -1000 : 0, 0)),
+                unit(2, bomber_type, mode == 2 ? 1 : 2, at(1000, 0), mode == 3)}),
+            sensors(5000), health, motion, std::nullopt, combat);
+        expect(static_cast<bool>(made), "station prediction control creates");
+        if (!made) continue;
+        auto value = std::move(made).value();
+        if (mode == 5)
+            expect(static_cast<bool>(value.submit({{0, 2, 0}, {2}, tactical::DamagePayload{units(10000), 0}})),
+                "all attachment destruction queues before attack");
+        if (mode >= 6)
+            expect(static_cast<bool>(value.submit({{0, 2, 0}, {2}, tactical::MovePayload{at(3000, 0)}})),
+                "moving target path queues before attack");
+        tactical::CommandPayload payload = mode == 2
+            ? tactical::CommandPayload{tactical::GuardPayload{at(0, 0), 2}}
+            : tactical::CommandPayload{tactical::AttackMovePayload{at(0, 0), 2}};
+        expect(static_cast<bool>(value.submit({{1, 1, 0}, {1}, payload})), "prediction control queues");
+        static_cast<void>(run(value, 2));
+        const auto path = value.motion_state(1);
+        if (mode < 6) {
+            const double expected_x = mode == 1 || mode == 4 || mode == 5 ? 415.0
+                : mode == 2 ? 460.0 : mode == 3 ? -585.0 : 1415.0;
+            expect(path && path->kind == tactical::MotionKind::path
+                && std::abs(coordinate(path->target.x) - expected_x) < 1e-3,
+                "static aim falls back to the parent without standing attachments; guard/tracking stay unchanged");
+        } else {
+            expect(path && path->kind == tactical::MotionKind::path && coordinate(path->target.x) > 425.0,
+                "moving target path prediction advances beyond the at-rest parent slot");
+            if (path && mode == 6) moving_parent_slot = path->target;
+            if (path && mode == 7)
+                expect(moving_parent_slot && path->target == *moving_parent_slot,
+                    "a moving-layer attachment leaves tracked parent path prediction unchanged");
+        }
+    }
+
+    // Losing the chosen attachment must invalidate a completed static approach,
+    // even though that endpoint was close enough to the parent's centre.
+    {
+        auto combat = table();
+        combat.profiles[0].max_attack_distance = units(600);
+        combat.profiles[2].hardpoints = {{0, at(1000, 0), true}, {1, at(2000, 0), true}};
+        combat.footprints = {{bomber_type, units(50), units(50), units(50)}};
+        auto motion = turning_motion_all();
+        motion.profiles.erase(motion.profiles.begin() + 1);
+        motion.profiles.front().max_speed = units(20);
+        motion.profiles.front().acceleration = motion.profiles.front().deceleration = units(1);
+        tactical::HardpointProfile attachment;
+        attachment.destroyable = true; attachment.max_health = units(10000);
+        tactical::DurabilityTable health;
+        health.profiles.push_back({bomber_type, units(100000), std::nullopt, false, {attachment, attachment}});
+        auto made = tactical::TacticalSession::create(
+            setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, bomber_type, 2, at(1000, 0))}),
+            sensors(5000), health, motion, std::nullopt, combat);
+        expect(static_cast<bool>(made), "replacement approach creates");
+        if (made) {
+            auto value = std::move(made).value();
+            expect(static_cast<bool>(value.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2, 0}})),
+                "first attachment attack queues");
+            expect(static_cast<bool>(value.submit({{150, 2, 0}, {2}, tactical::DamagePayload{units(10000), 0}})),
+                "attachment replacement queues");
+            static_cast<void>(run(value, 400));
+            expect(planar(state_of(value, 1).position, at(3000, 0)) <= 650.0,
+                "destroyed attachment triggers approach to the surviving farther attachment");
+        }
+    }
+
     // AT-10 / OR-03 / W-05: centre admission uses the facing-selected hard extent;
     // a hardpoint aim uses the soft radius. Test the inclusive boundary and one raw
     // unit outside it, separately from the shorter mapping slot.
     const auto footprint_session = [](const math::Vec3 position, const bool hardpoint) {
         auto combat = table();
         if (hardpoint) combat.profiles[2].hardpoints = {{0, at(-50, 0), true}};
+        combat.footprints = {{bomber_type, units(100), units(200), units(50)}};
         auto motion = turning_motion_all();
         tactical::Footprint footprint;
         footprint.type_id = bomber_type;
-        footprint.x_extent = units(200);
-        footprint.y_extent = units(50);
-        footprint.radius = units(100);
+        footprint.x_extent = units(1);
+        footprint.y_extent = units(1);
+        footprint.radius = units(1); // WWP-21: combat's loaded type geometry takes precedence.
         motion.footprints = {footprint};
         auto created = tactical::TacticalSession::create(
             setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, bomber_type, 2, position)}),
@@ -350,12 +515,59 @@ void test_orders_phase() {
         if (recorder.orders.size() != before) ran.push_back(tick);
     }
     expect(ran == std::vector<std::uint64_t>{10, 20, 30}, "the orders phase runs every 10 ticks after the order");
-    expect(recorder.worlds.size() == 35 && std::all_of(recorder.worlds.begin(), recorder.worlds.end(),
+    // Flight reads a pre-hit view; targeting reads the refreshed post-hit view.
+    expect(recorder.worlds.size() == 2 * 35 && std::all_of(recorder.worlds.begin(), recorder.worlds.end(),
         [](const std::size_t count) { return count == eawr::sim::tick_partition_count; }),
         "every combat world fills disjoint slots in the named phase with the fixed partition count");
     expect(std::all_of(recorder.orders.begin(), recorder.orders.end(),
                [](const std::size_t count) { return count == eawr::sim::tick_partition_count; }),
         "the orders phase uses the fixed partition count");
+}
+
+void test_orders_lost_target() {
+    // WMV-13 (#719): the shooter (sensors 1500) attacks a bomber 1400 ahead that flies off to
+    // (6000, 0). Once its owner no longer sees the bomber, the shooter flies to where it last saw
+    // it, stops within 40 units of that point in the plane, holds no target and its order becomes a
+    // move; it does not follow the bomber further. 1, 2, 4 and 8 workers end on the same state.
+    const auto start = setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, bomber_type, 2, at(1400, 0), true)});
+    std::vector<std::string> finals;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        auto value = orders_session(start, 600, 1500);
+        expect(static_cast<bool>(value.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})), "lost target: attack is queued");
+        expect(static_cast<bool>(value.submit({{0, 2, 0}, {2}, tactical::MovePayload{at(6000, 0)}})), "lost target: move is queued");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::optional<math::Vec3> last_seen;
+        std::optional<std::uint64_t> lost;
+        std::optional<std::uint64_t> dropped;
+        bool seen_before = false; // the session reads sight from the previous frame's snapshot
+        for (std::uint64_t tick = 0; tick < 3000; ++tick) {
+            const auto stepped = value.step(executor);
+            expect(static_cast<bool>(stepped), "lost target: step succeeds");
+            if (!stepped) break;
+            const auto& snapshot = *stepped.value().snapshot;
+            for (const auto& instance : snapshot.instances()) {
+                if (instance.entity_id != 2) continue;
+                if (seen_before) last_seen = state_of(value, 2).position;
+                seen_before = (instance.visible_to & 1U) != 0U;
+                if (!seen_before && !lost && last_seen) lost = tick;
+            }
+            if (!dropped && state_of(value, 1).order.kind == tactical::OrderKind::move) dropped = tick;
+        }
+        expect(lost.has_value() && last_seen.has_value(), "lost target: the bomber leaves the shooter's sight");
+        expect(dropped.has_value() && lost && *dropped > *lost, "lost target: the attack becomes a move after sight is lost");
+        const auto shooter = state_of(value, 1);
+        const auto combat = value.combat_state(1);
+        expect(combat && combat->attack_target == 0, "lost target: the shooter holds no target");
+        if (last_seen) {
+            expect(planar(shooter.position, *last_seen) <= 40.0 + 1e-3,
+                "lost target: the shooter stops within 40 units of the last seen position");
+            expect(planar(shooter.position, state_of(value, 2).position) > 1500.0, "lost target: it does not follow the bomber");
+        }
+        expect(value.motion_state(1) && value.motion_state(1)->kind == tactical::MotionKind::none, "lost target: the shooter stays put");
+        finals.push_back(value.state_sha256());
+    }
+    expect(std::all_of(finals.begin(), finals.end(), [&](const std::string& hash) { return hash == finals[0]; }),
+        "lost target: 1, 2, 4 and 8 workers end on the same state");
 }
 
 void test_orders_workers_and_replay() {

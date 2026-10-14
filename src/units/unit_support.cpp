@@ -1,5 +1,6 @@
 #include "unit_internal.hpp"
 
+#include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/scene/scene.hpp"
 
@@ -70,6 +71,7 @@ void record(Report& report, const data::XmlDocument& document) {
 // gameconstants.xml scalars the M2 combat tickets read. Booleans load as 0/1; a list
 // (Diminishing_Firepower) keeps its text.
 constexpr std::string_view combat_scalars[] = {
+    "Stealth_Detection_Time", // WST-09: optional; the debug build defaults to 1.0 s.
     "Diminishing_Firepower",              // #74
     "Asteroid_Field_Damage",
     "Asteroid_Field_Damage_Rate",
@@ -83,6 +85,7 @@ constexpr std::string_view combat_scalars[] = {
     "Depleted_Shield_Regen_Cap",
     "Hull_Vs_Hard_Points_Health_Constraint",
     "Hardpoint_Recharge_Cutoff_For_Opportunity_Fire",
+    "Melee_Cutoff_Range", // WWP-27: a melee type omits the target craft's team radius
     "Engines_Disabled_Speed_Modifier",
     "Space_Elevated_Vulnerability_Duration",
     "Space_Elevated_Vulnerability_Factor",
@@ -112,10 +115,15 @@ constexpr std::string_view combat_scalars[] = {
     "SpaceObjectTrackingInterval",        // #71
     "SpaceObjectTrackingTreeCount",       // #71
     "DestinationSearchRadiusIncrementSpace", // #266
+    "MovementReevaluationFrameCount",     // OR-06
+    "MaxWaypointsPerPath",               // HCB-58
+    "Space_Guard_Range",                  // OR-14
     "MP_Default_Credits",                 // #530 PU-01
     "MP_Default_Start_Tech_Level",        // WPR-02
     "MP_Default_Max_Tech_Level",          // WPR-02
     "Tactical_Build_Time_Multiplier",     // #530 PU-13
+    "Credit_Cap_Per_Planet",              // WGT-27
+    "Space_Station_Destruction_Forces_Retreat", // WGM-51
     "Allow_Reinforcement_Percentage_Normalized", // #530 PU-21
     "FormationMinimumSideError",          // #599
     "FormationMaximumSideError",          // #599
@@ -265,6 +273,10 @@ std::optional<Fixed> number(const std::string_view text) {
 }
 
 std::optional<bool> boolean(const std::string_view text) {
+    return data::retail::boolean(text); // AU-82
+}
+
+std::optional<bool> canonical_boolean(const std::string_view text) {
     const std::string value = lower(trim(text));
     if (value == "yes" || value == "true" || value == "1") return true;
     if (value == "no" || value == "false" || value == "0") return false;
@@ -281,8 +293,8 @@ std::string model_path(const std::string_view name) {
 
 const data::XmlNode* Object::single(const std::string_view tag) {
     read_single.insert(lower(tag));
-    const auto* found = effective.value(tag);
-    return found == nullptr ? nullptr : &found->value;
+    // ML-24: placeholders leave an earlier or inherited value intact, including nested records.
+    return data::retail::single(layers, tag);
 }
 
 std::string Object::text(const std::string_view tag) {
@@ -334,7 +346,7 @@ void Object::note_duplicates(Report& report) const {
             std::string joined;
             for (const auto& value : values) joined += (joined.empty() ? "" : " | ") + value;
             report.note(layer->id, tag, joined, "single-value tag authored " + std::to_string(values.size()) +
-                        " times in one layer; the last occurrence is used");
+                        " times in one layer; the last non-placeholder occurrence is used");
         }
     }
 }
@@ -546,12 +558,26 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
     for (const auto tag : combat_scalars) {
         NamedConstant constant{std::string(tag), std::nullopt, {}};
         const auto* node = last_child(root, tag);
-        if (node == nullptr && (tag == "MP_Default_Start_Tech_Level" || tag == "MP_Default_Max_Tech_Level")) continue;
+        if (tag == "Stealth_Detection_Time") {
+            // Keep an absent optional constant out of content identity (stock data authors none).
+            if (node == nullptr) continue;
+            constant.text = trim(node->raw_text);
+            constant.value = number(constant.text);
+            if (!constant.value || constant.value->raw() < 0
+                || constant.value->raw() > 3600 * Fixed::scale) {
+                report.missing("GameConstants", constant.tag, constant.text, "not a decimal in [0, 3600] seconds");
+                continue;
+            }
+            tables.constants.scalars.push_back(std::move(constant));
+            continue;
+        }
+        if (node == nullptr && (tag == "MP_Default_Start_Tech_Level" || tag == "MP_Default_Max_Tech_Level"
+            || tag == "Credit_Cap_Per_Planet" || tag == "Space_Station_Destruction_Forces_Retreat")) continue;
         if (node == nullptr) {
             report.missing("GameConstants", constant.tag, {}, "required constant is absent");
         } else {
             constant.text = trim(node->raw_text);
-            if (const auto flag = boolean(constant.text)) {
+            if (const auto flag = canonical_boolean(constant.text)) {
                 constant.value = Fixed::from_raw(*flag ? Fixed::scale : 0);
             } else if (constant.text.find(',') != std::string::npos) {
                 // A list constant keeps only its text; each value must be a decimal.
@@ -571,6 +597,19 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
     }
     std::set<std::pair<std::string, std::string>> present;
     for (const auto& child : root.children) {
+        // WGCH-65: preserve category mappings separately for each tactical mode.
+        if (tables.campaign_scene && (iequals(child.name, "Default_Bounty_By_Category_SP") || iequals(child.name, "Default_Bounty_By_Category_MP"))) {
+            data::tag_trace::used(child);
+            const auto row = tokens(child.raw_text);
+            if (row.size() != 2) { report.missing("GameConstants", child.name, child.raw_text, "expected category and value"); continue; }
+            const auto category = enum_value(tables.categories, row[0]);
+            const auto value = number(row[1]);
+            if (!category || !value) { report.missing("GameConstants", child.name, child.raw_text, "invalid category or decimal"); continue; }
+            auto& list = iequals(child.name, "Default_Bounty_By_Category_MP") ? tables.constants.bounty_mp : tables.constants.bounty_sp;
+            const auto prior = std::find_if(list.begin(), list.end(), [&](const auto& entry) { return entry.category == *category; });
+            if (prior == list.end()) list.push_back({*category, *value}); else prior->value = *value;
+            continue;
+        }
         if (!iequals(child.name, "Damage_To_Armor_Mod")) continue;
         data::tag_trace::used(child);
         const auto row = tokens(child.raw_text);
@@ -669,6 +708,41 @@ std::optional<std::pair<Fixed, Fixed>> collision_half_extents(
 } // namespace eawr::units::detail
 
 namespace eawr::units {
+
+core::Result<CollisionBounds> prepare_galactic_collision_bounds(const assets::Model& model) {
+    const auto fail = [&](const std::string& message) {
+        core::Diagnostic error; error.code = std::string(diagnostic_codes::bone_frame);
+        error.message = message; error.logical_path = model.source.logical_path;
+        return core::Result<CollisionBounds>::failure(std::move(error));
+    };
+    auto frames = bind_frames(model);
+    if (!frames) return core::Result<CollisionBounds>::failure(frames.error());
+    bool any = false;
+    for (const auto& mesh : model.meshes) {
+        if (!mesh.collidable) continue;
+        any = true;
+        if (mesh.bone < -1 || (mesh.bone >= 0 && static_cast<std::size_t>(mesh.bone) >= frames.value().size()))
+            return fail("galactic collision mesh names a missing bone");
+        const auto x0 = scene::fixed_from_binary32(mesh.bounds_min.x), y0 = scene::fixed_from_binary32(mesh.bounds_min.y),
+            z0 = scene::fixed_from_binary32(mesh.bounds_min.z), x1 = scene::fixed_from_binary32(mesh.bounds_max.x),
+            y1 = scene::fixed_from_binary32(mesh.bounds_max.y), z1 = scene::fixed_from_binary32(mesh.bounds_max.z);
+        if (!x0 || !y0 || !z0 || !x1 || !y1 || !z1 || x0.value() > x1.value() || y0.value() > y1.value() || z0.value() > z1.value())
+            return fail("galactic collision mesh has unrepresentable or reversed bounds");
+        const auto frame = mesh.bone < 0 ? sim::math::identity_matrix() : frames.value()[static_cast<std::size_t>(mesh.bone)];
+        for (int corner = 0; corner < 8; ++corner) {
+            const Vec3 local{corner & 1 ? x1.value() : x0.value(), corner & 2 ? y1.value() : y0.value(),
+                corner & 4 ? z1.value() : z0.value()};
+            if (!sim::math::transform_point(frame, local)) return fail("galactic collision mesh reference pose overflows Q24");
+        }
+    }
+    if (any) {
+        const auto bounds = detail::collision_bounds(model, frames.value());
+        if (!bounds) return fail("galactic collision bounds unexpectedly empty");
+        return core::Result<CollisionBounds>::success(*bounds);
+    }
+    const auto one = Fixed::from_raw(Fixed::scale), minus_one = Fixed::from_raw(-Fixed::scale);
+    return core::Result<CollisionBounds>::success({{minus_one, minus_one, minus_one}, {one, one, one}});
+}
 
 core::Result<std::vector<sim::math::Mat3x4>> bind_frames(const assets::Model& model) {
     const auto failure = [&](std::string message) {

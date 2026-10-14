@@ -99,6 +99,11 @@ void WorldUiView::write_report(std::ostream& output) const {
     };
     output << "  \"world_ui\": {\"ring\": \"" << ring_source_ << "\", \"ring_loaded\": " << (ring_.is_valid() ? "true" : "false")
            << ", \"atlas_loaded\": " << (atlas_.is_valid() ? "true" : "false") << ", \"types\": " << types_.size()
+           << ", \"waypoint_paths\": " << waypoint_paths_ << ", \"waypoint_flags\": " << waypoint_flags_
+           << ", \"waypoint_lines\": " << waypoint_lines_ << ", \"waypoint_loops\": " << waypoint_loops_
+           << ", \"waypoint_stubs_omitted\": " << waypoint_stubs_omitted_
+           << ", \"max_waypoint_paths\": " << max_waypoint_paths_ << ", \"max_waypoint_flags\": " << max_waypoint_flags_
+           << ", \"waypoint_surfaces\": " << waypoint_assets_.size()
            << ", \"circles\": " << circles_drawn_ << ", \"max_circles\": " << max_circles_
            << ", \"health_bars\": " << health_bars_ << ", \"shield_bars\": " << shield_bars_
            << ", \"max_health_bars\": " << max_health_bars_ << ", \"reticles\": " << reticles_drawn_
@@ -130,7 +135,8 @@ void WorldUiView::write_report(std::ostream& output) const {
         };
         rect("frame", geometry.frame);
         rect("inner", geometry.inner);
-        output << "}";
+        output << ", \"tint\": [" << int{geometry.tint[0]} << ", " << int{geometry.tint[1]} << ", "
+               << int{geometry.tint[2]} << "], \"owner\": " << geometry.owner << "}";
     }
     output << "]";
     output << ", \"gripper_points\": [";

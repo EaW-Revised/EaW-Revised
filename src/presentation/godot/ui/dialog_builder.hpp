@@ -40,7 +40,12 @@ struct BuiltDialog final {
 
 // The frame is not yet in a tree; the caller adds it where it belongs.
 // Images (PETROGLYPH_DIALOG_IMAGE) are set at run time and are skipped.
+// `retail_combos` keeps each combo at the width its rectangle gives it, its text clipping, instead of
+// letting it grow to its longest item (the retail control never grows), and gives its drop-down list the
+// retail list skin. Off by default: a screen opts in once its combos are checked against retail (the
+// skirmish setup, #3167).
 [[nodiscard]] BuiltDialog build_dialog(const data::ui::Dialog& dialog, const presentation::ui::ThemeModel& theme,
-                                       data::ui::TextLookup* text, presentation::ui::Placement placement);
+                                       data::ui::TextLookup* text, presentation::ui::Placement placement,
+                                       bool retail_combos = false);
 
 } // namespace eawr::presentation::godot_backend

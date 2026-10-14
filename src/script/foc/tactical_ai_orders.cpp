@@ -4,6 +4,7 @@
 #include "eawr/script/foc/tactical_ai.hpp"
 
 #include "tactical_ai_internal.hpp"
+#include "eawr/sim/tactical/types.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -59,6 +60,19 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         return authoritative::TacticalOrder{static_cast<tactical::PlayerId>(player.value()),
             std::move(units), std::move(payload)};
     };
+    if (command.verb == verb_special_fire) {
+        if (arguments.size() != 4 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, source, target and AI admission");
+        const auto* target = as_handle(arguments[2], handle_game_object);
+        const auto* admission = std::get_if<LuaNumber>(&arguments[3].data);
+        if (target == nullptr || admission == nullptr) return bad("malformed target or admission");
+        const auto value = numeric::to_exact_integer(*admission);
+        if (!value || (value.value() != static_cast<std::int64_t>(tactical::SpecialFireAdmission::ai_object) &&
+            value.value() != static_cast<std::int64_t>(tactical::SpecialFireAdmission::ai_taskforce)))
+            return bad("invalid AI admission");
+        return OrderResult::success(make_order({unit->id}, tactical::SpecialFirePayload{target->id,
+            static_cast<tactical::SpecialFireAdmission>(value.value())}));
+    }
     if (command.verb == verb_credit_grant || command.verb == verb_reservation_debit) {
         const auto* value = std::get_if<LuaNumber>(&arguments[2].data);
         if (arguments.size() != 3 || value == nullptr) return bad("malformed credit grant");
@@ -115,18 +129,52 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         return OrderResult::success(make_order({unit->id}, tactical::AttackPayload{target->id}));
     }
     if (command.verb == verb_ability) {
-        if (arguments.size() != 4) return bad("expects an ability and an action");
+        if (arguments.size() != 4 && arguments.size() != 5 && arguments.size() != 7) return bad("expects an ability and an action");
         std::int64_t values[2]{};
         for (std::size_t index = 0; index < 2; ++index) {
             const auto* value = std::get_if<LuaNumber>(&arguments[2 + index].data);
             if (value == nullptr) return bad("malformed ability or action");
             auto exact = numeric::to_exact_integer(*value);
-            if (!exact || exact.value() < 1 || exact.value() > 4) return bad("malformed ability or action");
+            // AB-44: any modelled ability kind (the AbilityKind enum's named kinds) and any action
+            // (switch on, off, autofire on, off); the session itself refuses what the unit cannot do.
+            const bool valid = exact && exact.value() >= 1 && (index == 0
+                ? exact.value() <= std::numeric_limits<std::uint8_t>::max()
+                    && tactical::to_string(static_cast<tactical::AbilityKind>(exact.value())) != "NONE"
+                : exact.value() <= static_cast<std::int64_t>(tactical::AbilityAction::autofire_off));
+            if (!valid) return bad("malformed ability or action");
             values[index] = exact.value();
         }
-        return OrderResult::success(make_order({unit->id},
-            tactical::AbilityPayload{static_cast<tactical::AbilityKind>(values[0]),
-                static_cast<tactical::AbilityAction>(values[1])}));
+        if (arguments.size() == 4) {
+            return OrderResult::success(make_order({unit->id},
+                tactical::AbilityPayload{static_cast<tactical::AbilityKind>(values[0]),
+                    static_cast<tactical::AbilityAction>(values[1])}));
+        }
+        if (arguments.size() == 5) {
+            const Handle* target = as_handle(arguments[4], handle_game_object);
+            if (!target || values[0] != static_cast<std::int64_t>(tactical::AbilityKind::leech_shields)
+                || values[1] != static_cast<std::int64_t>(tactical::AbilityAction::activate))
+                return bad("shield leech activation expects an object target");
+            return OrderResult::success(make_order({unit->id}, tactical::AbilityPayload{
+                tactical::AbilityKind::leech_shields, tactical::AbilityAction::activate, target->id}));
+        }
+        // WAB-76, WHE-61: BUZZ_DROIDS and WEAKEN_ENEMY from Lua switch on at a point.
+        if ((values[0] != static_cast<std::int64_t>(tactical::AbilityKind::buzz_droids)
+                && values[0] != static_cast<std::int64_t>(tactical::AbilityKind::corrupt_systems)
+                && values[0] != static_cast<std::int64_t>(tactical::AbilityKind::weaken_enemy))
+            || values[1] != static_cast<std::int64_t>(tactical::AbilityAction::activate))
+            return bad("only an area ability activation takes a point");
+        math::Vec3 point;
+        math::Fixed* axes[] = {&point.x, &point.y, &point.z};
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto* coordinate = std::get_if<LuaNumber>(&arguments[4 + i].data);
+            if (coordinate == nullptr) return bad("malformed ability point");
+            auto fixed = numeric::to_fixed(*coordinate);
+            if (!fixed) return bad("invalid ability point");
+            *axes[i] = fixed.value();
+        }
+        tactical::AbilityPayload payload{static_cast<tactical::AbilityKind>(values[0]), tactical::AbilityAction::activate};
+        payload.position = point;
+        return OrderResult::success(make_order({unit->id}, payload));
     }
     const bool attack_move = command.verb == verb_attack_move;
     if ((attack_move || command.verb == verb_guard) && arguments.size() == 3) {

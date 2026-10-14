@@ -115,6 +115,12 @@ struct PlacementCache {
     math::Mat3x4 matrix{};
 };
 
+struct BankedPlacementCache {
+    math::Quat heading{};
+    math::Fixed roll{};
+    math::Mat3x4 matrix{};
+};
+
 struct LiveUnit {
     UnitState state;
     std::optional<DurabilityState> durability;
@@ -139,6 +145,12 @@ struct LiveUnit {
     math::Fixed cause_damage_mode{math::Fixed::from_raw(math::Fixed::scale)};
     math::Fixed take_damage_mode{math::Fixed::from_raw(math::Fixed::scale)};
     bool in_tractor_beam{}; // derived from live source/category entries, never hashed
+    std::optional<CorruptSystemsState> corrupt{};
+    std::optional<WaypointRoute> waypoints{};
+    std::optional<BankedPlacementCache> banked_placement_cache{}; // WWP-73: combat and snapshot share it
+    bool garrison_unit{}; // WU-37: per-object birth provenance, not inherited by new wingmen.
+    std::optional<Sighting> sighting{}; // WMV-13 (#719): the order's target, last seen
+    std::optional<PositionHistory> position_history{};
 };
 
 // WNO-23/42: one boundary for capture and conversion. Notifications run with the new
@@ -147,7 +159,9 @@ template <typename Notify>
 [[nodiscard]] core::Result<void> transfer_owner(LiveUnit& unit, const PlayerId owner, Notify&& notify) {
     if (unit.state.owner == owner) return core::Result<void>::success();
     unit.state.order = {};
+    unit.waypoints.reset();
     unit.approach.reset();
+    unit.sighting.reset();
     unit.formation.reset();
     unit.state.owner = owner;
     if (const auto changed = notify(unit); !changed) return changed;
@@ -248,14 +262,18 @@ struct PopulationShare {
 // A squadron's orders as its craft read them in the craft phase (#75): its leader, what it
 // attacks or the point it holds.
 struct SquadronFrame {
+    std::optional<std::uint32_t> attack_hardpoint{}; // partitioned destination-point staging
+    EntityId resolved_attack_target{}; // serial retargets invalidate the staged point
     const SquadronState* state{};
     const SquadronProfile* profile{};
     EntityId leader{};
+    math::Fixed base_max_speed{}; // WMV-44: slowest live roster member's base speed
     bool attacking{};
     math::Vec3 target_position{};
     math::Fixed target_radius{};
     bool target_craft{};
     bool approach{}; // FA-07
+    std::optional<LaneFlight> attack_lane{}; // FD-65
     DogfightFlight dogfight{DogfightFlight::none}; // #457, FD-01 to FD-03
     CombatCell cell{};
     math::Vec3 hold{};
@@ -270,9 +288,13 @@ struct SquadronFrame {
 
 // A squadron as the squadron phase stages it (#271).
 struct SquadronOutcome {
+    std::optional<SquadronAttackPath> attack_path;
+    std::optional<bool> attack_approach{};
+    std::optional<std::uint32_t> attack_hardpoint{}; // order-tick implicit destination selection
     bool container_live{};
     std::vector<EntityId> members; // live craft, ascending
     math::Vec3 centre{};
+    math::Quat rotation{}; // WSQ-53: the leader's facing
     math::Mat3x4 transform{};
     std::optional<core::Diagnostic> error;
 };

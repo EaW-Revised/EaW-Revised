@@ -9,6 +9,7 @@
 #include <optional>
 #include <map>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 // #82 P2-19: the local player's battle selection (docs/behaviour/foc-battle-selection.md). Picking,
@@ -150,9 +151,20 @@ struct Modifiers {
 class Selection final {
 public:
     [[nodiscard]] const std::vector<sim::EntityId>& units() const noexcept { return selected_; }
-    [[nodiscard]] bool contains(sim::EntityId entity) const noexcept;
+    // #1067: membership is a hash set kept beside the ordered vector, so every path that adds or
+    // removes many units does one set probe per unit instead of a scan of the selection. The vector
+    // alone decides order (selection order leads the unit cards and the group recall).
+    [[nodiscard]] bool contains(sim::EntityId entity) const noexcept { return members_.contains(entity); }
     [[nodiscard]] bool empty() const noexcept { return selected_.empty(); }
-    void clear() noexcept { selected_.clear(); }
+    void clear() noexcept {
+        selected_.clear();
+        members_.clear();
+    }
+    // #1067: how many membership-structure operations (set probe, insert, erase or one element of a
+    // bulk pass, or a retain_sorted binary-search comparison) the mutating calls have made so far.
+    // A counter, not a timer: tests bound bulk selection calls by
+    // N (or N log N) for a large box, type or group call. contains() is not counted.
+    [[nodiscard]] std::uint64_t membership_operations() const noexcept { return membership_operations_; }
 
     // A left click (no drag) on `picked`, or on nothing. An own unit: Shift toggles it, Ctrl adds
     // every own unit of its type on screen, otherwise it becomes the selection. Another player's
@@ -175,8 +187,9 @@ public:
     // WSU-38 (#550): the same test for a craft type: adds every own squadron with a craft of
     // `craft_type` on screen, whether or not its icon is. Returns whether it added any.
     bool craft_type_on_screen(sim::tactical::TypeId craft_type, std::span<const BattleUnit> units, const ScreenRect& viewport);
-    // Drops units that no longer stand in the session (destroyed); selection and groups.
-    void retain(std::span<const sim::EntityId> alive);
+    // Drops destroyed selection/group members. The caller's alive IDs must be sorted ascending
+    // (SnapshotIndex::alive already is). Probes only stored members, with no allocation or alive scan.
+    void retain_sorted(std::span<const sim::EntityId> alive);
     // #425: the selection becomes `units` (a unit card click, unit_cards.hpp), in that order and
     // without repeats. Returns whether it changed.
     bool replace(std::span<const sim::EntityId> units);
@@ -201,8 +214,16 @@ public:
 
 private:
     void add(sim::EntityId entity);
+    // Appends when absent; returns whether it did. One counted set probe.
+    bool append(sim::EntityId entity);
+    // Replaces the ordered vector (already free of repeats) and rebuilds the membership set.
+    void adopt(std::vector<sim::EntityId> next);
+    // Keeps the first occurrence of each entity, in order. One counted probe per element.
+    void unique_in_order(std::vector<sim::EntityId>& members);
     std::optional<Vec3f> selected_group(std::size_t group, double logical_frame, std::span<const BattleUnit> alive);
     std::vector<sim::EntityId> selected_;
+    std::unordered_set<sim::EntityId> members_; // exactly the entries of selected_
+    std::uint64_t membership_operations_{};
     std::array<std::vector<sim::EntityId>, control_group_count> groups_{};
     std::map<sim::EntityId, std::size_t> group_numbers_;
     std::optional<std::size_t> last_group_;

@@ -1,4 +1,5 @@
 #include "eawr/skirmish/ai.hpp"
+#include "eawr/skirmish/placement.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 
 #include "eawr/script/numeric/q24_boundary.hpp"
@@ -35,25 +36,56 @@ numeric_value lua_float(std::uint32_t bits) {
 script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables) {
     script::foc::AiSetup setup;
     setup.seed = start.setup.seed;
+    setup.allow_special_weapons = start.match.allow_superweapons;
     setup.perception.campaign_game = false; // SAE-01
     for (const auto& category : tables.categories) setup.content.categories.emplace(upper(category.name), category.value);
     for (const auto& property : tables.properties) setup.content.properties.emplace(upper(property.name), property.value);
+    for (const auto& projectile : tables.projectiles) {
+        // WTA-34: the categories the engine's defensive ability queries test.
+        std::uint32_t bits = 0;
+        if (upper(projectile.category) == "MISSILE") bits = script::foc::ai_projectile_missile;
+        else if (upper(projectile.category) == "ROCKET") bits = script::foc::ai_projectile_rocket;
+        else if (upper(projectile.category) == "MPTL_ROCKET") bits = script::foc::ai_projectile_mptl_rocket;
+        if (bits != 0) setup.content.projectile_categories.emplace(type_id(projectile.id), bits);
+    }
     for (const auto& unit : tables.units) {
         if (roster_disabled_types().contains(type_id(unit.id))) continue;
         script::foc::AiType type;
         type.type_id = type_id(unit.id);
         type.name = upper(unit.id);
+        type.decoration = unit.decoration;
+        type.lua_script = unit.lua_script;
+        const auto scale = unit.scale_factor.value_or(sim::math::Fixed::from_integer(1).value());
+        const auto bound = [&](sim::math::Vec3 point) {
+            return sim::math::Vec3{sim::math::multiply(point.x, scale).value(),
+                sim::math::multiply(point.y, scale).value(), sim::math::multiply(point.z, scale).value()};
+        };
+        if (unit.collision) type.proximity_bounds = std::array{bound(unit.collision->min), bound(unit.collision->max)};
         type.category_bits = unit.category_bits;
         type.property_bits = unit.property_bits;
         for (const auto& ability : unit.abilities) {
             if (roster_ability_reason(unit.id, ability.type).empty()) type.abilities.push_back(upper(ability.type));
         }
         type.projectile_types = unit.weapon ? 1U : 0U;
+        // WTA-34: the projectile types Get_All_Projectile_Types lists, hardpoints in order and then the object weapon.
+        const auto projectile_id = [&](const units::Weapon& weapon) -> sim::tactical::TypeId {
+            return weapon.projectile_index < tables.projectiles.size()
+                ? type_id(tables.projectiles[weapon.projectile_index].id) : sim::tactical::TypeId{};
+        };
+        for (const auto& hardpoint : unit.hardpoints) {
+            type.hardpoint_projectiles.push_back(hardpoint.weapon ? projectile_id(*hardpoint.weapon) : sim::tactical::TypeId{});
+        }
+        if (unit.weapon) type.object_projectile = projectile_id(*unit.weapon);
+        type.point_defence_script = upper(unit.lua_script) == "OBJECTSCRIPT_POINTDEFENSE";
+        type.corrupt_systems_script = upper(unit.lua_script) == "OBJECTSCRIPT_IG2000";
         // BEHAVIOR_LOCO: ships that move and squadrons; stations and craft (members) do not
-        // enter the freestore on their own.
-        type.locomotor = (unit.kind == units::UnitKind::ship && unit.movement.max_speed.has_value()) ||
+        // enter the freestore on their own, nor do ships without a locomotor (WAB-71 droids).
+        type.locomotor = (unit.kind == units::UnitKind::ship && unit.movement.max_speed.has_value() && unit.locomotion) ||
             unit.kind == units::UnitKind::squadron;
-        type.star_base = unit.kind == units::UnitKind::station;
+        type.star_base = unit.star_base;
+        type.space_special_weapon = unit.planetary_weapon.has_value();
+        type.targeting = unit.targeting;
+        type.unit_ai = unit.unit_ai;
         type.capture_point = unit.capture_point;
         type.build_pad = unit.build_pad;
         type.tactical_cost = unit.production.build_cost_multiplayer.value_or(sim::math::Fixed{});
@@ -63,11 +95,28 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         type.last_state_visible_under_fow = unit.last_state_visible_under_fow;
         type.tech_level = unit.tech_level;
         type.base_level = unit.base_level;
+        type.previous_base_levels = unit.previous_base_levels;
         if (unit.ai_combat_power) type.combat_power = lua(*unit.ai_combat_power);
         if (unit.targeting_max_attack_distance) type.max_attack_distance = lua(*unit.targeting_max_attack_distance);
+        if (unit.targeting_min_attack_distance) type.min_attack_distance = lua(*unit.targeting_min_attack_distance);
+        // WTA-36: the hero the type builds; a company member keeps its own authored hero flag.
+        if (!unit.company_members.empty()) {
+            const auto& member = unit.company_members.front();
+            const auto* body = tables.find(member.type);
+            type.hero = member.named_hero || (body != nullptr && body->special_weapon_in_space);
+        } else {
+            const auto* body = unit.members.empty() || unit.members.front().craft_index >= tables.units.size()
+                ? &unit : &tables.units[unit.members.front().craft_index];
+            type.hero = body->named_hero || body->special_weapon_in_space;
+        }
         if (unit.movement.max_speed) type.max_speed = lua(*unit.movement.max_speed);
         if (unit.footprint.custom_soft_radius) type.soft_radius = lua(*unit.footprint.custom_soft_radius);
         if (unit.space_fow_reveal_range) type.reveal_range = lua(*unit.space_fow_reveal_range);
+        if (const auto box = placement_box(unit)) {
+            // WTA-28: the planar half extents of the type's bounds (the PL-02 placement box).
+            type.bounds_half_x = lua(sim::math::Fixed::from_raw((box->max_x.raw() - box->min_x.raw()) / 2));
+            type.bounds_half_y = lua(sim::math::Fixed::from_raw((box->max_y.raw() - box->min_y.raw()) / 2));
+        }
         type.squadron = unit.kind == units::UnitKind::squadron;
         type.craft = unit.kind == units::UnitKind::craft;
         type.squadron_units = static_cast<std::uint32_t>(unit.members.size());
@@ -131,13 +180,15 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         script::foc::AiPlayer entry;
         entry.player = player.player.player_id;
         entry.faction = upper(player.faction);
-        entry.ai = player.lobby && !player.human;
+        // MAT-09: a demo map's player runs the AI player type the map's start names, by editor index.
+        const bool named = !player.ai_player_type.empty();
+        entry.ai = (player.lobby && !player.human) || named;
         entry.human = player.lobby && player.human;
         for (const auto& faction : inputs.factions) {
             if (upper(faction.name) != entry.faction) continue;
             entry.neutral = faction.neutral;
             // WSS-35, AI-11: every lobby AI uses its faction's authored Basic_AI.
-            if (entry.ai) entry.player_type = faction.basic_ai;
+            if (entry.ai) entry.player_type = named ? player.ai_player_type : faction.basic_ai;
             break;
         }
         setup.players.push_back(std::move(entry));
@@ -183,6 +234,28 @@ core::Result<std::map<std::string, std::string>> ai_modules(
         modules.emplace(path, std::move(text));
     }
     return ModulesResult::success(std::move(modules));
+}
+
+core::Result<std::map<std::string, std::string>> select_ai_modules(
+    const std::map<std::string, std::string>& cached, const script::foc::AiSetup& setup, const bool plans) {
+    using Result = core::Result<std::map<std::string, std::string>>;
+    auto paths = script::foc::required_modules(setup);
+    if (plans) {
+        for (auto list : {script::foc::plan_library_modules(), script::foc::selected_plans()})
+            paths.insert(paths.end(), list.begin(), list.end());
+    }
+    std::map<std::string, std::string> selected;
+    for (const auto& path : paths) {
+        const auto found = cached.find(path);
+        if (found == cached.end()) {
+            core::Diagnostic diagnostic;
+            diagnostic.code = std::string(script::authoritative::codes::module_rejected);
+            diagnostic.message = "required module is not in the prepared cache: " + path;
+            return Result::failure(std::move(diagnostic));
+        }
+        selected.emplace(found->first, found->second);
+    }
+    return Result::success(std::move(selected));
 }
 
 } // namespace eawr::skirmish

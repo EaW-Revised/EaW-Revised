@@ -21,7 +21,9 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -159,6 +161,78 @@ std::vector<Shot> run(tactical::TacticalSession& value, const std::uint64_t tick
     return state && !state->weapons.empty() ? state->weapons[0].opportunity.target : 0;
 }
 
+void test_charged_blast_budget() {
+    namespace d = tactical::detail;
+    std::optional<tactical::ChargedBlastState> charge{{2, 0, false}};
+    tactical::service_charged_blast(charge, 9);
+    expect(charge && charge->charge_remaining == 1 && !charge->charged_presentation,
+        "FSC-56: one admitted poll decrements once, without elapsed-time catch-up");
+    tactical::service_charged_blast(charge, 2);
+    expect(charge && charge->shots_remaining == 2 && charge->charged_presentation,
+        "FSC-56: completion snapshots this poll's eligible gun count");
+    charge = tactical::ChargedBlastState{1, 0, false};
+    tactical::service_charged_blast(charge, 0);
+    expect(charge && charge->charged_presentation, "FSC-58: zero eligible guns still publish charged presentation");
+    tactical::service_charged_blast(charge, 20);
+    expect(!charge, "FSC-58: the next admitted poll cleans the zero budget without recounting");
+
+    auto content = table();
+    auto special = content.profiles.front().weapons.front();
+    special.special = true;
+    special.pulse_count = 1;
+    special.min_recharge_hundredths = special.max_recharge_hundredths = 100;
+    special.shot.emplace(); special.shot->speed = units(25); special.shot->damage = units(600);
+    auto ordinary = special; ordinary.special = false; ordinary.hardpoint = 1;
+    content.profiles.front().weapons = {special, ordinary};
+    auto state = tactical::initial_combat(content.profiles.front(), 12345, 0, 1);
+    for (auto& gun : state.weapons) gun.countdown = 0;
+    state.attack_target = 2; state.direct = true;
+    const auto players = setup({}).players;
+    const std::vector<tactical::SnapshotPlayer> relations{{1, 1}, {2, 2}};
+    d::CombatWorld world; world.players = players; world.relationships = relations; world.table = &content;
+    world.seed = 12345;
+    d::CombatUnit own; own.id = 1; own.owner = 1; own.type_id = shooter_type;
+    own.profile = &content.profiles.front(); own.combat = &state; own.visible_to = 3;
+    own.transform = math::to_matrix(math::identity_quat(), {}).value();
+    d::CombatUnit enemy; enemy.id = 2; enemy.owner = 2; enemy.player_index = 1; enemy.type_id = fighter_type;
+    enemy.profile = &content.profiles[1]; enemy.position = enemy.previous_position = at(300, 0); enemy.visible_to = 3;
+    enemy.transform = math::to_matrix(math::identity_quat(), enemy.position).value();
+    world.units = {own, enemy};
+    const auto fire = [&](const tactical::ChargedBlastState blast) {
+        own.charged_blast = blast;
+        auto result = d::step_combat(world, own);
+        expect(static_cast<bool>(result), "FSC-57: charged combat attempt succeeds");
+        return result;
+    };
+    auto pending = fire({1, 0, false});
+    expect(pending && pending.value().events.empty(), "FSC-56: pending charge blocks both SPECIAL and ordinary guns");
+    auto last = fire({0, 1, true});
+    expect(last && last.value().events.size() == 2 && last.value().charged_blast->shots_remaining == 0
+        && (last.value().events[0].outcome & tactical::fired_charged_shot) != 0
+        && (last.value().events[1].outcome & tactical::fired_charged_shot) == 0,
+        "FSC-57: last successful SPECIAL consumes inside the attempt and permits the later ordinary gun this turn");
+    auto retained = fire({0, 2, true});
+    expect(retained && retained.value().events.size() == 1 && retained.value().charged_blast->shots_remaining == 1,
+        "FSC-57/59: a remaining shared budget blocks ordinary fire and is not recounted per gun");
+    if (retained) {
+        state = retained.value().state;
+        state.weapons.front().countdown = 0;
+        auto repeated = fire(*retained.value().charged_blast);
+        expect(repeated && repeated.value().events.size() == 2 && repeated.value().charged_blast->shots_remaining == 0,
+            "FSC-59: the same ready SPECIAL can consume the remaining shared count without a per-gun latch");
+        for (auto& clock : state.weapons) clock.countdown = 0;
+    }
+    content.profiles.front().weapons.front().category_restrictions = fighter_bit;
+    auto refused = fire({0, 1, true});
+    expect(refused && refused.value().events.empty() && refused.value().charged_blast->shots_remaining == 1,
+        "FSC-57: a failed SPECIAL attempt retains the budget and keeps the later ordinary gun blocked");
+    content.profiles.front().weapons.front().category_restrictions = 0;
+    state.weapons.front().countdown = 30;
+    auto cooling = fire({0, 1, true});
+    expect(cooling && cooling.value().events.empty() && cooling.value().charged_blast->shots_remaining == 1,
+        "FSC-59: ordinary cooldown failure does not consume or reset the shared budget");
+}
+
 void test_special_weapon_service() {
     auto content = table();
     auto& weapon = content.profiles[0].weapons[0];
@@ -189,6 +263,43 @@ void test_special_weapon_service() {
     expect(std::none_of(rows.begin(), rows.end(), [](const auto& event) {
         return event.kind == tactical::CombatEventKind::weapon_fired;
     }), "WAD-32/33: SPECIAL preserves ordinary category restriction gate");
+}
+
+// space-targeting R-01: a hardpoint whose authored maximum recharge is within
+// Hardpoint_Recharge_Cutoff_For_Opportunity_Fire counts both opportunity flags as on for an AI owner,
+// whatever the hardpoint data says; a human owner and a slower hardpoint keep the authored false flags.
+void test_ai_opportunity_cutoff() {
+    auto content = table();
+    auto& weapon = content.profiles[0].weapons[0];
+    weapon.opportunity_when_idle = false;
+    weapon.opportunity_when_targeting = false;
+    tactical::ShotProfile shot; shot.speed = units(25); shot.max_travel = units(700); shot.damage = units(40);
+    weapon.shot = shot;
+    const auto start = setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, fighter_type, 2, at(300, 0))});
+    const auto acquires = [&](const tactical::CombatTable& combat, const std::optional<bool> ai) {
+        tactical::EconomyRules economy;
+        if (ai) {
+            tactical::EconomyPlayer lobby;
+            lobby.player = 1;
+            lobby.ai = *ai;
+            economy.players = {lobby};
+        }
+        auto created = tactical::TacticalSession::create(start, sensors(2000), {}, {}, std::nullopt, combat, {}, {}, economy);
+        expect(static_cast<bool>(created), "R-01: the economy session is created");
+        if (!created) return false;
+        auto value = std::move(created).value();
+        const auto rows = run(value, 180);
+        return std::any_of(rows.begin(), rows.end(), [](const auto& event) {
+            return event.kind == tactical::CombatEventKind::weapon_fired || event.kind == tactical::CombatEventKind::target_acquired;
+        });
+    };
+    expect(!acquires(content, std::nullopt), "R-01: without the flag nothing is forced");
+    content.profiles[0].weapons[0].ai_opportunity_forced = true;
+    expect(!acquires(content, std::nullopt), "R-01: a session without an economy table has no AI owner");
+    expect(!acquires(content, false), "R-01: a human owner keeps the authored false flags");
+    expect(acquires(content, true), "R-01: an AI owner's quick-recharge hardpoint opportunity-fires despite the false flags");
+    content.profiles[0].weapons[0].ai_opportunity_forced = false;
+    expect(!acquires(content, true), "R-01: a slower hardpoint keeps the authored false flags for an AI owner");
 }
 
 void test_neutral_relationships() {
@@ -268,6 +379,26 @@ void test_neutral_relationships() {
     state.next_scan_frame = 0;
     const auto scanned = tactical::detail::squadron_target(world, state, squadron, world.units.front(), at(0, 0));
     expect(scanned.target == 3, "WHZ-51: a squadron scans past a nearer neutral object to its enemy");
+
+    // WST-11: a stealth-invisible enemy is neither kept (even on a planned approach) nor acquired by a
+    // squadron whose type cannot target stealth units; one that can still locks on.
+    world.units[2].stealth_invisible = true;
+    state.target = 3;
+    state.approach = true;
+    state.next_scan_frame = 100;
+    const auto hidden_kept = tactical::detail::squadron_target(world, state, squadron, world.units.front(), at(0, 0));
+    expect(hidden_kept.target == 0, "WST-11: a squadron drops a hidden enemy target, also on its approach");
+    state.target = 0;
+    state.approach = false;
+    state.next_scan_frame = 0;
+    const auto hidden_scan = tactical::detail::squadron_target(world, state, squadron, world.units.front(), at(0, 0));
+    expect(hidden_scan.target == 0, "WST-11: a squadron scan skips a hidden enemy");
+    tactical::CombatProfile seer = scanner;
+    seer.target_stealth = true;
+    auto detector = world.units.front();
+    detector.profile = &seer;
+    const auto detected = tactical::detail::squadron_target(world, state, squadron, detector, at(0, 0));
+    expect(detected.target == 3, "WST-11: a squadron of a Target_Stealth_Units type still acquires the hidden enemy");
 }
 
 [[nodiscard]] tactical::TacticalReplay battle() {
@@ -399,6 +530,16 @@ void test_manual_contracts() {
     enemy.position = at(500, 0); enemy.visible_to = 2; expect(!admitted(), "MC-01: fogged target refused");
     enemy.visible_to = 3; enemy.owner = 1; expect(!admitted(), "MC-01: friendly target refused");
     enemy.owner = 2;
+    weapon.category_restrictions = fighter_bit | bomber_bit | transport_bit;
+    auto target_profile = combat.profiles[2];
+    enemy.profile = &target_profile;
+    expect(!admitted(), "MC-09/10: the picked bomber craft is refused by the manual cannon");
+    target_profile.category_bits = 0;
+    expect(admitted(), "MC-09: direct category-less container admission does not inspect its members");
+    target_profile.category_bits = 8U; // a synthetic ship category outside the authored exclusions
+    expect(admitted(), "MC-09: a target outside the gun's exclusion remains admitted");
+    enemy.profile = &combat.profiles[1];
+    weapon.category_restrictions = 0;
     state.weapons.front().manual->target = 2;
     expect(!admitted(), "MC-02: retained assignment cannot be replaced");
     state.weapons.front().manual->requesting_player = 1;
@@ -438,7 +579,8 @@ void test_manual_contracts() {
         "MC-05: shared player readiness saturates at stored shot cooldown");
     // A turret admits by extent before it slews into the firing cone.
     tactical::ManualTurretProfile turret;
-    turret.axes = turret.coordinate_axes = {at(1, 0), at(0, 1), at(0, 0, 1)};
+    turret.axes = {at(1, 0), at(0, 1), at(0, 0, 1)};
+    turret.coordinate_axes = {at(0, 1), at(-1, 0), at(0, 0, 1)};
     turret.speed = Fixed::from_raw(one / 2); turret.yaw_extent = units(360); turret.pitch_extent = units(30);
     weapon.manual_turret = turret; weapon.manual_turret_required = true;
     state.weapons.front().manual->target = 0;
@@ -450,6 +592,426 @@ void test_manual_contracts() {
         && slewed.value().state.weapons.front().manual->yaw == units(1)
         && slewed.value().state.weapons.front().manual->pitch == Fixed::from_raw(-one / 2),
         "MC-06: authored half-degree pitch and both yaw steps precede fire-cone evaluation");
+    // The attachment coordinates and zero-pose muzzle differ by a quarter turn.
+    // A narrow yaw extent admits the forward target, then the posed gun launches.
+    weapon.manual_turret->yaw_extent = units(20);
+    enemy.position = at(500, 0); state.weapons.front().manual->target = 0;
+    expect(admitted(), "WSW-18: quarter-turn yaw admission accepts the muzzle-forward target");
+    enemy.position = at(0, 500);
+    expect(!admitted(), "WSW-18: quarter-turn yaw admission rejects the side target beyond extent");
+    enemy.position = enemy.previous_position = at(500, 0);
+    enemy.transform = math::to_matrix(math::identity_quat(), enemy.position).value();
+    world.units[1] = enemy; state.weapons.front().manual->target = 2;
+    weapon.fire_axes = turret.axes; weapon.cone_width = units(40); weapon.cone_height = units(3);
+    auto aligned = detail::step_combat(world, own);
+    expect(aligned && aligned.value().manual_fired.size() == 1
+        && aligned.value().state.weapons.front().manual->target == 0
+        && aligned.value().state.weapons.front().manual->yaw == Fixed{},
+        "WSW-18: nonaligned attachment coordinates preserve the muzzle cone and launch a manual shot");
+}
+
+void test_planetary_purchase_and_burst() {
+    auto combat = table();
+    for (auto& profile : combat.profiles) profile.weapons.clear();
+    auto& source = combat.profiles.back();
+    source.special_weapon = true;
+    source.max_attack_distance = Fixed{};
+    source.planetary_weapon = tactical::PlanetaryWeaponProfile{0, 1, 8, 2, fighter_bit};
+    auto gun = ion();
+    gun.hardpoint = tactical::object_weapon;
+    gun.range = Fixed{}; gun.fire_a = {}; gun.has_fire_b = false;
+    gun.cone_width = units(360); gun.cone_height = units(180); gun.pulse_count = 3;
+    gun.shot.emplace(); gun.shot->speed = units(7); gun.shot->max_travel = units(10000);
+    source.weapons = {gun};
+    const auto initial = setup({unit(1, shooter_type, 1, at(0, 0)),
+        unit(2, fighter_type, 2, at(5000, 0)), unit(3, gunship_type, 1, at(0, 0, -50))});
+    constexpr tactical::TypeId unlock_type = 90;
+    tactical::EconomyRules economy;
+    economy.players = {{1, units(100), 20, false}, {2, units(100), 20, true}};
+    tactical::BuildOption option{unlock_type, tactical::BuildKind::upgrade, tactical::BuildQueue::upgrades,
+        units(1), 1, 1, 0, true};
+    option.requirements.current_player = 1;
+    economy.menus = {{shooter_type, 1, {option}}};
+    tactical::UpgradeProfile unlock;
+    unlock.type = unlock_type; unlock.special_unlocks = {{false, false}}; unlock.consume_after_special_fire = true;
+    economy.upgrades = {unlock};
+    tactical::TacticalReplay replay;
+    replay.setup = initial; replay.final_tick_count = 20;
+    replay.commands = {
+        {{0, 1, 1}, {1}, tactical::BuyPayload{unlock_type}},
+        {{2, 1, 2}, {3}, tactical::SpecialFirePayload{2}},
+        {{7, 1, 3}, {1}, tactical::BuyPayload{unlock_type}},
+        {{8, 1, 4}, {3}, tactical::SpecialFirePayload{2}}, // permission restored, recharge still incomplete
+        {{11, 1, 5}, {3}, tactical::SpecialFirePayload{2}},
+        {{12, 1, 6}, {3}, tactical::SpecialFirePayload{2, tactical::SpecialFireAdmission::ai_object}}};
+    const auto encoded = tactical::write_replay(replay);
+    expect(static_cast<bool>(encoded), "WSW: purchase/burst replay writes");
+    const auto parsed = encoded ? tactical::parse_replay(encoded.value()) : tactical::parse_replay({});
+    expect(parsed && parsed.value() == replay, "WSW: purchase/burst replay round-trips");
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::from_replay(replay, sensors(1), {}, {}, std::nullopt, combat, {}, {}, economy);
+        expect(static_cast<bool>(created), "WSW: planetary economy session creates");
+        if (!created) return;
+        auto world = std::move(created).value();
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        std::vector<std::pair<std::uint64_t, std::uint32_t>> pulses;
+        std::vector<std::uint64_t> ready;
+        for (std::uint64_t frame = 0; frame < replay.final_tick_count; ++frame) {
+            const auto tick = world.step(executor);
+            expect(static_cast<bool>(tick), "WSW: planetary purchase/burst tick succeeds");
+            if (!tick) return;
+            hashes.push_back(tick.value().state_sha256);
+            const auto snapshot = tick.value().snapshot;
+            for (const auto& event : snapshot->events()) {
+                if (event.kind == tactical::EventKind::special_weapon_fired) pulses.emplace_back(event.tick, event.special_pulse);
+                if (event.kind == tactical::EventKind::special_weapon_ready) ready.push_back(event.tick);
+                if (frame == 8 && event.order == tactical::OrderKind::special_fire)
+                    expect(event.kind == tactical::EventKind::order_rejected, "WSW-16: re-purchase does not bypass recharge");
+                if (frame == 12 && event.order == tactical::OrderKind::special_fire)
+                    expect(event.kind == tactical::EventKind::order_rejected, "WSW-40: a human cannot request AI admission");
+            }
+            if (frame == 2 || frame == 11) {
+                expect(world.ledgers().front().completed.empty() && !snapshot->economy().front().special_weapons_enabled,
+                    "WSW-08/11: initial dispatch consumes the marked object and its permission");
+                expect(world.ledgers().front().lifetime.at(unlock_type) == (frame == 2 ? 1U : 2U),
+                    "WSW-11: consumption retains lifetime production count");
+            }
+        }
+        expect(pulses == std::vector<std::pair<std::uint64_t, std::uint32_t>>{{2, 0}, {4, 1}, {6, 2}, {11, 0}, {13, 1}, {15, 2}},
+            "WSW-19/20: three pulses retain frame spacing after enabling purchase consumption");
+        expect(ready == std::vector<std::uint64_t>{10}, "WSW-34: ready cue waits for recharge plus permission, fires once");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "WSW: purchase/source/burst clocks match at workers 1/2/4/8");
+    }
+    for (const int scenario : {0, 1, 2, 3, 4, 5, 6}) {
+        auto content = combat;
+        auto money = economy;
+        auto script = replay;
+        script.commands.resize(2);
+        script.final_tick_count = 12;
+        tactical::DurabilityTable health;
+        if (scenario == 0) { // WSW-22: cone rejection still advances logical fire and emits each pulse cue.
+            // The shared object-gun predicate treats zero extents as unbounded.
+            // A nonzero narrow extent rejects the target above the source plane.
+            content.profiles.back().weapons.front().cone_width = Fixed::from_raw(one / 10);
+            content.profiles.back().weapons.front().cone_height = Fixed::from_raw(one / 10);
+        } else if (scenario == 1) { // WSW-08: a non-consuming unlock remains held across recharge.
+            money.upgrades.front().consume_after_special_fire = false;
+            script.commands.push_back({{11, 1, 3}, {3}, tactical::SpecialFirePayload{2}});
+        } else if (scenario == 2) { // WSW-09: rejected helper still consumes an admitted player event.
+            content.profiles.back().planetary_weapon->valid_targets = bomber_bit;
+        } else if (scenario == 5 || scenario == 6) {
+            script.setup.players[1].team_id = script.setup.players[0].team_id;
+            if (scenario == 5) content.pad_neutral_factions = {script.setup.players[1].faction_id};
+        } else {
+            // WSW-48: a designated station hardpoint gates new dispatches, not
+            // the continuation of an already-started planetary burst.
+            tactical::DurabilityProfile station;
+            station.type_id = shooter_type; station.max_hull = units(1000);
+            tactical::HardpointProfile point;
+            point.destroyable = true; point.max_health = units(50); point.allows_special_weapon_use = true;
+            station.hardpoints = {point}; health.profiles = {station};
+            money.upgrades.front().consume_after_special_fire = false;
+            if (scenario == 3)
+                script.commands.insert(script.commands.begin() + 1, {{1, 1, 2}, {1}, tactical::DamagePayload{units(50), 0}});
+            else script.commands.push_back({{3, 1, 3}, {1}, tactical::DamagePayload{units(50), 0}});
+            script.commands[scenario == 3 ? 2 : 1].key.sequence = 3;
+            if (scenario == 4) script.commands.back().key.sequence = 4;
+        }
+        auto created = tactical::TacticalSession::from_replay(script, sensors(1), health, {}, std::nullopt, content, {}, {}, money);
+        expect(static_cast<bool>(created), "WSW: wrapper/permission variant creates");
+        if (!created) return;
+        auto world = std::move(created).value();
+        std::size_t cues = 0, projectiles = 0;
+        const eawr::sim::InlineExecutor executor;
+        while (world.completed_tick() < script.final_tick_count) {
+            if (world.completed_tick() == 2) {
+                const auto frozen = world.snapshot();
+                const auto expected = scenario == 2 ? tactical::RejectReason::ability_unavailable
+                    : scenario == 6 ? tactical::RejectReason::target_not_hostile : tactical::RejectReason::none;
+                expect(tactical::planetary_special_fire_target_admission(*frozen, 3, 2) == expected,
+                    "WSW-13/16: frozen planetary target gate matches command category/alliance admission, including neutrals");
+                const auto picked = tactical::manual_special_fire_admission(*frozen, 3, 2);
+                expect(picked && (expected == tactical::RejectReason::none
+                        ? picked.value() == std::optional(tactical::attack_hull) : !picked.value()),
+                    "WSW-13/16: frozen special admission and opcode 27 share the planetary target gate");
+            }
+            const auto stepped = world.step(executor);
+            expect(static_cast<bool>(stepped), "WSW: wrapper/permission variant ticks");
+            if (!stepped) return;
+            for (const auto& event : stepped.value().snapshot->events())
+                cues += event.kind == tactical::EventKind::special_weapon_fired ? 1U : 0U;
+            for (const auto& event : stepped.value().snapshot->combat_events())
+                projectiles += event.kind == tactical::CombatEventKind::weapon_fired ? 1U : 0U;
+        }
+        if (scenario == 0) expect(cues == 3 && projectiles == 0,
+            "WSW-22/33: failed projectile construction keeps three wrapper pulse receipts");
+        if (scenario == 1) expect(cues == 4 && world.ledgers().front().completed.size() == 1
+            && world.snapshot()->economy().front().special_weapons_enabled,
+            "WSW-08: persistent permission admits another shot after recharge without another purchase");
+        if (scenario == 2) expect(cues == 0 && world.ledgers().front().completed.empty()
+            && world.snapshot()->instances().back().planetary_weapon->state.recharge_until == 0,
+            "WSW-09/16: invalid category consumes player permission without starting a burst or recharge");
+        if (scenario == 3 || scenario == 4) expect(cues == (scenario == 3 ? 0U : 3U)
+            && world.ledgers().front().completed.size() == 1 && !world.snapshot()->economy().front().special_weapons_enabled,
+            "WSW-48: destroyed required hardpoint blocks admission and ready cues while an active burst keeps its pulses");
+        if (scenario == 5 || scenario == 6) expect(cues == (scenario == 5 ? 3U : 0U),
+            "WSW-13/16: authoritative planetary command agrees with the frozen gate for neutral and allied targets");
+    }
+}
+
+void test_special_stealth_construction() {
+    for (const bool planetary : {false, true}) for (const bool counter : {false, true}) {
+        auto combat = table();
+        for (auto& profile : combat.profiles) profile.weapons.clear();
+        auto& source = combat.profiles.front();
+        source.target_stealth = counter;
+        auto gun = ion();
+        gun.min_recharge_hundredths = gun.max_recharge_hundredths = 0;
+        gun.shot.emplace(); gun.shot->speed = units(7); gun.shot->max_travel = units(10000);
+        gun.cone_width = units(360); gun.cone_height = units(180);
+        if (planetary) {
+            source.special_weapon = true;
+            source.planetary_weapon = tactical::PlanetaryWeaponProfile{0, 1, 8, 2, fighter_bit};
+            gun.hardpoint = tactical::object_weapon; gun.pulse_count = 3; gun.range = {};
+        } else {
+            source.star_base = true;
+            gun.requires_manual_target = gun.special = true; gun.pulse_count = 1;
+        }
+        source.weapons = {gun};
+        tactical::AbilityProfile cloak;
+        cloak.kind = tactical::AbilityKind::stealth; cloak.expiration_frames = 200; cloak.recharge_frames = 90;
+        cloak.gui_activated_ability_name = "Special_Stealth_Test";
+        tactical::SpecialAbilityProfile handler;
+        handler.name = cloak.gui_activated_ability_name; handler.kind = tactical::SpecialAbilityKind::stealth;
+        handler.style = tactical::SpecialActivationStyle::user_input;
+        handler.service_interval = tactical::special_service_interval(handler.kind);
+        handler.stealth_transition = Fixed::from_raw(one / 2);
+        tactical::UnitAbilityProfile cloaked;
+        cloaked.type_id = fighter_type; cloaked.abilities = {cloak}; cloaked.special = {handler};
+        tactical::AbilityTable abilities; abilities.profiles = {cloaked};
+        tactical::EconomyRules economy;
+        economy.players = {{1, units(100), 20, false}, {2, units(100), 20, false}};
+        tactical::BuildOption option{90, tactical::BuildKind::upgrade, tactical::BuildQueue::upgrades,
+            units(1), 1, 1, 0, true};
+        economy.menus = {{shooter_type, 1, {option}}};
+        tactical::UpgradeProfile unlock; unlock.type = 90; unlock.special_unlocks = {{false, false}};
+        economy.upgrades = {unlock};
+        tactical::TacticalReplay replay;
+        replay.setup = setup({unit(1, shooter_type, 1, at(0, 0)),
+            unit(2, fighter_type, 2, at(planetary ? 5000 : 500, 0))});
+        replay.final_tick_count = 48;
+        replay.commands = {{{0, 1, 1}, {1}, tactical::BuyPayload{90}},
+            {{0, 2, 1}, {2}, tactical::AbilityPayload{tactical::AbilityKind::stealth, tactical::AbilityAction::activate}},
+            {{40, 1, 2}, {1}, tactical::SpecialFirePayload{2}}};
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto created = tactical::TacticalSession::from_replay(replay, planetary ? sensors(1) : sensors(),
+                {}, {}, std::nullopt, combat, {}, abilities, economy);
+            expect(static_cast<bool>(created), "WSW-22/WST-11: cloaked special-target fixture creates");
+            if (!created) { std::cerr << created.error().message << '\n'; return; }
+            auto world = std::move(created).value();
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::size_t cues = 0, shots = 0, accepted = 0;
+            while (world.completed_tick() < replay.final_tick_count) {
+                if (world.completed_tick() == 40) {
+                    const auto frozen = world.snapshot();
+                    expect(frozen->instances().back().stealth_invisible && frozen->instances().front().target_stealth == counter,
+                        "WSW-22/WST-07: frozen admission retains target cloak and shooter counter capability");
+                    const auto picked = tactical::manual_special_fire_admission(*frozen, 1, 2);
+                    expect(picked && picked.value().has_value() == (planetary || counter),
+                        "WSW-14/22: planetary target admission precedes stealth construction; manual admission rejects uncountered cloak");
+                }
+                const auto tick = world.step(executor);
+                expect(static_cast<bool>(tick), "WSW-22/WST-11: cloaked special-target tick succeeds");
+                if (!tick) return;
+                hashes.push_back(tick.value().state_sha256 + tick.value().snapshot->sha256());
+                for (const auto& event : tick.value().snapshot->events()) {
+                    cues += event.kind == tactical::EventKind::special_weapon_fired ? 1U : 0U;
+                    accepted += event.kind == tactical::EventKind::order_accepted && event.order == tactical::OrderKind::special_fire ? 1U : 0U;
+                }
+                for (const auto& event : tick.value().snapshot->combat_events())
+                    shots += event.kind == tactical::CombatEventKind::weapon_fired ? 1U : 0U;
+            }
+            expect(accepted == (planetary || counter ? 1U : 0U) && cues == (planetary ? 3U : 0U)
+                && shots == (counter ? planetary ? 3U : 1U : 0U),
+                "WSW-22/33: uncountered cloak rejects construction; planetary pulses still report, counters fire through planetary fog");
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "WSW-22/WST-11: special stealth construction matches workers 1/2/4/8");
+        }
+    }
+}
+
+void test_special_frozen_target_radius() {
+    auto combat = table();
+    for (auto& profile : combat.profiles) profile.weapons.clear();
+    auto gun = ion();
+    gun.requires_manual_target = true; gun.special = true; gun.pulse_count = 1;
+    gun.min_recharge_hundredths = gun.max_recharge_hundredths = 0;
+    gun.fire_a = {}; gun.has_fire_b = false;
+    gun.shot.emplace(); gun.shot->speed = units(7);
+    combat.profiles.front().weapons = {gun};
+    combat.footprints = {{shooter_type, units(35), units(10), units(10)},
+        {fighter_type, units(100), units(10), units(10)}};
+    const auto initial = setup({unit(1, shooter_type, 1, at(0, 0)),
+        unit(2, fighter_type, 2, at(750, 0))});
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto value = session(initial, combat); // Neither object has a motion profile.
+        const auto frozen = value.snapshot();
+        expect(frozen->instances().front().soft_radius == units(35)
+            && frozen->instances().back().soft_radius == units(100),
+            "WWP-21/WSW-40: frozen stationary objects retain loaded combat footprints");
+        const auto admitted = tactical::manual_special_fire_admission(*frozen, 1, 2);
+        expect(admitted && admitted.value() == std::optional<std::uint32_t>{0},
+            "WWP-20/WSW-40: frozen manual admission includes the loaded stationary target radius");
+        if (workers == 1) {
+            auto source = frozen->instances().front();
+            auto craft = frozen->instances().back();
+            craft.durability.emplace();
+            craft.durability->hull = units(100);
+            const auto hovered = tactical::manual_special_fire_admission(frozen->players(), source, craft, false);
+            expect(hovered && hovered.value().has_value(), "MC-10: a live craft is valid at hover");
+            craft.durability->hull = {};
+            const auto clicked = tactical::manual_special_fire_admission(frozen->players(), source, craft, false);
+            expect(clicked && !clicked.value(), "MC-10: a craft destroyed between hover and click is refused");
+            craft.entity_id = 3;
+            craft.durability->hull = units(100);
+            craft.category_bits = bomber_bit;
+            auto exclusions = std::make_shared<tactical::WeaponProfile>(*source.manual_weapons.front().admission_profile);
+            exclusions->category_restrictions = bomber_bit;
+            source.manual_weapons.front().admission_profile = exclusions;
+            const auto sibling = tactical::manual_special_fire_admission(frozen->players(), source, craft, false);
+            expect(sibling && !sibling.value(), "MC-09/10: a living bomber sibling remains excluded after the hovered craft dies");
+        }
+        expect(static_cast<bool>(value.submit({{0, 1, 0}, {1}, tactical::ManualTargetPayload{2, 0}})),
+            "stationary-radius manual request submits");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        std::size_t shots = 0;
+        for (int tick = 0; tick < 3; ++tick) {
+            const auto step = value.step(executor);
+            expect(static_cast<bool>(step), "stationary-radius manual request steps");
+            if (!step) return;
+            hashes.push_back(step.value().state_sha256 + step.value().snapshot->sha256());
+            for (const auto& event : step.value().snapshot->combat_events())
+                shots += event.kind == tactical::CombatEventKind::weapon_fired ? 1U : 0U;
+        }
+        expect(shots == 1, "WWP-20/WSW-40: authoritative manual fire agrees with frozen loaded-radius admission");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "stationary-radius admission matches on 1/2/4/8 workers");
+    }
+}
+
+void test_planetary_projectile_target_radius() {
+    for (const bool melee : {false, true}) for (const eawr::sim::EntityId target : {2U, 3U}) {
+        auto combat = table();
+        for (auto& profile : combat.profiles) profile.weapons.clear();
+        combat.melee_cutoff = units(50);
+        combat.profiles[3].category_bits = fighter_bit;
+        combat.footprints = {{fighter_type, units(7), units(3), units(4)},
+            {transport_type, units(11), units(1), units(1)}};
+        auto& source = combat.profiles.back();
+        source.special_weapon = true; source.max_attack_distance = units(melee ? 0 : 1000);
+        source.planetary_weapon = tactical::PlanetaryWeaponProfile{0, 1, 8, 2, fighter_bit};
+        auto gun = ion(); gun.hardpoint = tactical::object_weapon; gun.range = {};
+        gun.fire_a = {}; gun.has_fire_b = false; gun.pulse_count = 1;
+        gun.cone_width = units(360); gun.cone_height = units(180);
+        gun.shot.emplace(); gun.shot->speed = units(7); gun.shot->max_travel = units(1000);
+        source.weapons = {gun};
+        tactical::DurabilityTable health; health.damage.emplace(); health.damage->shield_recharge_frames = 1;
+        tactical::EconomyRules economy;
+        economy.players = {{1, units(100), 20, true}, {2, units(100), 20, false}};
+        tactical::BuildOption option{90, tactical::BuildKind::upgrade, tactical::BuildQueue::upgrades,
+            units(1), 1, 1, 0, true};
+        economy.menus = {{gunship_type, 1, {option}}};
+        tactical::UpgradeProfile unlock; unlock.type = 90; unlock.special_unlocks = {{false, false}};
+        economy.upgrades = {unlock};
+        tactical::TacticalReplay replay;
+        replay.setup = setup({unit(1, gunship_type, 1, at(0, 0)),
+            unit(2, fighter_type, 2, at(500, 0)), unit(3, transport_type, 2, at(500, 0))});
+        replay.setup.squadrons = {{3, {2}}}; replay.final_tick_count = 4;
+        replay.commands = {{{0, 1, 1}, {1}, tactical::BuyPayload{90}},
+            {{2, 1, 2}, {1}, tactical::SpecialFirePayload{target}}};
+        const auto allowance = target == 3 ? 11 : melee ? 7 : 18;
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto created = tactical::TacticalSession::from_replay(replay, sensors(), health, {},
+                std::nullopt, combat, {}, {}, economy);
+            expect(static_cast<bool>(created), "planetary craft/team travel fixture creates");
+            if (!created) return;
+            auto value = std::move(created).value();
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            while (value.completed_tick() < replay.final_tick_count) {
+                const auto step = value.step(executor);
+                expect(static_cast<bool>(step), "planetary craft/team travel fixture steps");
+                if (!step) return;
+                hashes.push_back(step.value().state_sha256 + step.value().snapshot->sha256());
+            }
+            expect(value.projectiles().size() == 1 && value.projectiles().front().target == target
+                && value.projectiles().front().max_travel == units(1000 + allowance),
+                "WWP-27/WSW-18: planetary travel uses shared craft/team radius and zero-distance melee classification");
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "planetary craft/team travel matches on 1/2/4/8 workers");
+        }
+    }
+}
+
+void test_special_manual_routes() {
+    auto combat = table();
+    for (auto& profile : combat.profiles) profile.weapons.clear();
+    auto& station = combat.profiles.front();
+    station.star_base = true;
+    auto gun = ion(); gun.requires_manual_target = true; gun.special = true;
+    gun.pulse_count = 1; gun.manual_cooldown_frames = 90;
+    gun.shot.emplace(); gun.shot->speed = units(7);
+    station.weapons = {gun};
+    tactical::EconomyRules economy;
+    economy.players = {{1, units(100), 20, true}, {2, units(100), 20, false}};
+    tactical::BuildOption option{90, tactical::BuildKind::upgrade, tactical::BuildQueue::upgrades, units(1), 1, 1, 0, true};
+    economy.menus = {{shooter_type, 1, {option}}};
+    tactical::UpgradeProfile unlock; unlock.type = 90; unlock.special_unlocks = {{false, false}};
+    economy.upgrades = {unlock};
+    tactical::TacticalReplay replay;
+    replay.setup = setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, fighter_type, 2, at(500, 0)),
+        unit(3, shooter_type, 1, at(0, 20))});
+    // W-03: let both guns finish the ordinary keyed spawn countdown (at most
+    // 105 frames) before testing player versus gun cooldown admission.
+    replay.final_tick_count = 118;
+    replay.commands = {{{0, 1, 1}, {1}, tactical::BuyPayload{90}},
+        {{110, 1, 2}, {1}, tactical::SpecialFirePayload{2}},
+        {{112, 1, 3}, {3}, tactical::SpecialFirePayload{2}},
+        {{112, 1, 4}, {1}, tactical::SpecialFirePayload{2, tactical::SpecialFireAdmission::ai_object}},
+        {{112, 1, 5}, {3}, tactical::SpecialFirePayload{2, tactical::SpecialFireAdmission::ai_object}}};
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::from_replay(replay, sensors(), {}, {}, std::nullopt, combat, {}, {}, economy);
+        expect(static_cast<bool>(created), "WSW-40: typed manual route fixture creates");
+        if (!created) return;
+        auto world = std::move(created).value();
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        std::size_t accepted = 0, rejected = 0, shots = 0;
+        while (world.completed_tick() < replay.final_tick_count) {
+            const auto tick = world.step(executor);
+            expect(static_cast<bool>(tick), "WSW-40: typed manual route steps");
+            if (!tick) return;
+            hashes.push_back(tick.value().state_sha256 + tick.value().snapshot->sha256());
+            for (const auto& event : tick.value().snapshot->events()) if (event.order == tactical::OrderKind::special_fire) {
+                accepted += event.kind == tactical::EventKind::order_accepted ? 1U : 0U;
+                rejected += event.kind == tactical::EventKind::order_rejected ? 1U : 0U;
+            }
+            for (const auto& event : tick.value().snapshot->combat_events()) shots += event.kind == tactical::CombatEventKind::weapon_fired ? 1U : 0U;
+        }
+        expect(accepted == 2 && rejected == 2 && shots == 2 && world.ledgers().front().completed.size() == 1,
+            "WSW-08/40: permanent unlock persists; player clock blocks another station, AI requires its gun but bypasses player clock");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "WSW-40: typed manual AI/player routes match at workers 1/2/4/8");
+    }
 }
 
 void test_manual_session_and_replay() {
@@ -484,6 +1046,9 @@ void test_manual_session_and_replay() {
                     [](const tactical::Event& event) { return event.kind == tactical::EventKind::order_rejected
                         && event.order == tactical::OrderKind::manual_target && event.unit == 3; }),
                     "MC-09: another station is refused until the shared player clock is ready");
+                const auto admitted = tactical::manual_special_fire_admission(*stepped.value().snapshot, 3, 2);
+                expect(admitted && admitted.value() == std::optional<std::uint32_t>{0},
+                    "WSW-40: frozen manual admission uses the free gun despite the player's HUD cooldown");
             }
         }
         return hashes;
@@ -491,6 +1056,9 @@ void test_manual_session_and_replay() {
     std::vector<std::string> reference;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         auto value = session(initial, combat);
+        const auto admitted = tactical::manual_special_fire_admission(*value.snapshot(), 1, 2);
+        expect(admitted && admitted.value() == std::optional<std::uint32_t>{0},
+            "WSW-40: public frozen-view admission matches a ready manual gun");
         for (const auto& command : commands) expect(static_cast<bool>(value.submit(command)), "MC-09: manual command queues");
         eawr::platform::ThreadWorkerAdapter executor(workers);
         auto hashes = drive(std::move(value), executor);
@@ -605,7 +1173,10 @@ void test_squadron_object_weapon_reference() {
     self.profile = &profile;
     self.combat = &state;
     self.transform = math::identity_matrix();
-    self.squadron_centre = at(0, 200);
+    auto parent = self;
+    parent.id = 15;
+    parent.position = at(0, 200);
+    parent.combat = nullptr;
     tactical::detail::CombatUnit team;
     team.id = 20;
     team.owner = 2;
@@ -620,8 +1191,8 @@ void test_squadron_object_weapon_reference() {
     near_centre.id = 22;
     near_centre.position = at(200, 200);
     near_centre.transform = math::to_matrix(math::identity_quat(), near_centre.position).value();
-    world.units = {self, team, near_shooter, near_centre};
-    world.teams = {{20, {21, 22}}};
+    world.units = {self, parent, team, near_shooter, near_centre};
+    world.teams = {{15, {11}}, {20, {21, 22}}};
     const auto fired = [&](const eawr::sim::EntityId expected, const bool hull) {
         const auto step = tactical::detail::step_combat(world, world.units.front());
         expect(static_cast<bool>(step), "WWP-49: object team-target firing succeeds");
@@ -631,12 +1202,44 @@ void test_squadron_object_weapon_reference() {
         if (hull && !step.value().events.empty()) expect(step.value().events.front().target_hardpoint == tactical::no_hardpoint,
             "WWP-49: a team-targeted object weapon clears the aimed hardpoint");
     };
-    fired(22, true);
-    world.units.front().squadron_centre.reset();
-    fired(21, true); // No squadron centre: retain the existing ungrouped reference.
-    world.units.front().squadron_centre = at(0, 200);
+    fired(21, true); // A parent with target metadata but no ordinary targeting uses the muzzle.
+    world.units[1].combat = &state;
+    fired(22, true); // An ordinary targeting parent supplies the reference even with no bound muzzle.
+    profile.weapons.front().muzzles = {at(0, 200)};
+    world.units[1].combat = nullptr;
+    fired(22, true); // The actual muzzle, rather than the shooter centre, selects the other craft.
+    profile.weapons.front().muzzles = {at(0, 0)};
+    fired(21, true);
+    world.units[1].combat = &state;
+    fired(22, true); // Ordinary parent targeting overrides the actual muzzle.
+    world.units.erase(world.units.begin() + 1);
+    fired(21, true); // A missing parent falls back to the muzzle too.
+    world.units.insert(world.units.begin() + 1, parent);
+    world.units[1].combat = &state;
+    profile.weapons.front().muzzles.clear();
     profile.weapons.front().hardpoint = 0;
-    fired(21, false); // WWP-19 is a separate route; this change does not alter it.
+    {
+        // WWP-19 (#711): a hardpoint ordered at the team fires at a random craft each attempt, by
+        // a keyed draw (seed, frame, unit, slot), aimed by the R-10 search on that craft.
+        std::set<eawr::sim::EntityId> hit;
+        bool repeatable = true;
+        for (std::uint64_t frame = 1; frame <= 32; ++frame) {
+            world.frame = frame;
+            const auto step = tactical::detail::step_combat(world, world.units.front());
+            const auto again = tactical::detail::step_combat(world, world.units.front());
+            expect(static_cast<bool>(step) && static_cast<bool>(again), "WWP-19: hardpoint team-target firing succeeds");
+            if (!step || !again) return;
+            expect(step.value().events.size() == 1, "WWP-19: the hardpoint fires one shot at the team");
+            if (step.value().events.size() != 1 || again.value().events.size() != 1) return;
+            const auto& event = step.value().events.front();
+            hit.insert(event.target);
+            repeatable = repeatable && again.value().events.front().target == event.target;
+        }
+        expect(hit == std::set<eawr::sim::EntityId>{21, 22},
+            "WWP-19: a hardpoint's shots spread over the team's craft, not only the nearest");
+        expect(repeatable, "WWP-19: the craft draw is keyed, so the same frame picks the same craft");
+        world.frame = 0;
+    }
     profile.weapons.front().hardpoint = tactical::object_weapon;
     world.units.pop_back();
     fired(21, true); // The selected craft dies; the held team still resolves a live survivor.
@@ -737,17 +1340,81 @@ void test_member_held_identity() {
         "WMV-18: an absent formation has neither diversion admission nor scan extension");
 }
 
+#include "retaliation_cases.hpp"
+
+void test_squadron_adoption_and_retention() {
+    namespace d = tactical::detail;
+    d::CombatWorld world;
+    tactical::CombatProfile profile;
+    profile.max_attack_distance = units(500);
+    d::CombatUnit self;
+    self.id = 11;
+    self.position = at(500, 0);
+    self.profile = &profile;
+    d::CombatUnit target;
+    target.id = 20;
+    target.position = at(900, 0);
+    target.profile = &profile;
+    world.units = {self, target};
+    tactical::CombatState held;
+    held.attack_target = 20;
+    held.attack_hardpoint = 1;
+    d::FormationAttackContext formation{true, true, false, &self};
+    const auto retained = [&](const eawr::sim::EntityId formation_target, const bool same_cell) {
+        auto result = d::finish_squadron_target(world, self, held, formation, formation_target, same_cell);
+        expect(static_cast<bool>(result), "WDF-02: retention arithmetic succeeds");
+        return result ? result.value().attack_target : eawr::sim::invalid_entity_id;
+    };
+    auto admitted = d::formation_can_attack(world, world.units.back(), units(200), at(0, 0), formation);
+    expect(admitted && !admitted.value(),
+        "WDF-03: a target in a member's reach but beyond the formation's allowance is not adopted");
+    expect(retained(0, false) == 20, "WDF-02: a refused find in firing reach remains held by the member");
+    world.units.back().position = at(1100, 0);
+    expect(retained(0, false) == 0, "WDF-02: an unadopted out-of-reach target is cleared this frame");
+    auto cleared = d::finish_squadron_target(world, self, held, formation, 0, false);
+    expect(cleared && cleared.value().attack_hardpoint == tactical::no_hardpoint,
+        "WDF-02: clearing also discards the old hardpoint");
+    expect(retained(20, false) == 20, "WDF-02: the formation's target remains held outside firing reach");
+    expect(retained(0, true) == 20, "WDF-02: the same recorded combat cell keeps a target outside firing reach");
+    formation.present = false;
+    const auto without_formation = d::finish_squadron_target(world, self, held, formation, 0, false);
+    expect(without_formation && without_formation.value().attack_target == 20
+        && without_formation.value().attack_hardpoint == 1,
+        "WDF-02: an absent formation retains an out-of-reach target and hardpoint");
+    formation.present = true;
+    held.direct = true;
+    expect(retained(0, false) == 20, "WDF-02: a player-direct target remains held outside firing reach");
+    held.direct = false;
+    world.units.back().position = at(700, 0);
+    admitted = d::formation_can_attack(world, world.units.back(), units(200), at(0, 0), formation);
+    expect(admitted && admitted.value(), "WDF-03: the allowance-circle attack reach includes its boundary");
+    world.units.back().position.x = math::Fixed::from_raw(units(700).raw() + 1);
+    admitted = d::formation_can_attack(world, world.units.back(), units(200), at(0, 0), formation);
+    expect(admitted && !admitted.value(), "WDF-03: one raw unit beyond the allowance-circle reach is refused");
+    formation.allows_divert = false;
+    admitted = d::formation_can_attack(world, world.units.back(), units(200), at(500, 0), formation);
+    expect(admitted && !admitted.value(), "WDF-03: a formation that cannot divert refuses even a close target");
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "usage: combat_tests <fixtures directory> <space-targeting-cases.json> [--update]\n";
         return 2;
     }
     const bool update = argc > 3 && std::string_view(argv[3]) == "--update";
+    retaliation_cases::gates();
+    retaliation_cases::damage_path();
+    test_planetary_purchase_and_burst();
+    test_special_stealth_construction();
+    test_special_frozen_target_radius();
+    test_planetary_projectile_target_radius();
+    test_special_manual_routes();
     test_manual_session_and_replay();
     test_manual_contracts();
     test_validation();
     test_membership_index();
     test_member_held_identity();
+    test_squadron_adoption_and_retention();
     test_squadron_object_weapon_reference();
     test_note_cases(argv[2]);
     test_priority_beats_distance();
@@ -758,23 +1425,33 @@ int main(int argc, char** argv) {
     test_neutral_relationships();
     test_ship_level_choice();
     test_ship_level_suitability();
+        test_displayed_health_damaged();
+    test_target_stickiness();
+    test_target_stickiness_session();
     test_restrictions_and_fog();
     test_noncollidable_opportunity_target();
     test_special_weapon_service();
+    test_charged_blast_budget();
+    test_ai_opportunity_cutoff();
     test_zero_cone();
     test_fire_bone_cone();
     test_launcher_cone();
+    test_object_turret();
     test_fire_bone_pole();
     test_object_weapon_cone();
+    test_unit_weapon_targeting_and_muzzles();
     test_lead();
+    test_history_checkpoint();
     test_order_without_attack_distance();
     test_attack_turn();
     test_attack_turn_edges();
+    test_best_hardpoint();
     test_orders_approach();
     test_orders_attack_move();
     test_orders_guard();
     test_orders_workers_and_replay();
     test_orders_phase();
+    test_orders_lost_target();
     test_hardpoint_orders();
     test_hardpoint_orders_replay();
     test_battle(argv[1], update);

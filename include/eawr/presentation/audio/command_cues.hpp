@@ -7,7 +7,7 @@
 
 namespace eawr::presentation::audio {
 
-enum class CommandCue : std::uint8_t { none, attack, attack_move, guard, move, stop, negative, count };
+enum class CommandCue : std::uint8_t { none, attack, attack_move, guard, move, stop, negative, waypoint, count };
 
 // BA-27: selecting a mode sounds only when it becomes armed. Stop sounds on the press.
 [[nodiscard]] constexpr bool command_cue_on_press(CommandCue cue, bool armed) noexcept {

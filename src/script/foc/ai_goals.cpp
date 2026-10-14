@@ -1,14 +1,28 @@
+#include "eawr/core/tick_profile.hpp"
 #include "ai_engine_internal.hpp"
+#include "ai_learning.hpp"
+#include "galactic_ai_funding.hpp"
+#include "galactic_ai_actions.hpp"
+#include "eawr/script/numeric/decimal.hpp"
 
 #include <algorithm>
 #include <bit>
-#include <chrono>
 #include <cmath>
-#include <cstdio>
 
 namespace eawr::script::foc::ai {
 
 using namespace engine_internal;
+
+namespace {
+// GS-31: active tactical goals have a tapering preference over nearby proposals.
+Real maintenance_priority(const PlayerAi& player, const Goal& goal) {
+    if (player.galactic || !goal.active || !(real(1) / real(100) < goal.desire)
+        || !(goal.desire < real(40))) return goal.desire;
+    const Real preference = (real(1) - (goal.desire - real(1) / real(100))
+        / (real(3999) / real(100))) * (real(8) / real(5));
+    return to_single(goal.desire + preference);
+}
+} // namespace
 
 // ---- Goal system ---------------------------------------------------------------------------
 
@@ -16,6 +30,12 @@ using namespace engine_internal;
 // its category on (and not off).
 bool Engine::proposable(const PlayerAi& player, const GoalFunctionEntry& function) const {
     if (player.proposal_blocks > 0) return false;
+    if (player.galactic) {
+        const auto enabled = player.proposal_counts.find(function.goal_name);
+        const auto excluded = player.exclusion_counts.find(function.goal_name);
+        return enabled != player.proposal_counts.end() && enabled->second > 0
+            && (excluded == player.exclusion_counts.end() || excluded->second == 0);
+    }
     if (player.space_template == nullptr) return true;
     const std::string& category = function.goal->category;
     return player.space_template->goals_on.contains(category) && !player.space_template->goals_off.contains(category);
@@ -63,22 +83,7 @@ std::optional<std::size_t> choose_target(const std::vector<Real>& scores, Real f
 // GS-11: which targets a goal applies to. A region is a TACTICAL_LOCATION; an object is a
 // friendly (allied owner) or enemy unit, or a structure (a star base).
 bool Engine::target_matches(tactical::PlayerId player, const std::set<std::string>& flags, const Target* target) const {
-    if (target == nullptr) return false;
-    if (target->object == 0) return flags.contains("TACTICAL_LOCATION");
-    const ViewUnit* unit = host_->view->find(target->object);
-    if (unit == nullptr) return false;
-    const AiType* type = host_->type(unit->type);
-    // WNO-13: either authored persistent-state flag bypasses this forced object-fog gate.
-    if (!(type != nullptr && (type->initial_state_visible_under_fow || type->last_state_visible_under_fow)) &&
-        detail::object_fogged(*host_->view, *unit, player)) return false;
-    const bool allied = unit->owner != 0 && host_->players.contains(unit->owner) && !host_->neutral(unit->owner) &&
-        host_->allied(unit->owner, player);
-    // GS-11: capture ownership alone does not make a target a build pad.
-    if (type != nullptr && type->build_pad)
-        return flags.contains(allied ? "FRIENDLY_BUILD_PAD" : "ENEMY_BUILD_PAD");
-    const bool structure = type != nullptr && (type->star_base || (type->capture_point && !type->locomotor));
-    const std::string flag = std::string(allied ? "FRIENDLY_" : "ENEMY_") + (structure ? "STRUCTURE" : "UNIT");
-    return flags.contains(flag);
+    return host_->ai_world->target_matches(player, flags, target);
 }
 
 bool Engine::applies(const PlayerAi& player, const GoalType& goal, const Target* target) const {
@@ -106,13 +111,17 @@ std::int64_t Engine::recent_failures(const History* history) const {
 }
 
 void Engine::register_activation(PlayerAi& player, const Goal& goal, bool success) {
-    const GoalFunctionEntry& function = player.functions[goal.function];
-    const Real duration = function.goal->activation_tracking_duration;
-    const std::int64_t expiry = duration < Real{} ? -1 : frame_ + truncate(to_single(duration * real(fps)));
-    player.activations[{function.goal_name, goal.target}].entries.emplace_back(success, expiry);
+    mark_native_state_changed();
+    learning::activation(player, goal, success, frame_, static_cast<std::uint32_t>(fps));
 }
 
 Real Engine::category_budget(const PlayerAi& player, const std::string& category) const {
+    if (player.galactic) {
+        const auto ledger = player.galactic_funding ? player.galactic_funding->ledger(player.player) : nullptr;
+        const auto id = data_.goal_categories.find(category);
+        if (!ledger || id == data_.goal_categories.end() || !ledger->categories.contains(id->second)) return {};
+        return numeric::from_fixed(ledger->categories.at(id->second).available_cash);
+    }
     if (player.space_template == nullptr) return Real{};
     const auto found = player.space_template->budget.find(category);
     if (found == player.space_template->budget.end()) return Real{};
@@ -134,28 +143,34 @@ std::int64_t Engine::proposal_budget(std::int64_t count) const {
 }
 
 void Engine::initialize_goals(PlayerAi& player) {
+    mark_native_state_changed();
     const auto targets = std::max<std::int64_t>(1, static_cast<std::int64_t>(player.targets.size()));
     player.per_frame = proposal_budget(targets * static_cast<std::int64_t>(player.functions.size()));
 }
 
 // GS-02 to GS-05.
 void Engine::service_goals(PlayerAi& player) {
+    mark_native_state_changed();
     if (player.sleep_frames >= 1) {
         --player.sleep_frames;
         return;
     }
     propose(player);
     if (!player.maintenance_due) return;
+    if (player.galactic) begin_galactic_maintenance(player);
     ++work_.maintenances;
     maintain(player);
     player.maintenance_due = false;
     player.per_frame = proposal_budget(player.nontrivial);
     player.nontrivial = 0;
-    player.sleep_frames = truncate(to_single(real(fps) * player.difficulty.space_goal_cycle_sleep));
+    player.sleep_frames = truncate(to_single(real(fps) * (player.galactic
+        ? player.difficulty.galactic_goal_cycle_sleep : player.difficulty.space_goal_cycle_sleep)));
 }
 
 // GS-04: the proposal pass, a per-frame budget of (function, target) evaluations.
 void Engine::propose(PlayerAi& player) {
+    core::tick_profile::Scope scope("serial.goal.proposal");
+    mark_native_state_changed();
     if (player.maintenance_due) return;
     for (std::int64_t step = 0; step < player.per_frame; ++step) {
         if (player.next_function >= player.functions.size()) {
@@ -165,12 +180,22 @@ void Engine::propose(PlayerAi& player) {
             return;
         }
         const GoalFunctionEntry& function = player.functions[player.next_function];
+        const Target* target = nullptr;
+        // Journal the evaluation already being performed; never evaluate again to observe it.
+        // Global goals include authored mod purchase/funding goals as well as stock ones.
+        const bool trace_proposal = host_->setup.journal && !player.galactic
+            && (function.goal->application.contains("GLOBAL") || function.goal_name == "DEFEND_SPACE_STATION");
+        std::string proposal_trace;
         const auto decision = [&](std::string event, std::string reason) {
             if (!host_->setup.journal || (function.goal_name != "PURCHASE_SPACE_UPGRADES_GENERIC"
                 && function.goal_name != "SKIRMISH_UPGRADE_SPACE_STATION"
-                && function.goal_name != "TACTICAL_MULTIPLAYER_BUILD_SPACE_UNITS_GENERIC")) return;
+                && function.goal_name != "TACTICAL_MULTIPLAYER_BUILD_SPACE_UNITS_GENERIC"
+                && function.goal_name != "GROUND_TO_SPACE_DAMAGE"
+                && function.goal_name != "GROUND_TO_SPACE_DISABLE"
+                && !trace_proposal)) return;
+            if (trace_proposal) reason += proposal_trace;
             host_->setup.journal->plans.push_back(PlanEvent{static_cast<std::uint64_t>(frame_),
-                player.player, {}, function.goal_name, {}, std::move(event), std::move(reason)});
+                player.player, {}, function.goal_name, target_name(target), std::move(event), std::move(reason)});
         };
         if (!proposable(player, function)) {
             decision("rejected", "proposal blocked or goal category disabled");
@@ -180,7 +205,6 @@ void Engine::propose(PlayerAi& player) {
             continue;
         }
         const bool global = function.goal->application.contains("GLOBAL");
-        const Target* target = nullptr;
         if (!global) {
             if (player.next_target >= player.targets.size()) {
                 ++player.next_function;
@@ -194,6 +218,19 @@ void Engine::propose(PlayerAi& player) {
                 --step;
                 continue;
             }
+        }
+        if (player.galactic) {
+            ++player.nontrivial;
+            ++work_.goals_evaluated;
+            const auto allocated = allocate_galactic_goal(player.player, player.next_function, target ? target->id : 0);
+            if (!allocated) throw std::runtime_error(allocated.error().message);
+            if (global) { ++player.next_function; player.next_target = 0; } else ++player.next_target;
+            if (allocated.value()) {
+                auto& retained = player.proposed.back();
+                if (!select_units(player, retained, *retained.potential) || !production_time_allowed(player, retained)
+                    || !galactic_fundable(player, retained, false)) player.proposed.pop_back();
+            }
+            continue;
         }
         Goal goal;
         goal.id = player.next_goal_id++;
@@ -218,9 +255,18 @@ void Engine::propose(PlayerAi& player) {
         ++player.nontrivial;
         ++work_.goals_evaluated;
         advance();
-        if (function.equation == nullptr) continue;
-        const auto value = run_equation(*function.equation, context_of(player, target));
-        if (!value) continue;
+        if (function.equation == nullptr) {
+            decision("rejected", "authored equation missing");
+            continue;
+        }
+        auto proposal_context = context_of(player, target);
+        if (trace_proposal) proposal_context.proposal_trace = &proposal_trace;
+        const auto value = run_equation(*function.equation, proposal_context);
+        if (!value) {
+            if (trace_proposal) proposal_trace += " raw=unavailable adjusted=unavailable";
+            decision("rejected", "authored perception unavailable");
+            continue;
+        }
         const auto goal_key = std::make_pair(function.goal_name, goal.target);
         const auto outcomes = player.goal_outcomes.find(goal_key);
         const auto activations = player.activations.find(goal_key);
@@ -229,6 +275,8 @@ void Engine::propose(PlayerAi& player) {
             real(recent_failures(outcomes == player.goal_outcomes.end() ? nullptr : &outcomes->second)));
         desire = desire + to_single(function.goal->per_activation_failure_desire_adjust *
             real(recent_failures(activations == player.activations.end() ? nullptr : &activations->second)));
+        if (trace_proposal) proposal_trace += " raw=" + numeric::decimal::format_lua_number(value->repr)
+            + " adjusted=" + numeric::decimal::format_lua_number(desire.repr);
         if (!(Real{} < desire)) {
             decision("rejected", "nonpositive authored desire");
             continue;
@@ -236,8 +284,22 @@ void Engine::propose(PlayerAi& player) {
         goal.desire = to_single(desire);
         decision("proposed", "positive authored desire");
         if (!plan_goal(player, goal)) {
+            if (trace_proposal && goal.potential) {
+                const auto& selection = *goal.potential;
+                proposal_trace += " plan=" + plans_[selection.plan].module + " units=" + std::to_string(selection.units.size())
+                    + " contrast_threshold=" + numeric::decimal::format_lua_number(selection.threshold.repr);
+            }
             decision("rejected", "no feasible plan selection");
             continue;
+        }
+        if (trace_proposal && goal.potential) {
+            std::string selected = "quote=" + numeric::decimal::format_lua_number(goal.potential->cost.repr)
+                + " credits=" + show(fixed(host_->credits(player.player))) + " units=";
+            for (const auto type : goal.potential->units) {
+                const auto* info = host_->type(type);
+                selected += (info ? info->name : std::to_string(type)) + ";";
+            }
+            decision("selected", std::move(selected));
         }
         player.proposed.push_back(std::move(goal));
     }
@@ -246,6 +308,7 @@ void Engine::propose(PlayerAi& player) {
 // PL-01: a plan is drawn for the goal among the plans of its type whose goal category the
 // template turns on, weighted by the plan's success rate plus 1.
 bool Engine::plan_goal(PlayerAi& player, Goal& goal) {
+    mark_native_state_changed();
     const GoalFunctionEntry& function = player.functions[goal.function];
     std::vector<std::pair<std::size_t, Real>> usable;
     Real total{};
@@ -267,7 +330,10 @@ bool Engine::plan_goal(PlayerAi& player, Goal& goal) {
         total = to_single(total + weight);
     }
     if (usable.empty()) return false;
-    const Real draw = sync_.uniform(Real{}, total);
+    const Real draw = [&] {
+        core::tick_profile::Scope scope("serial.goal.ordered-rng");
+        return sync_.uniform(Real{}, total);
+    }();
     std::size_t chosen = usable.back().first;
     Real sum{};
     for (const auto& [index, weight] : usable) {
@@ -285,7 +351,33 @@ bool Engine::plan_goal(PlayerAi& player, Goal& goal) {
 }
 
 void Engine::reserve(PlayerAi& player, Goal& goal) {
+    core::tick_profile::Scope scope("serial.goal.reservations");
+    mark_native_state_changed();
     if (!goal.potential) return;
+    if (player.galactic) {
+        auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
+        std::optional<galactic_ai::QualifiedFreestore> staged_pool;
+        if (actions && actions->qualified_freestore_available()) {
+            staged_pool = actions->qualified_freestore().clone();
+            for (const auto object : goal.potential->freestore) if (object) {
+                const auto* held = staged_pool->reservations(player.player);
+                if (held) if (const auto found = held->find(object); found != held->end() && found->second == goal.potential->id) continue;
+                const auto reserved = staged_pool->reserve(player.player, object, goal.potential->id);
+                if (!reserved || !reserved.value())
+                    throw std::runtime_error(reserved ? "galactic actor is already reserved" : reserved.error().message);
+            }
+        }
+        const auto result = player.galactic_funding->reserve({player.player, galactic_funding_request(player, goal), true});
+        if (!result) throw std::runtime_error(result.error().message);
+        if (staged_pool) actions->qualified_freestore().replace(*staged_pool);
+        for (auto object : goal.potential->freestore) if (object) player.reserved[object] = goal.id;
+        if (!goal.exclusions_registered) {
+            for (const auto& name : player.functions.at(goal.function).goal->global_exclusions) ++player.exclusion_counts[name];
+            goal.exclusions_registered = true;
+        }
+        goal.potential->reserved = goal.potential->funded = true;
+        return;
+    }
     for (const sim::EntityId object : goal.potential->freestore) {
         if (object != 0) player.reserved[object] = goal.id;
     }
@@ -299,26 +391,33 @@ void Engine::reserve(PlayerAi& player, Goal& goal) {
     }
     if (!goal.potential->funded) {
         // WAS-25: debit the real wallet once and keep only the refundable remainder.
+        if (host_->setup.journal)
+            host_->setup.journal->plans.push_back(PlanEvent{static_cast<std::uint64_t>(frame_), player.player,
+                {}, goal.function < player.functions.size() ? player.functions[goal.function].goal_name : std::string(),
+                target_name(target(goal.target)),
+                "funds_reserved", "goal=" + std::to_string(goal.id) + " amount=" + show(goal.potential->cost)
+                    + " credits_before=" + show(fixed(host_->credits(player.player)))});
         player.reserved_credits[goal.id] = goal.potential->cost;
         change_wallet(player.player, -goal.potential->cost);
         goal.potential->cost = Real{};
         goal.potential->funded = true;
     }
     for (std::size_t i = 0; i < goal.potential->sources.size(); ++i) {
-        if (goal.potential->sources[i] == 2 && host_->world != nullptr
-            && host_->world->pads().contains(goal.potential->producers[i]))
+        if (goal.potential->sources[i] == 2 && host_->ai_world->available()
+            && host_->ai_world->pads().contains(goal.potential->producers[i]))
             pad_reservations_[goal.potential->producers[i]] = {player.player, goal.id, goal.potential->units[i]};
     }
     goal.potential->reserved = true;
 }
 
 void Engine::change_wallet(const tactical::PlayerId player, const Real amount) {
+    mark_native_state_changed();
     if (amount == Real{}) return;
     const auto value = numeric::to_fixed(amount);
     if (!value) throw std::runtime_error("AI wallet amount: " + value.error().message);
     auto delta = value.value();
-    if (delta.raw() > 0 && host_->world != nullptr) {
-        if (const auto* account = host_->world->economy().player(player); account != nullptr && account->ai) {
+    if (delta.raw() > 0 && host_->ai_world->available()) {
+        if (const auto* account = host_->ai_world->economy().player(player); account != nullptr && account->ai) {
             const auto adjusted = math::multiply(delta, account->credit_multiplier);
             if (!adjusted) throw std::runtime_error("AI wallet refund: " + adjusted.error().message);
             delta = adjusted.value();
@@ -336,13 +435,38 @@ void Engine::change_wallet(const tactical::PlayerId player, const Real amount) {
 }
 
 void Engine::refund_funds(PlayerAi& player, const std::uint64_t goal) {
+    mark_native_state_changed();
+    if (player.galactic) {
+        auto* funding = dynamic_cast<GalacticFunding*>(player.galactic_funding.get());
+        if (!funding) throw std::runtime_error("galactic release requires the retained funding owner");
+        salvage_galactic_goal(player, goal);
+        return; // WGA-349: category release and aggregate dead budget; no wallet grant.
+    }
     const auto funds = player.reserved_credits.find(goal);
     if (funds == player.reserved_credits.end()) return;
+    if (host_->setup.journal)
+        host_->setup.journal->plans.push_back(PlanEvent{static_cast<std::uint64_t>(frame_), player.player,
+            {}, {}, {}, "funds_refunded", "goal=" + std::to_string(goal) + " amount=" + show(funds->second)
+                + " credits_before=" + show(fixed(host_->credits(player.player)))});
     change_wallet(player.player, funds->second); // WAS-26: only unused work, once
     player.reserved_credits.erase(funds);
 }
 
-void Engine::release(PlayerAi& player, const Goal& goal, const bool refund) {
+void Engine::release(PlayerAi& player, Goal& goal, const bool refund) {
+    core::tick_profile::Scope scope("serial.goal.reservations");
+    mark_native_state_changed();
+    if (player.galactic && goal.potential) {
+        auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
+        if (actions && actions->qualified_freestore_available())
+            actions->qualified_freestore().release(player.player, goal.potential->id);
+    }
+    if (player.galactic && refund && goal.exclusions_registered) {
+        for (const auto& name : player.functions.at(goal.function).goal->global_exclusions) {
+            auto found = player.exclusion_counts.find(name);
+            if (found != player.exclusion_counts.end() && found->second) --found->second;
+        }
+        goal.exclusions_registered = false;
+    }
     if (refund) refund_funds(player, goal.id);
     std::erase_if(pad_reservations_, [&](const auto& entry) {
         return entry.second.player == player.player && entry.second.goal == goal.id;
@@ -367,7 +491,46 @@ void Engine::release(PlayerAi& player, const Goal& goal, const bool refund) {
 
 // GS-30: goal set maintenance, category by category in budget order.
 void Engine::maintain(PlayerAi& player) {
-    const auto by_desire = [](const Goal& a, const Goal& b) { return b.desire < a.desire; };
+    core::tick_profile::Scope scope("serial.goal.maintenance");
+    mark_native_state_changed();
+    for (auto& goal : player.active) {
+        const auto& function = player.functions.at(goal.function);
+        // GS-30: refresh tactical active desire before sorting and replacement too.
+        if (!player.galactic && !function.goal->application.contains("GLOBAL")
+            && !applies(player, *function.goal, target(goal.target))) continue;
+        auto context = context_of(player, target(goal.target));
+        std::string trace;
+        const bool observe = host_->setup.journal && !player.galactic
+            && function.goal->application.contains("GLOBAL");
+        if (observe) context.proposal_trace = &trace;
+        const auto value = function.equation ? run_equation(*function.equation, context) : std::nullopt;
+        if (observe) {
+            trace += " goal_id=" + std::to_string(goal.id) + " running_plan=" + std::to_string(goal.plan)
+                + " previous=" + numeric::decimal::format_lua_number(goal.desire.repr)
+                + " raw=" + (value ? numeric::decimal::format_lua_number(value->repr) : "unavailable");
+            host_->setup.journal->plans.push_back(PlanEvent{static_cast<std::uint64_t>(frame_),
+                player.player, {}, function.goal_name, target_name(target(goal.target)),
+                "maintenance_evaluation", std::move(trace)});
+        }
+        if (!value) {
+            if (player.galactic) goal.finished = true;
+            continue;
+        }
+        if (!player.galactic) {
+            // GS-30: current tactical desire is a fresh raw equation value, not proposal history.
+            goal.desire = to_single(std::clamp(to_single(*value), Real{}, huge));
+            continue;
+        }
+        const auto key = std::make_pair(function.goal_name, goal.target);
+        const auto failures = player.goal_outcomes.find(key), activations = player.activations.find(key);
+        goal.desire = to_single(*value
+            + to_single(function.goal->per_failure_desire_adjust * real(recent_failures(failures == player.goal_outcomes.end() ? nullptr : &failures->second)))
+            + to_single(function.goal->per_activation_failure_desire_adjust * real(recent_failures(activations == player.activations.end() ? nullptr : &activations->second))));
+        if (!(Real{} < goal.desire)) goal.finished = true;
+    }
+    const auto by_desire = [&](const Goal& a, const Goal& b) {
+        return maintenance_priority(player, b) < maintenance_priority(player, a);
+    };
     std::stable_sort(player.active.begin(), player.active.end(), by_desire);
     std::vector<std::string> categories;
     for (const auto* set : {&player.active, &player.proposed}) {
@@ -380,6 +543,14 @@ void Engine::maintain(PlayerAi& player) {
     std::vector<std::pair<Real, std::string>> ordered;
     for (const std::string& category : categories) ordered.emplace_back(category_budget(player, category), category);
     std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return b.first < a.first; });
+    if (player.galactic) {
+        const auto ledger = player.galactic_funding->ledger(player.player);
+        const auto ids = funding::category_order(*ledger);
+        if (!ids) throw std::runtime_error(ids.error().message);
+        ordered.clear();
+        for (auto id : ids.value()) for (const auto& category : categories)
+            if (data_.goal_categories.at(category) == id) ordered.emplace_back(category_budget(player, category), category);
+    }
     // Reservations are rebuilt by the pass.
     for (Goal& goal : player.active) {
         if (goal.potential && goal.plan == 0) {
@@ -408,10 +579,11 @@ void Engine::maintain(PlayerAi& player) {
     player.active = std::move(kept);
     for (Goal& goal : player.active) {
         if (goal.plan != 0 || !goal.potential) continue;
-        if (staggered()) {
+        if (staggered() && !player.galactic) {
             queue_attach(player, goal);
         } else if (auto attached = attach_plan(player, goal, *scripts_, sequence_); !attached) {
             goal.finished = true;
+            if (player.galactic) release(player, goal);
         }
     }
 }
@@ -420,6 +592,7 @@ void Engine::maintain(PlayerAi& player) {
 // (player, then goal order), until a tick has an attach budget. A goal already waiting keeps its
 // place.
 void Engine::queue_attach(PlayerAi& player, const Goal& goal) {
+    mark_native_state_changed();
     for (const PendingAttach& pending : pending_attach_) {
         if (pending.player == player.player && pending.goal == goal.id) return;
     }
@@ -429,6 +602,7 @@ void Engine::queue_attach(PlayerAi& player, const Goal& goal) {
 // SCH-04: attaches the queue's first `attach_per_tick` goals that still need a plan: a goal a
 // later pass dropped, finished, or that got its plan some other way leaves the queue unattached.
 core::Result<void> Engine::drain_attaches(authoritative::ScriptScheduler& scripts, std::uint64_t& sequence) {
+    mark_native_state_changed();
     std::size_t taken = 0;
     std::uint32_t attached = 0;
     while (taken < pending_attach_.size() && attached < host_->setup.schedule.attach_per_tick) {
@@ -444,6 +618,7 @@ core::Result<void> Engine::drain_attaches(authoritative::ScriptScheduler& script
 }
 
 void Engine::maintain_category(PlayerAi& player, const std::string& category, std::vector<Goal>& kept_all) {
+    mark_native_state_changed();
     const auto in_category = [&](const Goal& goal) { return player.functions[goal.function].goal->category == category; };
     std::vector<Goal> active;
     for (Goal& goal : player.active) {
@@ -458,8 +633,35 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
         if (global || applies(player, *player.functions[goal.function].goal, target(goal.target))) candidates.push_back(goal);
     }
     const auto finish = [&](Goal& goal) {
-        release(player, goal);
-        if (goal.plan != 0) finish_plan(player, goal.plan, *scripts_);
+        if (player.galactic && goal.plan != 0 && running_.contains(goal.plan)) {
+            finish_plan(player, goal.plan, *scripts_);
+            goal.exclusions_registered = false;
+        } else {
+            release(player, goal);
+            if (goal.plan != 0) finish_plan(player, goal.plan, *scripts_);
+        }
+    };
+    const auto budget_running = [&](Goal& goal) {
+        // GS-31: trimming applies even without proposals; protected plans keep zero desire.
+        if (!player.galactic && !(Real{} < goal.desire)) {
+            const Plan* running = goal.plan != 0 ? plan(goal.plan) : nullptr;
+            if (running == nullptr || running->removable) { finish(goal); return false; }
+        }
+        // WGA-12/22/75: maintenance cleared every old budget's capital and
+        // income reservation. A running galactic plan must be budgeted again
+        // too, using its retained completion cost/resources, not a new roster.
+        if (player.galactic && goal.plan != 0) {
+            const auto ledger = player.galactic_funding->ledger(player.player);
+            if (!ledger || !ledger->goals.contains(goal.id)) { finish(goal); return false; }
+            if (ledger->goals.at(goal.id).reassessed) return true;
+            const auto request = galactic_funding_request(player, goal);
+            const auto feasible = player.galactic_funding->feasible({player.player, request, true});
+            if (!feasible) throw std::runtime_error(feasible.error().message);
+            if (!feasible.value()) { finish(goal); return false; }
+            const auto reserved = player.galactic_funding->reserve({player.player, request, true});
+            if (!reserved) throw std::runtime_error(reserved.error().message);
+        }
+        return true;
     };
     if (proposed_count == 0) {
         for (Goal& goal : active) {
@@ -467,14 +669,20 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
                 finish(goal);
                 continue;
             }
-            if (goal.potential && goal.plan == 0) reserve(player, goal);
-            kept_all.push_back(goal);
+            if (goal.potential && goal.plan == 0) {
+                if (player.galactic && !test_valid(player, goal)) {
+                    // WGA-215: eligible active reassessment records admission failure too.
+                    register_activation(player, goal, false); finish(goal); continue;
+                }
+                reserve(player, goal);
+            }
+            if (budget_running(goal)) kept_all.push_back(goal);
         }
         return;
     }
     const std::size_t limit = active.size() + 2;
     Real threshold = real(-1);
-    for (const Goal& goal : candidates) threshold = std::max(threshold, goal.desire);
+    for (const Goal& goal : candidates) threshold = std::max(threshold, maintenance_priority(player, goal));
     std::vector<Goal> keep;
     std::vector<Goal> abandon;
     for (Goal& goal : active) {
@@ -484,13 +692,19 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
         }
         const Plan* running = goal.plan != 0 ? plan(goal.plan) : nullptr;
         const bool cullable = running == nullptr || running->removable;
-        if (!(goal.desire < threshold) || !cullable) {
+        if (!(maintenance_priority(player, goal) < threshold) || !cullable) {
             if (!goal.potential) {
                 keep.push_back(goal);
             } else if (!plans_[goal.potential->plan].magic && !test_target_contrast(player, goal)) {
                 finish(goal);
             } else {
-                if (goal.plan == 0) reserve(player, goal);
+                if (goal.plan == 0) {
+                    if (player.galactic && !test_valid(player, goal)) {
+                        // WGA-215: eligible active reassessment records admission failure too.
+                        register_activation(player, goal, false); finish(goal); continue;
+                    }
+                    reserve(player, goal);
+                }
                 keep.push_back(goal);
             }
         } else if (goal.potential && !test_target_contrast(player, goal)) {
@@ -499,9 +713,13 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
             abandon.push_back(goal);
         }
     }
-    const auto by_desire = [](const Goal& a, const Goal& b) { return b.desire < a.desire; };
+    const auto by_desire = [&](const Goal& a, const Goal& b) {
+        return maintenance_priority(player, b) < maintenance_priority(player, a);
+    };
     std::stable_sort(keep.begin(), keep.end(), by_desire);
     std::stable_sort(abandon.begin(), abandon.end(), by_desire);
+    // WGA-75: retained active plans consume their budget before proposals.
+    if (player.galactic) std::erase_if(keep, [&](Goal& goal) { return !budget_running(goal); });
     std::optional<Goal> first_abandon;
     if (!abandon.empty()) first_abandon = abandon.front();
     std::vector<Goal> pool = abandon;
@@ -517,12 +735,14 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
         return false;
     };
     const auto activate = [&](Goal& goal) {
+        if (!budget_running(goal)) return false;
         if (goal.plan == 0) reserve(player, goal);
         if (!goal.active) {
             goal.active = true;
             register_activation(player, goal, true);
         }
         keep.push_back(goal);
+        return true;
     };
     // Pass 1: in desire order until a goal cannot go in.
     while (!pool.empty() && keep.size() < limit) {
@@ -533,7 +753,7 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
             break;
         }
         pool.erase(pool.begin());
-        activate(goal);
+        if (!activate(goal)) continue;
         if (first_abandon && like(player, goal, *first_abandon)) break;
     }
     // Pass 2: desire-weighted draws among the rest.
@@ -543,14 +763,17 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
         for (std::size_t index = 0; index < pool.size(); ++index) {
             if (!proposable(player, player.functions[pool[index].function]) || like_kept(pool[index])) continue;
             eligible.push_back(index);
-            total = to_single(total + pool[index].desire);
+            total = to_single(total + maintenance_priority(player, pool[index]));
         }
         if (eligible.empty()) break;
-        const Real draw = sync_.uniform(Real{}, total);
+        const Real draw = [&] {
+        core::tick_profile::Scope scope("serial.goal.ordered-rng");
+        return sync_.uniform(Real{}, total);
+    }();
         std::size_t chosen = eligible.back();
         Real sum{};
         for (const std::size_t index : eligible) {
-            sum = to_single(sum + pool[index].desire);
+            sum = to_single(sum + maintenance_priority(player, pool[index]));
             if (draw < sum) {
                 chosen = index;
                 break;
@@ -569,14 +792,19 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
     for (Goal& goal : pool) {
         if (goal.active) finish(goal);
     }
-    for (Goal& goal : keep) kept_all.push_back(goal);
+    for (Goal& goal : keep) if (budget_running(goal)) kept_all.push_back(goal);
 }
 
 // ---- Planning (PL-40 to PL-44) --------------------------------------------------------------
 
 core::Result<void> Engine::attach_plan(PlayerAi& player, Goal& goal, authoritative::ScriptScheduler& scripts, std::uint64_t& sequence) {
+    mark_native_state_changed();
+    if (player.galactic && (!goal.potential || !goal.potential->valid || !goal.potential->reserved || !goal.potential->funded))
+        return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request,
+            "galactic plan attachment requires successful selection and reservation"));
     static_cast<void>(sequence);
     const PlanDef& definition = plans_[goal.potential->plan];
+    const auto selection = player.galactic ? galactic_selection(player, goal, definition) : nullptr;
     const std::uint64_t instance = next_instance_++;
     if (auto created = scripts.create_instance(instance, definition.module); !created) {
         record(nullptr, player.player, "failed", definition.name + ": " + created.error().message);
@@ -593,7 +821,7 @@ core::Result<void> Engine::attach_plan(PlayerAi& player, Goal& goal, authoritati
     plan.start_tick = static_cast<std::uint64_t>(frame_);
     plan.requires_production = std::find(goal.potential->sources.begin(), goal.potential->sources.end(), 2) != goal.potential->sources.end();
     for (const auto factory : goal.potential->producers) {
-        if (host_->world != nullptr && host_->world->pads().contains(factory)) plan.reserved_pads.push_back(factory);
+        if (host_->ai_world->available() && host_->ai_world->pads().contains(factory)) plan.reserved_pads.push_back(factory);
     }
     const auto event = [&](ScriptEvent::Kind kind, std::string name) {
         ScriptEvent out;
@@ -625,6 +853,7 @@ core::Result<void> Engine::attach_plan(PlayerAi& player, Goal& goal, authoritati
         tf.plan = plan.id;
         tf.definition = index;
         tf.name = tf_def.name;
+        if (selection && index < selection->force_stages.size()) tf.galactic_stage = selection->force_stages[index];
         // PL-40: TaskForce types follow authored team order, retaining selection
         // order within each team. Produce_Force queues purchases in this order.
         std::vector<std::size_t> selected;
@@ -666,6 +895,7 @@ core::Result<void> Engine::attach_plan(PlayerAi& player, Goal& goal, authoritati
 // PL-42: every 0.1 s each plan's threads are pumped; a plan whose script exited or has no live
 // thread is finished.
 core::Result<void> Engine::service_plans(PlayerAi& player, authoritative::ScriptScheduler& scripts, std::uint64_t& sequence) {
+    mark_native_state_changed();
     static_cast<void>(sequence);
     // PL-45: Purge_Goals abandons every other running plan of the player that the goal system may
     // remove, in plan order.
@@ -724,36 +954,37 @@ core::Result<void> Engine::service_plans(PlayerAi& player, authoritative::Script
     return core::Result<void>::success();
 }
 
-// PL-43: a plan ends: its outcome is learned, its units go back to the free store, its build
-// tasks and blocks go and its script instance is removed. PL-45: an abandoned plan learns only its
-// goal's outcome, with the plan's result so far.
+// WGA-212/213: first completion/abandonment records the retained result
+// for both goal and plan before their live association is detached.
 void Engine::finish_plan(PlayerAi& player, std::uint64_t plan_id, authoritative::ScriptScheduler& scripts, const bool abandoned) {
+    mark_native_state_changed();
     const auto found = running_.find(plan_id);
     if (found == running_.end()) return;
     Plan& plan = found->second;
     const PlanDef& definition = plans_[plan.definition];
-    const Goal* goal = nullptr;
-    for (const Goal& entry : player.active) {
+    Goal* goal = nullptr;
+    for (Goal& entry : player.active) {
         if (entry.id == plan.goal) goal = &entry;
     }
-    if (goal != nullptr) {
-        // LS-01: goal and plan outcomes.
-        const GoalFunctionEntry& function = player.functions[goal->function];
-        const Real duration = function.goal->tracking_duration;
-        const std::int64_t expiry = duration < Real{} ? -1 : frame_ + truncate(to_single(duration * real(fps)));
-        player.goal_outcomes[{function.goal_name, goal->target}].entries.emplace_back(plan.result, expiry);
-        if (!abandoned) player.plan_outcomes[{plan.definition, goal->target}].entries.emplace_back(plan.result, expiry);
-    }
-    if (!abandoned) {
-        auto& success = player.plan_success[plan.definition];
-        success.first += plan.result ? 1 : 0;
-        success.second += 1;
-    }
     record(&plan, player.player, abandoned ? "abandoned" : "finished", plan.result ? "success" : "failure");
+    if (player.galactic) {
+        auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
+        if (goal) release(player, *goal); // WGA-348/349: choose salvage while plan and heads remain attached
+        for (auto& task : player.tasks) if (task.source == 2 && task.completion
+            && std::find(plan.taskforces.begin(), plan.taskforces.end(), task.taskforce) != plan.taskforces.end()) {
+            if (!actions) throw std::runtime_error("galactic task finish requires its native producer owner");
+            const auto finished = actions->finish_task(task.completion, task.salvage);
+            if (!finished) throw std::runtime_error(finished.error().message);
+            task.finished = true; task.state_entered = static_cast<std::uint64_t>(frame_);
+        }
+    }
     for (const std::uint64_t tf_id : plan.taskforces) {
         const auto tf = taskforces_.find(tf_id);
         if (tf == taskforces_.end()) continue;
-        for (const sim::EntityId unit : tf->second.units) player.assigned.erase(unit);
+        for (const sim::EntityId unit : tf->second.units) {
+            return_galactic_actor(tf->second, unit);
+            player.assigned.erase(unit);
+        }
         for (const auto& purchase : tf->second.pooled) {
             auto& count = player.reserved_pool[purchase.type];
             if (count != 0) --count;
@@ -766,8 +997,21 @@ void Engine::finish_plan(PlayerAi& player, std::uint64_t plan_id, authoritative:
                                return std::find(plan.taskforces.begin(), plan.taskforces.end(), task.taskforce) != plan.taskforces.end();
                            }),
         player.tasks.end());
+    if (player.galactic) mark_galactic_tasks_changed();
     for (auto iterator = blocks_.begin(); iterator != blocks_.end();) {
         if (iterator->second.instance == plan.instance) {
+            if (iterator->second.galactic_request && iterator->second.kind == Block::Kind::move) {
+                auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
+                if (!actions) throw std::runtime_error("galactic block release requires its native listener owner");
+                const auto retired = actions->retire_movement(iterator->second.galactic_request);
+                if (!retired) throw std::runtime_error(retired.error().message);
+            }
+            if (iterator->second.galactic_request && iterator->second.kind == Block::Kind::galactic_invade) {
+                auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
+                if (!actions) throw std::runtime_error("invasion block release requires its native queue owner");
+                const auto retired = actions->retire_invasion(iterator->second.galactic_request);
+                if (!retired) throw std::runtime_error(retired.error().message);
+            }
             iterator = blocks_.erase(iterator);
         } else {
             ++iterator;
@@ -780,6 +1024,7 @@ void Engine::finish_plan(PlayerAi& player, std::uint64_t plan_id, authoritative:
             ++iterator;
         }
     }
+    if (goal != nullptr) learning::outcome(player, *goal, plan, frame_, static_cast<std::uint32_t>(fps));
     static_cast<void>(scripts.remove_instance(plan.instance));
     refund_funds(player, plan.goal);
     std::erase_if(pad_reservations_, [&](const auto& entry) {

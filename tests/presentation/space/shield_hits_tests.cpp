@@ -1,9 +1,11 @@
 // #415: how a live battle orients and places a shield hit (presentation::space shield_hits,
 // docs/behaviour/battle-presentation.md BP-10, BP-17 to BP-19). Synthetic inputs only.
 #include "eawr/presentation/space/shield_hits.hpp"
+#include "eawr/presentation/space/live_units.hpp"
 #include "eawr/presentation/particles/contact_frame.hpp"
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -289,6 +291,158 @@ void placement_rule() {
     expect(near(side, {0.0, 0.0, -1.0}), "placement: roll 90 turns the model's -X from -Y to -Z, got " + text(side));
 }
 
+void beam_attachment_rule() {
+    namespace math = eawr::sim::math;
+    const Vec3d position{100.0, -20.0, 7.0};
+    const Vec3d bind_point{10.0, -4.0, 3.0};
+    const Vec3d hardpoint{4.0, 10.0, 3.0}; // unit loader's fixed quarter turn
+    const auto fixed = [](const double v) {
+        return math::Fixed::from_raw(static_cast<std::int64_t>(std::round(v * math::Fixed::scale)));
+    };
+    const auto converted = [](const math::Vec3& v) -> Vec3d {
+        return {static_cast<double>(v.x.raw()) / math::Fixed::scale,
+                static_cast<double>(v.y.raw()) / math::Fixed::scale,
+                static_cast<double>(v.z.raw()) / math::Fixed::scale};
+    };
+    // Identity, yaw 90, and yaw/pitch/roll 90 (whose composed unit rotation is Ry(90)).
+    const double half = std::sqrt(0.5);
+    const std::array<math::Quat, 3> rotations{{math::identity_quat(),
+        {fixed(0), fixed(0), fixed(half), fixed(half)},
+        {fixed(0), fixed(half), fixed(0), fixed(half)}}};
+    const std::array<Vec3d, 3> angles{{{0, 0, 0}, {90, 0, 0}, {90, 90, 90}}};
+    const std::array<Vec3d, 3> expected{{{104, -10, 10}, {90, -16, 10}, {103, -10, 3}}};
+    for (std::size_t i = 0; i < rotations.size(); ++i) {
+        const auto matrix = math::to_matrix(rotations[i], {fixed(100), fixed(-20), fixed(7)});
+        expect(matrix.has_value(), "beam attachment: sim rotation is valid");
+        if (!matrix) continue;
+        // The sim aim path transforms the unit-frame hardpoint, with no model turn.
+        const auto aim = math::transform_point(matrix.value(), {fixed(4), fixed(10), fixed(3)});
+        expect(aim.has_value(), "beam attachment: sim aim is valid");
+        if (!aim) continue;
+        const auto endpoint = space::live_unit_point(hardpoint, position, angles[i][0], angles[i][2], angles[i][1]);
+        expect(near(endpoint, converted(aim.value()), 0.00001) && near(endpoint, expected[i]),
+               "beam endpoint equals the sim hardpoint aim on level and rotated targets");
+        const auto axes = space::live_unit_axes(angles[i][0], angles[i][2], angles[i][1]);
+        Vec3d explosion = position;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            explosion[axis] += axes.x[axis] * hardpoint[0] + axes.y[axis] * hardpoint[1] + axes.z[axis] * hardpoint[2];
+        }
+        expect(near(endpoint, explosion), "beam endpoint and leech start coincide with the hardpoint explosion");
+        // Drawn bone: R * Q * bind translation; its scale was already applied by the loader.
+        auto drawn = matrix.value();
+        for (auto& row : drawn.rows) {
+            const auto x = row[0];
+            row[0] = row[1];
+            row[1] = fixed(-static_cast<double>(x.raw()) / math::Fixed::scale);
+        }
+        const auto bone = math::transform_point(drawn, {fixed(10), fixed(-4), fixed(3)});
+        expect(bone.has_value(), "beam attachment: drawn bone is valid");
+        const auto zap = space::live_model_point(bind_point, position, angles[i][0], angles[i][2], 1.0, angles[i][1]);
+        expect(bone && near(zap, converted(bone.value()), 0.00001) && near(zap, expected[i]),
+               "laser-defence zap equals the drawn model-space bind bone on level and rotated targets");
+        expect(!near(endpoint, space::live_model_point(hardpoint, position, angles[i][0], angles[i][2], 1.0, angles[i][1])),
+               "a second quarter turn reproduces the old endpoint and zap error");
+    }
+}
+
+void explosion_frame_rule() {
+    const Vec3d position{100.0, -20.0, 7.0};
+    const Vec3d model_point{12.0, -5.0, 3.0};
+    const Vec3d hardpoint{5.0, 12.0, 3.0}; // fixed model quarter turn already applied
+    for (const double yaw : {0.0, 37.0, -120.0}) {
+        for (const double roll : {0.0, -12.5, 45.0, -90.0}) {
+            const auto axes = space::live_unit_axes(yaw, roll);
+            Vec3d placed = position;
+            for (std::size_t i = 0; i < 3; ++i) {
+                placed[i] += axes.x[i] * hardpoint[0] + axes.y[i] * hardpoint[1] + axes.z[i] * hardpoint[2];
+            }
+            expect(near(placed, space::live_model_point(model_point, position, yaw, roll, 1.0)),
+                   "BP-15: hardpoint explosion lands on the drawn banked hardpoint");
+            expect(near(cross(axes.x, axes.y), axes.z) && near(dot(axes.z, axes.z), 1.0),
+                   "BP-14/BP-15: explosion facing remains orthonormal with particle scale unchanged");
+            const double radians = yaw * 3.14159265358979323846 / 180.0;
+            const Vec3d forward{std::cos(radians), std::sin(radians), 0.0};
+            expect(near(axes.x, forward), "BP-14: bank keeps forward facing");
+            if (roll == 0.0) {
+                expect(near(axes.y, {-forward[1], forward[0], 0.0}) && near(axes.z, {0.0, 0.0, 1.0}),
+                       "BP-14/BP-15: unbanked explosion frame is unchanged");
+            }
+        }
+    }
+    // Non-pitched axes retain the old operation order, including signed zero.
+    for (const double yaw : {0.0, 37.0, -120.0}) {
+        for (const double roll : {0.0, -12.5, 45.0, -90.0}) {
+            const auto axes = space::live_unit_axes(yaw, roll);
+            const double cr = std::cos(roll / (180.0 / 3.14159265358979323846));
+            const double sr = std::sin(roll / (180.0 / 3.14159265358979323846));
+            const double cy = std::cos(yaw / (180.0 / 3.14159265358979323846));
+            const double sy = std::sin(yaw / (180.0 / 3.14159265358979323846));
+            const std::array<Vec3d, 3> inputs{{{1.0, 0.0, 0.0}, {-0.0, 1.0, 0.0}, {-0.0, 0.0, 1.0}}};
+            const std::array<Vec3d, 3> actual{axes.x, axes.y, axes.z};
+            for (std::size_t column = 0; column < 3; ++column) {
+                const auto& v = inputs[column];
+                const Vec3d r{v[0], v[1] * cr - v[2] * sr, v[1] * sr + v[2] * cr};
+                const Vec3d old{0.0 + (r[0] * cy - r[1] * sy) * 1.0,
+                               0.0 + (r[0] * sy + r[1] * cy) * 1.0, 0.0 + r[2] * 1.0};
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    expect(std::bit_cast<std::uint64_t>(actual[column][axis]) == std::bit_cast<std::uint64_t>(old[axis]),
+                           "non-pitched explosion axes are bit-identical");
+                }
+            }
+        }
+    }
+    for (const double pitch : {-90.0, -40.0, 35.0, 90.0, 110.0}) {
+        const double y = 37.0 / (180.0 / 3.14159265358979323846);
+        const double p = pitch / (180.0 / 3.14159265358979323846);
+        const double r = -23.0 / (180.0 / 3.14159265358979323846);
+        const double cy = std::cos(y), sy = std::sin(y), cp = std::cos(p), sp = std::sin(p);
+        const double cr = std::cos(r), sr = std::sin(r);
+        const auto axes = space::live_unit_axes(37.0, -23.0, pitch);
+        const auto mesh = space::make_shield_collision_mesh({{{-2.0, -2.0, 0.0}, {2.0, -2.0, 0.0}, {0.0, 2.0, 0.0}}});
+        const space::LivePose pose{position, 37.0, -23.0, 1.0, pitch};
+        const auto start = space::live_model_point({0.0, 0.0, 2.0}, position, 37.0, -23.0, 1.0, pitch);
+        const auto delta = space::live_model_point({0.0, 0.0, -4.0}, {}, 37.0, -23.0, 1.0, pitch);
+        const auto hit = space::first_shield_hit(mesh, pose, start, delta);
+        expect(hit && near(hit->contact, position) && near(hit->normal, axes.z),
+               "FM-02: pitched shield collision uses the same drawn hull frame and inverse");
+        expect(near(axes.x, {cy * cp, sy * cp, -sp})
+            && near(axes.y, {cy * sp * sr - sy * cr, sy * sp * sr + cy * cr, cp * sr})
+            && near(axes.z, {cy * sp * cr + sy * sr, sy * sp * cr - cy * sr, cp * cr}),
+               "FM-02: pitched explosion axes match the drawn hull matrix, including vertical and inverted craft");
+        Vec3d placed = position;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            placed[axis] += axes.x[axis] * hardpoint[0] + axes.y[axis] * hardpoint[1] + axes.z[axis] * hardpoint[2];
+        }
+        expect(near(placed, space::live_model_point(model_point, position, 37.0, -23.0, 1.0, pitch)),
+               "FM-02/BP-15: pitched model and explosion share the hardpoint");
+    }
+    // Snapshot sampling uses the draw path's vertical convention, rather than
+    // independent yaw/roll extraction (which loses the turn at a vertical nose).
+    for (const double pitch : {-90.0, -40.0, 0.0, 35.0, 90.0, 110.0}) {
+        const auto source = space::live_unit_axes(37.0, -23.0, pitch);
+        eawr::sim::math::Mat3x4 transform{};
+        const std::array<Vec3d, 3> columns{source.x, source.y, source.z};
+        for (std::size_t row = 0; row < 3; ++row) {
+            for (std::size_t column = 0; column < 3; ++column) {
+                transform.rows[row][column] = eawr::sim::math::Fixed::from_raw(static_cast<std::int64_t>(
+                    std::round(columns[column][row] * static_cast<double>(eawr::sim::math::Fixed::scale))));
+            }
+        }
+        const auto facing = space::instance_unit_facing(transform);
+        const auto sampled = space::live_unit_axes(facing[0], facing[2], facing[1]);
+        const std::array<Vec3d, 3> result{sampled.x, sampled.y, sampled.z};
+        for (std::size_t column = 0; column < 3; ++column) {
+            for (std::size_t row = 0; row < 3; ++row) {
+                expect(std::abs(result[column][row] - columns[column][row]) < 1.0e-6,
+                       "FM-02: sampled facing reconstructs the drawn frame across the vertical");
+            }
+        }
+    }
+    const auto banked = space::live_unit_axes(90.0, 90.0);
+    expect(near(banked.x, {0.0, 1.0, 0.0}) && near(banked.y, {0.0, 0.0, 1.0})
+        && near(banked.z, {1.0, 0.0, 0.0}), "BP-14/BP-15: yaw follows roll; local +Z banks with the hull");
+}
+
 } // namespace
 
 int main() {
@@ -316,6 +470,8 @@ int main() {
     flight_rule();
     many_hits();
     placement_rule();
+    beam_attachment_rule();
+    explosion_frame_rule();
     if (failures != 0) {
         std::cerr << failures << " shield hit contract(s) failed\n";
         return 1;

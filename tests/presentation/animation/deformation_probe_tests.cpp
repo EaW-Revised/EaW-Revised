@@ -558,6 +558,34 @@ void test_determinism_and_unchanged_inputs() {
 } // namespace
 
 int main() {
+    {
+        assets::Model model;
+        model.bones = {bone("root", -1), bone("turret", 0, {4.0F, 0.0F, 0.0F}),
+            bone("barrel", 1, {2.0F, 0.0F, 0.0F}), bone("muzzle", 2, {3.0F, 0.0F, 0.0F})};
+        auto player = playback::Player::create(model);
+        expect(static_cast<bool>(player), "UA-05: procedural hierarchy binds");
+        if (player) {
+            auto sampled = player.value().sample({});
+            expect(static_cast<bool>(sampled), "UA-05: procedural bind pose samples");
+            if (sampled) {
+                auto& pose = sampled.value();
+                const auto* storage = pose.bones.data();
+                auto yaw = playback::Player::identity_matrix();
+                yaw[0] = yaw[5] = 0; yaw[1] = 1; yaw[4] = -1;
+                auto pitch = playback::Player::identity_matrix();
+                pitch[0] = pitch[10] = 0; pitch[2] = -1; pitch[8] = 1;
+                expect(static_cast<bool>(player.value().apply_bone_transform(pose, 1, yaw)), "UA-05: yaw applies");
+                expect(close(pose.bones[3].model_asset[12], 4) && close(pose.bones[3].model_asset[13], 5),
+                    "UA-05: yaw moves descendant muzzle around the authored pivot");
+                expect(static_cast<bool>(player.value().apply_bone_transform(pose, 2, pitch)), "UA-05: barrel pitch applies");
+                expect(close(pose.bones[3].model_asset[12], 4) && close(pose.bones[3].model_asset[13], 2)
+                    && close(pose.bones[3].model_asset[14], -3), "UA-05: separate barrel pitch composes under turret yaw");
+                expect(player.value().sample_position(0, 1, pose) && pose.bones.data() == storage,
+                    "UA-05: next frame resets the base pose in reusable storage");
+                expect(!player.value().apply_bone_transform(pose, 99, yaw), "UA-05: invalid bone is rejected");
+            }
+        }
+    }
     test_bind_translation();
     test_rotated_translated_child();
     test_local_palette_four_influences();

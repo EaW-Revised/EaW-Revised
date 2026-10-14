@@ -140,12 +140,22 @@ class File:
 
 
 @dataclass
+class Observation:
+    owner: str
+    ability: str
+    space_behaviors: frozenset[str]
+    behaviors: frozenset[str]
+    consumed: bool
+
+
+@dataclass
 class Row:
     tag: str
     occurrences: int = 0
     files: set[str] = field(default_factory=set)
     owners: set[str] = field(default_factory=set)
     consumed: bool = False
+    observations: list[Observation] = field(default_factory=list)
 
 
 def build_sets(entries: list[dict[str, Any]], read_file) -> tuple[dict[str, Row], list[str]]:
@@ -193,6 +203,13 @@ def build_sets(entries: list[dict[str, Any]], read_file) -> tuple[dict[str, Row]
     for (logical_path, root), owner in sorted(roots.items(), key=lambda item: (item[1] == item[0][0], item[0])):
         found = files[logical_path]
         is_object = owner != logical_path
+        def behavior_tokens(tag: str) -> frozenset[str]:
+            return frozenset(ascii_fold(token) for child in subtree(found.nodes, root)
+                             if found.nodes[child].parent == root
+                             and ascii_fold(found.nodes[child].name) == tag
+                             for token in re.split(r"[\s,]+", found.nodes[child].text.strip()) if token)
+        space_behaviors = behavior_tokens("spacebehavior")
+        behaviors = behavior_tokens("behavior")
         for index in subtree(found.nodes, root):
             node = found.nodes[index]
             path = tag_path(found.nodes, root, index)
@@ -208,11 +225,22 @@ def build_sets(entries: list[dict[str, Any]], read_file) -> tuple[dict[str, Row]
                         or (is_object and index == root and ascii_fold(attribute) == "name"))
                 values.append((f"{path}/@{attribute}", read))
             for key, read in values:
+                ability = ""
+                ancestor = node.parent
+                while ancestor is not None and ancestor != root:
+                    if ascii_fold(found.nodes[ancestor].name) == "unit_ability":
+                        ability = next((ascii_fold(found.nodes[child].text.strip())
+                                        for child in subtree(found.nodes, ancestor)
+                                        if found.nodes[child].parent == ancestor
+                                        and ascii_fold(found.nodes[child].name) == "type"), "")
+                        break
+                    ancestor = found.nodes[ancestor].parent
                 row = rows.setdefault(key, Row(key))
                 row.occurrences += 1
                 row.files.add(logical_path)
                 row.owners.add(owner)
                 row.consumed = row.consumed or read
+                row.observations.append(Observation(owner, ability, space_behaviors, behaviors, read))
     # Rows differing only in ASCII case are one tag, as FoC matches names.
     merged: dict[str, Row] = {}
     for key in sorted(rows, key=lambda k: (ascii_fold(k), k)):
@@ -225,6 +253,7 @@ def build_sets(entries: list[dict[str, Any]], read_file) -> tuple[dict[str, Row]
         target.files |= row.files
         target.owners |= row.owners
         target.consumed = target.consumed or row.consumed
+        target.observations.extend(row.observations)
     return {row.tag: row for row in merged.values()}, problems
 
 
@@ -288,21 +317,26 @@ def guess_area(tag: str) -> str:
 
 # --- scene -------------------------------------------------------------------------------------
 
-def scene_report(rows: dict[str, Row], registry: dict[str, Any], problems: list[str]) -> tuple[dict[str, Any], list[str]]:
+def scene_report(rows: dict[str, Row], registry: dict[str, Any], problems: list[str],
+                 mode: str = "tactical") -> tuple[dict[str, Any], list[str]]:
     """The scene against the registry: rows keyed by (class, tag) after the registry's `*` collapsing."""
     statuses: dict[tuple[str, str], dict[str, Any]] = {}
     for object_class, tag, row in tag_registry.expand(registry):
         statuses[tag_registry.pair_key(object_class, tag)] = row
     scene: dict[tuple[str, str], bool] = {}
     spelled: dict[tuple[str, str], str] = {}
+    observations: dict[tuple[str, str], list[Observation]] = defaultdict(list)
     for row in rows.values():
         object_class, tail = tag_registry.split_key(tag_registry.normalise_path(row.tag))
         key = tag_registry.pair_key(object_class, tail)
         scene[key] = scene.get(key, False) or row.consumed
         spelled.setdefault(key, f"{object_class}/{tail}")
+        observations[key].extend(row.observations)
     failures: list[str] = []
     by_status: dict[str, int] = defaultdict(int)
     read_but: list[str] = []
+    traced_code = (("src/data/galactic/", "src/units/galactic_types.cpp", "src/sim/galactic/", "src/campaign/")
+                   if mode == "galactic" else tag_registry.TRACED_CODE)
     for key, consumed in sorted(scene.items()):
         row = statuses.get(key)
         if row is None:
@@ -310,10 +344,47 @@ def scene_report(rows: dict[str, Row], registry: dict[str, Any], problems: list[
                 failures.append(f"scene tag {spelled[key]} has no registry row")
             continue
         by_status[row["status"]] += 1
-        applied_in_traced = row["status"] in ("applied", "partial") and any(
-            target["code"].startswith(tag_registry.TRACED_CODE) for target in row.get("applied", []))
-        if applied_in_traced and not consumed and row.get("trace") != "unrecorded":
-            failures.append(f"{spelled[key]} is {row['status']} in the registry, but no loader of the M2 scene reads it")
+        if row["status"] in ("applied", "partial") and row.get("trace") != "unrecorded":
+            unread: set[str] = set()
+            for target in row.get("applied", []):
+                # Campaign child battles load these values; the standalone M2 start cannot.
+                if mode == "tactical" and tag_registry.reviewed_campaign_scene(row):
+                    continue
+                # Galactic targets share the registry but are outside the M2 scene trace.
+                # Keep them required by the galactic scene's own coverage check.
+                if mode == "tactical" and target["code"].startswith("src/sim/galactic/"):
+                    continue
+                if not target["code"].startswith(traced_code):
+                    continue
+                scope = target.get("trace_scope")
+                if scope is None:
+                    if not consumed:
+                        unread.add("")
+                    continue
+                # Explicit XML selectors, not an interpretation of the human-readable `types` list.
+                relevant: dict[tuple[str, str], bool] = {}
+                for observation in observations[key]:
+                    if scope.get("object_types") and ascii_fold(observation.owner) not in {
+                            ascii_fold(value) for value in scope["object_types"]}:
+                        continue
+                    if scope.get("ability_types") and observation.ability not in {
+                            ascii_fold(value) for value in scope["ability_types"]}:
+                        continue
+                    if observation.space_behaviors.intersection(ascii_fold(value) for value in
+                                                          scope.get("exclude_space_behaviors", [])):
+                        continue
+                    if observation.behaviors.intersection(ascii_fold(value) for value in
+                                                          scope.get("exclude_behaviors", [])):
+                        continue
+                    consumer = (ascii_fold(observation.owner), observation.ability)
+                    relevant[consumer] = relevant.get(consumer, False) or observation.consumed
+                unread.update(owner + (f" ({ability})" if ability else "")
+                              for (owner, ability), read in relevant.items() if not read)
+            scene_name = "GC" if mode == "galactic" else "M2"
+            for consumer in sorted(unread):
+                detail = f" for {consumer}" if consumer else ""
+                failures.append(f"{spelled[key]} is {row['status']} in the registry, "
+                                f"but no loader of the {scene_name} scene reads it{detail}")
         if consumed and row["status"] in ("foc-ignores", "land-or-galactic", "multiplayer", "presentation-later"):
             read_but.append(f"{spelled[key]} ({row['status']})")
     value = {
@@ -342,7 +413,7 @@ def scene_command(args: argparse.Namespace) -> int:
     entries = load_trace(args.trace)
     rows, problems = build_sets(entries, read_file)
     registry = tag_registry.load_registry(args.statuses)
-    value, failures = scene_report(rows, registry, problems)
+    value, failures = scene_report(rows, registry, problems, args.mode)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "tag-coverage.json").write_bytes(canonical_bytes(value))
     print(json.dumps({k: value[k] for k in ("consumed", "scene", "scene_by_status")}, sort_keys=True))
@@ -368,6 +439,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     scene.add_argument("--trace", required=True, type=Path, action="append")
     scene.add_argument("--statuses", required=True, type=Path)
     scene.add_argument("--out", required=True, type=Path)
+    scene.add_argument("--mode", choices=("tactical", "galactic"), default="tactical",
+                       help="judge application only in the selected simulation layer")
     args = parser.parse_args(list(argv) if argv is not None else None)
     try:
         return {"scene": scene_command}[args.command](args)

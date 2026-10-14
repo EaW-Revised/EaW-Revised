@@ -6,6 +6,7 @@
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/ui/world_ui.hpp"
+#include "eawr/presentation/godot/renderer.hpp"
 #include "eawr/vfs/vfs.hpp"
 
 #include <godot_cpp/classes/image_texture.hpp>
@@ -20,6 +21,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <set>
 #include <optional>
 #include <ostream>
@@ -43,7 +45,8 @@ public:
 
     // Resolves the art (the faction's selection ring, the command bar atlas, the reticle textures)
     // and each unit type's GUI tags. Never fails the view: what does not resolve is reported.
-    void prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live);
+    void prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live,
+                 const std::shared_ptr<GodotShaderCache>& shaders);
     void set_group_fonts(godot::Ref<godot::Font> icon, godot::Ref<godot::Font> bracket);
 
     struct Frame final {
@@ -60,10 +63,13 @@ public:
         const ui::AbilityState* abilities{}; // the same provider as the unit cards
         // #848 V-5d: false while either overview level is on: no unit bracket (health and shield
         // bars) draws. Circles, squadron icons and reticles do not read it (V-5e).
+        bool waypoints{};
         bool brackets{true};
+        bool visible{true}; // movie mode hides all world UI, including existing circle instances
     };
     // Poses the circles and draws the rest into `canvas_item` (already cleared by the caller).
     void draw(const Frame& frame, godot::RID canvas_item);
+    void follow_waypoint_lighting(const GodotRenderer& renderer);
     // The squadron whose icon the last drawn frame put under `point`.
     [[nodiscard]] std::optional<sim::EntityId> icon_at(std::array<float, 2> point) const;
     // The centre of squadron `squadron`'s icon in the last drawn frame.
@@ -101,6 +107,17 @@ public:
     }
 
 private:
+    void prepare_waypoints(const vfs::Vfs& filesystem, const std::shared_ptr<GodotShaderCache>& shaders);
+    void draw_waypoints(const Frame& frame, godot::RID canvas_item);
+    std::unique_ptr<GodotRenderer> waypoint_renderer_;
+    std::vector<sim::AssetId> waypoint_assets_;
+    std::string waypoint_model_, waypoint_texture_;
+    godot::Color waypoint_colour_{128.0F / 255.0F, 128.0F / 255.0F, 128.0F / 255.0F, 1.0F};
+    float waypoint_dash_{}, waypoint_gap_{}, waypoint_velocity_{};
+    ui::WaypointDashClock waypoint_clock_;
+    std::size_t waypoint_paths_{}, waypoint_flags_{}, waypoint_lines_{}, waypoint_loops_{};
+    std::size_t waypoint_stubs_omitted_{};
+    std::size_t max_waypoint_paths_{}, max_waypoint_flags_{};
     struct HardpointUi final {
         std::string texture;  // reticle art stem, empty: none
         std::string tooltip; // WU-51: localised HardPoint Tooltip_Text
@@ -204,6 +221,7 @@ private:
     std::vector<GroupRow> group_rows_;
     std::vector<Icon> icons_;
     std::vector<Reticle> reticle_rects_;  // the hovered unit's reticles of the last drawn frame
+    std::optional<ui::HardpointReticleSizes> reticle_sizes_;
     std::optional<Flash> flash_;
     godot::Ref<godot::Font> tooltip_font_;
     godot::Ref<godot::Font> tooltip_small_font_;
@@ -226,6 +244,8 @@ private:
         sim::EntityId entity{};
         std::array<float, 2> centre{};
         ui::SquadronIconRect frame{}, inner{};
+        ui::Rgb tint{}; // WU-21: the unselected frame's owner tint
+        sim::tactical::PlayerId owner{};
     };
     std::vector<IdentityGeometry> identity_geometry_;
     struct GridSample final {

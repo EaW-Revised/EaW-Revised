@@ -7,6 +7,8 @@
 #include "eawr/scene/scene.hpp"
 #include "eawr/scene/space_population.hpp"
 #include "eawr/sim/math/math.hpp"
+#include "eawr/script/authoritative/scheduler.hpp"
+#include "eawr/script/numeric/backend.hpp"
 #include "skirmish_internal.hpp"
 
 #include <algorithm>
@@ -19,6 +21,66 @@
 #include <vector>
 
 namespace eawr::skirmish {
+
+sim::MatchIdentity match_identity(const StartInputs& inputs) {
+    sim::MatchIdentity identity;
+    const auto rules = "tactical:" + std::to_string(sim::tactical::tactical_rules_version)
+        + ";math:1;Q" + std::to_string(sim::math::Fixed::fractional_bits) + ";tick:"
+        + std::to_string(sim::tactical::tick_numerator) + "/" + std::to_string(sim::tactical::tick_denominator);
+    const auto abi = script::numeric::numeric_abi();
+    const auto content = units::content_identity(*inputs.tables);
+    auto path = vfs::canonicalize(inputs.map);
+    const auto scripts = inputs.script_manifest_digest.empty()
+        ? script::authoritative::ModuleManifest{}.digest() : inputs.script_manifest_digest;
+    const auto ai = inputs.ai_data_digest.empty() ? core::sha256_hex({}) : inputs.ai_data_digest;
+    identity.domains = {
+        sim::identity_domain("rules", rules),
+        sim::identity_domain("numeric-abi", std::string(abi.name) + ":" + std::to_string(abi.version)),
+        sim::identity_domain("sandbox", script::authoritative::sandbox_policy_identity),
+        sim::IdentityDomain{"units", 1, content},
+        sim::identity_domain("map-path", path ? path.value() : inputs.map),
+        sim::identity_domain("map-digest", inputs.map_sha256),
+        sim::identity_domain("script-manifest", scripts),
+        sim::identity_domain("ai-data", ai),
+    };
+    return sim::compute_match_identity(std::move(identity));
+}
+
+core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem) {
+    using Result = core::Result<DataIdentity>;
+    DataIdentity identity;
+    // Conservative effective closure: all mounted Lua and XML, including future
+    // require() dependencies and AI references. Paths, never mount provenance.
+    script::authoritative::ModuleManifest manifest;
+    auto scripts = filesystem.enumerate("data/scripts/", ".lua");
+    if (!scripts) return Result::failure(scripts.error());
+    for (const auto& script : scripts.value()) {
+        auto source = filesystem.open(script.canonical_path);
+        if (!source) return Result::failure(source.error());
+        const std::string text(reinterpret_cast<const char*>(source.value().data()), source.value().size());
+        if (auto added = manifest.add(script.canonical_path, text); !added) return Result::failure(added.error());
+    }
+    identity.script_manifest_digest = manifest.digest();
+    auto xml = filesystem.enumerate("data/xml/", ".xml");
+    if (!xml) return Result::failure(xml.error());
+    std::sort(xml.value().begin(), xml.value().end(), [](const auto& a, const auto& b) {
+        return a.canonical_path < b.canonical_path;
+    });
+    std::vector<std::uint8_t> listing;
+    for (const auto& record : xml.value()) {
+        auto source = filesystem.open(record.canonical_path);
+        if (!source) return Result::failure(source.error());
+        const auto size = static_cast<std::uint32_t>(record.canonical_path.size());
+        for (unsigned shift = 0; shift < 32; shift += 8) listing.push_back(static_cast<std::uint8_t>(size >> shift));
+        listing.insert(listing.end(), record.canonical_path.begin(), record.canonical_path.end());
+        const auto digest = core::sha256(std::span(reinterpret_cast<const std::uint8_t*>(source.value().data()), source.value().size()));
+        listing.insert(listing.end(), digest.begin(), digest.end());
+    }
+    identity.ai_data_digest = core::sha256_hex(listing);
+
+    return Result::success(std::move(identity));
+}
+
 namespace {
 
 constexpr std::string_view constants_path = "data/xml/gameconstants.xml";
@@ -52,6 +114,11 @@ constexpr std::string_view colour_prefix = "MP_Color_";
     MapPlacement placement;
     placement.record = source.key.record_ordinal;
     for (const auto& field : source.fields) {
+        // WGT-121: the authored signed byte is independent of type branch retention.
+        if (field.id == 11 && field.bytes.size() == 1) {
+            const auto value = std::to_integer<std::uint8_t>(field.bytes.front());
+            placement.enable_at_level = static_cast<std::int8_t>(value < 128U ? value : static_cast<int>(value) - 256);
+        }
         if (field.id != 2 || field.bytes.size() != 4) continue;
         std::uint32_t value{};
         for (std::size_t index = 0; index < 4; ++index) {
@@ -95,13 +162,19 @@ constexpr std::string_view colour_prefix = "MP_Color_";
     const auto& object = effective.value();
     placement.element = object.type_name;
     placement.marker = scene::space_object_tags(object).marker;
+    for (const auto tag : {"Behavior", "SpaceBehavior"}) for (const auto& behavior : detail::tokens(text_of(object, tag))) {
+        if (detail::iequals(behavior, "DUMMY_SPECIAL_WEAPON_SOURCE")) placement.special_weapon_source = true;
+        if (detail::iequals(tag, "Behavior") && detail::iequals(behavior, "MARKER")) placement.marker_behavior = true;
+    }
     placement.victory_relevant = detail::boolean(text_of(object, "Victory_Relevant")).value_or(false);
     placement.hull = detail::number(text_of(object, "Tactical_Health"));
     placement.decoration = detail::retail_flag(text_of(object, "Is_Decoration"), false);
     placement.discardable = detail::retail_flag(text_of(object, "Is_Discardable"), true);
+    placement.branched_discardable = detail::retail_flag(text_of(object, "Is_Branched_Map_Discardable"), true);
+    placement.loads_when_faction_present = detail::retail_flag(text_of(object, "Loads_When_Faction_Present"), false);
     // SK-05: only placements that become map objects take their height here; SpaceProps are drawn
     // by the view and their Layer_Z_Adjust is #649's row.
-    if (!detail::iequals(placement.element, "SpaceProp")) {
+    if (!detail::iequals(placement.element, "SpaceProp") || placement.special_weapon_source) {
         placement.layer_z_adjust = detail::number(text_of(object, "Layer_Z_Adjust"));
     }
     for (const auto& candidate : detail::tokens(text_of(object, "Marker_For_Specific_Object_Type"))) {
@@ -218,6 +291,31 @@ core::Result<MatchOptions> read_match_defaults(const vfs::Vfs& filesystem) {
     return defaults_from_constants(constants.value().root);
 }
 
+core::Result<CreditsBounds> read_credits_bounds(const vfs::Vfs& filesystem) {
+    using Result = core::Result<CreditsBounds>;
+    auto constants = data::load_document(filesystem, constants_path);
+    if (!constants) return Result::failure(constants.error());
+    const auto& root = constants.value().root;
+    data::tag_trace::document(root);
+    CreditsBounds bounds;
+    std::string invalid;
+    const auto read = [&](const std::string_view tag, std::int64_t& value) {
+        const auto child = std::find_if(root.children.begin(), root.children.end(),
+            [&](const auto& node) { return detail::iequals(node.name, tag); });
+        if (child == root.children.end()) { invalid = std::string(tag) + " is missing"; return; }
+        data::tag_trace::used(*child);
+        const auto parsed = detail::number(detail::trim(child->raw_text));
+        if (!parsed) { invalid = std::string(tag) + " is not a number"; return; }
+        value = parsed->trunc_to_integer();
+    };
+    read("Min_Skirmish_Credits", bounds.minimum);
+    read("Max_Skirmish_Credits", bounds.maximum);
+    if (invalid.empty() && (bounds.minimum < 0 || bounds.maximum < bounds.minimum))
+        invalid = "Min_Skirmish_Credits and Max_Skirmish_Credits do not form a range";
+    if (!invalid.empty()) return Result::failure(detail::error(diagnostic_codes::input, invalid));
+    return Result::success(bounds);
+}
+
 core::Result<std::vector<LobbyColour>> read_lobby_colours(const vfs::Vfs& filesystem) {
     using Result = core::Result<std::vector<LobbyColour>>;
     auto constants = data::load_document(filesystem, constants_path);
@@ -310,6 +408,50 @@ core::Result<Fixture> fixture_from_options(
     return Result::success(std::move(fixture));
 }
 
+core::Result<Fixture> placed_fixture(const std::string_view map, PlacedForces forces, const std::uint64_t seed,
+    const vfs::Vfs& filesystem, const data::Catalog& catalog) {
+    using Result = core::Result<Fixture>;
+    Fixture fixture;
+    fixture.map = std::string(map);
+    if (!fixture.map.starts_with("data/art/maps/") || !fixture.map.ends_with(".ted")
+        || fixture.map.find('/', 14) != std::string::npos || fixture.map.find("..") != std::string::npos) {
+        return Result::failure(detail::error(diagnostic_codes::fixture,
+            "demo map must be a logical data/art/maps/*.ted path"));
+    }
+    auto record = filesystem.stat(fixture.map);
+    if (!record) return Result::failure(record.error());
+    auto bytes = filesystem.open(fixture.map);
+    if (!bytes) return Result::failure(bytes.error());
+    auto parsed = assets::load_map(bytes.value(), assets::source_from(record.value()), assets::object_type_catalog(catalog));
+    if (!parsed) return Result::failure(parsed.error());
+    if (parsed.value().kind != assets::MapKind::space) {
+        return Result::failure(detail::error(diagnostic_codes::fixture, "demo map must be a space map"));
+    }
+    fixture.map_sha256 = core::sha256_hex(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(bytes.value().data()), bytes.value().size()));
+    fixture.seed = seed;
+    fixture.pre_built_base = false;
+    fixture.free_starting_units = false;
+    fixture.victory_condition = sim::tactical::VictoryCondition::none; // MAT-17
+    fixture.placed = std::move(forces);
+    return Result::success(std::move(fixture));
+}
+
+core::Result<sim::tactical::MapBox> map_box_of(
+    const vfs::Vfs& filesystem, const data::Catalog& catalog, const std::string_view map_path) {
+    using Result = core::Result<sim::tactical::MapBox>;
+    const std::string path(map_path);
+    auto record = filesystem.stat(path);
+    if (!record) return Result::failure(record.error());
+    auto bytes = filesystem.open(path);
+    if (!bytes) return Result::failure(bytes.error());
+    auto map = assets::load_map(bytes.value(), assets::source_from(record.value()), assets::object_type_catalog(catalog));
+    if (!map) return Result::failure(map.error());
+    const std::span<const std::uint8_t> octets(
+        reinterpret_cast<const std::uint8_t*>(bytes.value().data()), bytes.value().size());
+    return Result::success(map_box_of_extents(declared_extent_bits(octets, map.value())));
+}
+
 core::Result<StartInputs> read_start_inputs(
     const Fixture& fixture,
     const vfs::Vfs& filesystem,
@@ -319,6 +461,11 @@ core::Result<StartInputs> read_start_inputs(
     StartInputs inputs;
     inputs.map = fixture.map;
     inputs.tables = &tables;
+
+    auto identity = read_data_identity(filesystem);
+    if (!identity) return Result::failure(identity.error());
+    inputs.script_manifest_digest = identity.value().script_manifest_digest;
+    inputs.ai_data_digest = identity.value().ai_data_digest;
 
     auto record = filesystem.stat(fixture.map);
     if (!record) return Result::failure(record.error());
@@ -347,7 +494,15 @@ core::Result<StartInputs> read_start_inputs(
             faction.playable = flag("Is_Playable");
             faction.multiplayer_player = flag("Create_Player_In_Multiplayer_Games");
             faction.neutral = flag("Is_Neutral");
+            faction.can_control_planets = flag("Can_Control_Planets");
             for (const auto& child : definition->root.children) {
+                for (std::size_t index = 0; index < 2; ++index) {
+                    const auto tag = index == 0 ? "Standalone_Space_Maps_Special_Weapon_A" : "Standalone_Space_Maps_Special_Weapon_B";
+                    if (detail::iequals(child.name, tag)) {
+                        data::tag_trace::used(child);
+                        faction.standalone_special_weapons[index] = detail::trim(child.raw_text);
+                    }
+                }
                 if (detail::iequals(child.name, "Basic_AI")) {
                     data::tag_trace::used(child);
                     faction.basic_ai = detail::trim(child.raw_text);
@@ -358,6 +513,27 @@ core::Result<StartInputs> read_start_inputs(
                     faction.space_unit_cap = static_cast<std::uint32_t>(value->raw() / sim::math::Fixed::scale);
                 }
             }
+        }
+        const auto resolved = catalog.resolve(name, data::Category::faction);
+        const auto* mapping = resolved ? resolved.value().value("Multiplayer_Beacon_Type") : nullptr;
+        if (mapping) {
+            data::tag_trace::used(mapping->value);
+            const auto beacon_name = detail::trim(mapping->value.raw_text);
+            auto beacon = catalog.resolve(beacon_name, data::Category::game_object);
+            const auto* lifetime = beacon ? beacon.value().value("Beacon_Lifetime_In_Secs") : nullptr;
+            if (!lifetime) return Result::failure(detail::error(diagnostic_codes::input,
+                "faction beacon has no resolved lifetime: " + beacon_name));
+            data::tag_trace::used(lifetime->value);
+            const auto seconds = detail::number(lifetime->value.raw_text);
+            const auto frames = seconds ? sim::math::multiply(*seconds,
+                sim::math::Fixed::from_raw(sim::tactical::logical_frames_per_second * sim::math::Fixed::scale))
+                : core::Result<sim::math::Fixed>::failure(detail::error(diagnostic_codes::input, "invalid beacon lifetime"));
+            if (!frames || frames.value().raw() < 0 || frames.value().raw()
+                > static_cast<std::int64_t>(sim::tactical::max_ticks) * sim::math::Fixed::scale)
+                return Result::failure(detail::error(diagnostic_codes::input, "invalid faction beacon lifetime"));
+            const auto rounded = (frames.value().raw() + sim::math::Fixed::scale / 2) / sim::math::Fixed::scale;
+            if (rounded == 0) return Result::failure(detail::error(diagnostic_codes::input, "beacon lifetime rounds to zero"));
+            faction.beacon = sim::tactical::TacticalSetup::BeaconRule{0, type_id(beacon_name), static_cast<std::uint32_t>(rounded)};
         }
         inputs.factions.push_back(std::move(faction));
     }

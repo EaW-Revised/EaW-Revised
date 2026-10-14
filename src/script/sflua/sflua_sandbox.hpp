@@ -16,6 +16,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace eawr::script::EAWR_SFLUA_NAMESPACE {
 
@@ -43,6 +44,13 @@ enum class SandboxFault : ::std::uint8_t {
 struct HostHandle {
     ::std::uint32_t kind{};
     ::std::uint64_t id{};
+};
+
+// WGA-471: semantic ownership excludes private interning/identity caches.
+// Counters describe work, never allocator addresses or elapsed-time decisions.
+struct HandleCensus {
+    ::std::vector<HostHandle> handles{};
+    ::std::uint64_t objects{}, edges{}, entries{};
 };
 
 class Sandbox {
@@ -107,6 +115,7 @@ public:
     // resolve methods on handles. The function must be a registered C function.
     void set_handle_index(lua_CFunction index);
     [[nodiscard]] bool to_handle(lua_State* thread, int index, HostHandle& handle) const;
+    [[nodiscard]] HandleCensus handle_census(::std::uint32_t kind) const;
 
     [[nodiscard]] ::std::uint64_t identity_count() const noexcept;
 

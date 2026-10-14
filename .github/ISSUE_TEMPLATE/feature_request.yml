@@ -1,10 +1,16 @@
-name: Feature or behaviour request
-description: Propose a feature, or report where EaW Revised behaves differently from the original game.
+name: Behaviour difference or agreed feature
+description: Report where EaW Revised behaves differently from the original game, or a concrete, agreed change. New ideas go on the Ideas board.
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
+        **A new feature or a wish?** Please post it on the
+        [Ideas board](https://github.com/EaW-Revised/EaW-Revised/discussions/categories/ideas) instead, where
+        others can upvote it ([how ideas are triaged](https://github.com/EaW-Revised/EaW-Revised/blob/main/docs/ideas.md)).
+        Use this form for a difference from the original game, or for a change already agreed in an idea
+        (link it below).
+
         For a difference from the original game, describe what the original does in your own words
         (what you saw while playing, or what the game's data files say). Please do not paste
         decompiler output, binary addresses or original source code.
@@ -14,6 +20,11 @@ body:
       label: What you would like
     validations:
       required: true
+  - type: input
+    id: idea
+    attributes:
+      label: Related idea
+      description: Link to the Ideas board post, if there is one.
   - type: textarea
     id: original
     attributes:

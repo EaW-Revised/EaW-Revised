@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <chrono>
+#include <set>
 #include <limits>
 
 namespace eawr::presentation::godot_backend {
@@ -217,6 +219,23 @@ void DebrisProps::prepare(const units::UnitTables& tables, const tactical::Comba
             props_.push_back(std::move(prop));
         }
     }
+    // Populate from the battle's authored references, before any presentation clock starts.
+    const auto warm_start=std::chrono::steady_clock::now();
+    std::set<std::string> particles_to_warm;
+    for(const auto& prop:props_){
+        if(!prop.fire.empty())particles_to_warm.insert(prop.fire);
+        if(!prop.explosion.empty())particles_to_warm.insert(prop.explosion);
+    }
+    for(const auto& name:particles_to_warm){
+        const auto* type=particle_type(name);
+        if(!type||!type->system)continue;
+        for(const auto& plan:particles::plan_system(*type->system)){
+            if(plan.drawable)static_cast<void>(backend_->prewarm_emitter(plan));
+        }
+    }
+    warm_emitters_=backend_->prewarmed_emitters();
+    warm_texture_bytes_=backend_->prewarmed_texture_bytes();
+    prewarm_ms_+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-warm_start).count();
 }
 
 space::DebrisPose DebrisProps::pose_at(const space::DebrisFlight& flight, const double presented_tick) const {
@@ -255,49 +274,84 @@ void DebrisProps::pose(const std::span<const platform::LiveTickEvents> reached, 
             presented_tick, reached.empty() ? std::nullopt : std::optional<std::uint64_t>(reached.front().tick));
     }
     std::vector<space::DebrisFlights::Ended> ended;
+    // Throws the prop of `found` at `tick`, from where the local player saw its ship in
+    // `snapshot`. Once that snapshot has left the history, what the player saw is unknown and no
+    // prop is thrown; a later frame's visibility never stands in for it (#401 review 1).
+    const auto throw_prop = [&](const auto found, const std::uint64_t tick,
+                                const std::shared_ptr<const tactical::TacticalSnapshot>& snapshot,
+                                const bool self_destruct) {
+        const Prop& prop = props_[found->second];
+        if (!snapshot) {
+            ++unknown_;
+            return;
+        }
+        const auto ship = space::debris_ship_at(snapshot.get(), prop.unit, viewer, reveal);
+        if (!ship) {
+            ++not_seen_;
+            return;
+        }
+        space::DebrisFlight flight;
+        flight.prop = found->second;
+        flight.tick = tick;
+        flight.spawn = space::debris_spawn(ship->position, ship->yaw_degrees, ship->roll_degrees, prop.attachment, ship->pitch_degrees);
+        flight.lifetime = space::debris_lifetime_frames(prop.motion, prop.unit, prop.hardpoint, tick,
+                                                        tactical::logical_frames_per_second);
+        // The flights that ran out before this event's birth end first, in tick order, so a
+        // stall that reaches a destroy, repair and destroy again throws both (#401 review 3).
+        const auto serial = flights_.launch(flight, ended);
+        for (const space::DebrisFlights::Ended& gone : ended) retire(gone);
+        ended.clear();
+        if (!serial) {
+            // A repaired hardpoint destroyed again while its first prop still flies.
+            ++busy_;
+            return;
+        }
+        max_live_ = std::max<std::uint64_t>(max_live_, flights_.flights().size());
+        if (spawn_rows_.size() < row_limit) {
+            spawn_rows_.push_back("{\"unit\": " + std::to_string(prop.unit) + ", \"hardpoint\": "
+                + std::to_string(prop.hardpoint) + ", \"prop\": " + json(prop.type) + ", \"tick\": "
+                + std::to_string(tick) + ", \"self_destruct\": " + (self_destruct ? "true" : "false")
+                + ", \"lifetime_frames\": "
+                + (flight.lifetime ? std::to_string(*flight.lifetime) : std::string("null")) + ", \"position\": ["
+                + number(flight.spawn.position[0]) + ", " + number(flight.spawn.position[1]) + ", "
+                + number(flight.spawn.position[2]) + "]}");
+        }
+    };
     for (const platform::LiveTickEvents& record : reached) {
         for (const tactical::Event& event : record.events) {
-            if (event.kind != tactical::EventKind::hardpoint_destroyed) continue;
-            const auto found = prop_of_.find({event.unit, event.hardpoint});
-            if (found == prop_of_.end()) continue;
-            const Prop& prop = props_[found->second];
-            // The ship at the event's tick, as the local player saw it then. Once that tick's
-            // snapshot has left the history, what the player saw is unknown and no prop is
-            // thrown; a later frame's visibility never stands in for it (#401 review 1).
-            const auto snapshot = snapshot_at(record.tick);
-            if (!snapshot) {
+            if (event.kind == tactical::EventKind::hardpoint_destroyed) {
+                const auto found = prop_of_.find({event.unit, event.hardpoint});
+                if (found != prop_of_.end()) {
+                    const bool killed = std::any_of(record.events.begin(), record.events.end(),
+                        [&](const tactical::Event& candidate) {
+                            return candidate.kind == tactical::EventKind::unit_destroyed
+                                && candidate.unit == event.unit;
+                        });
+                    // BP-37: a hit immediately before the hull kill still throws its prop.
+                    // The kill snapshot omits the ship, so use the same last pose and visibility
+                    // as the self-destruct, without throwing this hardpoint a second time.
+                    const auto snapshot = killed && record.tick > 0
+                        ? snapshot_at(record.tick - 1) : snapshot_at(record.tick);
+                    throw_prop(found, record.tick, snapshot, false);
+                }
+                continue;
+            }
+            if (event.kind != tactical::EventKind::unit_destroyed) continue;
+            // WCC-71 (BP-37): the hardpoints still standing at the kill are destroyed and throw
+            // their props too. The kill tick's snapshot no longer lists the unit, so its ship and
+            // its hardpoints are the tick before's.
+            const auto lower = prop_of_.lower_bound({event.unit, 0U});
+            if (lower == prop_of_.end() || lower->first.first != event.unit) continue;
+            const auto before = record.tick > 0 ? snapshot_at(record.tick - 1) : nullptr;
+            if (!before) {
                 ++unknown_;
                 continue;
             }
-            const auto ship = space::debris_ship_at(snapshot.get(), event.unit, viewer, reveal);
-            if (!ship) {
-                ++not_seen_;
-                continue;
-            }
-            space::DebrisFlight flight;
-            flight.prop = found->second;
-            flight.tick = record.tick;
-            flight.spawn = space::debris_spawn(ship->position, ship->yaw_degrees, ship->roll_degrees, prop.attachment);
-            flight.lifetime = space::debris_lifetime_frames(prop.motion, prop.unit, prop.hardpoint, record.tick,
-                                                            tactical::logical_frames_per_second);
-            // The flights that ran out before this event's birth end first, in tick order, so a
-            // stall that reaches a destroy, repair and destroy again throws both (#401 review 3).
-            const auto serial = flights_.launch(flight, ended);
-            for (const space::DebrisFlights::Ended& gone : ended) retire(gone);
-            ended.clear();
-            if (!serial) {
-                // A repaired hardpoint destroyed again while its first prop still flies.
-                ++busy_;
-                continue;
-            }
-            max_live_ = std::max<std::uint64_t>(max_live_, flights_.flights().size());
-            if (spawn_rows_.size() < row_limit) {
-                spawn_rows_.push_back("{\"unit\": " + std::to_string(prop.unit) + ", \"hardpoint\": "
-                    + std::to_string(prop.hardpoint) + ", \"prop\": " + json(prop.type) + ", \"tick\": "
-                    + std::to_string(record.tick) + ", \"lifetime_frames\": "
-                    + (flight.lifetime ? std::to_string(*flight.lifetime) : std::string("null")) + ", \"position\": ["
-                    + number(flight.spawn.position[0]) + ", " + number(flight.spawn.position[1]) + ", "
-                    + number(flight.spawn.position[2]) + "]}");
+            for (const space::SelfDestructHardpoint& hardpoint :
+                 space::self_destruct_hardpoints(before.get(), event.unit, record.events)) {
+                if (!hardpoint.standing) continue;
+                const auto found = prop_of_.find({event.unit, hardpoint.hardpoint});
+                if (found != prop_of_.end()) throw_prop(found, record.tick, before, true);
             }
         }
     }
@@ -475,6 +529,7 @@ void DebrisProps::release() {
     released_ = true;
     for (const Effect& effect : effects_) static_cast<void>(registry_->release(effect.handle));
     effects_.clear();
+    backend_->release_prewarm();
     flights_.clear();
     pending_.clear();
 }
@@ -497,7 +552,11 @@ void DebrisProps::write_report(std::ostream& output) const {
     output << "  \"breakoff_props\": {\"props\": " << props_.size() << ", \"live\": " << flights_.flights().size()
            << ", \"max_live\": " << max_live_ << ", \"not_seen\": " << not_seen_ << ", \"unknown\": " << unknown_
            << ", \"busy\": " << busy_ << ", \"live_effects\": " << effects_.size()
-           << ", \"clock_start\": " << (clock_start_ ? number(*clock_start_) : std::string("null"));
+           << ", \"clock_start\": " << (clock_start_ ? number(*clock_start_) : std::string("null"))
+           << ", \"prewarm_ms\": " << number(prewarm_ms_)
+           << ", \"warm_emitters\": " << warm_emitters_
+           << ", \"warm_texture_bytes\": " << warm_texture_bytes_
+           << ", \"backend_live_rids\": " << backend_->live_rids();
     rows("prepared", prepared_rows_);
     rows("spawned", spawn_rows_);
     rows("expired", expired_rows_);

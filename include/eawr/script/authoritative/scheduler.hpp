@@ -4,8 +4,9 @@
 // instances serviced once per simulation tick. Each instance owns one Lua
 // state of the authoritative numeric profile; its service reads only its own
 // state and the tick's inputs and writes only its own staging buffer, so the
-// instance service runs partitioned over the executor (ADR-009) and an ordered
-// serial commit publishes commands and events in stable instance order.
+// default instance service runs partitioned over the executor (ADR-009) and an
+// ordered serial commit publishes commands and events in stable instance order.
+// A bounded host can opt into the transactional native action phase below.
 
 #include "eawr/core/result.hpp"
 #include "eawr/script/authoritative/clock_rng.hpp"
@@ -53,17 +54,22 @@ inline constexpr std::string_view missing_api = "EAWR-SCRIPT-0215";
 // A known engine API ran with a documented stand-in result because the host
 // does not model what it reads (#79, the #78 fallback record). The call goes on.
 inline constexpr std::string_view unsupported_api = "EAWR-SCRIPT-0216";
+// A sourced nonfatal Lua API warning. The call and object service continue.
+inline constexpr std::string_view script_warning = "EAWR-SCRIPT-0217";
 } // namespace codes
 
 // Persistence and state hashing (#248, docs/lua-persistence.md). A changed
 // encoding rule needs a new identity.
-inline constexpr std::string_view save_format_identity = "eawr-script-save-v2";
+inline constexpr std::string_view save_format_identity = "eawr-script-save-v4";
+// Galactic clock profile plus the shared proximity and object attachment state.
+inline constexpr std::string_view galactic_save_format_identity = "eawr-script-galactic-save-v2";
+inline constexpr std::string_view query_save_format_identity = "eawr-script-query-save-v1";
 inline constexpr std::string_view state_hash_identity = "eawr-script-state-v1";
 inline constexpr std::string_view authoritative_state_identity = "eawr-authoritative-state-v1";
 
 struct Handle {
     std::uint32_t kind{};
-    std::uint64_t id{}; // below 2^37
+    std::uint64_t id{}; // object identities stay below 2^37; a host kind may pack all 64 bits
     friend bool operator==(const Handle&, const Handle&) = default;
 };
 
@@ -76,6 +82,18 @@ struct Value {
     [[nodiscard]] static Value text(std::string value) { return Value{std::move(value)}; }
 };
 using ValueList = std::vector<Value>;
+
+// WGA-471/472: opt-in semantic release, through the atomic native-effect host.
+struct ManagedHandlePolicy {
+    std::uint32_t kind{};
+    std::string inventory_query{};
+    std::string release_action{};
+    std::uint64_t interval{1}; // completed invocation domain, independent of wall time
+};
+struct ManagedHandleWork {
+    std::uint64_t objects{}, edges{}, entries{}, host_values{}, censuses{}, released{};
+    std::uint64_t nanoseconds{}, service_nanoseconds{}; // observation only, never saved
+};
 
 // Lists nest at most this deep in a host value (a flat list is depth 1): the
 // save format's bound, so submit_event rejects deeper event values.
@@ -155,6 +173,13 @@ struct SessionConfig {
     Quotas quotas{};
     // Module search directories after "./" (L-03), in order, e.g. "Data/Scripts/Library/".
     std::vector<std::string> script_directories;
+    // Mode time is supplied at a barrier, independently of service/RNG ticks.
+    // The GC save identity persists that mode frame; default saves are unchanged.
+    bool galactic_clock{};
+    // Synchronous query sessions receive nondecreasing 1/30-second mode time
+    // independently of invocation count. Roots read the last supplied time (0
+    // before service); timers use this time. Saves have a distinct identity.
+    bool query_clock{};
 };
 
 // The session's pinned effective modules. Logical paths are compared after
@@ -173,9 +198,37 @@ private:
 };
 
 class BindingContext;
+// L-32: the callable stays in the calling instance's Lua registry. Only
+// object/filter identities and the query extent reach the engine binding.
+struct ProximityQuery {
+    Handle object;
+    numeric::LuaNumber extent{};
+    std::optional<Handle> player;
+    std::optional<Handle> type;
+};
+using ProximityCandidates = std::function<std::vector<Handle>(const ProximityQuery&)>;
 // A host binding: arguments in, results out. A failure raises a Lua error with
 // its message; the resume or handler that called it is rolled back.
 using Binding = std::function<core::Result<ValueList>(BindingContext&, const ValueList&)>;
+
+// Opt-in native effects (docs/lua-sandbox.md, immediate effects). A shadow owns
+// every mutable dependency of its actions, including notifications and identity
+// allocation. Clones share only immutable inputs; queries never mutate state.
+class ImmediateEffectState {
+public:
+    virtual ~ImmediateEffectState() = default;
+    [[nodiscard]] virtual std::unique_ptr<ImmediateEffectState> clone() const = 0;
+    [[nodiscard]] virtual core::Result<ValueList> apply(std::string_view action, const ValueList&) = 0;
+    [[nodiscard]] virtual core::Result<ValueList> query(std::string_view name, const ValueList&) const = 0;
+};
+
+class ImmediateEffectHost {
+public:
+    virtual ~ImmediateEffectHost() = default;
+    [[nodiscard]] virtual core::Result<std::unique_ptr<ImmediateEffectState>> capture() const = 0;
+    // Atomic publication: failure leaves the host unchanged. No Lua runs here.
+    [[nodiscard]] virtual core::Result<void> publish(std::unique_ptr<ImmediateEffectState>) = 0;
+};
 
 // What a binding may do during a script call. Everything it stages belongs to
 // the calling instance's current transaction.
@@ -191,6 +244,10 @@ public:
     // instance, so a command's sequence can name what the command creates (#449).
     [[nodiscard]] virtual std::uint64_t command_sequence() const noexcept = 0;
     virtual void issue_command(std::string verb, ValueList arguments) = 0;
+    // Runs against the ordered service's private shadow. A failed action also
+    // discards its partial writes, even if Lua catches the binding error.
+    [[nodiscard]] virtual core::Result<ValueList> apply_immediate(std::string_view action, const ValueList& arguments) = 0;
+    [[nodiscard]] virtual core::Result<ValueList> query_immediate(std::string_view name, const ValueList& arguments) const = 0;
     // Posts an event to an instance (possibly this one), delivered from the next tick.
     virtual core::Result<void> post_event(ScriptEvent event) = 0;
     // Delivers `event` to this instance once `seconds` have elapsed
@@ -198,6 +255,9 @@ public:
     virtual core::Result<void> start_timer(numeric::LuaNumber seconds, ScriptEvent event) = 0;
     // Adds a diagnostic to this instance's service report; the call goes on.
     virtual void report(std::string_view code, std::string message) = 0;
+    virtual core::Result<void> register_proximity(ProximityQuery query) = 0;
+    virtual core::Result<void> cancel_proximity(Handle object) = 0;
+    virtual core::Result<void> service_proximities(Handle object, const ProximityCandidates& candidates) = 0;
 };
 
 enum class InstanceOutcome : std::uint8_t {
@@ -226,6 +286,8 @@ struct ServiceReport {
     std::vector<ScriptDiagnostic> diagnostics; // ordered by instance, then occurrence
     std::vector<std::uint64_t> removed_instances;
     std::vector<InstanceLoad> loads; // every serviced instance, ascending ID
+    ManagedHandleWork managed_handles{};
+    std::vector<Handle> managed_releases{}; // ordered observation, never saved
 };
 
 // Per-service choices of the host. They are inputs of the tick, like its events.
@@ -233,6 +295,23 @@ struct ServiceOptions {
     // Instances whose threads the host paces: they are pumped only by pump
     // events, never after their events. Empty: every instance is pumped.
     std::function<bool(std::uint64_t instance)> host_paced;
+    // GC profile: GetCurrentTime reads this mode frame at 1/30 s.
+    // Absent, it reads the last set_galactic_frame value. Native timers and
+    // random keys retain the scheduler's invocation tick domain.
+    // The query profile requires time_tick on every invocation; its upstream
+    // clock may advance while this scheduler receives no calls. Query timers
+    // use upstream deadlines; elapsed timers precede the invocation's events.
+    std::optional<std::uint64_t> time_tick{};
+};
+
+// SOS-40/44: lifecycle metadata is distinct from the Lua graph. An ended or
+// rejected attachment stays recorded while its object lives, preventing restart.
+struct ObjectScript {
+    Handle object;
+    std::uint64_t generation{};
+    std::uint64_t instance{};
+    std::string module;
+    friend bool operator==(const ObjectScript&, const ObjectScript&) = default;
 };
 
 class ScriptScheduler {
@@ -251,10 +330,27 @@ public:
     // method has gives nil. Before the first instance, like bindings.
     [[nodiscard]] core::Result<void> register_method(std::uint32_t handle_kind, std::string_view method, Binding binding);
 
+    // Opt in at a barrier, before root chunks that use immediate bindings.
+    // Services native script instances in ascending ID order on the owner
+    // thread. The host supplies a small explicit instance bound; world/entity
+    // phases remain partitioned, as does the default scheduler profile.
+    [[nodiscard]] core::Result<void> set_immediate_effect_host(
+        std::shared_ptr<ImmediateEffectHost> host, std::size_t max_instances);
+    [[nodiscard]] core::Result<void> register_managed_handles(ManagedHandlePolicy policy);
+    // Retained host aliases (e.g. bridge commands), supplied at the barrier.
+    void set_managed_handle_roots(std::function<ValueList()> roots);
+    [[nodiscard]] ManagedHandleWork managed_handle_work() const noexcept;
+
     // Creates an instance from a manifest module, runs its chunk with the
     // service budget at the current tick, then seals its globals. Instance IDs
     // are stable and unique; a failing chunk leaves no instance.
     [[nodiscard]] core::Result<void> create_instance(std::uint64_t instance, std::string_view root_module);
+
+    // Ordered structural commit of the host's partitioned attachment proposals.
+    // Fresh initialization events run in the normal partitioned service, with
+    // definitions before main creation and Object assignment (SOS-30/41).
+    [[nodiscard]] core::Result<std::vector<ScriptDiagnostic>> reconcile_objects(std::vector<ObjectScript> objects);
+    [[nodiscard]] std::vector<ObjectScript> object_scripts() const;
 
     // Queues an event from the simulation. Its key tick must be later than the
     // completed tick.
@@ -262,7 +358,8 @@ public:
 
     // Services every instance for the next tick: delivers due events and timers
     // in key order, pumps threads, then commits in instance order. The instance
-    // phase runs partitioned on the executor.
+    // default phase runs partitioned on the executor; an immediate-effect host
+    // instead runs its bounded script set in the ordered native action phase.
     [[nodiscard]] core::Result<ServiceReport> service(
         const sim::PartitionExecutor& executor, const ServiceOptions& options = {});
 
@@ -272,6 +369,11 @@ public:
     [[nodiscard]] core::Result<std::optional<Value>> read_global(std::uint64_t instance, std::string_view name);
 
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
+    [[nodiscard]] bool uses_galactic_clock() const noexcept;
+    [[nodiscard]] TickDuration tick_duration() const noexcept;
+    [[nodiscard]] std::uint64_t galactic_frame() const noexcept;
+    // Before engine preparation/attachment so root chunks see mode time too.
+    [[nodiscard]] core::Result<void> set_galactic_frame(std::uint64_t frame);
     [[nodiscard]] std::vector<std::uint64_t> instances() const;
     // The thread slots of an instance at the tick barrier, in slot order: true for a live
     // thread (PL-42 reads this, #449). Reads only.
@@ -289,6 +391,9 @@ public:
     // instance's host state and reachable Lua graph. Reads only; runs
     // serially. Fails with EAWR-SCRIPT-0212 for a state it cannot represent.
     [[nodiscard]] core::Result<std::string> save();
+    // Independent sandbox graphs are encoded on disjoint worker slots, then
+    // appended in instance order; bytes and refusal order match save().
+    [[nodiscard]] core::Result<std::string> save(const sim::PartitionExecutor& executor);
     // Replaces the script state with a save of this session (same config,
     // manifest and bindings). Validates everything before publishing; on any
     // failure (EAWR-SCRIPT-0213) the scheduler is unchanged. No script code
@@ -297,6 +402,11 @@ public:
     // Lowercase hex SHA-256 of the versioned script state (state_hash_identity
     // over the canonical save): every value that can affect future ticks.
     [[nodiscard]] core::Result<std::string> state_hash();
+    [[nodiscard]] core::Result<std::string> state_hash(const sim::PartitionExecutor& executor);
+    // Per-tick actual state digest: cache unchanged sandbox graphs, compose
+    // current scheduler metadata. The full archive/state_hash stays available.
+    [[nodiscard]] core::Result<std::string> sync_hash(bool verify_graphs = false);
+    [[nodiscard]] std::uint64_t sync_graph_encodes() const noexcept;
 
 private:
     struct Impl;

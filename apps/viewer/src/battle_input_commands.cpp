@@ -36,6 +36,10 @@ namespace {
 bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, const SpacePopulation& population,
                         SpaceEnvironment& space) {
     if (event.is_null()) return false;
+    // Capture before refreshing/picking; decoding an input may span simulation
+    // frames. LAN reserves this epoch until its intent reaches the core.
+    const auto input_epoch = live.input_epoch();
+    if (input_epoch) live.note_native_input(input_epoch.epoch());
     if (const auto* motion = Object::cast_to<InputEventMouseMotion>(event.ptr())) {
         pointer_ = {static_cast<float>(motion->get_position().x), static_cast<float>(motion->get_position().y)};
         if (left_) {
@@ -62,7 +66,8 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
         const ui::Modifiers modifiers = modifiers_of(*button);
         if (index == MOUSE_BUTTON_LEFT) {
             if (button->is_pressed()) {
-                if (button->is_double_click()) {
+                if (button->is_double_click() && !beacon_targeting_
+                    && (!live.order_input() || live.order_input()->mode() != ui::OrderMode::waypoint)) {
                     // FoC: the double click selects the type on screen and its release is spent.
                     // #550 (WU-23a, WSU-38): an own squadron's icon takes it before the world under
                     // it and selects every own squadron with a craft of its leader's type on screen.
@@ -122,9 +127,48 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
 }
 
 void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifiers modifiers, LiveSessionView& live) {
+    if (beacon_targeting_) {
+        left_.reset();
+        const auto pick = ray(at[0], at[1]);
+        const auto point = pick ? ui::battle_plane_point(*pick) : std::nullopt;
+        if (!point) return;
+        const auto x = scene::fixed_from_binary32((*point)[0]);
+        const auto y = scene::fixed_from_binary32((*point)[1]);
+        if (!x || !y) return;
+        beacon_targeting_ = false;
+        if (live.place_beacon({x.value(), y.value(), {}})) {
+            ++orders_;
+            note("beacon placement tick " + std::to_string(live.order_tick()));
+        } else { ++refused_; negative_feedback(); }
+        return;
+    }
     if (ignore_left_release_) {
         ignore_left_release_ = false;
         left_.reset();
+        return;
+    }
+    // HCB-57: waypoint placement owns a left release before selection gestures.
+    if (auto* input = live.order_input(); input && input->mode() == ui::OrderMode::waypoint && !placing_ && !ability_target_) {
+        left_.reset();
+        const auto pick_ray = ray(at[0], at[1]);
+        const auto point = pick_ray ? ui::battle_plane_point(*pick_ray) : std::nullopt;
+        if (!point) return;
+        const auto x = scene::fixed_from_binary32((*point)[0]);
+        const auto y = scene::fixed_from_binary32((*point)[1]);
+        if (!x || !y) return;
+        const sim::math::Vec3 destination{x.value(), y.value(), {}};
+        input->set_selection(selection_.units());
+        const auto issued = input->world_command(ui::WorldPick{destination}, ui::CommandOrigin::world_click,
+            ui::OrderModifiers{modifiers.ctrl, modifiers.alt, false});
+        if (issued && issued.value()) {
+            ++orders_;
+            note("waypoint placement tick " + std::to_string(live.order_tick()));
+            if (move_feedback_) move_feedback_(destination, ui::OrderMode::move, false, live.order_tick());
+            acknowledge(Acknowledgement::Kind::move, sim::invalid_entity_id, sim::tactical::attack_hull, destination);
+        } else if (!issued) {
+            ++refused_;
+            note("refused: " + issued.error().message);
+        }
         return;
     }
     // WR-15: the original press belonged to the pool's GUI, so a drag drop needs no world press.
@@ -166,18 +210,47 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
         return;
     }
     const auto pick_ray = ray(at[0], at[1]);
-    auto picked = pick_ray ? ui::pick_unit(*pick_ray, units_) : std::nullopt;
+    const auto picked_index = pick_ray ? ui::pick_index(*pick_ray, units_) : std::nullopt;
+    auto picked = picked_index ? std::optional(special_target_source_
+        ? ui::special_weapon_pick_target(units_[*picked_index].entity, units_[*picked_index].part)
+        : units_[*picked_index].entity) : std::nullopt;
     // WU-23: a squadron icon takes the click before the world under it; WU-41: a hardpoint reticle
     // replaces the picked object and is tested before the icon.
     if (const auto reticle = world_ui_->reticle_at(at)) {
         picked = reticle->entity;
     } else if (const auto icon = world_ui_->icon_at(at)) {
-        picked = *icon;
+        // MC-11: the icon is not a special-weapon target, even over a valid world pick.
+        picked = special_target_source_
+            ? ui::special_weapon_pick_target(*icon, sim::invalid_entity_id, true) : *icon;
+    }
+    if (special_target_source_) {
+        const auto target = picked.value_or(sim::invalid_entity_id);
+        if (!special_target_valid(target, live)) {
+            ++special_invalid_;
+            negative_feedback();
+            note("special weapon: invalid target");
+            return;
+        }
+        const auto source = *special_target_source_;
+        if (live.special_fire(source, target)) {
+            const auto* instance = live.snapshot_index().instance(source);
+            if (instance && !instance->planetary_weapon) {
+                Acknowledgement ack;
+                ack.cue = audio::CommandCue::attack;
+                acknowledgements_.push_back(std::move(ack));
+            }
+            special_target_source_.reset();
+            ++special_fires_;
+            ++orders_;
+            note("special fire " + std::to_string(source) + " target " + std::to_string(target));
+        } else negative_feedback();
+        return;
     }
     if (ability_target_) {
         const auto kind = sim::tactical::ability_kind(ui::ability_name(ability_target_->ability));
         // AB-09 / WAD-38: area abilities accept a world point, including empty space.
-        if (kind == sim::tactical::AbilityKind::weaken_enemy || kind == sim::tactical::AbilityKind::barrage) {
+        if (kind == sim::tactical::AbilityKind::weaken_enemy || kind == sim::tactical::AbilityKind::fow_reveal_ping || kind == sim::tactical::AbilityKind::barrage
+            || kind == sim::tactical::AbilityKind::buzz_droids || kind == sim::tactical::AbilityKind::corrupt_systems) {
             const auto point = ability_point(at, live);
             if (!point) {
                 negative_feedback();
@@ -250,6 +323,8 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
 void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifiers modifiers, LiveSessionView& live) {
     const auto start = right_start_;
     right_start_.reset();
+    if (beacon_targeting_) { beacon_targeting_ = false; return; }
+    if (special_target_source_) { cancel_special_target("right click"); return; }
     if (placing_) {
         // #530 PU-68: a right click cancels the placement.
         cancel_placement(live);
@@ -311,13 +386,15 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
         return;
     }
     const bool attack_moving = mode == ui::OrderMode::attack_move || (mode == ui::OrderMode::none && modifiers.ctrl && !modifiers.alt);
-    const auto click = guarding || attack_moving ? ui::RightClick::order : ui::right_click(mode, over, over_selected);
+    // HCB-57: only Waypoint needs an Alt override; OR-01 ordinary point clicks already order.
+    const bool queueing = modifiers.alt && mode == ui::OrderMode::waypoint;
+    const auto click = guarding || attack_moving || queueing ? ui::RightClick::order : ui::right_click(mode, over, over_selected);
     switch (click) {
     case ui::RightClick::nothing:
         return;
     case ui::RightClick::disarm:
         input->cancel_mode();
-        note("attack mode cancelled");
+        note(mode == ui::OrderMode::waypoint ? "waypoint mode cancelled" : "attack mode cancelled");
         return;
     case ui::RightClick::order:
         break;
@@ -340,7 +417,7 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
         char where[96];
         std::snprintf(where, sizeof(where), "%.9g,%.9g,0", static_cast<double>((*point)[0]), static_cast<double>((*point)[1]));
         // Move mode moves even onto an enemy (O-3).
-        const bool attacked = pick.hostile && mode != ui::OrderMode::move;
+        const bool attacked = pick.hostile && mode != ui::OrderMode::move && mode != ui::OrderMode::waypoint;
         std::string what = "move @" + std::string(where);
         if (attacked) {
             what = "attack " + std::to_string(pick.entity);
@@ -406,6 +483,25 @@ bool BattleInput::local_order_selection(const LiveSessionView& live) const {
 bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, LiveSessionView& live,
                       SpaceEnvironment& space) {
     ui::OrderInput* input = live.order_input();
+    // MP-06: requests enter the shared future-tick options stream, never local pacing.
+    // The keyboard binding is a remake control; MP-U1 allows either human to request.
+    if (live.multiplayer() && !modifiers.ctrl && !modifiers.alt && !modifiers.shift
+        && (code == static_cast<std::int64_t>(KEY_EQUAL) || code == static_cast<std::int64_t>(KEY_MINUS))) {
+        const auto step = live.lan_view().options.tactical_speed;
+        const auto requested = code == static_cast<std::int64_t>(KEY_EQUAL)
+            ? std::min<std::uint32_t>(step + 1, static_cast<std::uint32_t>(ui::speed_step_rates.size() - 1))
+            : step == 0 ? 0 : step - 1;
+        if (requested != step) static_cast<void>(live.request_speed(requested));
+        return true;
+    }
+    if (beacon_targeting_ && code == static_cast<std::int64_t>(KEY_ESCAPE)) {
+        beacon_targeting_ = false;
+        return true;
+    }
+    if (special_target_source_ && code == static_cast<std::int64_t>(KEY_ESCAPE)) {
+        cancel_special_target("escape");
+        return true;
+    }
     // #561 (AB-11): Esc cancels a waiting targeted ability.
     if (ability_target_ && code == static_cast<std::int64_t>(KEY_ESCAPE)) {
         cancel_ability_target("escape");
@@ -527,6 +623,11 @@ bool BattleInput::command_click(const ui::OrderMode mode, const bool stop, LiveS
                                 const ui::CommandOrigin origin) {
     auto* input = live.order_input();
     if (!input) return false;
+    beacon_targeting_ = false;
+    // OR-01: an ordinary command owns the next gesture, including Stop.
+    cancel_special_target("ordinary order");
+    cancel_ability_target("ordinary order");
+    if (placing_) cancel_placement(live);
     audio::CommandCue cue = audio::CommandCue::none;
     if (stop) {
         input->set_selection(selection_.units());
@@ -546,6 +647,7 @@ bool BattleInput::command_click(const ui::OrderMode mode, const bool stop, LiveS
         case ui::OrderMode::attack_move: cue = audio::CommandCue::attack_move; break;
         case ui::OrderMode::guard: cue = audio::CommandCue::guard; break;
         case ui::OrderMode::move: cue = audio::CommandCue::move; break;
+        case ui::OrderMode::waypoint: cue = audio::CommandCue::waypoint; break;
         case ui::OrderMode::none: break;
         }
     }

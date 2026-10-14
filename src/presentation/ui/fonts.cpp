@@ -154,4 +154,9 @@ TextCell gdi_text_cell(const FontCache& cache, const ResolvedFont& resolved, con
             static_cast<std::int32_t>(std::lround(cached->names.win_descent * pixels_per_unit))};
 }
 
+double centred_cell_baseline(const double box_top, const double box_height, const TextCell cell) noexcept {
+    const double block = static_cast<double>(cell.ascent) + static_cast<double>(cell.descent);
+    return std::round(box_top + (box_height - block) / 2.0 + static_cast<double>(cell.ascent));
+}
+
 } // namespace eawr::presentation::ui

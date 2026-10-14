@@ -27,12 +27,12 @@ inline constexpr std::string_view fog_looks = "EAWR-FOG-0101"; // a GameConstant
 
 // FW-01: the gameconstants.xml values the space fog plane reads, with FoC's values as defaults.
 struct FogLooks {
-    std::array<std::uint8_t, 4> colour{255, 255, 255, 255};  // SpaceFOWColor (r, g, b, a)
-    double height{-80.0};                                   // SpaceFOWHeight (source Z)
-    double cell_size{100.0};                                // DesiredSpaceFOWCellSize
-    double regrow_seconds{6.0};                             // SpaceFOWRegrowTime
+    std::array<std::uint8_t, 4> colour{255, 255, 255, 255};  // xml-fallback: SpaceFOWColor (r, g, b, a); load: src/presentation/space/fog_field.cpp#fog_looks
+    double height{-80.0};                                   // xml-fallback: SpaceFOWHeight (source Z); load: src/presentation/space/fog_field.cpp#fog_looks
+    double cell_size{100.0};                                // xml-fallback: DesiredSpaceFOWCellSize; load: src/presentation/space/fog_field.cpp#fog_looks
+    double regrow_seconds{6.0};                             // xml-fallback: SpaceFOWRegrowTime; load: src/presentation/space/fog_field.cpp#fog_looks
     // FW-22: SpaceReinforceFOWColor, the colour of the blocked-area overlay (#563).
-    std::array<std::uint8_t, 4> reinforce_colour{255, 0, 0, 254};
+    std::array<std::uint8_t, 4> reinforce_colour{255, 0, 0, 254}; // xml-fallback: SpaceReinforceFOWColor; load: src/presentation/space/fog_field.cpp#fog_looks
     bool reinforce_only_while_dragging{}; // SpaceReinforceFeedbackOnlyWhileDragging (FW-23)
     // Values that were absent or unreadable; their defaults are used.
     std::vector<core::Diagnostic> diagnostics;

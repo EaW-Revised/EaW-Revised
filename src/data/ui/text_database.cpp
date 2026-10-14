@@ -194,8 +194,26 @@ const TextEntry* TextDatabase::find(const std::string_view key) const noexcept {
     return nullptr;
 }
 
+namespace {
+
+// The retail executable registers these two defaults when the database lacks the key (observed in
+// the retail capture and the debug build); the text database does not ship them.
+struct BuiltinText final {
+    std::string_view key;
+    std::u16string_view value;
+};
+constexpr std::array<BuiltinText, 2> builtin_texts{{
+    {"TEXT_MODS_OPTIONS", u"Mods"},
+    {"TEXT_SELECT_MOD_TITLE", u"Select Mod"},
+}};
+
+} // namespace
+
 std::u16string TextLookup::text(const std::string_view key) {
     if (const auto* entry = database_->find(key)) return entry->value;
+    for (const BuiltinText& builtin : builtin_texts) {
+        if (builtin.key == key) return std::u16string(builtin.value);
+    }
     if (missing_.insert(std::string(key)).second) {
         diagnostics_.push_back(warning(
             database_->source, diagnostic_codes::text_missing_key,

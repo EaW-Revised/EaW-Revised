@@ -5,6 +5,7 @@
 #include "render_profile_viewport.hpp"
 
 #include "family_textures.hpp"
+#include "effect_clock_assets.hpp"
 #include "space_populate_internal.hpp"
 #include "shield_shell.hpp"
 
@@ -93,6 +94,68 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
 
 bool SpacePopulation::live_ship_drawn(const std::size_t ship) const noexcept {
     return ship < live_decisions_.size() && live_decisions_[ship].has_value();
+}
+
+bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span<const LivePose> poses,
+    const std::span<const LiveClipPose> clips) {
+    const auto rotation = [](const sim::math::Fixed degrees, const bool pitch) {
+        auto matrix = animation::Player::identity_matrix();
+        const auto radians = static_cast<float>(degrees.raw()) / static_cast<float>(sim::math::Fixed::scale)
+            * 0.017453292519943295F;
+        const auto c = std::cos(radians), s = std::sin(radians);
+        if (pitch) { matrix[0] = c; matrix[2] = -s; matrix[8] = s; matrix[10] = c; }
+        else { matrix[0] = c; matrix[1] = s; matrix[4] = -s; matrix[5] = c; }
+        return matrix;
+    };
+    for (const auto& request : poses) {
+        if (!request.turret || request.ship >= turret_bindings_.size() || !turret_bindings_[request.ship]) continue;
+        auto& binding = *turret_bindings_[request.ship];
+        if (request.ship >= contact_bones_.size() || contact_bones_[request.ship].size() != binding.pose.bones.size()) {
+            failure_ = "ordinary turret pose storage does not match the bound skeleton";
+            return false;
+        }
+        // UA-05: the validated sim profile owns XY-only and usable-barrel admission.
+        const bool barrel = request.turret->barrel && binding.barrel.has_value();
+        if (request.turret->barrel && !binding.barrel) {
+            failure_ = "ordinary turret profile requires a missing barrel bone";
+            return false;
+        }
+        const bool active_clip = std::any_of(clips.begin(), clips.end(),
+            [&](const LiveClipPose& clip) { return clip.ship == request.ship; });
+        if (active_clip) {
+            // The live clip already sampled this same model skeleton; preserve its local transforms.
+            std::copy(contact_bones_[request.ship].begin(), contact_bones_[request.ship].end(), binding.pose.bones.begin());
+        } else if (binding.idle) {
+            const auto& idle = idle_placements_[*binding.idle];
+            auto sampled = animation::sample_idle(*binding.player, idle.playback, idle.start_frame,
+                static_cast<std::uint64_t>(animation_sample_.value_or(0U)) + options_.idle_offset,
+                particles::map_owner_ticks_per_second, binding.pose);
+            if (!sampled) { failure_ = core::format_diagnostic(sampled.error()); return false; }
+        } else {
+            std::copy(binding.bind_bones.begin(), binding.bind_bones.end(), binding.pose.bones.begin());
+        }
+        auto turret = rotation(request.turret->yaw, false);
+        if (!barrel && !request.turret->xy_only)
+            turret = animation::Player::multiply(turret, rotation(request.turret->pitch, true));
+        if (!binding.player->apply_bone_transform(binding.pose, binding.turret, turret)) return false;
+        if (barrel && !request.turret->xy_only
+            && !binding.player->apply_bone_transform(binding.pose, *binding.barrel, rotation(request.turret->pitch, true))) return false;
+        // UA-05: storage and bone bindings are prepared once at composition, then reused each frame.
+        std::copy(binding.pose.bones.begin(), binding.pose.bones.end(), contact_bones_[request.ship].begin());
+        for (auto& bone : binding.pose.bones) {
+            if (bone.visible) continue;
+            for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset})
+                for (std::size_t index = 0; index < 12; ++index) (*matrix)[index] = 0.0F;
+        }
+        for (const auto index : piece_index_.pieces(request.ship)) {
+            const auto& piece = pieces_[index];
+            if (piece.gate || piece.shield || piece.cloak) continue;
+            if (auto posed = renderer.set_skin_pose(piece.instance.entity_id, piece.instance.asset_id, binding.pose.bones); !posed) {
+                failure_ = core::format_diagnostic(posed.error()); return false;
+            }
+        }
+    }
+    return true;
 }
 
 const animation::Player* SpacePopulation::live_clip(const std::size_t ship, const bool alternate) const noexcept {
@@ -185,6 +248,9 @@ std::optional<SpacePopulation::LiveBoneFrame> SpacePopulation::live_bone_frame(
 bool SpacePopulation::pose_live(const std::span<const LivePose> poses, const particles::StepExecutor* workers) {
     std::fill(live_shown_.begin(), live_shown_.end(), false);
     std::fill(live_defend_.begin(), live_defend_.end(), false);
+    std::fill(live_stealth_.begin(), live_stealth_.end(), false);
+    std::fill(live_blast_charging_.begin(), live_blast_charging_.end(), false);
+    std::fill(live_blast_charged_.begin(), live_blast_charged_.end(), false);
     std::fill(live_transforms_.begin(), live_transforms_.end(), std::nullopt);
     for (const LivePose& pose : poses) {
         if (!live_ship_drawn(pose.ship) || live_retired_[pose.ship]) continue;
@@ -202,6 +268,9 @@ bool SpacePopulation::pose_live(const std::span<const LivePose> poses, const par
         contact_live_ships_.insert_or_assign(pose.entity, pose.ship);
         live_shown_[pose.ship] = true;
         live_defend_[pose.ship] = pose.defend_active;
+        live_stealth_[pose.ship] = pose.stealth_active;
+        live_blast_charging_[pose.ship] = pose.blast_charging;
+        live_blast_charged_[pose.ship] = pose.blast_charged;
         if (pose.construction_hull) {
             live_alternates_[pose.ship] = presentation::ui::construction_alternate(*pose.construction_hull, live_alternate_counts_[pose.ship]);
         }
@@ -303,23 +372,28 @@ bool SpacePopulation::remember_fog_model(GodotRenderer& renderer, const sim::Ent
             }
         }
     }
+    bool released_old = false;
     for (const auto& old : saved) {
         if (reused.contains(old.instance.entity_id)) continue;
         renderer.forget_instance_pose(old.instance.entity_id);
         static_cast<void>(renderer.release(old.instance.asset_id));
+        released_old = true;
     }
+    if (released_old) prune_effect_clock_assets(effect_clock_assets_, renderer.resources());
     saved = std::move(next);
     return true;
 }
 
 void SpacePopulation::draw_fog_models(GodotRenderer& renderer, const space::FogGhosts& memory,
                                       std::vector<sim::RenderInstance>& output) {
+    bool released = false;
     for (auto entry = fog_models_.begin(); entry != fog_models_.end();) {
         const auto state = memory.states().find(entry->first);
         if (state == memory.states().end()) {
             for (const auto& piece : entry->second) {
                 renderer.forget_instance_pose(piece.instance.entity_id);
                 static_cast<void>(renderer.release(piece.instance.asset_id));
+                released = true;
             }
             entry = fog_models_.erase(entry);
         } else {
@@ -329,6 +403,7 @@ void SpacePopulation::draw_fog_models(GodotRenderer& renderer, const space::FogG
             ++entry;
         }
     }
+    if (released) prune_effect_clock_assets(effect_clock_assets_, renderer.resources());
 }
 
 std::size_t SpacePopulation::fog_model_pieces(const sim::EntityId entity) const noexcept {
@@ -353,7 +428,7 @@ void SpacePopulation::retire_live_ship(GodotRenderer& renderer, const std::size_
     std::set<sim::EntityId> entities;
     for (const std::size_t index : piece_index_.pieces(ship)) {
         const GatedInstance& piece = pieces_[index];
-        renderer.clear_skin_pose(piece.instance.entity_id);
+        renderer.forget_instance_pose(piece.instance.entity_id);
         dropped.insert(piece.instance.asset_id);
         entities.insert(piece.instance.entity_id);
     }
@@ -365,7 +440,7 @@ void SpacePopulation::retire_live_ship(GodotRenderer& renderer, const std::size_
     if (live_alternate_clips_[ship]) clips_[*live_alternate_clips_[ship]].reset();
     live_alternate_clips_[ship].reset();
     live_shown_[ship] = false;
-    // Uploads are shared by model, surface and colour: another clone of the same type keeps them.
+    // Uploads are shared by model and surface: another clone of the same type keeps them.
     for (const GatedInstance& piece : pieces_) dropped.erase(piece.instance.asset_id);
     for (const sim::AssetId asset : dropped) {
         static_cast<void>(renderer.release(asset));
@@ -373,6 +448,7 @@ void SpacePopulation::retire_live_ship(GodotRenderer& renderer, const std::size_
         passes_.erase(asset);
         ++live_released_assets_;
     }
+    if (!dropped.empty()) prune_effect_clock_assets(effect_clock_assets_, renderer.resources());
     rebuild_piece_index();
     refresh_instances();
 }

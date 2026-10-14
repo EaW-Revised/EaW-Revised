@@ -92,6 +92,8 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
         single.source = model.source;
         single.bones = model.bones;
         assets::Mesh mesh = source_mesh;
+        // BP-74: charge-state meshes are uploaded hidden and selected by the live phase gate.
+        if (ieq(mesh.name, "buildup") || ieq(mesh.name, "charged")) mesh.visible = true;
         mesh.submeshes = {source_mesh.submeshes[submesh_index]};
         single.meshes.push_back(std::move(mesh));
         const assets::Submesh& submesh = single.meshes.front().submeshes.front();
@@ -116,7 +118,7 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
         for (const assets::MaterialParameter& parameter : submesh.parameters) {
             material.bindings.push_back({parameter.name, parameter.value});
         }
-        if (material.program == "MeshAdditiveVColor.fx") {
+        if (legacy::reads_effect_time(material)) {
             material.bindings.push_back({"eawr_effect_time", 0.0F});
         }
         if (colour && scene::colorizes(submesh.shader)) {
@@ -147,10 +149,9 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
         SurfaceUpload upload;
         upload.renderer_asset = next_asset++;
         uploaded_.push_back(upload.renderer_asset);
-        if (material.program == "MeshAdditiveVColor.fx") effect_clock_assets_.push_back(upload.renderer_asset);
+        if (legacy::reads_effect_time(material)) effect_clock_assets_.push_back(upload.renderer_asset);
         passes_.emplace(upload.renderer_asset, material.pass);
         ++surfaces_uploaded_;
-        if (colour) ++team_colour_variants_;
         const std::int32_t bone = single.meshes.front().bone;
         if (!single.bones.empty() && (bone >= 0 || !submesh.skin_bones.empty())) {
             // Draw the bind pose until this placement's idle clip is sampled.
@@ -178,7 +179,7 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
 std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_shell(
     GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
     sim::AssetId& next_asset, const assets::Model& model, const std::uint32_t mesh_index,
-    const std::uint32_t submesh_index, std::string& status) {
+    const std::uint32_t submesh_index, std::string& status, const bool neutral_distortion) {
         assets::Model single;
         single.source = model.source;
         single.bones = model.bones;
@@ -187,7 +188,7 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_shell(
         mesh.visible = true;
         single.meshes.push_back(std::move(mesh));
         const assets::Submesh& submesh = single.meshes.front().submeshes.front();
-        const MaterialDescription material = meshshield_material(submesh);
+        const MaterialDescription material = meshshield_material(submesh, neutral_distortion);
         std::optional<assets::Texture> base;
         std::vector<GodotRenderer::BindingTexture> extra;
         for (const std::string_view binding : {std::string_view("BaseTexture"), std::string_view("WaveTexture"),
@@ -199,6 +200,19 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_shell(
             const auto* name = found == nullptr ? nullptr : std::get_if<std::string>(&found->value);
             const std::string path = name == nullptr ? std::string{}
                                                      : probe(cache, "data/art/textures/", *name, texture_suffixes);
+            if (path.empty() && neutral_distortion && binding == "DistortionTexture") {
+                // WST-12: the stock cloak names a distortion texture the FoC data does not ship. A
+                // black texel offsets nothing (the shader adds 0.25 x its rg); what FoC binds for a
+                // missing texture is unverified.
+                assets::Texture neutral;
+                neutral.width = 1;
+                neutral.height = 1;
+                neutral.mips.push_back({1, 1, 4, std::vector<std::byte>{std::byte{0}, std::byte{0}, std::byte{0}, std::byte{255}}});
+                extra.push_back({std::string(binding), std::move(neutral)});
+                status = "composed; " + std::string(binding) + " " + (name == nullptr ? std::string("missing") : *name + " unresolved")
+                    + ": no distortion";
+                continue;
+            }
             if (path.empty()) {
                 status = std::string(binding) + " " + (name == nullptr ? std::string("missing") : *name + " unresolved");
                 return std::nullopt;

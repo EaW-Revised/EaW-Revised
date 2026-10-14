@@ -101,17 +101,19 @@ void set_path_search_probe(PathSearchProbe* const probe) noexcept {
 core::Result<MotionState> plan_space_move(const MotionTable& table, const MotionProfile& limits,
     const Footprint& footprint, const CollisionWorld& world, const EntityId entity, const std::uint64_t tick,
     const Vec3 position, const Fixed yaw, const Fixed speed, const Vec3 target, PathSearchStats* const stats,
-    const PathSearchMode mode, const bool through_hazards, const std::optional<Vec3> filter_destination) {
+    const PathSearchMode mode, const bool through_hazards, const std::optional<Vec3> filter_destination, bool* const exhausted) {
     Search search(table, limits, footprint, world, entity, tick, position, yaw, speed, target, mode,
         search_scratch(), through_hazards, filter_destination);
     static_cast<void>(run_reported(search, unlimited, PathSearchPart::whole, stats));
+    if (exhausted != nullptr) *exhausted = search.exhausted();
     return search.outcome();
 }
 
 core::Result<std::optional<MotionState>> plan_space_move_within(const MotionTable& table, const MotionProfile& limits,
     const Footprint& footprint, const CollisionWorld& world, const EntityId entity, const std::uint64_t tick,
     const Vec3 position, const Fixed yaw, const Fixed speed, const Vec3 target, const std::uint64_t budget,
-    PathSearchStats* const stats, const bool through_hazards, const std::optional<Vec3> filter_destination) {
+    PathSearchStats* const stats, const bool through_hazards, const std::optional<Vec3> filter_destination, bool* const exhausted) {
+    if (exhausted != nullptr) *exhausted = false;
     Search search(
         table, limits, footprint, world, entity, tick, position, yaw, speed, target, PathSearchMode::bounded,
         search_scratch(), through_hazards, filter_destination);
@@ -119,6 +121,7 @@ core::Result<std::optional<MotionState>> plan_space_move_within(const MotionTabl
         return core::Result<std::optional<MotionState>>::success(std::nullopt);
     }
     const auto& outcome = search.outcome();
+    if (exhausted != nullptr) *exhausted = search.exhausted();
     if (!outcome) return core::Result<std::optional<MotionState>>::failure(outcome.error());
     return core::Result<std::optional<MotionState>>::success(std::optional<MotionState>(outcome.value()));
 }

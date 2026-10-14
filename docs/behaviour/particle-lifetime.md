@@ -5,6 +5,19 @@
 | PL-01 | Raw legacy decoding reads a scalar age sampler separately from lifetime and variation metadata. Ordinary group post-load allocation replaces its bounds with the sorted endpoints `max(0, A - A * variation)` and `A`. It preserves sampler mode and the saved constant default. Births therefore use that default in constant mode and the rebuilt range otherwise. Raw saved bounds alone do not describe the ordinary loaded range-mode effect. | Debug build: raw decode, group post-load allocation, scalar bounds setter and particle birth sampling. Authored damage smoke data; particle walk PS-47. |
 | PL-02 | Independent continuous emitters allocate the ceiling of rate times maximum age, bounded to 5003 particles per emitter before parent or every-vertex multiplicity. Automatic production pools sum independent emitter bounds rather than applying that ceiling once to the whole system. | Debug build: emitter allocation uses the continuous rate and maximum age, clamps the result, then applies parent and vertex multiplicities. |
 
+The Particle Editor's "minimum lifetime" percentage (Focumentation: Particle Editor,
+checked against the debug build) is the same rule seen from the editor: the minimum is
+one minus the variation, so every particle lives from A(1 - v) up to A and the editor's
+2 s with 50 % example gives 1 to 2 s. Of the 245 range-mode emitters in effective FoC
+particle files with a nonzero variation, 217 store exactly that range A(1 - v) to A in
+the file, which is what the editor writes; the other 28 (including the damage smoke
+below) store the wider A(1 - v) to A(1 + v), and PL-01's post-load rebuild is why their
+loaded range also stops at A. The editor's own label-to-field conversion was not read
+(the community tool was not consulted), but the 217 files make "minimum % = 1 - v"
+the working reading; stock variations all lie between 0 and 1. The wiki's further claim that the topmost
+emitter fixes an effect's total time has no counterpart in the engine's group update
+(particle walk PS-50).
+
 The hardpoint damage smoke effect authors lifetime metadata of 8 seconds and
 variation of 0.82, with a raw saved age range of 1.44 to 14.56 seconds. Its
 continuous rate is 5 particles per second, its particles use world space, and

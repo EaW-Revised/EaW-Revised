@@ -5,6 +5,7 @@
 
 #include "diagnostic_buffer.hpp"
 #include "fog_adapter.hpp"
+#include "gpu_memory_ledger.hpp"
 #include "instance_reconciliation.hpp"
 #include "legacy/registry.hpp"
 #include "missing_asset_waits.hpp"
@@ -16,6 +17,8 @@
 #include "submission_plan.hpp"
 #include "upload_identity.hpp"
 #include "upload_identity_pool.hpp"
+#include "texture_budget.hpp"
+#include "resource_residency.hpp"
 #include "upload_winding.hpp"
 
 #include <godot_cpp/classes/global_constants.hpp>
@@ -104,6 +107,11 @@ public:
     };
 
     struct Resource final {
+        struct Recipe final {
+            assets::Model model;
+            std::shared_ptr<const assets::Texture> texture;
+            std::vector<std::pair<std::string, std::shared_ptr<const assets::Texture>>> bindings;
+        };
         RID mesh;
         RID texture;
         // Per-binding textures (upload with BindingTexture entries), by name.
@@ -112,7 +120,6 @@ public:
         std::shared_ptr<const CachedShader> shared_shader;
         RID material;
         RenderPass pass{RenderPass::opaque};
-        std::optional<std::int32_t> priority{};
         std::size_t bone_count{};
         std::vector<std::uint8_t> skin_used_bones;
         bool skinned{};
@@ -130,6 +137,11 @@ public:
         bool shadow_variant_failed{};
         // A repeated upload is a shared reference only for this identity.
         std::shared_future<detail::UploadIdentity> identity;
+        // #2856: what this resource holds on the GPU, as ledger entries.
+        std::vector<detail::GpuItem> gpu_items;
+        // Admission-only state follows the existing frame fields, preserving their offsets.
+        std::shared_ptr<const Recipe> recipe;
+        std::optional<std::int32_t> priority{};
     };
 
     struct FogConsumer final {
@@ -164,6 +176,7 @@ public:
         RID skeleton;
         Transform3D object_transform;
         detail::PlacedPiece placement; // #888: what it last sent, and the submit that carried it
+        bool visible{true};
     };
 
     struct PendingPose final {
@@ -172,7 +185,8 @@ public:
         std::vector<Transform3D> model_transforms{};
     };
 
-    explicit Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders);
+    explicit Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders, bool attach_scene);
+    bool attach_scene_{true};
 
     ~Impl();
 
@@ -239,6 +253,8 @@ public:
 
     void set_billboard_light(const sim::AssetId asset_id, const std::array<float, 3>& toward_light);
     [[nodiscard]] core::Result<void> set_material_scalar(sim::AssetId asset_id, std::string_view binding, float value);
+    [[nodiscard]] core::Result<void> set_material_vector3(sim::AssetId asset_id, std::string_view binding,
+                                                         const std::array<float, 3>& value);
     [[nodiscard]] core::Result<void> set_material_priority(sim::AssetId asset_id, std::int32_t priority);
     void set_light_scale(sim::EntityId entity_id, const std::array<float, 3>& rgb);
     void apply_light_scale(RenderingServer& rendering, sim::EntityId entity_id, const Instance& instance) const;
@@ -265,6 +281,8 @@ public:
     [[nodiscard]] GodotRenderer::LifecycleCounts lifecycle_counts() const noexcept;
 
     [[nodiscard]] std::vector<GodotRenderer::InstanceEvidence> instance_evidence() const;
+    [[nodiscard]] std::optional<std::array<float, 12>> bone_evidence(sim::EntityId entity, std::int32_t bone) const;
+    void set_instance_visible(sim::EntityId entity, bool visible);
 
     void set_camera(const FixedCamera& camera);
 
@@ -340,8 +358,23 @@ private:
         const Resource& resource,
         const PendingPose* pose);
 
-    [[nodiscard]] bool upload_texture(
-        RenderingServer& rendering, const assets::Texture& source, RID& target);
+    // #2856: the pooled texture for this content, created on first use; its
+    // item (one pool reference) is appended to `items`.
+    [[nodiscard]] bool acquire_texture(RenderingServer& rendering, const assets::Texture& source, RID& target,
+        std::vector<detail::GpuItem>& items);
+    void release_texture(RenderingServer& rendering, const detail::GpuItem& item);
+    // `drop` top mips are left out (GM-04); 0 uploads the whole stored chain.
+    [[nodiscard]] static RID create_texture(RenderingServer& rendering, const assets::Texture& source,
+        std::uint32_t drop = 0);
+    // GM-04: rebuild pooled textures at the current budget drop, in place, at most `limit` of
+    // them; true when none is left above it.
+    bool apply_texture_drop(RenderingServer& rendering, std::size_t limit = ~std::size_t{});
+    // GM-04: once a frame: finish a pending drop a few textures at a time, else measure the
+    // device when due (process-wide cadence) and raise the drop when over budget.
+    void enforce_texture_budget(RenderingServer& rendering);
+    // The engine's frames drawn, which stamps texture releases for the budget (0 without an engine).
+    [[nodiscard]] static std::uint64_t drawn_frame();
+    detail::TextureDropProgress texture_drop_;
 
     [[nodiscard]] static bool shader_compiled(
         RenderingServer& rendering, const RID& shader, const StringName& declared);
@@ -372,7 +405,11 @@ private:
     // With authored_binormals every vertex also carries its binormal as
     // CUSTOM0 coefficients (legacy::binormal_coefficients).
     [[nodiscard]] bool upload_mesh(RenderingServer& rendering, const assets::Model& source, Resource& target,
-        bool authored_binormals = false);
+        bool authored_binormals = false, bool resident = true);
+    [[nodiscard]] bool admit_resource(RenderingServer& rendering, sim::AssetId asset, Resource& resource);
+    void evict_resource(RenderingServer& rendering, sim::AssetId asset, Resource& resource);
+    void reconcile_residency(RenderingServer& rendering, std::span<const sim::RenderInstance> instances);
+    std::shared_ptr<const assets::Texture> keep_texture(const assets::Texture& texture);
 
     [[nodiscard]] static bool shared_name(const std::string& value) {
         return value.starts_with("shared:");
@@ -381,7 +418,7 @@ private:
         return value.substr(std::string_view("shared:").size());
     }
 
-    static void free_resource(RenderingServer& rendering, const Resource& resource);
+    void free_resource(RenderingServer& rendering, const Resource& resource);
 
     Node3D& owner_;
     std::shared_ptr<GodotShaderCache> shader_cache_;
@@ -395,6 +432,20 @@ private:
     std::unique_ptr<detail::UploadIdentityPool> upload_identity_pool_;
     std::map<sim::AssetId, Resource> resources_;
     std::map<std::string, RID> shared_textures_;
+    std::vector<detail::GpuItem> shared_gpu_items_;
+    struct PooledTexture final {
+        RID rid;
+        std::uint64_t references{};
+        // GM-04: the ledger item as resident now, the top mips left out, and the source's mip
+        // edges and byte counts, so a later drop knows what each level costs.
+        detail::GpuItem item;
+        std::uint32_t dropped{};
+        std::vector<std::array<std::uint32_t, 2>> mip_edges;
+        std::vector<std::uint64_t> mip_bytes;
+        bool rebuild_failed{};  // the engine refused a rebuild; not retried
+    };
+    std::map<std::pair<std::uint64_t, std::uint64_t>, PooledTexture> texture_pool_;
+    std::uint64_t unshared_textures_{};
     std::optional<GodotRenderer::LightingState> lighting_;
     std::optional<GodotRenderer::WindState> wind_;
     bool scene_bloom_active_{};
@@ -433,6 +484,9 @@ private:
     GodotRenderer::ExternalFogHandle next_external_fog_handle_{1};
     std::map<sim::AssetId, std::string> fog_unsupported_;
     std::optional<FogRuntime> fog_;
+    // Keep the eager frame state at its original offsets. Fitting submits only read the flag.
+    detail::ResourceResidency residency_;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::weak_ptr<const assets::Texture>> texture_recipes_;
 };
 
 } // namespace eawr::presentation::godot_backend

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/sim/tactical/snapshot.hpp"
+#include "eawr/presentation/ui/layout.hpp"
 
 #include <array>
 #include <cstddef>
@@ -30,6 +31,7 @@ struct BattleResults {
     std::array<std::map<std::string, std::string>, 2> statistics;
     std::uint64_t elapsed_milliseconds{}; // WBF-44, excluded from replay state
     std::string scoring_diagnostic;
+    std::string status_message; // LAN departure reason in the results header
     friend bool operator==(const BattleResults&, const BattleResults&) = default;
 };
 
@@ -44,6 +46,7 @@ struct ResultType {
 [[nodiscard]] BattleResults battle_results(const sim::tactical::TacticalSnapshot& snapshot,
     sim::tactical::PlayerId local_player, const std::function<ResultType(sim::tactical::TypeId)>& type_info);
 [[nodiscard]] std::size_t loss_scroll_max(std::size_t count) noexcept;
+[[nodiscard]] PixelRect battle_result_status_rect(PixelRect header, double losses_top) noexcept;
 [[nodiscard]] std::string battle_time_text(std::uint64_t milliseconds);
 
 } // namespace eawr::presentation::ui

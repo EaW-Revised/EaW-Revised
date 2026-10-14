@@ -68,11 +68,16 @@ constexpr double foc_min_determinant = 1.0e-4;
 
 // The model's rotation (quarter turn, roll, yaw) applied to a direction (live_model_point).
 [[nodiscard]] Vec3d rotate_to_world(const Vec3d& value, const LivePose& pose) noexcept {
-    return live_model_point(value, {0.0, 0.0, 0.0}, pose.yaw_degrees, pose.roll_degrees, 1.0);
+    return live_model_point(value, {0.0, 0.0, 0.0}, pose.yaw_degrees, pose.roll_degrees, 1.0, pose.pitch_degrees);
 }
 
 // Its inverse: a world direction in model axes.
 [[nodiscard]] Vec3d rotate_to_model(const Vec3d& value, const LivePose& pose) noexcept {
+    if (pose.pitch_degrees != 0.0) {
+        const auto axes = live_unit_axes(pose.yaw_degrees, pose.roll_degrees, pose.pitch_degrees);
+        // Inverse unit rotation, then inverse model quarter turn.
+        return {dot(value, axes.y), -dot(value, axes.x), dot(value, axes.z)};
+    }
     const double yaw = pose.yaw_degrees / degrees_per_radian;
     const double cy = std::cos(yaw);
     const double sy = std::sin(yaw);
@@ -161,19 +166,57 @@ std::optional<ShieldSegmentHit> first_shield_hit(const std::span<const ShieldTri
     return hit;
 }
 
-Vec3d live_model_point(const Vec3d& model_point, const Vec3d& position, const double yaw_degrees,
-                       const double roll_degrees, const double scale_factor) noexcept {
-    // Quarter turn, then roll about +X, then yaw about +Z (scene::placement_transform).
-    const Vec3d turned{-model_point[1], model_point[0], model_point[2]};
-    const double roll = roll_degrees / degrees_per_radian;
-    const double cr = std::cos(roll);
-    const double sr = std::sin(roll);
-    const Vec3d rolled{turned[0], turned[1] * cr - turned[2] * sr, turned[1] * sr + turned[2] * cr};
-    const double yaw = yaw_degrees / degrees_per_radian;
+namespace {
+
+// The drawn hull frame: Rz(yaw) Ry(pitch) Rx(roll), FM-02. Retain the two
+// existing arithmetic orders at zero pitch, including debris translation,
+// so level and non-pitched ships retain their exact coordinates.
+[[nodiscard]] Vec3d unit_frame_point(const Vec3d& point, const Vec3d& position,
+                                     const double yaw_degrees, const double roll_degrees,
+                                     const double pitch_degrees, const double scale_factor,
+                                     const bool debris_arithmetic) noexcept {
+    const double yaw = debris_arithmetic ? yaw_degrees * pi / 180.0 : yaw_degrees / degrees_per_radian;
+    const double roll = debris_arithmetic ? roll_degrees * pi / 180.0 : roll_degrees / degrees_per_radian;
     const double cy = std::cos(yaw);
     const double sy = std::sin(yaw);
-    const Vec3d yawed{rolled[0] * cy - rolled[1] * sy, rolled[0] * sy + rolled[1] * cy, rolled[2]};
+    const double cr = std::cos(roll);
+    const double sr = std::sin(roll);
+    Vec3d rotated{point[0], point[1] * cr - point[2] * sr, point[1] * sr + point[2] * cr};
+    if (pitch_degrees != 0.0) {
+        const double pitch = pitch_degrees / degrees_per_radian;
+        const double cp = std::cos(pitch);
+        const double sp = std::sin(pitch);
+        rotated = {rotated[0] * cp + rotated[2] * sp, rotated[1],
+                   -rotated[0] * sp + rotated[2] * cp};
+    }
+    if (debris_arithmetic) {
+        return {position[0] + cy * rotated[0] - sy * rotated[1],
+                position[1] + sy * rotated[0] + cy * rotated[1],
+                pitch_degrees == 0.0 ? position[2] + sr * point[1] + cr * point[2] : position[2] + rotated[2]};
+    }
+    const Vec3d yawed{rotated[0] * cy - rotated[1] * sy,
+                     rotated[0] * sy + rotated[1] * cy, rotated[2]};
     return add(position, scale(yawed, scale_factor));
+}
+
+} // namespace
+
+Vec3d live_model_point(const Vec3d& model_point, const Vec3d& position, const double yaw_degrees,
+                       const double roll_degrees, const double scale_factor, const double pitch_degrees) noexcept {
+    return unit_frame_point({-model_point[1], model_point[0], model_point[2]}, position,
+                            yaw_degrees, roll_degrees, pitch_degrees, scale_factor, false);
+}
+
+Vec3d live_unit_point(const Vec3d& point, const Vec3d& position, const double yaw_degrees,
+                      const double roll_degrees, const double pitch_degrees) noexcept {
+    return unit_frame_point(point, position, yaw_degrees, roll_degrees, pitch_degrees, 1.0, true);
+}
+
+ShieldHitAxes live_unit_axes(const double yaw_degrees, const double roll_degrees,
+                             const double pitch_degrees) noexcept {
+    return {live_model_point({0.0, -1.0, 0.0}, {}, yaw_degrees, roll_degrees, 1.0, pitch_degrees),
+            live_model_point({1.0, 0.0, 0.0}, {}, yaw_degrees, roll_degrees, 1.0, pitch_degrees),
+            live_model_point({0.0, 0.0, 1.0}, {}, yaw_degrees, roll_degrees, 1.0, pitch_degrees)};
 }
 
 ShieldCollisionMesh make_shield_collision_mesh(std::vector<ShieldTriangle> triangles, std::size_t chunk_size) {
@@ -272,7 +315,7 @@ std::optional<ShieldFlightHit> shield_flight_hit(const ShieldCollisionMesh& mesh
     if (dot(direction, direction) == 0.0) return std::nullopt;
     // The frame step, and on past the far side of the mesh's sphere: the nearest hit of the long
     // cast is the step's own whenever the step meets the mesh, so one cast serves both.
-    const Vec3d centre = live_model_point(mesh.centre, pose.position, pose.yaw_degrees, pose.roll_degrees, pose.scale);
+    const Vec3d centre = live_model_point(mesh.centre, pose.position, pose.yaw_degrees, pose.roll_degrees, pose.scale, pose.pitch_degrees);
     const Vec3d to_centre = sub(centre, step_start);
     const double past = std::sqrt(dot(to_centre, to_centre)) + mesh.radius * pose.scale + 1.0;
     const double step = std::isfinite(step_length) ? std::max(step_length, 0.0) : 0.0;

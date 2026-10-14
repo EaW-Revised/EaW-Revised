@@ -26,6 +26,9 @@ using Real = numeric::LuaNumber;
 // Single-precision + - * / of single operands equal to_single() of the binary64 result.
 [[nodiscard]] Real to_single(Real value) noexcept;
 [[nodiscard]] Real real(std::int64_t value) noexcept;
+// The binary32 encoding of to_single(value), and its exact binary64 value back.
+[[nodiscard]] std::uint32_t binary32_bits(Real value) noexcept;
+[[nodiscard]] Real binary32_value(std::uint32_t bits) noexcept;
 // A decimal literal of the data (the C runtime's atof); nullopt when it is not one.
 [[nodiscard]] std::optional<Real> parse_real(std::string_view text) noexcept;
 [[nodiscard]] Real square_root(Real value) noexcept;

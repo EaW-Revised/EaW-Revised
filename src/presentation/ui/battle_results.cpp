@@ -43,6 +43,11 @@ std::size_t loss_scroll_max(const std::size_t count) noexcept {
     return count > battle_loss_visible_entries ? count - battle_loss_visible_entries : 0;
 }
 
+PixelRect battle_result_status_rect(const PixelRect header, const double losses_top) noexcept {
+    const double top = header.y + header.height;
+    return {header.x, top, header.width, std::max(0.0, losses_top - top)};
+}
+
 std::string battle_time_text(const std::uint64_t milliseconds) {
     const auto seconds = milliseconds / 1000U;
     std::ostringstream text;

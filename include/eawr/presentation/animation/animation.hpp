@@ -129,6 +129,8 @@ public:
     // origin rule attachment() applies. A default/hand-built pose is not.
     [[nodiscard]] bool sampled(const Pose& pose) const noexcept;
     [[nodiscard]] std::size_t bone_count() const noexcept;
+    // UA-05: append a procedural local bone transform and rebuild descendants in caller storage.
+    [[nodiscard]] core::Result<void> apply_bone_transform(Pose& pose, std::size_t bone, const Matrix& transform) const;
 
     [[nodiscard]] static Matrix identity_matrix() noexcept;
     [[nodiscard]] static Matrix asset_to_render_matrix() noexcept;

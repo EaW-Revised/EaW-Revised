@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
@@ -13,6 +14,13 @@ namespace eawr::platform {
 struct PublishedFile {
     std::string kind;
     std::string path;
+    std::string text;
+};
+
+// A native filesystem target without narrowing its name to the ANSI code page.
+struct PublishedPathFile {
+    std::string kind;
+    std::filesystem::path path;
     std::string text;
 };
 
@@ -41,5 +49,10 @@ using PublishFault = std::function<std::error_code(std::string_view step, const 
 // targets that had none and removes only what the call created.
 [[nodiscard]] PublishReport publish_files(
     const std::vector<PublishedFile>& files, const PublishFault& fault = {});
+
+// Same publication and rollback rules. Fault/report paths are UTF-8; publish_files
+// retains its existing native narrow-string path and diagnostic contract.
+[[nodiscard]] PublishReport publish_path_files(
+    const std::vector<PublishedPathFile>& files, const PublishFault& fault = {});
 
 } // namespace eawr::platform

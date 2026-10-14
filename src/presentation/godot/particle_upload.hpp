@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 namespace eawr::presentation::godot_backend::detail {
 
@@ -30,11 +31,18 @@ struct ParticleSurfaceShape final {
     std::size_t indices{};
 
     [[nodiscard]] bool matches(const particles::VertexStream& stream) const noexcept {
-        return vertices != 0 && vertices == stream.vertices.size() && indices == stream.indices.size();
+        return vertices != 0 && vertices >= stream.vertices.size() && indices >= stream.indices.size();
     }
     void assign(const particles::VertexStream& stream) noexcept {
-        vertices = stream.vertices.size();
-        indices = stream.indices.size();
+        // Grow only from observed demand, with at most 50% spare storage. Unused
+        // index slots are degenerate triangles; particle count changes need no new surface.
+        const auto grow = [](const std::size_t demand) {
+            const auto extra = demand / 2;
+            return extra <= std::numeric_limits<std::size_t>::max() - demand ? demand + extra : demand;
+        };
+        vertices = grow(stream.vertices.size());
+        indices = grow(stream.indices.size());
+        indices -= indices % 3;
     }
 };
 

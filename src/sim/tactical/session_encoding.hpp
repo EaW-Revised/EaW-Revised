@@ -19,12 +19,20 @@ inline constexpr std::array<std::uint8_t, 4> projectile_tag{'P', 'R', 'O', 'J'};
 inline constexpr std::array<std::uint8_t, 4> formation_tag{'F', 'R', 'M', 'N'};
 // Ships waiting for a sliced search to land (PC-08, #520); only while any waits.
 inline constexpr std::array<std::uint8_t, 4> sliced_tag{'S', 'L', 'C', 'E'};
+// FC-68/FD-64: retained exhausted searches, coordinator-reserved; only while any wait.
+inline constexpr std::array<std::uint8_t, 4> path_retry_tag{'R', 'T', 'R', 'Y'};
+inline constexpr std::uint32_t path_retry_block_version = 1;
 // Approach mappings (#452); only while any unit has one.
 inline constexpr std::array<std::uint8_t, 4> approach_tag{'A', 'P', 'P', 'R'};
+inline constexpr std::array<std::uint8_t, 4> sighting_tag{'S', 'E', 'E', 'N'}; // WMV-13 (#719)
 // Squadron flight, orders and hangars (#75); only with a squadron table that names them.
 inline constexpr std::array<std::uint8_t, 4> craft_tag{'C', 'R', 'F', 'T'};
 inline constexpr std::array<std::uint8_t, 4> squadron_state_tag{'S', 'Q', 'S', 'T'};
+inline constexpr std::array<std::uint8_t, 4> squadron_attack_path_tag{'S', 'Q', 'A', 'P'};
 inline constexpr std::array<std::uint8_t, 4> hangar_tag{'H', 'N', 'G', 'R'};
+// WU-37: independent object and team birth marks; only while any is marked.
+inline constexpr std::array<std::uint8_t, 4> garrison_tag{'G', 'R', 'S', 'N'};
+inline constexpr std::uint32_t garrison_block_version = 1;
 // The target scans' collection trees (#469, space-targeting CO rules), once a unit with a combat
 // profile has stepped.
 inline constexpr std::array<std::uint8_t, 4> collection_tag{'C', 'U', 'L', 'L'};
@@ -34,14 +42,24 @@ inline constexpr std::array<std::uint8_t, 4> projectile_collection_tag{'C', 'O',
 inline constexpr std::array<std::uint8_t, 4> victory_tag{'V', 'I', 'C', 'T'};
 // Unit abilities (#76); only when a live unit's type has abilities.
 inline constexpr std::array<std::uint8_t, 4> ability_tag{'A', 'B', 'I', 'L'};
+// WST-03: cloaks (#1887), coordinator-reserved; only while a live unit's cloak is on.
+inline constexpr std::array<std::uint8_t, 4> stealth_tag{'S', 'T', 'L', 'H'};
+inline constexpr std::array<std::uint8_t, 4> stealth_end_tag{'S', 'T', 'L', 'X'}; // coordinator-reserved, WST-03
+// WSD-09: the Krayt object script's state, coordinator-reserved; only once a live unit's script has run.
+inline constexpr std::array<std::uint8_t, 4> self_destruct_script_tag{'K', 'S', 'C', 'R'};
+inline constexpr std::array<std::uint8_t, 4> charged_blast_tag{'B', 'L', 'S', 'T'}; // coordinator-reserved
+inline constexpr std::array<std::uint8_t, 4> mc30_script_tag{'M', 'S', 'C', 'R'}; // FC-57, coordinator-reserved
 // Ion stuns (#561); only while a live unit has one.
 inline constexpr std::array<std::uint8_t, 4> ion_stun_tag{'I', 'O', 'N', 'S'};
+inline constexpr std::array<std::uint8_t, 4> corrupt_tag{'C', 'R', 'P', 'T'}; // coordinator-reserved
 inline constexpr std::array<std::uint8_t, 4> asteroid_tag{'A', 'S', 'T', 'D'}; // coordinator-reserved
 inline constexpr std::array<std::uint8_t, 4> hazard_move_tag{'M', 'V', 'H', 'Z'}; // coordinator-reserved
 // EN-08: coordinator-reserved, only while a unit has a temporary engine-disable deadline.
 inline constexpr std::array<std::uint8_t, 4> engine_disable_tag{'E', 'D', 'I', 'S'};
 inline constexpr std::array<std::uint8_t, 4> nebula_tag{'N', 'E', 'B', 'C'}; // coordinator-reserved
 inline constexpr std::array<std::uint8_t, 4> storm_tag{'S', 'T', 'M', 'C'}; // coordinator-reserved
+// WCC-82: damage tracking, coordinator-reserved; only while a live unit's window or rate is not zero.
+inline constexpr std::array<std::uint8_t, 4> damage_tracking_tag{'D', 'T', 'R', 'K'};
 inline constexpr std::uint32_t victory_block_version = 1;
 // Skirmish purchasing (#530): credits, queues and pools, only with economy rules; arrivals and
 // population shares, only while any.

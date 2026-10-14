@@ -42,9 +42,9 @@ namespace skirmish_start_test_support {
 
 
 // The tick-zero state hash of the committed m2-start replay (FoC data, fixture seed 67).
-constexpr std::string_view m2_tick_zero_state = "8e6f2dbdb28a4ede544df23ab6550b7e6ee837ca9040e2a2b2d8760dcb74fa8a";
+constexpr std::string_view m2_tick_zero_state = "78697a3cd28322cd6f19b659de3b131a7cb8d6cf312e7dcfb684d63689cdaeda";
 // docs/unit-data.md: the FoC fleet's unit-table identity, the replay's content identity.
-constexpr std::string_view m2_content_identity = "9736d7d8e41e66b5a5ee2a74a8b5b3e3d08d6c794365ab3dc419ce5100eae559";
+constexpr std::string_view m2_content_identity = "86cc028edddd02a1805cd1f89d5f73d9ad511f61baecfbf7d1042d722ecad496";
 
 int failures{};
 
@@ -146,8 +146,8 @@ void committed_fixture(const std::filesystem::path& fixtures) {
     expect(replay.value().commands.empty() && replay.value().final_tick_count == 30, "setup alone, 30 ticks");
     expect(hex(setup.content_identity) == m2_content_identity, "content identity is the FoC unit-table identity");
     expect(setup.seed == skirmish::m2_fixture().seed, "fixture seed");
-    expect(setup.players.size() == 7 && setup.units.size() == 62 && setup.squadrons.size() == 5,
-           "7 players (#272), 35 units and the 27 craft of 5 squadrons (#75)");
+    expect(setup.players.size() == 7 && setup.units.size() == 64 && setup.squadrons.size() == 5,
+           "7 players (#272), 37 units and the 27 craft of 5 squadrons (#75)");
     const auto session = tactical::TacticalSession::from_replay(replay.value());
     expect(session && session.value().state_sha256() == m2_tick_zero_state, "pinned tick-zero state hash");
     const auto census = skirmish::census_json(setup, nullptr);
@@ -159,20 +159,28 @@ void committed_fixture(const std::filesystem::path& fixtures) {
 using namespace skirmish_start_test_support;
 
 int main(const int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "usage: skirmish_start_tests <fixtures directory>\n";
+    const bool installed = argc == 3 && std::string_view(argv[2]) == "--installed";
+    if (argc != 2 && !installed) {
+        std::cerr << "usage: skirmish_start_tests <fixtures directory> [--installed]\n";
         return 2;
     }
     const std::filesystem::path fixtures(argv[1]);
+    if (installed) {
+        const auto root = environment("EAWR_EAW_GAME_ROOT");
+        if (!root || root->empty()) return 77;
+        foc_start(fixtures);
+        return failures == 0 ? 0 : 1;
+    }
     setup_contract();
     synthetic_start();
+    synthetic_special_sources();
+    synthetic_placed_start();
     synthetic_roster_gate();
     synthetic_placement();
     synthetic_failures();
     replay_round_trip();
     synthetic_heights();
     committed_fixture(fixtures);
-    foc_start(fixtures);
     if (failures != 0) {
         std::cerr << failures << " skirmish start check(s) failed\n";
         return 1;

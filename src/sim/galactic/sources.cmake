@@ -1,0 +1,49 @@
+# The galactic simulation's translation units (ADR-012), shared by the root library and, once the
+# viewer's galactic mode includes this list, the viewer. Paths are absolute so both can include it.
+
+set(EAWR_SIM_GALACTIC_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/ability_host.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ability_corruption.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ability_ruins.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ability_hack.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ability_destruction.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ability_host_encoding.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ai_funding.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/corruption_model.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/corruption_actions.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/corruption_views.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/commands.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/control.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/encoding.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/fleets.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/fleet_intelligence.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/graph.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/hero_return.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/economy_corruption.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/economy_corruption_encoding.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/income.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/income_encoding.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/movement.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/observer.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/observer_encoding.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/observer_service.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/production.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/production_actions.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/production_encoding.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/replay.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/scoring.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/session.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/setup.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/snapshot.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/synthetic.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/story_adapters.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/story_goals.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/victory.cpp"
+)
+
+# Fixture-level galactic hero actions, WGCH-20..115.
+list(APPEND EAWR_SIM_GALACTIC_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/ability_theft.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/hero_actions.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/hero_action_views.cpp"
+)

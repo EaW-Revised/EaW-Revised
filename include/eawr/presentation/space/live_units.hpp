@@ -9,6 +9,7 @@
 #include <array>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Presentation of a live tactical session's units (#80): where each unit is drawn between the
@@ -18,8 +19,8 @@ namespace eawr::presentation::particles { class StepExecutor; }
 namespace eawr::presentation::space {
 
 // FW-24: only HIDE_WHEN_FOGGED or TEAM makes a map prop fog-bound.
-[[nodiscard]] bool map_prop_fog_bound(std::span<const std::string> behavior,
-                                    std::span<const std::string> space_behavior) noexcept;
+[[nodiscard]] bool map_prop_fog_bound(std::string_view behavior,
+                                    std::string_view space_behavior) noexcept;
 // Ascending, unique IDs for drawing: sensor-visible units plus living map
 // props that cannot be fogged. The sensor list and snapshots remain immutable.
 void map_prop_draw_visibility(std::span<const sim::EntityId> visible,
@@ -56,6 +57,9 @@ struct LiveUnitPose {
 // The pitch of an instance transform (Rz(yaw) Ry(pitch) Rx(roll), space-fighters FM-02, #506):
 // the angle of its forward column below the XY plane, in degrees in [-90, 90]. Zero for a ship.
 [[nodiscard]] double instance_pitch_degrees(const sim::math::Mat3x4& transform) noexcept;
+
+// The snapshot's drawn yaw, pitch and roll, including the FM-02 vertical-pose convention.
+[[nodiscard]] std::array<double, 3> instance_unit_facing(const sim::math::Mat3x4& transform) noexcept;
 
 // The units of `latest` that `viewer` sees (TacticalSnapshot::visible_entities) plus any of
 // `fading` `latest` still holds, in ascending ID (#535: a unit fading out after `viewer` stopped

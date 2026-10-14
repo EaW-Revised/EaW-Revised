@@ -111,6 +111,11 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   box half extents are multiplied by `Radar_Icon_Scale_Space` (default 2) and projected to the
   radar frame. A model-free team uses that scale itself as its X/Y world half extent around
   the member mean, independently of member spread. Facing and icon rotation retain MM-08.
+  A textured ordinary-unit icon requires a composed model, even at fixed icon size and in
+  replay or revealed views. A populated model-free team uses its member route instead;
+  an explicitly empty icon name still draws a point without requiring a model.
+  Model absence comes from a known composition placement, independently of its current
+  visibility or pick box. Missing population or placement information preserves admission.
   The stock Team authors scale 200 but no draw-to-scale override, so that value alone does not
   justify resizing its default icon. The two newly supported tags `Radar_Blip_Size` and
   `Radar_Draw_To_Scale` have no authored occurrences in the pinned FoC inventory, hence no

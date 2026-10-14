@@ -385,7 +385,8 @@ private:
 void test_phase_map() {
     auto session = s91_session(coruscant());
     const PhaseRecorder recorder;
-    const std::vector<std::string> expected{"gather", "movement", "targeting", "unit-systems", "squadrons", "fog-reveal", "fog-cells", "visibility"};
+    const std::vector<std::string> expected{"gather", "movement", "hull-service", "combat-input-refresh",
+        "targeting", "unit-systems", "squadrons", "fog-reveal", "fog-cells", "visibility"};
     for (int tick = 0; tick < 5; ++tick) {
         recorder.calls.clear();
         expect(static_cast<bool>(session.step(recorder)), "phase map step");
@@ -395,7 +396,7 @@ void test_phase_map() {
             expect(partitions == expected_partitions, "phase " + name + " uses its deterministic partition count");
             names.push_back(name);
         }
-        expect(names == expected, "tick " + std::to_string(tick) + ": the phase map is gather, movement, targeting, unit-systems, squadrons, "
+        expect(names == expected, "tick " + std::to_string(tick) + ": the phase map is gather, movement, hull-service, combat-input-refresh, targeting, unit-systems, squadrons, "
             "fog-reveal, fog-cells, visibility");
     }
 }

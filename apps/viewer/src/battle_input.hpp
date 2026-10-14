@@ -14,6 +14,7 @@
 #include "eawr/presentation/ui/pads.hpp"
 #include "eawr/presentation/ui/overview_ui.hpp"
 #include "eawr/presentation/ui/selection.hpp"
+#include "eawr/presentation/ui/special_weapon.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
 
 #include <godot_cpp/classes/input_event.hpp>
@@ -50,7 +51,8 @@ public:
     explicit BattleInput(godot::Node3D& host);
     ~BattleInput();
     // #424: resolves the world UI's art and per-type data (after the live view is prepared).
-    void prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live);
+    void prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live,
+                 const std::shared_ptr<GodotShaderCache>& shaders);
     BattleInput(const BattleInput&) = delete;
     BattleInput& operator=(const BattleInput&) = delete;
 
@@ -65,6 +67,7 @@ public:
     void cursor_frame(const LiveSessionView& live, const SpaceEnvironment& space, double delta, bool capture);
     // Records pointer position ahead of GUI ownership without issuing a world action.
     void observe_pointer(const godot::Ref<godot::InputEvent>& event);
+    [[nodiscard]] std::optional<ui::BattleUnit> encyclopedia_unit() const;
     // Focus loss or the pointer leaving: a drag in progress ends without selecting.
     void cancel() noexcept;
     // The report's "battle_input" member, followed by ",\n".
@@ -85,6 +88,13 @@ public:
     // BA-27: mouse and keyboard share the same mode transition and cue.
     bool command_click(ui::OrderMode mode, bool stop, LiveSessionView& live, ui::CommandOrigin origin);
     void negative_feedback();
+    [[nodiscard]] ui::SpecialWeaponButton special_weapon_button(const LiveSessionView& live) const;
+    bool special_weapon_click(LiveSessionView& live);
+    bool beacon_click(LiveSessionView& live);
+    [[nodiscard]] bool beacon_targeting() const noexcept { return beacon_targeting_; }
+    [[nodiscard]] bool beacon_enabled(const LiveSessionView& live) const noexcept {
+        return beacon_delay_.has_value() && live.beacon_available() && (beacon_targeting_ || beacon_remaining_ <= 0);
+    }
 
     // #425: the selection as the command bar's unit cards (unit_cards.hpp), rebuilt every frame and
     // after input changes the selection. `slots` is the HUD shell's card slot count (24 in FoC).
@@ -140,6 +150,7 @@ public:
     // bottom-left) meet the plane z = `height` in source X/Y, a ray that misses it giving its far
     // point (MM-09); and a right click on the minimap, which orders the selection to the source
     // point as a right click on empty space does (MM-11). True when an order was issued.
+    void follow_waypoint_lighting(const GodotRenderer& renderer) { world_ui_->follow_waypoint_lighting(renderer); }
     [[nodiscard]] bool selected(sim::EntityId entity) const { return selection_.contains(entity); }
     [[nodiscard]] std::optional<std::array<std::array<double, 2>, 4>> ground_corners(double height) const;
     bool minimap_move(double x, double y, bool double_click, LiveSessionView& live);
@@ -174,7 +185,16 @@ private:
     void left_release(std::array<float, 2> at, ui::Modifiers modifiers, LiveSessionView& live);
     void right_release(std::array<float, 2> at, ui::Modifiers modifiers, LiveSessionView& live);
     [[nodiscard]] bool key(std::int64_t code, ui::Modifiers modifiers, LiveSessionView& live, SpaceEnvironment& space);
-    void replay(const LiveSessionView::ScriptedInput& scripted);
+    void replay(const LiveSessionView::ScriptedInput& scripted, LiveSessionView& live);
+    std::uint64_t acceptance_next_tick_{120};
+    unsigned acceptance_stage_{};
+    std::optional<sim::EntityId> acceptance_unit_;
+    std::optional<std::uint64_t> acceptance_sequence_;
+    bool acceptance_approached_{};
+    std::string acceptance_recovery_target_;
+    ui::Vec3f acceptance_recovery_anchor_{};
+    struct AcceptanceAttempt { std::uint64_t tick{}; unsigned stage{}; std::string result; std::size_t candidates{}; };
+    std::vector<AcceptanceAttempt> acceptance_attempts_;
     // A scripted middle-button gesture: Ctrl key, button and motion events through the engine queue.
     void replay_middle(const LiveSessionView::ScriptedInput& scripted, const std::string& name);
     void draw();
@@ -200,6 +220,7 @@ private:
     const units::UnitTables* card_tables_{};
     std::map<sim::tactical::TypeId, const units::UnitType*> card_types_;
     std::shared_ptr<const sim::tactical::TacticalSnapshot> cards_snapshot_;
+    std::uint64_t cards_pending_revision_{};
     std::vector<sim::EntityId> cards_selection_;
     std::size_t cards_slots_{};
     ui::CardLayout card_layout_;
@@ -236,6 +257,10 @@ private:
     std::uint64_t ability_targeted_{};
     std::uint64_t ability_target_cancels_{};
     void cancel_ability_target(const char* why);
+    void cancel_special_target(const char* why);
+    [[nodiscard]] bool special_target_valid(sim::EntityId target, const LiveSessionView& live) const;
+    std::optional<sim::EntityId> special_target_source_;
+    std::uint64_t special_fires_{}, special_cancels_{}, special_invalid_{};
     // CU-12: hover and click share the current simulation's world-point admission.
     [[nodiscard]] std::optional<sim::math::Vec3> ability_point(
         const std::array<float, 2> at, const LiveSessionView& live) const;
@@ -284,6 +309,9 @@ private:
     void record_pick_candidates(const ui::PickRay& pick_ray);
     std::unique_ptr<WorldUiView> world_ui_;
     bool ignore_left_release_{};
+    bool beacon_targeting_{};
+    std::optional<double> beacon_delay_;
+    double beacon_remaining_{};
     std::size_t next_scripted_{};
     // --eawr-live-follow-group: the eased camera focus (source x, y) and the tick it was last moved at.
     std::optional<std::array<double, 2>> follow_;

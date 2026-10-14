@@ -32,3 +32,11 @@ tests/replay/fixtures/tactical-v2.*.csv text eol=lf
 tests/replay/fixtures/tactical-combat.*.csv text eol=lf
 tests/replay/fixtures/tactical-damage.*.csv text eol=lf
 tests/replay/fixtures/tactical-victory.*.csv text eol=lf
+tests/galactic/fixtures/corpus/*.hashes.csv text eol=lf
+tests/galactic/fixtures/corpus/*.eawr-gcreplay binary
+tests/galactic/fixtures/graph-corpus/*.hashes.csv text eol=lf
+tests/galactic/fixtures/graph-corpus/*.eawr-gcreplay binary
+tests/galactic/fixtures/fleet-corpus/*.hashes.csv text eol=lf
+tests/galactic/fixtures/fleet-corpus/*.eawr-gcreplay binary
+tests/galactic/fixtures/production-corpus/*.hashes.csv text eol=lf
+tests/galactic/fixtures/production-corpus/*.eawr-gcreplay binary

@@ -1,5 +1,6 @@
 #include "replay_internal.hpp"
 
+
 namespace eawr::sim::tactical {
 using namespace replay_detail;
 
@@ -52,6 +53,89 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         return core::Result<Bytes>::failure(validated.error());
     }
     const auto metadata = replay.setup.skirmish ? skirmish_body(*replay.setup.skirmish) : std::vector<std::uint8_t>{};
+    Bytes native;
+    if (replay.setup.native_scene) {
+        const auto& scene = *replay.setup.native_scene;
+        sim::detail::append_u32(native, 1);
+        sim::detail::append_u32(native, scene.multiplayer ? 1U : 0U);
+        for (const auto* names : {&scene.source_types, &scene.source_obstacles, &scene.battle_types}) {
+            sim::detail::append_u32(native, static_cast<std::uint32_t>(names->size()));
+            for (const auto& name : *names) {
+                sim::detail::append_u16(native, static_cast<std::uint16_t>(name.size()));
+                native.insert(native.end(), name.begin(), name.end());
+            }
+        }
+    }
+    Bytes campaign;
+    Bytes carriers;
+    const auto carrier_count = std::count_if(replay.setup.units.begin(), replay.setup.units.end(),
+        [](const auto& unit) { return unit.purchase_type != 0 || !unit.contained.empty(); });
+    const auto node = [&](auto&& self, Bytes& body, const CarriedObject& object) -> void {
+        sim::detail::append_u64(body, object.entity_id);
+        sim::detail::append_u64(body, object.type_id);
+        sim::detail::append_u64(body, object.parent);
+        sim::detail::append_u32(body, (object.named_hero ? 1U : 0U) | (object.generic_hero ? 2U : 0U)
+            | (object.combat_preserved ? 4U : 0U));
+        sim::detail::append_u32(body, static_cast<std::uint32_t>(object.members.size()));
+        for (const auto& member : object.members) self(self, body, member);
+    };
+    if (carrier_count != 0) {
+        sim::detail::append_u32(carriers, 1);
+        sim::detail::append_u32(carriers, static_cast<std::uint32_t>(carrier_count));
+        for (const auto& unit : replay.setup.units) if (unit.purchase_type != 0 || !unit.contained.empty()) {
+            sim::detail::append_u64(carriers, unit.entity_id);
+            sim::detail::append_u64(carriers, unit.purchase_type);
+            sim::detail::append_u32(carriers, static_cast<std::uint32_t>(unit.contained.size()));
+            for (const auto& object : unit.contained) node(node, carriers, object);
+        }
+    }
+    if (replay.setup.campaign) {
+        const auto& binding = *replay.setup.campaign;
+        sim::detail::append_u32(campaign, binding.reserve_order.empty() ? 3U : 4U); // optional source pool order
+        sim::detail::append_i64(campaign, binding.corruption_price_multiplier.raw());
+        sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.players.size()));
+        for (const auto& p : binding.players) {
+            sim::detail::append_u32(campaign, p.player);
+            sim::detail::append_i64(campaign, p.credits.raw());
+            sim::detail::append_u32(campaign, p.population_cap);
+            sim::detail::append_u32(campaign, (p.ai ? 1U : 0U) | (p.strategic_credits ? 2U : 0U));
+            sim::detail::append_i64(campaign, p.reinforcement_yaw.raw());
+            sim::detail::append_u32(campaign, p.start_tech);
+            sim::detail::append_u32(campaign, p.max_tech);
+            sim::detail::append_i64(campaign, p.credit_multiplier.raw());
+            sim::detail::append_i64(campaign, p.credit_cap->raw());
+            sim::detail::append_i64(campaign, p.strategic_credits.value_or(math::Fixed{}).raw());
+        }
+        sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.reserves.size()));
+        for (const auto& r : binding.reserves) {
+            sim::detail::append_u64(campaign, r.id);
+            sim::detail::append_u64(campaign, r.type);
+            sim::detail::append_u32(campaign, r.owner);
+            sim::detail::append_u32(campaign, r.restricted ? 1U : 0U);
+            sim::detail::append_u64(campaign, r.purchase_type);
+            sim::detail::append_u32(campaign, static_cast<std::uint32_t>(r.contained.size()));
+            for (const auto& object : r.contained) node(node, campaign, object);
+        }
+        sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.upgrades.size()));
+        for (const auto& u : binding.upgrades) {
+            sim::detail::append_u64(campaign, u.type);
+            sim::detail::append_u64(campaign, u.holder);
+            sim::detail::append_u32(campaign, u.owner);
+        }
+        sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.population_registered.size()));
+        for (const auto id : binding.population_registered) sim::detail::append_u64(campaign, id);
+        sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.victory_leaders.size()));
+        for (const auto id : binding.victory_leaders) sim::detail::append_u64(campaign, id);
+        sim::detail::append_u64(campaign, binding.victory_station);
+        if (!binding.reserve_order.empty()) {
+            sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.reserve_order.size()));
+            for (const auto id : binding.reserve_order) sim::detail::append_u64(campaign, id);
+        }
+    }
+    auto identity = replay.setup.match_identity ? sim::canonical_match_identity(*replay.setup.match_identity)
+        : std::vector<std::uint8_t>{};
+    if (replay.setup.match_identity) identity.insert(identity.end(),
+        replay.setup.match_identity->sha256.begin(), replay.setup.match_identity->sha256.end());
     std::size_t garrison_size = replay.setup.free_garrisons.empty() ? 0U : 8U;
     for (const auto& binding : replay.setup.free_garrisons)
         garrison_size += 16U + 8U * (binding.templates.size() + binding.registered.size());
@@ -60,11 +144,23 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         if (!unit.garrison_enabled) disabled_garrisons.push_back(unit.entity_id);
     }
     const bool extensions = replay.setup.match_policy.has_value() || replay.setup.skirmish.has_value()
-        || !disabled_garrisons.empty() || replay.setup.queue_identities || garrison_size != 0;
+        || !disabled_garrisons.empty() || replay.setup.queue_identities || garrison_size != 0
+        || replay.setup.first_free_entity_id.has_value() || replay.setup.campaign.has_value() || !carriers.empty()
+        || !replay.setup.cinematic_seats.empty() || !identity.empty()
+        || replay.setup.departure_policy.has_value() || !replay.setup.beacon_rules.empty()
+        || replay.setup.attract_pool.has_value() || replay.setup.native_scene.has_value();
     const auto header_size = replay_header_size + (extensions ? 4U : 0U)
         + (replay.setup.match_policy ? 8U : 0U) + (replay.setup.skirmish ? 4U + metadata.size() : 0U)
         + (disabled_garrisons.empty() ? 0U : 4U + 8U * disabled_garrisons.size())
-        + (replay.setup.queue_identities ? 8U : 0U) + (garrison_size == 0 ? 0U : 4U + garrison_size);
+        + (replay.setup.queue_identities ? 8U : 0U) + (garrison_size == 0 ? 0U : 4U + garrison_size)
+        + (replay.setup.first_free_entity_id ? 12U : 0U) + (campaign.empty() ? 0U : 4U + campaign.size())
+        + (carriers.empty() ? 0U : 4U + carriers.size())
+        + (replay.setup.cinematic_seats.empty() ? 0U : 12U + 8U * replay.setup.cinematic_seats.size())
+        + (identity.empty() ? 0U : 4U + identity.size())
+        + (replay.setup.departure_policy ? 12U + 4U * replay.setup.departure_policy->humans.size() : 0U)
+        + (replay.setup.beacon_rules.empty() ? 0U : 12U + 16U * replay.setup.beacon_rules.size())
+        + (replay.setup.attract_pool ? 12U + 8U * replay.setup.attract_pool->types.size() : 0U)
+        + (native.empty() ? 0U : 4U + native.size());
     if (header_size > std::numeric_limits<std::uint16_t>::max()) {
         return fail<Bytes>(diagnostic_codes::resource_limit, "encoded replay header exceeds the 65535-byte limit", {});
     }
@@ -108,7 +204,11 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     if (extensions) {
         sim::detail::append_u32(bytes, (replay.setup.match_policy ? 1U : 0U) + (replay.setup.skirmish ? 1U : 0U)
             + (disabled_garrisons.empty() ? 0U : 1U) + (replay.setup.queue_identities ? 1U : 0U)
-            + (garrison_size == 0 ? 0U : 1U));
+            + (garrison_size == 0 ? 0U : 1U) + (replay.setup.first_free_entity_id ? 1U : 0U)
+            + (replay.setup.campaign ? 1U : 0U) + (carriers.empty() ? 0U : 1U)
+            + (replay.setup.cinematic_seats.empty() ? 0U : 1U)
+            + (identity.empty() ? 0U : 1U) + (replay.setup.departure_policy ? 1U : 0U)
+            + (replay.setup.beacon_rules.empty() ? 0U : 1U) + (replay.setup.attract_pool ? 1U : 0U) + (replay.setup.native_scene ? 1U : 0U));
     }
     if (replay.setup.match_policy) {
         sim::detail::append_u16(bytes, replay_extension_match_policy);
@@ -143,6 +243,66 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             for (const auto type : binding.templates) sim::detail::append_u64(bytes, type);
             for (const auto id : binding.registered) sim::detail::append_u64(bytes, id);
         }
+    }
+    if (replay.setup.first_free_entity_id) {
+        sim::detail::append_u16(bytes, replay_extension_first_free_id);
+        sim::detail::append_u16(bytes, 8);
+        sim::detail::append_u64(bytes, *replay.setup.first_free_entity_id);
+    }
+    if (!identity.empty()) {
+        sim::detail::append_u16(bytes, replay_extension_match_identity);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(identity.size()));
+        bytes.insert(bytes.end(), identity.begin(), identity.end());
+    }
+    if (replay.setup.departure_policy) {
+        sim::detail::append_u16(bytes, replay_extension_multiplayer_departure);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(8U + 4U * replay.setup.departure_policy->humans.size()));
+        sim::detail::append_u32(bytes, 1);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(replay.setup.departure_policy->humans.size()));
+        for (const auto id : replay.setup.departure_policy->humans) sim::detail::append_u32(bytes, id);
+    }
+    if (!replay.setup.beacon_rules.empty()) {
+        sim::detail::append_u16(bytes, replay_extension_beacon_rules);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(8U + 16U * replay.setup.beacon_rules.size()));
+        sim::detail::append_u32(bytes, 1);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(replay.setup.beacon_rules.size()));
+        for (const auto& rule : replay.setup.beacon_rules) {
+            sim::detail::append_u32(bytes, rule.player);
+            sim::detail::append_u32(bytes, rule.lifetime_frames);
+            sim::detail::append_u64(bytes, rule.type);
+        }
+    }
+    if (!campaign.empty()) {
+        sim::detail::append_u16(bytes, replay_extension_campaign);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(campaign.size()));
+        bytes.insert(bytes.end(), campaign.begin(), campaign.end());
+    }
+    if (!carriers.empty()) {
+        sim::detail::append_u16(bytes, replay_extension_carriers);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(carriers.size()));
+        bytes.insert(bytes.end(), carriers.begin(), carriers.end());
+    }
+    if (!replay.setup.cinematic_seats.empty()) {
+        sim::detail::append_u16(bytes, replay_extension_cinematic_seats);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(8U + 8U * replay.setup.cinematic_seats.size()));
+        sim::detail::append_u32(bytes, 1);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(replay.setup.cinematic_seats.size()));
+        for (const auto& seat : replay.setup.cinematic_seats) {
+            sim::detail::append_u32(bytes, seat.player);
+            sim::detail::append_u32(bytes, seat.cinematics_enabled ? 1U : 0U);
+        }
+    }
+    if (replay.setup.attract_pool) {
+        sim::detail::append_u16(bytes, replay_extension_attract_pool);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(8U + 8U * replay.setup.attract_pool->types.size()));
+        sim::detail::append_u32(bytes, 1);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(replay.setup.attract_pool->types.size()));
+        for (const auto type : replay.setup.attract_pool->types) sim::detail::append_u64(bytes, type);
+    }
+    if (!native.empty()) {
+        sim::detail::append_u16(bytes, replay_extension_native_scene);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(native.size()));
+        bytes.insert(bytes.end(), native.begin(), native.end());
     }
     for (const auto& player : replay.setup.players) {
         detail::append_player(bytes, player);

@@ -186,8 +186,11 @@ struct Content {
     }
     auto filesystem = eawr::vfs::Vfs::mount(specs);
     if (!filesystem) return fail("the FoC vfs does not mount");
-    auto catalog = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
-    if (!catalog) return fail("the FoC catalog does not load");
+    auto catalog = eawr::data::load_catalog_strict(filesystem.value(), eawr::data::Profile::foc);
+    if (!catalog) return fail("the FoC catalog does not load: " + eawr::core::format_diagnostic(catalog.error()));
+    if (!catalog.value().health.clean()) {
+        std::cerr << "path_bench --melee: catalog load: " << eawr::data::describe_load_health(catalog.value().health) << '\n';
+    }
     eawr::scene::VfsAssetCache cache(filesystem.value());
     const auto access = cache.access();
     eawr::units::LoadInput input;
@@ -207,6 +210,7 @@ struct Content {
     auto fog = skirmish::fog_rules(inputs.value());
     if (!fog) return fail("the M2 fog rules do not build");
     content.value().fog = fog.value();
+    content.value().map_box = skirmish::map_box(inputs.value());
     return Content{std::move(tables).value(), std::move(start).value(), std::move(content).value()};
 }
 
@@ -264,7 +268,8 @@ struct Run {
     const bool live_execution, Sampler* sampler) {
     const auto victory = skirmish::victory_rules(replay.setup, content.tables, skirmish::human_slots(skirmish::m2_fixture()));
     auto created = tactical::TacticalSession::from_replay(replay, content.content.sensors, content.content.durability,
-        content.content.motion, content.content.fog, content.content.combat, victory, content.content.abilities);
+        content.content.motion, content.content.fog, content.content.combat, victory, content.content.abilities,
+        tactical::EconomyRules{}, content.content.map_box);
     if (!created) {
         std::cerr << "path_bench --melee: " << eawr::core::format_diagnostic(created.error()) << '\n';
         return std::nullopt;

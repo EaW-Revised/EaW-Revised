@@ -9,8 +9,11 @@
 
 #include "ai_data.hpp"
 #include "host.hpp"
+#include "galactic_ai_selector_runtime.hpp"
+#include "eawr/script/foc/galactic_ai.hpp"
 
 #include <cstdint>
+#include <array>
 #include <functional>
 #include <map>
 #include <memory>
@@ -20,7 +23,11 @@
 #include <tuple>
 #include <vector>
 
+namespace eawr::script::foc::galactic_ai { class NativeActions; }
 namespace eawr::script::foc::ai {
+class GalacticFunding;
+struct GalacticBudgetBuild;
+namespace galactic_goals { struct MaterializedPlanCatalog; }
 
 using detail::Host;
 using detail::ViewUnit;
@@ -31,6 +38,7 @@ namespace math = sim::math;
 inline constexpr std::uint32_t handle_taskforce = 5;   // id: TaskForce ID
 inline constexpr std::uint32_t handle_block = 6;       // id: block_id(instance, command sequence)
 inline constexpr std::uint32_t handle_ai_target = 7;   // id: AI target ID
+inline constexpr std::uint32_t handle_freestore = 8;   // id: galactic player ID
 
 // Engine requests of the plan bindings (ScriptCommand::verb); after_service takes them.
 inline constexpr std::string_view verb_ai = "foc.ai";
@@ -87,6 +95,15 @@ public:
     [[nodiscard]] bool ready() const noexcept { return x_cells_ > 0; }
     // PG-03: each object's entries are refreshed on the object's own cadence.
     void service(const WorldView& view, const Host& host, std::int64_t frame);
+    // Prepare last turn's demand using this turn's completed view. Cold keys stay inline.
+    void prepare_contributions();
+    struct QueryCounts {
+        std::size_t prepared_keys{}, queries{}, warm{}, cold{}, repeats{}, cross_player{}, scalar_hits{};
+    };
+    [[nodiscard]] const QueryCounts& query_counts() const noexcept { return query_counts_; }
+    using QueryObserver = void (*)(std::uint64_t tick, std::size_t queried_keys, const QueryCounts&) noexcept;
+    // Optional write-only profiling sink. No runtime I/O or simulation input.
+    static void observe_queries(QueryObserver observer) noexcept;
 
     // PG-05: the threat in a rectangle of the objects of `player`'s allies (friendly) or enemies.
     [[nodiscard]] Real force(const Host& host, const WorldView& view, const Rect& rect, std::uint64_t category,
@@ -110,6 +127,7 @@ public:
     [[nodiscard]] std::vector<sim::EntityId> objects() const;
 
 private:
+    friend struct GoalStateCodec;
     struct Tracked {
         std::vector<ThreatEntry> entries;
         std::int64_t next_service{};
@@ -129,6 +147,15 @@ private:
     using TotalKey = std::tuple<std::uint64_t, tactical::PlayerId, bool, std::uint64_t>;
     using ForceKey = std::tuple<std::uint64_t, tactical::PlayerId, bool, std::uint64_t,
         std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, sim::EntityId>;
+    using ContributionKey = std::pair<std::uint64_t, std::uint64_t>;
+    struct Contribution {
+        const ViewUnit* unit{};
+        std::optional<Real> total;
+        std::vector<Real> entries;
+    };
+    using Contributions = std::map<sim::EntityId, Contribution>;
+    [[nodiscard]] const Contributions* contributions(std::uint64_t category, Real attenuator,
+        tactical::PlayerId player) const;
     [[nodiscard]] bool preparing(const Host& host, const WorldView& view) const noexcept {
         return executor_ != nullptr && preparation_host_ == &host && preparation_view_ == &view;
     }
@@ -138,7 +165,25 @@ private:
     const WorldView* preparation_view_{};
     mutable std::map<TotalKey, Real> total_queries_;
     mutable std::map<ForceKey, Real> force_queries_;
+    std::map<ContributionKey, Contributions> contributions_;
+    mutable std::map<ContributionKey, std::set<tactical::PlayerId>> requested_;
+    std::map<ContributionKey, std::set<tactical::PlayerId>> pending_;
+    mutable QueryCounts query_counts_;
 };
+
+// ---- Local threat centers (WHE-68) ------------------------------------------------------------
+
+// The strongest local threat center of `objects` (ascending ID): planar cluster
+// centers, each scored by the summed `power` of the objects whose planar squared
+// distance is within `radius_squared`; equal scores keep the last center. `draw`
+// supplies uniform(low, high), called Y then X for each random initial center.
+struct ThreatCenter {
+    Real x{};
+    Real y{};
+    Real threat{};
+};
+ThreatCenter local_threat_center(const std::vector<const ViewUnit*>& objects, Real radius_squared,
+    const std::function<Real(const ViewUnit&)>& power, const std::function<Real(Real, Real)>& draw);
 
 // ---- Targets (GS-10) ------------------------------------------------------------------------
 
@@ -176,6 +221,7 @@ struct TaskForceDef {
     bool required{};
     Real minimum_force{};
     std::int32_t minimum_size{};
+    bool deny_special_weapon_attach{}; // HA-01: DenySpecialWeaponAttach entry (last: positional initializers)
 };
 
 struct PlanDef {
@@ -186,6 +232,10 @@ struct PlanDef {
     bool ignore_target{};
     bool magic{};
     bool allow_free_store{true};
+    // HA-01: some TaskForce with a team lacks DenySpecialWeaponAttach. Retail reads it only for the
+    // extra (team-less) attach of special-weapon sources, which the host does not model; a source
+    // listed in a team is admitted either way (WSW-47).
+    bool allow_special_weapons{};
     bool allow_engaged{true};
     Real per_failure_contrast_adjust{};
     Real min_contrast{};
@@ -201,6 +251,7 @@ struct Contrast {
 
 // The unit selection of an instantiated goal (PL-20).
 struct PotentialPlan {
+    std::uint64_t id{};                        // galactic engine-wide allocation identity
     std::size_t plan{};                        // PlanDef index
     bool valid{};
     bool reserved{};
@@ -217,6 +268,7 @@ struct PotentialPlan {
     std::vector<Contrast> target_contrast;     // PL-31: the target's contrast list
     std::vector<Contrast> current_contrast;    // what the selected units leave of it
     Real threshold{};
+    bool target_contrast_disabled{}; // WGA-341: GC Produce_Force without staging
 };
 // SAE-05: one activation gate; SAE-09's tactical activation estimate is zero.
 [[nodiscard]] inline Real production_time_limit(const GoalType& goal, const std::optional<Real> linear,
@@ -240,6 +292,7 @@ struct Goal {
     bool finished{};
     std::optional<PotentialPlan> potential;
     std::uint64_t plan{};          // running plan ID, 0 when none
+    bool exclusions_registered{}; // WGA-57: exactly once per active/executing goal
 };
 
 // ---- Execution (EX) -------------------------------------------------------------------------
@@ -262,11 +315,14 @@ struct BuildTask {
     Real generic_cost{};
     bool finished{};
     bool failed{};
+    sim::galactic::PlanetId staging{}, associated_producer{};
+    std::uint64_t state_entered{};
+    bool salvage{}, allocated{}, joined{}, synchronized_staging{};
 };
 
 // A blocking object a plan script waits on (EX-20).
 struct Block {
-    enum class Kind : std::uint8_t { produce, move, ambush, reinforce } kind{Kind::move};
+    enum class Kind : std::uint8_t { produce, move, ambush, reinforce, galactic_land, galactic_launch, galactic_form, galactic_invade } kind{Kind::move};
     std::uint64_t id{};
     std::uint64_t instance{};
     std::uint64_t taskforce{};
@@ -292,6 +348,12 @@ struct Block {
     std::uint32_t reinforcement_attempt{};
     std::uint64_t pool_token{};
     std::uint64_t waiting_on{}; // SAE-11: another Lua handle for the same live operation
+    std::uint64_t galactic_request{};
+    sim::EntityId galactic_actor{}; // retained result wrapper, independent of completion
+    // EX-31 (#3087): -1, or the destination owner when an attack on a non-hostile object refused
+    // every mover; such a block waits until the TaskForce empties, the destination dies or its new
+    // owner is no enemy.
+    std::int64_t held_owner{-1};
 };
 
 struct TaskForce {
@@ -313,6 +375,8 @@ struct TaskForce {
     bool had_units{};
     bool damaged_pending{};                   // one Unit_Damaged queued since the last pump
     std::map<sim::EntityId, sim::EntityId> last_target; // unit -> attack target (Target_In_Range)
+    sim::galactic::PlanetId galactic_stage{}; // WGA-226/254: retained authored force staging
+    sim::EntityId galactic_fleet{}; // WGA-227: actual retained orbital fleet
 };
 
 struct Plan {
@@ -370,6 +434,8 @@ struct Context {
     std::optional<tactical::PlayerId> enemy;
     std::optional<tactical::PlayerId> human;
     const Target* target{};
+    // Transient proposal diagnostics; never retained by the engine or serialized.
+    std::string* proposal_trace{};
 };
 
 // ---- Per-player systems ---------------------------------------------------------------------
@@ -381,7 +447,7 @@ struct GoalFunctionEntry {
     std::string equation_name; // as written
 };
 
-// Learning records (LS-01): outcomes with their expiry frame (-1: never).
+// WGA-214..216: append-ordered outcomes with signed expiry; nonpositive rows do not stop pruning.
 struct History {
     std::vector<std::pair<bool, std::int64_t>> entries;
 };
@@ -391,6 +457,10 @@ struct PlayerAi {
     const PlayerType* type{};
     const Template* space_template{};
     Difficulty difficulty{};
+    bool galactic{};
+    galactic_ai::TemplatePolicy galactic_policy;
+    std::shared_ptr<galactic_ai::Funding> galactic_funding;
+    std::map<std::string, std::uint32_t, std::less<>> proposal_counts, exclusion_counts;
     std::vector<GoalFunctionEntry> functions;
     std::vector<std::uint64_t> targets;            // goal target list (GS-10), in list order
     std::int64_t next_goal{}, next_planning{}, next_execution{}, next_learning{};
@@ -412,6 +482,10 @@ struct PlayerAi {
     std::map<std::pair<std::string, std::uint64_t>, History> goal_outcomes;
     std::map<std::pair<std::size_t, std::uint64_t>, History> plan_outcomes;
     std::map<std::size_t, std::pair<std::int64_t, std::int64_t>> plan_success; // successes, attempts
+    // WGA-213/221/223: cumulative tables do not decay during recent sweeps.
+    std::map<std::string, std::pair<std::int64_t, std::int64_t>, std::less<>> goal_success, unit_survival;
+    std::map<std::pair<std::string, std::uint64_t>, std::pair<std::int64_t, std::int64_t>> target_goal_success;
+    std::map<std::pair<std::size_t, std::uint64_t>, std::pair<std::int64_t, std::int64_t>> target_plan_success;
     // Execution: free store reservations (EX-01) and build tasks (EX-10).
     std::map<sim::EntityId, std::uint64_t> reserved; // object -> goal ID
     std::map<sim::EntityId, std::uint64_t> assigned; // object -> TaskForce ID
@@ -422,6 +496,14 @@ struct PlayerAi {
     std::uint64_t next_goal_id{1};
 };
 
+// WTA-23, WTA-26 to WTA-28: a unit's attack-positioning flag and service state.
+inline constexpr std::int64_t attack_positioning_frames = 150; // WTA-27
+struct AttackPositioning {
+    std::uint64_t instance{};    // the plan instance whose TaskForce switched it on: the orders' issuer
+    std::int64_t next{};         // the frame of the unit's next positioning
+    sim::EntityId target{};      // the attack target of its last move to an ideal position
+};
+
 // #957 (SCH-04): a goal whose plan script waits for an attach budget.
 struct PendingAttach {
     tactical::PlayerId player{};
@@ -430,16 +512,98 @@ struct PendingAttach {
 
 // ---- The engine -----------------------------------------------------------------------------
 
+class TacticalWorld;
+
+// WGA-56: goal IDs are local to a player; potential/running plan IDs are
+// engine-wide. A definition index is never a runtime reservation identity.
+struct GalacticGoalIdentity {
+    tactical::PlayerId player{};
+    std::uint64_t goal{}, potential_plan{}, running_plan{}, instance{}, target{};
+    std::string definition;
+    bool operator==(const GalacticGoalIdentity&) const = default;
+};
+class GoalStateContributor;
+
+// FD-73: only service deadlines use this clock. World, scoring and Lua clocks
+// keep advancing during a hold; enabled AI time preserves remaining phases.
+struct StaggeredServiceClock {
+    std::uint64_t paused_frames{};
+    std::optional<std::uint64_t> held_since;
+
+    void visit(std::uint64_t frame, bool suspended) {
+        if (suspended) {
+            if (!held_since) held_since = frame;
+        } else if (held_since) {
+            paused_frames += frame - *held_since;
+            held_since.reset();
+        }
+    }
+    [[nodiscard]] std::uint64_t enabled_frame(std::uint64_t frame) const noexcept {
+        return frame - paused_frames - (held_since && frame >= *held_since ? frame - *held_since : 0);
+    }
+};
+
 class Engine {
 public:
     Engine(std::shared_ptr<Host> host, AiData data, std::vector<PlanDef> plans);
+    // WGS-66: exact native child continuation; immutable content is rebuilt,
+    // references are validated, and restore never services gameplay.
+    [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_tactical_native(
+        std::string_view content_identity, authoritative::ScriptScheduler&) const;
+    [[nodiscard]] core::Result<void> restore_tactical_native(std::span<const std::uint8_t>,
+        std::string_view content_identity, authoritative::ScriptScheduler&);
+    // Continuation mutations, including synchronized draws, invalidate goals.
+    void mark_native_state_changed() noexcept { if (++native_revision_ == 0) std::terminate(); }
+    [[nodiscard]] std::uint64_t native_state_revision() const noexcept { return native_revision_; }
+    // WGA-01..05: the same native engine state, with manager-owned due tests.
+    [[nodiscard]] core::Result<void> begin_galactic_barrier(const World&, galactic_ai::Clocks,
+        authoritative::ScriptScheduler&, std::uint64_t& sequence, std::span<const galactic_ai::PlayerSelection>,
+        const sim::PartitionExecutor* executor = nullptr);
+    [[nodiscard]] core::Result<void> apply_galactic_policy(tactical::PlayerId, const galactic_ai::TemplatePolicy&);
+    void set_galactic_funding(std::shared_ptr<galactic_ai::Funding>);
+    void set_galactic_selection(GalacticSelectionProvider provider) { galactic_selection_ = std::move(provider); }
+    void set_galactic_stage_catalog(std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> catalog) { galactic_stage_catalog_ = std::move(catalog); }
+    using GalacticStageUsability = std::function<core::Result<bool>(tactical::PlayerId, const sim::galactic::GalacticSnapshot&, sim::galactic::PlanetId)>;
+    void set_galactic_stage_usability(GalacticStageUsability reader) { galactic_stage_usability_ = std::move(reader); }
+    using GalacticStageObjectReader = std::function<core::Result<bool>(tactical::PlayerId, const sim::galactic::GalacticSnapshot&, sim::EntityId)>;
+    void set_galactic_stage_garrison(GalacticStageObjectReader reader) { galactic_stage_garrison_ = std::move(reader); }
+    void set_galactic_stage_combat_skip(GalacticStageObjectReader reader) { galactic_stage_combat_skip_ = std::move(reader); }
+    [[nodiscard]] core::Result<std::pair<Real, bool>> galactic_freestore_selection_facts(
+        tactical::PlayerId, sim::galactic::PlanetId target, sim::EntityId object, const PlanDef&) const;
+    void set_galactic_build_observer(GalacticBuildObserver observer) { galactic_build_observer_ = std::move(observer); }
+    // Allocation is separate from force selection, funding and plan execution.
+    // Positive authored desire chooses a template-enabled plan with the shared
+    // synchronized weighted draw, then retains an unselected potential plan.
+    [[nodiscard]] core::Result<std::optional<GalacticGoalIdentity>> allocate_galactic_goal(
+        tactical::PlayerId, std::size_t function, std::uint64_t target);
+    [[nodiscard]] std::optional<GalacticGoalIdentity> galactic_goal(tactical::PlayerId, std::uint64_t goal) const;
+    [[nodiscard]] std::optional<std::uint64_t> galactic_goal_for_plan(tactical::PlayerId, std::uint64_t plan) const;
+    [[nodiscard]] bool galactic_reservation_valid(tactical::PlayerId, sim::EntityId, std::uint64_t potential_plan) const;
+    [[nodiscard]] core::Result<std::map<sim::EntityId, std::uint64_t>> galactic_execution_reservations(tactical::PlayerId) const;
+    [[nodiscard]] core::Result<void> reserve_galactic_object(tactical::PlayerId, std::uint64_t goal, sim::EntityId);
+    [[nodiscard]] core::Result<void> release_galactic_goal(tactical::PlayerId, std::uint64_t goal);
+    using GalacticBuildPublication = std::shared_ptr<const std::vector<GalacticBudgetBuild>>;
+    [[nodiscard]] core::Result<GalacticBuildPublication> galactic_build_budgets(
+        const galactic_ai::NativeActions&, const GalacticFunding&) const;
+    [[nodiscard]] core::Result<math::Fixed> galactic_build_remaining_cost(tactical::PlayerId, const BuildTask&) const;
+    void mark_galactic_tasks_changed() noexcept { if (++galactic_tasks_revision_ == 0) std::terminate(); galactic_build_cache_.reset(); }
+    [[nodiscard]] std::uint64_t galactic_build_tasks_revision() const noexcept { return galactic_tasks_revision_; }
+    [[nodiscard]] std::optional<std::uint64_t> galactic_potential_for_goal(tactical::PlayerId, std::uint64_t goal) const;
+    [[nodiscard]] std::vector<GalacticGoalIdentity> galactic_goals(tactical::PlayerId) const;
+    [[nodiscard]] core::Result<void> service_galactic_system(tactical::PlayerId, galactic_ai::Service,
+        authoritative::ScriptScheduler&, std::uint64_t& sequence);
+    [[nodiscard]] core::Result<void> commit_galactic_events(authoritative::ScriptScheduler&, std::uint64_t& sequence);
 
     // Serial, before the script service: perception, goals, planning and execution of every AI
     // player in ascending player ID (GS-01). Engine events for the scripts are submitted to
-    // `scripts` with keys from `sequence`.
-    [[nodiscard]] core::Result<void> before_service(const tactical::TacticalSession& world,
-        const tactical::TacticalSnapshot& snapshot, authoritative::ScriptScheduler& scripts, std::uint64_t& sequence,
-        const sim::PartitionExecutor* executor = nullptr);
+    // `scripts` with keys from `sequence`. WTA-01/02: on a player's execution frame,
+    // `execution_hook` (the freestore's service tests) runs after its goals and planning and
+    // before its build tasks.
+    // Hooks allocate event keys from the engine's live counter during the barrier.
+    using ExecutionHook = std::function<core::Result<void>(tactical::PlayerId, std::uint64_t&)>;
+    [[nodiscard]] core::Result<void> before_service(const World& world,
+        authoritative::ScriptScheduler& scripts, std::uint64_t& sequence,
+        const sim::PartitionExecutor* executor = nullptr, const ExecutionHook& execution_hook = {});
     // Serial, after the script service: takes the plan scripts' engine requests out of the
     // report and adds the engine's unit orders.
     [[nodiscard]] core::Result<void> after_service(authoritative::ServiceReport& report);
@@ -447,12 +611,22 @@ public:
     // ---- Reads for the bindings (const; no engine step runs during the script service) ----
     [[nodiscard]] std::optional<Real> evaluate(std::string_view equation, tactical::PlayerId player,
         const Target* target) const;
+    // FT-05/06: selected manager owns object liveness and positions.
+    [[nodiscard]] const WorldView* completed_view() const;
     [[nodiscard]] const Target* target(std::uint64_t id) const;
     [[nodiscard]] const Target* target_of_object(sim::EntityId object) const;
     [[nodiscard]] const TaskForce* taskforce(std::uint64_t id) const;
     [[nodiscard]] const Plan* plan_of_instance(std::uint64_t instance) const;
     [[nodiscard]] const Plan* plan(std::uint64_t id) const;
     [[nodiscard]] const Block* block(std::uint64_t id) const;
+    [[nodiscard]] std::optional<galactic_ai::MovementReach> galactic_movement_reach(std::uint64_t plan) const;
+    [[nodiscard]] std::vector<std::uint64_t> galactic_movement_requests() const;
+    [[nodiscard]] core::Result<void> validate_galactic_movement(std::uint64_t request,
+        std::uint64_t plan, std::uint64_t taskforce, std::uint64_t block, bool registered) const;
+    // WGA-202/204: qualified retained listener delivery, without parent service.
+    [[nodiscard]] core::Result<void> deliver_galactic_space_conflict(std::uint64_t request,
+        std::uint64_t plan, std::uint64_t taskforce, std::uint64_t block, bool begin, authoritative::ScriptScheduler&);
+
     [[nodiscard]] const ThreatGrid& grid() const noexcept { return grid_; }
     [[nodiscard]] bool reserved(sim::EntityId object) const;
     // DT-03: the attacker that threatens the objects most.
@@ -468,6 +642,16 @@ public:
     [[nodiscard]] std::optional<Real> global_value(const std::string& name) const;
     // A unit's type as the goal system counts it (a squadron container's squadron type).
     [[nodiscard]] bool in_freestore(const ViewUnit& unit, tactical::PlayerId player) const;
+    // FH-11, AI-08: a freestore unit the freestore's unit service calls On_Unit_Service for: one
+    // that no goal has reserved for its plan (#782).
+    [[nodiscard]] bool unit_service(const ViewUnit& unit, tactical::PlayerId player) const;
+    // WTA-02 (#783): whether the player's execution service, which runs its freestore's service
+    // tests, falls on `frame`: every 0.1 s from its first service. A player the goal system does
+    // not run (or before its first service) is tested every frame.
+    [[nodiscard]] bool execution_due(tactical::PlayerId player, std::int64_t frame) const;
+    // WTA-02: whether the goal system runs the player, so its execution service runs the
+    // freestore's tests (before_service's execution hook).
+    [[nodiscard]] bool runs_player(tactical::PlayerId player) const;
     // GS-11: whether a target matches application flags (upper-case names) for the player.
     [[nodiscard]] bool target_matches(tactical::PlayerId player, const std::set<std::string>& flags, const Target* target) const;
     [[nodiscard]] sim::EntityId producer(tactical::PlayerId player, tactical::TypeId type,
@@ -482,9 +666,16 @@ public:
 
 private:
     friend struct EngineContractAccess;
+    friend class TacticalWorld;
+    friend class GoalStateContributor;
+    friend struct GoalStateCodec;
     void prepare_producers() const;
-    struct Evaluator;
     // Perception.
+    void prepare_station_levels(const sim::PartitionExecutor*);
+    [[nodiscard]] Real station_base_level(tactical::PlayerId) const;
+    struct StationLevel { tactical::PlayerId owner{}; Real level{}; };
+    // Derived only for the current ordered service barrier; never persisted.
+    std::optional<std::vector<StationLevel>> station_levels_;
     void build_targets(PlayerAi& player);
     void update_targets();
     [[nodiscard]] std::optional<Real> run_equation(const Equation& equation, const Context& context) const;
@@ -504,14 +695,22 @@ private:
     [[nodiscard]] bool like(const PlayerAi& player, const Goal& a, const Goal& b) const;
     [[nodiscard]] bool plan_goal(PlayerAi& player, Goal& goal);
     [[nodiscard]] bool select_units(PlayerAi& player, const Goal& goal, PotentialPlan& potential);
+    [[nodiscard]] bool select_galactic_units(PlayerAi&, const Goal&, PotentialPlan&);
+    [[nodiscard]] std::shared_ptr<const GalacticSelectionInput> galactic_selection(const PlayerAi&, const Goal&, const PlanDef&) const;
+    [[nodiscard]] galactic_goals::ProductionEstimate galactic_estimate(const PlayerAi&, const Goal&, const PotentialPlan&, bool linear) const;
+    [[nodiscard]] sim::galactic::funding::GoalRequest galactic_funding_request(const PlayerAi&, const Goal&) const;
+    [[nodiscard]] bool galactic_fundable(const PlayerAi&, const Goal&, bool activation) const;
+    void service_galactic_execution(PlayerAi&);
+    void begin_galactic_maintenance(PlayerAi&);
+    void salvage_galactic_goal(PlayerAi&, std::uint64_t goal);
     [[nodiscard]] bool production_time_allowed(const PlayerAi& player, const Goal& goal) const;
     [[nodiscard]] bool test_valid(PlayerAi& player, Goal& goal);
     [[nodiscard]] bool test_target_contrast(PlayerAi& player, Goal& goal);
     void reserve(PlayerAi& player, Goal& goal);
-    void release(PlayerAi& player, const Goal& goal, bool refund = true);
+    void release(PlayerAi& player, Goal& goal, bool refund = true);
     void refund_funds(PlayerAi& player, std::uint64_t goal);
     void change_wallet(tactical::PlayerId player, Real amount);
-    void observe_purchases(PlayerAi& player, const tactical::TacticalSnapshot& snapshot);
+    void observe_purchases(PlayerAi& player, const World& world);
     [[nodiscard]] std::optional<Real> pad_count(tactical::PlayerId player,
         const std::vector<std::string>& types, bool open) const;
     void register_activation(PlayerAi& player, const Goal& goal, bool success);
@@ -532,7 +731,13 @@ private:
     void service_reinforcements(PlayerAi& player);
     void service_blocks();
     void service_taskforce_events();
-    void track_damage(const tactical::TacticalSnapshot& snapshot);
+    void track_damage(const World& world);
+    // AI-32/WLD-10: ObjectScript_PointDefense, once a second per AI-owned Crusader.
+    void service_point_defence();
+    void service_corrupt_systems();
+    // WTA-26 to WTA-28: attack positioning of the flagged units.
+    void service_attack_positioning();
+    [[nodiscard]] math::Vec3 ideal_attack_position(const ViewUnit& target, Real half, tactical::PlayerId player) const;
     void emit_call(const Plan& plan, const TaskForce& taskforce, std::string_view event, authoritative::ValueList arguments);
     void emit_thread_event(const Plan& plan, const TaskForce& taskforce, std::string_view event,
         authoritative::ValueList arguments);
@@ -540,6 +745,7 @@ private:
     [[nodiscard]] std::optional<math::Vec3> ambush_point(const Block& block, const Plan& plan) const;
     void order_ambush(Block& block, const TaskForce& taskforce, const Plan& plan, bool fresh);
     void remove_member(TaskForce& taskforce, sim::EntityId unit);
+    void return_galactic_actor(const TaskForce&, sim::EntityId);
     [[nodiscard]] bool defines_function(std::uint64_t instance, const std::string& name) const;
     void record(const Plan* plan, tactical::PlayerId player, std::string event, std::string detail = {});
     [[nodiscard]] PlayerAi* player_ai(tactical::PlayerId player);
@@ -553,11 +759,20 @@ private:
     void issue_order(const Plan& plan, const ViewUnit& unit, std::string_view verb, sim::EntityId target,
         const math::Vec3& destination);
 
+    std::uint64_t native_revision_{1};
+    std::uint64_t galactic_tasks_revision_{1}; // derived publication invalidation, not saved state
+    mutable std::shared_ptr<const std::vector<GalacticBudgetBuild>> galactic_build_cache_;
+    mutable std::array<std::uint64_t, 3> galactic_build_cache_key_{};
     std::shared_ptr<Host> host_;
     mutable bool producers_prepared_{};
     mutable std::map<std::pair<tactical::PlayerId, tactical::TypeId>, std::vector<sim::EntityId>> producers_;
     mutable ProducerWork producer_work_{};
     const sim::PartitionExecutor* perception_executor_{};
+    GalacticSelectionProvider galactic_selection_;
+    std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> galactic_stage_catalog_;
+    GalacticStageUsability galactic_stage_usability_;
+    GalacticStageObjectReader galactic_stage_garrison_, galactic_stage_combat_skip_;
+    GalacticBuildObserver galactic_build_observer_;
     struct PadReservation {
         tactical::PlayerId player{};
         std::uint64_t goal{};
@@ -568,6 +783,7 @@ private:
     std::map<sim::EntityId, PadReservation> pad_reservations_;
     AiData data_;
     std::vector<PlanDef> plans_;
+    mutable std::string native_configuration_; // immutable closure, computed once
     ThreatGrid grid_;
     std::vector<PlayerAi> players_;
     std::map<std::uint64_t, Target> targets_;
@@ -580,6 +796,8 @@ private:
     // This tick's first hit on each object: (attacker, deliberate) (EX-44).
     std::map<sim::EntityId, std::pair<sim::EntityId, bool>> last_hits_;
     std::map<std::string, Real, std::less<>> globals_;
+    // WTA-23: the units whose attack-positioning flag is on, ascending ID.
+    std::map<sim::EntityId, AttackPositioning> positioning_;
     std::vector<PlanRecord> records_;
     std::vector<TickCost> costs_;
     // #957: counters of the barrier step in progress and the plans waiting to be attached.
@@ -600,6 +818,8 @@ private:
     std::uint64_t next_instance_{first_plan_instance};
     std::uint64_t order_sequence_{};
     bool initialized_{};
+    StaggeredServiceClock staggered_clock_;
+    bool staggered_seeded_{};
 };
 
 // PL-10 to PL-12: a plan from the globals its definition load leaves: Category, TaskForce,

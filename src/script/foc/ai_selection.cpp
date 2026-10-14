@@ -1,10 +1,9 @@
+#include "eawr/core/tick_profile.hpp"
 #include "ai_engine_internal.hpp"
 
 #include <algorithm>
 #include <bit>
-#include <chrono>
 #include <cmath>
-#include <cstdio>
 
 namespace eawr::script::foc::ai {
 
@@ -13,9 +12,25 @@ using namespace engine_internal;
 // EX-01: the free store objects a potential plan may take, with their cost (the XY distance
 // squared to the goal target, 0 without one).
 std::vector<const ViewUnit*> Engine::freestore_list(const PlayerAi& player, const Goal& goal, const PlanDef& plan) const {
+    core::tick_profile::Scope scope("serial.goal.free-store-inputs");
     std::vector<const ViewUnit*> out;
+    if (player.galactic) {
+        const auto input = galactic_selection(player, goal, plan);
+        if (!input) return out;
+        for (const auto& row : input->freestore) {
+            const auto* unit = host_->view->find(row.object);
+            if (!unit || unit->owner != player.player || player.assigned.contains(row.object)) continue;
+            const auto held = player.reserved.find(row.object);
+            if (held == player.reserved.end() || held->second == goal.id) out.push_back(unit);
+        }
+        return out;
+    }
+    const auto* account = host_->economy(player.player);
     for (const ViewUnit& unit : host_->view->units) {
         if (!in_freestore(unit, player.player)) continue;
+        // WSW-47: proposals require an enabled, fully ready persistent source, admitted by the match.
+        if (unit.planetary_weapon && (!host_->setup.allow_special_weapons || account == nullptr || !account->special_weapons_enabled
+            || unit.planetary_weapon->readiness.raw() < math::Fixed::scale)) continue;
         if (const auto found = player.reserved.find(unit.id); found != player.reserved.end() && found->second != goal.id) continue;
         if (unit.health < data_.constants.health_low_threshold) continue;
         if (!plan.allow_engaged) {
@@ -38,6 +53,12 @@ std::vector<const ViewUnit*> Engine::freestore_list(const PlayerAi& player, cons
 // PL-31: the target's contrast list: entry 0 the target force, then one entry per enemy
 // contrast category, each times the plan's maximum contrast factor.
 std::vector<Contrast> Engine::contrast_list(const PlayerAi& player, const Goal& goal, const PlanDef& plan, Real max_factor) const {
+    if (player.galactic) {
+        std::vector<Contrast> result;
+        const auto input = galactic_selection(player, goal, plan);
+        if (input) for (const auto& row : input->contrast) result.push_back({row.category, to_single(row.force * max_factor)});
+        return result;
+    }
     static_cast<void>(plan);
     std::vector<Contrast> out;
     const Target* target = this->target(goal.target);
@@ -84,6 +105,9 @@ bool contrast_met(const std::vector<Contrast>& target, const std::vector<Contras
 
 // PL-20 to PL-35: the marshallers select units for the goal's plan one at a time.
 bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& potential) {
+    core::tick_profile::Scope scope("serial.goal.unit-selection");
+    mark_native_state_changed();
+    if (player.galactic) return select_galactic_units(player, goal, potential);
     const PlanDef& plan = plans_[potential.plan];
     potential.units.clear();
     potential.freestore.clear();
@@ -114,9 +138,12 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
     const std::vector<const ViewUnit*> store = plan.allow_free_store ? freestore_list(player, goal, plan) : std::vector<const ViewUnit*>{};
     std::vector<Real> cost(store.size());
     Real max_cost{};
-    for (std::size_t index = 0; index < store.size(); ++index) {
-        cost[index] = has_target ? xy_distance_squared(store[index]->position, target_x, target_y) : Real{};
-        max_cost = std::max(max_cost, cost[index]);
+    {
+        core::tick_profile::Scope distances("serial.goal.distances");
+        for (std::size_t index = 0; index < store.size(); ++index) {
+            cost[index] = has_target ? xy_distance_squared(store[index]->position, target_x, target_y) : Real{};
+            max_cost = std::max(max_cost, cost[index]);
+        }
     }
     std::vector<bool> allocated(store.size());
     // Plan marshaller (PL-22): the team layout and the proposal types.
@@ -159,6 +186,8 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
         for (std::size_t team = 0; team < plan.taskforces[tf].teams.size(); ++team) {
             layout.push_back(Slot{tf, team, 0});
             for (const tactical::TypeId type : plan.taskforces[tf].teams[team].types) {
+                const AiType* info = host_->type(type);
+                if (info != nullptr && info->space_special_weapon && !host_->setup.allow_special_weapons) continue;
                 if (std::find(proposals.begin(), proposals.end(), type) != proposals.end()) continue;
                 bool present = false;
                 for (const ViewUnit* unit : store) present = present || unit->type == type;
@@ -180,7 +209,10 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
             const TeamDef& team = plan.taskforces[layout[slot].taskforce].teams[layout[slot].team];
             if (std::find(team.types.begin(), team.types.end(), proposals[index]) != team.types.end()) teams.push_back(slot);
         }
-        if (!teams.empty()) starts[index] = static_cast<std::size_t>(sync_.range(0, static_cast<std::int32_t>(teams.size()) - 1));
+        if (!teams.empty()) {
+            core::tick_profile::Scope draw("serial.goal.ordered-rng");
+            starts[index] = static_cast<std::size_t>(sync_.range(0, static_cast<std::int32_t>(teams.size()) - 1));
+        }
     }
     std::vector<std::int32_t> tf_size(plan.taskforces.size());
     std::vector<Real> tf_force(plan.taskforces.size());
@@ -233,6 +265,11 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
                 if (best == store.size() || cost[object] < cost[best]) best = object;
             }
             allocation[index] = best;
+            // WSW-47: these are persistent free-store objects, never new production.
+            if (info != nullptr && info->space_special_weapon && best == store.size()) {
+                erased[index] = true;
+                continue;
+            }
             if (best != store.size() && Real{} < max_cost) weight = weight + to_single(real(1) - cost[best] / max_cost);
             // Tech tree (tactical): Tech_Level / 5 * 2.
             if (info != nullptr) weight = weight + to_single(to_single(real(info->tech_level) / real(5)) * real(2));
@@ -263,7 +300,7 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
                     const auto factory = producer(player.player, type, target != nullptr ? target->object : 0);
                     const auto* option = build_option(player.player, type, factory);
                     const auto allowed = option != nullptr && tactical::production_allowed(*option, true, [&](tactical::TypeId counted) {
-                        auto counts = host_->world->production_counts(player.player, counted);
+                        auto counts = host_->ai_world->production_counts(player.player, counted);
                         for (std::size_t selected = 0; selected < potential.units.size(); ++selected) {
                             if (potential.units[selected] == counted && potential.sources[selected] == 2) {
                                 ++counts.current_player; ++counts.current_allies;
@@ -287,7 +324,10 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
             if (!reject) {
                 Real contrast_weight{};
                 if (plan.ignore_target) {
-                    contrast_weight = sync_.uniform(Real{}, to_single(type_power(type) / real(500)));
+                    contrast_weight = [&] {
+                        core::tick_profile::Scope draw("serial.goal.ordered-rng");
+                        return sync_.uniform(Real{}, to_single(type_power(type) / real(500)));
+                    }();
                 } else if (contrast && info != nullptr) {
                     Real top{};
                     std::size_t top_index = 0;
@@ -398,7 +438,14 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
     return valid;
 }
 
-bool Engine::production_time_allowed(const PlayerAi&, const Goal&) const {
+bool Engine::production_time_allowed(const PlayerAi& player, const Goal& goal) const {
+    if (player.galactic) {
+        if (!goal.potential) return false;
+        const auto estimate = galactic_estimate(player, goal, *goal.potential, false);
+        const auto linear = galactic_estimate(player, goal, *goal.potential, true);
+        return estimate.feasible && linear.feasible && ai::production_time_allowed(
+            *player.functions.at(goal.function).goal, linear.seconds, estimate.seconds);
+    }
     // SAE-09: tactical selection resets its activation estimate to zero; only galactic
     // selection computes production travel/queue time. SAE-05 rejects only an estimate
     // exceeding a positive limit, so zero never rejects here. Feasibility remains SAE-03.
@@ -407,8 +454,11 @@ bool Engine::production_time_allowed(const PlayerAi&, const Goal&) const {
 
 // GS-21: a potential plan is still valid when its units are still there for it.
 bool Engine::test_valid(PlayerAi& player, Goal& goal) {
+    mark_native_state_changed();
     if (!goal.potential || !goal.potential->valid) return false;
     if (goal.plan != 0) return running_.contains(goal.plan);
+    if (player.galactic) return select_units(player, goal, *goal.potential)
+        && production_time_allowed(player, goal) && galactic_fundable(player, goal, true);
     if (!goal.potential->reserved && !goal.potential->funded)
         return select_units(player, goal, *goal.potential) && production_time_allowed(player, goal);
     for (const sim::EntityId object : goal.potential->freestore) {
@@ -422,6 +472,7 @@ bool Engine::test_valid(PlayerAi& player, Goal& goal) {
 
 // GS-22: the contrast test of an active goal.
 bool Engine::test_target_contrast(PlayerAi& player, Goal& goal) {
+    mark_native_state_changed();
     if (!goal.potential || !goal.potential->valid) return false;
     if (goal.plan != 0) {
         // A running plan keeps its goal while its target lives (fidelity list: the retail test
@@ -432,7 +483,7 @@ bool Engine::test_target_contrast(PlayerAi& player, Goal& goal) {
     if (!goal.potential->reserved) return test_valid(player, goal);
     if (!test_valid(player, goal)) return false;
     const PlanDef& plan = plans_[goal.potential->plan];
-    if (plan.ignore_target || goal.target == 0) return true;
+    if (plan.ignore_target || goal.potential->target_contrast_disabled || goal.target == 0) return true;
     if (goal.potential->funded) return true; // WAS-25: restoration retains the original allocation
     return select_units(player, goal, *goal.potential);
 }

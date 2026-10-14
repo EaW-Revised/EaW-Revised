@@ -20,6 +20,90 @@ using namespace fighters_detail;
 
 namespace detail {
 
+core::Result<SquadronTargetCommit> commit_squadron_target(const CombatWorld& world,
+    const CombatUnit& unit, CombatState scanned, CombatState& member,
+    const std::span<CombatState* const> roster, SquadronState& team,
+    const Vec3 team_position, const Fixed divert, const Vec3 anchor,
+    const FormationAttackContext& formation, const bool same_cell, const bool scanning) {
+    SquadronTargetCommit result;
+    const auto previous = member.attack_target;
+    member = std::move(scanned);
+    const auto parent = world.container_of(member.attack_target);
+    const auto selected = parent != invalid_entity_id ? parent : member.attack_target;
+    if (!scanning) {
+        // Held, not found: the tail below retains or clears the member's own target.
+    } else if (selected != invalid_entity_id) {
+        // WSQ-43/47: a find is shared when it is not the team's held target, or when the member
+        // had none; a member that already held it (an earlier tick's find, or a player's attack
+        // adopted before the order) shares it to a team that does not.
+        result.shared = selected != team.target || previous == invalid_entity_id;
+        member.attack_target = selected;
+        if (result.shared) {
+            team.target = selected;
+            team.target_hardpoint = member.direct ? member.attack_hardpoint : attack_hull;
+            for (auto* recipient : roster) {
+                recipient->attack_target = selected;
+                recipient->attack_hardpoint = team.target_hardpoint;
+                recipient->direct = member.direct;
+            }
+        }
+        const auto destination = team.formation ? team.formation->attack_target : invalid_entity_id;
+        result.notified = !member.direct && selected != destination;
+        result.admitted = member.direct;
+        if (result.notified) {
+            if (const auto* target = world.find(selected)) {
+                auto admitted = formation_can_attack(world, *target, divert, anchor, formation);
+                if (!admitted) return core::Result<SquadronTargetCommit>::failure(admitted.error());
+                result.admitted = admitted.value();
+            }
+        }
+        if (result.admitted && team.formation) {
+            auto& destination_state = *team.formation;
+            if (selected != destination_state.attack_target) {
+                // WMV-18: only an autonomous find splits the team's base destination; a player's
+                // attack changes the attack destination alone. Both start the FA-07 approach.
+                if (!member.direct) {
+                    if (destination_state.complete && destination_state.base_target == invalid_entity_id)
+                        destination_state.base_position = team_position;
+                    destination_state.attack_override = true;
+                    destination_state.complete = false;
+                }
+                team.approach = true;
+                destination_state.attack_hardpoint = member.direct ? member.attack_hardpoint : attack_hull;
+            }
+            destination_state.attack_target = selected;
+        }
+    } else if (previous != invalid_entity_id && team.target == previous) {
+        // WSQ-44 (debug build, EWSQ-26): a member that loses the team's held target (fog, stealth,
+        // limbo) shares the loss: the team and every member still holding it let go, and the
+        // formation's destination is cleared as an unmatched find would. The caller ends the combat.
+        result.lost = true;
+        team.target = invalid_entity_id;
+        team.target_hardpoint = attack_hull;
+        team.approach = false;
+        for (auto* recipient : roster) {
+            if (recipient->attack_target != previous) continue;
+            recipient->attack_target = invalid_entity_id;
+            recipient->attack_hardpoint = no_hardpoint;
+            recipient->direct = false;
+        }
+        if (team.formation) {
+            auto& held = *team.formation;
+            if (held.attack_override) {
+                held.attack_override = false;
+                held.complete = held.has_reached_done;
+            }
+            held.attack_target = invalid_entity_id;
+            held.attack_hardpoint = attack_hull;
+        }
+    }
+    const auto destination = team.formation ? team.formation->attack_target : invalid_entity_id;
+    auto tail = finish_squadron_target(world, unit, member, formation, destination, same_cell);
+    if (!tail) return core::Result<SquadronTargetCommit>::failure(tail.error());
+    member = std::move(tail).value();
+    return core::Result<SquadronTargetCommit>::success(result);
+}
+
 namespace {
 
 // Squared distance of two points as an exact wide integer of raw units (ties compare exactly).
@@ -39,8 +123,14 @@ namespace {
 
 SquadronScan squadron_target(const CombatWorld& world, const SquadronState& state, const SquadronProfile& squadron,
     const CombatUnit& leader, const Vec3 anchor) {
-    const auto visible = [&leader](const CombatUnit& unit) {
-        return unit.team == leader.team || (unit.visible_to & (std::uint64_t{1} << leader.player_index)) != 0U;
+    // WST-11: a stealth-invisible enemy is no squadron target, kept or acquired, unless the leader's type
+    // targets stealth units: the same rule as ship targeting. It also ends a planned approach.
+    const auto stealth_hidden = [&leader](const CombatUnit& unit) {
+        return unit.team != leader.team && unit.stealth_invisible && !(leader.profile && leader.profile->target_stealth);
+    };
+    const auto visible = [&leader, &stealth_hidden](const CombatUnit& unit) {
+        return !stealth_hidden(unit)
+            && (unit.team == leader.team || (unit.visible_to & (std::uint64_t{1} << leader.player_index)) != 0U);
     };
     // FT-01: a live target the owner sees is kept, and so is a fogged one while the squadron still
     // flies the approach its attack planned (FA-07, #633).
@@ -48,7 +138,7 @@ SquadronScan squadron_target(const CombatWorld& world, const SquadronState& stat
         // #424: a squadron target (a player's attack order) is kept while one of its craft is.
         const auto* current = world.resolve_target(world.find(state.target), leader.position);
         if (current != nullptr && world.hostile(leader.owner, current->owner)
-            && (visible(*current) || state.approach)) return SquadronScan{state.target, state.next_scan_frame};
+            && !stealth_hidden(*current) && (visible(*current) || state.approach)) return SquadronScan{state.target, state.next_scan_frame};
     }
     SquadronScan result{invalid_entity_id, state.next_scan_frame};
     if (world.frame < state.next_scan_frame || leader.profile == nullptr || !leader.profile->max_attack_distance) {

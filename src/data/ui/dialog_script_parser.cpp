@@ -273,6 +273,9 @@ private:
             result.push_back(std::move(field));
             if (!done() && is_punctuation(current(), ',')) {
                 ++index_;
+                // UI-RC1: commas separate tokens; repeated separators do not
+                // introduce a zero-valued coordinate or displace the next field.
+                while (!done() && is_punctuation(current(), ',')) ++index_;
                 continue;
             }
             return core::Result<std::vector<Field>>::success(std::move(result));

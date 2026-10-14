@@ -434,6 +434,24 @@ class SpaceGraphicalCases:
 
 
     @unittest.skipUnless(os.environ.get("EAWR_EAW_GAME_ROOT"),
+                         "set EAWR_EAW_GAME_ROOT for the galactic planet map markers")
+    def test_planet_map_marker_models_are_not_environment(self):
+        # #3077: every galactic planet space map places a Death_Star_Position
+        # marker whose editor model uses the planet shader. Markers are never
+        # drawn in game; the map's own backdrop planet still is.
+        root = pathlib.Path(os.environ["EAWR_EAW_GAME_ROOT"])
+        with tempfile.TemporaryDirectory(prefix="eawr-planet-marker-") as temporary:
+            code, result, _ = self._run(root, "data/art/maps/_space_planet_corellia_01.ted",
+                                        pathlib.Path(temporary), "corellia",
+                                        ("--eawr-populate", "--eawr-map-effects", "off"))
+            self.assertEqual(code, 0, result["failure"])
+        surfaces = result["space"]["surfaces"]
+        self.assertFalse([item for item in surfaces if item["object"].lower() == "death_star_position"])
+        planets = [item for item in surfaces if item["role"].startswith("planet")]
+        self.assertTrue(planets and all(item["status"] == "drawn" for item in planets), planets)
+
+
+    @unittest.skipUnless(os.environ.get("EAWR_EAW_GAME_ROOT"),
                          "set EAWR_EAW_GAME_ROOT for the Coruscant opening pose")
     def test_coruscant_default_pose_is_the_tactical_opening_pose(self):
         # One opening rule: without a map camera config the default view
@@ -677,6 +695,22 @@ class SpaceGraphicalCases:
             self._expect_failure(code, result, "failed", "the synthetic shader is not an environment surface")
             self.assertEqual(result["space"]["slice"], "E-space-environment-v1")
             self.assertIn("primary sky drew no surface", result["failure"])
+
+
+    def test_missing_tactical_cameras_fails_before_sky(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-space-missing-tactical-camera-") as temporary:
+            directory = pathlib.Path(temporary)
+            root = fixture.write_fixture_root(directory / "fixture")
+            (root / "GameData/Data/XML/TacticalCameras.xml").unlink()
+            code, result, _ = self._run(
+                root, fixture.MAP_LOGICAL_PATH, directory, "missing-tactical-camera",
+                ("--eawr-space-camera", fixture.CAMERA, "--eawr-populate"))
+            self._expect_failure(code, result, "failed", "missing tactical camera XML")
+            self.assertEqual(result["space"]["slice"], "E-space-environment-v1")
+            self.assertIn("Space_Mode camera: EAWR-VFS-0002", result["failure"])
+            self.assertIn("data/xml/tacticalcameras.xml", result["failure"])
+            self.assertIn("asset is not present in the mounted view", result["failure"])
+            self.assertNotIn("primary sky drew no surface", result["failure"])
 
 
     def test_nonfinite_camera_fails_with_strict_json(self):

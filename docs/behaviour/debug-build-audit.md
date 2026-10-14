@@ -68,7 +68,7 @@ resolved, fully or in part, is counted as confirmed.
 
 | Claim | Verdict | Reason |
 |---|---|---|
-| R-01 | differs | The service gates and the no-clear-on-rejection rule hold (AU-01). Missing: for a hardpoint owned by an AI player, both opportunity-enable flags count as on whenever its maximum recharge is at most `Hardpoint_Recharge_Cutoff_For_Opportunity_Fire` (3.0 s in FoC), whatever the hardpoint data says (AU-14). |
+| R-01 | confirmed | The service gates and the no-clear-on-rejection rule hold (AU-01). For a hardpoint owned by an AI player, both opportunity-enable flags count as on whenever its maximum recharge is at most `Hardpoint_Recharge_Cutoff_For_Opportunity_Fire` (3.0 s in FoC), whatever the hardpoint data says (AU-14); the remake applies it from the unit tables (`WeaponProfile::ai_opportunity_forced`) and the economy table's AI owners. |
 | R-02 | differs | A successful retained attempt ends processing without an event (AU-01). Missing: when the parent is inside a nebula and its position is fogged to the retained target's owner, the retained attempt counts as failed. |
 | R-03 | confirmed | A failed retained attempt clears the reference and forces a scan in the same service (AU-01). |
 | R-04 | confirmed | The scan runs when the truncated half of the logical rate is strictly less than the frames since the last scan; the frame is recorded before the search (AU-01). |
@@ -176,8 +176,8 @@ resolved, fully or in part, is counted as confirmed.
 |---|---|---|
 | Single-value last occurrence | confirmed | Tags apply in document order (AU-80). |
 | Most-derived variant layer | confirmed | A variant is a copy of its base with its own tags applied on top (AU-83). |
-| Empty and placeholder values | differs | Missing from the note: an empty tag value and the value `TBD` change nothing, so the inherited or earlier value stays (AU-80, AU-81). |
-| List tags | differs | Retail list semantics depend on the tag. `Squadron_Units` and the two spawned-unit lists append, including onto a list a variant inherits. `Squadron_Offsets` and `Fire_Inaccuracy_Distance` replace the inherited list in a variant, where each occurrence also replaces the one before. Each occurrence of a spawned-unit list tag reads one type and count pair only (AU-82). No M2 type exercises a difference. |
+| Empty and placeholder values | differs | Missing from the note: an empty tag value and the value `TBD` change nothing, so the inherited or earlier value stays (AU-80, AU-81). Values are read with surrounding whitespace trimmed and the check precedes the tag lookup, so it holds for every object-type tag whatever its parser (ML-24). |
+| List tags | differs | Retail list semantics depend on the tag. ML-26 corrects AU-82's squadron inheritance reading: `Squadron_Units` appends in an ordinary type, but the first authored variant member replaces the inherited list; later tokens and occurrences append, while omission or placeholder-only text preserves inherited members. The shared reader and M2 squadron loader apply this rule. The two spawned-unit lists still append onto inherited lists, reading one type/count pair per occurrence. `Squadron_Offsets` and `Fire_Inaccuracy_Distance` replace the inherited list in a variant, where each occurrence also replaces the one before. Those M2 list consumers still select the most-derived authoring layer (AU-82; fresh debug build G4-AR12; [ML-26](walks/mod-loading.md)). |
 | List splitting | not checkable | The separator set of the retail tokeniser was not read. |
 | Decimals | confirmed | The retail number parse reads the leading number and ignores trailing text, so `0.8f` reads 0.8 (AU-82). |
 | Booleans | confirmed | Canonical values agree. Retail reads true for `1` or a value starting with Y or T in either case and false for anything else (AU-82); added to the note. |

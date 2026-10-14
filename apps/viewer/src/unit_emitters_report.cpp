@@ -85,6 +85,18 @@ void UnitEmitters::write_report(std::ostream& output) const {
            << ", \"ships\": " << ships_.size() << ", \"plans\": " << plans_ << ", \"running\": " << running
            << ", \"max_running\": " << max_running_ << ", \"max_particles\": " << max_particles_;
     counts(output, "started", started_);
+    output << ", \"model_axis\": {";
+    bool first_axis = true;
+    for (const auto& [name, measured] : model_axis_) {
+        if (measured.samples == 0) continue;
+        if (!first_axis) output << ", ";
+        first_axis = false;
+        output << json(name) << ": {\"samples\": " << measured.samples
+               << ", \"max_sine_error\": " << measured.max_sine_error
+               << ", \"reversed\": " << measured.reversed << "}";
+    }
+    output << "}";
+    counts(output, "deployment_drains_started", deployment_drains_started_);
     output << ", \"invulnerability_drains\": {\"started\": " << invulnerability_drains_started_
            << ", \"finished\": " << invulnerability_drains_finished_ << ", \"cut_short\": "
            << invulnerability_drains_cut_short_ << "}";

@@ -7,10 +7,42 @@ Do not let a PATH clang++ independently discover a newer Visual Studio STL.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
+import threading
+
+
+VCVARS_TIMEOUT = 120
+COMPILE_TIMEOUT = 60
+_vcvars_environments: dict[tuple, dict[str, str]] = {}
+_vcvars_lock = threading.Lock()
+
+
+def _vcvars_environment(root: Path, vs_version: str, environment: dict[str, str]) -> dict[str, str]:
+    vcvars = root / "VC/Auxiliary/Build/vcvars64.bat"
+    toolset_file = root / "VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt"
+    toolset = toolset_file.read_text().strip() if toolset_file.is_file() else ""
+    arguments: tuple[str, ...] = ()  # vcvars64 selects the default x64 toolset.
+    key = (socket.gethostname(), str(vcvars.resolve()), vcvars.stat().st_mtime_ns,
+           vs_version, toolset, arguments, tuple(sorted(environment.items())))
+    with _vcvars_lock:
+        if key not in _vcvars_environments:
+            # cmd.exe does not understand list2cmdline's backslash-escaped quotes.
+            command = f'"{environment.get("COMSPEC", "cmd.exe")}" /d /s /c "call "{vcvars}" >NUL && set"'
+            initialized = subprocess.run(command, env=environment, capture_output=True,
+                                         text=True, timeout=VCVARS_TIMEOUT)
+            if initialized.returncode:
+                raise RuntimeError("Native fixture could not initialize VS 2022 x64 tools: " + initialized.stderr)
+            # Windows environment names are case insensitive.
+            captured = {key.upper(): value for line in initialized.stdout.splitlines()
+                        if "=" in line for key, value in [line.split("=", 1)] if key}
+            _vcvars_environments[key] = captured
+        # A caller may customize its compile environment without changing the cache.
+        return dict(_vcvars_environments[key])
 
 
 @dataclass
@@ -33,11 +65,14 @@ def select_toolchain() -> Toolchain | None:
         raise RuntimeError("Native fixture requires VS 2022 C++ x64 tools; vswhere.exe is missing")
     found = subprocess.run([str(vswhere), "-products", "*", "-version", "[17.0,18.0)",
                             "-latest", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                            "-property", "installationPath"], capture_output=True, text=True, timeout=30)
+                            "-format", "json"], capture_output=True, text=True, timeout=30)
     if found.returncode or not found.stdout.strip():
         raise RuntimeError("Native fixture requires a complete VS 2022 C++ x64 toolchain: " + found.stderr)
-    root = Path(found.stdout.strip())
-    vcvars = root / "VC/Auxiliary/Build/vcvars64.bat"
+    installations = json.loads(found.stdout)
+    if not installations:
+        raise RuntimeError("Native fixture requires a complete VS 2022 C++ x64 toolchain")
+    root = Path(installations[0]["installationPath"])
+    vs_version = installations[0]["installationVersion"]
     # A CTest can inherit a different developer shell. Reinitialize its compiler,
     # include and library settings in the child only, leaving the caller untouched.
     for key in list(environment):
@@ -46,16 +81,7 @@ def select_toolchain() -> Toolchain | None:
             "VSINSTALLDIR", "VCINSTALLDIR", "DEVENVDIR", "INCLUDE", "LIB", "LIBPATH", "CL", "_CL_",
         }:
             del environment[key]
-    # cmd.exe does not understand list2cmdline's backslash-escaped quotes.
-    command = f'"{environment.get("COMSPEC", "cmd.exe")}" /d /s /c "call "{vcvars}" >NUL && set"'
-    initialized = subprocess.run(command,
-                                 env=environment, capture_output=True, text=True, timeout=30)
-    if initialized.returncode:
-        raise RuntimeError("Native fixture could not initialize VS 2022 x64 tools: " + initialized.stderr)
-    # Environment names on Windows are case insensitive; normalize the captured
-    # names to avoid duplicate PATH/Path entries when passing them back to Windows.
-    environment = {key.upper(): value for line in initialized.stdout.splitlines()
-                   if "=" in line for key, value in [line.split("=", 1)] if key}
+    environment = _vcvars_environment(root, vs_version, environment)
     tools = Path(environment.get("VCTOOLSINSTALLDIR", ""))
     compiler = tools / "bin/Hostx64/x64/cl.exe"
     if not tools.is_absolute() or not tools.resolve().is_relative_to(root.resolve()) or not compiler.is_file():
@@ -80,7 +106,8 @@ def compile_fixture(toolchain: Toolchain, source: Path, executable: Path) -> Non
     else:
         arguments = ["-std=c++20", str(source), "-o", str(executable)]
     built = subprocess.run([toolchain.compiler, *arguments], env=toolchain.environment,
-                           cwd=source.parent, capture_output=True, text=True, timeout=60)
+                           cwd=source.parent, capture_output=True, text=True,
+                           timeout=COMPILE_TIMEOUT)
     if built.returncode:
         # cl's banner names its version; clang-cl needs --version separately.
         version = subprocess.run([toolchain.compiler, "--version" if "clang" in Path(toolchain.compiler).name

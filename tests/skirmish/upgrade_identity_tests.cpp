@@ -61,6 +61,59 @@ static int paired(bool shadow) {
         &&option->price.raw()==950*Fixed::scale&&option->build_frames==690&&profile&&!profile->bonuses.empty());
 }
 
+// WST-03 (#1906): a Space_Automatic Battlefield_Modifier_Ability's Stealth_Duration_Multiplier loads
+// as (multiplier - 1) for the owner and, with Apply_To_All_Allies, its allies; a multiplier of 1 or a
+// ground style adds nothing. The upgrade becomes buyable, and the modifier binds content identity.
+static int cloaking() {
+    const auto dir=std::filesystem::temp_directory_path() / ("eawr-cloaking-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    write(dir/"XML/GameObjectFiles.xml","<Game_Object_Files><File>probe.xml</File></Game_Object_Files>");
+    write(dir/"XML/FactionFiles.xml","<Faction_Files><File>factions.xml</File></Faction_Files>");
+    write(dir/"XML/factions.xml","<Factions><Faction Name=\"Underworld\"/></Factions>");
+    const auto modifier=[](const std::string& name,const std::string& style,const std::string& multiplier,const std::string& allies) {
+        return "<UpgradeObject Name=\""+name+"\"><Behavior>DUMMY_UPGRADE</Behavior><Affiliation>Underworld</Affiliation>"
+            "<Tactical_Build_Cost_Multiplayer>1000</Tactical_Build_Cost_Multiplayer><Tactical_Build_Time_Seconds>30</Tactical_Build_Time_Seconds>"
+            "<Tactical_Production_Queue>Tactical_Upgrades</Tactical_Production_Queue><Abilities SubObjectList=\"Yes\">"
+            "<Battlefield_Modifier_Ability Name=\""+name+"_Effect\"><Activation_Style>"+style+"</Activation_Style>"
+            "<Stealth_Duration_Multiplier>"+multiplier+"</Stealth_Duration_Multiplier><Apply_To_All_Allies>"+allies+"</Apply_To_All_Allies>"
+            "<Stacking_Category>3</Stacking_Category></Battlefield_Modifier_Ability></Abilities></UpgradeObject>";
+    };
+    // Invented fixture objects in the stock cloaking-generator shape.
+    write(dir/"XML/probe.xml", "<Objects><StarBase Name=\"Probe_Station\"><Affiliation>Underworld</Affiliation>"
+        "<Tactical_Buildable_Objects_Multiplayer>Underworld,Probe_Cloak,Probe_Owner_Cloak,Probe_Plain,Probe_Ground</Tactical_Buildable_Objects_Multiplayer></StarBase>"
+        +modifier("Probe_Cloak","Space_Automatic","1.25","Yes")+modifier("Probe_Owner_Cloak","Space_Automatic","1.50","No")
+        +modifier("Probe_Plain","Space_Automatic","1.0","Yes")+modifier("Probe_Ground","Ground_Automatic","1.5","Yes")+"</Objects>");
+    const std::array mounts{eawr::vfs::MountSpec{"synthetic",dir,"data",{}}};
+    auto vfs=eawr::vfs::Vfs::mount(mounts); if(!vfs) return 2;
+    auto loaded=eawr::data::load_catalog(vfs.value(),eawr::data::Profile::foc); if(!loaded) return 2;
+    eawr::units::LoadInput input; input.catalog=&loaded.value().catalog; input.filesystem=&vfs.value();
+    input.types={"Probe_Station"};
+    auto loaded_tables=eawr::units::load_unit_tables(input); if(!loaded_tables) return 2;
+    auto& tables=loaded_tables.value();
+    for(const auto& tag: {"MP_Default_Credits","Tactical_Build_Time_Multiplier","Space_Elevated_Vulnerability_Factor",
+        "Space_Elevated_Vulnerability_Duration","Space_Reinforcement_Collision_Check_Distance"})
+        tables.constants.scalars.push_back({tag,std::string_view(tag)=="Space_Elevated_Vulnerability_Factor"?Fixed{}:Fixed::from_raw(Fixed::scale),{}});
+    auto rules=eawr::skirmish::economy_rules({}, {}, tables); if(!rules) {std::cerr<<rules.error().message<<'\n'; return 2;}
+    const auto* menu=rules.value().menu(eawr::skirmish::type_id("Probe_Station"),eawr::skirmish::faction_id("Underworld"));
+    const auto check=[&](const char* name,const bool modified,const char* percentage,const bool allies) {
+        const auto* unit=tables.find(name);
+        const auto* option=menu?menu->find(eawr::skirmish::type_id(name)):nullptr;
+        const auto* profile=rules.value().upgrade(eawr::skirmish::type_id(name));
+        if(!unit||!option||!profile) return false;
+        if(!modified) return unit->production.stealth_duration_bonuses.empty()&&profile->stealth_duration.empty()&&!option->available;
+        return unit->production.stealth_duration_bonuses.size()==1&&option->available&&profile->stealth_duration.size()==1
+            &&profile->stealth_duration[0].stacking_category==3&&profile->stealth_duration[0].all_allies==allies
+            &&profile->stealth_duration[0].percentage==Fixed::from_decimal(percentage).value();
+    };
+    bool ok=check("Probe_Cloak",true,"0.25",true)&&check("Probe_Owner_Cloak",true,"0.5",false)
+        &&check("Probe_Plain",false,"0",false)&&check("Probe_Ground",false,"0",false);
+    const auto identity=eawr::units::content_identity(tables);
+    auto variant=tables;
+    for(auto& unit:variant.units) if(unit.id=="Probe_Cloak") unit.production.stealth_duration_bonuses[0].multiplier=Fixed::from_raw(Fixed::scale*2);
+    ok=ok&&eawr::units::content_identity(variant)!=identity;
+    std::cout<<"cloaking modifiers "<<(ok?"ok":"FAILED")<<'\n';
+    std::error_code ignored; std::filesystem::remove_all(dir,ignored);
+    return ok?0:1;
+}
 
 namespace {
 int failures{};
@@ -106,6 +159,7 @@ int stock_contract() {
     for(int level=1;level<=5;++level) input.types.push_back("Skirmish_Underworld_Star_Base_"+std::to_string(level));
     input.types.push_back("Underworld_Mineral_Extractor");
     for(const auto& entry:stock) input.types.push_back(entry.name);
+    for(const auto* name: {"US_Cloaking_Generator_L1_Upgrade","US_Cloaking_Generator_L2_Upgrade"}) input.types.push_back(name);
     auto tables=eawr::units::load_unit_tables(input); if(!tables) return 2;
     auto rules=eawr::skirmish::economy_rules({}, {}, tables.value());
     if(!rules) {std::cerr<<rules.error().message<<'\n'; return 2;}
@@ -123,7 +177,9 @@ int stock_contract() {
         expect(profile!=nullptr,name+" has upgrade profile");
         if(index<8) expect(profile&&!profile->bonuses.empty()&&unit->production.combat_bonuses.size()==1,
             name+" retains its owned automatic combat ability");
-        else if(index==8) expect(!unit->inactive_abilities.empty(),name+" retains its deferred owned modifier");
+        else if(index==8) expect(unit->special_unlocks.size()==1&&unit->special_unlocks.front().enable
+                &&!unit->special_unlocks.front().all_allies&&!unit->special_unlocks.front().reverse,
+                name+" retains its owner-only special-weapon enabling modifier");
         else expect(unit->production.income_bonuses.size()==2,name+" retains both owned income modifiers");
         for(int level=1;level<=5;++level) {
             const auto station="Skirmish_Underworld_Star_Base_"+std::to_string(level);
@@ -136,7 +192,8 @@ int stock_contract() {
                     name+" uses upgrade identity and queue");
                 expect(option->price==Fixed::from_raw(entry.price*Fixed::scale)&&option->build_frames==static_cast<std::uint32_t>(entry.seconds*30),
                     name+" menu retains cost and duration");
-                expect(option->available==(index<8),name+" supported ability availability");
+                // WSW-06/07: the plasma use upgrade is a supported station option too.
+                expect(option->available,name+" supported ability availability");
             }
         }
         if(index>=9) {
@@ -147,6 +204,13 @@ int stock_contract() {
                 name+" belongs to the extractor and admits its space income modifier");
         }
         std::cout<<name<<" type="<<unit->xml_type<<" price="<<entry.price<<" first_station="<<entry.first_station<<'\n';
+    }
+    // WST-03 (#1906): the cloaking-generator upgrades lengthen the owner's and allies' cloaks.
+    for(const auto& [name,percentage]: {std::pair{"US_Cloaking_Generator_L1_Upgrade","0.25"},std::pair{"US_Cloaking_Generator_L2_Upgrade","0.5"}}) {
+        const auto* profile=rules.value().upgrade(eawr::skirmish::type_id(name));
+        expect(profile&&profile->stealth_duration.size()==1&&profile->stealth_duration[0].stacking_category==3
+            &&profile->stealth_duration[0].all_allies&&profile->stealth_duration[0].percentage==Fixed::from_decimal(percentage).value(),
+            std::string(name)+" carries its cloak-duration modifier");
     }
     // Exercise the ordinary buy/completion path with the authored prerequisites, prices and durations.
     // Higher levels are bought after their preceding upgrades, with enough staged credits.
@@ -190,6 +254,6 @@ int stock_contract() {
 }
 int main(int argc,char** argv) {
     if(argc>1&&std::string_view(argv[1])=="--stock") return stock_contract();
-    const auto control=paired(false); const auto duplicate=paired(true);
-    return control==0&&duplicate==0?0:1;
+    const auto control=paired(false); const auto duplicate=paired(true); const auto cloak=cloaking();
+    return control==0&&duplicate==0&&cloak==0?0:1;
 }

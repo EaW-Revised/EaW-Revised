@@ -18,6 +18,7 @@
 #include <godot_cpp/classes/texture_rect.hpp>
 
 #include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/canvas_item_material.hpp>
 #include <godot_cpp/classes/font.hpp>
 #include <godot_cpp/classes/input_event.hpp>
@@ -99,6 +100,7 @@ public:
         std::function<godot::String(const std::string&)> result_name;
         godot::String battle_time;
         godot::String exit_text;
+        std::function<godot::CanvasLayer*()> save_replay;
     };
 
     EawrBattleOverlay();
@@ -113,6 +115,8 @@ public:
     // BEP-03: the end panel for the result; nullopt hides it.
     void show_end(std::optional<bool> won);
     void set_results(const presentation::ui::BattleResults& results);
+    void allow_save_replay(bool allowed);
+    void save_replay();
     void _notification(int what);
 
     // A shown control's rect in viewport pixels: "message", "resume", "quit" or "end_panel".
@@ -146,7 +150,12 @@ private:
     std::function<void()> begin_action_;
     EawrOverlayButton* quit_{};
     godot::Control* panel_{};
+    EawrUiLabel* result_status_{};
+    double result_losses_top_{};
     std::optional<BuiltDialog> result_dialog_;
+    bool save_replay_allowed_{};
+    godot::CanvasLayer* save_screen_{};
+    int64_t save_screen_id_{};
     presentation::ui::BattleResults results_;
     std::array<std::size_t, 2> result_scroll_{};
     godot::Vector2 laid_out_{-1.0F, -1.0F};

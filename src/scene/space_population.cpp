@@ -200,7 +200,8 @@ bool drawable_projectile_effects(const Placement& placement) noexcept {
 
 std::vector<SpacePlacementDecision> classify_space_placements(
     const Scene& scene,
-    const std::function<std::optional<SpaceObjectTags>(std::string_view object_id)>& tags_of) {
+    const std::function<std::optional<SpaceObjectTags>(std::string_view object_id)>& tags_of,
+    const bool ability_proxy_owner) {
     std::vector<SpacePlacementDecision> decisions;
     decisions.reserve(scene.placements.size());
     for (const Placement& placement : scene.placements) {
@@ -210,7 +211,7 @@ std::vector<SpacePlacementDecision> classify_space_placements(
         std::optional<SpaceObjectTags> tags;
         if (!placement.object_id.empty() && tags_of) tags = tags_of(placement.object_id);
         if (tags) decision.type_name = tags->type_name;
-        const bool effect_projectile = tags && tags->type_name == "Projectile"
+        const bool effect_owner = tags && (tags->type_name == "Projectile" || (ability_proxy_owner && tags->type_name == "SpaceUnit"))
             && drawable_projectile_effects(placement);
         for (const Surface& surface : placement.surfaces) {
             if (is_shadow_volume_shader(surface.shader)) ++decision.shadow_volume_surfaces;
@@ -219,7 +220,7 @@ std::vector<SpacePlacementDecision> classify_space_placements(
             decision.role = SpaceRole::marker;
         } else if (tags && (tags->nebula || tags->background)) {
             decision.role = SpaceRole::environment;
-        } else if (placement.drawable() || effect_projectile) {
+        } else if (placement.drawable() || effect_owner) {
             decision.role = SpaceRole::drawn;
             if (tags) decision.hardpoints = tags->hardpoints;
             const auto decal = [&](const std::string_view mesh) {
@@ -240,11 +241,11 @@ std::vector<SpacePlacementDecision> classify_space_placements(
             }
             for (const Issue& issue : placement.issues) {
                 if (!shadow_volume_issue(issue)
-                    && !(effect_projectile && issue.cause == Cause::model_has_no_surface)) {
+                    && !(effect_owner && issue.cause == Cause::model_has_no_surface)) {
                     decision.missing.push_back(describe(issue));
                 }
             }
-            if (decision.drawn_surfaces.empty() && !effect_projectile) {
+            if (decision.drawn_surfaces.empty() && !effect_owner) {
                 // Only damage decals were supported: nothing of the intact
                 // object would draw.
                 decision.role = SpaceRole::not_drawable;

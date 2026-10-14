@@ -171,7 +171,9 @@ void Search::finish(const bool found) {
             state.start_speed = speed_;
             state.target = {open_.x, open_.y, target_.z};
             state.nodes = std::move(nodes_);
-        } // else every try failed: the unit stays (AV-U5)
+        }
+        // FC-68: only exhaustion, not an already-close/invalid prelude, starts the retry clock.
+        exhausted_ = !found;
         outcome_ = core::Result<MotionState>::success(std::move(state));
     }
 // Runs `search` until it ends or reaches `until` and reports the call's work (PathSearchStats).
@@ -215,6 +217,8 @@ struct SlicedPathSearch::State {
         const CollisionWorld& world_in, const EntityId entity, const std::uint64_t tick, const Vec3 position, const Fixed yaw,
         const Fixed speed, const Vec3 target, const bool through_hazards, const std::optional<Vec3> filter_destination)
         : limits(limits_in), footprint(footprint_in),
+          input{limits_in, footprint_in, {}, {}, world_in.interval, false, false, entity, tick,
+              position, target, yaw, speed, through_hazards, filter_destination, 0, false, false},
           search(table, limits, footprint, world, entity, tick, position, yaw, speed, target, PathSearchMode::bounded,
               scratch, through_hazards, filter_destination) {
         world.interval = world_in.interval;
@@ -233,6 +237,7 @@ struct SlicedPathSearch::State {
     std::vector<TrackedLeaf> statics;
     CollisionWorld world;
     SearchScratch scratch;
+    Checkpoint input;
     Search search;
 };
 
@@ -247,6 +252,7 @@ SlicedPathSearch& SlicedPathSearch::operator=(SlicedPathSearch&&) noexcept = def
 SlicedPathSearch::~SlicedPathSearch() = default;
 
 bool SlicedPathSearch::run(const std::uint64_t expansions, PathSearchStats* const stats) {
+    state_->input.started = true;
     auto& search = state_->search;
     if (search.ended()) return true;
     const auto spent = search.work().stats.expansions;
@@ -255,6 +261,7 @@ bool SlicedPathSearch::run(const std::uint64_t expansions, PathSearchStats* cons
 }
 
 bool SlicedPathSearch::ended() const noexcept { return state_->search.ended(); }
+bool SlicedPathSearch::exhausted() const noexcept { return state_->search.exhausted(); }
 
 core::Result<MotionState> SlicedPathSearch::result() const {
     if (!state_->search.ended()) {
@@ -273,6 +280,39 @@ std::size_t SlicedPathSearch::held_bytes() const noexcept {
     bytes += state_->scratch.components.capacity() * sizeof(Component);
     bytes += state_->scratch.records.held_bytes() + state_->scratch.open.held_bytes();
     return bytes;
+}
+
+SlicedPathSearch::Checkpoint SlicedPathSearch::checkpoint() const {
+    auto saved = state_->input;
+    saved.layer = state_->layer;
+    saved.statics = state_->statics;
+    saved.has_layer = std::any_of(state_->world.layers.begin(), state_->world.layers.end(), [](const auto* layer) { return layer != nullptr; });
+    saved.has_statics = state_->world.statics != nullptr;
+    saved.expansions = expansions();
+    saved.started = state_->input.started;
+    saved.ended = ended();
+    return saved;
+}
+
+core::Result<SlicedPathSearch> SlicedPathSearch::from_checkpoint(const MotionTable& table, const Checkpoint& saved) {
+    const auto invalid = [] {
+        return core::Result<SlicedPathSearch>::failure(core::Diagnostic{"EAWR-SIM-0305", core::Severity::error,
+            "invalid sliced-search checkpoint", {}, {}, {}, {}});
+    };
+    if (saved.tick > max_ticks || saved.expansions > 100000000U || saved.interval == 0) return invalid();
+    CollisionWorld world;
+    world.interval = saved.interval;
+    if (saved.has_layer) {
+        const auto index = dynamic_layer_index(saved.footprint.layer);
+        if (!index) return invalid();
+        world.layers[*index] = &saved.layer;
+    }
+    if (saved.has_statics) world.statics = &saved.statics;
+    SlicedPathSearch restored(table, saved.limits, saved.footprint, world, saved.entity, saved.tick,
+        saved.position, saved.yaw, saved.speed, saved.target, saved.through_hazards, saved.filter_destination);
+    if (saved.started) static_cast<void>(restored.run(saved.expansions));
+    if (restored.expansions() != saved.expansions || restored.ended() != saved.ended) return invalid();
+    return core::Result<SlicedPathSearch>::success(std::move(restored));
 }
 
 

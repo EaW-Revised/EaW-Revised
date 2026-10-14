@@ -75,6 +75,8 @@ struct ScriptedTick {
     std::string state_sha256;
     // The same hash either way (#637): ready, or pending on the state hasher.
     sim::StateHash state_hash;
+    // The script digest already computed for the authoritative tick, reused by game nesting.
+    std::string script_sha256;
 };
 
 // The engine side of the scripts (#79): what the original engine does to its
@@ -87,6 +89,20 @@ struct ScriptedTick {
 class ScriptEngine {
 public:
     virtual ~ScriptEngine() = default;
+    // FD-71: scoring visits precede mode/object work, unlike the later Lua pass.
+    [[nodiscard]] virtual core::Result<void> before_world(
+        const sim::PartitionExecutor&, const sim::tactical::TacticalSession&) {
+        return core::Result<void>::success();
+    }
+    // SOS-40: fresh attachments precede the first world step; restore retains their registry.
+    [[nodiscard]] virtual core::Result<void> initialize_fresh(
+        const sim::tactical::TacticalSession&, ScriptScheduler&);
+    // WGS-66: native continuation is separate from the Lua scheduler. Stateless
+    // engines use absence; a stateful owner must validate before publishing.
+    [[nodiscard]] virtual core::Result<std::optional<std::vector<std::uint8_t>>> save_native(
+        const sim::tactical::TacticalSession&, ScriptScheduler&);
+    [[nodiscard]] virtual core::Result<void> restore_native(std::span<const std::uint8_t>,
+        const sim::tactical::TacticalSession&, ScriptScheduler&);
     [[nodiscard]] virtual core::Result<ServiceOptions> before_service(
         const sim::tactical::TacticalSession& world, const sim::tactical::TacticalTick& tick, ScriptScheduler& scripts) = 0;
     // Independent preparation may use the tick executor before the ordered engine commit.
@@ -106,12 +122,25 @@ public:
     }
 };
 
+// Host state beside the world's full checkpoint: the scheduler and orders which have
+// not reached the world yet, plus the routing cursors consumed by the next service.
+struct TacticalScriptSave {
+    std::uint64_t completed_tick{};
+    std::string scheduler;
+    std::vector<ScriptCommand> pending;
+    std::map<sim::tactical::PlayerId, std::pair<std::uint64_t, std::uint64_t>> last_keys;
+    std::optional<std::vector<std::uint8_t>> native;
+};
+
 class ScriptedTacticalSession {
 public:
     // The scheduler and the world must be at the same completed tick (both
     // fresh, or both restored at one barrier).
     [[nodiscard]] static core::Result<ScriptedTacticalSession> create(
         sim::tactical::TacticalSession world, ScriptScheduler scripts);
+    [[nodiscard]] static core::Result<ScriptedTacticalSession> restore(
+        sim::tactical::TacticalSession world, ScriptScheduler scripts, const TacticalScriptSave& saved);
+    [[nodiscard]] core::Result<TacticalScriptSave> save_scripts();
     ScriptedTacticalSession(ScriptedTacticalSession&&) noexcept;
     ScriptedTacticalSession& operator=(ScriptedTacticalSession&&) noexcept;
     ~ScriptedTacticalSession();
@@ -131,6 +160,11 @@ public:
     // a tick barrier. The live session turns it off: it reads only the world's hash. The world,
     // the scripts and every hash that is computed are the same either way.
     void set_authoritative_hash(bool every_tick) noexcept;
+    // Optional mode publication boundary after object commits, before outer AI.
+    void set_shared_mode_service(std::function<core::Result<void>()>);
+    // Optional campaign controller gate over translated commands. Empty preserves standalone
+    // tactical routing; the owning session reconstructs it from its hashed controller state.
+    void set_order_admission(std::function<bool(const TacticalOrder&)> admission);
     // #957: a monotonic clock in nanoseconds; with one, step() fills ScriptedTick::timing. The sim
     // never reads a clock itself: presentation and tools supply it.
     void set_step_clock(std::function<std::uint64_t()> clock);
@@ -150,10 +184,12 @@ public:
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     // Script state hash at the tick barrier (ScriptScheduler::state_hash).
     [[nodiscard]] core::Result<std::string> script_state_hash();
+    [[nodiscard]] core::Result<std::string> script_state_hash(const sim::PartitionExecutor& executor);
     // Script commands routed to the next tick and not yet submitted.
     [[nodiscard]] std::size_t pending_script_commands() const noexcept;
     // The world's replay: setup, every executed player and script command.
     [[nodiscard]] sim::tactical::TacticalReplay record() const;
+    void scramble_storage_for_testing();
 
 private:
     struct Impl;

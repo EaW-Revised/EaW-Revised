@@ -12,6 +12,7 @@
 // CO-12): one bounding-box tree per player over its units, whose history decides the order in
 // which a box query returns them. Serial state: it is updated once per tick in ascending unit ID
 // and read, never written, by the targeting phase.
+namespace eawr::sim::tactical::checkpoint_detail { struct Access; }
 namespace eawr::sim::tactical::detail {
 
 // A closed axis-aligned box, Q24 corners.
@@ -23,6 +24,7 @@ struct CullBox {
 
 // One player's tree (CO-02 to CO-10).
 class CollectionTree final {
+    friend struct checkpoint_detail::Access;
 public:
     CollectionTree();
 
@@ -70,6 +72,7 @@ private:
 
 // Every player's tree (CO-01), keyed by player ID.
 class CollectionTrees final {
+    friend struct checkpoint_detail::Access;
 public:
     struct Member {
         EntityId id{};

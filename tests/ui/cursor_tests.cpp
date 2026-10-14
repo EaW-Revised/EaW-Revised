@@ -33,6 +33,22 @@ using namespace eawr;
 namespace ui = presentation::ui;
 using test::ui::expect;
 void states() {
+    {
+        ui::CursorInput special;
+        special.special_weapon = 0;
+        expect(ui::battle_cursor(special) == "POINTER_ATTACK_WITH_SPECIAL_WEAPON_INVALID", "WSW-31: invalid special pick");
+        special.special_weapon_valid = true;
+        special.passable = false;
+        expect(ui::battle_cursor(special) == "POINTER_ATTACK_WITH_SPECIAL_WEAPON_0", "WSW-14: range/terrain does not gate planetary cursor");
+        special.special_weapon = 1;
+        expect(ui::battle_cursor(special) == "POINTER_ATTACK_WITH_SPECIAL_WEAPON_1", "WSW-15: ion target action");
+        special.special_weapon = 2;
+        expect(ui::battle_cursor(special) == "POINTER_ATTACK_WITH_SPECIAL_WEAPON_2", "WSW-15: authored action index");
+        special.special_weapon = 9;
+        expect(ui::battle_cursor(special) == "POINTER_ATTACK_WITH_SPECIAL_WEAPON_INVALID", "WSW-15: unknown action is invalid");
+        special.hud = true;
+        expect(ui::battle_cursor(special) == "POINTER_NORMAL", "WSW-31: GUI retains pointer ownership");
+    }
     ui::CursorInput state;
     const auto check = [&](const std::string_view id) { expect(ui::battle_cursor(state) == id, id.data()); };
     check("POINTER_NORMAL");

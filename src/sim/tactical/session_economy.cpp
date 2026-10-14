@@ -21,7 +21,7 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
+#include "diagnostic_timer.hpp"
 #include <cstdlib>
 #include <cstddef>
 #include <cstdint>
@@ -148,6 +148,7 @@ core::Result<void> TacticalSession::Impl::build_bonus_profiles(const std::vector
 core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update_command_ledger(
     const std::vector<LiveUnit>& live, const EntityId first_new, const PartitionExecutor& executor) const {
     using Result = core::Result<CommandLedger>;
+    using math::Fixed;
     CommandLedger result;
     const auto find = [&](const EntityId id) -> const LiveUnit* {
         const auto found = std::lower_bound(live.begin(), live.end(), id,
@@ -170,7 +171,9 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
             if (host == nullptr) continue;
             const auto type = source.id == source.host ? host->state.type_id
                 : contained_type(contained_type, host->state.contained, source.id);
-            if (type == economy.command_bonuses[source.profile].type) retained[partition].push_back(source);
+            const auto& profile = economy.command_bonuses[source.profile];
+            if (type == profile.type && (!profile.battlefield || std::binary_search(profile.enabled_players.begin(), profile.enabled_players.end(), host->state.owner)))
+                retained[partition].push_back(source);
         }
     });
     if (!retired) return Result::failure(retired.error());
@@ -184,7 +187,7 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
             const auto begin = std::lower_bound(economy.command_bonuses.begin(), economy.command_bonuses.end(), type,
                 [](const CommandBonusProfile& profile, const TypeId value) { return profile.type < value; });
             for (auto it = begin; it != economy.command_bonuses.end() && it->type == type; ++it)
-                born[partition].push_back({id, host, static_cast<std::size_t>(it - economy.command_bonuses.begin()), {}});
+                if (!it->battlefield || std::binary_search(it->enabled_players.begin(), it->enabled_players.end(), find(host)->state.owner)) born[partition].push_back({id, host, static_cast<std::size_t>(it - economy.command_bonuses.begin()), {}});
         };
         const auto riders = [&](auto&& self, const std::vector<CarriedObject>& objects, const EntityId host) -> void {
             for (const auto& object : objects) {
@@ -203,12 +206,24 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
     const auto existing = result.sources.size();
     for (auto& part : born) result.sources.insert(result.sources.end(),
         std::make_move_iterator(part.begin()), std::make_move_iterator(part.end()));
+    // GC player effects share the existing partitioned notification phase.
+    using PlayerContribution = std::tuple<EntityId, std::size_t, PlayerId, std::uint32_t, Fixed, Fixed>;
+    std::array<std::vector<PlayerContribution>, tick_partition_count> player_parts;
     const auto notified = executor.execute_phase("command-recipient-events", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, result.sources.size());
         for (auto index = range.begin; index < range.end; ++index) {
             auto& source = result.sources[index];
             const auto* host = find(source.host);
             const auto& profile = economy.command_bonuses[source.profile];
+            if (profile.battlefield) {
+                source.targets.clear();
+                for (const auto& player : setup.players) {
+                    if (profile.all_allies ? !allied(host->state.owner, player.player_id) : host->state.owner != player.player_id) continue;
+                    player_parts[partition].emplace_back(source.id, source.profile, player.player_id,
+                        profile.bonus.stacking_category, profile.bonus.percentages[4], profile.reveal_delta);
+                }
+                continue; // player ledger: no recipient type, distance or visibility discovery
+            }
             std::erase_if(source.targets, [&](const EntityId target) { return find(target) == nullptr; });
             // WHE-53/54: existing applications survive an owner change; qualify only notifications.
             const auto begin = index < existing ? first : std::size_t{0};
@@ -230,9 +245,46 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
     std::sort(result.sources.begin(), result.sources.end(), [](const auto& left, const auto& right) {
         return std::pair{left.id, left.profile} < std::pair{right.id, right.profile};
     });
+    if (setup.campaign) result.sources.erase(std::unique(result.sources.begin(), result.sources.end(), [](const auto& a, const auto& b) {
+        return a.id == b.id && a.profile == b.profile;
+    }), result.sources.end());
     // Ordered sparse commit: no target discovery or per-entity work in this reduction.
     for (std::size_t index = 0; index < result.sources.size(); ++index)
         for (const auto target : result.sources[index].targets) result.recipients[target].push_back(index);
+    // Ordered sparse reduction of staged source/player entries, never a live-unit pass.
+    std::vector<PlayerContribution> contributions;
+    for (auto& part : player_parts) contributions.insert(contributions.end(),
+        std::make_move_iterator(part.begin()), std::make_move_iterator(part.end()));
+    std::sort(contributions.begin(), contributions.end());
+    contributions.erase(std::unique(contributions.begin(), contributions.end()), contributions.end());
+    std::map<std::pair<PlayerId, std::uint32_t>, std::array<std::optional<Fixed>, 2>> reduced;
+    for (const auto& [actor, profile, player, category, defence, reveal] : contributions) {
+        (void)actor; (void)profile;
+        auto& values = reduced[{player, category}]; const std::array incoming{defence, reveal};
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (incoming[i] == Fixed{}) continue;
+            if (!values[i]) values[i] = incoming[i];
+            // WGT-50 / WHE-55: zero is an ordinary stacking category too.
+            // Each category keeps its greatest source contribution; categories add.
+            else values[i] = std::max(*values[i], incoming[i]);
+        }
+    }
+    for (const auto& [key, values] : reduced) {
+        if (values[0]) result.battlefield_defence[key.first].emplace_back(key.second, *values[0]);
+        if (values[1]) {
+            auto at = std::lower_bound(result.reveal_multipliers.begin(), result.reveal_multipliers.end(), key.first,
+                [](const auto& value, PlayerId player) { return value.first < player; });
+            if (at == result.reveal_multipliers.end() || at->first != key.first)
+                at = result.reveal_multipliers.insert(at, {key.first, Fixed::from_raw(Fixed::scale)});
+            auto sum = math::add(at->second, *values[1]); if (!sum) return Result::failure(sum.error()); at->second = sum.value();
+        }
+    }
+    for (const auto& [player, multiplier] : result.reveal_multipliers) {
+        (void)player;
+        if (multiplier < Fixed{}) return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+            "campaign reveal modifier sum is negative"));
+    }
+    if (!result.reveal_multipliers.empty()) if (auto valid=validate_sensors(sensors,result.reveal_multipliers); !valid) return Result::failure(valid.error());
     return Result::success(std::move(result));
 }
 
@@ -252,8 +304,29 @@ CombatBonuses TacticalSession::Impl::command_bonuses_for(const LiveUnit& unit, c
         if (!unit.durability || durability.find(unit.state.type_id)->max_shields.raw() == 0) contribution[3] = {};
         accumulate_combat_bonus(categories[category], contribution);
     }
+    const auto battlefield = ledger.battlefield_defence.find(owner.value_or(unit.state.owner));
+    if (battlefield != ledger.battlefield_defence.end()) for (const auto& [category_id, value] : battlefield->second) {
+        const auto category = static_cast<std::size_t>(std::lower_bound(bonus_categories.begin(), bonus_categories.end(), category_id) - bonus_categories.begin());
+        CombatBonuses contribution{}; contribution[4] = value;
+        accumulate_combat_bonus(categories[category], contribution);
+    }
+    bool leeching = false;
+    if (unit.abilities) {
+        const auto* nested = beam_profile(unit, AbilityKind::leech_shields);
+        const auto* profile = abilities.find(unit.state.type_id);
+        const auto slot = profile ? ability_slot(*profile, AbilityKind::leech_shields) : std::nullopt;
+        if (nested && slot && unit.abilities->slots[*slot].active) {
+            const auto category = std::lower_bound(bonus_categories.begin(), bonus_categories.end(), 0U);
+            if (category != bonus_categories.end() && *category == 0) {
+                CombatBonuses contribution{};
+                contribution[1] = nested->leech_damage_bonus; // WLS-02, WHE-55: category 0 adds to damage.
+                accumulate_combat_bonus(categories[static_cast<std::size_t>(category - bonus_categories.begin())], contribution);
+                leeching = true;
+            }
+        }
+    }
     const bool targeted = targeted_effects && accumulate_concentrate_bonus(unit.state.entity_id, categories, effect_world);
-    return sum_combat_bonus_categories(categories, found != ledger.recipients.end() || targeted);
+    return sum_combat_bonus_categories(categories, found != ledger.recipients.end() || battlefield != ledger.battlefield_defence.end() || targeted || leeching);
 }
 
 core::Result<void> TacticalSession::Impl::apply_command_bonuses(std::vector<LiveUnit>& live, const CommandLedger& ledger,
@@ -300,10 +373,25 @@ bool TacticalSession::Impl::prune_upgrade_holders(std::vector<PlayerEconomy>& ac
     const std::vector<LiveUnit>& live) const {
         bool changed = false;
         for (auto& account : accounts) {
-            std::erase_if(account.completed, [&](const CompletedBuild& held) {
+            std::erase_if(account.completed, [&](CompletedBuild& held) {
                 const auto current = std::lower_bound(live.begin(), live.end(), held.station,
                     [](const LiveUnit& unit, const EntityId id) { return unit.state.entity_id < id; });
                 if (current != live.end() && current->state.entity_id == held.station) return false;
+                if (setup.campaign) {
+                    const auto owner = std::find_if(setup.players.begin(), setup.players.end(), [&](const auto& p) { return p.player_id == account.player; });
+                    if (owner != setup.players.end()) for (const auto& player : setup.players) {
+                        if (!std::binary_search(economy.campaign_playable_factions.begin(), economy.campaign_playable_factions.end(), player.faction_id)
+                            || !allied(player.player_id, account.player)) continue;
+                        for (const auto& unit : live) {
+                            if (unit.state.owner != player.player_id || unit.state.entity_id == held.station) continue;
+                            const auto* menu = economy.menu(unit.state.type_id, owner->faction_id);
+                            if (menu && std::any_of(menu->options.begin(), menu->options.end(), [&](const auto& option) { return option.type == held.type; })) {
+                                held.station = unit.state.entity_id; changed = true; return false;
+                            }
+                        }
+                    }
+                    changed = true; return true; // WGT-51: no holder removes campaign persistence.
+                }
                 const auto* upgrade = economy.upgrade(held.type);
                 // U-BP-6: mine-host loss does not establish deletion of a modifier object.
                 if (upgrade != nullptr && !upgrade->income_modifiers.empty()) return false;
@@ -437,6 +525,19 @@ std::vector<EconomyView> TacticalSession::Impl::economy_views(
                 player != nullptr ? player->population_cap : 0U, ledger.queues, ledger.pool,
                 ledger.pool_version, ledger.pool_additions, ledger.pool_addition_frame,
                 ledger.completed, ledger.lifetime, ledger.tech_level, ledger.pool_tokens});
+            views.back().special_weapons_enabled = special_weapons_enabled(ledger.player, staged_ledgers);
+            views.back().campaign_extra_releases = ledger.campaign_extra_releases;
+            if (setup.campaign) for (std::size_t index = 0; index < ledger.pool.size()
+                && index < ledger.pool_tokens.size(); ++index) {
+                const auto token = ledger.pool_tokens[index];
+                const auto& reserves = setup.campaign->reserves;
+                const auto found = std::lower_bound(reserves.begin(), reserves.end(), token,
+                    [](const auto& row, const auto id) { return row.id < id; });
+                if (found == reserves.end() || found->id != token || found->owner != ledger.player
+                    || found->type != ledger.pool[index]) continue;
+                views.back().reserves.push_back({token, found->type,
+                    population_of(found->purchase_type != 0 ? found->purchase_type : found->type), found->restricted});
+            }
         }
         return views;
     }
@@ -444,6 +545,24 @@ std::vector<EconomyView> TacticalSession::Impl::economy_views(
 bool TacticalSession::Impl::allied(const PlayerId left, const PlayerId right) const {
         return players_allied(snapshot_players, left, right);
     }
+
+bool TacticalSession::Impl::special_weapons_enabled(const PlayerId player,
+    const std::vector<PlayerEconomy>& accounts, const UnitStage* live,
+    const std::set<PlayerId>* staged_disabled) const {
+    if (setup.match_policy && !setup.match_policy->allow_superweapons) return false;
+    const auto& disabled = staged_disabled ? *staged_disabled : special_disabled_by_hardpoint;
+    if (disabled.contains(player)) return false;
+    // WSW-12/46: true modifiers belong to the held object. Removal/consumption
+    // removes that exact source without erasing another owner's allied unlock.
+    for (const auto& account : accounts) for (const auto& held : account.completed) {
+        if (live && held.station != invalid_entity_id && live->find(held.station) == live->end()) continue;
+        const auto* profile = economy.upgrade(held.type);
+        if (!profile) continue;
+        for (const auto& unlock : profile->special_unlocks)
+            if (!unlock.reverse && (account.player == player || (unlock.all_allies && allied(account.player, player)))) return true;
+    }
+    return false;
+}
 
 const Player* TacticalSession::Impl::player_of(const PlayerId id) const noexcept {
         const auto found = std::find_if(setup.players.begin(), setup.players.end(),
@@ -495,7 +614,9 @@ core::Result<bool> TacticalSession::Impl::replenish_wingmen(const EntityId leade
         adjust_owned(state, true);
         if (motion.squadrons.find_craft(state.type_id)) {
             CraftState flight;
-            flight.yaw = yaw_degrees(state.rotation).value();
+            const auto yaw = yaw_degrees(state.rotation);
+            // Keep the same deterministic default as placed squadron members.
+            flight.yaw = yaw ? yaw.value() : math::Fixed{};
             stage.crafts[id] = flight;
         }
         if (const auto share = stage.shares.find(leader); share != stage.shares.end()) stage.shares[id] = share->second;
@@ -562,6 +683,11 @@ const BuildOption* TacticalSession::Impl::build_option(const LiveUnit& station, 
     }
 
 std::uint32_t TacticalSession::Impl::population_of(const TypeId type) const noexcept {
+        if (economy.campaign) {
+            const auto found = std::lower_bound(economy.campaign_population.begin(), economy.campaign_population.end(), type,
+                [](const auto& row, const auto id) { return row.first < id; });
+            return found != economy.campaign_population.end() && found->first == type ? found->second : 0;
+        }
         for (const auto& menu : economy.menus) {
             if (const auto* option = menu.find(type)) return option->population;
         }
@@ -729,11 +855,17 @@ core::Result<void> TacticalSession::Impl::block_placement(const UnitState& unit,
         const auto one = math::Fixed::from_raw(math::Fixed::scale);
         const auto heading_x = math::Fixed::from_raw(one.raw() - 2 * (yy.value().raw() + zz.value().raw()));
         const auto heading_y = math::Fixed::from_raw(2 * (xy.value().raw() + wz.value().raw()));
-        const auto turns = math::atan2_turn(heading_y, heading_x);
-        if (!turns) return Void::failure(turns.error());
-        const auto degrees = math::multiply(turns.value(), math::Fixed::from_raw(360 * math::Fixed::scale));
-        if (!degrees) return Void::failure(degrees.error());
-        auto bounds = blocker_bounds(*footprint->box, unit.position, degrees.value());
+        // A craft pitched through the vertical has no planar heading. Place its box unturned to
+        // keep the arrival search defined; the retail facing in this case remains unverified.
+        math::Fixed heading{};
+        if (heading_x.raw() != 0 || heading_y.raw() != 0) {
+            const auto turns = math::atan2_turn(heading_y, heading_x);
+            if (!turns) return Void::failure(turns.error());
+            const auto degrees = math::multiply(turns.value(), math::Fixed::from_raw(360 * math::Fixed::scale));
+            if (!degrees) return Void::failure(degrees.error());
+            heading = degrees.value();
+        }
+        auto bounds = blocker_bounds(*footprint->box, unit.position, heading);
         if (!bounds) return Void::failure(bounds.error());
         blockers.push_back(bounds.value());
         return Void::success();
@@ -763,6 +895,25 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
         auto* ledger = ledger_of(stage.ledgers, issuer);
         const auto* player = economy.player(issuer);
         if (ledger == nullptr || player == nullptr) return finish(RejectReason::no_economy);
+        if (const auto* release = std::get_if<CampaignCreditReleasePayload>(&command.payload)) {
+            if (!economy.campaign || !player->ai || !player->strategic_credits)
+                return finish(RejectReason::cannot_produce);
+            const auto remaining = math::subtract(*player->strategic_credits, ledger->campaign_extra_releases);
+            if (!remaining) return Void::failure(remaining.error());
+            auto amount = release->request.raw() < 0 ? remaining.value() : std::min(release->request, remaining.value());
+            if (player->credit_cap) {
+                const auto headroom = math::subtract(*player->credit_cap, std::min(ledger->credits, *player->credit_cap));
+                if (!headroom) return Void::failure(headroom.error());
+                amount = std::min(amount, headroom.value());
+            }
+            const auto balance = math::add(ledger->credits, amount);
+            const auto extra = math::add(ledger->campaign_extra_releases, amount);
+            if (!balance || !extra) return Void::failure(!balance ? balance.error() : extra.error());
+            // WGA-54 is a transfer: track only admitted credits, preserving any cap-blocked balance.
+            ledger->credits = balance.value();
+            ledger->campaign_extra_releases = extra.value();
+            return finish(RejectReason::none);
+        }
         if (std::holds_alternative<PadSellPayload>(command.payload)) {
             const auto sold = staged.find(command.units.front());
             if (sold == staged.end() || (sold->second.durability && sold->second.durability->hull.raw() <= 0)) {
@@ -911,6 +1062,19 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
             return finish(removed.value() ? RejectReason::none : RejectReason::no_queue_entry);
         }
         const auto& reinforce = std::get<ReinforcePayload>(command.payload);
+        const CampaignReserve* campaign_reserve = nullptr;
+        if (economy.campaign) {
+            if (!setup.campaign || reinforce.pool_token == 0) return finish(RejectReason::not_in_pool);
+            const auto& reserves = setup.campaign->reserves;
+            const auto found = std::lower_bound(reserves.begin(), reserves.end(), reinforce.pool_token,
+                [](const auto& row, const auto id) { return row.id < id; });
+            if (found == reserves.end() || found->id != reinforce.pool_token || found->owner != issuer
+                || found->type != reinforce.type) return finish(RejectReason::not_in_pool);
+            if (found->restricted) return finish(RejectReason::cannot_produce);
+            const auto* hero = economy.hero(reinforce.type);
+            if (hero && !hero->riders.empty() && found->contained.empty()) return finish(RejectReason::cannot_produce);
+            campaign_reserve = &*found;
+        }
         if (economy.disabled_types.contains(reinforce.type)) {
             return finish(RejectReason::cannot_produce);
         }
@@ -932,20 +1096,19 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
             static_cast<void>(id);
             if (share.owner == issuer) owned += share.share;
         }
-        const auto population = population_of(reinforce.type);
+        const auto population = population_of(campaign_reserve && campaign_reserve->purchase_type != 0
+            ? campaign_reserve->purchase_type : reinforce.type);
         const auto count = population_count(owned);
         if (count > player->population_cap || population > player->population_cap - count) {
             stage.cues.push_back({issuer, reinforce.type, tick, BattleEconomyCue::Kind::unit_cap});
             return finish(RejectReason::no_population_room);
         }
         // WR-25: tracking, including a layer rebuilt by an earlier command, starts at the staged frame.
-        const auto placement_begin = std::chrono::steady_clock::now();
+        const DiagnosticTimer placement_timer;
         auto valid = placement_valid(issuer, reinforce.type, reinforce.position, staged, tick + 1, collisions,
             stage.placement_work, nullptr, reinforce.facing_yaw);
         if (stage.placement_work != nullptr) {
-            stage.placement_work->nanoseconds += static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - placement_begin).count());
+            stage.placement_work->nanoseconds += placement_timer.elapsed_nanoseconds();
         }
         if (!valid) return Void::failure(valid.error());
         if (!valid.value()) return finish(RejectReason::invalid_position);
@@ -958,12 +1121,15 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
         }
         // PU-34, PU-35: a new unit at the start of its lane, arriving at `exit`.
         const auto add = [&](const TypeId type, const math::Vec3& exit, const math::Quat& facing,
-                             const std::int64_t share) -> core::Result<EntityId> {
+                             const std::int64_t share, const bool root = false) -> core::Result<EntityId> {
             if (stage.next_id == invalid_entity_id) {
                 return core::Result<EntityId>::failure(
                     detail::diagnostic(diagnostic_codes::resource_limit, context + "stable ID space exhausted"));
             }
-            const auto id = stage.next_id;
+            const auto persistent = campaign_reserve != nullptr && root;
+            const auto id = persistent ? campaign_reserve->id : stage.next_id;
+            if (staged.find(id) != staged.end()) return core::Result<EntityId>::failure(
+                detail::diagnostic(diagnostic_codes::invalid_setup, context + "reserve identity already exists"));
             const ArrivalState arrival{0, exit, direction.value()};
             auto start = arrival_position(arrival);
             if (!start) return core::Result<EntityId>::failure(start.error());
@@ -976,10 +1142,10 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
             }
             stage.arrivals.emplace(id, arrival);
             // FL-12: only an authored hangar on the deployed type creates a spawner.
-            if (motion.squadrons.find_spawner(type) != nullptr) stage.born_spawners.push_back(id);
+            if (motion.squadrons.find_spawner(type, issuer) != nullptr) stage.born_spawners.push_back(id);
             if (share > 0) stage.shares.emplace(id, PopulationShare{issuer, share});
             if (economy.stream(type) != nullptr) stage.earners.emplace_back(id, issuer); // PU-02
-            stage.next_id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1;
+            if (!persistent) stage.next_id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1;
             return core::Result<EntityId>::success(id);
         };
         // PL-08: the arrival point is on the plane (height 0). A created unit is then raised by its
@@ -993,7 +1159,7 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
             // PL-08: a single ship is created on the point without a search, so it may overlap.
             const auto* footprint = economy.footprint_of(deployed);
             const math::Vec3 raised{point.x, point.y, footprint != nullptr ? footprint->layer_z : math::Fixed{}};
-            auto added = add(deployed, raised, rotation.value(), population_share(population, 1));
+            auto added = add(deployed, raised, rotation.value(), population_share(population, 1), true);
             if (!added) return Void::failure(added.error());
             event.unit = added.value();
             if (solo != nullptr && squadron != nullptr) {
@@ -1051,7 +1217,7 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
                 stage.crafts[added.value()] = flight.value();
                 members.push_back(added.value());
             }
-            auto container = add(deployed, math::Vec3{point.x, point.y, layer_z}, math::identity_quat(), 0);
+            auto container = add(deployed, math::Vec3{point.x, point.y, layer_z}, math::identity_quat(), 0, true);
             if (!container) return Void::failure(container.error());
             SquadronState order;
             order.container = container.value();
@@ -1064,7 +1230,13 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
             stage.squadrons.push_back(Squadron{container.value(), std::move(members)});
             event.unit = container.value();
         }
-        if (hero != nullptr) {
+        if (campaign_reserve != nullptr && (campaign_reserve->purchase_type != 0 || !campaign_reserve->contained.empty())) {
+            auto& carrier = staged.at(event.unit).state;
+            adjust_owned(carrier, false);
+            carrier.purchase_type = campaign_reserve->purchase_type;
+            carrier.contained = campaign_reserve->contained;
+            adjust_owned(carrier, true);
+        } else if (hero != nullptr) {
             auto& carrier = staged.at(event.unit).state;
             adjust_owned(carrier, false);
             carrier.purchase_type = reinforce.type;

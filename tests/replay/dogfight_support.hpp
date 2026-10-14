@@ -84,6 +84,7 @@ struct Session {
     tactical::DurabilityTable durability;
     tactical::CombatTable weapons = combat();
     std::vector<Order> orders;
+    tactical::MapBox box; // WDF-05: the fighter grids' low corner (a fixture below the origin sets its own)
 };
 
 } // namespace dogfight_test_support

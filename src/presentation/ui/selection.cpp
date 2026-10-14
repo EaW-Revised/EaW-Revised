@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace eawr::presentation::ui {
 namespace {
@@ -224,6 +226,7 @@ RightRelease right_release(const std::optional<std::array<float, 2>> press, cons
 
 RightClick right_click(const OrderMode mode, const BattleUnit* over, const bool over_selected) noexcept {
     switch (mode) {
+    case OrderMode::waypoint: return RightClick::disarm;
     case OrderMode::attack:
         return over != nullptr && over->hostile ? RightClick::order : RightClick::disarm;
     case OrderMode::move:
@@ -237,12 +240,30 @@ RightClick right_click(const OrderMode mode, const BattleUnit* over, const bool 
     return RightClick::order;
 }
 
-bool Selection::contains(const sim::EntityId entity) const noexcept {
-    return std::find(selected_.begin(), selected_.end(), entity) != selected_.end();
+void Selection::add(const sim::EntityId entity) { append(entity); }
+
+bool Selection::append(const sim::EntityId entity) {
+    ++membership_operations_;
+    if (!members_.insert(entity).second) return false;
+    selected_.push_back(entity);
+    return true;
 }
 
-void Selection::add(const sim::EntityId entity) {
-    if (!contains(entity)) selected_.push_back(entity);
+void Selection::adopt(std::vector<sim::EntityId> next) {
+    selected_ = std::move(next);
+    members_.clear();
+    members_.reserve(selected_.size());
+    members_.insert(selected_.begin(), selected_.end());
+    membership_operations_ += selected_.size();
+}
+
+void Selection::unique_in_order(std::vector<sim::EntityId>& members) {
+    std::unordered_set<sim::EntityId> seen;
+    seen.reserve(members.size());
+    std::erase_if(members, [&](const sim::EntityId entity) {
+        ++membership_operations_;
+        return !seen.insert(entity).second;
+    });
 }
 
 bool Selection::click(const std::optional<sim::EntityId> picked, const Modifiers modifiers,
@@ -250,7 +271,7 @@ bool Selection::click(const std::optional<sim::EntityId> picked, const Modifiers
     const BattleUnit* unit = picked ? find(units, *picked) : nullptr;
     if (unit == nullptr) {
         if (picked || selected_.empty()) return false;
-        selected_.clear();
+        clear();
         return true;
     }
     if (!unit->own || !unit->selectable || unit->neutral) {
@@ -259,14 +280,14 @@ bool Selection::click(const std::optional<sim::EntityId> picked, const Modifiers
         return false;
     }
     if (modifiers.shift) {
-        const auto found = std::find(selected_.begin(), selected_.end(), unit->entity);
-        if (found != selected_.end()) selected_.erase(found);
-        else selected_.push_back(unit->entity);
+        ++membership_operations_;
+        if (members_.erase(unit->entity) != 0) std::erase(selected_, unit->entity);
+        else append(unit->entity);
         return true;
     }
     if (modifiers.ctrl) return type_on_screen(unit->type, units, viewport);
     if (selected_.size() == 1 && selected_.front() == unit->entity) return false;
-    selected_.assign(1, unit->entity);
+    adopt({unit->entity});
     return true;
 }
 
@@ -293,7 +314,7 @@ bool Selection::box(const ScreenRect& rect, const bool shift, const std::span<co
     for (const BattleUnit& unit : units) {
         if (!unit.own || !unit.selectable || unit.neutral || !unit.locomotion || unit.decoration
             || !unit.screen || !rect.contains_origin(*unit.screen)) continue;
-        if (!shift && !found) selected_.clear();
+        if (!shift && !found) clear();
         found = true;
         add(unit.entity);
     }
@@ -317,9 +338,7 @@ bool Selection::type_on_screen(const sim::tactical::TypeId type, const std::span
     for (const BattleUnit& unit : units) {
         if (!unit.own || !unit.selectable || unit.neutral || unit.decoration || unit.type != type
             || !unit.screen || !viewport.contains_origin(*unit.screen)) continue;
-        if (contains(unit.entity)) continue;
-        selected_.push_back(unit.entity);
-        added = true;
+        if (append(unit.entity)) added = true;
     }
     return added;
 }
@@ -330,18 +349,29 @@ bool Selection::craft_type_on_screen(const sim::tactical::TypeId craft_type, con
     for (const BattleUnit& unit : units) {
         if (!unit.own || !unit.selectable || unit.neutral || unit.decoration
             || unit.part == sim::invalid_entity_id || unit.part_type != craft_type) continue;
-        if (!unit.screen || !viewport.contains_origin(*unit.screen) || contains(unit.entity)) continue;
-        selected_.push_back(unit.entity);
-        added = true;
+        if (!unit.screen || !viewport.contains_origin(*unit.screen)) continue;
+        if (append(unit.entity)) added = true;
     }
     return added;
 }
 
-void Selection::retain(const std::span<const sim::EntityId> alive) {
-    const auto gone = [alive](const sim::EntityId entity) {
-        return std::find(alive.begin(), alive.end(), entity) == alive.end();
+void Selection::retain_sorted(const std::span<const sim::EntityId> alive) {
+    if (selected_.empty() && std::all_of(groups_.begin(), groups_.end(),
+            [](const auto& group) { return group.empty(); })) return;
+    const auto gone = [this, alive](const sim::EntityId entity) {
+        const auto found = std::lower_bound(alive.begin(), alive.end(), entity,
+            [this](const sim::EntityId candidate, const sim::EntityId target) {
+                ++membership_operations_;
+                return candidate < target;
+            });
+        ++membership_operations_;
+        return found == alive.end() || *found != entity;
     };
-    std::erase_if(selected_, gone);
+    std::erase_if(selected_, [this, &gone](const sim::EntityId entity) {
+        if (!gone(entity)) return false;
+        members_.erase(entity);
+        return true;
+    });
     for (auto& group : groups_) {
         std::erase_if(group, [this, &gone](const sim::EntityId entity) {
             if (!gone(entity)) return false;
@@ -352,37 +382,40 @@ void Selection::retain(const std::span<const sim::EntityId> alive) {
 }
 
 bool Selection::replace(const std::span<const sim::EntityId> units) {
-    std::vector<sim::EntityId> next;
-    for (const sim::EntityId entity : units) {
-        if (std::find(next.begin(), next.end(), entity) == next.end()) next.push_back(entity);
-    }
+    std::vector<sim::EntityId> next(units.begin(), units.end());
+    unique_in_order(next);
     if (next == selected_) return false;
-    selected_ = std::move(next);
+    adopt(std::move(next));
     return true;
 }
 
 void Selection::replace_entity(const sim::EntityId previous, const sim::EntityId replacement) {
-    const auto transfer = [=](std::vector<sim::EntityId>& members) {
+    const auto transfer = [=, this](std::vector<sim::EntityId>& members) {
         std::replace(members.begin(), members.end(), previous, replacement);
-        for (auto at = members.begin(); at != members.end(); ++at) {
-            members.erase(std::remove(at + 1, members.end(), *at), members.end());
-        }
+        unique_in_order(members);
     };
     transfer(selected_);
+    adopt(std::move(selected_));
     for (auto& members : groups_) transfer(members);
 }
 
 void Selection::owner_changed(const sim::EntityId entity, const sim::tactical::PlayerId previous,
     const sim::tactical::PlayerId current, const sim::tactical::PlayerId observer) {
     if (previous == current || previous != observer) return;
-    std::erase(selected_, entity);
+    ++membership_operations_;
+    if (members_.erase(entity) != 0) std::erase(selected_, entity);
     for (auto& members : groups_) std::erase(members, entity);
     group_numbers_.erase(entity);
 }
 
 void Selection::assign_group(const std::size_t group) {
     for (const auto entity : groups_.at(group)) group_numbers_.erase(entity);
-    for (auto& members : groups_) std::erase_if(members, [this](const sim::EntityId entity) { return contains(entity); });
+    for (auto& members : groups_) {
+        std::erase_if(members, [this](const sim::EntityId entity) {
+            ++membership_operations_;
+            return members_.contains(entity);
+        });
+    }
     groups_.at(group) = selected_;
     for (const auto entity : selected_) group_numbers_[entity] = group;
 }
@@ -394,18 +427,25 @@ std::optional<std::size_t> Selection::group_of(const sim::EntityId entity) const
 
 std::optional<Vec3f> Selection::recall_group(const std::size_t group, const bool add, const double logical_frame,
                                              const std::span<const BattleUnit> alive) {
-    if (!add) selected_.clear();
+    if (!add) clear();
     return selected_group(group, logical_frame, alive);
 }
 
 std::optional<Vec3f> Selection::add_to_group(const std::size_t group, const double logical_frame,
                                              const std::span<const BattleUnit> alive) {
     auto& members = groups_.at(group);
+    for (std::size_t other = 0; other < groups_.size(); ++other) {
+        if (other == group) continue;
+        std::erase_if(groups_[other], [this](const sim::EntityId entity) {
+            ++membership_operations_;
+            return members_.contains(entity);
+        });
+    }
+    std::unordered_set<sim::EntityId> present(members.begin(), members.end());
+    membership_operations_ += members.size();
     for (const sim::EntityId entity : selected_) {
-        for (std::size_t other = 0; other < groups_.size(); ++other) {
-            if (other != group) std::erase(groups_[other], entity);
-        }
-        if (std::find(members.begin(), members.end(), entity) == members.end()) members.push_back(entity);
+        ++membership_operations_;
+        if (present.insert(entity).second) members.push_back(entity);
         group_numbers_[entity] = group;
     }
     return selected_group(group, logical_frame, alive);
@@ -416,9 +456,18 @@ std::optional<Vec3f> Selection::selected_group(const std::size_t group, const do
     double sum_x = 0.0;
     double sum_y = 0.0;
     std::size_t count = 0;
+    // The first standing unit of an ID answers for it, as a scan of `alive` would.
+    std::unordered_map<sim::EntityId, const BattleUnit*> standing;
+    if (!groups_.at(group).empty()) {
+        standing.reserve(alive.size());
+        for (const BattleUnit& unit : alive) standing.try_emplace(unit.entity, &unit);
+        membership_operations_ += alive.size();
+    }
     for (const sim::EntityId entity : groups_.at(group)) {
-        const BattleUnit* unit = find(alive, entity);
-        if (unit == nullptr) continue;
+        ++membership_operations_;
+        const auto found = standing.find(entity);
+        if (found == standing.end()) continue;
+        const BattleUnit* unit = found->second;
         add(entity);
         sum_x += unit->position[0];
         sum_y += unit->position[1];

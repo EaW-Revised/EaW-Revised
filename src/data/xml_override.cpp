@@ -88,7 +88,16 @@ void apply_document_overrides(XmlNode& root, const std::string_view canonical_pa
         if (path.empty()) continue;
         XmlNode* container = &root;
         for (std::size_t index = 0; container != nullptr && index + 1 < path.size(); ++index) {
-            container = last_child(*container, path[index]);
+            if (index == 0 && !change.object_id.empty()) {
+                XmlNode* selected = nullptr;
+                for (auto& child : container->children) {
+                    if (!ascii_iequals(child.name, path[index])) continue;
+                    for (const auto& attr : child.attributes) {
+                        if (ascii_iequals(attr.name, "Name") && ascii_iequals(attr.value, change.object_id)) selected = &child;
+                    }
+                }
+                container = selected;
+            } else container = last_child(*container, path[index]);
         }
         if (container != nullptr) replace_children(*container, path.back(), change.values, nullptr);
     }
@@ -147,6 +156,14 @@ core::Result<Catalog> with_overrides(const Catalog& catalog, const std::span<con
         replace_children(*container, path.back(), change.values, inherited);
     }
     Catalog result(catalog.impl_);
+    std::vector<const Definition*> member_definitions;
+    member_definitions.reserve(catalog.impl_->definitions.size());
+    for (std::size_t index = 0; index < catalog.impl_->definitions.size(); ++index) {
+        const auto replaced = overlay->replaced.find(index);
+        member_definitions.push_back(replaced == overlay->replaced.end()
+            ? &catalog.impl_->definitions[index] : &replaced->second);
+    }
+    derive_member_flags(member_definitions, overlay->member_flags, overlay->member_flags_issue);
     result.overlay_ = std::move(overlay);
     return Made::success(std::move(result));
 }

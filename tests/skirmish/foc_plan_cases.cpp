@@ -1,10 +1,13 @@
 #include "foc_plan_support.hpp"
 #include "../../src/script/foc/ai_data.hpp"
+#include <limits>
 
 namespace foc_plan_test_support {
 
+// Additional economy-specific contracts; every battle uses the full skirmish economy.
 bool economy_run = false;
 bool reinforcement_fixture = false;
+bool special_fixture = false;
 struct Content {
     tactical::EconomyRules economy;
     skirmish::SkirmishStart start;
@@ -28,6 +31,10 @@ struct TypeActivity {
 };
 
 struct Run {
+    std::uint64_t special_purchases{}, special_enabled{}, special_projectiles{};
+    std::uint64_t population_ready_frame{};
+    std::vector<std::uint64_t> special_launch_frames;
+    std::set<std::uint64_t> special_projectile_ids;
     std::set<eawr::sim::CommandKey> accepted_cash_grants;
     std::size_t purchases{}, reinforcements{}, upgrades{};
     std::size_t rejected_commands{};
@@ -100,7 +107,8 @@ std::string line_of(const foc::PlanEvent& event) {
         event.target + "," + event.event + ",\"" + detail + "\"";
 }
 
-std::optional<Content> load(const std::filesystem::path& root, bool underworld = false, bool bombing_fixture = false) {
+std::optional<Content> load(const std::filesystem::path& root, bool underworld = false, bool bombing_fixture = false,
+    const std::string& special_faction = {}) {
     std::vector<eawr::vfs::MountSpec> specs;
     for (const auto& [id, folder] : {std::pair{std::string("expansion"), std::string("corruption")},
                                      std::pair{std::string("base"), std::string("GameData")}}) {
@@ -125,25 +133,34 @@ std::optional<Content> load(const std::filesystem::path& root, bool underworld =
     expect(static_cast<bool>(tables), "FoC unit tables load");
     if (!tables) return std::nullopt;
     auto fixture = skirmish::m2_fixture();
+    if (!special_faction.empty()) {
+        fixture.slots[0].faction = special_faction == "Rebel" ? "Empire" : "Rebel";
+        fixture.slots[0].fleet = {special_faction == "Rebel" ? "Acclamator_Assault_Ship" : "Nebulon_B_Frigate"};
+        fixture.slots[1].faction = special_faction;
+        fixture.slots[1].fleet.assign(2, special_faction == "Empire" ? "Acclamator_Assault_Ship" :
+            special_faction == "Rebel" ? "Nebulon_B_Frigate" : "Interceptor4_Frigate");
+        underworld = special_faction == "Underworld";
+    }
     // FL-13: this combat fixture needs a complete bombing team on the field;
     // skirmish stations cannot supply their campaign garrison rows.
     if (bombing_fixture) {
         fixture.slots[1].fleet.insert(fixture.slots[1].fleet.end(), {
             "TIE_Bomber_Squadron", "TIE_Bomber_Squadron", "TIE_Bomber_Squadron", "TIE_Fighter_Squadron"});
     }
-    if (underworld) {
+    if (underworld && special_faction.empty()) {
         fixture.slots[1].faction = "Underworld";
         fixture.slots[1].fleet.clear(); // Use the faction's authored starting forces.
     }
     auto inputs = skirmish::read_start_inputs(fixture, filesystem.value(), catalog.value().catalog, tables.value());
     expect(static_cast<bool>(inputs), "FoC start inputs read");
     if (!inputs) return std::nullopt;
-    if (underworld) {
+    if (underworld || !special_faction.empty()) {
         // The normal M2 fixture pins Empire/Rebel types. Keep those and add
         // the selected faction's authored forces and station marker types.
         auto extended_input = input;
         for (const auto type : eawr::units::pinned_m2_types()) extended_input.types.emplace_back(type);
         for (const auto obstacle : eawr::units::pinned_m2_obstacles()) extended_input.obstacles.emplace_back(obstacle);
+        for (const auto& slot : fixture.slots) extended_input.types.insert(extended_input.types.end(), slot.fleet.begin(), slot.fleet.end());
         for (const auto& forces : inputs.value().faction_forces)
             for (const auto& type : forces.space_skirmish_default_forces) extended_input.types.push_back(type);
         for (const auto& placement : inputs.value().placements)
@@ -165,20 +182,89 @@ std::optional<Content> load(const std::filesystem::path& root, bool underworld =
         expect(removed > 0, "focused bombing fixture omits competing map-object targets");
         if (removed == 0) return std::nullopt;
     }
+    if (!special_faction.empty()) {
+        // WSW-36/37/38: keep the refinery prerequisite and combat targets; unrelated
+        // neutral map objects can win authored desires without being valid gun targets.
+        std::erase_if(inputs.value().placements, [](const auto& placement) {
+            return skirmish::is_map_object_placement(placement) && placement.type != "Mineral_Extractor_Pad";
+        });
+    }
     auto start = skirmish::build_start(fixture, inputs.value());
     expect(static_cast<bool>(start), "FoC start builds: " + (start ? std::string() : start.error().message));
     if (!start) return std::nullopt;
+    if (!special_faction.empty()) {
+        // WSW-36/39: controlled, persistent battle at an authored manual-gun station level.
+        // Conventional shots are suppressed below; stock Lua and goal equations remain active.
+        const auto station = std::find_if(tables.value().units.begin(), tables.value().units.end(), [&](const auto& type) {
+            return type.kind == eawr::units::UnitKind::station && type.base_level == 5 && type.affiliation == special_faction;
+        });
+        expect(station != tables.value().units.end(), "WSW: installed level-five station is loaded");
+        if (station == tables.value().units.end()) return std::nullopt;
+        for (auto& unit : start.value().units) if (unit.role == skirmish::UnitRole::station && unit.state.owner == 2) {
+            unit.type = station->id; unit.state.type_id = skirmish::type_id(station->id);
+            for (auto& state : start.value().setup.units) if (state.entity_id == unit.state.entity_id) state.type_id = unit.state.type_id;
+        }
+        const auto own_station = std::find_if(start.value().units.begin(), start.value().units.end(), [](const auto& unit) {
+            return unit.role == skirmish::UnitRole::station && unit.state.owner == 2;
+        });
+        for (auto& unit : start.value().units) {
+            if (unit.type == "Mineral_Extractor_Pad") {
+                unit.state.owner = 2;
+                for (auto& state : start.value().setup.units) if (state.entity_id == unit.state.entity_id) state.owner = 2;
+                break;
+            }
+        }
+        for (auto& unit : start.value().units) if (unit.role == skirmish::UnitRole::fleet && unit.state.owner == 1) {
+            unit.state.position = own_station->state.position;
+            // WSW-37/39: planetary targets stay outside the 2500-unit station-defence
+            // trigger. The manual target stays inside the stock free-store search's
+            // 1500-unit radius, with room below the raised cannon's elevation limit.
+            const std::int64_t offset = underworld ? 1400 : 3000;
+            unit.state.position.x = eawr::sim::math::Fixed::from_raw(unit.state.position.x.raw() + offset * eawr::sim::math::Fixed::scale);
+            for (auto& state : start.value().setup.units) if (state.entity_id == unit.state.entity_id) state.position = unit.state.position;
+        }
+    }
     auto economy = skirmish::economy_rules(start.value(), inputs.value(), tables.value());
     expect(static_cast<bool>(economy), "skirmish economy loads");
     if (!economy) return std::nullopt;
+    if (!special_faction.empty()) {
+        const auto station = std::find_if(start.value().units.begin(), start.value().units.end(), [](const auto& unit) {
+            return unit.role == skirmish::UnitRole::station && unit.state.owner == 2;
+        });
+        // Focus the stock goal's purchase on authored unlocks, without replacing its
+        // Lua, selection, prices, build times or requirements with an explicit Buy.
+        for (auto& menu : economy.value().menus) if (menu.station == station->state.type_id) {
+            for (auto& option : menu.options) {
+                const bool special = std::any_of(economy.value().upgrades.begin(), economy.value().upgrades.end(), [&](const auto& upgrade) {
+                    return upgrade.type == option.type && !upgrade.special_unlocks.empty();
+                });
+                // Stock ship purchases/reinforcements fill the population cap before
+                // the authored upgrade goal can run; focus only its upgrade choices.
+                if (!special && option.kind == tactical::BuildKind::upgrade) option.available = false;
+            }
+            expect(std::any_of(menu.options.begin(), menu.options.end(), [](const auto& option) {
+                return option.available && option.kind == tactical::BuildKind::upgrade;
+            }),
+                "WSW-36: focused station menu retains its authored special unlock");
+        }
+    }
     auto content = skirmish::session_content(tables.value(), skirmish::human_slots(fixture));
     expect(static_cast<bool>(content), "FoC session content builds");
     if (!content) return std::nullopt;
+    if (!special_faction.empty()) {
+        // Hold the target fleet alive so a long purchase/recharge trace measures the feature.
+        for (auto& profile : content.value().combat.profiles) {
+            if (profile.planetary_weapon) continue;
+            std::erase_if(profile.weapons, [](const auto& weapon) { return !weapon.requires_manual_target; });
+        }
+        for (auto& profile : content.value().durability.profiles) profile.scenario_invulnerable = true;
+    }
     // #495: the goal-system battle runs on the map's fog grid, as the live session does.
     auto fog = skirmish::fog_rules(inputs.value());
     expect(static_cast<bool>(fog), "the M2 fog grid builds");
     if (!fog) return std::nullopt;
     content.value().fog = fog.value();
+    content.value().map_box = skirmish::map_box(inputs.value());
     Content out{std::move(economy).value(), start.value(), std::move(content).value(), skirmish::victory_rules(start.value(), tables.value()),
         skirmish::ai_setup(start.value(), inputs.value(), tables.value()), {}, {}};
     if (bombing_fixture) {
@@ -226,7 +312,7 @@ std::optional<Content> load(const std::filesystem::path& root, bool underworld =
     const auto player = std::find_if(out.ai.players.begin(), out.ai.players.end(),
         [](const auto& entry) { return entry.player == 2; });
     expect(player != out.ai.players.end() && player->ai
-        && player->player_type == (underworld ? "AI_Player_Underworld" : "BasicEmpire"),
+        && (!special_faction.empty() || player->player_type == (underworld ? "AI_Player_Underworld" : "BasicEmpire")),
         "WSS-35: installed faction Basic_AI reaches the runtime controller");
     // PL-13: a squadron type takes its craft's categories and the sum of their power.
     const auto bomber = out.ai.content.categories.find("BOMBER");
@@ -242,16 +328,90 @@ std::optional<Content> load(const std::filesystem::path& root, bool underworld =
     expect(static_cast<bool>(modules), "the AI's Lua files load: " + (modules ? std::string() : modules.error().message));
     if (!modules) return std::nullopt;
     out.modules = std::move(modules).value();
+    if (!special_faction.empty()) {
+        // WSW-36/37/38: focused stock-plan integration; the separate AI battle runs
+        // all selected plans. Competing collect/purge plans legitimately claim idle
+        // sources, so their world-wide objectives are outside this binding witness.
+        const auto plans = foc::selected_plans();
+        std::erase_if(out.modules, [&](const auto& module) {
+            return std::find(plans.begin(), plans.end(), module.first) != plans.end()
+                && !module.first.ends_with("/purchasespaceupgradesgeneric.lua")
+                && !module.first.ends_with("/groundtospacedamage.lua")
+                && !module.first.ends_with("/groundtospacedisable.lua");
+        });
+    }
     return out;
 }
 
+// SAE-01/02/03, WBP-40: stock pad guards need the same construction economy as the viewer.
 std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_t ticks) {
     auto world = tactical::TacticalSession::create(content.start.setup, content.content.sensors, content.content.durability,
         content.content.motion, content.content.fog, content.content.combat, content.victory,
-        content.content.abilities, economy_run ? content.economy : tactical::EconomyRules{});
+        content.content.abilities, content.economy, content.content.map_box);
     expect(static_cast<bool>(world), "the world is created");
     if (!world) return std::nullopt;
     std::vector<tactical::PlayerCommand> initial_orders;
+    tactical::TypeId population_type{};
+    std::uint32_t population_value{};
+    eawr::sim::math::Vec3 population_point{};
+    if (special_fixture) {
+        initial_orders.push_back({{0, 2, 0}, {}, tactical::CreditGrantPayload{eawr::sim::math::Fixed::from_integer(50000).value()}});
+        const auto pad = std::find_if(content.start.units.begin(), content.start.units.end(), [](const auto& unit) {
+            return unit.type == "Mineral_Extractor_Pad" && unit.state.owner == 2;
+        });
+        const auto player = std::find_if(content.ai.players.begin(), content.ai.players.end(), [](const auto& entry) { return entry.player == 2; });
+        expect(pad != content.start.units.end() && player != content.ai.players.end(), "WSW-36: staged refinery pad exists");
+        if (pad == content.start.units.end() || player == content.ai.players.end()) return std::nullopt;
+        const auto owner = std::find_if(content.start.players.begin(), content.start.players.end(), [](const auto& entry) {
+            return entry.player.player_id == 2;
+        });
+        const auto* menu = owner != content.start.players.end() ? content.economy.menu(pad->state.type_id, owner->player.faction_id) : nullptr;
+        const auto option = menu != nullptr ? std::find_if(menu->options.begin(), menu->options.end(), [](const auto& entry) {
+            return entry.available && entry.kind == tactical::BuildKind::structure;
+        }) : std::vector<tactical::BuildOption>::const_iterator{};
+        expect(menu != nullptr && option != menu->options.end(), "WSW-36: staged refinery uses the loaded faction pad menu");
+        if (menu == nullptr || option == menu->options.end()) return std::nullopt;
+        initial_orders.push_back({{0, 2, 1}, {pad->state.entity_id}, tactical::PadBuildPayload{option->type}});
+        const auto station = std::find_if(content.start.units.begin(), content.start.units.end(), [](const auto& unit) {
+            return unit.role == skirmish::UnitRole::station && unit.state.owner == 2;
+        });
+        const auto* station_menu = content.economy.menu(station->state.type_id, owner->player.faction_id);
+        const auto* account = content.economy.player(2);
+        expect(station_menu != nullptr && account != nullptr && account->population_cap > 7,
+            "WSW-36: loaded station menu and population cap support the stock prerequisite");
+        if (station_menu == nullptr || account == nullptr || account->population_cap <= 7) return std::nullopt;
+        const tactical::BuildOption* population_option = nullptr;
+        std::uint64_t preparation_frames = std::numeric_limits<std::uint64_t>::max();
+        std::uint32_t quantity = 0;
+        // The stock upgrade equation needs fewer than eight population points free.
+        // Satisfy it through ordinary authored purchases/arrivals, not a special-use Buy.
+        for (const auto& candidate : station_menu->options) {
+            const auto type = std::find_if(content.ai.content.types.begin(), content.ai.content.types.end(), [&](const auto& entry) {
+                return entry.type_id == candidate.type;
+            });
+            if (!candidate.available || candidate.kind != tactical::BuildKind::unit || candidate.population == 0
+                || type == content.ai.content.types.end() || !type->locomotor || type->squadron
+                || !world.value().build_allowed(2, station->state.entity_id, candidate.type)) continue;
+            const auto count = (account->population_cap - 7 + candidate.population - 1) / candidate.population;
+            if (count * candidate.population > account->population_cap) continue;
+            const auto& limits = candidate.requirements;
+            if ((limits.current_player && *limits.current_player < count)
+                || (limits.lifetime_player && *limits.lifetime_player < count)
+                || (limits.current_allies && *limits.current_allies < count)
+                || (limits.lifetime_allies && *limits.lifetime_allies < count)
+                || candidate.price.raw() * count > 50000 * eawr::sim::math::Fixed::scale) continue;
+            const auto frames = std::uint64_t{count} * candidate.ai_build_frames;
+            if (frames < preparation_frames) { population_option = &candidate; preparation_frames = frames; quantity = count; }
+        }
+        expect(population_option != nullptr, "WSW-36: authored ship purchases can satisfy the population prerequisite");
+        if (population_option == nullptr) return std::nullopt;
+        population_type = population_option->type; population_value = population_option->population;
+        if (workers == 1) std::cout << "population fixture type " << population_type << " value " << population_value
+                                   << " quantity " << quantity << " cap " << account->population_cap << '\n';
+        population_point = station->state.position;
+        for (std::uint32_t index = 0; index < quantity; ++index)
+            initial_orders.push_back({{0, 2, index + 2U}, {station->state.entity_id}, tactical::BuyPayload{population_type}});
+    }
     if (reinforcement_fixture) {
         const auto station = std::find_if(content.start.units.begin(), content.start.units.end(), [](const auto& unit) {
             return unit.role == skirmish::UnitRole::station && unit.state.owner == 2;
@@ -269,7 +429,6 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
         initial_orders.push_back({{0, 2, 0}, {station->state.entity_id}, tactical::BuyPayload{type}});
     }
     foc::AiSetup setup = content.ai;
-    setup.perception.campaign_game = !economy_run; // Preserve the campaign combat regression.
     setup.journal = std::make_shared<foc::AiJournal>();
     auto session = foc::create_session(std::move(world).value(), setup, content.modules);
     expect(static_cast<bool>(session), "the AI session is created: " + (session ? std::string() : session.error().code + " " + session.error().message));
@@ -291,12 +450,41 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
     Run out;
     const auto began = std::chrono::steady_clock::now();
     for (std::uint64_t tick = 0; tick < ticks; ++tick) {
+        if (special_fixture && tick != 0) {
+            const auto& live = session.value().world();
+            for (const auto& account : live.snapshot()->economy()) if (account.player == 2
+                && account.population + population_value <= account.population_cap) {
+                for (const auto& ledger : live.ledgers()) if (ledger.player == 2) {
+                    const auto pooled = std::find(ledger.pool.begin(), ledger.pool.end(), population_type);
+                    if (pooled == ledger.pool.end()) continue;
+                    const auto index = static_cast<std::size_t>(pooled - ledger.pool.begin());
+                    for (std::uint32_t attempt = 0; attempt < 100; ++attempt) {
+                        const auto point = tactical::reinforcement_search_candidate(population_point, attempt);
+                        if (!point) continue;
+                        const auto allowed = live.reinforcement_point(2, population_type, *point);
+                        if (!allowed || !allowed.value()) continue;
+                        initial_orders.push_back({{tick, 2, 0}, {},
+                            tactical::ReinforcePayload{population_type, *point, ledger.pool_tokens[index]}});
+                        break;
+                    }
+                }
+            }
+        }
         auto stepped = session.value().step(executor, initial_orders);
         initial_orders.clear();
         expect(static_cast<bool>(stepped), "step " + std::to_string(tick + 1) + (stepped ? std::string() : ": " + stepped.error().message));
         if (!stepped) return std::nullopt;
         const auto& result = stepped.value();
         expect(result.refused_input.empty(), "the prearranged purchase reaches the world");
+        if (special_fixture && tick == 0) {
+            const auto events = result.world.snapshot->events();
+            const bool built = std::any_of(events.begin(), events.end(), [](const auto& event) {
+                return event.kind == tactical::EventKind::order_accepted && event.order == tactical::OrderKind::pad_build
+                    && event.player == 2 && event.sequence == 1;
+            });
+            expect(built, "WSW-36: the staged refinery construction is admitted");
+            if (!built) return std::nullopt;
+        }
         out.placement_ns += result.world.reinforcement_placement_ns;
         out.max_placement_ns = std::max(out.max_placement_ns, result.world.reinforcement_placement_ns);
         out.placement_queries += result.world.reinforcement_collision_queries;
@@ -309,6 +497,31 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
                 [](const auto& routed) { return routed.command.verb == foc::verb_reinforce; })));
         out.hashes.push_back(result.state_sha256);
         out.world_hashes.push_back(result.world.state_sha256);
+        if (special_fixture) {
+            for (const auto& account : result.world.snapshot->economy()) if (account.player == 2) {
+                if (out.population_ready_frame == 0 && account.population_cap - std::min(account.population, account.population_cap) < 8)
+                    out.population_ready_frame = result.world.snapshot->completed_tick();
+                out.special_enabled += account.special_weapons_enabled ? 1U : 0U;
+                for (const auto& [type, count] : account.lifetime) {
+                    const auto found = content.names.find(type);
+                    if (found != content.names.end() && (found->second == "RS_Ion_Cannon_Use_Upgrade" ||
+                        found->second == "ES_Hypervelocity_Gun_Use_Upgrade" || found->second == "US_Plasma_Cannon_Use_Upgrade"))
+                        out.special_purchases = std::max(out.special_purchases, count);
+                }
+            }
+            for (const auto& projectile : result.world.snapshot->projectiles()) {
+                if (projectile.owner != 2 || out.special_projectile_ids.contains(projectile.id)) continue;
+                const auto live = std::find_if(result.world.snapshot->instances().begin(), result.world.snapshot->instances().end(),
+                    [&](const auto& unit) { return unit.entity_id == projectile.shooter && unit.owner == 2; });
+                if (live == result.world.snapshot->instances().end()) continue;
+                if (live->planetary_weapon || std::any_of(live->manual_weapons.begin(), live->manual_weapons.end(),
+                    [&](const auto& weapon) { return weapon.hardpoint == projectile.weapon; })) {
+                    ++out.special_projectiles;
+                    out.special_projectile_ids.insert(projectile.id);
+                    out.special_launch_frames.push_back(result.world.snapshot->completed_tick());
+                }
+            }
+        }
         for (const auto& instance : result.world.snapshot->instances()) {
             types.emplace(instance.entity_id, instance.type_id);
             const eawr::sim::math::Vec3 at{instance.fixed_transform.rows[0][3], instance.fixed_transform.rows[1][3],
@@ -324,7 +537,22 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
             if (event.kind == tactical::EventKind::order_rejected) {
                 ++out.rejected_commands;
                 std::cout << "rejected tick " << event.tick << " player " << event.player
-                    << " sequence " << event.sequence << " " << tactical::to_string(event.reason) << '\n';
+                    << " sequence " << event.sequence << " " << tactical::to_string(event.reason)
+                    << " order " << tactical::to_string(event.order) << " unit " << event.unit << '\n';
+                for (const auto& routed : result.script_input) {
+                    if (!routed.submitted || routed.key.tick != event.tick || routed.key.player_id != event.player
+                        || routed.key.sequence != event.sequence) continue;
+                    std::cout << "  script " << routed.command.verb;
+                    for (const auto& argument : routed.command.arguments) {
+                        const auto* object = std::get_if<auth::Handle>(&argument.data);
+                        if (object == nullptr) continue;
+                        std::cout << " object " << object->id;
+                        for (const auto& instance : result.world.snapshot->instances()) {
+                            if (instance.entity_id == object->id) std::cout << " owner " << instance.owner;
+                        }
+                    }
+                    std::cout << '\n';
+                }
             }
             if (event.kind != tactical::EventKind::order_accepted) continue;
             if (event.order == tactical::OrderKind::credit_grant)
@@ -460,6 +688,29 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
     out.journal = *setup.journal;
     return out;
 }
+struct AttackActivity {
+    std::uint64_t start{}, order{};
+};
+
+std::optional<AttackActivity> attack_window(const Content& content, std::uint64_t seed, std::uint64_t ticks) {
+    auto seeded = content;
+    seeded.start.setup.seed = seeded.ai.seed = seed;
+    auto result = run(seeded, 1, ticks);
+    if (!result) return std::nullopt;
+    AttackActivity activity;
+    for (const auto& event : result->journal.plans) {
+        if (event.tick > ticks || (event.plan != "destroyunit" && event.plan != "destroyunitminimal"
+            && event.plan != "flankplan" && event.plan != "turboattacklocation")) continue;
+        if (event.event == "started" && (activity.start == 0 || event.tick < activity.start)) activity.start = event.tick;
+        if (event.event == "order" && (activity.order == 0 || event.tick < activity.order)) activity.order = event.tick;
+    }
+    std::cout << "unfiltered attack seed " << seed << ": first start " << activity.start
+        << ", first order " << activity.order << ", window " << ticks << std::endl;
+    std::cout << "attack seed " << seed << ": " << ticks << " ticks in " << result->seconds
+        << " s, first hit " << result->first_hit << ", final " << result->hashes.back() << std::endl;
+    return activity;
+}
+
 // #1415, PL-20/21/22/25 and GS-30/31: competing goals can reserve a named plan's
 // units, so a whole battle does not guarantee that plan. Keep the mounted goal
 // equation, templates and Lua, and remove only other goal-function entries.
@@ -518,11 +769,189 @@ std::optional<Run> focused_goal(const Content& content, const std::string& goal,
     return first;
 }
 
+
+int native_continuation(const Content& content) {
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto make_world = [&](const tactical::TacticalReplay& replay) {
+            return tactical::TacticalSession::from_replay(replay, content.content.sensors, content.content.durability,
+                content.content.motion, content.content.fog, content.content.combat, content.victory,
+                content.content.abilities, tactical::EconomyRules{}, content.content.map_box);
+        };
+        tactical::TacticalReplay initial; initial.setup = content.start.setup;
+        auto world = make_world(initial);
+        if (!world) { expect(false, world.error().message); return 1; }
+        auto setup = content.ai; setup.journal = std::make_shared<foc::AiJournal>();
+        setup.perception.campaign_game = true;
+        if (workers == 1) {
+            auto skirmish_setup = setup; skirmish_setup.perception.campaign_game = false;
+            skirmish_setup.journal = std::make_shared<foc::AiJournal>();
+            auto skirmish_world = make_world(initial);
+            if (!skirmish_world) { expect(false, skirmish_world.error().message); return 1; }
+            auto skirmish = foc::create_session(std::move(skirmish_world).value(), skirmish_setup, content.modules);
+            if (!skirmish) { expect(false, skirmish.error().message); return 1; }
+            for (unsigned i = 0; i < 600; ++i) {
+                auto tick = skirmish.value().step(executor);
+                if (!tick) { expect(false, tick.error().message); return 1; }
+            }
+            auto skirmish_saved = skirmish.value().save_scripts();
+            auto base = foc::prepare_session(skirmish_setup, content.modules);
+            if (!skirmish_saved || !base) { expect(false, "skirmish save and base scheduler prepare"); return 1; }
+            const auto loaded = base.value().scripts.load(skirmish_saved.value().scheduler);
+            if (!loaded) { expect(false, loaded.error().message); return 1; }
+            expect(!skirmish_saved.value().native
+                && skirmish.value().script_state_hash().value() == base.value().scripts.state_hash().value(),
+                "skirmish with goals retains the base Lua-only save and hash");
+            auto freestore_setup = setup; freestore_setup.bounds.reset(); freestore_setup.xml.clear();
+            auto freestore_world = make_world(initial);
+            if (!freestore_world) { expect(false, freestore_world.error().message); return 1; }
+            auto freestore = foc::create_session(std::move(freestore_world).value(), freestore_setup, content.modules);
+            if (!freestore) { expect(false, freestore.error().message); return 1; }
+            expect(!freestore.value().save_scripts().value().native,
+                "campaign freestore without a goals owner retains its base save");
+        }
+        auto running = foc::create_session(std::move(world).value(), setup, content.modules);
+        if (!running) { expect(false, running.error().message); return 1; }
+        for (unsigned i = 0; i < 600; ++i) {
+            auto tick = running.value().step(executor);
+            if (!tick) { expect(false, tick.error().message); return 1; }
+        }
+        expect(std::any_of(setup.journal->plans.begin(), setup.journal->plans.end(), [](const auto& row) {
+            return row.event == "started";
+        }), "WGS-66 stock proof has actual plan activation before saving");
+        auto state = running.value().world().save_checkpoint_state();
+        auto saved = running.value().save_scripts();
+        if (!state || !saved) { expect(false, !state ? state.error().message : saved.error().message); return 1; }
+        expect(saved.value().native && saved.value().native->size() > 65, "WGS-66 archives the live tactical Engine beside freestore Lua");
+        const auto log = running.value().record();
+        auto restore = [&](const auth::TacticalScriptSave& input, const std::map<std::string, std::string>& modules)
+            -> eawr::core::Result<auth::ScriptedTacticalSession> {
+            using Result = eawr::core::Result<auth::ScriptedTacticalSession>;
+            auto rebuilt = make_world(log);
+            if (!rebuilt) return Result::failure(rebuilt.error());
+            if (auto loaded = rebuilt.value().load_checkpoint_state(state.value()); !loaded) return Result::failure(loaded.error());
+            auto prepared = foc::prepare_session(setup, modules);
+            if (!prepared) return Result::failure(prepared.error());
+            auto child = auth::ScriptedTacticalSession::restore(std::move(rebuilt).value(), std::move(prepared.value().scripts), input);
+            if (!child) return child;
+            if (input.native) {
+                expect(!child.value().script_state_hash() && !child.value().step(executor)
+                    && child.value().completed_tick() == input.completed_tick,
+                    "unclaimed native child state refuses hash and gameplay without advancing the world");
+            }
+            if (auto bound = prepared.value().bind(child.value()); !bound) return Result::failure(bound.error());
+            return child;
+        };
+        if (workers == 1) {
+            setup.perception.campaign_game = false;
+            expect(!restore(saved.value(), content.modules), "campaign native state refuses a skirmish owner");
+            setup.perception.campaign_game = true;
+            auto missing = saved.value(); missing.native.reset();
+            expect(!restore(missing, content.modules), "missing tactical native state refuses a fresh engine");
+            auto malformed = saved.value(); malformed.native->pop_back();
+            expect(!restore(malformed, content.modules), "truncated tactical native state refuses before publication");
+            auto changed = content.modules; changed.begin()->second += "\n-- changed closure\n";
+            expect(!restore(saved.value(), changed), "changed selected Lua content refuses native restore");
+        }
+        auto restored = restore(saved.value(), content.modules);
+        if (!restored) { expect(false, restored.error().message); return 1; }
+        const auto recaptured = restored.value().save_scripts();
+        expect(recaptured && recaptured.value().native == saved.value().native
+            && recaptured.value().scheduler == saved.value().scheduler, "restore recaptures exact native and Lua state without gameplay");
+        std::vector<std::string> hashes;
+        for (unsigned i = 0; i < 300; ++i) {
+            const auto control = running.value().step(executor);
+            const auto resumed = restored.value().step(executor);
+            if (!control || !resumed) { expect(false, !control ? control.error().message : resumed.error().message); return 1; }
+            expect(control.value().state_sha256 == resumed.value().state_sha256
+                && running.value().record().commands == restored.value().record().commands,
+                "restored tactical AI continues identical decisions, orders, Lua and synchronized RNG");
+            hashes.push_back(control.value().state_sha256);
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "tactical native continuation agrees on 1/2/4/8 workers");
+        std::cout << "native continuation " << workers << " workers: " << saved.value().native->size()
+            << " bytes at tick 600, 300 identical resumed ticks\n";
+    }
+    return failures == 0 ? 0 : 1;
+}
+
 int run_foc_plan_cases(int argc, char** argv) {
     const auto root = environment("EAWR_EAW_GAME_ROOT");
+    if (!root && argc > 1 && std::string_view(argv[1]) == "--native-continuation") {
+        std::cerr << "native continuation requires installed game data\n"; return 1;
+    }
     if (!root) {
         std::cout << "SKIPPED: set EAWR_EAW_GAME_ROOT for the FoC plan battle\n";
         return 0;
+    }
+    if (argc > 1 && std::string_view(argv[1]) == "--native-continuation") {
+        auto content = load(*root);
+        return content ? native_continuation(*content) : 1;
+    }
+    if (argc > 1 && std::string_view(argv[1]) == "--attack-long-tail") {
+        if (argc != 3 || std::strtoull(argv[2], nullptr, 10) == 0) {
+            std::cerr << "usage: foc_plan_tests --attack-long-tail <ticks>\n";
+            return 1;
+        }
+        const auto ticks = std::strtoull(argv[2], nullptr, 10);
+        auto content = load(*root, false);
+        if (!content) return 1;
+        const auto activity = attack_window(*content, 3, ticks);
+        if (!activity) return 1;
+        // PL-01/02/03 and WSW-47: the same unfiltered fixture has a measured
+        // long tail. Keep this separate batch coverage, including actual orders.
+        expect(activity->start > 0, "unfiltered long-tail seed 3 starts an attack plan within " + std::to_string(ticks));
+        expect(activity->order > 0, "unfiltered long-tail seed 3 orders its attack force within " + std::to_string(ticks));
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc > 2 && std::string_view(argv[1]) == "--special-weapons") {
+        const std::string faction = argv[2];
+        const std::uint64_t ticks = argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 18000;
+        special_fixture = economy_run = true;
+        auto content = load(*root, faction == "Underworld", false, faction);
+        if (!content) return 1;
+        std::optional<Run> first;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto result = run(*content, workers, ticks);
+            if (!result) return 1;
+            std::cout << faction << " " << workers << " worker(s): purchases " << result->special_purchases
+                << ", enabled frames " << result->special_enabled << ", projectiles " << result->special_projectiles
+                << ", population ready " << result->population_ready_frame << std::endl;
+            if (result->special_purchases == 0 || result->special_projectiles == 0) {
+                for (const auto& event : result->journal.plans)
+                    if (event.plan == "purchasespaceupgradesgeneric" || event.plan == "groundtospacedamage" || event.plan == "groundtospacedisable"
+                        || event.goal == "GROUND_TO_SPACE_DAMAGE" || event.goal == "GROUND_TO_SPACE_DISABLE")
+                        std::cout << line_of(event) << '\n';
+                for (const auto& diagnostic : result->diagnostics) std::cout << diagnostic << '\n';
+            }
+            expect(result->special_purchases > 0, "WSW-36: stock AI purchases its use upgrade");
+            expect(result->special_enabled > 0, "WSW: AI purchase enables battlefield special weapons");
+            expect(result->special_projectiles > 0, "WSW-22/39: AI launches travelling special projectiles");
+            if (result->special_purchases == 0 || result->special_enabled == 0 || result->special_projectiles == 0) return 1;
+            if (!first) first = std::move(result);
+            else {
+                expect(result->hashes == first->hashes && result->commands == first->commands,
+                    "WSW: installed AI battle and staged commands agree on 1/2/4/8 workers");
+                expect(result->special_launch_frames == first->special_launch_frames, "WSW: projectile trace agrees across workers");
+            }
+        }
+        if (faction == "Underworld") {
+            expect(first->special_launch_frames.size() >= 2, "WSW-39/40: Underworld repeats its shot");
+            bool gun_clock_repeat = false;
+            for (std::size_t index = 1; index < first->special_launch_frames.size(); ++index)
+                gun_clock_repeat = gun_clock_repeat || first->special_launch_frames[index] - first->special_launch_frames[index - 1] < 3600;
+            expect(gun_clock_repeat, "WSW-40: stock free-store repeats before the human 120-second clock");
+        }
+        std::cout << faction << " special weapon purchases " << first->special_purchases << ", enabled frames " << first->special_enabled
+            << ", actual projectiles " << first->special_projectiles << "; launch frames";
+        for (const auto frame : first->special_launch_frames) std::cout << ' ' << frame;
+        std::cout << '\n';
+        auto replayed = eawr::platform::headless_tick_hashes(first->record, content->content.sensors, content->content.durability,
+            content->content.motion, content->content.combat, content->victory, content->content.fog, content->content.abilities, content->economy, content->content.map_box);
+        expect(replayed && replayed.value() == first->world_hashes, "WSW: installed battle replays without AI scripts");
+        return failures == 0 ? 0 : 1;
     }
     const std::uint64_t ticks = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 5400;
     const bool underworld = argc > 4 && std::string_view(argv[4]) == "--underworld";
@@ -563,7 +992,7 @@ int run_foc_plan_cases(int argc, char** argv) {
         }
         const auto replayed = eawr::platform::headless_tick_hashes(first.record, content->content.sensors,
             content->content.durability, content->content.motion, content->content.combat, content->victory,
-            content->content.fog, content->content.abilities, content->economy);
+            content->content.fog, content->content.abilities, content->economy, content->content.map_box);
         expect(replayed && replayed.value() == first.world_hashes,
             "SAE-10: recorded ordinary commands reproduce every headless world hash");
         return failures == 0 ? 0 : 1;
@@ -687,11 +1116,28 @@ int run_foc_plan_cases(int argc, char** argv) {
         std::cout << "plan " << plan << ": started " << count << ", orders " << ordered[plan] << ", finished " << finished[plan] << '\n';
     }
     expect(!started.empty(), "the goal system starts plans");
-    // #495: on the real map bounds (PG-01) the Empire's first attack is TURBO_ATTACK_LOCATION on
-    // the Rebel corner's threat cell (tick 378); DESTROY_UNIT follows at tick 503.
-    expect(started.contains("destroyunit") || started.contains("flankplan") || started.contains("destroyunitminimal")
-            || started.contains("turboattacklocation"),
-        "an attack plan (destroyunit, destroyunitminimal, flankplan or turboattacklocation) starts");
+    if (economy_run) {
+        expect(started.contains("destroyunit") || started.contains("flankplan") || started.contains("destroyunitminimal")
+                || started.contains("turboattacklocation"),
+            "an attack plan (destroyunit, destroyunitminimal, flankplan or turboattacklocation) starts");
+    } else {
+        // PL-02/03 admit planetary definitions without checking this player's sources;
+        // GS-04/PL-01 draw before force admission (WSW-47). Keep the full installed
+        // goal set and seven fixed seeds, including the original seed 67. This 600-second
+        // project coverage bound tests attack starts and orders, not retail cadence or
+        // the separate AI technology-progression release gate.
+        constexpr std::uint64_t attack_window = 18000;
+        // Seed 3 keeps its separate historical long-tail coverage in
+        // foc_plan_long_tail; the seven fixed windows remain unchanged.
+        for (const std::uint64_t seed : {1U, 2U, 4U, 5U, 49U, 67U, 101U}) {
+            const auto activity = foc_plan_test_support::attack_window(*content, seed, attack_window);
+            if (!activity) return 1;
+            expect(activity->start > 0, "unfiltered installed battle seed " + std::to_string(seed)
+                + " starts an attack plan within " + std::to_string(attack_window) + " ticks");
+            expect(activity->order > 0, "unfiltered installed battle seed " + std::to_string(seed)
+                + " attack plan orders its force");
+        }
+    }
     std::optional<Run> bombing;
     // #1415, EX-31 (#1557): retain unconditional plan coverage in the existing focused
     // runs. The full battle's former 3600-tick deadline was unsourced: formation waits
@@ -896,7 +1342,7 @@ int run_foc_plan_cases(int argc, char** argv) {
 
     // The record replays without scripts.
     auto replayed = eawr::platform::headless_tick_hashes(first.record, content->content.sensors, content->content.durability,
-        content->content.motion, content->content.combat, content->victory, content->content.fog, content->content.abilities, economy_run ? content->economy : tactical::EconomyRules{});
+        content->content.motion, content->content.combat, content->victory, content->content.fog, content->content.abilities, content->economy, content->content.map_box);
     expect(replayed && replayed.value() == first.world_hashes, "the headless replay of the record reproduces the world");
 
     // The live session hosts the same AI and goal system (driven pacing, 4 workers).
@@ -906,12 +1352,11 @@ int run_foc_plan_cases(int argc, char** argv) {
     auto scripts = std::make_shared<eawr::platform::LiveScripts>();
     scripts->wrap = [&content](tactical::TacticalSession world) {
         auto setup = content->ai;
-        setup.perception.campaign_game = !economy_run;
         return foc::create_session(std::move(world), setup, content->modules);
     };
     options.scripts = scripts;
     auto live = eawr::platform::LiveSession::start(content->start.setup, content->content.sensors, content->content.durability,
-        content->content.motion, content->content.combat, options, content->victory, content->content.fog, content->content.abilities, economy_run ? content->economy : tactical::EconomyRules{});
+        content->content.motion, content->content.combat, options, content->victory, content->content.fog, content->content.abilities, content->economy, content->content.map_box);
     expect(static_cast<bool>(live), "the live session starts with the goal system");
     if (live) {
         live.value()->advance_to(ticks);

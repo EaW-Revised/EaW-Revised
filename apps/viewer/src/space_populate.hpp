@@ -99,10 +99,15 @@ public:
             bool placement_preview{}; // WR-12: a visual clone, with attached particle emitters hidden
             // #456: a model slot for a projectile in flight (BattleEffects' pools; counted apart).
             bool projectile_slot{};
+            bool beacon_model{}; // HCB-12: reusable beacon model, counted apart from session units.
+            bool ability_proxy_owner{}; // WAB-75: explicit ability-created visual slot.
             bool construction{};
             // #427: its type has a DEFEND ability, so its SHIELD sub-object is composed as the
             // shield shell pose_live() shows while LivePose::defend_active (BP-22).
             bool defend_shell{};
+            // WST-12: its type has STEALTH, so its STEALTH sub-object is composed as the cloak
+            // pose_live() shows while LivePose::stealth_active, hiding BASEMESH and the hardpoints.
+            bool stealth_shell{};
         };
         std::vector<PlacedShip> placed_ships;
         // #80: TED records whose objects the live session owns; the session's
@@ -113,6 +118,9 @@ public:
         // (#136). Called once at the end of compose and after each
         // set_hardpoint_state that changes a state; false fails the caller.
         std::function<bool(SpacePopulation&)> attached_effects;
+        // BLD-10: the placements compose has uploaded, of all it decided on (done, total), for the
+        // battle loading screen's bar. Called before each placement and once at the end.
+        std::function<void(std::size_t, std::size_t)> progress;
     };
 
     explicit SpacePopulation(Options options);
@@ -150,9 +158,15 @@ public:
         std::vector<scene::HardpointState> hardpoints{};
         // #427: the unit's DEFEND ability runs, so its shield shell shows (BP-22).
         bool defend_active{};
+        // WST-12: the unit's cloak is on: the STEALTH sub-object shows instead of the hull.
+        bool stealth_active{};
+        bool blast_charging{};
+        bool blast_charged{};
         std::optional<double> construction_hull{};
         // Reusable launch slots bind to the simulation unit currently occupying them.
         sim::EntityId entity{};
+        struct TurretPose { sim::math::Fixed yaw{}, pitch{}; bool xy_only{}, barrel{}; };
+        std::optional<TurretPose> turret{};
     };
     // Moves every live ship's pieces to its pose and hides the live ships
     // `poses` does not list, then refreshes instances(). False (failure()
@@ -178,6 +192,8 @@ public:
         bool alternate{}; // PlacedShip::alternate_clip (#76)
     };
     [[nodiscard]] bool pose_live_clips(GodotRenderer& renderer, std::span<const LiveClipPose> poses);
+    [[nodiscard]] bool pose_live_turrets(GodotRenderer& renderer, std::span<const LivePose> poses,
+        std::span<const LiveClipPose> clips);
     // #81: a live ship that is gone for good (a death clone removed or faded
     // out): drops its pieces, skin poses and clip, and releases the uploads no
     // other piece draws. It is never drawn again.
@@ -194,6 +210,11 @@ public:
         std::array<float, 3> high{};
     };
     [[nodiscard]] std::optional<LiveShipBox> live_ship_box(std::size_t ship) const;
+    // MM-17: composition's model identity, independent of fog, posing or current visibility.
+    // Missing population/placement information is unknown, not a model-free object.
+    [[nodiscard]] std::optional<bool> live_ship_model_present(std::size_t ship) const noexcept {
+        return composed_ && scene_ && ship < live_models_.size() ? live_models_[ship] : std::nullopt;
+    }
     // #394: what the emitters that follow a drawn live ship read each frame:
     // its composed placement (model and proxy references), its hardpoints and
     // their current states, and the model transform the last pose_live() gave
@@ -300,7 +321,7 @@ private:
     [[nodiscard]] std::optional<SurfaceUpload> upload_shell(
         GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
         sim::AssetId& next_asset, const assets::Model& model, std::uint32_t mesh_index,
-        std::uint32_t submesh_index, std::string& status);
+        std::uint32_t submesh_index, std::string& status, bool neutral_distortion = false);
     // A piece of hardpoint art: shown by the state of hardpoint `hardpoint`
     // of decisions_[decision].
     struct HardpointGate final {
@@ -318,6 +339,11 @@ private:
         // #427: its ship's shield shell, drawn while the ship's DEFEND runs.
         bool shield{};
         std::optional<std::uint32_t> alternate{};
+        // WST-12: its ship's STEALTH sub-object (shown while cloaked), or a BASEMESH surface or
+        // attached hardpoint model (hidden while cloaked).
+        bool cloak{};
+        bool cloak_hidden{};
+        std::optional<bool> blast_charged{}; // BP-74: false=buildup, true=charged
     };
     void rebuild_piece_index();
     void refresh_instances();
@@ -373,6 +399,14 @@ private:
     std::map<std::size_t, std::size_t> idle_live_ships_;
     std::map<sim::EntityId, std::size_t> contact_live_ships_;
     std::vector<std::vector<animation::BonePose>> contact_bones_;
+    struct TurretBinding {
+        std::shared_ptr<const animation::Player> player;
+        animation::Pose pose;
+        std::vector<animation::BonePose> bind_bones;
+        std::size_t turret{};
+        std::optional<std::size_t> barrel, idle;
+    };
+    std::vector<std::optional<TurretBinding>> turret_bindings_;
     std::vector<AnimatedInstance> animated_instances_;
     std::map<std::string, animation::IdlePlayback> idle_playbacks_;
     // Object id -> the Idle_Anim_00_Rate_Mod text that did not parse (rate 1 kept).
@@ -390,10 +424,19 @@ private:
     // #80: per placed ship, its decision index when drawn, and whether the
     // last pose_live() listed it; the reasons a live ship was not drawn.
     std::vector<std::optional<std::size_t>> live_decisions_;
+    std::vector<std::optional<bool>> live_models_;
     std::vector<bool> live_shown_;
     // #427: per placed ship, whether the last pose_live() gave it an active DEFEND; the
     // shield shell uploads and, per object id, what became of its shell.
     std::vector<bool> live_defend_;
+    // WST-12: per placed ship, whether the last pose_live() gave it an active cloak; per object
+    // id, what became of its STEALTH sub-object.
+    std::vector<bool> live_stealth_;
+    std::vector<bool> live_blast_charging_;
+    std::vector<bool> live_blast_charged_;
+    std::map<std::string, std::uint64_t> blast_meshes_shown_;
+    std::map<std::string, std::string> stealth_shells_;
+    std::uint64_t stealth_shells_shown_{};
     std::vector<sim::AssetId> shield_assets_;
     std::map<std::string, std::string> shield_shells_;
     std::uint64_t shield_shells_shown_{};
@@ -415,6 +458,9 @@ private:
     std::vector<bool> live_retired_;
     std::size_t live_released_assets_{};
     std::size_t session_records_skipped_{};
+    std::vector<std::uint32_t> skipped_session_records_;
+    // Historical compose assignments: reports are also written after release.
+    std::vector<std::vector<sim::AssetId>> hull_surface_assets_;
     // The debug object's XML type and placed yaw (its marker's own yaw).
     std::string debug_ship_type_{"SpaceUnit"};
     float debug_ship_yaw_{};

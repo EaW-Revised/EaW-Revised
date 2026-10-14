@@ -63,6 +63,15 @@ unimplemented.
 
 ## Tactical XML source policy
 
+The following declarations record the existing XML application contract in
+`camera::solve`; they do not settle the unresolved retail spline fidelity above.
+
+| Rule | XML application | Evidence |
+|---|---|---|
+| CAMXML-01 | `Distance_Min` and `Distance_Max` bound the solved camera distance. Without splines, zoom linearly interpolates between them; the solved distance also normalizes pan speed over this range. | Tactical camera XML ranges; existing camera contract and `camera::solve`; project presentation policy. |
+| CAMXML-02 | `Use_Splines` selects `Distance_Spline` and `Pitch_Spline` evaluation at the current zoom. Clamp the resulting distance to the distance range; retain the spline pitch without the linear-mode pitch clamp. Disabled splines do not participate. | Tactical camera XML curves; existing camera solve contract; project presentation policy, retail spline fidelity unverified. |
+| CAMXML-03 | Initialize the solved field of view from `Fov_Default`, clamped to `Fov_Min` through `Fov_Max`. Projection interprets this angle under the field-of-view policy above. | Tactical camera XML defaults/ranges; existing camera contract; debug-build projection facts above. |
+
 The Godot-independent loader reads the selected `Land_Mode`, `Space_Mode`, or `Unlocked`
 definition from `tacticalcameras.xml` and the global scroll tags from `gameconstants.xml`.
 The caller supplies VFS bytes, relative logical paths, and source SHA strings. Its ordered

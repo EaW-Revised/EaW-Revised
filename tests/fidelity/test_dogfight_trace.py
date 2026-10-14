@@ -13,8 +13,9 @@ space-fighters fidelity list). The trace has no craft targets, so the TIEs' turn
 holds the remake's losses, their ticks and hit rates where they are, below the recording's, so the
 gap can only close; they guard DG-37 (the craft sphere's gate) and, with S-98, W-06a. S-98 (the X-wings intercept TIE bombers attacking a corvette) runs with 1 and
 8 workers and must lose the bombers the recording loses, near its ticks, with the X-wings' shots
-and hits near its shot log (W-06a). The recordings stay private, so this test checks those
-outcomes, not every field; docs/behaviour/space-fighters.md explains the remaining differences.
+and hits near its shot log (W-06a). S-98 starts at the recording's order frame (#1617: the craft on
+their native poses there), so its recorded death ticks are counted from that frame. The recordings
+stay private, so this test checks those outcomes, not every field; docs/behaviour/space-fighters.md explains the remaining differences.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import json
 import math
 import os
 import pathlib
@@ -47,10 +49,15 @@ LOSS_LIMITS = {"xwing": (0, 5), "tie": (2, 7)}
 # (#607 review: the old burst clock) the seventh TIE dies at 1070, so this and S-98 guard W-06a.
 TIE_LAST_LOSS_LIMIT = 1200
 HIT_RATE_LIMIT = 0.95  # recorded: X-wings 75 of 86 shots, TIE fighters 152 of 163 (#607 shot log)
-RECORDED_BOMBER_DEATHS = [723, 929, 1110]  # S-98: three of four bombers by tick 1200
-BOMBER_DEATH_WINDOW = 100  # the remake (#607): 685, 1022, 1030
+# S-98: the recording loses three of four bombers by native tick 1200, at 723, 929 and 1110. The
+# scenario's tick 0 is native tick 150, the X-wings' order (#1617).
+RECORDED_ORDER_FRAME = 150
+RECORDED_TICKS = 1200
+RECORDED_BOMBER_DEATHS = [tick - RECORDED_ORDER_FRAME for tick in (723, 929, 1110)]
+# The remake from the order frame (#1617, main c66ff1c7): four bombers at 403, 620, 694 and 755.
+BOMBER_DEATH_WINDOW = 100
 RECORDED_INTERCEPT_SHOTS = (162, 98)  # the X-wings' shots and their hits on the bombers
-INTERCEPT_SHARE = 0.2  # the remake: 155 and 94
+INTERCEPT_SHARE = 0.2  # the remake from the order frame: 156 and 112
 SCALE = float(1 << 24)
 FAILURES: List[str] = []
 
@@ -237,6 +244,10 @@ def main() -> int:
             outcome = check_outcome(pathlib.Path(trace_path), runs[1]["combat"])
             print("S-97 outcome: " + outcome)
         intercept = args.scenarios / f"{INTERCEPT}.json"
+        staged = json.loads(intercept.read_text(encoding="utf-8"))
+        check(staged["duration_ticks"] == RECORDED_TICKS - RECORDED_ORDER_FRAME
+              and all(event["tick"] == 1 for event in staged["events"]),
+              "S-98: the scenario starts at the recording's order frame (both orders at tick 1)")
         pair = {workers: run(args.program, intercept, root, work, workers, contacts=True) for workers in (1, 8)}
         if all(pair.values()):
             for kind in ("trace", "hashes", "replay", "header", "combat"):

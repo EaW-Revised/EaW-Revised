@@ -3,6 +3,7 @@
 #include "eawr/presentation/audio/sfx.hpp"
 #include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/audio/command_cues.hpp"
+#include "eawr/presentation/space/unit_fade.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -15,6 +16,8 @@
 namespace {
 
 namespace audio = eawr::presentation::audio;
+namespace space = eawr::presentation::space;
+namespace sim = eawr::sim;
 using audio::Field;
 using Result = audio::Start::Result;
 
@@ -400,7 +403,7 @@ void wave_files() {
 }
 
 void falloff_and_listener() {
-    const audio::Space3D space{};
+    const audio::Space3D space{1.5, 2.0, 60.0};
     // Minimum distance 300 * 1.5 = 450: full volume inside, then min / (min + 2 (d - min)).
     expect(near(audio::falloff_gain(100.0, 300.0, space), 1.0), "inside saturation");
     expect(near(audio::falloff_gain(450.0, 300.0, space), 1.0), "at saturation");
@@ -745,6 +748,52 @@ void music() {
     expect(std::isfinite(fade.level) && near(fade.level, 0.0), "zero level/duration remains finite");
 }
 
+void sighting_service_timing() {
+    // SND-42/64, SND-E54, WSU-03: per-object countdown, bypassed while the fade differs from target.
+    audio::SightingService service;
+    expect(service.tick(1, true, 1.0), "a new object is serviced on its first frame");
+    for (int frame = 1; frame < 30; ++frame) expect(!service.tick(1, true, 1.0), "settled object waits out its countdown");
+    expect(service.tick(1, true, 1.0), "settled object is serviced every 30 frames");
+    // A second object first tracked 7 frames later keeps its own phase.
+    for (int frame = 0; frame < 7; ++frame) (void)service.tick(1, true, 1.0);
+    expect(service.tick(2, true, 1.0), "second object has its own first service");
+    int serviced_one = 0, serviced_two = 0;
+    for (int frame = 0; frame < 60; ++frame) {
+        serviced_one += service.tick(1, true, 1.0) ? 1 : 0;
+        serviced_two += service.tick(2, true, 1.0) ? 1 : 0;
+    }
+    expect(serviced_one == 2 && serviced_two == 2, "each object is serviced twice in 60 frames");
+    // While the fade differs from its target, the object is serviced every frame and the countdown restarts.
+    audio::SightingService fading;
+    expect(fading.tick(3, true, 1.0), "fading: first service");
+    expect(!fading.tick(3, true, 1.0), "settled: waits");
+    int every = 0;
+    for (int step = 2; step <= 8; ++step) every += fading.tick(3, true, step / 10.0) ? 1 : 0;
+    expect(every == 7, "fading object is serviced every frame");
+    bool again = false;
+    for (int frame = 0; frame < 29; ++frame) again = again || fading.tick(3, true, 1.0);
+    expect(!again, "countdown restarted at the last fading service");
+    expect(fading.tick(3, true, 1.0), "then serviced 30 frames after it");
+    fading.retain([](std::uint64_t) { return false; });
+    expect(fading.tracked() == 0, "retain drops vanished objects");
+
+    // Driven by the real fade: revealed from fog mid-countdown, the object is serviced every frame
+    // while it eases in, so the cue request time follows the fade rather than a shared phase.
+    space::UnitFade fade;
+    audio::SightingService revealed;
+    const std::vector<sim::EntityId> alive{9};
+    int first_visible_service = -1, services_while_fading = 0;
+    for (int frame = 0; frame < 120; ++frame) {
+        const bool visible = frame >= 10;
+        fade.advance(visible ? std::vector<sim::EntityId>{9} : std::vector<sim::EntityId>{}, alive, 1.0);
+        const bool due = revealed.tick(9, visible, fade.opacity(9).value_or(0.0F));
+        if (visible && due && first_visible_service < 0) first_visible_service = frame;
+        if (visible && due && frame < 40) ++services_while_fading;
+    }
+    expect(first_visible_service >= 10 && first_visible_service <= 11, "reveal is serviced at once, not at the next shared phase");
+    expect(services_while_fading > 10, "serviced every frame while the fade moves");
+}
+
 void announcements() {
     using Cue = audio::SightingAnnouncements::Cue;
     audio::SightingAnnouncements sightings;
@@ -815,6 +864,41 @@ void announcements() {
 } // namespace
 
 int main() {
+    {
+        std::vector<std::string> problems;
+        const std::array stock{Field{"Audio_Space_3D_Saturation_Distance_Mod", "1.5"},
+            Field{"Audio_Space_3D_Rolloff_Distance_Mod", "2"}, Field{"Audio_Space_3D_Listener_Z_Pullback_Dist", "60"}};
+        const std::array mod{Field{"Audio_Space_3D_Saturation_Distance_Mod", "3"},
+            Field{"Audio_Space_3D_Rolloff_Distance_Mod", "4"}, Field{"Audio_Space_3D_Listener_Z_Pullback_Dist", "120"}};
+        const auto original = audio::space_3d(stock, problems), changed = audio::space_3d(mod, problems);
+        expect(original && changed && problems.empty(), "BA-10: authored space values validate");
+        if (original && changed) {
+            expect(audio::falloff_gain(1000, 300, *original) != audio::falloff_gain(1000, 300, *changed),
+                "BA-11: perturbed XML factors change attenuation");
+            expect(audio::listener_for_camera({0, 0, 500}, {0, 0, -1}, *original).position
+                != audio::listener_for_camera({0, 0, 500}, {0, 0, -1}, *changed).position,
+                "BA-12: perturbed XML pullback changes listener");
+        }
+        const auto missing = audio::space_3d({}, problems);
+        expect(!missing && problems.size() == 3 && problems.front().starts_with("EAWR-AUDIO-0301"),
+            "missing spatial tags diagnose without stock defaults");
+        audio::SfxEvent sound;
+        sound.name = "degraded-spatial";
+        sound.samples = {"sample.wav"};
+        audio::Voices voices;
+        audio::Random random(1);
+        const auto started = voices.start({&sound, missing ? std::optional<audio::Vec3>(audio::Vec3{1, 2, 3}) : std::nullopt}, {}, random);
+        expect(started.result == Result::playing && !audio::Voices::is_3d_voice(started.voice),
+            "missing spatial settings keep playback in the 2D pool");
+        problems.clear();
+        const auto defaults = audio::ambient_moving_delays("", "", "unit", problems);
+        expect(defaults && *defaults == std::array{150, 300} && problems.empty(),
+            "SND-46: missing ambient delays use sourced defaults without diagnostics");
+        problems.clear();
+        const auto delays = audio::ambient_moving_delays("2", "4", "unit", problems);
+        expect(delays && *delays == std::array{60, 120} && problems.empty(), "SND-46: XML delays change reschedule bounds");
+        expect(!audio::ambient_moving_delays("0", "4", "unit", problems), "SND-46: invalid delays do not silently default");
+    }
     for (const auto cue : {audio::CommandCue::attack, audio::CommandCue::attack_move,
                            audio::CommandCue::guard, audio::CommandCue::move}) {
         expect(audio::command_cue_on_press(cue, true), "mode arming requests its cue");
@@ -866,6 +950,7 @@ int main() {
     speakers();
     music();
     announcements();
+    sighting_service_timing();
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

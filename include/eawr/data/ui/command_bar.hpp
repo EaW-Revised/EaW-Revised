@@ -147,6 +147,7 @@ enum class Field : std::uint8_t {
     mega_texture_name,
     model_name,
     mouse_over_sfx,
+    right_click_sfx,
     // token lists
     bar_overlay_name,
     bar_texture_name,

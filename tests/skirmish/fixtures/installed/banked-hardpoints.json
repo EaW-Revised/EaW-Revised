@@ -1,0 +1,71 @@
+{
+  "format": "eawr-scenario",
+  "format_version": 1,
+  "id": "banked-hardpoints",
+  "label": "banked-hardpoints",
+  "duration_ticks": 1501,
+  "content": [],
+  "players": [
+    {
+      "label": "source",
+      "faction": "Empire"
+    },
+    {
+      "label": "target",
+      "faction": "Rebel"
+    }
+  ],
+  "units": [
+    {
+      "label": "source",
+      "type": "Acclamator_Assault_Ship",
+      "owner": "source",
+      "position": [
+        -2500,
+        -3000,
+        0
+      ],
+      "facing_degrees": 0,
+      "spawn": "start",
+      "staging": []
+    },
+    {
+      "label": "target",
+      "type": "Nebulon_B_Frigate",
+      "owner": "target",
+      "position": [
+        -2374,
+        -2000,
+        0
+      ],
+      "facing_degrees": 0,
+      "spawn": "start",
+      "staging": []
+    }
+  ],
+  "events": [
+    {
+      "tick": 1,
+      "action": "attack",
+      "unit": "source",
+      "target": "target"
+    },
+    {
+      "tick": 700,
+      "action": "move",
+      "unit": "source",
+      "position": [
+        -3000,
+        -1500,
+        0
+      ]
+    },
+    {
+      "tick": 1100,
+      "action": "attack",
+      "unit": "source",
+      "target": "target"
+    }
+  ],
+  "installed_replay_audit": true
+}

@@ -7,6 +7,7 @@
 #include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/types.hpp"
+#include "eawr/sim/tactical/retreat.hpp"
 #include "eawr/sim/tactical/victory.hpp"
 
 #include <cstdint>
@@ -21,6 +22,7 @@
 // header's types; it never sees the session that produced them (UI-07 boundary,
 // tools/check_presentation_boundary.py).
 namespace eawr::sim::tactical {
+namespace checkpoint_detail { struct Access; }
 
 // One hardpoint of a durable instance (#72): `enabled` is false once it is destroyed, so a
 // destroyed weapon hardpoint may not fire (HD-10).
@@ -67,6 +69,9 @@ struct AbilityStatus {
     EntityId target{}; // WHE-26/27: presentation only, published from the ordinary tracked slot
     std::uint32_t target_hardpoint{0xffffffffU};
     std::uint64_t started_tick{}; // presentation-only birth of instant wingman effects
+    std::optional<math::Vec3> position{}; // WHE-33: flare at the consumed marker point
+    std::uint32_t blast_charge_remaining{};
+    bool blast_charged_presentation{}; // independent of the generic recharge dial
     friend constexpr bool operator==(const AbilityStatus&, const AbilityStatus&) noexcept = default;
 };
 
@@ -77,7 +82,24 @@ struct ManualWeaponView {
     std::uint64_t assigned_frame{};
     math::Fixed yaw{};
     math::Fixed pitch{};
-    friend constexpr bool operator==(const ManualWeaponView&, const ManualWeaponView&) noexcept = default;
+    std::uint32_t countdown{}, pulses_left{};
+    bool available{};
+    // WSW-40: immutable content, copied once at session creation and held by frozen views.
+    std::shared_ptr<const WeaponProfile> admission_profile{};
+    friend bool operator==(const ManualWeaponView& a, const ManualWeaponView& b) {
+        return a.hardpoint == b.hardpoint && a.target == b.target && a.requesting_player == b.requesting_player
+            && a.assigned_frame == b.assigned_frame && a.yaw == b.yaw && a.pitch == b.pitch
+            && a.countdown == b.countdown && a.pulses_left == b.pulses_left && a.available == b.available
+            && ((!a.admission_profile && !b.admission_profile)
+                || (a.admission_profile && b.admission_profile && *a.admission_profile == *b.admission_profile));
+    }
+};
+
+// OF-05: presentation copy of retained authored points, outside canonical encoding.
+struct WaypointDisplayPoint {
+    math::Vec3 position{};
+    bool repeat{};
+    friend bool operator==(const WaypointDisplayPoint&, const WaypointDisplayPoint&) = default;
 };
 
 // visible_to bit k is the k-th snapshot player; reveal_range is the type's sensor profile.
@@ -97,6 +119,7 @@ struct TacticalInstance {
     std::optional<std::uint32_t> arrival{};
     // #561: the frames left of its ion stun (IS-03, IS-09 shows it); zero when not stunned.
     std::uint32_t ion_stun_frames{};
+    std::optional<CorruptSystemsState> corrupt{}; // WHE-33/34: visible recipient effect and lifetime
     // WSU-34: renderer inputs for the squadron icon's slide and idle-grid braking.
     // Presentation only; neither field participates in canonical_bytes() or hashes.
     std::optional<math::Vec3> craft_velocity_per_frame{};
@@ -107,7 +130,20 @@ struct TacticalInstance {
     bool in_nebula{}; // WHZ-25: cached service, member union, or hard-box fallback
     bool in_ion_storm{}; // WHZ-31: shield service's cached contact, never a zeroed pool
     std::vector<ManualWeaponView> manual_weapons{}; // WAD-39: existing snapshot/command consumer hook
+    std::optional<WeaponState::TurretState> object_turret{}; // UA-05: target and procedural angles
+    // Derived from the validated combat profile; identity already covers these static inputs.
+    bool object_turret_xy_only{}, object_turret_barrel{};
+    struct PlanetaryWeaponView {
+        std::uint32_t index{}, target_action{};
+        std::uint64_t valid_targets{};
+        SpecialWeaponState state{};
+        math::Fixed readiness{};
+        friend bool operator==(const PlanetaryWeaponView&, const PlanetaryWeaponView&) = default;
+    };
+    std::optional<PlanetaryWeaponView> planetary_weapon{}; // WSW-14: readiness independent of permission.
     bool in_tractor_beam{}; // WHE-27: derived from live source-owned tractor entries
+    // WU-37: copied hangar provenance; presentation only, excluded from canonical bytes.
+    bool garrison_unit{};
     // WU-49: the stationary destination for an arriving unit's world identity.
     // Presentation only, alongside arrival; excluded from canonical_bytes().
     std::optional<math::Vec3> arrival_exit{};
@@ -117,6 +153,17 @@ struct TacticalInstance {
     // SND-67: sampled ordinary-space walk speed for audio, published in existing worker slots.
     // Absent for craft/non-locomotor objects; excluded from canonical bytes.
     std::optional<math::Fixed> locomotor_speed_per_frame{};
+    // WST-12/13: its cloak is on, and it is hidden from enemies that cannot target stealth units
+    // (WST-09). Presentation only; the hashed state is the STLH block. Excluded from canonical bytes.
+    bool stealth_on{};
+    bool stealth_invisible{};
+    bool target_stealth{}; // WST-07: frozen shooter capability used by special manual admission.
+    std::uint64_t category_bits{}; // WSW-13/40: frozen targeting metadata, outside visual canonical bytes.
+    math::Fixed soft_radius{};
+    std::vector<WaypointDisplayPoint> waypoint_points{};
+    // WGT-21 / WHE-45: hidden riders keep an identity on their visible carrier.
+    // Presentation only; excluded from snapshot canonical bytes.
+    std::vector<CarriedObject> contained{};
     friend bool operator==(const TacticalInstance&, const TacticalInstance&) = default;
 };
 
@@ -156,6 +203,7 @@ struct SnapshotPlayer {
     PlayerId player_id{};
     TeamId team_id{};
     bool neutral{}; // WHZ-51: relationship metadata, derived from the bound faction data
+    bool radar_enabled{}; // WRAD-02: enemy minimap permission, independent of world fog.
     friend constexpr bool operator==(const SnapshotPlayer&, const SnapshotPlayer&) noexcept = default;
 };
 
@@ -201,7 +249,16 @@ struct BattleEconomyCue {
     friend bool operator==(const BattleEconomyCue&, const BattleEconomyCue&) = default;
 };
 
+// WSL-29: copied presentation timer; excluded from canonical bytes/hashes.
+struct GarrisonTimerView {
+    PlayerId player{};
+    std::uint32_t duration_frames{};
+    std::optional<std::uint64_t> due_frame;
+    bool operator==(const GarrisonTimerView&) const = default;
+};
+
 class TacticalSnapshot final {
+    friend struct checkpoint_detail::Access;
 public:
     TacticalSnapshot(
         std::uint64_t completed_tick,
@@ -221,8 +278,12 @@ public:
         std::shared_ptr<const std::vector<BattleProduction>> productions = {},
         std::vector<std::pair<PlayerId, ManualPlayerClock>> manual_clocks = {},
         std::shared_ptr<const std::vector<BattleEconomyCue>> economy_cues = {},
-        std::vector<AbilitySpawnState> ability_spawns = {});
+        std::vector<AbilitySpawnState> ability_spawns = {},
+        std::vector<RetreatView> retreat_views = {},
+        std::vector<GarrisonTimerView> garrison_timers = {},
+        std::vector<BeaconState> beacons = {});
 
+    [[nodiscard]] std::span<const RetreatView> retreat_views() const noexcept { return retreat_views_; }
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] std::span<const SnapshotPlayer> players() const noexcept;
     [[nodiscard]] std::span<const TacticalInstance> instances() const noexcept;
@@ -230,6 +291,9 @@ public:
     [[nodiscard]] std::span<const CombatEvent> combat_events() const noexcept;
     [[nodiscard]] std::span<const Projectile> projectiles() const noexcept;
     [[nodiscard]] std::span<const AbilitySpawnState> ability_spawns() const noexcept;
+    // HCB-12c: only the observer's allies, including in unrevealed map regions.
+    [[nodiscard]] std::vector<BeaconState> visible_beacons(PlayerId observer) const;
+    [[nodiscard]] std::span<const GarrisonTimerView> garrison_timers() const noexcept;
     [[nodiscard]] const std::optional<BattleOutcome>& outcome() const noexcept;
     // Killed craft spinning away after the tick (#447), ascending ID.
     [[nodiscard]] std::span<const SpinningCraft> spinning() const noexcept;
@@ -255,6 +319,7 @@ public:
     [[nodiscard]] std::string sha256() const;
 
 private:
+    std::vector<RetreatView> retreat_views_;
     std::uint64_t completed_tick_{};
     std::vector<SnapshotPlayer> players_;
     std::vector<TacticalInstance> instances_;
@@ -262,6 +327,8 @@ private:
     std::vector<CombatEvent> combat_events_;
     std::vector<Projectile> projectiles_;
     std::vector<AbilitySpawnState> ability_spawns_;
+    std::vector<BeaconState> beacons_;
+    std::vector<GarrisonTimerView> garrison_timers_;
     std::optional<BattleOutcome> outcome_;
     std::vector<SpinningCraft> spinning_;
     std::vector<SquadronTarget> squadron_targets_;
@@ -276,3 +343,20 @@ private:
 };
 
 } // namespace eawr::sim::tactical
+
+namespace eawr::sim::tactical {
+// WSW-13/16: planetary target admission is independent of permission, recharge,
+// range and visibility. A non-allied neutral target is admitted by this route.
+[[nodiscard]] RejectReason planetary_special_fire_target_admission(
+    const TacticalSnapshot& snapshot, EntityId source, EntityId target) noexcept;
+[[nodiscard]] RejectReason planetary_special_fire_target_admission(
+    std::span<const SnapshotPlayer> players, const TacticalInstance& source, const TacticalInstance& target) noexcept;
+// WSW-13/40: returns attack_hull for an admitted planetary target, or the first
+// authored manual gun's hardpoint. Independent of player permission/HUD cooldown;
+// require_gun_ready applies to the ordinary manual gun route only.
+[[nodiscard]] core::Result<std::optional<std::uint32_t>> manual_special_fire_admission(
+    const TacticalSnapshot& snapshot, EntityId source, EntityId target, bool require_gun_ready = true);
+[[nodiscard]] core::Result<std::optional<std::uint32_t>> manual_special_fire_admission(
+    std::span<const SnapshotPlayer> players, const TacticalInstance& source, const TacticalInstance& target,
+    bool require_gun_ready = true, std::optional<std::uint32_t> hardpoint = std::nullopt);
+}

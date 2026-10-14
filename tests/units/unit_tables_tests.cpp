@@ -99,14 +99,226 @@ void collision_extents() {
     wide.meshes.push_back(mast);
     const auto two = eawr::units::detail::collision_half_extents(wide, frames.value());
     expect(two && two->first.raw() == raw(100) && two->second.raw() == raw(40), "two meshes: the union box's half extents");
+    auto strict = eawr::units::prepare_galactic_collision_bounds(wide);
+    expect(strict && strict.value().min.z.raw() == raw(-5) && strict.value().max.z.raw() == raw(5),
+        "GC collision bounds reuse all collision mesh corners");
+    wide.bones[0].relative_transform[11] = 7.0F;
+    strict = eawr::units::prepare_galactic_collision_bounds(wide);
+    expect(strict && strict.value().min.z.raw() == raw(2) && strict.value().max.z.raw() == raw(12),
+        "GC collision bounds retain reference bone translation");
+    wide.meshes[0].collidable = wide.meshes[1].collidable = false;
+    wide.meshes[0].bounds_min.z = -1000.0F;
+    strict = eawr::units::prepare_galactic_collision_bounds(wide);
+    expect(strict && strict.value().min == point(raw(-1), raw(-1), raw(-1)) && strict.value().max == point(raw(1), raw(1), raw(1)),
+        "no collision-enabled meshes use the sourced unit box regardless of render bounds");
+    wide.meshes[0].collidable = true; wide.meshes[0].bone = 999;
+    expect(!eawr::units::prepare_galactic_collision_bounds(wide), "missing collision mesh bone refuses");
+    wide.meshes[0].bone = 0; wide.meshes[0].bounds_min.z = std::numeric_limits<float>::quiet_NaN();
+    expect(!eawr::units::prepare_galactic_collision_bounds(wide), "malformed collision bounds cannot become the no-mesh fallback");
+    wide.meshes[0].bounds_min.z = 6.0F;
+    expect(!eawr::units::prepare_galactic_collision_bounds(wide), "reversed collision bounds refuse");
 }
 
+
+void engine_disable_durations() {
+    for (const auto duration : {"", "0", "-1", "-0.25", "20", "3601"}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Engine_Disable_Test");
+        const auto start = xml.find("<Projectile Name=\"Proj_Test_Small\">")
+            + std::string_view{"<Projectile Name=\"Proj_Test_Small\">"}.size();
+        xml.insert(start, "<Projectile_Disables_Engines_When_Power_Drained>Yes</Projectile_Disables_Engines_When_Power_Drained>"
+            + (std::string_view(duration).empty() ? std::string{} : "<Projectile_Disable_Engines_Duration>"
+                + std::string(duration) + "</Projectile_Disable_Engines_Duration>"));
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "EN-08: duration fixture loads");
+        if (!loaded.tables) continue;
+        expect(!has_row(loaded.tables->unresolved, "Proj_Test_Small", "Projectile_Disable_Engines_Duration"),
+            "EN-08: an absent duration is a supported default");
+        const auto combat = eawr::units::combat_table(*loaded.tables);
+        expect(static_cast<bool>(combat), "EN-08: absent, negative, stock and long durations bind");
+        if (!combat) continue;
+        const auto expected = std::string_view(duration).starts_with('-')
+            ? eawr::sim::tactical::indefinite_engine_disable_frames
+            : std::string_view(duration) == "20" ? 600U : std::string_view(duration) == "3601" ? 108030U : 0U;
+        bool found = false;
+        for (const auto& profile : combat.value().profiles) {
+            for (const auto& weapon : profile.weapons) {
+                if (!weapon.shot || !weapon.shot->disable_engines_frames) continue;
+                found = true;
+                expect(*weapon.shot->disable_engines_frames == expected, "EN-08: duration maps to the sourced frame rule");
+            }
+        }
+        expect(found, "EN-08: enabled projectile reaches a weapon profile");
+        expect(static_cast<bool>(eawr::sim::tactical::validate_combat(combat.value())),
+            "EN-08: bound duration passes simulation validation");
+    }
+}
 
 } // namespace
 
 using namespace unit_tables_test_support;
 
-int main() {
+int main(const int argc, char** argv) {
+    if (argc == 2 && (std::string_view(argv[1]) == "--installed"
+        || std::string_view(argv[1]) == "--formation-deceleration-installed")) {
+        const auto root = environment("EAWR_EAW_GAME_ROOT");
+        if (!root || root->empty()) return 77;
+        foc_fleet(std::string_view(argv[1]) == "--formation-deceleration-installed");
+        return failures == 0 ? 0 : 1;
+    }
+    // Installed compatibility checks use the real manifest chain and model cache.
+    // Scan mode overlays the extracted effective XML above the installed assets.
+    if (argc == 5 && (std::string_view(argv[1]) == "--engine-disable-mod"
+        || std::string_view(argv[1]) == "--mod-loader-scan")) {
+        const bool scan = std::string_view(argv[1]) == "--mod-loader-scan";
+        auto roots = eawr::vfs::mod_chain_roots(std::filesystem::path(argv[3]));
+        roots.emplace_back("expansion", std::filesystem::path(argv[2]) / "corruption" / "Data");
+        roots.emplace_back("base", std::filesystem::path(argv[2]) / "GameData" / "Data");
+        auto chain = eawr::vfs::resolve_manifest_chain(roots);
+        if (!chain) { std::cerr << chain.error().message << '\n'; return 1; }
+        std::vector<eawr::vfs::MountSpec> specs;
+        if (scan) specs.push_back({"effective", std::filesystem::path(argv[4]) / "data", "data", {}});
+        for (auto& layer : chain.value()) specs.push_back(std::move(layer.mount));
+        auto filesystem = eawr::vfs::Vfs::mount(specs);
+        if (!filesystem) { std::cerr << filesystem.error().message << '\n'; return 1; }
+        auto catalog = eawr::data::load_catalog_strict(filesystem.value(), eawr::data::Profile::remake);
+        if (!catalog) { std::cerr << catalog.error().message << '\n'; return 1; }
+        eawr::scene::VfsAssetCache cache(filesystem.value());
+        eawr::units::LoadInput input;
+        input.catalog = &catalog.value().catalog;
+        input.filesystem = &filesystem.value();
+        input.model = cache.access().model;
+        std::vector<std::string> types;
+        std::size_t resolved = 0;
+        if (scan) {
+            for (const auto& definition : catalog.value().catalog.definitions()) {
+                if (!definition.namespace_winner) continue;
+                const auto object = catalog.value().catalog.resolve(definition.id, definition.category);
+                if (!object) {
+                    std::cout << "ERROR\tcatalog\t" << definition.id << '\t' << object.error().message << '\n';
+                    ++failures;
+                    continue;
+                }
+                ++resolved;
+                if (definition.category == eawr::data::Category::game_object
+                    && (object.value().value("Space_Model_Name") || definition.type_name == "Squadron"
+                        || definition.type_name == "StarBase" || definition.type_name == "SpaceUnit"))
+                    types.push_back(definition.id);
+            }
+        } else types.emplace_back(argv[4]);
+        std::size_t loaded_count = 0;
+        for (const auto& type : types) {
+            input.types = {type};
+            const auto tables = eawr::units::load_unit_tables(input);
+            if (!tables) {
+                std::cout << "ERROR\tunits\t" << type << '\t' << tables.error().message << '\n';
+                ++failures;
+                continue;
+            }
+            ++loaded_count;
+            const auto check = [&](const std::string_view stage, const auto& result) {
+                if (!result) {
+                    std::cout << "ERROR\t" << stage << '\t' << type << '\t' << result.error().message << '\n';
+                    ++failures;
+                }
+            };
+            const auto combat = eawr::units::combat_table(tables.value());
+            check("combat", combat);
+            if (scan) {
+                check("durability", eawr::units::durability_table(tables.value()));
+                check("motion", eawr::units::motion_table(tables.value()));
+                check("abilities", eawr::units::ability_table(tables.value()));
+            } else {
+                bool found = false;
+                for (const auto& projectile : tables.value().projectiles) {
+                    if (!projectile.disables_engines_when_power_drained || projectile.disable_engines_duration) continue;
+                    found = true;
+                    std::cout << "default-duration projectile\t" << projectile.id << '\n';
+                }
+                expect(found, "EN-08: installed type reaches an enabled projectile with no authored duration");
+                if (combat) expect(static_cast<bool>(eawr::sim::tactical::validate_combat(combat.value())),
+                    "EN-08: installed combat profile passes simulation validation");
+            }
+        }
+        std::cout << "installed loader: resolved " << resolved << ", tactical types " << types.size()
+                  << ", loaded " << loaded_count << ", failures " << failures << '\n';
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--engine-disable") {
+        engine_disable_durations();
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--space-population") {
+        space_population();
+        return failures == 0 ? 0 : 1;
+    }
+    // Targeted installed-mod regression: game root, mod chain, craft type. This uses
+    // real XML inheritance and model resolution without starting a renderer.
+    if (argc == 5 && std::string_view(argv[1]) == "--bank-angle-mod") {
+        auto roots = eawr::vfs::mod_chain_roots(std::filesystem::path(argv[3]));
+        roots.emplace_back("expansion", std::filesystem::path(argv[2]) / "corruption" / "Data");
+        roots.emplace_back("base", std::filesystem::path(argv[2]) / "GameData" / "Data");
+        auto chain = eawr::vfs::resolve_manifest_chain(roots);
+        if (!chain) { std::cerr << chain.error().message << '\n'; return 1; }
+        std::vector<eawr::vfs::MountSpec> specs;
+        for (auto& layer : chain.value()) specs.push_back(std::move(layer.mount));
+        auto filesystem = eawr::vfs::Vfs::mount(specs);
+        if (!filesystem) { std::cerr << filesystem.error().message << '\n'; return 1; }
+        auto catalog = eawr::data::load_catalog_strict(filesystem.value(), eawr::data::Profile::remake);
+        if (!catalog) { std::cerr << catalog.error().message << '\n'; return 1; }
+        eawr::scene::VfsAssetCache cache(filesystem.value());
+        eawr::units::LoadInput input;
+        input.catalog = &catalog.value().catalog;
+        input.filesystem = &filesystem.value();
+        input.model = cache.access().model;
+        input.types = {argv[4]};
+        auto tables = eawr::units::load_unit_tables(input);
+        if (!tables) { std::cerr << tables.error().message << '\n'; return 1; }
+        auto motion = eawr::units::motion_table(tables.value());
+        if (!motion) { std::cerr << motion.error().message << '\n'; return 1; }
+        const auto* craft = motion.value().squadrons.find_craft(eawr::assets::object_type_crc(argv[4]));
+        expect(craft && craft->bank_angle == Fixed::from_raw(raw(360)),
+            "FM-03: installed mod craft binds with its authored bank of 360");
+        eawr::sim::tactical::TacticalSetup setup;
+        setup.players = {{1, 1, 1, eawr::sim::tactical::player_flag_commandable}};
+        expect(static_cast<bool>(eawr::sim::tactical::TacticalSession::create(setup, {}, {}, motion.value())),
+            "FM-03: installed mod motion tables pass session creation");
+        std::cout << "installed bank-angle loader: " << argv[4] << ", craft "
+                  << motion.value().squadrons.craft.size() << ", failures " << failures << '\n';
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--object-scripts") {
+        object_script_inheritance();
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--formation-deceleration") {
+        synthetic_tables();
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc != 1) return 1;
+    {
+        for (const bool authored : {false, true}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            const auto begin = xml.find("<Unit_Abilities_Data");
+            const auto end = xml.find("</Unit_Abilities_Data>", begin) + std::string_view{"</Unit_Abilities_Data>"}.size();
+            const std::string fields = authored
+                ? "<Charge_Up_Seconds>5</Charge_Up_Seconds><Damage_Multiplier>5</Damage_Multiplier>" : "";
+            xml.replace(begin, end - begin, "<Unit_Abilities_Data><Unit_Ability><Type>BLAST</Type>"
+                "<Recharge_Seconds>90</Recharge_Seconds><GUI_Activated_Ability_Name>Test_Blast</GUI_Activated_Ability_Name>"
+                "</Unit_Ability></Unit_Abilities_Data><Abilities><Blast_Ability Name=\"Test_Blast\">"
+                "<Activation_Style>User_Input</Activation_Style>" + fields + "</Blast_Ability></Abilities>");
+            write_fixture(tree.root, xml);
+            const auto loaded = load(tree.root, models(-40.0F));
+            expect(loaded.tables.has_value(), "BLAST required-field fixture loads");
+            if (!loaded.tables) continue;
+            for (const auto tag : {"Charge_Up_Seconds", "Damage_Multiplier"}) {
+                expect(has_row(loaded.tables->unresolved, "Test_Frigate", tag) == !authored,
+                    "WHE-35/36: absent required BLAST field is reported; authored field has no gap");
+            }
+        }
+    }
     {
         // FW-25: validated inherited flags apply independently of XML class.
         for (const auto& class_name : {"StarBase", "SpaceBuildable", "SpecialStructure", "SecondaryStructure", "Marker"}) {
@@ -152,11 +364,55 @@ int main() {
         }
     }
     synthetic_tables();
+    for (const std::string value : {"", "Yes", "true", "1", "no", "0"}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string behavior = "TARGETING,REVEAL , HIDE_WHEN_FOGGED, SIMPLE_SPACE_LOCOMOTOR";
+        xml.replace(xml.find(behavior), behavior.size(), behavior + ", TURRET");
+        const std::string fields = "<Turret_Bone_Name>HP_F-L_BONE</Turret_Bone_Name><Barrel_Bone_Name>HP_F-L_BONE</Barrel_Bone_Name>"
+            "<Turret_Rotate_Speed>3.5</Turret_Rotate_Speed><Projectile_Types>Proj_Test_Small</Projectile_Types>"
+            + (value.empty() ? std::string{} : "<Turret_XY_Only>" + value + "</Turret_XY_Only>");
+        const auto start = xml.find("<SpaceUnit Name=\"Test_Frigate\">") + std::string_view{"<SpaceUnit Name=\"Test_Frigate\">"}.size();
+        xml.insert(start, fields);
+        write_fixture(tree.root, xml);
+        auto loaded = load(tree.root, models(-40.0F));
+        if (!loaded.tables) continue;
+        auto* unit = const_cast<eawr::units::UnitType*>(loaded.tables->find("Test_Frigate"));
+        const bool expected = value == "Yes" || value == "true" || value == "1";
+        expect(unit && unit->object_turret && unit->object_turret->xy_only == expected
+            && unit->object_turret->rest_delay == eawr::sim::tactical::default_object_turret_rest_delay,
+            "UA-05/FC-61: one retail boolean parser and absent-tag rest default feed ordinary turrets");
+        if (!unit || !unit->object_turret) continue;
+        const auto object_weapon = [](const auto& combat) -> const eawr::sim::tactical::WeaponProfile* {
+            if (!combat) return nullptr;
+            const auto* profile = combat.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+            if (!profile) return nullptr;
+            for (const auto& weapon : profile->weapons)
+                if (weapon.hardpoint == eawr::sim::tactical::object_weapon) return &weapon;
+            return nullptr;
+        };
+        const auto combat = eawr::units::combat_table(*loaded.tables);
+        const auto* weapon = object_weapon(combat);
+        expect(weapon && weapon->object_turret && weapon->object_turret->xy_only == expected
+            && weapon->object_turret->barrel, "UA-05: usable barrel and validated XY-only reach the sim profile together");
+        unit->object_turret->barrel.axes.reset();
+        const auto no_axes = eawr::units::combat_table(*loaded.tables);
+        weapon = object_weapon(no_axes);
+        expect(weapon && weapon->object_turret && !weapon->object_turret->barrel,
+            "UA-05: a barrel bone without axes uses the no-barrel profile for both consumers");
+        unit->object_turret->turret.axes = std::array<Vec3, 3>{};
+        const auto invalid = eawr::units::combat_table(*loaded.tables);
+        expect(!invalid && invalid.error().message.find("unusable bone axes") != std::string::npos,
+            "UA-05: unusable required turret axes report a contract failure instead of silently disabling fire");
+    }
+    engine_disable_durations();
     object_weapon_defaults();
     squadron_container_health();
+    retail_value_rules();
     living_collision_admission();
     ship_suitability_content();
     height_adjusted_aim();
+    object_weapon_muzzles();
     presentation_admission();
     priority_rules();
     content_identity();
@@ -222,9 +478,41 @@ int main() {
     }
     bind_frame_errors();
     hunt_tables();
+    {
+        namespace t = eawr::sim::tactical;
+        for (const auto kind : {t::AbilityKind::tractor_beam, t::AbilityKind::leech_shields, t::AbilityKind::blast,
+                t::AbilityKind::energy_weapon}) {
+            eawr::units::UnitTables tables;
+            auto& unit = tables.units.emplace_back(); unit.id = "Dependency_Fixture"; unit.kind = eawr::units::UnitKind::ship;
+            auto& authored = unit.abilities.emplace_back();
+            authored.type = kind == t::AbilityKind::tractor_beam ? "TRACTOR_BEAM" : kind == t::AbilityKind::leech_shields
+                ? "LEECH_SHIELDS" : kind == t::AbilityKind::blast ? "BLAST" : "ENERGY_WEAPON";
+            authored.gui_activated_ability_name = "dependency";
+            auto& nested = unit.special_abilities.emplace_back(); nested.name = "dependency";
+            nested.kind = kind == t::AbilityKind::blast ? t::SpecialAbilityKind::blast
+                : kind == t::AbilityKind::leech_shields ? t::SpecialAbilityKind::leech_shields
+                : kind == t::AbilityKind::tractor_beam ? t::SpecialAbilityKind::tractor_beam : t::SpecialAbilityKind::energy_weapon;
+            nested.style = t::SpecialActivationStyle::user_input;
+            nested.leech_duration_frames = 30; nested.leech_damage_bonus = Fixed::from_raw(Fixed::scale);
+            if (kind == t::AbilityKind::blast) nested.charged_blast = t::ChargedBlastProfile{};
+            unit.hardpoints.resize(4);
+            unit.hardpoints[0].type = eawr::units::HardpointType::weapon_laser;
+            unit.hardpoints[1].type = unit.hardpoints[2].type = eawr::units::HardpointType::weapon_special;
+            unit.hardpoints[3].type = eawr::units::HardpointType::tractor_beam;
+            const auto compiled = eawr::units::ability_table(tables);
+            expect(static_cast<bool>(compiled), "WHD-01: synthetic hardpoint dependency content compiles");
+            expect(compiled && !compiled.value().profiles.empty() && !compiled.value().profiles.front().abilities.empty(),
+                "WHD-01: synthetic dependency ability is exposed");
+            if (!compiled || compiled.value().profiles.empty() || compiled.value().profiles.front().abilities.empty()) continue;
+            const auto& ability = compiled.value().profiles.front().abilities.front();
+            const auto expected = kind == t::AbilityKind::tractor_beam ? std::vector<std::uint32_t>{3}
+                : kind == t::AbilityKind::energy_weapon ? std::vector<std::uint32_t>{} : std::vector<std::uint32_t>{1, 2};
+            expect(ability.required_hardpoints == expected && ability.requires_hardpoint == (kind != t::AbilityKind::energy_weapon),
+                "WHD-01: dependency resolves by type, includes both SPECIALs, excludes unrelated weapons and visual bones");
+        }
+    }
     mass_driver_type();
     collision_extents();
-    foc_fleet();
     if (failures != 0) {
         std::cerr << failures << " unit table contract(s) failed\n";
         return 1;

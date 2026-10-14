@@ -389,6 +389,39 @@ void test_level_up_service_boundary() {
         }
     }
 }
+void test_special_hardpoint_upgrade() {
+    auto rules = economy();
+    rules.upgrades.front().special_unlocks = {{true, false}};
+    auto health = durability();
+    for (auto& profile : health.profiles) if (profile.type_id == 40 || profile.type_id == 41) {
+        profile.hardpoints[1].allows_special_weapon_use = true;
+        profile.hardpoints[1].repair_amount_per_frame = whole(100);
+        profile.hardpoints[1].repair_cost_per_frame = whole(1);
+    }
+    auto created = t::TacticalSession::create(setup(), {}, health, {}, std::nullopt, {}, {}, {}, rules);
+    expect(static_cast<bool>(created), "WSW-48: allied required-hardpoint fixture creates");
+    if (!created) return;
+    auto world = std::move(created).value();
+    const auto enabled = [&](t::PlayerId player) {
+        const auto views = world.snapshot()->economy();
+        const auto found = std::find_if(views.begin(), views.end(), [player](const auto& view) { return view.player == player; });
+        return found != views.end() && found->special_weapons_enabled;
+    };
+    expect(static_cast<bool>(world.submit(buy(0, 1, 0, 1, 90))), "WSW-46: buy allied unlock");
+    through(world, 3);
+    expect(enabled(1) && enabled(2) && enabled(3) && !enabled(4), "WSW-46/48: default required flag admits every enabled ally");
+    expect(static_cast<bool>(world.submit({{3, 1, 1}, {1}, t::DamagePayload{whole(200), 1}})), "WSW-48: destroy required hardpoint");
+    expect(static_cast<bool>(world.submit(buy(3, 1, 2, 1, 91))), "WSW-48: replace disabled station");
+    const auto events = through(world, 10);
+    expect(!enabled(1) && !enabled(2) && !enabled(3), "WSW-48: one disabled allied hardpoint blocks the team despite another intact station");
+    const auto replaced = std::find_if(events.begin(), events.end(), [](const auto& event) { return event.kind == t::EventKind::station_replaced; });
+    expect(replaced != events.end(), "WSW-48: disabled station replacement completes");
+    if (replaced == events.end()) return;
+    expect(static_cast<bool>(world.submit({{10, 2, 0}, {replaced->sequence}, t::RepairHardpointPayload{1}})), "WSW-48: ally repairs transferred disabled slot");
+    through(world, 12);
+    expect(enabled(1) && enabled(2) && enabled(3) && !enabled(4), "WSW-48: restored hardpoint enables every ally after ordered repair commit");
+}
+
 void test_level_up() {
     auto world = create(); if (!world) return;
     expect(static_cast<bool>(world->submit(buy(0, 1, 0, 1, 90))), "buy upgrade beside levelup");
@@ -427,6 +460,124 @@ void test_level_up() {
     expect(events.back().reason == t::RejectReason::cannot_produce, "WPR-33 old station prerequisite prevents repeat levelup");
     expect(world->durability_state(id)->hardpoints[1].raw() > 0 && t::hardpoint_disabled(*world->durability_state(id), 1),
         "WPR-52 disabled state survives ECS and later ticks");
+}
+void test_disabled_special_dependency() {
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto health = durability();
+        for (auto& profile : health.profiles) {
+            profile.max_shields = {};
+            for (auto& hp : profile.hardpoints) {
+                hp.repair_amount_per_frame = whole(50);
+                hp.repair_cost_per_frame = whole(1);
+            }
+            if (profile.type_id == 40 || profile.type_id == 41)
+                profile.hardpoints[1].special_ability_name = "Comm_Radar";
+        }
+        t::AbilityProfile blast;
+        blast.kind = t::AbilityKind::blast; blast.requires_hardpoint = true; blast.required_hardpoints = {1};
+        blast.gui_activated_ability_name = "special"; blast.recharge_at_activation = true;
+        blast.charged_blast = t::ChargedBlastProfile{2, whole(5), {}, {}, {}};
+        t::SpecialAbilityProfile nested;
+        nested.name = "special"; nested.kind = t::SpecialAbilityKind::blast;
+        nested.style = t::SpecialActivationStyle::user_input; nested.service_interval = 1;
+        nested.charged_blast = blast.charged_blast;
+        t::SpecialAbilityProfile radar;
+        radar.name = "Comm_Radar"; radar.kind = t::SpecialAbilityKind::enable_radar;
+        radar.style = t::SpecialActivationStyle::skirmish_automatic;
+        radar.initially_enabled = false; radar.affects_all_allies = true;
+        t::AbilityTable abilities;
+        for (const auto type : {40ULL, 41ULL}) {
+            t::UnitAbilityProfile profile; profile.type_id = type;
+            profile.abilities = {blast}; profile.special = {nested, radar};
+            abilities.profiles.push_back(profile);
+        }
+        auto created = t::TacticalSession::create(setup(), {}, health, {}, std::nullopt, {}, {}, abilities, economy());
+        expect(static_cast<bool>(created), "WHD-01: disabled SPECIAL station fixture creates");
+        if (!created) continue;
+        {
+            auto intact = t::TacticalSession::create(setup(), {}, health, {}, std::nullopt, {}, {}, abilities, economy());
+            expect(static_cast<bool>(intact), "WRAD-04: intact upgrade fixture creates");
+            if (!intact) continue;
+            auto& upgraded = intact.value();
+            expect(static_cast<bool>(upgraded.submit(buy(0, 1, 0, 1, 91))), "WRAD-04: intact upgrade submits");
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            bool replaced{};
+            while (upgraded.completed_tick() < 7 && !replaced) {
+                const auto step = upgraded.step(executor);
+                expect(static_cast<bool>(step), "WRAD-04: intact upgrade tick succeeds");
+                if (!step) break;
+                for (const auto& event : step.value().snapshot->events()) {
+                    if (event.kind != t::EventKind::station_replaced || event.unit != 1) continue;
+                    replaced = true;
+                    const auto state = upgraded.ability_state(event.sequence);
+                    expect(state && state->special.slots.size() > 1 && state->special.slots[1].enabled,
+                        "WRAD-04: intact replacement enables radar immediately after the upgrade tick");
+                }
+            }
+            expect(replaced, "WRAD-04: intact station upgrade completes");
+        }
+        auto world = std::move(created).value();
+        expect(world.ability_state(1)->special.slots[1].enabled, "WRAD-04: intact starting comm array unlocks radar");
+        expect(static_cast<bool>(world.submit({{0, 1, 0}, {1}, t::DamagePayload{whole(100), 1}})),
+            "WHD-01: destroy required SPECIAL before replacement");
+        expect(static_cast<bool>(world.submit(buy(0, 1, 1, 1, 91))), "WHD-01: buy replacement station");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        eawr::sim::EntityId replacement{};
+        while (world.completed_tick() < 7) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "WHD-01: disabled dependency replacement tick succeeds");
+            if (!step) break;
+            hashes.push_back(step.value().state_sha256);
+            for (const auto& event : step.value().snapshot->events())
+                if (event.kind == t::EventKind::station_replaced && event.unit == 1) replacement = event.sequence;
+        }
+        expect(replacement != 0, "WHD-01: station replacement produced a live holder");
+        if (!replacement) continue;
+        const auto ready = [&]() {
+            const auto instances = world.snapshot()->instances();
+            const auto holder = std::find_if(instances.begin(), instances.end(), [&](const auto& instance) {
+                return instance.entity_id == replacement;
+            });
+            return holder != instances.end() && !holder->abilities.empty() && holder->abilities.front().ready;
+        };
+        const auto disabled = world.durability_state(replacement);
+        expect(disabled && disabled->hardpoints[1] == decimal("0.1") && t::hardpoint_disabled(*disabled, 1),
+            "WHD-01: replacement dependency has positive health but is disabled");
+        expect(!ready(), "WHD-01: disabled SPECIAL greys the session HUD");
+        expect(!world.ability_state(replacement)->special.slots[1].enabled,
+            "WRAD-04: replaced comm array at positive health remains disabled and radar stays off");
+        expect(static_cast<bool>(world.submit({{7, 1, 2}, {replacement},
+            t::AbilityPayload{t::AbilityKind::blast, t::AbilityAction::activate}})), "WHD-01: disabled BLAST submits");
+        expect(static_cast<bool>(world.submit({{7, 1, 3}, {replacement}, t::RepairHardpointPayload{1}})),
+            "WHD-01: repair disabled SPECIAL submits");
+        for (unsigned frame = 7; frame < 10; ++frame) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "WHD-01: disabled dependency repair tick succeeds");
+            if (!step) break;
+            hashes.push_back(step.value().state_sha256);
+            if (frame == 7) {
+                expect(std::any_of(step.value().snapshot->events().begin(), step.value().snapshot->events().end(), [](const auto& event) {
+                    return event.kind == t::EventKind::order_rejected && event.reason == t::RejectReason::ability_unavailable;
+                }), "WHD-01: positive-health disabled SPECIAL refuses BLAST");
+                expect(!ready(), "WHD-01: partial repair keeps the dependency unavailable");
+                expect(!world.ability_state(replacement)->special.slots[1].enabled,
+                    "WRAD-04: partial comm-array repair does not unlock radar");
+            }
+        }
+        expect(ready(), "WHD-01: full repair restores session HUD readiness");
+        expect(world.ability_state(replacement)->special.slots[1].enabled,
+            "WRAD-04: full comm-array repair restores the automatic radar handler");
+        expect(static_cast<bool>(world.submit({{10, 1, 4}, {replacement},
+            t::AbilityPayload{t::AbilityKind::blast, t::AbilityAction::activate}})), "WHD-01: restored BLAST submits");
+        const auto restored = world.step(executor);
+        expect(restored && world.ability_state(replacement)->charged_blast.has_value(),
+            "WHD-01: full repair restores command admission");
+        if (restored) hashes.push_back(restored.value().state_sha256);
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "WHD-01: disabled dependency repair hashes equal on 1/2/4/8 workers");
+    }
 }
 void test_teammate_level_up() {
     auto world = create(); if (!world) return;
@@ -777,6 +928,73 @@ t::TacticalSetup free_garrison_setup() {
     value.free_garrisons = {{1, 600, {30, 30}, {7, 9}}};
     return value;
 }
+void test_garrison_marked_station_upgrade() {
+    const auto find_instance = [](const t::TacticalSession& world, eawr::sim::EntityId id) -> const t::TacticalInstance* {
+        const auto instances = world.snapshot()->instances();
+        const auto found = std::find_if(instances.begin(), instances.end(),
+            [id](const auto& instance) { return instance.entity_id == id; });
+        return found != instances.end() ? &*found : nullptr;
+    };
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = setup();
+        initial.units = {{1, 40, 1, {}, m::identity_quat(), {}},
+            {3, 10, 1, {}, m::identity_quat(), {}}};
+        initial.units.front().garrison_enabled = false;
+        // A synthetic generic free-garrison birth exercises an otherwise stock-unreachable
+        // marked station. No test hook writes provenance into the simulation.
+        initial.free_garrisons = {{1, 1, {40}, {3}}};
+        auto motion = free_garrison_motion();
+        for (auto& hangar : motion.squadrons.spawners) {
+            hangar.entries.clear(); hangar.delay_frames = 1;
+        }
+        auto made = t::TacticalSession::create(initial, {}, durability(), motion, std::nullopt, {}, {}, {}, economy());
+        expect(static_cast<bool>(made), "WU-37: marked station upgrade fixture creates");
+        if (!made) return;
+        auto world = std::move(made).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        const auto advance = [&]() {
+            if (workers != 1) world.scramble_storage_for_testing();
+            auto stepped = world.step(executor);
+            expect(static_cast<bool>(stepped), "WU-37: marked station upgrade steps");
+            if (stepped) hashes.push_back(stepped.value().state_sha256);
+            return stepped;
+        };
+        expect(static_cast<bool>(world.submit({{0, 1, 0}, {3}, t::DamagePayload{whole(10000)}})),
+            "WU-37: deplete generic free-garrison original");
+        eawr::sim::EntityId marked{};
+        for (unsigned frame = 0; frame < 100 && marked == 0; ++frame) {
+            if (!advance()) return;
+            for (const auto& instance : world.snapshot()->instances())
+                if (instance.type_id == 40 && instance.garrison_unit) marked = instance.entity_id;
+        }
+        const auto* starting = find_instance(world, 1);
+        expect(marked != 0 && starting && !starting->garrison_unit,
+            "WU-37: generic birth marks the new station while the starting station stays unmarked");
+        if (marked == 0) return;
+        expect(static_cast<bool>(world.submit(buy(world.completed_tick(), 1, 1, marked, 91))),
+            "WU-37: marked station level-up submits");
+        eawr::sim::EntityId replacement{};
+        for (unsigned frame = 0; frame < 12; ++frame) {
+            auto stepped = advance();
+            if (!stepped) return;
+            for (const auto& event : stepped.value().snapshot->events())
+                if (event.kind == t::EventKind::station_replaced && event.unit == marked) replacement = event.sequence;
+            if (replacement != 0) {
+                const auto* upgraded = find_instance(world, replacement);
+                expect(upgraded && upgraded->garrison_unit,
+                    "WU-37: replacement retains the station birth mark through subsequent ECS commits");
+            }
+        }
+        const auto* upgraded = find_instance(world, replacement);
+        expect(replacement != 0 && upgraded && upgraded->type_id == 41,
+            "WU-37: marked station actually upgrades to its replacement type");
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "WU-37: marked station replacement agrees on 1/2/4/8 workers");
+    }
+}
+
 void test_free_garrison_replenishment() {
     std::vector<std::string> hashes;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -799,6 +1017,12 @@ void test_free_garrison_replenishment() {
                 else expect(hash == hashes[tick], "FL-14: every tick agrees on 1/2/4/8 and shuffled storage");
                 if (!checked_bay && tick >= 1350 && !world.squadrons().empty()) {
                     const auto squadron = world.squadrons().front();
+                    const auto views = world.snapshot()->instances();
+                    const auto view = std::find_if(views.begin(), views.end(), [&](const auto& value) {
+                        return value.entity_id == squadron.container;
+                    });
+                    expect(view != views.end() && view->garrison_unit,
+                        "WU-37: a free-garrison respawn from a hangar keeps the flag");
                     const auto units = world.units();
                     const auto craft = std::find_if(units.begin(), units.end(), [&](const auto& unit) {
                         return unit.entity_id == squadron.members.front();
@@ -836,6 +1060,12 @@ void test_free_garrison_replenishment() {
     }
 }
 void test_free_garrison_timer_order() {
+    const t::TacticalSnapshot plain(0, {}, {}, {});
+    const t::TacticalSnapshot decorated(0, {}, {}, {}, {}, {}, std::nullopt,
+        {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {{1, 600, 615}});
+    expect(plain.canonical_bytes() == decorated.canonical_bytes()
+        && plain.sha256() == decorated.sha256(),
+        "HCB-62: published timer metadata changes no canonical snapshot bytes or hash");
     std::vector<std::string> hashes;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         auto initial = free_garrison_setup();
@@ -847,6 +1077,12 @@ void test_free_garrison_timer_order() {
         auto made = t::TacticalSession::create(initial, {}, free_garrison_health(), free_garrison_motion());
         expect(static_cast<bool>(made), "FL-14: coincident timer/hangar fixture creates"); if (!made) return;
         auto world = std::move(made).value();
+        const auto initial_snapshot = world.snapshot();
+        expect(initial_snapshot->garrison_timers().size() == 1
+            && initial_snapshot->garrison_timers().front().player == 1
+            && initial_snapshot->garrison_timers().front().duration_frames == 600
+            && !initial_snapshot->garrison_timers().front().due_frame,
+            "HCB-62: initial publication includes the player's authored delay without a running wait");
         expect(static_cast<bool>(world.submit({{14, 1, 0}, {7, 9}, t::DamagePayload{whole(10000)}})),
             "FL-14: full depletion at frame 15 starts the 600-frame timer");
         eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -862,7 +1098,16 @@ void test_free_garrison_timer_order() {
             }
             return true;
         };
+        if (!advance(15)) return;
+        const auto waiting_snapshot = world.snapshot();
+        expect(waiting_snapshot->garrison_timers().size() == 1
+            && waiting_snapshot->garrison_timers().front().due_frame == due
+            && !initial_snapshot->garrison_timers().front().due_frame,
+            "HCB-62: completed-tick publication copies the committed deadline and preserves older snapshots");
         if (!advance(due)) return;
+        expect(!world.snapshot()->garrison_timers().front().due_frame
+            && waiting_snapshot->garrison_timers().front().due_frame == due,
+            "HCB-62: expiry removes the published wait without mutating a retained snapshot");
         expect(world.squadrons().empty(), "FL-14: frame 615 timer maturation cannot feed the same-frame hangar pass");
         if (!advance(due + 29)) return;
         expect(world.squadrons().empty(), "FL-14: matured queue remains unlaunched through frame 644");
@@ -1364,9 +1609,9 @@ void test_production_work() {
 void test_hero_command_ledger() {
     auto content = economy();
     content.command_bonuses = {
-        {40, 0, {3, {10, 40}, {decimal("0.25"), {}, decimal("0.25"), decimal("0.25"), {}, {}}}},
-        {41, 0, {3, {10}, {decimal("0.5"), {}, {}, {}, {}, {}}}},
-        {41, 1, {4, {10}, {decimal("0.25"), {}, {}, {}, {}, {}}}},
+        {40, 0, {3, {10, 40}, {decimal("0.25"), {}, decimal("0.25"), decimal("0.25"), {}, {}}}, 0, false, false, {}, {}},
+        {41, 0, {3, {10}, {decimal("0.5"), {}, {}, {}, {}, {}}}, 0, false, false, {}, {}},
+        {41, 1, {4, {10}, {decimal("0.25"), {}, {}, {}, {}, {}}}, 0, false, false, {}, {}},
     };
     auto initial = setup();
     initial.units.erase(initial.units.begin(), initial.units.begin() + 2);
@@ -1407,13 +1652,13 @@ void test_hero_command_ledger() {
     expect(world.durability_state(4)->hull == whole(100) && world.durability_state(4)->energy == whole(100),
         "WHE-19: final source removal clamps current hull and energy");
 
-    content.command_bonuses = {{40, 0, {0, {10}, {decimal("0.25"), {}, {}, {}, {}, {}}}, 200}};
+    content.command_bonuses = {{40, 0, {0, {10}, {decimal("0.25"), {}, {}, {}, {}, {}}}, 200, false, false, {}, {}}};
     auto faction = t::TacticalSession::create(setup(), {}, durability(), {}, std::nullopt, {}, {}, {}, content);
     expect(faction && faction.value().durability_state(3)->hull == whole(100)
         && faction.value().durability_state(4)->hull == whole(125) && faction.value().durability_state(5)->hull == whole(125),
         "WHE-13: exact faction replaces allied eligibility");
 
-    content.command_bonuses = {{40, 0, {0, {10}, {decimal("-0.25"), {}, {}, {}, {}, {}}}}};
+    content.command_bonuses = {{40, 0, {0, {10}, {decimal("-0.25"), {}, {}, {}, {}, {}}}, 0, false, false, {}, {}}};
     auto negative = t::TacticalSession::create(initial, {}, health, {}, std::nullopt, {}, {}, {}, content);
     expect(static_cast<bool>(negative), "WHE-55: negative command content creates");
     if (!negative) return;
@@ -1429,7 +1674,7 @@ void test_hero_command_ledger() {
         expect(static_cast<bool>(negative.value().step(budget)), "idle command budget fixture steps");
     expect(budget.command_phases == 0, "WHE-53: stationary ticks perform no command discovery or application phases");
 
-    content.command_bonuses = {{40, 0, {0, {10}, {decimal("0.25"), {}, decimal("0.25"), {}, {}, {}}}}};
+    content.command_bonuses = {{40, 0, {0, {10}, {decimal("0.25"), {}, decimal("0.25"), {}, {}, {}}}, 0, false, false, {}, {}}};
     auto carried_setup = setup();
     carried_setup.units[0].type_id = 41;
     carried_setup.units[1].type_id = 41;
@@ -1457,7 +1702,7 @@ void test_hero_command_ledger() {
 
 void test_hero_worker_determinism() {
     auto content = economy();
-    content.command_bonuses = {{40, 0, {0, {10}, {decimal("0.25"), decimal("0.1"), {}, {}, decimal("0.1"), decimal("0.1")}}}};
+    content.command_bonuses = {{40, 0, {0, {10}, {decimal("0.25"), decimal("0.1"), {}, {}, decimal("0.1"), decimal("0.1")}}, 0, false, false, {}, {}}};
     std::string expected;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         auto created = t::TacticalSession::create(setup(), {}, durability(), {}, std::nullopt, {}, {}, {}, content);
@@ -1723,8 +1968,69 @@ void test_live_station_repair() {
     }
 }
 
+void test_human_pad_radar_creation() {
+    for (const bool enabled : {false, true}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            t::TacticalSetup start;
+            start.seed = 540;
+            start.players = {{1, 0, 100, 1}, {2, 1, 200, 1}};
+            start.units = {{1, 20, 1, {}, m::identity_quat(), {}}};
+            t::EconomyRules rules;
+            rules.players = {{1, whole(1000), 0}};
+            t::StationMenu menu;
+            menu.station = 20; menu.faction = 100; menu.station_producer = false;
+            menu.options = {option(30, t::BuildKind::structure, t::BuildQueue::units, 30)};
+            rules.menus = {menu};
+            rules.pads.neutral = 2;
+            rules.pads.capture = {{20, whole(100), whole(1), {100, 200}, false, true, true}};
+            rules.pads.construction = {{30, 40, whole(100), 1, 1}};
+            rules.pads.influence = {{20, false}, {30, false}, {40, false}};
+            t::SpecialAbilityProfile radar;
+            radar.name = "Construction_Radar"; radar.kind = t::SpecialAbilityKind::enable_radar;
+            radar.style = t::SpecialActivationStyle::skirmish_automatic; radar.initially_enabled = enabled;
+            t::UnitAbilityProfile source; source.type_id = 30; source.special = {radar};
+            t::AbilityTable abilities; abilities.profiles = {source};
+            t::DurabilityTable health;
+            for (const t::TypeId type : {20U, 30U, 40U}) {
+                t::DurabilityProfile row; row.type_id = type; row.max_hull = whole(300);
+                if (type == 30) {
+                    t::HardpointProfile point;
+                    point.destroyable = true; point.max_health = whole(100); point.special_ability_name = radar.name;
+                    row.hardpoints.push_back(point);
+                }
+                health.profiles.push_back(row);
+            }
+            auto made = t::TacticalSession::create(start, {}, health, {}, {}, {}, {}, abilities, rules);
+            expect(static_cast<bool>(made), "FC-75: human pad radar fixture creates");
+            if (!made) { std::cerr << made.error().message << '\n'; continue; }
+            auto world = std::move(made).value();
+            expect(!world.snapshot()->players().front().radar_enabled, "FC-75: no pad radar source before birth");
+            expect(static_cast<bool>(world.submit({{0, 1, 0}, {1}, t::PadBuildPayload{30}})),
+                "FC-75: human radar pad build submits");
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned tick = 0; tick < 3; ++tick) {
+                auto result = world.step(executor);
+                expect(static_cast<bool>(result), "FC-75: human pad radar construction steps");
+                if (!result) { std::cerr << result.error().message << '\n'; break; }
+                expect(world.construction().size() == 1 && world.pads().at(1).under_construction != 0,
+                    "FC-75: human request creates a construction placeholder");
+                expect(world.snapshot()->players().front().radar_enabled == enabled,
+                    "FC-75: construction radar publishes immediately without unlocking named gates");
+                hashes.push_back(result.value().state_sha256 + result.value().snapshot->sha256());
+            }
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "FC-75: human pad radar hashes and snapshots equal on 1/2/4/8 workers");
+        }
+    }
+}
+
 } // namespace
 int main() {
+    test_human_pad_radar_creation();
+    test_disabled_special_dependency();
+    test_special_hardpoint_upgrade();
     test_level_up_completion_boundary();
     test_level_up_without_next_type();
     test_level_up_death_while_held();
@@ -1733,6 +2039,7 @@ int main() {
     test_limits(); test_bonuses_and_completion(); test_level_up(); test_roster_gate(); test_repair_carryover(); test_replay_determinism();
     test_cancel_releases_team_reservation();
     test_garrison_replay_extension();
+    test_garrison_marked_station_upgrade();
     test_free_garrison_replenishment();
     test_free_garrison_timer_order();
     test_free_garrison_pending_and_generic();

@@ -1,0 +1,249 @@
+#include "galactic_ai_selection_content.hpp"
+
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
+
+namespace eawr::script::foc::ai {
+namespace {
+namespace gc = sim::galactic;
+core::Diagnostic unavailable(std::string message) {
+    return detail::make_error(authoritative::codes::missing_api, std::move(message));
+}
+Real distance(const galactic_ai::TargetInput& a, const galactic_ai::TargetInput& b) {
+    const auto x = to_single(numeric::from_fixed(a.position.x) - numeric::from_fixed(b.position.x));
+    const auto y = to_single(numeric::from_fixed(a.position.y) - numeric::from_fixed(b.position.y));
+    const auto z = to_single(numeric::from_fixed(a.position.z) - numeric::from_fixed(b.position.z));
+    return to_single(square_root(to_single(to_single(x * x) + to_single(y * y) + to_single(z * z))));
+}
+}
+core::Result<std::vector<gc::PlanetId>> galactic_force_stages(const PlanDef& plan,
+    std::span<const galactic_goals::GalacticForceConstraints> constraints, gc::PlanetId target,
+    std::string_view reachability, std::span<const gc::PlanetId> sites) {
+    using Result = core::Result<std::vector<gc::PlanetId>>;
+    if (constraints.size() != plan.taskforces.size()) return Result::failure(unavailable("force staging requires complete authored constraints"));
+    std::vector<gc::PlanetId> stages(plan.taskforces.size());
+    if (plan.allow_free_store && !plan.magic && target) for (std::size_t force = 0; force < stages.size(); ++force) {
+        const auto& options = constraints[force]; gc::PlanetId selected{};
+        if (upper_case(reachability) == "SINGLE_HOP_DISCONNECTED") selected = target;
+        else for (const auto site : sites) {
+            const auto prior = std::span(stages).first(force);
+            if (options.unique_stage && std::find(prior.begin(), prior.end(), site) != prior.end()) continue;
+            if (!options.unique_stage && options.matching_stage && std::find(prior.begin(), prior.end(), site) == prior.end()) continue;
+            selected = site; break;
+        }
+        stages[force] = selected ? selected : target;
+    }
+    return Result::success(std::move(stages));
+}
+static core::Result<bool> read_allowed_production_site(const galactic_ai::WorldInput& input, tactical::PlayerId player, gc::PlanetId planet) {
+    auto rows = input.producers.read(player, planet, {}, true);
+    if (!rows) return core::Result<bool>::failure(rows.error());
+    return core::Result<bool>::success(!rows.value().empty());
+}
+bool allowed_production_site(const galactic_ai::WorldInput& input, tactical::PlayerId player, gc::PlanetId planet) {
+    auto result = read_allowed_production_site(input, player, planet);
+    return result && result.value();
+}
+core::Result<std::vector<GalacticSelectionContrast>> galactic_target_contrast(const GalacticWorld& world,
+    const Context& context, std::span<const std::uint64_t> categories, Real classified_scale) {
+    using Result = core::Result<std::vector<GalacticSelectionContrast>>;
+    std::vector<GalacticSelectionContrast> out;
+    for (const auto channel : {gc::ProductionDomain::ground, gc::ProductionDomain::space}) {
+        const auto total = world.target_enemy_force(context, channel);
+        if (!total) return Result::failure(unavailable("target contrast requires cached enemy force and actual defensive structures"));
+        out.push_back({channel, 0, *total, false});
+    }
+    for (const auto channel : {gc::ProductionDomain::ground, gc::ProductionDomain::space}) {
+        const auto total = out[channel == gc::ProductionDomain::ground ? 0U : 1U].force;
+        for (const auto category : categories) {
+            if (!category) return Result::failure(unavailable("classified target contrast category must be nonzero"));
+            Real force{};
+            if (Real{} < total) {
+                const auto value = world.target_enemy_force(context, channel, category);
+                if (!value) return Result::failure(unavailable("classified target contrast force is unavailable"));
+                force = *value * classified_scale;
+            }
+            out.push_back({channel, category, force, false});
+        }
+    }
+    return Result::success(std::move(out));
+}
+core::Result<std::vector<GalacticSelectionGarrison>> galactic_proposal_garrisons(
+    const GalacticSelectionContent& content, gc::TypeId type, std::uint32_t tech, gc::PlanetId target) {
+    using Result = core::Result<std::vector<GalacticSelectionGarrison>>;
+    const auto source = content.types.find(type);
+    if (source == content.types.end() || !source->second.original)
+        return Result::failure(unavailable("proposal garrison expansion requires its original type"));
+    const auto& levels = source->second.original->starting_spawned_units;
+    if (tech >= levels.size()) return Result::failure(unavailable("proposal garrison tech is outside the authored level table"));
+    auto level = tech;
+    while (level && levels[level].empty()) --level;
+    const auto& spawned = levels[level];
+    const auto planet = content.planets.find(target);
+    if (target && planet == content.planets.end()) return Result::failure(unavailable("proposal garrison target terrain is unavailable"));
+    std::vector<GalacticSelectionGarrison> out;
+    const auto append = [&](std::string_view name) -> core::Result<void> {
+        const auto canonical = upper_case(name);
+        const auto unit = std::find_if(content.types.begin(), content.types.end(),
+            [&](const auto& row) { return row.second.name == canonical; });
+        if (unit == content.types.end()) return core::Result<void>::failure(unavailable("proposal garrison type is unbound: " + canonical));
+        const auto traits = std::find_if(content.ai.types.begin(), content.ai.types.end(),
+            [&](const auto& row) { return row.type_id == unit->first; });
+        if (traits == content.ai.types.end()) return core::Result<void>::failure(unavailable("proposal garrison combat metric is unavailable"));
+        Real terrain = real(1);
+        if (planet != content.planets.end()) {
+            if (const auto environment = content.terrain.find(planet->second.terrain); environment != content.terrain.end())
+                if (const auto movement = environment->second.find(unit->second.movement_class); movement != environment->second.end()) terrain = movement->second;
+        }
+        out.push_back({unit->first, unit->second.value.channel, to_single(traits->combat_power), terrain, true});
+        return core::Result<void>::success();
+    };
+    for (const auto& spawn : spawned) {
+        // The original count getter selects the first entry for this type,
+        // even when the authored list contains the same type again.
+        const auto first = std::find_if(spawned.begin(), spawned.end(),
+            [&](const auto& row) { return upper_case(row.type) == upper_case(spawn.type); });
+        for (std::int32_t count = 0; count < first->count; ++count)
+            if (const auto added = append(spawn.type); !added) return Result::failure(added.error());
+    }
+    for (const auto& escort : source->second.space_escorts)
+        if (const auto added = append(escort); !added) return Result::failure(added.error());
+    return Result::success(std::move(out));
+}
+GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const GalacticSelectionContent> content,
+    std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> plans, std::shared_ptr<const GalacticWorld> world,
+    std::shared_ptr<const Engine> engine, std::function<std::shared_ptr<const gc::GalacticSnapshot>()> snapshot,
+    GalacticHeroSelectionProvider heroes, GalacticFreestoreSelectionProvider freestore) {
+    return [content = std::move(content), plans = std::move(plans), world = std::move(world),
+            engine = std::weak_ptr<const Engine>(engine), snapshot = std::move(snapshot), heroes = std::move(heroes), freestore = std::move(freestore)]
+        (tactical::PlayerId player, gc::PlanetId target, const GoalType& goal, const PlanDef& plan)
+        -> core::Result<std::shared_ptr<const GalacticSelectionInput>> {
+        using Result = core::Result<std::shared_ptr<const GalacticSelectionInput>>;
+        const auto manager = engine.lock(); const auto state = snapshot ? snapshot() : nullptr;
+        const auto input = world ? world->copy_input() : nullptr;
+        if (!manager || !content || !plans || !world || !state || !input || !state->production() || !state->player_economy())
+            return Result::failure(unavailable("stock selection requires completed world, content and production owners"));
+        auto out = std::make_shared<GalacticSelectionInput>();
+        const auto authored = plans->constraints.find(plan.name);
+        if (authored == plans->constraints.end()) return Result::failure(unavailable("stock plan constraints missing"));
+        if (authored->second.additional_cost.value_or(Real{}) != Real{})
+            out->missing_facts.push_back("stock nonzero AdditionalCost retained roster and paid-cost initialization");
+        if (plan.magic) out->missing_facts.push_back("stock magic live lock, unlock, disable and named space hero admission");
+        if (target && !plan.ignore_target) out->missing_facts.push_back("stock remembered target contrast and proposal garrison expansion");
+        if (plan.allow_free_store && !plan.magic) {
+            if (!freestore) out->missing_facts.push_back("stock freestore membership, AI usability, loss state and path producer");
+            else {
+                const auto copied = freestore(player, target, plan);
+                if (!copied) return Result::failure(copied.error());
+                out->freestore = copied.value();
+            }
+        }
+        if (!out->missing_facts.empty()) return Result::success(std::move(out));
+        out->minimum_cost = authored->second.minimum_cost.value_or(Real{}); out->maximum_cost = Real{}; // No authored maximum-plan-cost global is applied.
+        for (const auto& force : authored->second.forces)
+            out->attachment_allowed.emplace_back(!force.deny_heroes, !force.deny_special_weapons && plan.allow_special_weapons);
+        const auto account = std::find_if(state->player_economy()->players.begin(), state->player_economy()->players.end(), [&](const auto& row) { return row.player == player; });
+        if (account == state->player_economy()->players.end()) return Result::failure(unavailable("stock selection player account missing"));
+        out->player_tech = static_cast<std::uint32_t>(account->current_tech);
+        if (!content->population_check) return Result::failure(unavailable("stock selection global population gate unqualified"));
+        out->population_check = *content->population_check;
+        const auto population = std::find_if(state->population().begin(), state->population().end(), [&](const auto& row) { return row.player == player; });
+        if (out->population_check && population == state->population().end()) return Result::failure(unavailable("stock selection population census missing"));
+        if (population != state->population().end()) out->remaining_population = to_single(numeric::from_fixed(population->capacity) - numeric::from_fixed(population->used));
+        const auto destination = std::find_if(input->targets.begin(), input->targets.end(), [&](const auto& row) { return row.planet == target; });
+        if (target && destination == input->targets.end()) return Result::failure(unavailable("stock selection target absent"));
+        for (const auto& site : input->targets) {
+            const auto allowed = read_allowed_production_site(*input, player, site.planet);
+            if (!allowed) return Result::failure(allowed.error());
+            if (!allowed.value()) continue;
+            const auto reach = target ? world->goal_reachable(player, target, site.planet, goal.reachability) : std::optional{true};
+            if (!reach) return Result::failure(unavailable("stock production reachability owner unavailable"));
+            if (*reach) out->production_sites.push_back(site.planet);
+        }
+        out->reachable = !target || !out->production_sites.empty();
+        // WGA-254: the freestore marshaller initializes staging only for an
+        // ordinary freestore-enabled plan. Missing staging falls back to target.
+        const auto stages = galactic_force_stages(plan, authored->second.forces, target, goal.reachability, out->production_sites);
+        if (!stages) { return Result::failure(stages.error()); }
+        out->force_stages = stages.value();
+        std::set<gc::TypeId> proposals;
+        for (const auto& force : plan.taskforces) for (const auto& team : force.teams)
+            proposals.insert(team.types.begin(), team.types.end());
+        const std::vector<gc::TypeId> requested(proposals.begin(), proposals.end());
+        auto producers = requested.empty() ? core::Result<std::vector<galactic_ai::ProducerInput>>::success({})
+            : input->producers.read(player, 0, requested);
+        if (!producers) return Result::failure(producers.error());
+        for (auto producer : producers.value()) {
+            const auto type = content->types.find(producer.type); if (type == content->types.end()) continue;
+            producer.reachable = std::find(out->production_sites.begin(), out->production_sites.end(), producer.planet) != out->production_sites.end();
+            if (!producer.reachable) continue;
+            if (target) {
+                const auto source = std::find_if(input->targets.begin(), input->targets.end(), [&](const auto& row) { return row.planet == producer.planet; });
+                if (source == input->targets.end()) return Result::failure(unavailable("stock production source absent"));
+                producer.distance = distance(*source, *destination);
+            }
+            producer.hyperspace_speed = type->second.hyperspace_speed;
+            const auto factor = content->faction_speed.find(player);
+            if (factor == content->faction_speed.end()) return Result::failure(unavailable("stock production faction speed missing"));
+            producer.faction_speed_factor = factor->second;
+            if (!content->technology_weight && !type->second.value.structure && producer.base_level != producer.required_level)
+                return Result::failure(unavailable("stock production technology estimate constant unqualified"));
+            producer.technology_weight = content->technology_weight.value_or(Real{});
+            out->producers.push_back(producer);
+        }
+        const gc::PlanetProduction* location{};
+        for (const auto& row : state->production()->planets) if (row.planet == target) location = &row;
+        if (location) {
+            for (std::size_t channel = 0; channel < 2; ++channel) {
+                const auto occupied = std::count_if(location->objects.begin(), location->objects.end(), [&](const auto& object) {
+                    return object.kind == gc::ProductionKind::structure && static_cast<std::size_t>(object.domain) == channel;
+                });
+                const auto slots = channel == 0 ? location->ground_slots : location->space_slots;
+                out->remaining_structure_slots_by_channel[channel] = static_cast<std::uint32_t>(std::max<std::int64_t>(slots - occupied, 0));
+            }
+        }
+        const auto planet = content->planets.find(target);
+        for (const auto id : proposals) {
+            const auto original = content->types.find(id);
+            if (original == content->types.end()) return Result::failure(unavailable("stock proposal original type missing"));
+            const auto& source = original->second;
+            auto facts = source.value; facts.survival_type = source.survival_type;
+            facts.terrain_allowed = true; facts.terrain_effectiveness = real(1);
+            const auto type = std::find_if(content->ai.types.begin(), content->ai.types.end(), [&](const auto& row) { return row.type_id == id; });
+            if (type == content->ai.types.end()) return Result::failure(unavailable("stock original AI type missing"));
+            if (planet != content->planets.end()) {
+                facts.terrain_allowed = (planet->second.restricted_categories & type->category_bits) == 0
+                    && std::find(planet->second.restricted_types.begin(), planet->second.restricted_types.end(), id) == planet->second.restricted_types.end();
+                if (const auto terrain = content->terrain.find(planet->second.terrain); terrain != content->terrain.end())
+                    if (const auto movement = terrain->second.find(source.movement_class); movement != terrain->second.end()) facts.terrain_effectiveness = movement->second;
+            }
+            facts.instance_allowed = true; facts.instance_remaining = std::numeric_limits<std::uint32_t>::max();
+            if (facts.structure) {
+                facts.instance_allowed = false;
+                if (location) for (const auto& offer : location->offers) if (offer.type == id) {
+                    const auto count = std::count_if(location->objects.begin(), location->objects.end(), [&](const auto& object) { return object.type == id; });
+                    facts.instance_allowed = offer.planet_limit < 0 || count < offer.planet_limit;
+                    facts.instance_remaining = offer.planet_limit < 0 ? std::numeric_limits<std::uint32_t>::max()
+                        : static_cast<std::uint32_t>(std::max<std::int64_t>(offer.planet_limit - count, 0));
+                }
+                for (const auto& producer : out->producers)
+                    if (producer.type == id && producer.planet == target && producer.admission == gc::ProductionAdmission::allowed) {
+                        facts.target_cost = numeric::from_fixed(producer.cost);
+                        facts.target_build_seconds = numeric::from_fixed(producer.build_seconds);
+                        break;
+                    }
+            }
+            if (facts.hero && heroes) {
+                const auto weights = heroes(player, target, id, plan); if (!weights) return Result::failure(weights.error());
+                facts.hero_weight = weights.value().target_weight; facts.escort_weight = weights.value().escort_weight;
+                facts.hero_minimum_cost = weights.value().minimum_cost; facts.hero_maximum_cost = weights.value().maximum_cost;
+                facts.hero_containment_allowed = weights.value().containment_allowed;
+            } // Absent hero owner rejects that candidate through containment, never a guessed weight.
+            out->types.emplace(id, std::move(facts));
+        }
+        out->complete = true;
+        return Result::success(std::move(out));
+    };
+}
+}

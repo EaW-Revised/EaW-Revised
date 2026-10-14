@@ -728,6 +728,25 @@ void test_view_yaw_pan() {
 }
 
 int main() {
+    {
+        const camera::TacticalFrame original{1280, 720, 45, 1, 10000, {0, 100, 200}, {0, 0, 0}, {0, 1, 0}};
+        const std::array<float, 3> subject{100, 20, -40};
+        auto entry = camera::movie_frame(original, subject, 0);
+        auto later = camera::movie_frame(original, subject, 5);
+        expect(entry && later && entry.value().target == subject && later.value().target == subject,
+            "movie camera keeps the supplied visible subject in view");
+        expect(entry && later && entry.value().eye != later.value().eye, "movie camera moves on presentation time");
+        expect(entry && entry.value().near_plane == original.near_plane && entry.value().far_plane == original.far_plane,
+            "movie director keeps authored clipping");
+        const std::array<float, 3> moved{110, 25, -30};
+        auto followed = camera::movie_frame(original, moved, 5);
+        expect(later && followed, "moving movie subject accepted");
+        if (later && followed) for (std::size_t i = 0; i < 3; ++i)
+            close(followed.value().eye[i] - later.value().eye[i], moved[i] - subject[i], "movie follows without a camera cut");
+        expect(!camera::movie_frame(original, subject, -1), "movie refuses negative elapsed time");
+        expect(!camera::movie_frame(original, subject, std::numeric_limits<double>::infinity()), "movie refuses non-finite time");
+        expect(original.eye == std::array<float, 3>{0, 100, 200}, "tactical return frame remains intact");
+    }
     test_view_yaw_pan();
     test_pan_speed_scale();
     test_orbit_pitch_limits_and_persistence();

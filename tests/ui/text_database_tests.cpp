@@ -223,6 +223,10 @@ void missing_key_contracts() {
     }
     expect(lookup.diagnostics().front().message.find("TEXT_ABSENT") != std::string::npos,
            "missing-key diagnostic names the key");
+    // The retail executable's own defaults for the two mod-dialog keys the database lacks.
+    expect(lookup.text("TEXT_MODS_OPTIONS") == u"Mods", "the mods button has its built-in caption");
+    expect(lookup.text("TEXT_SELECT_MOD_TITLE") == u"Select Mod", "the mod dialog has its built-in title");
+    expect(lookup.diagnostics().size() == 2U, "a built-in default reports nothing");
 }
 
 // UI-T4: the language path, resolved through the VFS so the FoC layer wins.

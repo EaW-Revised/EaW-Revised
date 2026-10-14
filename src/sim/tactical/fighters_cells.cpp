@@ -26,48 +26,51 @@ namespace {
 }
 
 constexpr std::int64_t cell_raw = combat_cell_size * Fixed::scale;
-
-} // namespace
-
-CombatCell combat_cell_of(const Vec3& point) noexcept {
-    CombatCell cell;
-    cell.y = static_cast<std::int32_t>(floor_divide(point.y.raw(), cell_raw));
-    auto x = point.x.raw();
-    if ((cell.y & 1) != 0) x -= cell_raw / 2;
-    cell.x = static_cast<std::int32_t>(floor_divide(x, cell_raw));
-    return cell;
-}
-
-Vec3 combat_cell_point(const CombatCell cell, const Fixed z) noexcept {
-    auto x = static_cast<std::int64_t>(cell.x) * cell_raw + cell_raw / 2;
-    if ((cell.y & 1) != 0) x += cell_raw / 2;
-    return {Fixed::from_raw(x), Fixed::from_raw(static_cast<std::int64_t>(cell.y) * cell_raw + cell_raw / 2), z};
-}
-
-namespace {
-
 constexpr std::int64_t idle_raw = idle_cell_size * Fixed::scale;
 
-} // namespace
-
-CombatCell idle_cell_of(const Vec3& point) noexcept {
+// WDF-05: both grids are laid over the map box from its low corner. The row is the truncated
+// (y - min_y) / size (integer division truncates); an odd row moves x back half a cell, x is
+// clamped to min_x, and the column is the truncated (x - min_x) / size.
+[[nodiscard]] CombatCell grid_cell_of(const Vec3& point, const MapBox& box, const std::int64_t size) noexcept {
     CombatCell cell;
-    cell.y = static_cast<std::int32_t>(floor_divide(point.y.raw(), idle_raw));
+    cell.y = static_cast<std::int32_t>((point.y.raw() - box.min_y.raw()) / size);
     auto x = point.x.raw();
-    if ((cell.y & 1) != 0) x -= idle_raw / 2;
-    cell.x = static_cast<std::int32_t>(floor_divide(x, idle_raw));
+    if ((cell.y & 1) != 0) x -= size / 2;
+    x = std::max(x, box.min_x.raw());
+    cell.x = static_cast<std::int32_t>((x - box.min_x.raw()) / size);
     return cell;
 }
 
-Vec3 idle_cell_point(const CombatCell cell, const Fixed z) noexcept {
-    auto x = static_cast<std::int64_t>(cell.x) * idle_raw + idle_raw / 2;
-    if ((cell.y & 1) != 0) x += idle_raw / 2;
-    return {Fixed::from_raw(x), Fixed::from_raw(static_cast<std::int64_t>(cell.y) * idle_raw + idle_raw / 2), z};
+// A cell's point is min + index x size + size / 2, plus half a cell in x on odd rows.
+[[nodiscard]] Vec3 grid_cell_point(const CombatCell cell, const Fixed z, const MapBox& box, const std::int64_t size) noexcept {
+    auto x = box.min_x.raw() + static_cast<std::int64_t>(cell.x) * size + size / 2;
+    if ((cell.y & 1) != 0) x += size / 2;
+    const auto y = box.min_y.raw() + static_cast<std::int64_t>(cell.y) * size + size / 2;
+    return {Fixed::from_raw(x), Fixed::from_raw(y), z};
 }
 
-std::optional<CombatCell> idle_cell_claim(const Vec3& desired, const std::span<const CombatCell> taken) {
+} // namespace
+
+CombatCell combat_cell_of(const Vec3& point, const MapBox& box) noexcept {
+    return grid_cell_of(point, box, cell_raw);
+}
+
+Vec3 combat_cell_point(const CombatCell cell, const Fixed z, const MapBox& box) noexcept {
+    return grid_cell_point(cell, z, box, cell_raw);
+}
+
+CombatCell idle_cell_of(const Vec3& point, const MapBox& box) noexcept {
+    return grid_cell_of(point, box, idle_raw);
+}
+
+Vec3 idle_cell_point(const CombatCell cell, const Fixed z, const MapBox& box) noexcept {
+    return grid_cell_point(cell, z, box, idle_raw);
+}
+
+std::optional<CombatCell> idle_cell_claim(
+    const Vec3& desired, const std::span<const CombatCell> taken, const MapBox& box) {
     const auto held = [&taken](const CombatCell cell) { return std::find(taken.begin(), taken.end(), cell) != taken.end(); };
-    const CombatCell start = idle_cell_of(desired);
+    const CombatCell start = idle_cell_of(desired, box);
     if (!held(start)) return start;
     // FM-24: rings around the start cell, row by row from the low corner; the start cell counts
     // as the first cell examined.
@@ -83,7 +86,7 @@ std::optional<CombatCell> idle_cell_claim(const Vec3& desired, const std::span<c
                 ++examined;
                 const CombatCell cell{x, y};
                 if (held(cell)) continue;
-                const Vec3 point = idle_cell_point(cell, Fixed{});
+                const Vec3 point = idle_cell_point(cell, Fixed{}, box);
                 const auto dx = math::detail::unsigned_magnitude(point.x.raw() - desired.x.raw());
                 const auto dy = math::detail::unsigned_magnitude(point.y.raw() - desired.y.raw());
                 auto score = math::detail::multiply_u64(dx, dx);
@@ -99,9 +102,9 @@ std::optional<CombatCell> idle_cell_claim(const Vec3& desired, const std::span<c
     return std::nullopt;
 }
 
-bool within_combat_cell_reach(const Vec3& point, const CombatCell cell) noexcept {
+bool within_combat_cell_reach(const Vec3& point, const CombatCell cell, const MapBox& box) noexcept {
     // FD-03: 400 / sqrt(2), compared squared (80000 square units) in raw units.
-    const Vec3 centre = combat_cell_point(cell, Fixed{});
+    const Vec3 centre = combat_cell_point(cell, Fixed{}, box);
     const auto dx = math::detail::unsigned_magnitude(point.x.raw() - centre.x.raw());
     const auto dy = math::detail::unsigned_magnitude(point.y.raw() - centre.y.raw());
     auto across = math::detail::multiply_u64(dx, dx);
@@ -122,6 +125,28 @@ core::Result<bool> in_follow_cone(const CraftView& self, const Vec3& target, Fix
         return core::Result<bool>::failure(calc.error("follow test of craft " + std::to_string(self.id)));
     }
     return core::Result<bool>::success(result);
+}
+
+void claim_chases(const std::span<CraftView> views, const std::span<const std::size_t> scanners,
+    const std::span<const std::vector<EntityId>> candidates, const std::uint64_t frame_number) {
+    const auto find = [views](const EntityId id) -> CraftView* {
+        const auto found = std::lower_bound(views.begin(), views.end(), id,
+            [](const CraftView& view, const EntityId value) { return view.id < value; });
+        return found != views.end() && found->id == id ? &*found : nullptr;
+    };
+    for (std::size_t index = scanners.size(); index-- != 0;) {
+        auto& self = views[scanners[index]].state;
+        if (self.chase_until != 0) continue; // taken by an earlier-serviced craft this frame
+        for (const auto candidate : candidates[index]) {
+            auto* chased = find(candidate);
+            if (chased == nullptr || chased->state.chase_until != 0) continue;
+            self.chase = candidate;
+            self.chase_until = frame_number + chase_frames;
+            chased->state.chase = invalid_entity_id;
+            chased->state.chase_until = frame_number + chase_frames;
+            break;
+        }
+    }
 }
 
 ChaseCandidateIndex::ChaseCandidateIndex(std::vector<ChaseCandidate> candidates)

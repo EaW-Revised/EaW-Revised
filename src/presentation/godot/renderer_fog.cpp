@@ -228,7 +228,7 @@ void GodotRenderer::Impl::unregister_external_fog_material(const GodotRenderer::
         const Resource& resource = resources_.at(asset);
         GodotRenderer::FogConsumerEvidence evidence{.asset_id = asset, .kind = consumer.kind};
         evidence.attached = consumer.id != fog::ConsumerId{};
-        const std::int64_t surfaces = rendering->mesh_get_surface_count(resource.mesh);
+        const std::int64_t surfaces = resource.mesh.is_valid() ? rendering->mesh_get_surface_count(resource.mesh) : 0;
         evidence.surfaces = static_cast<std::size_t>(surfaces);
         for (std::int64_t surface = 0; surface < surfaces; ++surface) {
             const RID material = rendering->mesh_surface_get_material(
@@ -369,6 +369,7 @@ void GodotRenderer::Impl::set_surface_material(RenderingServer& rendering, const
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (!fog_ || !rendering || consumer.id != fog::ConsumerId{}) return std::nullopt;
     const Resource& resource = resources_.at(asset_id);
+    if (!resource.mesh.is_valid()) return std::nullopt;
     if (consumer.kind == GodotRenderer::FogConsumerKind::batch_mesh_gloss
         || consumer.kind == GodotRenderer::FogConsumerKind::batch_mesh_alpha
         || consumer.kind == GodotRenderer::FogConsumerKind::legacy_derived) {

@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <unordered_map>
 
 namespace eawr::presentation::audio {
 
@@ -28,6 +30,33 @@ public:
     [[nodiscard]] bool enemy_seen() const noexcept { return enemy_seen_; }
 private:
     bool enemy_seen_{};
+};
+
+// SND-42/64, SND-E54, WSU-03: each object has its own fog-service countdown. A settled
+// object is serviced once per 30 logical frames; while its fade differs from its target
+// (by at least 0.0001) it is serviced every frame and the countdown restarts. A new object
+// is due on the first frame it is tracked (the starting phase is not sourced).
+class SightingService final {
+public:
+    static constexpr std::uint32_t period_frames = 30;
+    static constexpr double fade_epsilon = 0.0001;
+    // One logical frame for one object; true when the sighting handlers run now.
+    [[nodiscard]] bool tick(std::uint64_t entity, bool visible, double opacity) {
+        auto [it, inserted] = countdown_.try_emplace(entity, 0U);
+        std::uint32_t& left = it->second;
+        if (!inserted && left > 0) --left;
+        if (left != 0 && std::abs((visible ? 1.0 : 0.0) - opacity) < fade_epsilon) return false;
+        left = period_frames;
+        return true;
+    }
+    // Drops objects the session no longer holds; call with the live count now and then.
+    template<class Alive>
+    void retain(const Alive& alive) {
+        std::erase_if(countdown_, [&](const auto& entry) { return !alive(entry.first); });
+    }
+    [[nodiscard]] std::size_t tracked() const noexcept { return countdown_.size(); }
+private:
+    std::unordered_map<std::uint64_t, std::uint32_t> countdown_;
 };
 
 // SND-44: FIFO, including duplicates; only the front is serviced. Storage is

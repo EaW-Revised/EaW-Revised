@@ -51,6 +51,13 @@ public:
     GodotParticleBackend& operator=(const GodotParticleBackend&) = delete;
 
     [[nodiscard]] std::uint64_t create_emitter(const particles::EmitterRenderPlan& plan) override;
+    // Population-time hidden, empty emitters pin shared textures/shaders. Runtime
+    // instances retain ordinary creation order. Oversized/refused plans fall back.
+    [[nodiscard]] bool prewarm_emitter(const particles::EmitterRenderPlan& plan);
+    void release_prewarm();
+    [[nodiscard]] std::size_t prewarmed_emitters() const noexcept;
+    [[nodiscard]] std::uint64_t prewarmed_texture_bytes() const noexcept;
+    void prepare_emitter(std::uint64_t resource, const particles::VertexStream& stream) override;
     void update_emitter(std::uint64_t resource, const particles::VertexStream& stream) override;
     void destroy_emitter(std::uint64_t resource) override;
     [[nodiscard]] std::string failure_cause() const override;
@@ -86,13 +93,14 @@ public:
 
     // Every RenderingServer RID this backend currently owns (meshes, materials,
     // instances, shared textures and shaders). Zero after the last emitter is
-    // destroyed is the no-leak evidence.
+    // destroyed (including prewarm holds) is the no-leak evidence.
     [[nodiscard]] std::size_t live_rids() const noexcept;
     [[nodiscard]] std::size_t live_emitters() const noexcept;
     [[nodiscard]] std::vector<FogEmitterEvidence> fog_emitter_evidence() const;
 
-    // Opt-in frame profiling across the main thread's particle backends. Uploads include
-    // only nonempty streams; replacements count newly allocated mesh surfaces.
+    // Opt-in frame profiling across particle backends. Conversion sums preparation time
+    // on every worker, while submission is caller-thread time. Uploads include only
+    // nonempty streams; replacements count newly allocated mesh surfaces.
     struct FrameWork final {
         std::uint64_t streams{};
         std::uint64_t uploads{};

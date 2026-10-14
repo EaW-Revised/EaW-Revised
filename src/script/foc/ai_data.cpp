@@ -152,6 +152,7 @@ GoalType goal_type(const XmlElement& element) {
     goal.mode = upper_case(element.child_text("GameMode"));
     goal.category = upper_case(element.child_text("Category"));
     goal.reachability = upper_case(element.child_text("Reachability"));
+    for (const auto& name : split_names(element.child_text("Global_Exclusions"), ", \t\r\n")) goal.global_exclusions.insert(upper_case(name));
     const auto set = [&](std::string_view tag, Real& field) {
         if (const auto value = number(element.child_text(tag))) field = *value;
     };
@@ -249,10 +250,16 @@ std::vector<std::string> ai_xml_files() {
 
 core::Result<AiData> load_ai_data(
     const std::map<std::string, std::string, std::less<>>& xml, const ConverterFunction& converters) {
+    return load_ai_data_files(xml, converters, ai_xml_files());
+}
+
+core::Result<AiData> load_ai_data_files(
+    const std::map<std::string, std::string, std::less<>>& xml, const ConverterFunction& converters,
+    const std::vector<std::string>& paths) {
     using DataResult = core::Result<AiData>;
     AiData data;
     std::vector<std::pair<std::string, std::string>> equation_files;
-    for (const std::string& path : ai_xml_files()) {
+    for (const std::string& path : paths) {
         const std::string* text = find_file(xml, path);
         if (text == nullptr) return DataResult::failure(error(path + ": AI XML file missing"));
         if (path.find("/perceptualequations/") != std::string::npos) {
@@ -273,6 +280,9 @@ core::Result<AiData> load_ai_data(
             set("AI_SpaceAreaThreatScaleFactor", constants.area_threat_scale);
             set("AI_SpaceThreatDecayStep", constants.threat_decay_step);
             set("Health_Low_Percent_Threshold", constants.health_low_threshold);
+            set("Low_Threat_Reachability_Tolerance", constants.low_threat_tolerance);
+            set("Medium_Threat_Reachability_Tolerance", constants.medium_threat_tolerance);
+            set("High_Threat_Reachability_Tolerance", constants.high_threat_tolerance);
             Real cells = real(constants.fog_cells_per_threat_cell);
             set("AI_FogCellsPerThreatCell", cells);
             constants.fog_cells_per_threat_cell = std::max<std::int64_t>(1, truncate(cells));
@@ -291,6 +301,13 @@ core::Result<AiData> load_ai_data(
                 for (const std::string& name : split_names(templates->child_text("Space"), ", \t\r\n")) {
                     player.space_templates.push_back(upper_case(name));
                 }
+                for (const std::string& name : split_names(templates->child_text("Galactic"), ", \t\r\n")) {
+                    player.galactic_templates.push_back(upper_case(name));
+                }
+            }
+            for (const auto mode : {"Galactic", "Space", "Land"}) {
+                const auto script = root.child_text(std::string(mode) + "FreeStoreScript");
+                if (!script.empty()) player.freestore.emplace(upper_case(mode), script);
             }
             if (const XmlElement* adjustments = root.child("Difficulty_Adjustments")) {
                 for (const XmlElement& child : adjustments->children) {
@@ -302,18 +319,34 @@ core::Result<AiData> load_ai_data(
             for (const XmlElement& element : root.children) {
                 Template entry;
                 entry.name = element.name;
+                if (const auto value = number(element.child_text("Priority"))) entry.priority = static_cast<int>(truncate(*value));
+                entry.trigger = element.child_text("Trigger");
+                entry.untrigger = element.child_text("Un_Trigger");
                 if (const XmlElement* budget = element.child("Budget")) {
                     for (const XmlElement& child : budget->children) {
-                        entry.budget.emplace(upper_case(child.name), trimmed(child.text));
+                        entry.budget.insert_or_assign(upper_case(child.name), trimmed(child.text));
+                    }
+                }
+                if (const XmlElement* allowances = element.child("Tactical_Budget_Allowance")) {
+                    for (const XmlElement& child : allowances->children) {
+                        const auto value = number(trimmed(child.text));
+                        if (!value) return DataResult::failure(error(path + ": invalid tactical allowance"));
+                        entry.tactical_allowances.insert_or_assign(upper_case(child.name), *value);
                     }
                 }
                 if (const XmlElement* on = element.child("Turn_On")) {
                     entry.goals_on = categories(on->child("Goals"), "Category");
                     entry.plans_on = categories(on->child("Plans"), "Goal_Category");
+                    entry.goal_types_on = categories(on->child("Goals"), "Goal_Type");
+                    entry.plan_types_on = categories(on->child("Plans"), "Goal_Type");
+                    entry.plan_names_on = categories(on->child("Plans"), "Name");
                 }
                 if (const XmlElement* off = element.child("Turn_Off")) {
                     entry.goals_off = categories(off->child("Goals"), "Category");
                     entry.plans_off = categories(off->child("Plans"), "Goal_Category");
+                    entry.goal_types_off = categories(off->child("Goals"), "Goal_Type");
+                    entry.plan_types_off = categories(off->child("Plans"), "Goal_Type");
+                    entry.plan_names_off = categories(off->child("Plans"), "Name");
                 }
                 data.templates.emplace(upper_case(entry.name), std::move(entry));
             }
@@ -323,7 +356,10 @@ core::Result<AiData> load_ai_data(
             name = upper_case(name.substr(0, name.size() - 4));
             std::vector<GoalFunction> functions;
             for (const XmlElement& element : root.children) {
-                functions.push_back(GoalFunction{upper_case(element.child_text("Goal")), element.child_text("Function")});
+                // WGA-93: a later Function within one entry replaces its earlier binding.
+                std::string function;
+                for (const auto& child : element.children) if (iequal(child.name, "Function")) function = trimmed(child.text);
+                functions.push_back(GoalFunction{upper_case(element.child_text("Goal")), std::move(function)});
             }
             data.function_sets.emplace(std::move(name), std::move(functions));
         } else if (path.find("/goals/") != std::string::npos) {
@@ -341,6 +377,10 @@ core::Result<AiData> load_ai_data(
                 if (const auto value = number(element.child_text("Space_AI_Goal_Cycle_Sleep_Duration"))) {
                     difficulty.space_goal_cycle_sleep = *value;
                 }
+                if (const auto value = number(element.child_text("Galactic_AI_Contrast_Multiplier"))) difficulty.galactic_contrast_multiplier = *value;
+                if (const auto value = number(element.child_text("Galactic_Build_Time_Multiplier"))) difficulty.galactic_build_time_multiplier = *value;
+                if (const auto value = number(element.child_text("Galactic_AI_Goal_Cycle_Sleep_Duration"))) difficulty.galactic_goal_cycle_sleep = *value;
+                if (const auto value = number(element.child_text("Credit_Multiplier"))) difficulty.credit_multiplier = *value;
                 data.difficulties.emplace(upper_case(element.name_attribute), difficulty);
             }
         }

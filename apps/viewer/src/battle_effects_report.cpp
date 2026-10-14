@@ -45,9 +45,15 @@ void BattleEffects::release() {
         return std::find(move_particles_.begin(), move_particles_.end(), effect.particle) != move_particles_.end();
     }));
     released_ = true;
+    for (auto& [name, look] : healing_lightning_) {
+        static_cast<void>(name);
+        if (look.batch.resource != 0) backend_->destroy_emitter(look.batch.resource);
+        look.batch.resource = 0;
+    }
     for (const LiveEffect& effect : effects_) static_cast<void>(registry_->release(effect.handle));
     effects_.clear();
     energy_owner_effects_.clear();
+    leech_effects_.clear();
     weaken_effects_.clear();
     spawned_projectile_types_.clear();
     for (auto& look : hero_beams_) {
@@ -58,6 +64,18 @@ void BattleEffects::release() {
         look.active_at_release = look.births.size();
         look.births.clear();
     }
+    for (auto& entry : defence_batches_) {
+        if (entry.second.resource != 0) backend_->destroy_emitter(entry.second.resource);
+        entry.second.resource = 0;
+    }
+    for (auto& [type, look] : leech_beams_) {
+        static_cast<void>(type);
+        if (look.batch.resource != 0) backend_->destroy_emitter(look.batch.resource);
+        if (look.sparks.resource != 0) backend_->destroy_emitter(look.sparks.resource);
+        look.batch.resource = 0; look.sparks.resource = 0;
+        look.active_at_release = look.births.size(); look.births.clear();
+    }
+    defence_zaps_.clear();
     for (Batch* target : {&kites_, &beams_}) {
         if (target->resource != 0) backend_->destroy_emitter(target->resource);
         target->resource = 0;
@@ -72,6 +90,8 @@ void BattleEffects::write_report(std::ostream& output) const {
            << kite_axis_max_sine_ << ", \"reversed\": " << kite_axis_reversed_ << "}"
            << ", \"max_beams\": " << max_beams_ << ", \"projectile_models_drawn\": " << models_drawn_ << ", \"live_effects\": " << effects_.size()
            << ", \"max_live_effects\": " << max_live_effects_ << ", \"effects_dropped\": " << effects_dropped_;
+    output << ", \"healing_pulses\": " << healing_pulses_ << ", \"healing_particles\": " << healing_particles_
+           << ", \"healing_bolt_samples\": " << healing_bolt_samples_;
     output << ", \"laser_z_scales\": [" << laser_scales_.beam << ',' << laser_scales_.kite << ']'
            << ", \"max_beam_width\": " << max_beam_width_ << ", \"max_kite_width\": " << max_kite_width_;
     output << ", \"laser_depth\": {\"clips\": [" << effect_clips_[0] << ',' << effect_clips_[1] << ']';
@@ -84,7 +104,9 @@ void BattleEffects::write_report(std::ostream& output) const {
     depth_sample("first_kite", first_kite_depth_);
     depth_sample("first_beam", first_beam_depth_);
     output << '}';
-    output << ", \"energy_beams_drawn\": " << energy_beams_drawn_ << ", \"tractor_beams_drawn\": " << tractor_beams_drawn_;
+    output << ", \"shield_leech_beams_drawn\": " << leech_beams_drawn_;
+    output << ", \"energy_beams_drawn\": " << energy_beams_drawn_ << ", \"tractor_beams_drawn\": " << tractor_beams_drawn_
+           << ", \"defence_beams_drawn\": " << defence_beams_drawn_;
     output << ", \"hero_beam_looks\": [";
     for (std::size_t index = 0; index < hero_beams_.size(); ++index) {
         const auto& look = hero_beams_[index];
@@ -93,6 +115,10 @@ void BattleEffects::write_report(std::ostream& output) const {
             << "],\"sparks_drawn\":" << look.sparks_drawn << ",\"moving_samples\":" << look.moving_samples
             << ",\"last_spark_fraction\":" << look.last_spark_fraction
             << ",\"active_sources\":" << (released_ ? look.active_at_release : look.births.size())
+            << ",\"origin_from_pose\":" << (look.last_origin_from_pose ? "true" : "false")
+            << ",\"source_position\":[" << look.last_source.position[0] << ',' << look.last_source.position[1] << ',' << look.last_source.position[2]
+            << "],\"source_yaw\":" << look.last_source.yaw_degrees << ",\"source_roll\":" << look.last_source.roll_degrees
+            << ",\"bind_origin\":[" << look.last_bind_origin[0] << ',' << look.last_bind_origin[1] << ',' << look.last_bind_origin[2] << ']'
             << ",\"last_quad\":[";
         for (std::size_t vertex = 0; vertex < look.last_quad.size(); ++vertex) {
             const auto& point = look.last_quad[vertex];
@@ -100,6 +126,23 @@ void BattleEffects::write_report(std::ostream& output) const {
                 << ',' << point.u << ',' << point.v << ']';
         }
         output << "]}";
+    }
+    output << ']';
+    output << ", \"leech_beam_looks\": [";
+    bool first_leech = true;
+    for (const auto& [type, look] : leech_beams_) {
+        output << (first_leech ? "" : ",") << "{\"type\":" << type
+            << ",\"origin_from_pose\":" << (look.last_origin_from_pose ? "true" : "false")
+            << ",\"source_position\":[" << look.last_source.position[0] << ',' << look.last_source.position[1] << ',' << look.last_source.position[2]
+            << "],\"source_yaw\":" << look.last_source.yaw_degrees << ",\"source_roll\":" << look.last_source.roll_degrees
+            << ",\"bind_origin\":[" << look.last_bind_origin[0] << ',' << look.last_bind_origin[1] << ',' << look.last_bind_origin[2]
+            << "],\"last_quad\":[";
+        for (std::size_t vertex = 0; vertex < look.last_quad.size(); ++vertex) {
+            const auto& point = look.last_quad[vertex].position;
+            output << (vertex ? "," : "") << '[' << point.x << ',' << point.y << ',' << point.z << ']';
+        }
+        output << "]}";
+        first_leech = false;
     }
     output << ']';
     const auto move_active = released_ ? move_feedback_at_release_
@@ -137,9 +180,11 @@ void BattleEffects::write_report(std::ostream& output) const {
     }
     output << "]}";
     counts("projectiles_not_drawn", not_drawn_);
+    counts("projectile_terminal_culls", terminal_culls_);
     // #862 (AB-66): ability shots fired and their drawn frames, by the projectile type they drew as.
     counts("ability_shots_fired", ability_shots_fired_);
     counts("ability_shot_frames_drawn", ability_shots_drawn_);
+    counts("reflected_shot_frames_drawn", reflected_shots_drawn_);
     // #456 BP-62: each model projectile pool: its slots, the most bound at once, the flights it
     // took and those it refused (every slot bound or resting).
     output << ", \"projectile_models\": {";
@@ -189,6 +234,24 @@ void BattleEffects::write_report(std::ostream& output) const {
                << (row.first_age ? std::to_string(*row.first_age) : std::string("null")) << "]";
     }
     output << "], \"spawn_log_full\": " << (spawn_log_.size() >= spawn_log_limit ? "true" : "false");
+    output << ", \"explosion_frames\": [";
+    bool first_explosion = true;
+    for (const SpawnRow& row : spawn_log_) {
+        if (!row.frame || !(row.key.starts_with("hardpoint:") || row.key.starts_with("death:")
+            || row.key.starts_with("self_destruct:") || row.key.starts_with("spin_away:"))) continue;
+        const auto explosion_point = [&](const particles::Vec3 value) {
+            output << triple({value.x, value.y, value.z});
+        };
+        output << (first_explosion ? "" : ", ") << "{\"tick\": " << row.tick << ", \"key\": " << json(row.key)
+               << ", \"position\": ";
+        explosion_point(row.frame->origin);
+        output << ", \"basis\": [";
+        explosion_point(row.frame->basis.x); output << ", ";
+        explosion_point(row.frame->basis.y); output << ", ";
+        explosion_point(row.frame->basis.z); output << "]}";
+        first_explosion = false;
+    }
+    output << "]";
     output << ", \"particle_types\": {";
     bool first = true;
     for (const auto& [name, type] : particle_types_) {

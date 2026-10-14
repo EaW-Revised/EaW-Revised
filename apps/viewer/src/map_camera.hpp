@@ -60,6 +60,10 @@ struct MapCameraConfig final {
 [[nodiscard]] core::Result<MapCameraConfig> skirmish_camera_config(
     const assets::Map& map, const skirmish::SkirmishStart& start, sim::tactical::PlayerId local_player);
 
+// Campaign entry/restore has exact actors, but does not save selected fleet-marker IDs.
+[[nodiscard]] core::Result<MapCameraConfig> campaign_camera_config(
+    const assets::Map& map, const sim::tactical::TacticalSetup& setup, sim::tactical::PlayerId local_player);
+
 // Applies the config's constant overrides over the XML layer (see
 // camera::apply_map_overrides for precedence and rejection rules). Without an
 // override block `xml` is returned unchanged and nothing else is checked, so

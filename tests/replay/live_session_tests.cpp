@@ -1,4 +1,7 @@
 #include "eawr/platform/live_session.hpp"
+#include "eawr/core/tick_profile.hpp"
+#include "eawr/platform/live_scripts.hpp"
+#include "eawr/platform/tactical_feed.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/replay.hpp"
 #include "eawr/sim/tactical/motion.hpp"
@@ -10,11 +13,14 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -106,6 +112,12 @@ public:
     }
     [[nodiscard]] std::uint64_t frames() const { return frames_; }
     [[nodiscard]] bool ordered() const { return ordered_; }
+    [[nodiscard]] bool wait_for(const std::uint64_t tick) const {
+        std::unique_lock lock(observed_mutex_);
+        return observed_.wait_for(lock, std::chrono::seconds(60), [&] {
+            return observed_frame_ && observed_tick_ >= tick;
+        });
+    }
 
 private:
     void read(const LiveSession& live) {
@@ -121,6 +133,12 @@ private:
                 static_cast<void>(frame.latest->visible_entities(1));
             }
             ++frames_;
+            {
+                const std::lock_guard lock(observed_mutex_);
+                observed_tick_ = last;
+                observed_frame_ = true;
+            }
+            observed_.notify_all();
             std::this_thread::yield();
         }
     }
@@ -128,6 +146,10 @@ private:
     std::atomic<bool> done_{false};
     std::atomic<std::uint64_t> frames_{0};
     std::atomic<bool> ordered_{true};
+    mutable std::mutex observed_mutex_;
+    mutable std::condition_variable observed_;
+    std::uint64_t observed_tick_{0};
+    bool observed_frame_{false};
     std::thread thread_;
 };
 
@@ -158,14 +180,18 @@ void test_driven_matches_headless(const std::filesystem::path& fixtures) {
         expect(session.completed_tick() == 0 && session.frame().latest != nullptr, label + "tick zero is published");
         {
             const Reader reader(session);
+            // A scheduled simulation thread does not imply the presentation thread ran.
+            expect(reader.wait_for(0), label + "the reader observes tick zero before stepping");
             for (const auto& command : replay.commands) session.submit(order_of(command, true));
             // Step in slices, as frames would ask for ticks.
             for (std::uint64_t tick = 7; tick < replay.final_tick_count; tick += 7) {
                 session.advance_to(tick);
                 expect(session.wait_for(tick, std::chrono::seconds(60)), label + "a driven slice completes");
+                expect(reader.wait_for(tick), label + "the reader observes the driven slice");
             }
             session.advance_to(replay.final_tick_count);
             expect(session.wait_for(replay.final_tick_count, std::chrono::seconds(60)), label + "the run completes");
+            expect(reader.wait_for(replay.final_tick_count), label + "the reader observes the final frame");
             expect(reader.frames() > 0 && reader.ordered(), label + "the reader sees ordered frames");
         }
         expect(session.completed_tick() == replay.final_tick_count, label + "driven pacing stops at the target");
@@ -179,6 +205,56 @@ void test_driven_matches_headless(const std::filesystem::path& fixtures) {
         const auto recorded = tactical::write_replay(session.record());
         const auto encoded = tactical::write_replay(replay);
         expect(recorded && encoded && recorded.value() == encoded.value(), label + "the live run records the fixture");
+    }
+}
+
+void test_phase_timings_preserve_hashes(const std::filesystem::path& fixtures) {
+    const auto parsed = tactical::parse_replay(read_bytes(fixtures / "tactical-motion.eawr-replay"), "phase-timings");
+    expect(static_cast<bool>(parsed), "phase timing fixture parses");
+    if (!parsed) return;
+    const auto golden = read_hashes(fixtures / "tactical-motion.hashes.csv");
+    constexpr std::uint64_t ticks = 12;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        for (const bool measure : {false, true}) {
+            LiveSession::Options options;
+            options.workers = workers;
+            options.pacing = LiveSession::Pacing::driven;
+            options.measure_phases = measure;
+            auto live = LiveSession::start(parsed.value().setup, {}, {}, motion_table(), {}, options);
+            expect(static_cast<bool>(live), "phase timing session starts");
+            if (!live) continue;
+            for (const auto& command : parsed.value().commands) live.value()->submit(order_of(command, true));
+            live.value()->advance_to(ticks);
+            expect(live.value()->wait_for(ticks, std::chrono::seconds(10)), "timed ticks finish");
+            live.value()->stop();
+            expect(golden.size() >= ticks && live.value()->tick_hashes()
+                == std::vector<std::string>(golden.begin(), golden.begin() + static_cast<std::ptrdiff_t>(ticks)),
+                "phase timing never changes tick hashes on 1/2/4/8 workers");
+            const auto costs = live.value()->tick_costs_after(0);
+            expect(costs.size() == ticks, "phase timing retains one cost per tick");
+            for (const auto& cost : costs) {
+                double partitions = 0.0, total = 0.0, serial = 0.0, fog = 0.0, named_serial = 0.0;
+                bool detailed = false;
+                bool serial_detailed = false;
+                for (const auto& phase : cost.phases) {
+                    expect(phase.ms >= 0.0, "diagnostic elapsed times are nonnegative");
+                    if (phase.name.starts_with("worker.")) { detailed = true; partitions += phase.ms; }
+                    if (phase.name.starts_with("serial.")) { serial_detailed = true; named_serial += phase.ms; }
+                    if (phase.name == "worker-total") total = phase.ms;
+                    if (phase.name == "serial-remainder") serial = phase.ms;
+                    if (phase.name == "fog") fog = phase.ms;
+                }
+                expect(detailed == measure, "named barrier costs are opt-in");
+                expect(serial_detailed == measure, "serial stage costs are opt-in");
+                if (measure) {
+                    expect(partitions == total, "barrier sum counts each measured phase once");
+                    expect(named_serial <= serial + 0.000001,
+                        "exclusive serial stages do not double count barriers");
+                    expect(std::abs(cost.total_ms - (total + serial + fog)) < 0.000001,
+                        "barriers and serial remainder account for the complete tick");
+                }
+            }
+        }
     }
 }
 
@@ -352,6 +428,19 @@ void test_event_log_bounds_a_high_event_rate() {
     tactical::CombatEvent shot;
     shot.kind = tactical::CombatEventKind::weapon_fired;
     expect(!LiveEventLog::presented(shot), "an ordinary shot is not presented");
+    tactical::Event special;
+    special.kind = tactical::EventKind::special_weapon_fired;
+    expect(LiveEventLog::presented(special), "WSW-33: a special weapon pulse reaches the audio consumer");
+    special.kind = tactical::EventKind::special_weapon_ready;
+    expect(LiveEventLog::presented(special), "WSW-34: a special weapon ready notice reaches the audio consumer");
+    tactical::Event sale{1, tactical::EventKind::pad_structure_sold, 2, 7, 9};
+    LiveEventLog sale_log({.ticks = 100, .bytes = 4096});
+    sale_log.record(tactical::TacticalSnapshot(1, {}, {}, {sale}));
+    for (std::uint64_t tick = 2; tick <= 70; ++tick) sale_log.record(tactical::TacticalSnapshot(tick, {}, {}, {}));
+    const auto sold = sale_log.after(0, 70);
+    expect(sold.ticks.size() == 1 && sold.ticks.front().events.size() == 1
+        && sold.ticks.front().events.front() == sale,
+        "WBP-31: sale owner, parent and child survive discarded snapshot history for audio");
     tactical::CombatEvent expiry;
     expiry.kind = tactical::CombatEventKind::projectile_expired;
     expiry.target = 123; expiry.shooter = 9; expiry.aim = at(20, 30, 40);
@@ -409,6 +498,32 @@ void test_event_log_bounds_a_high_event_rate() {
     expect(log.after(ticks, ticks + 1).lost_through == ticks + 1, "the oversized tick is reported lost");
     std::cout << "event log: sizeof(LiveTickEvents) " << sizeof(eawr::platform::LiveTickEvents) << ", sizeof(Event) "
               << sizeof(tactical::Event) << ", sizeof(CombatEvent) " << sizeof(tactical::CombatEvent) << '\n';
+}
+
+void test_event_log_keeps_pad_audio_events() {
+    using eawr::platform::LiveEventLog;
+    const std::vector<tactical::Event> events{
+        {1, tactical::EventKind::pad_captured, 2, 1, 9},
+        {2, tactical::EventKind::pad_construction_started, 2, 0, 10},
+        {3, tactical::EventKind::pad_construction_completed, 2, 0, 11},
+    };
+    LiveEventLog log({.ticks = 100, .bytes = 4096});
+    for (const auto& event : events) {
+        expect(LiveEventLog::presented(event), "pad capture and construction events are presented");
+        log.record(tactical::TacticalSnapshot(event.tick, {}, {}, {event}));
+    }
+    for (std::uint64_t tick = 4; tick <= 70; ++tick) {
+        log.record(tactical::TacticalSnapshot(tick, {}, {}, {}));
+    }
+    const auto delivered = log.after(0, 70);
+    expect(!delivered.lost_through && delivered.ticks.size() == events.size(),
+        "each pad audio event survives skipped snapshots until the presentation consumer reads it");
+    for (std::size_t index = 0; index < delivered.ticks.size() && index < events.size(); ++index) {
+        const auto& record = delivered.ticks[index];
+        expect(record.tick == events[index].tick && record.events == std::vector{events[index]},
+            "pad audio delivery preserves kind, tick, owner, previous owner and child identity");
+    }
+    expect(log.after(3, 70).ticks.empty(), "the consumer cursor does not redeliver pad audio events");
 }
 
 // #370 re-review 3: the reported loss never runs past the asked range, and a dropped tick
@@ -700,9 +815,90 @@ void test_victory_outcome() {
         for (const auto& event : decided->events()) reported = reported || event.kind == tactical::EventKind::victory;
     }
     expect(reported, "the deciding tick's snapshot has the victory event");
-    session.stop();
+    if (!latest || !latest->outcome()) return;
+    const auto end_tick = latest->outcome()->end_tick;
+    session.halt_at(end_tick);
+    session.advance_to(end_tick);
+    expect(session.wait_for(end_tick, std::chrono::seconds(30)), "the finished recording reaches the battle end tick");
+    eawr::platform::StandaloneTacticalFeed feed(std::move(live).value());
+    const auto saved = eawr::platform::serialize_finished_replay(feed);
+    const auto replay_output = tactical::write_replay(feed.record());
+    expect(saved && replay_output && saved.value() == replay_output.value(),
+        "the production Save serializer matches replay output for a finished live session");
+    if (saved) {
+        const auto parsed = tactical::parse_replay(saved.value());
+        expect(parsed && parsed.value().final_tick_count == end_tick, "the saved recording ends at the finished battle tick");
+    }
     const auto headless = eawr::platform::headless_tick_hashes(session.record(), {}, durability, {}, {}, victory);
     expect(headless && headless.value() == session.tick_hashes(), "the live victory run matches its headless replay");
+}
+
+// The content passed as one TacticalContent runs exactly like the same tables passed one by one:
+// the live run, its headless replay through either form, and a stepped TacticalSession agree on
+// every tick hash, and a table the session refuses is refused the same way.
+void test_content_bundle_matches_arguments() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}, {2, 1, 2, tactical::player_flag_commandable}};
+    for (const auto& [id, owner] : {std::pair{1U, 1U}, std::pair{2U, 2U}}) {
+        tactical::UnitState station;
+        station.entity_id = id;
+        station.type_id = 40;
+        station.owner = owner;
+        station.position = at(id == 1 ? -3000 : 3000, 0, 0);
+        setup.units.push_back(station);
+    }
+    tactical::TacticalContent content;
+    content.durability.rules = {decimal("0.2"), decimal("0.4"), decimal("0.33")};
+    content.durability.profiles = {{40, units(2400), std::nullopt, false, {}}};
+    content.motion = motion_table();
+    content.victory.condition = tactical::VictoryCondition::enemy_starbase_destroyed;
+    content.victory.starbase_types = {40};
+    content.victory.contenders = {1, 2};
+    content.victory.humans = {1};
+    content.map_box = {units(-6000), units(-4500)};
+    auto live = LiveSession::start(setup, content, {.workers = 2, .pacing = LiveSession::Pacing::driven});
+    expect(static_cast<bool>(live), "a live session starts from a content bundle");
+    if (!live) return;
+    auto& session = *live.value();
+    session.submit({1, {2}, tactical::DamagePayload{units(3000)}, 3});
+    session.advance_to(6);
+    expect(session.wait_for(6, std::chrono::seconds(30)), "the bundled session reaches tick 6");
+    session.stop();
+    const auto replay = session.record();
+    const auto bundled = eawr::platform::headless_tick_hashes(replay, content);
+    const auto separate = eawr::platform::headless_tick_hashes(replay, content.sensors, content.durability,
+        content.motion, content.combat, content.victory, content.fog, content.abilities, content.economy, content.map_box);
+    expect(bundled && separate && bundled.value() == separate.value() && bundled.value() == session.tick_hashes(),
+        "the bundled and separate headless runs give the live run's hashes");
+    auto stepped = tactical::TacticalSession::from_replay(replay, content);
+    expect(static_cast<bool>(stepped), "a replay session starts from a content bundle");
+    expect(stepped && stepped.value().map_box() == content.map_box,
+        "WDF-05: the bundled replay retains the map box");
+    if (stepped && bundled) {
+        const eawr::sim::InlineExecutor executor;
+        std::vector<std::string> hashes;
+        while (stepped.value().completed_tick() < replay.final_tick_count) {
+            auto tick = stepped.value().step(executor);
+            if (!tick) break;
+            hashes.push_back(tick.value().state_sha256);
+        }
+        expect(hashes == bundled.value(), "TacticalSession::from_replay with a bundle steps the same hashes");
+    }
+    const auto created = tactical::TacticalSession::create(setup, content);
+    const auto positional = tactical::TacticalSession::create(setup, content.sensors, content.durability,
+        content.motion, content.fog, content.combat, content.victory, content.abilities, content.economy, content.map_box);
+    expect(created && positional && created.value().map_box() == content.map_box
+        && positional.value().map_box() == content.map_box,
+        "WDF-05: bundled and separate creation retain the map box");
+    expect(created && positional && created.value().state_sha256() == positional.value().state_sha256(),
+        "TacticalSession::create with a bundle starts in the same state");
+    auto refused = content;
+    refused.victory.contenders = {7};
+    const auto bundled_refusal = tactical::TacticalSession::create(setup, refused);
+    const auto separate_refusal = tactical::TacticalSession::create(setup, refused.sensors, refused.durability,
+        refused.motion, refused.fog, refused.combat, refused.victory, refused.abilities, refused.economy, refused.map_box);
+    expect(!bundled_refusal && !separate_refusal && bundled_refusal.error().code == separate_refusal.error().code,
+        "a bundle with an unknown contender is refused like the separate tables");
 }
 
 // #459 (docs/behaviour/tactical-time-controls.md TP-01 to TP-03, TMC-05, TMC-06) and #453
@@ -936,20 +1132,305 @@ void test_quit_publication_halts_the_live_thread() {
     }
 }
 
+void test_driver_digest_reuses_completed_world() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto reference = tactical::TacticalSession::create(setup);
+        expect(static_cast<bool>(reference), "LAN digest reference starts");
+        if (!reference) continue;
+        const eawr::sim::InlineExecutor executor;
+        const auto framed = [](const std::string& world_hash) {
+            return eawr::sim::sha256_hex({reinterpret_cast<const std::uint8_t*>(world_hash.data()), world_hash.size()});
+        };
+        std::vector<std::string> expected{framed(reference.value().state_sha256())};
+        for (unsigned tick = 0; tick < 64; ++tick) {
+            auto stepped = reference.value().step(executor);
+            expect(static_cast<bool>(stepped), "LAN reference advances");
+            if (stepped) expected.push_back(framed(stepped.value().state_hash.get()));
+        }
+        std::vector<std::string> actual;
+        LiveSession::Options options;
+        options.workers = workers;
+        options.pacing = LiveSession::Pacing::driven;
+        options.step_driver = [&](eawr::platform::LiveStepContext& context,
+            std::span<const tactical::PlayerCommand>, std::uint64_t) {
+            if (context.completed_tick() == 0) actual.push_back(context.state_hash());
+            auto stepped = context.step();
+            if (!stepped) return eawr::core::Result<bool>::failure(stepped.error());
+            const auto digest = context.state_hash();
+            expect(digest == context.state_hash(), "repeated LAN reads resolve the same completed tick");
+            actual.push_back(digest);
+            return eawr::core::Result<bool>::success(true);
+        };
+        auto live = LiveSession::start(setup, {}, {}, {}, {}, options);
+        expect(static_cast<bool>(live), "LAN digest live session starts");
+        if (!live) continue;
+        live.value()->advance_to(64);
+        expect(live.value()->wait_for(64, std::chrono::seconds(10)), "LAN digest ticks complete");
+        live.value()->stop();
+        expect(actual == expected, "initial and every completed LAN digest retain exact framing on 1/2/4/8");
+    }
+}
+
+void test_abandoned_staging_releases_live_callbacks() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    auto callback_owner = std::make_shared<int>(1);
+    const std::weak_ptr<int> observer = callback_owner;
+    std::shared_ptr<eawr::platform::LiveStepContext> abandoned;
+    LiveSession::Options options; options.pacing = LiveSession::Pacing::driven;
+    options.step_driver = [&, callback_owner](eawr::platform::LiveStepContext& context,
+        std::span<const tactical::PlayerCommand>, std::uint64_t) {
+        using Result = eawr::core::Result<bool>;
+        if (context.completed_tick() == 1) {
+            expect(*callback_owner == 1, "original admission callback is live");
+            auto built = context.rebuild(); if (!built) return Result::failure(built.error());
+            abandoned = std::move(built).value();
+        }
+        auto stepped = context.step();
+        return stepped ? Result::success(true) : Result::failure(stepped.error());
+    };
+    auto live = LiveSession::start(setup, {}, {}, {}, {}, options);
+    expect(static_cast<bool>(live), "abandoned recovery fixture starts"); if (!live) return;
+    live.value()->advance_to(2);
+    expect(live.value()->wait_for(2, std::chrono::seconds(10)), "abandoned staging fixture completes");
+    live.value()->stop(); live.value().reset(); options.step_driver = {}; callback_owner.reset();
+    expect(abandoned && observer.expired(), "failed staging cannot retain a live controller through its callbacks");
+    abandoned.reset();
+}
+
+void test_recovery_staging_and_publication() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const auto caller = std::this_thread::get_id();
+        bool replaced{};
+        LiveSession::Options options; options.workers = workers; options.pacing = LiveSession::Pacing::driven;
+        options.step_driver = [&](eawr::platform::LiveStepContext& context, std::span<const tactical::PlayerCommand>, std::uint64_t) {
+            using Result = eawr::core::Result<bool>;
+            if (context.completed_tick() == 8 && !replaced) {
+                expect(std::this_thread::get_id() != caller, "recovery factory runs off the presentation caller");
+                auto staged = context.rebuild(); if (!staged) return Result::failure(staged.error());
+                expect(staged.value()->completed_tick() == 0, "recovery rebuild begins at tick zero");
+                while (staged.value()->completed_tick() < 8) {
+                    auto stepped = staged.value()->step(); if (!stepped) return Result::failure(stepped.error());
+                }
+                expect(context.completed_tick() == 8 && context.state_hash() == staged.value()->state_hash(),
+                    "headless staging keeps live state unchanged and reproduces its hash");
+                auto activated = staged.value()->activate(); if (!activated) return Result::failure(activated.error());
+                replaced = true;
+            }
+            auto stepped = context.step();
+            return stepped ? Result::success(true) : Result::failure(stepped.error());
+        };
+        auto live = LiveSession::start(setup, {}, {}, {}, {}, options);
+        expect(static_cast<bool>(live), "recovery publication fixture starts"); if (!live) continue;
+        live.value()->advance_to(16);
+        expect(live.value()->wait_for(16, std::chrono::seconds(10)), "replaced live world resumes on its owner");
+        live.value()->stop();
+        expect(replaced && live.value()->tick_hashes().size() == 16 && live.value()->frame().latest->completed_tick() == 16,
+            "recovery swaps controller references and retains one hash per completed tick");
+        const auto expected = eawr::platform::headless_tick_hashes(live.value()->record(), {}, {}, {}, {});
+        expect(expected && expected.value() == live.value()->tick_hashes(), "recovery is deterministic at each worker count");
+        expect(live.value()->events_after(0, 16).ticks.empty(), "headless catch-up does not emit presentation events");
+    }
+}
+
+void test_recovery_refuses_concurrent_orders_on_both_peers() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        std::mutex gate_mutex;
+        std::condition_variable gate;
+        unsigned staging{};
+        bool release{};
+        std::array<std::unique_ptr<eawr::platform::StandaloneTacticalFeed>, 2> peers;
+        std::array<bool, 2> replaced{};
+        for (std::size_t peer = 0; peer < peers.size(); ++peer) {
+            LiveSession::Options options; options.workers = workers; options.pacing = LiveSession::Pacing::driven;
+            options.step_driver = [&, peer](eawr::platform::LiveStepContext& context,
+                std::span<const tactical::PlayerCommand> commands, std::uint64_t) {
+                using Result = eawr::core::Result<bool>;
+                if (context.completed_tick() == 8 && !replaced[peer]) {
+                    auto staged = context.rebuild(); if (!staged) return Result::failure(staged.error());
+                    auto step = staged.value()->step(); if (!step) return Result::failure(step.error());
+                    { std::unique_lock lock(gate_mutex); ++staging; gate.notify_all();
+                      if (!gate.wait_for(lock, std::chrono::seconds(10), [&] { return release; }))
+                          throw std::runtime_error("recovery order test release deadline"); }
+                    while (staged.value()->completed_tick() < 8) {
+                        step = staged.value()->step(); if (!step) return Result::failure(step.error());
+                    }
+                    auto activated = staged.value()->activate(); if (!activated) return Result::failure(activated.error());
+                    replaced[peer] = true;
+                }
+                auto installed = context.install(commands); if (!installed) return Result::failure(installed.error());
+                auto step = context.step(); return step ? Result::success(true) : Result::failure(step.error());
+            };
+            auto live = LiveSession::start(setup, {}, {}, {}, {}, options);
+            expect(static_cast<bool>(live), "paired order-recovery fixture starts");
+            if (!live) return;
+            peers[peer] = std::make_unique<eawr::platform::StandaloneTacticalFeed>(std::move(live).value());
+            expect(static_cast<bool>(peers[peer]->try_submit({1, {}, tactical::RevealAllPayload{1}, 10})),
+                "future order accepted before staging");
+            peers[peer]->advance_to(16);
+        }
+        bool ready{};
+        { std::unique_lock lock(gate_mutex); ready = gate.wait_for(lock, std::chrono::seconds(10), [&] { return staging == 2; }); }
+        expect(ready, "both peers reached catch-up before presentation submits");
+        if (ready) for (auto& peer : peers) {
+            const auto submitted = peer->try_submit({1, {}, tactical::RevealAllPayload{1}, 12});
+            expect(!submitted && submitted.error().code == "EAWR-PLATFORM-0600"
+                && peer->submission_notice() && peer->rejected_orders().size() == 1,
+                "both peers explicitly refuse the catch-up order with the HUD diagnostic");
+        }
+        { const std::lock_guard lock(gate_mutex); release = true; } gate.notify_all();
+        for (auto& peer : peers) {
+            expect(peer->wait_for(16, std::chrono::seconds(10)), "recovery resumes after order refusal");
+            peer->stop();
+            const auto record = peer->record();
+            expect(record.commands.size() == 1 && record.commands[0].key.tick == 10,
+                "pre-staging future order survives and refused catch-up order never executes");
+        }
+        expect(peers[0]->record() == peers[1]->record() && peers[0]->tick_hashes() == peers[1]->tick_hashes(),
+            "catch-up submission has the same fate and hashes on both peers at every worker count");
+    }
+}
+
+void test_scripted_recovery_keeps_sealed_publication_input() {
+    namespace auth = eawr::script::authoritative;
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    auto scripts = std::make_shared<eawr::platform::LiveScripts>();
+    scripts->wrap = [](tactical::TacticalSession world) {
+        auth::SessionConfig config; config.seed = 42; config.tick_duration = {1, 30};
+        auto scheduler = auth::ScriptScheduler::create(config, {});
+        if (!scheduler) return eawr::core::Result<auth::ScriptedTacticalSession>::failure(scheduler.error());
+        return auth::ScriptedTacticalSession::create(std::move(world), std::move(scheduler).value());
+    };
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        bool replaced{};
+        LiveSession::Options options; options.workers = workers; options.pacing = LiveSession::Pacing::driven; options.scripts = scripts;
+        options.step_driver = [&](eawr::platform::LiveStepContext& context, std::span<const tactical::PlayerCommand>, std::uint64_t) {
+            using Result = eawr::core::Result<bool>;
+            if (context.completed_tick() == 2 && !replaced) {
+                auto staged = context.rebuild(); if (!staged) return Result::failure(staged.error());
+                while (staged.value()->completed_tick() < 2) {
+                    auto stepped = staged.value()->step(); if (!stepped) return Result::failure(stepped.error());
+                }
+                // Core can install the next agreed tick in the publication pump.
+                const tactical::PlayerCommand sealed{{2, 1, 0}, {}, tactical::RevealAllPayload{1}};
+                auto installed = staged.value()->install(std::span(&sealed, 1)); if (!installed) return Result::failure(installed.error());
+                auto activated = staged.value()->activate(); if (!activated) return Result::failure(activated.error());
+                replaced = true;
+            }
+            auto stepped = context.step();
+            return stepped ? Result::success(true) : Result::failure(stepped.error());
+        };
+        auto live = LiveSession::start(setup, {}, {}, {}, {}, options);
+        expect(static_cast<bool>(live), "scripted recovery fixture starts"); if (!live) continue;
+        live.value()->advance_to(4);
+        expect(live.value()->wait_for(4, std::chrono::seconds(10)), "scripted publication resumes normal stepping");
+        live.value()->stop();
+        const auto replay = live.value()->record();
+        expect(replaced && replay.commands.size() == 1 && replay.commands[0].key.tick == 2
+            && std::holds_alternative<tactical::RevealAllPayload>(replay.commands[0].payload),
+            "publication retains the next sealed scripted input exactly once");
+        const auto expected = eawr::platform::headless_tick_hashes(replay, {}, {}, {}, {});
+        expect(expected && expected.value() == live.value()->tick_hashes(), "scripted publication retains deterministic world hashes");
+    }
+}
+
+void test_admission_driver_holds_and_publishes_once() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    std::atomic<bool> admit{false};
+    std::atomic<unsigned> calls{0}, inputs{0};
+    std::vector<tactical::PlayerCommand> held;
+    LiveSession::Options options;
+    options.pacing = LiveSession::Pacing::driven;
+    options.command_source = [sent = false](std::uint64_t tick) mutable {
+        const bool issue = tick == 0 && !std::exchange(sent, true);
+        return issue ? std::vector<tactical::PlayerCommand>{{{0, 1, 0}, {}, tactical::RevealAllPayload{1}}}
+                         : std::vector<tactical::PlayerCommand>{};
+    };
+    options.step_driver = [&](eawr::platform::LiveStepContext& context,
+        std::span<const tactical::PlayerCommand> commands, std::uint64_t) {
+        using Result = eawr::core::Result<bool>;
+        ++calls;
+        inputs += static_cast<unsigned>(commands.size());
+        held.insert(held.end(), commands.begin(), commands.end());
+        if (!admit) return Result::success({});
+        const auto installed = context.install(held);
+        held.clear();
+        if (!installed) return Result::failure(installed.error());
+        auto stepped = context.step();
+        if (!stepped) return Result::failure(stepped.error());
+        const auto encoded = context.canonical_input();
+        expect(static_cast<bool>(encoded), "driver obtains executed input after its step");
+        if (encoded) {
+            const auto replay = tactical::parse_replay(encoded.value(), "driver-executed-input");
+            expect(replay && replay.value().commands.size() == 1
+                && std::holds_alternative<tactical::RevealAllPayload>(replay.value().commands[0].payload),
+                "driver diagnostic input records the command executed by the existing world");
+        }
+        return Result::success(true);
+    };
+    auto live = LiveSession::start(setup, {}, {}, {}, {}, options);
+    expect(static_cast<bool>(live), "admission-driver session starts");
+    if (!live) return;
+    live.value()->advance_to(1);
+    expect(!live.value()->wait_for(1, std::chrono::milliseconds(50))
+        && live.value()->completed_tick() == 0 && calls > 1, "driver holds tick zero while pumping");
+    expect(inputs == 1, "a held admission does not submit a local command twice");
+    admit = true;
+    expect(live.value()->wait_for(1, std::chrono::seconds(10)), "admitted tick publishes normally");
+    live.value()->stop();
+    expect(live.value()->frame().latest->completed_tick() == 1 && live.value()->tick_hashes().size() == 1,
+        "admission publishes one snapshot and one hash");
+}
+
 } // namespace
 
 int main(const int argc, const char* const argv[]) {
+    {
+        namespace profile = eawr::core::tick_profile;
+        profile::Recording recording;
+        const profile::Capture capture(recording);
+        {
+            const profile::Scope serial("serial.outer");
+            {
+                const profile::Pause barrier;
+                const profile::Scope inline_callback("serial.worker-callback");
+                const profile::Pause nested_barrier;
+                const profile::Scope nested_callback("serial.nested-worker-callback");
+            }
+            const profile::Scope restored("serial.restored");
+        }
+        expect(recording.costs.size() == 2 && recording.costs[0].name == "serial.restored"
+            && recording.costs[1].name == "serial.outer",
+            "inline worker callbacks do not become serial rows and nested pauses restore recording");
+    }
     if (argc != 2) {
         std::cerr << "usage: tactical_live_session_tests <fixture directory>\n";
         return 2;
     }
     test_start_rejects_worker_counts();
+    test_driver_digest_reuses_completed_world();
+    test_admission_driver_holds_and_publishes_once();
+    test_recovery_staging_and_publication();
+    test_recovery_refuses_concurrent_orders_on_both_peers();
+    test_scripted_recovery_keeps_sealed_publication_input();
+    test_abandoned_staging_releases_live_callbacks();
     test_quit_publication_halts_the_live_thread();
     test_shared_fog_history();
     test_victory_outcome();
+    test_content_bundle_matches_arguments();
     test_driven_matches_headless(argv[1]);
+    test_phase_timings_preserve_hashes(argv[1]);
     test_event_log_outlives_the_history();
     test_event_log_bounds_a_high_event_rate();
+    test_event_log_keeps_pad_audio_events();
     test_event_log_keeps_base_attack_metadata();
     test_event_log_keeps_sparse_ability_frames();
     test_event_log_gap_stays_in_the_asked_range();

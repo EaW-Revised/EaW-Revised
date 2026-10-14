@@ -371,13 +371,13 @@
 | WU-16 | same; the < 10 % clause applies only to the pointer and selection candidates (WSU-50) |
 | WU-17 | **differs**: a selected squadron's craft never show bars (WSU-50); the remake's hover exception is the owner's world UI and squadron-selection policy |
 | WU-21 | same (WSU-31) |
-| WU-22 | **differs**: the mean of the live craft (WSU-32) |
+| WU-22 | same (WSU-32) |
 | WU-23 | same (WSU-38); the double click is by the leader's craft type (WSU-38) |
 | WU-24 | **differs**: the icon slides (WSU-34); a gridded icon sits at its slot without the 0.048 offset (WSU-36) |
 | WU-25, WU-25a | same |
 | WU-26 | same; rows run downward (WSU-36) |
 | WU-27 | the jump is **differs** (WSU-34); the rest stands |
-| WU-18 | same; **missing there**: the whole-pixel truncation (WSU-54) |
+| WU-18 | same (WSU-54) |
 | L-9, L-10 | same; **missing there**: the card bars are pixel aligned (WSU-60) |
 
 ## Gaps against the remake
@@ -408,7 +408,7 @@ box), `include/eawr/presentation/ui/world_ui.hpp`, `src/presentation/ui/world_ui
 | WSU-21 to WSU-23 | validated behaviour data filters the box; click/type retain stations | same |
 | WSU-24 | ship cards after a box; first producer for deliberate mixed selection | same |
 | WSU-30, WSU-31 | `draw_icons` | same |
-| WSU-32 | hull over the hull of all craft, lost craft empty | **differs** (mean of live craft) |
+| WSU-32 | `ui::squadron_health`: the mean display health of the live craft | same |
 | WSU-33 | group digit and allied active-ability overlay (world ability icons and control-group numbers, WU-43, WU-45) | same |
 | WSU-34 | persistent anchor slides with leader thrust, member velocity cap and idle-grid braking | same in effect; formation centre approximation as WSQ-48 |
 | WSU-35 | 0.048 offset; icons drawn while the point is in front | same |
@@ -420,7 +420,7 @@ box), `include/eawr/presentation/ui/world_ui.hpp`, `src/presentation/ui/world_ui
 | WSU-50 | selectable/hero/construction/indigenous admission; hovered selected craft retains its bar | **differs** by the owner's craft-bar policy; one unidentified special-type exception remains missing |
 | WSU-63 | current neutral owner suppresses selection, health/shield bars and reticles; captured owners use normal rules | deliberate owner policy; merchant/gravity station data still satisfy FoC bar admission |
 | WSU-51, WSU-53, WSU-56, WSU-57 | WU rules in `world_ui_view.cpp` | same |
-| WSU-52 | bars and cards show the hull alone | **differs**: display health for types that die with their hardpoints (displayed-health target scoring (legacy EAWR-705) for targeting) |
+| WSU-52 | `ui::display_health` drives the world bars, the cards and the hero identity bar; the targeting's "damaged" test reads the same S/T (WCC-16) | same |
 | WSU-54 | bracket point truncated to whole pixels (world ability icons and control-group numbers) | same |
 | WSU-55 | indexed control-group digit above the bars (world ability icons and control-group numbers, WU-45) | same |
 | WSU-58 | allied active-ability icon above the bracket (world ability icons and control-group numbers, WU-44) | same |
@@ -428,10 +428,10 @@ box), `include/eawr/presentation/ui/world_ui.hpp`, `src/presentation/ui/world_ui
 | WSU-65 | no hover highlight | **missing** |
 | WSU-66 | rings at the unit's position | same |
 
-Counts, by rule (49): **same 36**, **differs 10** (WSU-10 to WSU-12 picking, WSU-14 the fog
-pick, WSU-17 the fade-out click, WSU-32 squadron health,
+Counts, by rule (49): **same 38**, **differs 8** (WSU-10 to WSU-12 picking, WSU-14 the fog
+pick, WSU-17 the fade-out click,
 WSU-38 the icon double click, WSU-50 WU-17's hover
-exception, WSU-52 display health, WSU-63 neutral presentation),
+exception, WSU-63 neutral presentation),
 **missing 3** (WSU-05 and WSU-06 the ghost, WSU-65 the hover highlight).
 
 ### XML tags this subsystem reads

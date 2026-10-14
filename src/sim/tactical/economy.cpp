@@ -139,11 +139,25 @@ const UpgradeProfile* EconomyRules::upgrade(const TypeId type) const noexcept {
 }
 
 core::Result<void> validate_economy(const EconomyRules& rules, const std::span<const Player> players) {
+    for (std::size_t index = 0; index < rules.campaign_population.size(); ++index)
+        if (rules.campaign_population[index].first == 0 || (index != 0
+            && rules.campaign_population[index - 1].first >= rules.campaign_population[index].first))
+            return invalid("campaign population types must strictly increase");
     for (std::size_t index = 0; index < rules.command_bonuses.size(); ++index) {
         const auto& profile = rules.command_bonuses[index];
         if (profile.type == 0 || (index != 0 && std::pair{rules.command_bonuses[index - 1].type,
             rules.command_bonuses[index - 1].slot} >= std::pair{profile.type, profile.slot}))
             return invalid("command sources must be nonzero and strictly increasing");
+        if (profile.battlefield) {
+            if (!rules.campaign || !std::is_sorted(profile.enabled_players.begin(), profile.enabled_players.end())
+                || std::adjacent_find(profile.enabled_players.begin(), profile.enabled_players.end()) != profile.enabled_players.end())
+                return invalid("battlefield modifier requires campaign players in canonical order");
+            for (const auto player : profile.enabled_players)
+                if (std::none_of(players.begin(), players.end(), [&](const auto& p) { return p.player_id == player; }))
+                    return invalid("battlefield modifier owner is absent");
+            if (profile.reveal_delta.raw() < -8 * math::Fixed::scale || profile.reveal_delta.raw() > 8 * math::Fixed::scale)
+                return invalid("battlefield reveal contribution exceeds supported bounds");
+        }
         const auto& targets = profile.bonus.applicable;
         if (!std::is_sorted(targets.begin(), targets.end()) || std::adjacent_find(targets.begin(), targets.end()) != targets.end())
             return invalid("command recipients must be strictly increasing");
@@ -197,6 +211,9 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
             return invalid("player " + std::to_string(entry.player) + " is not declared");
         }
         if (!amount(entry.credits)) return invalid("player " + std::to_string(entry.player) + " credits out of range");
+        if (entry.credit_cap && !amount(*entry.credit_cap)) return invalid("campaign credit cap out of range");
+        if (entry.strategic_credits && (!entry.ai || !amount(*entry.strategic_credits)))
+            return invalid("retained strategic credits require an AI and a valid balance");
         if (entry.start_tech > entry.max_tech) return invalid("starting tech exceeds maximum");
         if (!amount(entry.credit_multiplier)) return invalid("credit multiplier out of range");
     }
@@ -255,15 +272,32 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
         }
     }
     if (rules.max_queue == 0) return invalid("the queue length is zero");
+    for (std::size_t index = 0; index < rules.bounty_values.size(); ++index) {
+        const auto& entry = rules.bounty_values[index];
+        if (!entry.first || entry.second < math::Fixed{}
+            || (index && rules.bounty_values[index - 1].first >= entry.first))
+            return invalid("invalid bounty value ordering or amount");
+    }
     for (std::size_t index = 0; index < rules.upgrades.size(); ++index) {
         const auto& upgrade = rules.upgrades[index];
         if (upgrade.type == 0 || (index != 0 && rules.upgrades[index - 1].type >= upgrade.type)) {
             return invalid("upgrade types are not strictly increasing and nonzero");
         }
+        for (const auto& bounty : upgrade.bounties) {
+            if (bounty.percentage < math::Fixed{} || !std::is_sorted(bounty.factions.begin(), bounty.factions.end())
+                || std::adjacent_find(bounty.factions.begin(), bounty.factions.end()) != bounty.factions.end())
+                return invalid("invalid bounty source percentage or factions");
+        }
         for (const auto& modifier : upgrade.income_modifiers) {
             const auto* stream = rules.stream(modifier.target_source);
             if (stream == nullptr || !amount(stream->base_value) || stream->interval_seconds.raw() <= 0) {
                 return invalid("an income modifier requires an authored target stream value and interval");
+            }
+        }
+        for (const auto& modifier : upgrade.stealth_duration) {
+            // WST-03: a cloak-duration contribution above -1 and at most +8 keeps the frame count finite.
+            if (modifier.percentage.raw() <= -math::Fixed::scale || modifier.percentage.raw() > 8 * math::Fixed::scale) {
+                return invalid("a stealth duration modifier is outside supported bounds");
             }
         }
         for (const auto& bonus : upgrade.bonuses) {
@@ -323,6 +357,7 @@ core::Result<void> change_credits(PlayerEconomy& state, const EconomyPlayer& pla
     const auto balance = math::add(state.credits, amount);
     if (!balance) return core::Result<void>::failure(balance.error());
     state.credits = balance.value();
+    if (player.credit_cap && state.credits > *player.credit_cap) state.credits = *player.credit_cap;
     return core::Result<void>::success();
 }
 

@@ -1,4 +1,5 @@
 #include "kit_internal.hpp"
+#include "hud_icon_text.hpp"
 
 namespace eawr::presentation::godot_backend {
 namespace kit_detail {
@@ -94,12 +95,39 @@ namespace {
             size_of(icon(control, "Small_Frame_Right")).x, size_of(icon(control, "Small_Frame_Bottom")).y};
 }
 
+namespace {
+void refresh_oversampling(const int64_t pointer) {
+    auto* item = reinterpret_cast<CanvasItem*>(pointer);
+    if (!item->is_visible_in_tree()
+        || item->get_oversampling_with_scale() != CanvasItem::OVERSAMPLING_WITH_SCALE_PARENT_NODE) {
+        return;
+    }
+    // Godot recomputes a node's oversampling from its transform when the transform changes or the node
+    // enters the tree, but only while the node is visible in the tree; a part that was hidden while the
+    // window was resized keeps a stale level when it is shown.
+    refresh_text_oversampling(*item);
+}
+} // namespace
+
+void track_oversampling(CanvasItem& item) {
+    item.connect("visibility_changed", callable_mp_static(&refresh_oversampling).bind(reinterpret_cast<int64_t>(&item)));
+}
+
 } // namespace kit_detail
+
+void refresh_text_oversampling(CanvasItem& root) {
+    // Switching the mode off and back on recomputes the level of the node and of its descendants from
+    // their current transforms.
+    const CanvasItem::OversamplingWithScale mode = root.get_oversampling_with_scale();
+    root.set_oversampling_with_scale(CanvasItem::OVERSAMPLING_WITH_SCALE_DISABLED);
+    root.set_oversampling_with_scale(mode);
+}
 
 void register_ui_kit_classes() {
     GDREGISTER_CLASS(EawrUiFrame);
     GDREGISTER_CLASS(EawrUiButton);
     GDREGISTER_CLASS(EawrUiLabel);
+    GDREGISTER_CLASS(EawrHudText);
     GDREGISTER_CLASS(EawrUiCheck);
     GDREGISTER_CLASS(EawrUiSlider);
     GDREGISTER_CLASS(EawrUiBar);

@@ -4,6 +4,7 @@
 #include "eawr/sim/math/fixed.hpp"
 #include "eawr/vfs/vfs.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -66,6 +67,13 @@ struct EffectiveValue {
     ValueProvenance provenance{ValueProvenance::own};
     std::string source_object_id;
     std::optional<XmlNode> displaced_value;
+};
+
+// WGA-363/364: derived state at the end of the XML parse timeline.
+struct TypeMemberFlags {
+    bool ground_company_member{};
+    bool squadron_member{};
+    friend bool operator==(const TypeMemberFlags&, const TypeMemberFlags&) = default;
 };
 
 struct EffectiveObject {
@@ -146,6 +154,7 @@ public:
     [[nodiscard]] std::vector<const Definition*> find_all(std::string_view object_id) const;
     [[nodiscard]] core::Result<EffectiveObject> resolve(std::string_view object_id) const;
     [[nodiscard]] core::Result<EffectiveObject> resolve(std::string_view object_id, Category category) const;
+    [[nodiscard]] core::Result<TypeMemberFlags> member_flags(std::string_view object_id) const;
     [[nodiscard]] const std::vector<Definition>& definitions() const noexcept;
     [[nodiscard]] const std::vector<InventoryFile>& physical_inventory() const noexcept;
     [[nodiscard]] const std::vector<RegistryFile>& registry_files() const noexcept;
@@ -165,13 +174,40 @@ private:
     friend core::Result<struct LoadResult> load_catalog(const vfs::Vfs&, Profile, const LoadOptions&);
 };
 
+// What load_catalog found wrong with the ACTIVE registries (R-10, R-13, C-06; docs/xml-model.md),
+// counted apart from the physical-XML noise in `diagnostics` (an unreferenced malformed file is a
+// diagnostic and not a health problem). FoC fails a load on a registry root that cannot be read or
+// is the wrong root, and on an admitted hardpoint include that cannot be read or parsed; a missing
+// include is omitted with a warning. load_catalog keeps going and reports; the caller acts.
+struct LoadHealth {
+    std::size_t registry_invalid{};            // a registry root missing, unreadable, malformed or the wrong root
+    std::size_t include_failed{};              // an admitted include (any registry) that exists but cannot be read or parsed
+    std::size_t hardpoint_include_failed{};    // the hardpoint share of include_failed: fatal
+    std::size_t include_missing{};             // an admitted include that is not found (warning only)
+    std::optional<core::Diagnostic> fatal;     // the first failure FoC fails the load on
+    [[nodiscard]] bool failed() const noexcept { return fatal.has_value(); }
+    [[nodiscard]] bool clean() const noexcept {
+        return registry_invalid == 0 && include_failed == 0 && hardpoint_include_failed == 0 && include_missing == 0;
+    }
+};
+
 struct LoadResult {
     Catalog catalog;
     std::vector<core::Diagnostic> diagnostics;
+    LoadHealth health;
 };
+
+// One line naming every non-zero health count ("registry_invalid=1 include_failed=2"), empty when
+// the load is clean. Production callers print it after a load that succeeded.
+[[nodiscard]] std::string describe_load_health(const LoadHealth& health);
 
 [[nodiscard]] core::Result<LoadResult> load_catalog(const vfs::Vfs& vfs, Profile profile);
 [[nodiscard]] core::Result<LoadResult> load_catalog(
+    const vfs::Vfs& vfs, Profile profile, const LoadOptions& options);
+// load_catalog for production callers: the same load, but a failure FoC also fails on (LoadHealth::fatal)
+// is returned as the error, so a broken registry or hardpoint include never loads silently.
+[[nodiscard]] core::Result<LoadResult> load_catalog_strict(const vfs::Vfs& vfs, Profile profile);
+[[nodiscard]] core::Result<LoadResult> load_catalog_strict(
     const vfs::Vfs& vfs, Profile profile, const LoadOptions& options);
 [[nodiscard]] core::Result<sim::math::Fixed> fixed_value(const XmlNode& node);
 
@@ -203,6 +239,8 @@ struct DocumentOverride {
     std::string logical_path;
     std::string tag;
     std::vector<std::string> values;
+    // Optional Name selector for the first path container (e.g. a TradeRoute).
+    std::string object_id{};
 };
 
 class DocumentOverrides final {
@@ -254,6 +292,7 @@ inline constexpr std::string_view variant_cycle = "EAWR-XML-0009";
 inline constexpr std::string_view unknown_field = "EAWR-XML-0010";
 inline constexpr std::string_view deprecated_field = "EAWR-XML-0011";
 inline constexpr std::string_view physical_unreadable = "EAWR-XML-0012";
+inline constexpr std::string_view member_timeline_unavailable = "EAWR-XML-0013";
 } // namespace diagnostic_codes
 
 } // namespace eawr::data

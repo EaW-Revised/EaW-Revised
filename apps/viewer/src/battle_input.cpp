@@ -2,6 +2,7 @@
 
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
+#include "eawr/presentation/ui/hud_shell.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
@@ -53,9 +54,11 @@ BattleInput::~BattleInput() {
     if (rendering != nullptr && canvas_item_.is_valid()) rendering->free_rid(canvas_item_);
 }
 
-void BattleInput::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live) {
-    world_ui_->prepare(filesystem, catalog, live);
+void BattleInput::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live,
+                          const std::shared_ptr<GodotShaderCache>& shaders) {
+    world_ui_->prepare(filesystem, catalog, live, shaders);
     cursor_.prepare(filesystem);
+    beacon_delay_ = ui::beacon_place_delay(filesystem);
 }
 
 void BattleInput::note(std::string text) {
@@ -113,7 +116,8 @@ void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& populati
         pick_shapes_loaded_ = true;
     }
     // WNO-23/42, WPR-52: consume reached ownership/replacement events before
-    // deriving selection flags from the current frame's units.
+    // deriving selection flags from the current frame's units. A pad capture
+    // removes the previous local owner's selection and control-group memberships.
     for (const auto& tick : live.battle_frame().reached) {
         if (tick.tick <= replacement_tick_) continue;
         for (const auto& event : tick.events) {
@@ -196,10 +200,31 @@ void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& populati
         std::erase(selected, sim::invalid_entity_id);
         selection_.replace(selected);
     }
-    selection_.retain(live.alive_units());
+    selection_.retain_sorted(live.alive_units());
+}
+
+bool BattleInput::beacon_click(LiveSessionView& live) {
+    if (beacon_targeting_) {
+        beacon_targeting_ = false;
+        beacon_remaining_ = 0;
+        note("beacon placement cancelled by button");
+        return true;
+    }
+    if (!beacon_enabled(live)) return false;
+    cancel_special_target("beacon");
+    cancel_ability_target("beacon");
+    if (placing_) cancel_placement(live);
+    if (auto* orders = live.order_input()) orders->cancel_mode();
+    left_.reset();
+    ignore_left_release_ = false;
+    beacon_targeting_ = true;
+    beacon_remaining_ = *beacon_delay_;
+    note("beacon: pick a position");
+    return true;
 }
 
 void BattleInput::cancel() noexcept {
+    beacon_targeting_ = false;
     placing_.reset();
     left_.reset();
     right_start_.reset();
@@ -219,6 +244,10 @@ void BattleInput::frame(LiveSessionView& live, const SpacePopulation& population
     refresh(live, population, space);
     refresh_cards(live);
     // #848: the frame after a wheel or overview key gesture is sampled once it has drawn (below).
+    if (special_target_source_) {
+        const auto button = special_weapon_button(live);
+        if (!button.enabled() || button.source != *special_target_source_) cancel_special_target("source unavailable");
+    }
     const std::optional<std::uint64_t> overview_sample = overview_sample_pending_;
     overview_sample_pending_.reset();
     // The frame after a scripted middle gesture: its events reached the camera, which stepped.
@@ -227,6 +256,177 @@ void BattleInput::frame(LiveSessionView& live, const SpacePopulation& population
         camera_sample_pending_.reset();
     }
     follow(live, space);
+    // Acceptance input is injected through the same engine event queue as the
+    // ordinary scripted UI tests, using currently visible units on each seat.
+    if (live.options().lan_acceptance && frame_ && live.presented_tick() >= static_cast<double>(acceptance_next_tick_)) {
+        const auto tick = static_cast<std::uint64_t>(live.presented_tick());
+        const auto eligible = [&](const auto& unit) {
+            const auto shape = pick_shapes_.find(unit.part != sim::invalid_entity_id ? unit.part_type : unit.type);
+            return unit.own && unit.selectable && shape != pick_shapes_.end() && shape->second.movable;
+        };
+        const auto on_screen = [&](const auto& point) {
+            // Leave HUD margins; projection alone does not make a world target clickable.
+            return point && (*point)[0] >= 32 && (*point)[0] < viewport_[0] - 32
+                && (*point)[1] >= 64 && (*point)[1] < viewport_[1] - 180;
+        };
+        const auto candidates = static_cast<std::size_t>(std::count_if(units_.begin(), units_.end(), eligible));
+        const auto minimap_target = [&](const auto& position, LiveSessionView::ScriptedInput& input) {
+            const auto bounds = space.live_camera_bounds();
+            if (!bounds) return false;
+            // MM-11: scripted minimap points use normalized coordinates, like the HUD.
+            const auto point = ui::minimap_point(ui::minimap_extents(
+                bounds->min_x, bounds->max_x, bounds->min_y, bounds->max_y), position[0], position[1]);
+            input.minimap = true;
+            input.points.push_back({point.x, point.y, 0.0});
+            return true;
+        };
+        const auto record = [&](std::string result) {
+            acceptance_attempts_.push_back({tick, acceptance_stage_, std::move(result), candidates});
+        };
+        const auto advance = [&] {
+            acceptance_stage_ = (acceptance_stage_ + 1) % 5;
+            acceptance_next_tick_ = tick + (acceptance_stage_ == 0 ? 740 : 40);
+            acceptance_approached_ = false;
+        };
+        const auto retry = [&](std::string reason, bool reselect = false) {
+            record(std::move(reason)); acceptance_next_tick_ = tick + 30;
+            acceptance_approached_ = false;
+            if (reselect) { acceptance_stage_ = 0; acceptance_unit_.reset(); }
+        };
+        bool waiting = false;
+        if (acceptance_sequence_) {
+            if (live.order_sequence() > *acceptance_sequence_) { record("command queued"); advance(); }
+            else retry("gesture produced no command", true);
+            acceptance_sequence_.reset();
+            waiting = true;
+        }
+        if (!waiting) {
+            LiveSessionView::ScriptedInput input; input.tick = tick;
+            const auto own = std::find_if(units_.begin(), units_.end(), [&](const auto& unit) {
+                return acceptance_unit_ && unit.entity == *acceptance_unit_ && eligible(unit);
+            });
+            if (acceptance_stage_ == 0) {
+                auto candidate = std::find_if(units_.begin(), units_.end(), [&](const auto& unit) {
+                    const auto type = card_types_.find(unit.type);
+                    return eligible(unit) && type != card_types_.end()
+                        && (!type->second->abilities.empty() || !type->second->team_abilities.empty());
+                });
+                if (candidate == units_.end()) candidate = std::find_if(units_.begin(), units_.end(), eligible);
+                if (candidate == units_.end()) {
+                    // WPR-33/PU-60/WR-11: replace lost craft through the normal
+                    // allied station menu and reinforcement drag, never by spawning.
+                    const auto gesture = [&](LiveSessionView::ScriptedInput recovery, const std::string& target, const std::string& action = "click") {
+                        if (acceptance_recovery_target_ != target) { acceptance_recovery_target_ = target; acceptance_approached_ = false; }
+                        recovery.kind = acceptance_approached_ ? action : "hover";
+                        recovery.tick = tick;
+                        const auto fired = scripted_fired_; replay(recovery, live);
+                        record(target + (scripted_fired_ > fired ? " gesture" : " target unavailable"));
+                        acceptance_approached_ = scripted_fired_ > fired && !acceptance_approached_;
+                        acceptance_next_tick_ = tick + 15;
+                    };
+                    const auto* economy = live.local_economy();
+                    if (placing_) {
+                        LiveSessionView::ScriptedInput recovery;
+                        recovery.points.push_back({acceptance_recovery_anchor_[0] + 150.0, acceptance_recovery_anchor_[1] + 150.0, 0.0});
+                        gesture(recovery, "reinforcement drop", "release");
+                    } else if (economy && !economy->pool.empty()) {
+                        LiveSessionView::ScriptedInput recovery;
+                        recovery.hud = hud_point_ && hud_point_("r_0000") ? "r_0000" : "b_reinforcement";
+                        gesture(recovery, recovery.hud, recovery.hud == "r_0000" ? "press" : "click");
+                    } else if (economy && std::any_of(economy->queues.begin(), economy->queues.end(), [](const auto& queue) { return !queue.empty(); })) {
+                        retry("replacement build pending");
+                    } else if (production_station_) {
+                        const auto button = std::find_if(build_buttons_.begin(), build_buttons_.end(), [&](const auto& option) {
+                            const auto shape = pick_shapes_.find(option.type);
+                            return option.enabled && option.disabled_reason.empty() && shape != pick_shapes_.end() && shape->second.movable;
+                        });
+                        if (button == build_buttons_.end()) retry("no available replacement build");
+                        else { LiveSessionView::ScriptedInput recovery; recovery.card = button->slot;
+                            gesture(recovery, "replacement build " + std::to_string(button->slot)); }
+                    } else {
+                        const auto station = std::find_if(units_.begin(), units_.end(), [&](const auto& unit) {
+                            const auto* instance = live.snapshot_index().instance(unit.entity);
+                            const auto faction = live.local_faction_id();
+                            const auto* point = instance ? live.economy().pads.point(instance->type_id) : nullptr;
+                            const auto* menu = instance && faction ? live.economy().menu(instance->type_id, *faction) : nullptr;
+                            return instance && unit.own && unit.selectable && live.is_ally_of_local(instance->owner)
+                                && (!point || !point->build_pad) && menu && !menu->options.empty();
+                        });
+                        if (station == units_.end()) retry("no allied production station for replacement");
+                        else {
+                            acceptance_recovery_anchor_ = station->position;
+                            LiveSessionView::ScriptedInput recovery;
+                            if (!on_screen(station->screen)) {
+                                if (minimap_target(station->position, recovery)) gesture(recovery, "replacement station camera");
+                                else retry("replacement camera bounds unavailable"); }
+                            else { recovery.unit = station->entity; gesture(recovery, "replacement station selection"); }
+                        }
+                    }
+                }
+                else if (!on_screen(candidate->screen)) {
+                    // MM-11: camera recovery uses the ordinary minimap gesture.
+                    input.kind = acceptance_approached_ ? "click" : "hover";
+                    if (!minimap_target(candidate->position, input)) retry("camera bounds unavailable");
+                    else {
+                        const auto fired = scripted_fired_; replay(input, live);
+                        if (scripted_fired_ == fired) retry("minimap camera target unavailable");
+                        else { record("minimap camera gesture"); acceptance_approached_ = !acceptance_approached_;
+                            acceptance_next_tick_ = tick + 15; }
+                    }
+                } else {
+                    acceptance_unit_ = candidate->entity;
+                    input.kind = "click"; input.unit = candidate->part != sim::invalid_entity_id ? candidate->part : candidate->entity;
+                    const auto fired = scripted_fired_; replay(input, live);
+                    if (scripted_fired_ > fired) { record("selection gesture"); advance(); }
+                    else retry("selection target unavailable");
+                }
+            } else if (own == units_.end() || !selection_.contains(*acceptance_unit_)) retry("selection lost", true);
+            else if (!on_screen(own->screen)) retry("selected unit left viewport", true);
+            else {
+                bool ready = true;
+                if (acceptance_stage_ == 1) {
+                    input.kind = "rclick";
+                    // A nearby viewport-validated destination avoids runaway camera targets.
+                    input.points.push_back({own->position[0] + 30.0, own->position[1] + 30.0, 0.0});
+                    if (!on_screen(project({static_cast<float>(input.points[0][0]), static_cast<float>(input.points[0][1]), 0.0F}))) ready = false;
+                } else if (acceptance_stage_ == 2) {
+                    input.kind = "rclick";
+                    const auto enemy = std::find_if(units_.begin(), units_.end(), [&](const auto& unit) {
+                        return unit.hostile && unit.selectable && on_screen(unit.screen);
+                    });
+                    if (enemy != units_.end()) input.unit = enemy->part != sim::invalid_entity_id ? enemy->part : enemy->entity;
+                    else { input.ctrl = true; input.points.push_back({own->position[0] - 30.0, own->position[1] - 30.0, 0.0}); }
+                } else {
+                    input.kind = acceptance_stage_ == 3 ? "hover" : "click";
+                    const ui::AbilityState& state = ability_state_ != nullptr ? *ability_state_ : ready_abilities_;
+                    for (std::size_t index = 0; index < ability_bar_.buttons.size(); ++index) {
+                        const auto request = ui::ability_click(ability_bar_.buttons[index], false, state);
+                        if (request && !request->targeted && ability_bar_.buttons[index].disabled_reason.empty()) { input.ability = index; break; }
+                    }
+                    ready = input.ability.has_value();
+                }
+                if (!ready) {
+                    record("no viewport target or ready ability");
+                    // Unavailable ability does not block move/attack traffic in later cycles.
+                    acceptance_stage_ = 0; acceptance_next_tick_ = tick + 120; acceptance_approached_ = false;
+                } else {
+                    const auto fired = scripted_fired_;
+                    const auto sequence = live.order_sequence();
+                    if (acceptance_stage_ == 1) {
+                        // OR-01/O-3: the ordinary Move hotkey makes a nearby
+                        // destination usable even over the selected hull.
+                        LiveSessionView::ScriptedInput mode;
+                        mode.tick = tick; mode.kind = "key"; mode.key = "M";
+                        replay(mode, live);
+                    }
+                    replay(input, live);
+                    if (scripted_fired_ == fired) retry("gesture target unavailable", true);
+                    else if (input.kind == "hover") { record("ability approach"); advance(); }
+                    else { record("gesture injected"); acceptance_sequence_ = sequence; acceptance_next_tick_ = tick + 10; }
+                }
+            }
+        }
+    }
     const auto& scripted = live.options().inputs;
     // A gesture fires on its tick, or with f<frame> on that shown frame (a paused battle's tick
     // holds, #459); they fire in the order given.
@@ -258,7 +458,7 @@ void BattleInput::frame(LiveSessionView& live, const SpacePopulation& population
                 }
             }
         }
-        replay(input);
+        replay(input, live);
         ++next_scripted_;
     }
     update_hover();
@@ -272,6 +472,7 @@ void BattleInput::frame(LiveSessionView& live, const SpacePopulation& population
 
 void BattleInput::cursor_frame(const LiveSessionView& live, const SpaceEnvironment& space,
     const double delta, const bool capture) {
+    beacon_remaining_ = std::max(0.0, beacon_remaining_ - std::max(delta, 0.0));
     ui::CursorInput input;
     input.dragging = left_ && left_->moved
         && (ui::drag_extent(left_->start, left_->end) > ui::minimum_drag_select_distance || selection_.empty());
@@ -295,10 +496,17 @@ void BattleInput::cursor_frame(const LiveSessionView& live, const SpaceEnvironme
     input.camera_pan = camera.first;
     input.camera_rotate = camera.second;
     if (const auto* orders = live.order_input()) input.mode = orders->mode();
+    if (special_target_source_) {
+        input.special_weapon = special_weapon_button(live).target_action;
+        input.special_weapon_valid = hovered_ && special_target_valid(
+            ui::special_weapon_pick_target(units_[*hovered_].entity, units_[*hovered_].part), live);
+    }
     if (ability_target_) {
         const auto kind = sim::tactical::ability_kind(ui::ability_name(ability_target_->ability));
         const bool point_target = kind == sim::tactical::AbilityKind::barrage
-            || kind == sim::tactical::AbilityKind::weaken_enemy;
+            || kind == sim::tactical::AbilityKind::fow_reveal_ping
+            || kind == sim::tactical::AbilityKind::weaken_enemy || kind == sim::tactical::AbilityKind::buzz_droids
+            || kind == sim::tactical::AbilityKind::corrupt_systems;
         input.ability = point_target ? ui::CursorTarget::space_position : ui::CursorTarget::enemy;
         // CU-09 limitation: object abilities currently classify hostile contacts only; the
         // full ability admission query remains unwired (foc-cursors.md, Scope).
@@ -306,13 +514,13 @@ void BattleInput::cursor_frame(const LiveSessionView& live, const SpaceEnvironme
         // CU-12: movement passability must not replace the point ability's invalid pointer.
         if (point_target) input.passable = true;
     }
-    if (pointer_ && !ability_target_ && !placing_ && input.mode == ui::OrderMode::none && !input.ctrl && !input.alt) {
+    if (pointer_ && !ability_target_ && !special_target_source_ && !placing_ && input.mode == ui::OrderMode::none && !input.ctrl && !input.alt) {
         if (const auto reticle = world_ui_->reticle_at(*pointer_))
             input.repair = live.hardpoint_repair_allowed(reticle->entity, reticle->hardpoint);
     }
     input.placing = placing_.has_value();
     input.placement_valid = live.placement_valid();
-    const std::string_view id = ui::battle_cursor(input);
+    const std::string_view id = beacon_targeting_ && !input.hud ? "POINTER_PLACE_BEACON" : ui::battle_cursor(input);
     const std::string_view hover = input.hud ? std::string_view("hud") : std::string_view(cursor_hover_);
     cursor_history_.record(live.shown_frames(), id, hover);
     cursor_.update(id, delta);
@@ -333,6 +541,7 @@ std::optional<sim::math::Vec3> BattleInput::ability_point(
     if (!frame.latest) return std::nullopt;
     const auto instances = frame.latest->instances();
     const auto kind = sim::tactical::ability_kind(ui::ability_name(ability_target_->ability));
+    if (kind == sim::tactical::AbilityKind::fow_reveal_ping) return point; // WFP-02: no range or fog admission gate
     if (kind == sim::tactical::AbilityKind::barrage) {
         // BARR-01, CU-12: logical visibility, independent of the presentation reveal switch.
         if (frame.fog) {
@@ -359,6 +568,49 @@ std::optional<sim::math::Vec3> BattleInput::ability_point(
             const sim::math::Vec3 position{observer.fixed_transform.rows[0][3],
                 observer.fixed_transform.rows[1][3], observer.fixed_transform.rows[2][3]};
             if (sim::tactical::within_range(position, point, *observer.reveal_range, sim::tactical::RangeMetric::planar))
+                return point;
+        }
+        return std::nullopt;
+    }
+    if (kind == sim::tactical::AbilityKind::corrupt_systems && live.tables() != nullptr) {
+        for (const auto entity : ability_target_->units) {
+            const auto source = std::find_if(instances.begin(), instances.end(),
+                [&](const auto& instance) { return instance.entity_id == entity; });
+            if (source == instances.end()) continue;
+            const auto& types = live.tables()->units;
+            const auto type = std::find_if(types.begin(), types.end(),
+                [&](const auto& unit) { return skirmish::type_id(unit.id) == source->type_id; });
+            if (type == types.end()) continue;
+            for (const auto& special : type->special_abilities) {
+                if (special.kind != sim::tactical::SpecialAbilityKind::corrupt_systems) continue;
+                const sim::math::Vec3 position{source->fixed_transform.rows[0][3],
+                    source->fixed_transform.rows[1][3], source->fixed_transform.rows[2][3]};
+                if (sim::tactical::within_range(position, point, special.corrupt_max_range, sim::tactical::RangeMetric::planar)
+                    && (special.corrupt_min_range.raw() <= 0 || !sim::tactical::within_range(position, point,
+                        special.corrupt_min_range, sim::tactical::RangeMetric::planar))) return point;
+            }
+        }
+        return std::nullopt;
+    }
+    if (kind == sim::tactical::AbilityKind::buzz_droids && live.tables() != nullptr) {
+        // WAB-70: the point lies within the authored planar reach of a holder (the squadron's
+        // team container carries it, AB-60) and outside its minimum.
+        for (const auto entity : ability_target_->units) {
+            const auto source = std::find_if(instances.begin(), instances.end(),
+                [&](const auto& instance) { return instance.entity_id == entity; });
+            if (source == instances.end()) continue;
+            const auto& types = live.tables()->units;
+            const auto type = std::find_if(types.begin(), types.end(),
+                [&](const auto& unit) { return skirmish::type_id(unit.id) == source->type_id; });
+            if (type == types.end()) continue;
+            const auto& buzz = type->team_buzz_droids ? type->team_buzz_droids : type->buzz_droids;
+            if (!buzz) continue;
+            const sim::math::Vec3 position{source->fixed_transform.rows[0][3],
+                source->fixed_transform.rows[1][3], source->fixed_transform.rows[2][3]};
+            const auto minimum = buzz->min_range.value_or(sim::math::Fixed{});
+            if (sim::tactical::within_range(position, point, buzz->max_range.value_or(sim::math::Fixed{}),
+                    sim::tactical::RangeMetric::planar)
+                && (minimum.raw() <= 0 || !sim::tactical::within_range(position, point, minimum, sim::tactical::RangeMetric::planar)))
                 return point;
         }
         return std::nullopt;

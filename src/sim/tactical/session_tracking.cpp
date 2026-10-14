@@ -210,15 +210,40 @@ namespace session_detail {
     return matrix;
 }
 
-// The snapshot placement additionally rolls the heading by its bank (BK-05).
+// ABF-01, BK-05: immutable scans share the banked frame without writing victim caches.
+[[nodiscard]] core::Result<math::Mat3x4> unit_transform(const LiveUnit& unit) {
+    if (unit.banked_placement_cache && unit.banked_placement_cache->heading == unit.state.rotation
+        && unit.banked_placement_cache->roll == unit.roll) {
+        auto matrix = unit.banked_placement_cache->matrix;
+        matrix.rows[0][3] = unit.state.position.x;
+        matrix.rows[1][3] = unit.state.position.y;
+        matrix.rows[2][3] = unit.state.position.z;
+        return core::Result<math::Mat3x4>::success(matrix);
+    }
+    const auto rotation = banked_rotation(unit.state.rotation, unit.roll);
+    if (!rotation) return core::Result<math::Mat3x4>::failure(rotation.error());
+    return math::to_matrix(rotation.value(), unit.state.position);
+}
+
+// WWP-73, BK-05: combat and snapshot share one banked placement in the owning partition.
 [[nodiscard]] core::Result<math::Mat3x4> unit_transform(LiveUnit& unit) {
     if (unit.roll.raw() == 0) return level_transform(unit);
+    if (unit.banked_placement_cache && unit.banked_placement_cache->heading == unit.state.rotation
+        && unit.banked_placement_cache->roll == unit.roll) {
+        auto& matrix = unit.banked_placement_cache->matrix;
+        matrix.rows[0][3] = unit.state.position.x;
+        matrix.rows[1][3] = unit.state.position.y;
+        matrix.rows[2][3] = unit.state.position.z;
+        return core::Result<math::Mat3x4>::success(matrix);
+    }
     ++unit.banked_matrix_builds;
     const auto rotation = banked_rotation(unit.state.rotation, unit.roll);
     if (!rotation) {
         return core::Result<math::Mat3x4>::failure(rotation.error());
     }
-    return math::to_matrix(rotation.value(), unit.state.position);
+    auto matrix = math::to_matrix(rotation.value(), unit.state.position);
+    if (matrix) unit.banked_placement_cache = BankedPlacementCache{unit.state.rotation, unit.roll, matrix.value()};
+    return matrix;
 }
 
 } // namespace session_detail
@@ -229,6 +254,11 @@ core::Result<void> TacticalSession::Impl::plan_order(LiveUnit& unit, const Comma
             return core::Result<void>::success(); // MV-03: no motion profile, the unit stays
         }
         if (std::holds_alternative<StopPayload>(payload)) {
+            unit.motion = MotionState{};
+            unit.speed = math::Fixed{};
+            return core::Result<void>::success();
+        }
+        if (unit.abilities && ability_movement_disabled(*abilities.find(unit.state.type_id), *unit.abilities)) {
             unit.motion = MotionState{};
             unit.speed = math::Fixed{};
             return core::Result<void>::success();
@@ -308,12 +338,32 @@ void TacticalSession::Impl::take_plan(LiveUnit& unit, MotionState plan) {
         }
     }
 
+void TacticalSession::Impl::retain_path_failure(LiveUnit& unit, const math::Vec3 target,
+    const std::uint64_t frame, const math::Fixed max_speed) {
+        const auto previous = unit.formation;
+        unit.motion = MotionState{};
+        unit.speed = {};
+        unit.formation = FormationWait{frame + 2U * logical_frames_per_second + 1U, target, max_speed,
+            previous ? previous->order : CommandKey{}, previous ? previous->rank : 0U, false, frame};
+    }
+
 core::Result<bool> TacticalSession::Impl::plan_path_within(LiveUnit& unit, const math::Vec3 target, const std::uint64_t start,
     const CollisionWorld* world, const std::optional<math::Fixed> max_speed, PathSearchStats* const stats,
     const std::optional<std::uint64_t> budget) const {
+        // WIN-02, WMS-02: attack/guard/formation replans share the same deployment lock.
+        if (unit.abilities && ability_movement_disabled(*abilities.find(unit.state.type_id), *unit.abilities)) {
+            unit.motion = MotionState{};
+            unit.speed = math::Fixed{};
+            return core::Result<bool>::success(true);
+        }
         const auto inputs = path_inputs(unit, max_speed);
         if (!inputs) return core::Result<bool>::failure(inputs.error());
         const auto& in = inputs.value();
+        if (unit.formation && unit.formation->failure_frame
+            && (start <= *unit.formation->failure_frame
+                || start - *unit.formation->failure_frame <= 2U * logical_frames_per_second)) {
+            return core::Result<bool>::success(true);
+        }
         if (max_speed && in.limits.max_speed.raw() <= 0) {
             unit.motion = MotionState{};
             unit.speed = math::Fixed{};
@@ -329,17 +379,27 @@ core::Result<bool> TacticalSession::Impl::plan_path_within(LiveUnit& unit, const
                     && order.target == invalid_entity_id)
                 ? std::optional<math::Vec3>{order.destination} : std::nullopt;
             if (budget) {
+                bool exhausted = false;
                 auto within = plan_space_move_within(motion, in.limits, *footprint, *world, unit.state.entity_id, start,
-                    in.position, in.yaw, in.speed, target, *budget, stats, order.through_hazards, filter_destination);
+                    in.position, in.yaw, in.speed, target, *budget, stats, order.through_hazards, filter_destination, &exhausted);
                 if (!within) return core::Result<bool>::failure(within.error());
                 if (!within.value()) return core::Result<bool>::success(false);
+                if (exhausted) {
+                    retain_path_failure(unit, target, start, in.limits.max_speed);
+                    return core::Result<bool>::success(true);
+                }
                 take_plan(unit, std::move(*within.value()));
                 return core::Result<bool>::success(true);
             }
+            bool exhausted = false;
             auto plan = plan_space_move(
                 motion, in.limits, *footprint, *world, unit.state.entity_id, start, in.position, in.yaw, in.speed, target, stats,
-                PathSearchMode::bounded, order.through_hazards, filter_destination);
+                PathSearchMode::bounded, order.through_hazards, filter_destination, &exhausted);
             if (!plan) return core::Result<bool>::failure(plan.error());
+            if (exhausted) {
+                retain_path_failure(unit, target, start, in.limits.max_speed);
+                return core::Result<bool>::success(true);
+            }
             take_plan(unit, std::move(plan).value());
             return core::Result<bool>::success(true);
         }
@@ -390,6 +450,19 @@ EntityId TacticalSession::Impl::approach_target(const LiveUnit& unit) noexcept {
         }
     }
 
+EntityId TacticalSession::Impl::order_unit(const LiveUnit& unit) noexcept {
+        if (!unit.motion) return invalid_entity_id;
+        const auto& order = unit.state.order;
+        switch (order.kind) {
+        case OrderKind::attack:
+        case OrderKind::attack_move:
+        case OrderKind::guard:
+            return order.target;
+        default:
+            return invalid_entity_id;
+        }
+    }
+
 bool TacticalSession::Impl::approach_due(const LiveUnit& unit, const std::uint64_t tick) const noexcept {
         const auto issued = unit.state.order.issued_tick;
         return approach_target(unit) != invalid_entity_id && tick > issued
@@ -407,7 +480,10 @@ math::Fixed TacticalSession::Impl::approach_range(const LiveUnit& unit, const bo
         auto extension = detail::target_soft_radius(&motion, *target);
         if (!detail::has_aim_hardpoint(*target)) {
             extension = {};
-            if (const auto* footprint = motion.footprint(target->type_id))
+            const auto* geometry = target->formation_footprint ? &*target->formation_footprint : target->footprint;
+            if (geometry != nullptr)
+                extension = std::min(geometry->x_extent, geometry->y_extent);
+            else if (const auto* footprint = motion.footprint(target->type_id))
                 extension = std::min(footprint->x_extent, footprint->y_extent);
             else if (target->profile != nullptr && target->profile->collision) {
                 const auto& box = *target->profile->collision;
@@ -429,10 +505,10 @@ bool TacticalSession::Impl::target_hardpoint_standing(const LiveUnit& target, co
             || !hardpoint_destroyed(*health, *target.durability, index);
     }
 
-math::Vec3 TacticalSession::Impl::approach_point(const bool guard, const LiveUnit& target,
-    const detail::CombatUnit* target_view, const math::Vec3& from, const std::uint32_t hardpoint) {
+math::Vec3 TacticalSession::Impl::approach_point(const LiveUnit& unit, const bool guard, const LiveUnit& target,
+    const detail::CombatUnit* target_view, const std::uint32_t hardpoint) const {
         if (guard || target_view == nullptr) return target.state.position;
-        return detail::ordered_aim_point(*target_view, from, hardpoint);
+        return detail::ordered_aim_point(&combat, combat.find(unit.state.type_id), *target_view, unit.state.position, hardpoint);
     }
 
 core::Result<math::Vec3> TacticalSession::Impl::movement_end(const LiveUnit& unit) {
@@ -460,8 +536,20 @@ core::Result<math::Vec3> TacticalSession::Impl::predicted_position(
         return core::Result<math::Vec3>::success(sample.value().position);
     }
 
+core::Result<math::Vec3> TacticalSession::Impl::predicted_approach_position(const LiveUnit& target,
+    const math::Vec3& aim, const std::uint64_t frame, const std::uint64_t at) const {
+        const auto* footprint = motion.footprint(target.state.type_id);
+        const bool tracked = footprint != nullptr
+            ? footprint->layer != SpaceLayer::none && footprint->layer != SpaceLayer::static_object
+            : target.motion.has_value();
+        if (tracked) return predicted_position(target, frame, at);
+        // OR-07: resolved attachment position, or the parent when none stands.
+        return core::Result<math::Vec3>::success(aim);
+    }
+
 core::Result<TacticalSession::Impl::ApproachPlan> TacticalSession::Impl::approach_mapping(
-    const LiveUnit& unit, const LiveUnit& target, const math::Fixed range, const std::uint64_t frame) const {
+    const LiveUnit& unit, const LiveUnit& target, const math::Fixed range, const std::uint64_t frame,
+    const std::optional<math::Vec3>& aim) const {
         const auto limits = limits_of(unit);
         if (!limits) return core::Result<ApproachPlan>::failure(limits.error());
         const auto target_yaw = yaw_degrees(target.state.rotation);
@@ -474,7 +562,8 @@ core::Result<TacticalSession::Impl::ApproachPlan> TacticalSession::Impl::approac
         ApproachPlan plan;
         plan.prediction_frame = detail::prediction_frame(frame, unit.state.position, limits.value().max_speed,
             target.state.position, target_yaw.value(), target_speed, range);
-        const auto predicted = predicted_position(target, frame, plan.prediction_frame);
+        const auto predicted = predicted_approach_position(
+            target, aim.value_or(target.state.position), frame, plan.prediction_frame);
         if (!predicted) return core::Result<ApproachPlan>::failure(predicted.error());
         auto slot = detail::approach_slot(unit.state.position, predicted.value(), range);
         if (!slot) return core::Result<ApproachPlan>::failure(slot.error());
@@ -487,7 +576,7 @@ core::Result<std::optional<TacticalSession::Impl::ApproachPlan>> TacticalSession
         using Checked = core::Result<std::optional<ApproachPlan>>;
         const bool guard = unit.state.order.kind == OrderKind::guard;
         const auto range = approach_range(unit, guard, target_view);
-        const auto now = approach_point(guard, target, target_view, unit.state.position,
+        const auto now = approach_point(unit, guard, target, target_view,
             unit.state.order.kind == OrderKind::attack ? unit.state.order.hardpoint : attack_hull);
         auto reach = core::Result<math::Fixed>::success(range);
         if (!guard && target_view != nullptr) {
@@ -501,12 +590,13 @@ core::Result<std::optional<TacticalSession::Impl::ApproachPlan>> TacticalSession
         const auto end = movement_end(unit);
         if (!end) return Checked::failure(end.error());
         const auto predicted =
-            predicted_position(target, frame, unit.approach ? unit.approach->prediction_frame : std::uint64_t{0});
+            predicted_approach_position(target, now, frame,
+                unit.approach ? unit.approach->prediction_frame : std::uint64_t{0});
         if (!predicted) return Checked::failure(predicted.error());
         if (within_range(end.value(), predicted.value(), range, RangeMetric::planar)) {
             return Checked::success(std::nullopt);
         }
-        auto plan = approach_mapping(unit, target, range, frame);
+        auto plan = approach_mapping(unit, target, range, frame, now);
         if (!plan) return Checked::failure(plan.error());
         return Checked::success(plan.value());
     }

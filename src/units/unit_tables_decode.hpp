@@ -88,6 +88,7 @@ private:
     void load_production(Object& object, UnitType& unit);
 
     void load_body(Object& object, UnitType& unit);
+    void load_planetary_weapon(Object& object, UnitType& unit);
 
     void load_squadron(Object& object, UnitType& unit);
 

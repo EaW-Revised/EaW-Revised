@@ -392,6 +392,7 @@ public:
     bool run(const std::uint64_t until);
 
     [[nodiscard]] bool ended() const noexcept { return outcome_.has_value(); }
+    [[nodiscard]] bool exhausted() const noexcept { return exhausted_; }
     [[nodiscard]] const core::Result<MotionState>& outcome() const { return *outcome_; }
     [[nodiscard]] Work& work() noexcept { return work_; }
 
@@ -435,6 +436,7 @@ private:
     std::optional<Finder> finder_;
     bool started_{};
     bool running_{};
+    bool exhausted_{};
     Vec2 open_{};
     Fixed length_;
     Fixed start_yaw_;

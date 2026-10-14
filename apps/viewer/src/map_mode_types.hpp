@@ -1,6 +1,8 @@
 #pragma once
 
+#include "attract_camera.hpp"
 #include "map_mode_assets.hpp"
+#include <chrono>
 
 namespace eawr::presentation::godot_backend {
 
@@ -139,8 +141,25 @@ struct MapMode::State final {
 
     // P2-20a (#83): the tactical HUD shell over the map, when asked for.
     std::optional<TacticalHud::Options> hud_options;
+    // MAT-10: the demo map's saved camera, drawn as a locked view (MapMode::Options::attract).
+    std::optional<skirmish::AttractCamera> attract_camera;
+    // The attract's moving camera (a placeholder for FoC's battle camera, #3005): it starts at the
+    // saved camera above and is driven from the live battle each frame.
+    std::optional<AttractCamera> attract_motion;
+    std::vector<std::array<float, 3>> attract_ships;
+    std::array<float, 3> attract_first_eye{};
+    std::size_t attract_camera_updates{};
+    // attract_status(): each unit's first-sampled position (raw Q24 x, y, z) and hull.
+    struct AttractSample final {
+        std::array<std::int64_t, 3> position{};
+        std::int64_t hull{};
+    };
+    std::map<sim::EntityId, AttractSample> attract_baseline;
     bool hud_faction_given{};
     std::unique_ptr<TacticalHud> hud;
+    godot::Control* lan_overlay{};
+    godot::Control* lan_incident{};
+    LanRecoveredNotice lan_recovered_notice;
     // Builds the HUD when asked for; false with `failure` set when the shell
     // cannot be read.
     [[nodiscard]] bool build_hud(godot::Node3D& host, const std::optional<std::string>& context_name);
@@ -159,6 +178,15 @@ struct MapMode::State final {
     // #453, #459: hands the live battle's time panel and outcome to the HUD. Called right after
     // each live frame, so a capture of that frame shows them.
     void sync_battle_hud();
+    // #1923 (docs/behaviour/loading-screen.md): the battle loading screen, the host's or one built
+    // here under the battle's host, the honest progress behind its bar, and the Begin that
+    // dismisses it and starts the battle (BLD-10 to BLD-13).
+    EawrLoadingScreen* loading{};
+    std::string loading_failure;
+    presentation::ui::LoadProgress load_progress;
+    void open_loading_screen(godot::Node3D& host, const assets::Map& map);
+    void load_report(std::size_t stage, std::uint64_t done, std::uint64_t total);
+    void begin_battle();
     // #455: hands the live battle to the HUD's minimap (what the local player sees, the fog
     // revealers of the local team, the camera's outline). Called right after each live frame.
     void sync_minimap();
@@ -171,16 +199,21 @@ struct MapMode::State final {
     // player's economy, and the pool slots' types for a pick.
     void sync_production();
     std::vector<sim::tactical::TypeId> pool_types;
+    std::vector<std::uint64_t> pool_tokens;
     EawrProductionPanel::View production_view;
     presentation::ui::PoolLayoutCache production_pool_cache;
     std::size_t production_pool_pending{};
     presentation::ui::BuildMenuCache production_menu_cache;
+    std::optional<std::pair<sim::EntityId, sim::tactical::TypeId>> encyclopedia_world_hover;
+    bool encyclopedia_ability_hover{};
     std::array<std::vector<sim::tactical::QueueEntry>, sim::tactical::build_queue_count> production_queues;
     std::uint64_t minimap_syncs{};
     // #848 (docs/behaviour/foc-battle-selection.md V-5a to V-5g): the battle UI in the overview
     // levels x1 and x2. Once per live frame, after the camera took this frame's level and before
     // the battle input draws: hides what the level hides and starts the fade on a level change.
     void sync_overview_ui();
+    void set_movie_mode(bool on);
+    sim::EntityId movie_subject{};
     std::string overview_level;
     presentation::ui::OverviewUi overview_ui;
     std::unique_ptr<OverviewFadeView> overview_fade;

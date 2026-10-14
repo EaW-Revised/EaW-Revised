@@ -218,6 +218,8 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
         look.hide_when_fogged = std::any_of(behaviours.begin(), behaviours.end(),
             [](const auto& name) { return lower(name) == "hide_when_fogged"; });
         look.immediate_fog = truthy(tag(value, "Last_State_Visible_Under_FOW"));
+        const auto visible_to_enemy = tag(value, "Model_Visible_To_Enemy");
+        look.visible_to_enemy = visible_to_enemy.empty() || truthy(visible_to_enemy);
         // BP-01: Projectile_Custom_Render 1 is the laser beam, 2 the laser kite; anything else
         // draws Space_Model_Name.
         const int custom = presentation_constants::custom_render(tag(value, "Projectile_Custom_Render"));
@@ -248,6 +250,15 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
     }
     // #862 (space-abilities AB-60, AB-66): the craft of a squadron whose team holds
     // ION_CANNON_SHOT fire its Projectile_Types_Override while it is on; craft type -> projectile.
+    for (const units::UnitType& type : tables.units) {
+        if (!type.cluster_bomb) continue;
+        // WCB-01: the real bomb authors object death effects for either terminal path.
+        auto look = look_of(type.cluster_bomb->bomb_type);
+        if (look.detonation.empty()) look.detonation = look.death_explosion;
+        if (look.lifetime_detonation.empty()) look.lifetime_detonation = look.death_explosion;
+        types_[skirmish::type_id(type.cluster_bomb->bomb_type)].weapons.emplace(tactical::object_weapon,
+            std::move(look));
+    }
     std::map<std::string, std::string> ability_projectiles;
     for (const units::UnitType& squadron : tables.units) {
         if (squadron.kind != units::UnitKind::squadron) continue;
@@ -261,12 +272,55 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
     }
     for (const units::UnitType& type : tables.units) {
         TypeLooks looks;
+        looks.healing = type.special_abilities;
+        for (const auto& handler : looks.healing) {
+            if (handler.kind != tactical::SpecialAbilityKind::force_healing || handler.heal_lightning.empty()
+                || healing_lightning_.contains(handler.heal_lightning)) continue;
+            const auto document = data::load_document(*filesystem_, "data/xml/lightningeffecttypes.xml");
+            if (!document) continue;
+            for (const auto& effect : document.value().root.children) {
+                const auto name = std::find_if(effect.attributes.begin(), effect.attributes.end(), [](const auto& attribute) {
+                    return lower(attribute.name) == "name";
+                });
+                if (name == effect.attributes.end() || lower(name->value) != lower(handler.heal_lightning)) continue;
+                HealLightning look;
+                const auto read = [&](const std::string_view tag_name) {
+                    for (const auto& child : effect.children) if (lower(child.name) == lower(tag_name)) {
+                        data::tag_trace::used(child); return numbers(child.raw_text);
+                    }
+                    return std::vector<float>{};
+                };
+                const auto scalar = [&](const std::string_view tag_name) { const auto v = read(tag_name); return v.empty() ? 0.0F : v[0]; };
+                for (const auto& child : effect.children) if (lower(child.name) == "texture_name") {
+                    data::tag_trace::used(child); look.texture = trim(child.raw_text);
+                }
+                look.width_min = scalar("Width_Min"); look.width_max = scalar("Width_Max");
+                look.fade_min = scalar("Fadeout_Time_Min"); look.fade_max = scalar("Fadeout_Time_Max");
+                look.interval_min = scalar("Bolt_Creation_Interval_Min"); look.interval_max = scalar("Bolt_Creation_Interval_Max");
+                look.detail = static_cast<std::uint32_t>(std::clamp(scalar("Detail"), 1.0F, 64.0F));
+                look.bolts = static_cast<std::uint32_t>(std::clamp(scalar("Number_Bolts"), 0.0F, 128.0F));
+                const auto displacement = read("Displace");
+                for (std::size_t i = 0; i < std::min(displacement.size(), look.displacement.size()); ++i) look.displacement[i] = displacement[i];
+                const auto colour = [&](const std::string_view tag_name) {
+                    const auto v = read(tag_name);
+                    return v.size() >= 4 ? particles::Color{v[0] / 255.0F, v[1] / 255.0F, v[2] / 255.0F, v[3] / 255.0F} : particles::Color{};
+                };
+                look.start = colour("Color_Start"); look.end = colour("Color_End");
+                healing_lightning_.emplace(handler.heal_lightning, std::move(look));
+            }
+        }
+        for (const auto& special : type.special_abilities) {
+            if (special.kind != tactical::SpecialAbilityKind::corrupt_systems) continue;
+            looks.corrupt_target_particle = special.corrupt_target_particle;
+            looks.corrupt_owner_particle = special.corrupt_owner_particle;
+        }
         for (std::size_t index = 0; index < type.death_projectiles.size(); ++index) {
             looks.weapons.emplace(tactical::death_projectile_slot_flag | static_cast<std::uint32_t>(index),
                 look_of(type.death_projectiles[index]));
         }
         for (const auto& ability : type.abilities)
             if (ability.type == "REPLENISH_WINGMEN") looks.replenish_particle = ability.replenish_particle;
+            else if (ability.type == "LURE") looks.lure_particle = ability.lure_particle;
         const tactical::CombatProfile* profile = combat.find(skirmish::type_id(type.id));
         const auto ability_projectile = ability_projectiles.find(type.id);
         // The shot's frame step (Max_Speed per frame), for where its flight meets a shield (BP-19).
@@ -283,6 +337,13 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
                 ProjectileLook look = look_of(hardpoint.weapon->projectile);
                 look.step_length = step_of(static_cast<std::uint32_t>(index));
                 looks.weapons.emplace(static_cast<std::uint32_t>(index), std::move(look));
+                if (!hardpoint.weapon->charged_projectile.empty()) {
+                    ProjectileLook charged = look_of(hardpoint.weapon->charged_projectile);
+                    if (profile) for (const auto& gun : profile->weapons)
+                        if (gun.hardpoint == index && gun.charged_shot)
+                            charged.step_length = static_cast<double>(to_float(gun.charged_shot->speed));
+                    looks.charged_weapons.emplace(static_cast<std::uint32_t>(index), std::move(charged));
+                }
                 // AB-66: a weapon the simulation gave an ability shot draws it with the override's look.
                 const tactical::WeaponProfile* weapon = nullptr;
                 if (profile != nullptr) {
@@ -334,6 +395,8 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
         if (!type.model_path.empty()) {
             if (auto model = assets::load_model(*filesystem_, type.model_path)) {
                 looks.shield_mesh = has_shield_mesh(model.value());
+                for (std::size_t bone = 0; bone < model.value().bones.size(); ++bone)
+                    looks.named_bones.emplace(lower(model.value().bones[bone].name), static_cast<std::uint32_t>(bone));
                 if (type.shielded || !looks.asteroid_hits.empty()) {
                     looks.collision = space::make_shield_collision_mesh(collision_triangles(model.value(), false, &looks.collision_bones));
                 }
@@ -358,8 +421,48 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
             }
         }
         for (const auto& nested : type.special_abilities) {
-            if (nested.kind != tactical::SpecialAbilityKind::energy_weapon && nested.kind != tactical::SpecialAbilityKind::tractor_beam) continue;
-            const auto beam = nested.kind == tactical::SpecialAbilityKind::energy_weapon ? 0U : 1U;
+            if (nested.kind == tactical::SpecialAbilityKind::blast && nested.charged_blast) {
+                looks.blast_charging_particle = nested.charged_blast->charging_effect;
+                looks.blast_charged_particle = nested.charged_blast->charged_effect;
+            }
+            if (nested.kind == tactical::SpecialAbilityKind::laser_defense) {
+                // WLD-12: the beam's authored look; the origin is the bone nearest the shot at draw time.
+                auto& defence = looks.defence;
+                defence.texture = nested.defence_beam_texture;
+                defence.width = std::max(0.0F, to_float(nested.defence_beam_width));
+                const auto channel = [&](const std::size_t index) { return static_cast<float>(nested.defence_colour[index]) / 255.0F; };
+                defence.colour = {channel(0), channel(1), channel(2), channel(3)};
+                defence.frames = nested.defence_beam_frames;
+                if (!type.model_path.empty()) {
+                    if (auto model = assets::load_model(*filesystem_, type.model_path)) {
+                        const auto frames = units::bind_frames(model.value());
+                        if (frames) for (const auto& name : nested.defence_bones) {
+                            for (std::size_t bone = 0; bone < model.value().bones.size(); ++bone) {
+                                if (lower(model.value().bones[bone].name) != lower(name)) continue;
+                                const auto& frame = frames.value()[bone];
+                                // Keep bind points in model space; the zap consumer applies the quarter turn.
+                                defence.bones.push_back({to_float(frame.rows[0][3]) * looks.scale,
+                                    to_float(frame.rows[1][3]) * looks.scale, to_float(frame.rows[2][3]) * looks.scale});
+                                break;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            if (nested.kind != tactical::SpecialAbilityKind::energy_weapon && nested.kind != tactical::SpecialAbilityKind::tractor_beam
+                && nested.kind != tactical::SpecialAbilityKind::leech_shields) continue;
+            const auto beam = nested.kind == tactical::SpecialAbilityKind::energy_weapon ? 0U
+                : nested.kind == tactical::SpecialAbilityKind::leech_shields ? 2U : 1U;
+            if (beam == 2) {
+                auto& look = leech_beams_[id];
+                look.texture = nested.leech_texture;
+                look.width = to_float(nested.leech_beam_width);
+                look.frames = static_cast<std::int32_t>(nested.leech_beam_frames);
+                const auto& c = nested.leech_colour;
+                look.colour = {c[0] / 255.0F, c[1] / 255.0F, c[2] / 255.0F, c[3] / 255.0F};
+                looks.leech_effect = nested.leech_effect;
+            }
             if (beam == 0) looks.energy_owner_particle = nested.beam_owner_particle;
             if (!nested.beam_owner_bone.empty() && !type.model_path.empty()) {
                 if (auto model = assets::load_model(*filesystem_, type.model_path)) {
@@ -367,8 +470,10 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
                     if (frames) for (std::size_t bone = 0; bone < model.value().bones.size(); ++bone) {
                         if (lower(model.value().bones[bone].name) != lower(nested.beam_owner_bone)) continue;
                         const auto& frame = frames.value()[bone];
-                        looks.beam_origins[beam] = {-to_float(frame.rows[1][3]) * looks.scale,
-                            to_float(frame.rows[0][3]) * looks.scale, to_float(frame.rows[2][3]) * looks.scale};
+                        looks.beam_bones[beam] = static_cast<std::uint32_t>(bone);
+                        // live_model_point applies the model quarter-turn; keep this fallback in asset space.
+                        looks.beam_origins[beam] = {to_float(frame.rows[0][3]) * looks.scale,
+                            to_float(frame.rows[1][3]) * looks.scale, to_float(frame.rows[2][3]) * looks.scale};
                         break;
                     }
                 }

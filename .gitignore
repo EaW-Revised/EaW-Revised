@@ -30,3 +30,6 @@ __pycache__/
 config/host-paths.local.json
 config/gpu-hosts.local.json
 config/build-hosts.local.json
+
+# Private relay configuration and locally generated certificate/key files.
+tools/relay/*.local.*

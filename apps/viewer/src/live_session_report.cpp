@@ -42,6 +42,27 @@ namespace eawr::presentation::godot_backend {
 namespace tactical = sim::tactical;
 using namespace live_session_detail;
 
+std::vector<std::uint8_t> LiveSessionView::finished_replay_bytes(std::string& error) {
+    const auto lan = lan_view();
+    const bool ended = (battle_end_ && battle_end_->ended_frame)
+        || (multiplayer() && lan.phase == LanPhase::ended && lan.victory.has_value());
+    if (!session_ || !ended || session_->failure()) {
+        error = "There is no finished battle recording to save.";
+        return {};
+    }
+    const auto final = session_->frame().latest;
+    if (!final || !final->outcome() || session_->completed_tick() < final->outcome()->end_tick) {
+        error = "The battle has not reached its recording end tick.";
+        return {};
+    }
+    // record() requires the worker to be joined. The end screen is already holding the
+    // completed tick; stopping here adds no command or presentation state (UI-C2).
+    auto bytes = platform::serialize_finished_replay(*session_);
+    if (!bytes) { error = core::format_diagnostic(bytes.error()); return {}; }
+    error.clear();
+    return std::move(bytes).value();
+}
+
 void LiveSessionView::save_failure_replay() {
     if (failure_replay_tried_ || !session_ || !session_->failure()) return;
     failure_replay_tried_ = true;
@@ -96,6 +117,29 @@ void LiveSessionView::write_report(std::ostream& output) const {
            << ", \"ready_tick\": " << (ready_tick_ ? std::to_string(*ready_tick_) : "null")
            << ", \"begin_tick\": " << (begin_tick_ ? std::to_string(*begin_tick_) : "null")
            << ", \"begin_frame\": " << (begin_frame_ ? std::to_string(*begin_frame_) : "null")
+           << ", \"carrier_riders\": [" << [&] {
+                std::string rows;
+                if (battle_frame_.latest) for (const auto& instance : battle_frame_.latest->instances()) {
+                    const auto named = [&](const tactical::TypeId type) {
+                        if (tables_) for (const auto& row : tables_->units) if (skirmish::type_id(row.id) == type) return row.id;
+                        return std::string{};
+                    };
+                    const auto* type = tables_ ? tables_->find(named(instance.type_id)) : nullptr;
+                    const auto range = type ? units::sensor_range(*type) : std::nullopt;
+                    const auto append = [&](auto&& self, const auto& contained) -> void {
+                        for (const auto& rider : contained) {
+                            rows += (rows.empty() ? "" : ", ") + std::string("{\"carrier\": ") + std::to_string(instance.entity_id)
+                                + ", \"carrier_type\": " + json(named(instance.type_id)) + ", \"rider\": " + std::to_string(rider.entity_id)
+                                + ", \"type\": " + json(named(rider.type_id)) + ", \"base_reveal_raw\": "
+                                + (range ? std::to_string(range->raw()) : "null") + ", \"reveal_raw\": "
+                                + (instance.reveal_range ? std::to_string(instance.reveal_range->raw()) : "null") + "}";
+                            self(self, rider.members);
+                        }
+                    };
+                    append(append, instance.contained);
+                }
+                return rows;
+              }() << "]"
            << ", \"results\": {\"elapsed_milliseconds\": " << results_.elapsed_milliseconds
            << ", \"time\": " << json(ui::battle_time_text(results_.elapsed_milliseconds))
            << ", \"scoring_pumps\": " << (scoring_ ? scoring_->pumps() : 0U)
@@ -131,11 +175,25 @@ void LiveSessionView::write_report(std::ostream& output) const {
                   }
                   return rows;
               }() << "]"
+           << ", \"beacons\": [" << [&] {
+                  std::string rows;
+                  for (const auto& beacon : visible_beacons())
+                      rows += (rows.empty() ? "" : ", ") + std::string("{\"player\": ") + std::to_string(beacon.player)
+                          + ", \"type\": " + json(beacon_type(beacon.type))
+                          + ", \"placed_tick\": " + std::to_string(beacon.placed_tick)
+                          + ", \"expires_tick\": " + std::to_string(beacon.expires_tick)
+                          + ", \"sequence\": " + std::to_string(beacon.sequence) + "}";
+                  return rows;
+              }() << "]"
            << ", \"replay\": " << json(ViewerPath::utf8(options_.replay_input))
            << ", \"reveal\": " << (options_.reveal ? "true" : "false")
            << ", \"pacing\": " << json(options_.real_time ? "real_time" : "driven")
            << ", \"workers\": " << (session_ ? session_->worker_count() : 0U)
            << ", \"local_player\": " << player_
+           << ", \"multiplayer\": " << (multiplayer() ? "true" : "false")
+           << ", \"lan_message\": " << json(multiplayer() ? lan_message(lan_view()) : std::string{})
+           << ", \"lan_input_delay\": " << (multiplayer() ? lan_view().input_delay : 0)
+           << ", \"lan_desync\": " << (multiplayer() && lan_view().desync_tick ? "true" : "false")
            << ", \"units\": " << ship_of_entity_.size()
            << ", \"launch_slots\": " << launch_slots_.size()
            << ", \"launched_drawn\": " << launched_ship_of_entity_.size()
@@ -155,8 +213,7 @@ void LiveSessionView::write_report(std::ostream& output) const {
                               if (instance.entity_id == container) owner = instance.owner;
                           }
                       }
-                      const bool launched = !setup_ || std::none_of(setup_->squadrons.begin(), setup_->squadrons.end(),
-                          [&](const tactical::Squadron& start) { return start.container == container; });
+                        const bool launched = squadron_launched(container);
                       // #614: how many of its craft have an S-foil clip pair, and how many hold the foils locked.
                       std::size_t foil_craft = 0;
                       std::size_t foils_locked = 0;
@@ -186,6 +243,20 @@ void LiveSessionView::write_report(std::ostream& output) const {
                                                  : std::string("null"))
            << ", \"visible_units\": " << visible_units_
            << ", \"hidden_units\": " << hidden_units_
+           << ", \"unfogged_map_props\": [" << [&] {
+                  std::string rows;
+                  if (start_) for (const auto& unit : start_->units) {
+                      const auto entity = unit.state.entity_id;
+                      if (!std::binary_search(unfogged_map_props_.begin(), unfogged_map_props_.end(), entity)) continue;
+                      const auto contacts = battle_frame_.latest ? battle_frame_.latest->visible_entities(player_)
+                          : std::span<const sim::EntityId>{};
+                      rows += (rows.empty() ? "" : ", ") + std::string("{\"entity\": ") + std::to_string(entity)
+                          + ", \"type\": " + json(unit.type)
+                          + ", \"sensor_visible\": " + (std::binary_search(contacts.begin(), contacts.end(), entity) ? "true" : "false")
+                          + ", \"opacity\": " + std::to_string(fade_.opacity(entity).value_or(0)) + "}";
+                  }
+                  return rows;
+              }() << "]"
            << ", \"fading_units\": " << fading_units_
            << ", \"fog_ghost_pieces\": " << fog_ghost_instances_.size()
            << ", \"fog_ghost_log\": [" << [&] {
@@ -255,8 +326,12 @@ void LiveSessionView::write_report(std::ostream& output) const {
                       const auto found = owner_of_entity_.find(ship.live_entity);
                       const auto owner = found == owner_of_entity_.end() ? 0U : found->second;
                       const auto& rgb = *ship.team_colour;
+                      // #3076 (WGT-120): lobby colour in a skirmish, else the type's or the faction's no-colorization colour.
+                      const char* source = colorization_enabled_ ? "lobby"
+                          : type_no_colorization_.contains(ship.object_id) ? "type" : "faction";
                       rows += (rows.empty() ? "" : ", ") + std::string("{\"entity\": ")
                           + std::to_string(ship.live_entity) + ", \"player\": " + std::to_string(owner)
+                          + ", \"type\": " + json(ship.object_id) + ", \"source\": " + json(source)
                           + ", \"rgb\": [" + std::to_string(rgb[0]) + ", " + std::to_string(rgb[1]) + ", " + std::to_string(rgb[2]) + "]}";
                   }
                   return rows;
@@ -300,11 +375,34 @@ void LiveSessionView::write_report(std::ostream& output) const {
            << ", \"defend\": " << (options_.defend ? "true" : "false")
            << ", \"shield_flash\": " << (options_.shield_flash ? "true" : "false")
            << ", \"shield_flashes\": " << shield_flashes_
+           << ", \"self_destruct_pulses\": " << self_destruct_pulses_
+           << ", \"self_destruct_cancels\": " << self_destruct_cancels_
+           << ", \"self_destruct_light_samples\": " << self_destruct_light_samples_
+           << ", \"max_self_destruct_light_red\": " << max_self_destruct_light_red_
            << ", \"shield_flash_samples\": " << shield_flash_samples_
            << ", \"shield_flash_duration\": " << shield_flash_constants_.duration
            << ", \"max_shield_flash_scale\": [" << max_shield_flash_scale_[0] << ','
            << max_shield_flash_scale_[1] << ',' << max_shield_flash_scale_[2] << ']'
 
+           << ", \"stealth_blends\": [" << [&] {
+                  std::ostringstream rows;
+                  bool first = true;
+                  for (const auto& [id, blend] : stealth_blends_) {
+                      rows << (first ? "" : ", ") << "{\"entity\": " << id << ", \"blend\": " << blend.value();
+                      if (battle_frame_.latest) {
+                          const auto instances = battle_frame_.latest->instances();
+                          const auto instance = std::lower_bound(instances.begin(), instances.end(), id,
+                              [](const auto& unit, const sim::EntityId entity) { return unit.entity_id < entity; });
+                          if (instance != instances.end() && instance->entity_id == id) {
+                              rows << ", \"stealth_on\": " << (instance->stealth_on ? "true" : "false")
+                                   << ", \"stealth_invisible\": " << (instance->stealth_invisible ? "true" : "false");
+                          }
+                      }
+                      rows << "}";
+                      first = false;
+                  }
+                  return rows.str();
+              }() << "]"
            << ", \"nebula_blends\": [" << [&] {
                   std::ostringstream rows;
                   bool first = true;
@@ -322,6 +420,18 @@ void LiveSessionView::write_report(std::ostream& output) const {
         output << (first_unit ? "" : ", ") << "{\"entity\": " << unit.entity << ", \"position\": [" << unit.position[0]
                << ", " << unit.position[1] << ", " << unit.position[2] << "], \"yaw\": " << unit.yaw << "}";
         first_unit = false;
+    }
+    output << "], \"object_turrets\": [";
+    bool first_turret = true;
+    if (ability_snapshot_) for (const auto& instance : ability_snapshot_->instances()) {
+        if (!instance.object_turret) continue;
+        const auto& turret = *instance.object_turret;
+        output << (first_turret ? "" : ", ") << "{\"entity\": " << instance.entity_id
+               << ", \"target\": " << turret.target
+               << ", \"yaw\": " << static_cast<double>(turret.yaw.raw()) / sim::math::Fixed::scale
+               << ", \"desired_yaw\": " << static_cast<double>(turret.desired_yaw.raw()) / sim::math::Fixed::scale
+               << ", \"ready\": " << (turret.ready ? "true" : "false") << "}";
+        first_turret = false;
     }
     output << "]"
            << ", \"drawn_launch_colours\": [";
@@ -413,6 +523,13 @@ void LiveSessionView::write_report(std::ostream& output) const {
                 << pad.state.target << ", \"progress_raw\": " << pad.state.progress.raw()
                 << ", \"under_construction\": " << pad.state.under_construction
                 << ", \"constructed\": " << pad.state.constructed;
+            // #3150: the colour the pad's capture bar and model tint take for its capture target (WBP-52).
+            if (instance != snapshot->instances().end()) {
+                const bool neutralizing = instance->owner != economy_.pads.neutral;
+                if (const auto rgb = model_colour_of_type(neutralizing ? instance->owner : pad.state.target, instance->type_id)) {
+                    output << ", \"capture_rgb\": [" << int((*rgb)[0]) << ", " << int((*rgb)[1]) << ", " << int((*rgb)[2]) << "]";
+                }
+            }
             if (pad.construction) {
                 output << ", \"start_frame\": " << pad.construction->start_frame
                     << ", \"finish_frame\": " << pad.construction->finish_frame

@@ -298,10 +298,10 @@ struct EnvironmentEffectPlan final {
 
 // The effects' TIME clock (#185). Nebula.fx moves only through it: a vertex
 // wave of period 1 / TFreq and a UV scroll of 3 * UVScrollRate per second of
-// it. Retail's scene clock gains LogicalFPS / 1000 = 0.03 s for each 30 Hz
-// sim frame a render step advanced (so it stands still while paused), and
-// wraps at 28800 s. The viewer's 30 Hz presentation tick stands for the sim
-// frame. `environment_effect_time` returns the clock at `tick`.
+// it. Retail gains 0.03 effect seconds per accepted logical frame at 30 Hz,
+// holds while paused and wraps at 28800 s. The viewer currently supplies
+// real-time 30 Hz presentation ticks, held for captures. Shared live pause/
+// speed admission remains FD-74 (legacy #3588). This returns the clock at tick.
 inline constexpr double effect_clock_seconds_per_tick = 0.03;
 inline constexpr std::uint64_t effect_clock_wrap_ticks = 960'000; // 28800 s
 [[nodiscard]] float environment_effect_time(std::uint64_t tick) noexcept;

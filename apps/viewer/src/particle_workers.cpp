@@ -1,11 +1,13 @@
 #include "particle_workers.hpp"
 
+#include "eawr/presentation/particles/worker_count.hpp"
+
 #include <algorithm>
 
 namespace eawr::presentation::godot_backend {
 
 std::size_t ParticleWorkers::default_count(const std::size_t hardware_threads) noexcept {
-    return std::clamp<std::size_t>(hardware_threads / 4, 1, 4);
+    return particles::default_particle_worker_count(hardware_threads);
 }
 
 ParticleWorkers::ParticleWorkers(const std::size_t count) : pool_(std::max<std::size_t>(count, 1)) {}

@@ -83,7 +83,7 @@ namespace {
 // A Death_* seconds tag of the clone type; `fallback` when absent or not a number.
 } // namespace
 
-LiveSessionView::LiveSessionView(Options options) : options_(std::move(options)), time_(options_.speed_step) {}
+LiveSessionView::LiveSessionView(Options options) : options_(std::move(options)), time_(options_.lan ? ui::default_speed_step : options_.speed_step) {}
 
 LiveSessionView::~LiveSessionView() {
     shutdown_trace::mark("live session view: stop begins");

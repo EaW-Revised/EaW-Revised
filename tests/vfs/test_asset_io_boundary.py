@@ -27,7 +27,8 @@ def main() -> int:
             if path.suffix.lower() not in {".cpp", ".cc", ".cxx", ".hpp", ".h"}:
                 continue
             relative = path.relative_to(arguments.root).as_posix()
-            if relative.startswith(("src/vfs/", "src/platform/", "include/eawr/vfs/")):
+            # Platform headers declare the native adapter API just as platform sources implement it.
+            if relative.startswith(("src/vfs/", "src/platform/", "include/eawr/platform/", "include/eawr/vfs/")):
                 continue
             for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if FORBIDDEN.search(line):

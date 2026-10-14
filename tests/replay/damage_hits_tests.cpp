@@ -227,8 +227,66 @@ void test_projectile_mesh_budget() {
               << rejected_work.boxes << ", triangles " << rejected_work.triangles << '\n';
 }
 
+// #700, DG-38 (BP-19): while the depletion effect runs the shield mesh lets a shot pass even
+// though the shield has recharged above zero (DG-09); it meets the hardpoint mesh behind. Once
+// the effect ends the shield mesh catches it again. The gate itself landed with #1311.
+void test_depleted_shield_mesh() {
+    namespace d = tactical::detail;
+    tactical::CombatProfile profile;
+    profile.collision = tactical::CollisionBox{at(-10, -10, -10), at(10, 10, 10)};
+    profile.meshes = {tactical::collision_mesh(plate(-5, 9), tactical::no_hardpoint, tactical::no_hardpoint, true),
+        tactical::collision_mesh(plate(0, 4), 0, tactical::no_hardpoint, false)};
+    profile.mesh_bounds = tactical::CollisionBox{at(-5, -9, -9), at(0, 9, 9)};
+    tactical::DamageRules rules;
+    rules.depleted_disable_seconds = units(5);
+    tactical::DurabilityState state;
+    state.shields = units(25); // recharged to the 0.25 regen cap of a 100-point shield
+    state.depleted_frame = 100;
+    std::vector<tactical::SnapshotPlayer> players{{1, 1, false}, {2, 2, false}};
+    d::CombatWorld world;
+    world.relationships = players;
+    world.damage = &rules;
+    d::CombatUnit target;
+    target.id = 2;
+    target.owner = 2;
+    target.profile = &profile;
+    target.durability = &state;
+    target.position = at(100, 0);
+    target.transform = math::to_matrix(math::identity_quat(), target.position).value();
+    world.units.push_back(target);
+    d::CollectionTrees tree;
+    tree.update({{target.id, target.owner, {at(90, -10, -10), at(110, 10, 10)}}}, 0);
+    world.projectile_collection = &tree;
+    tactical::Projectile projectile;
+    projectile.owner = 1;
+    projectile.position = at(80, 0);
+    projectile.step = at(40, 0);
+    projectile.speed = units(40);
+    projectile.max_travel = units(200);
+    d::ProjectileScratch scratch;
+    const auto shot = [&](const std::uint64_t frame) {
+        world.frame = frame;
+        return d::step_projectile(world, projectile, scratch);
+    };
+    const std::uint64_t disable_end = 100 + 5 * tactical::logical_frames_per_second;
+    for (const auto frame : {std::uint64_t{100}, disable_end - 1}) {
+        const auto inside = shot(frame);
+        expect(inside && inside.value().hit == target.id && inside.value().meshed
+                && inside.value().mesh_hardpoint == 0 && inside.value().contact.x == units(100),
+            "DG-38: during the depletion effect a shot passes the recharged shield mesh and meets the hardpoint");
+    }
+    const auto after = shot(disable_end);
+    expect(after && after.value().hit == target.id && after.value().meshed
+            && after.value().mesh_hardpoint == tactical::no_hardpoint && after.value().contact.x == units(95),
+        "DG-38: after the depletion effect the shield mesh catches the shot again");
+    state.shields = units(0);
+    const auto empty = shot(disable_end);
+    expect(empty && empty.value().mesh_hardpoint == 0, "DG-38: an empty shield's mesh still lets the shot pass");
+}
+
 void test_meshes() {
     test_projectile_mesh_budget();
+    test_depleted_shield_mesh();
     const auto all = [](std::size_t) { return true; };
     const auto placed = math::to_matrix(math::identity_quat(), at(100, 0)).value();
     std::vector<tactical::CollisionMesh> meshes{
@@ -836,6 +894,120 @@ void test_out_of_range_miss() {
 }
 
 void test_range_boundary() {
+    for (const bool parent_projectile : {false, true}) {
+        auto weapons = combat(1000);
+        auto& weapon = weapons.profiles[0].weapons[0];
+        weapon.fire_a = at(0, 0); weapon.range = units(1000); weapon.cone_height = units(180);
+        if (parent_projectile) {
+            auto object = weapon;
+            object.hardpoint = tactical::object_weapon;
+            weapons.profiles[0].weapons.push_back(object);
+        }
+        weapons.profiles[3].target_bones = {at(-100, 0, 300)};
+        weapons.footprints = {{station_type, units(300), units(20), units(10)}};
+        auto created = tactical::TacticalSession::create(
+            setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, station_type, 2, at(1250, 0))}),
+            sensors(), durability(), {}, std::nullopt, weapons);
+        expect(static_cast<bool>(created), "R-11: radius aim-point fixture builds");
+        if (!created) continue;
+        auto value = std::move(created).value();
+        expect(static_cast<bool>(value.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})), "R-11: attack queued");
+        bool observed = false;
+        const eawr::sim::InlineExecutor executor;
+        for (int tick = 0; tick < 30 && !observed; ++tick) {
+            const auto step = value.step(executor);
+            expect(static_cast<bool>(step), "R-11: radius aim-point step succeeds");
+            if (!step) break;
+            for (const auto& event : step.value().snapshot->combat_events()) {
+                if (event.kind != tactical::CombatEventKind::weapon_fired || event.weapon != 0) continue;
+                observed = true;
+                expect(event.aim.z == units(parent_projectile ? 300 : 0),
+                    "R-11: bone range adds radius only with a parent projectile; fallback always adds it");
+            }
+        }
+        expect(observed, "R-11: the extended aim selection fires");
+    }
+    // WWP-20/21/27: a range-1000 laser reaches a radius-300 station at 1250, not 1350.
+    for (const auto station_x : {1250, 1300, 1350}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+            auto weapons = combat(1000);
+            auto& weapon = weapons.profiles[0].weapons[0];
+            weapon.fire_a = at(0, 0);
+            weapon.range = units(1000);
+            weapons.footprints = {{station_type, units(300), units(20), units(10)}};
+            auto created = tactical::TacticalSession::create(
+                setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, station_type, 2, at(station_x, 0))}),
+                sensors(), durability(), {}, std::nullopt, weapons);
+            expect(static_cast<bool>(created), "WWP-20: station-radius session builds");
+            if (!created) continue;
+            auto value = std::move(created).value();
+            expect(static_cast<bool>(value.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})), "station attack queued");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            bool fired = false, hit = false, allowance = false;
+            std::vector<std::string> hashes;
+            for (int tick = 0; tick < 90; ++tick) {
+                auto step = value.step(executor);
+                expect(static_cast<bool>(step), "WWP-20: station-radius step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                for (const auto& event : step.value().snapshot->combat_events()) {
+                    fired = fired || event.kind == tactical::CombatEventKind::weapon_fired;
+                    hit = hit || event.kind == tactical::CombatEventKind::projectile_hit;
+                }
+                for (const auto& projectile : value.projectiles()) allowance = allowance || projectile.max_travel == units(1300);
+            }
+            expect(fired == (station_x <= 1300) && hit == (station_x <= 1300) && allowance == (station_x <= 1300),
+                "WWP-20/27: inclusive radius-extended firing range and travel reach the station hull");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "station-radius acceptance equals every tick on 1/2/4/8 workers");
+        }
+    }
+    {
+        namespace d = tactical::detail;
+        auto content = combat();
+        content.melee_cutoff = units(51);
+        std::array<tactical::TargetFootprint, 3> geometry{{{1, units(3), units(3), units(4)},
+            {2, units(7), units(3), units(4)}, {3, units(11), units(1), units(1)}}};
+        d::CombatWorld world;
+        world.table = &content;
+        world.units.resize(3);
+        for (std::size_t index = 0; index < world.units.size(); ++index) {
+            world.units[index].id = index + 1;
+            world.units[index].footprint = &geometry[index];
+        }
+        auto& shooter = world.units[0];
+        shooter.profile = &content.profiles[0];
+        world.teams = {{3, {2}}};
+        auto radius = d::projectile_target_radius(world, shooter, &world.units[1]);
+        expect(radius && radius.value() == units(18), "WWP-27: craft and nonformed container radii add");
+        tactical::SquadronProfile formation;
+        formation.offsets = {at(-10, -20), at(10, 20)};
+        const std::array<eawr::sim::EntityId, 2> members{1, 2};
+        const auto shape = d::formation_target_footprint(world, members, formation);
+        const auto expected = math::length(math::Vec2{units(13), units(24)});
+        expect(shape && expected && shape.value().radius == expected.value()
+            && shape.value().x_extent == units(13) && shape.value().y_extent == units(24),
+            "WWP-21: specialized formation team's ideal box uses base slots and hard extents");
+        world.units[2].formation_footprint = shape.value();
+        const auto bow = d::target_attack_distance(nullptr, world.units[2], at(-100, 0), units(1000), false);
+        const auto beam = d::target_attack_distance(nullptr, world.units[2], at(0, -100), units(1000), false);
+        expect(bow && beam && bow.value() == units(1013) && beam.value() == units(1024),
+            "A-07: explicitly supplied specialized geometry uses its ideal hard extents");
+        const auto extended = d::projectile_target_radius(world, shooter, &world.units[1]);
+        expect(extended && extended.value() == math::add(units(7), shape.value().radius).value(), "WWP-27: formed team uses its hard radius");
+        content.profiles[0].max_attack_distance = units(51);
+        radius = d::projectile_target_radius(world, shooter, &world.units[1]);
+        expect(radius && radius.value() == units(7), "WWP-27: melee cutoff is inclusive and omits only team radius");
+        content.profiles[0].max_attack_distance = Fixed::from_raw(units(51).raw() + 1);
+        radius = d::projectile_target_radius(world, shooter, &world.units[1]);
+        expect(radius && radius.value() == extended.value(), "WWP-27: one raw unit above melee cutoff retains team radius");
+        tactical::CombatEvent shot;
+        shot.origin = at(0, 0, 10); shot.aim = at(1250, 0, 60);
+        tactical::ShotProfile profile; profile.speed = units(25); profile.max_travel = units(1000);
+        const auto projectile = d::launch_projectile(shot, profile, 1, true, 1, {}, units(300));
+        expect(projectile && projectile.value().max_travel == units(1350), "WWP-27: travel also adds muzzle-to-aim height");
+    }
     const auto inside = boundary(205); // face at 195
     expect(inside.shots > 0 && inside.hits > 0, "a target just inside the range is hit");
     const auto last_step = boundary(225); // face at 215: past the range, inside the last step
@@ -938,6 +1110,373 @@ void test_broad_phase_sphere_reach() {
     expect(station_health && station_health->shields.raw() < 100 * one,
         "#636: the broad phase keeps a turned craft whose world box the path crosses beyond its corner");
     expect(frigate_health && frigate_health->shields.raw() == 100 * one, "the craft's sphere takes every shot");
+}
+
+// WFO-12/14, WCC-03/61 (battle flow G1): a projectile already in flight services before the ship it
+// reaches, so a unit it kills, or a weapon hardpoint it destroys, fires nothing in that frame. The
+// victims fire every frame, so their loss frame is always a frame in which they would have fired.
+void test_lost_shooter_withdraws_shots() {
+    auto weapons = combat();
+    auto rapid = laser(700, 0);
+    rapid.pulse_count = 200;
+    rapid.pulse_delay_frames = 1;
+    weapons.profiles[2].weapons = {rapid}; // corvette: on its destroyable weapon hardpoint 0
+    weapons.profiles[3].weapons = {rapid}; // station: no HardPoints, dies outright
+    weapons.profiles[2].max_attack_distance = units(700);
+    weapons.profiles[3].max_attack_distance = units(700);
+    auto health = durability();
+    health.profiles[3].max_hull = units(25);
+    health.profiles[3].max_shields = Fixed{};
+    health.profiles[3].shield_refresh = Fixed{};
+    struct Case {
+        tactical::TypeId victim;
+        tactical::EventKind loss;
+        std::string_view name;
+    };
+    for (const auto& checked : {Case{station_type, tactical::EventKind::unit_destroyed, "a killed unit"},
+             Case{corvette_type, tactical::EventKind::hardpoint_destroyed, "a destroyed weapon hardpoint"}}) {
+        const auto staged = setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, checked.victim, 2, at(300, 0), true)});
+        auto created = tactical::TacticalSession::create(staged, sensors(), health, {}, std::nullopt, weapons);
+        expect(static_cast<bool>(created), "lost-shooter session is created");
+        if (!created) continue;
+        auto value = std::move(created).value();
+        const eawr::sim::InlineExecutor executor;
+        std::vector<std::uint64_t> known;
+        std::optional<std::uint64_t> lost_tick;
+        bool fired_before = false, fired_at_loss = false, launched_at_loss = false;
+        for (std::uint64_t tick = 0; tick < 400 && !lost_tick; ++tick) {
+            auto stepped = value.step(executor);
+            expect(static_cast<bool>(stepped), "lost-shooter step succeeds");
+            if (!stepped) break;
+            for (const auto& event : stepped.value().snapshot->events()) {
+                if (event.kind == checked.loss && event.unit == 2) lost_tick = tick;
+            }
+            bool fired = false;
+            for (const auto& event : stepped.value().snapshot->combat_events()) {
+                fired = fired || (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 2);
+            }
+            bool launched = false;
+            for (const auto& projectile : value.projectiles()) {
+                launched = launched || (projectile.shooter == 2
+                    && !std::binary_search(known.begin(), known.end(), projectile.id));
+                known.insert(std::upper_bound(known.begin(), known.end(), projectile.id), projectile.id);
+            }
+            known.erase(std::unique(known.begin(), known.end()), known.end());
+            if (lost_tick) {
+                fired_at_loss = fired;
+                launched_at_loss = launched;
+            } else {
+                fired_before = fired;
+            }
+        }
+        const std::string name{checked.name};
+        expect(lost_tick.has_value() && fired_before, name + ": the victim fires every frame until its loss");
+        expect(lost_tick && !fired_at_loss, name + ": no weapon_fired event in the frame it is lost (WFO-12/14)");
+        expect(lost_tick && !launched_at_loss, name + ": no projectile launched in the frame it is lost (WCC-03/61)");
+        if (checked.victim == corvette_type) {
+            const auto survivor = value.durability_state(2);
+            expect(survivor && survivor->hull.raw() == 300 * one, name + ": the corvette itself survives");
+        }
+    }
+}
+
+
+void test_same_frame_retarget_after_kill() {
+    // Separate ship/member clocks and hardpoint opportunity admission. Team
+    // forwarding's exceptional death notifications remain UFS-06.
+    {
+        auto content = combat();
+        const std::vector<tactical::Player> owners{{1, 1, 1, tactical::player_flag_commandable},
+            {2, 2, 2, tactical::player_flag_commandable}};
+        const std::vector<tactical::SnapshotPlayer> relationships{{1, 1, false}, {2, 2, false}};
+        tactical::detail::CombatWorld world;
+        world.players = owners;
+        world.relationships = relationships;
+        world.table = &content;
+        world.frame = 40;
+        tactical::detail::CombatUnit self, target;
+        self.id = 1; self.owner = self.team = 1; self.profile = &content.profiles[0];
+        self.transform = math::identity_matrix();
+        target.id = 3; target.owner = target.team = 2; target.visible_to = 1;
+        target.profile = &content.profiles[2]; target.position = at(300, 0);
+        target.previous_position = target.position;
+        target.transform = math::to_matrix(math::identity_quat(), target.position).value();
+        world.units = {self, target};
+        const std::vector<tactical::SpaceBody> bodies{{3, 2, target.position}};
+        world.index = tactical::SpaceIndex::build(bodies).value();
+        auto state = tactical::initial_combat(content.profiles[0], 1, 0, 1);
+        state.attack_target = 2; state.direct = true; state.next_scan_frame = 40;
+        state.weapons[0].countdown = 0;
+        state.weapons[0].opportunity.last_scan_frame = 0;
+        world.units.front().combat = &state;
+        const auto dead = tactical::detail::step_combat(world, world.units.front());
+        expect(dead && dead.value().state.attack_target == 0 && dead.value().state.next_scan_frame == 40
+            && dead.value().events.empty() && dead.value().state.weapons[0].opportunity.last_scan_frame == 0,
+            "WWP-05: dead ordered target blocks death-frame hardpoint opportunity fire and keeps scan references");
+        if (dead) {
+            state = dead.value().state;
+            ++world.frame;
+            const auto idle = tactical::detail::step_combat(world, world.units.front());
+            expect(idle && !idle.value().events.empty(), "WWP-05: following-frame hardpoint opportunity service is admitted");
+        }
+        for (const auto deadline : {40U, 45U}) {
+            state.attack_target = 2; state.direct = false; state.next_scan_frame = deadline;
+            world.frame = 40;
+            const auto member = tactical::detail::target_combat(world, world.units.front(), {}, 0, {});
+            expect(member.attack_target == 0 && member.next_scan_frame == deadline,
+                "FC-41/FS-09: member death rejection preserves its individual scan clock");
+            state = member;
+            world.frame = 41;
+            const auto next = tactical::detail::target_combat(world, world.units.front(), {}, 0, {});
+            expect(next.attack_target == (deadline == 40 ? 3U : 0U),
+                "FC-41: member replacement obeys its independent deadline after the death turn");
+        }
+    }
+    auto weapons = combat();
+    auto rapid = laser(700, tactical::object_weapon);
+    rapid.min_recharge_hundredths = 0;
+    rapid.max_recharge_hundredths = 0;
+    rapid.pulse_count = 200;
+    rapid.pulse_delay_frames = 1;
+    weapons.profiles[0].weapons = {rapid};
+    auto health = durability();
+    // A constant damage curve and unit armor modifiers make each hull hit exactly ten.
+    health.damage->armor_mods = {units(1), units(1), units(1), units(1)};
+    health.damage->diminishing = {{units(0), units(1)}, {units(2), units(1)}};
+    health.profiles[3].max_hull = units(10000);
+    health.profiles[3].max_shields = Fixed{};
+    health.profiles[3].shield_refresh = Fixed{};
+    // FS-09/FD-06 and T-05: preserve the periodic scan gate. Calibrate continuous
+    // in-flight hits for death on the deadline and five frames before it.
+    const auto battle_setup = setup({unit(1, shooter_type, 1, at(0, 0)),
+        unit(2, station_type, 2, at(300, 0)), unit(3, corvette_type, 2, at(400, 100))});
+    auto probe = tactical::TacticalSession::create(battle_setup, sensors(), health, {}, std::nullopt, weapons);
+    expect(static_cast<bool>(probe), "WCC-25: due-scan calibration session is created");
+    if (!probe) return;
+    auto calibration = std::move(probe).value();
+    const eawr::sim::InlineExecutor inline_executor;
+    std::optional<std::uint64_t> first_hit;
+    std::uint64_t scan_frame = 0;
+    for (std::uint64_t tick = 0; tick < 30 && !first_hit; ++tick) {
+        auto stepped = calibration.step(inline_executor);
+        expect(static_cast<bool>(stepped), "WCC-25: due-scan calibration step succeeds");
+        if (!stepped) return;
+        if (tick == 0) {
+            const auto state = calibration.combat_state(1);
+            expect(state && state->attack_target == 2, "WCC-25: calibration holds the nearer victim");
+            if (!state) return;
+            scan_frame = state->next_scan_frame;
+        }
+        for (const auto& event : stepped.value().snapshot->combat_events())
+            if (event.kind == tactical::CombatEventKind::projectile_hit && event.shooter == 1 && event.target == 2)
+                first_hit = tick;
+    }
+    expect(first_hit && scan_frame >= 30 && scan_frame <= 45 && *first_hit < scan_frame,
+        "WCC-25/T-05: the held target is hit before its ordinary 30..45-frame scan is due");
+    if (!first_hit || *first_hit >= scan_frame || scan_frame > 45) return;
+    for (const auto death_frame : {scan_frame, scan_frame - 5}) {
+        health.profiles[3].max_hull = units(10 * static_cast<std::int64_t>(death_frame - *first_hit + 1));
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+            auto created = tactical::TacticalSession::create(battle_setup,
+                sensors(), health, {}, std::nullopt, weapons);
+            expect(static_cast<bool>(created), "WCC-25: same-frame retarget session is created");
+            if (!created) continue;
+            auto value = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            bool killed = false, replacement = false, stale = false;
+            const auto replacement_frame = std::max(death_frame + 1, scan_frame);
+            for (std::uint64_t tick = 0; tick <= replacement_frame; ++tick) {
+                auto stepped = value.step(executor);
+                expect(static_cast<bool>(stepped), "WCC-25: retarget step succeeds");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_hash.get());
+                for (const auto& event : stepped.value().snapshot->events())
+                    killed = killed || (event.kind == tactical::EventKind::unit_destroyed && event.unit == 2);
+                if (!killed) continue;
+                if (tick == death_frame) {
+                    const auto state = value.combat_state(1);
+                    expect(state && state->attack_target == 0
+                        && state->next_scan_frame == scan_frame,
+                        "FS-09/FD-06: death clears the held target without consuming or resetting its deadline");
+                }
+                if (tick < replacement_frame) {
+                    const auto state = value.combat_state(1);
+                    expect(state && state->attack_target == 0 && state->next_scan_frame == scan_frame,
+                        "FS-09: replacement waits for both the following frame and the retained deadline");
+                }
+                for (const auto& event : stepped.value().snapshot->combat_events()) {
+                    if (event.kind != tactical::CombatEventKind::weapon_fired || event.shooter != 1) continue;
+                    if (event.target == 3) {
+                        expect(tick == replacement_frame, "FD-06: the replacement shot waits until max(death + 1, deadline)");
+                        replacement = true;
+                    }
+                    stale = stale || event.target == 2;
+                }
+            }
+            expect(killed && replacement && !stale,
+                "FD-06: a due pulse fires at the replacement after death, with no stale shot");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "WCC-25: same-frame retarget hashes equal on 1/2/4/8 workers");
+        }
+    }
+
+    // FS-09: a death after the holder's targeting turn is detached at frame
+    // end, rather than being rediscovered (and deferred again) on the next turn.
+    auto late_weapons = weapons;
+    tactical::PrioritySet retained;
+    retained.unlisted = units(1000);
+    retained.rows = {{corvette_type, units(2)}, {station_type, units(1)}};
+    late_weapons.priority_sets = {retained};
+    late_weapons.profiles[0].priority_set = 0;
+    health.profiles[3].max_hull = units(10000);
+    for (const auto death_frame : {scan_frame, scan_frame - 5}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+            auto created = tactical::TacticalSession::create(battle_setup,
+                sensors(), health, {}, std::nullopt, late_weapons);
+            expect(static_cast<bool>(created), "FD-06: late-death session is created");
+            if (!created) continue;
+            auto value = std::move(created).value();
+            expect(static_cast<bool>(value.submit({{death_frame, 2, 0}, {2},
+                tactical::DamagePayload{units(10000), tactical::hull_target}})),
+                "FD-06: post-targeting lethal command is queued");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            const auto replacement_frame = std::max(death_frame + 1, scan_frame);
+            bool killed = false, replacement = false;
+            for (std::uint64_t tick = 0; tick <= replacement_frame; ++tick) {
+                auto stepped = value.step(executor);
+                expect(static_cast<bool>(stepped), "FD-06: late-death step succeeds");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_hash.get());
+                for (const auto& event : stepped.value().snapshot->events()) {
+                    if (event.kind != tactical::EventKind::unit_destroyed || event.unit != 2) continue;
+                    expect(tick == death_frame, "FD-06: command kills after targeting on the chosen frame");
+                    killed = true;
+                }
+                const auto state = value.combat_state(1);
+                if (tick >= death_frame && tick < replacement_frame) {
+                    expect(state && state->attack_target == 0 && state->next_scan_frame == scan_frame,
+                        "FS-09: end-frame detachment clears the target and preserves the deadline");
+                }
+                for (const auto& event : stepped.value().snapshot->combat_events()) {
+                    if (event.kind != tactical::CombatEventKind::weapon_fired || event.shooter != 1 || event.target != 3) continue;
+                    expect(tick == replacement_frame, "FD-06: late-death replacement fires at max(death + 1, deadline)");
+                    replacement = true;
+                }
+            }
+            expect(killed && replacement, "FD-06: completed detachment admits the first due replacement turn");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "FD-06: late-death hashes equal on 1/2/4/8 workers");
+        }
+    }
+}
+
+void test_hull_drag_before_fire() {
+    auto weapons = combat();
+    auto rapid = laser(700, 0);
+    rapid.min_recharge_hundredths = 0;
+    rapid.max_recharge_hundredths = 0;
+    rapid.pulse_count = 200;
+    rapid.pulse_delay_frames = 1;
+    weapons.profiles[2].weapons = {rapid};
+    weapons.profiles[2].max_attack_distance = units(700);
+    auto health = durability();
+    // The scripted hull hit occurs after fire at tick 2; drag must precede tick 3's pulse.
+    const tactical::PlayerCommand damage{{2, 1, 1}, {1}, tactical::DamagePayload{units(270), tactical::hull_target}};
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        auto created = tactical::TacticalSession::create(setup({unit(1, corvette_type, 1, at(0, 0)),
+            unit(2, shooter_type, 2, at(300, 0), true)}), sensors(), health, {}, std::nullopt, weapons);
+        expect(static_cast<bool>(created), "WFO-23: pre-fire hull drag session is created");
+        if (!created) continue;
+        auto value = std::move(created).value();
+        expect(static_cast<bool>(value.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})), "WFO-23: direct fire is queued");
+        expect(static_cast<bool>(value.submit(damage)), "WFO-23: hull damage is queued");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        bool checked = false;
+        for (std::uint64_t tick = 0; tick < 8; ++tick) {
+            auto stepped = value.step(executor);
+            expect(static_cast<bool>(stepped), "WFO-23: hull drag step succeeds");
+            if (!stepped) break;
+            hashes.push_back(stepped.value().state_hash.get());
+            if (tick == 2) {
+                const auto state = value.durability_state(1);
+                expect(state && state->hull == units(30) && state->hardpoints[0] == units(90),
+                    "WFO-23: command damage follows this frame's hull service, ready for next frame's pre-fire drag");
+            }
+            if (tick != 3) continue;
+            const auto state = value.durability_state(1);
+            expect(state && state->hardpoints[0] < units(90), "WCC-31: next frame drags standing hardpoint health");
+            for (const auto& event : stepped.value().snapshot->combat_events())
+                checked = checked || (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1);
+
+        }
+        expect(checked, "WFO-23: a standing hardpoint still fires after pre-fire drag");
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "WFO-23: hull drag hashes equal on 1/2/4/8 workers");
+    }
+}
+
+
+void test_hull_drag_lost_weapon_same_frame() {
+    auto weapons = combat();
+    auto rapid = laser(700, 0);
+    rapid.min_recharge_hundredths = 0;
+    rapid.max_recharge_hundredths = 0;
+    rapid.pulse_count = 200;
+    rapid.pulse_delay_frames = 1;
+    weapons.profiles[2].weapons = {rapid};
+    weapons.profiles[2].max_attack_distance = units(700);
+    weapons.profiles[2].hardpoints.push_back({1, at(-15, 0), true});
+    auto health = durability();
+    // WCC-31: existing nearest-Q24 loss rounding can finish a one-quantum weapon.
+    // A separate standing hardpoint keeps this distinct from last-hardpoint destruction.
+    health.profiles[2].hardpoints[0].max_health = Fixed::from_raw(1);
+    health.profiles[2].hardpoints.push_back({tactical::HardpointRole::engine, true, units(90), {}, {}});
+    const tactical::PlayerCommand damage{{2, 1, 1}, {1}, tactical::DamagePayload{units(270), tactical::hull_target}};
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        auto created = tactical::TacticalSession::create(setup({unit(1, corvette_type, 1, at(0, 0)),
+            unit(2, shooter_type, 2, at(300, 0), true)}), sensors(), health, {}, std::nullopt, weapons);
+        expect(static_cast<bool>(created), "WCC-31: rounded drag-loss session is created");
+        if (!created) continue;
+        auto value = std::move(created).value();
+        expect(static_cast<bool>(value.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})), "WCC-31: direct fire is queued");
+        expect(static_cast<bool>(value.submit(damage)), "WCC-31: rounded drag hull hit is queued");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        bool lost = false, fired_before = false, fired_at_loss = false, launched_at_loss = false;
+        std::uint64_t previous_projectile = 0;
+        for (std::uint64_t tick = 0; tick < 8 && !lost; ++tick) {
+            auto stepped = value.step(executor);
+            expect(static_cast<bool>(stepped), "WCC-31: rounded drag step succeeds");
+            if (!stepped) break;
+            hashes.push_back(stepped.value().state_hash.get());
+            for (const auto& event : stepped.value().snapshot->events())
+                lost = lost || (event.kind == tactical::EventKind::hardpoint_destroyed && event.unit == 1 && event.hardpoint == 0);
+            bool fired = false, launched = false;
+            for (const auto& event : stepped.value().snapshot->combat_events())
+                fired = fired || (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1 && event.weapon == 0);
+            for (const auto& projectile : value.projectiles()) {
+                launched = launched || (projectile.id > previous_projectile && projectile.shooter == 1 && projectile.weapon == 0);
+                previous_projectile = std::max(previous_projectile, projectile.id);
+            }
+            if (lost) { fired_at_loss = fired; launched_at_loss = launched; }
+            else fired_before = fired_before || fired;
+        }
+        const auto survivor = value.durability_state(1);
+        expect(lost && fired_before && survivor && survivor->hull == units(30)
+                && survivor->hardpoints[0] == Fixed{} && survivor->hardpoints[1].raw() > 0,
+            "WCC-31: rounded drag destroys the firing weapon while its hull and spare hardpoint survive");
+        expect(lost && !fired_at_loss && !launched_at_loss,
+            "WFO-23/WCC-31: a weapon lost to hull drag neither fires nor launches in its loss frame");
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "WCC-31: rounded drag-loss hashes equal on 1/2/4/8 workers");
+    }
 }
 
 

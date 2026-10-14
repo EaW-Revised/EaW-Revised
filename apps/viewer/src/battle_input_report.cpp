@@ -63,12 +63,15 @@ void BattleInput::draw() {
         };
         view.live = live_;
         view.abilities = ability_state_ != nullptr ? ability_state_ : &ready_abilities_;
+        view.waypoints = (live_->order_input() && live_->order_input()->mode() == ui::OrderMode::waypoint)
+            || (Input::get_singleton() && Input::get_singleton()->is_physical_key_pressed(KEY_ALT));
         view.brackets = overview_ui_.unit_brackets;
+        view.visible = overview_ui_.world_markers;
         world_ui_->draw(view, canvas_item_);
     }
     // FoC's drag box (SelectBoxBorderColor / SelectBoxFillColor): once the drag passes the select
     // distance, or at once while nothing is selected.
-    if (left_ && left_->moved
+    if (overview_ui_.world_markers && left_ && left_->moved
         && (ui::drag_extent(left_->start, left_->end) > ui::minimum_drag_select_distance || selection_.empty())) {
         const ui::ScreenRect rect = ui::drag_rect(left_->start, left_->end);
         const float width = std::max(3.0F, rect.max_x - rect.min_x);
@@ -87,6 +90,8 @@ void BattleInput::draw() {
 
 void BattleInput::write_report(std::ostream& output, const SpaceEnvironment& space) const {
     output << "  \"battle_input\": {\"events\": " << events_ << ", \"pickable_units\": " << units_.size();
+    output << ", \"special_weapon\": {\"fires\": " << special_fires_ << ", \"cancels\": " << special_cancels_
+        << ", \"invalid\": " << special_invalid_ << ", \"targeting\": " << (special_target_source_ ? "true" : "false") << '}';
     output << ", \"cursor\": ";
     cursor_.write_report(output);
     output << ", \"cursor_samples\": [";
@@ -140,7 +145,13 @@ void BattleInput::write_report(std::ostream& output, const SpaceEnvironment& spa
            << ", \"refused\": " << refused_ << ", \"boxes\": " << boxes_
            << ", \"camera_focuses\": " << focuses_ << ", \"camera_follow_moves\": " << follow_moves_
            << ", \"scripted_fired\": " << scripted_fired_
-           << ", \"overview\": " << json(space.live_camera_overview()) << ", \"scripted_points\": [";
+           << ", \"acceptance_attempts\": [";
+    for (std::size_t index = 0; index < acceptance_attempts_.size(); ++index) {
+        const auto& attempt = acceptance_attempts_[index];
+        output << (index ? "," : "") << "{\"tick\":" << attempt.tick << ",\"stage\":" << attempt.stage
+            << ",\"result\":" << json(attempt.result) << ",\"candidates\":" << attempt.candidates << '}';
+    }
+    output << "], \"overview\": " << json(space.live_camera_overview()) << ", \"scripted_points\": [";
     for (std::size_t index = 0; index < scripted_points_.size(); ++index) {
         const ScriptedPoint& point = scripted_points_[index];
         output << (index ? ", " : "") << "{\"kind\": " << json(point.kind) << ", \"tick\": " << point.tick

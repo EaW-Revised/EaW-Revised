@@ -8,6 +8,47 @@ changes. An unchanged battle leaves application unproven until its consumers are
 
 ## What it does
 
+### Galactic campaigns
+
+`statuses-galactic.json` selects the galactic scene automatically and includes GC targets
+from the shared `statuses.json` shard. Other registries select it with `--scene galactic`.
+The existing `foc_tag_perturb` executable accepts `--galactic <campaign-name>` or `*` for
+all stock campaigns. It reuses catalog overlays and document overrides; trade routes
+use the optional `Name` selector on the first document path container.
+The selector must match exactly one node. Stock files can contain duplicate route
+Names; those rows explicitly report `not reachable` rather than perturbing only one
+of the duplicates. The installed-game smoke contract checks this refusal as well as
+position/credit changes and the unchanged description control.
+
+```text
+python tools/inventory/tag_applied_check.py run --registry docs/tag-coverage/statuses-galactic.json --binary <foc_tag_perturb> --game-root <install> --out out/gc-tag-perturb --ticks 120 --jobs 1 --check-workers 1 --max-seconds 600
+```
+
+One process mounts the catalog once and batches every row across the campaigns. The
+runner reuses a baseline trace when the entire normalized immutable setup is equal:
+without external providers or commands, the deterministic run has identical inputs.
+Each campaign record marks that reuse explicitly. Changed setups run the full window.
+The wall-time budget includes loading and baselines; checks between frames and rows stop
+further simulation when it expires (an individual load/setup may finish after the budget).
+Every planned row receives a result, including rows skipped after the budget expires.
+
+The sandbox uses the installed campaign setup contract's explicit test providers:
+one fleet/member per starting force, neutral political ownership, authored tech and
+credits. AI, story, production, fiscal income, control effects and ability activation
+providers are absent; this is a bounded coverage probe, not a complete stock playthrough.
+Registry service descriptions and missing-service descriptions remain provenance;
+GC checks select Campaign, Planet, TradeRoute, Faction, GameConstants or unit XML classes.
+
+Campaign and content identities are cleared before both baseline and perturbed runs.
+Tick-zero and completed-frame state hashes and published snapshot hashes are compared;
+per-campaign records contain final snapshot facts for positions, owners, routes, fleets
+and balances. A changed immutable simulation profile can change the authoritative hash
+before an action exercises it, so inspect `facts_changed` as well as `hash_changed`.
+`changes` proves only the tested class and sandbox window. `no change` on an applied
+target is an unproven finding in `findings.md`; no registry status is changed automatically.
+`not reachable` names missing authored values, unsupported attributes, invalid overlays,
+setup refusals or budget exhaustion. GC presentation presets report `not reachable`.
+
 For every `applied` or `partial` registry row and every object type the row names:
 
 1. The value is changed **in memory** for the M2 scene's objects of that type, never in a file:

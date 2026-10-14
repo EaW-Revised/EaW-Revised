@@ -162,6 +162,21 @@ not become active definitions by discovery. Their parse outcomes and provenance 
 visible; an unexplained malformed active include or unresolved required definition
 prevents a full-pass result rather than disappearing from counts.
 
+### Load health
+
+`LoadResult::health` counts what is wrong with the active registries, apart from the
+physical-XML diagnostics above: `registry_invalid` (a registry root missing, unreadable,
+malformed or the wrong root), `include_failed` (an admitted include that exists but cannot be
+read or parsed), `hardpoint_include_failed` (the hardpoint share of those) and
+`include_missing` (an include that is not found; omitted with a warning, R-10 and R-13).
+FoC fails the load on a bad registry root and on an admitted hardpoint include that cannot be
+read or parsed (C-06), so those two set `health.fatal`. `load_catalog` still returns the catalog
+and every diagnostic, because the scanners report on broken trees; `load_catalog_strict` returns
+the fatal diagnostic as the error. Production callers use the strict load, or print
+`describe_load_health` after a lenient one, so a failed registry or include never loads silently.
+A malformed game-object include is counted and printed but not fatal here (the issue scoped the
+failure to hardpoints).
+
 ## Versioned scanner input receipt
 
 `xml_scan --input-receipt <json>` optionally writes a schema-version-1, metadata-only

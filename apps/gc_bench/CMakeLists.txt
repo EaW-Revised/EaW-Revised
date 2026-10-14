@@ -1,0 +1,11 @@
+add_executable(gc_bench main.cpp stock_snapshot.cpp)
+target_link_libraries(gc_bench PRIVATE eawr::sim_galactic eawr::platform eawr::campaign)
+target_compile_features(gc_bench PRIVATE cxx_std_20)
+eawr_target_project_warnings(gc_bench)
+
+if(BUILD_TESTING)
+    include(EawrTestTiers)
+    add_test(NAME gc_bench_stock_snapshot COMMAND gc_bench --stock-snapshot --ticks 200 --warmup 10 --workers 1,2,4,8)
+    set_tests_properties(gc_bench_stock_snapshot PROPERTIES SKIP_RETURN_CODE 77)
+    eawr_label_tests(DEFAULT slow)
+endif()

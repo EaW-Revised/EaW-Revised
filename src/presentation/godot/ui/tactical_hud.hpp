@@ -36,6 +36,8 @@
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
+#include "eawr/presentation/ui/retreat_button.hpp"
+#include "eawr/presentation/ui/special_weapon.hpp"
 #include "eawr/vfs/vfs.hpp"
 
 #include <godot_cpp/classes/control.hpp>
@@ -69,6 +71,8 @@ public:
         presentation::ui::ShellBlend blend{presentation::ui::ShellBlend::alpha};
         godot::Ref<godot::Texture2D> texture;
         std::vector<data::ui::ShellTriangle> triangles;
+        // An authored _ALT<n> mesh is drawn only while set_alternate() holds n.
+        std::optional<std::uint32_t> alternate;
     };
     struct Setup final {
         presentation::ui::LayoutRules rules{presentation::ui::LayoutRules::aspect_correct};
@@ -114,6 +118,9 @@ public:
     [[nodiscard]] int planet_pixels() const { return planet_pixels_; }
     // Runs `probe` once, on the first frame after the HUD is laid out.
     void set_probe(std::function<void()> probe);
+    // The shell's alternate index: meshes with an _ALT<n> suffix show only when n matches (none when unset).
+    // `alpha` tints those meshes (the unseen-contents dimming of the focused diorama).
+    void set_alternate(std::optional<std::uint32_t> index, float alpha = 1.0F);
 
 protected:
     static void _bind_methods() {}
@@ -130,6 +137,8 @@ private:
     godot::Rect2 planet_rect_;
     int planet_pixels_{};
     godot::Vector2 laid_out_{-1.0F, -1.0F};
+    std::optional<std::uint32_t> alternate_;
+    float alternate_alpha_{1.0F};
     std::function<void()> probe_;
 };
 
@@ -167,6 +176,7 @@ public:
     [[nodiscard]] const std::string& failure() const noexcept;
     [[nodiscard]] int options_presses() const noexcept;
     [[nodiscard]] EawrTacticalHud* hud() const noexcept;
+    [[nodiscard]] std::string localized_text(std::string_view key, std::string_view fallback) const;
     // The host saw `event` reach the world (it passed the GUI and the policy).
     void world_input(const godot::Ref<godot::InputEvent>& event);
     // #425: the command bar's unit cards; null before build() or when the shell has no card slots.
@@ -185,6 +195,8 @@ public:
     // null before build() or when the shell has no ability buttons.
     [[nodiscard]] EawrAbilityButtons* ability_buttons() const noexcept;
     void set_ability_bar(const presentation::ui::AbilityBar& bar);
+    void set_world_hover(const std::optional<std::pair<std::uint64_t, std::string>>& hovered);
+    void set_ability_hover(const std::string& type, std::uint32_t ability, std::size_t component);
     // #455 (docs/behaviour/foc-minimap.md): the command bar's minimap; null before build() or when the
     // shell has no radar mesh. Each frame the live battle hands it what the local player sees; the
     // blips and the camera outline follow every frame, the fog layer a few rows a frame (MM-04).
@@ -221,18 +233,33 @@ public:
     };
     void set_time_handlers(TimeHandlers handlers);
     void set_order_handler(std::function<void(std::string_view)> handler);
+    void set_movie_handler(std::function<void()> handler);
+    void set_beacon_handler(std::function<void()> handler);
+    void set_beacon(bool enabled, bool targeting);
+    void set_movie_mode(bool on);
+    [[nodiscard]] bool movie_mode() const;
     void set_order_mode(std::string_view active);
+    void set_special_weapon_handler(std::function<void()> handler);
+    void set_special_weapon(const presentation::ui::SpecialWeaponButton& view);
+    // HCB-15: the authored b_retreat slot; a disabled glyph until a campaign caller publishes a view.
+    void set_retreat_handler(std::function<void()> handler);
+    void set_retreat(const presentation::ui::RetreatButtonView& view);
+    [[nodiscard]] const presentation::ui::RetreatButtonView& retreat() const noexcept;
     // The panel's state each frame (TM-05, TM-06, TM-08, TM-09).
     struct TimeView final {
         bool paused{};
         bool fast_forward{};
         bool pause_enabled{true};
         bool fast_forward_enabled{true};
+        bool multiplayer{};
+        std::uint32_t speed_step{2};
     };
     void set_time_view(const TimeView& view);
     // #453: the local player's result (true: victory) once decided, and whether the battle ended.
     void set_battle(std::optional<bool> won, bool ended);
     void set_results(const presentation::ui::BattleResults& results);
+    using ReplayWriter = std::function<std::vector<std::uint8_t>(std::string&)>;
+    void set_replay_writer(bool allowed, ReplayWriter writer);
     void set_begin(bool ready);
     // #848 (docs/behaviour/foc-battle-selection.md V-5b): while either overview level is on, the
     // tactical shell with everything on it and, while paused, the pause banner hide; the win/lose

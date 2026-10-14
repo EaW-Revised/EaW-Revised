@@ -23,6 +23,9 @@ enum class VictoryCondition : std::uint8_t {
     // WBF-08/35: SKIRMISH_ALL_ENEMY_UNITS_DESTROYED, only when selected.
     all_enemy_units_destroyed = 2,
     intentional_quit = 3, // WBF-43: immediate local departure outcome, never a lobby selection
+    enemies_retreated = 4, // WR-47: runtime campaign condition, never a lobby selection
+    enemy_leader_destroyed = 5, // WGT-29: campaign-only outcome
+    campaign_station_destroyed = 6, // WGM-51: optional attacker condition
 };
 
 // The retail pending-victory countdown (VT-11): the battle ends 210 frames (7 s) after the
@@ -48,6 +51,8 @@ struct VictoryRules {
     std::vector<PlayerId> controlled_players{};
     // WBF-08/37: players with an installed condition. Empty retains the legacy contender list.
     std::vector<PlayerId> installed_players{};
+    std::vector<EntityId> campaign_leaders{};
+    EntityId campaign_station{};
     friend bool operator==(const VictoryRules&, const VictoryRules&) = default;
 };
 

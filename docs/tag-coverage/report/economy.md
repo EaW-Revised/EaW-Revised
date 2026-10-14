@@ -1,0 +1,1346 @@
+# economy tag coverage
+
+[All areas and legend](README.md)
+
+| Status | Space skirmish | Everything |
+|---|---:|---:|
+| applied | 305 | 305 |
+| partial | 262 | 262 |
+| todo | 216 | 216 |
+| presentation-later | 0 | 0 |
+| foc-ignores | 57 | 57 |
+| deferred | 2 | 2 |
+| land-or-galactic | 0 | 281 |
+| multiplayer | 0 | 3 |
+| **Total** | **842** | **1126** |
+
+Tables group the exact object class families listed together in the registry. Object kinds
+are station, ship, squadron or craft when specified; an empty kind list means the whole
+listed class. Each consumer retains its own kinds and rule IDs. Rule IDs are plain text:
+the registry does not supply public link targets. Tickets refer to the private tracker
+and are plain numbers. Code locations are repository paths without identifier anchors.
+
+## Audio
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Audio_Galactic_3D_Listener_Z_Pullback_Dist | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-27 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
+| Audio_Galactic_3D_Rolloff_Distance_Mod | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-27 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
+| Audio_Galactic_3D_Saturation_Distance_Mod | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-27 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
+| SFXEvent_MP_Give_Teammate_Credits | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
+| SFXEvent_Planet_Capture_Bonus_Reward | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Planet_Revealed | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+
+## BlackMarketItems
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Item/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Item/Ability_Names | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Item/Base_Cost_Credits | applied | galactic corruption economy (src/sim/galactic/corruption_model.cpp) | WGEP-58 | — | src/sim/galactic/corruption_model.cpp | basis: reviewed |
+| Item/Icon_Name | applied | whole class (apps/viewer/src/galactic/black_market_hud.cpp) | WGEP-141, WGEP-143 | — | apps/viewer/src/galactic/black_market_hud.cpp | Copied item menu and encyclopedia metadata; three authored beneficiary icons. Retail layout remains GHUD-C09.; basis: reviewed |
+| Item/Localized_Description | applied | whole class (apps/viewer/src/galactic/black_market_hud.cpp) | WGEP-141, WGEP-143 | — | apps/viewer/src/galactic/black_market_hud.cpp | Copied item menu and encyclopedia metadata; three authored beneficiary icons. Retail layout remains GHUD-C09.; basis: reviewed |
+| Item/Localized_Name | applied | whole class (apps/viewer/src/galactic/black_market_hud.cpp) | WGEP-141, WGEP-143 | — | apps/viewer/src/galactic/black_market_hud.cpp | Copied item menu and encyclopedia metadata; three authored beneficiary icons. Retail layout remains GHUD-C09.; basis: reviewed |
+| Item/Tech_Level | applied | galactic corruption economy (src/sim/galactic/corruption_model.cpp) | WGEP-58, WGEP-81 | — | src/sim/galactic/corruption_model.cpp | basis: reviewed |
+| Item/Tutorial_Base_Cost_Credits | partial | galactic corruption economy (src/sim/galactic/corruption_model.cpp); missing: unsourced tutorial omission defaults | WGEP-58 | 1130 | src/sim/galactic/corruption_model.cpp | basis: reviewed |
+| Item/Tutorial_Tech_Level | partial | galactic corruption economy (src/sim/galactic/corruption_model.cpp); missing: unsourced tutorial omission defaults | WGEP-58, WGEP-81 | 1130 | src/sim/galactic/corruption_model.cpp | basis: reviewed |
+| Item/Uncommon_Price_Multiplier | applied | galactic corruption economy (src/sim/galactic/corruption_model.cpp) | WGEP-58 | — | src/sim/galactic/corruption_model.cpp | basis: reviewed |
+| Item/Used_By_Units | applied | whole class (apps/viewer/src/galactic/black_market_hud.cpp) | WGEP-141, WGEP-143 | — | apps/viewer/src/galactic/black_market_hud.cpp | Copied item menu and encyclopedia metadata; three authored beneficiary icons. Retail layout remains GHUD-C09.; basis: reviewed |
+
+## Campaign
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| AI_Player_Control | todo | application not recorded | — | 1120 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| AI_Victory_Conditions | applied | galactic victory (src/campaign/setup.cpp) | WGS-15, WGS-16, WGS-78, WGS-83 | — | src/campaign/setup.cpp | basis: reviewed |
+| AI_Victory_Cycle_Limit | applied | galactic victory (src/campaign/setup.cpp) | WGS-15, WGS-16, WGS-78, WGS-83 | — | src/campaign/setup.cpp | basis: reviewed |
+| Autoresolve_Exclusion_Locations | applied | whole class (src/platform/galactic/live_game_session.cpp) | WAR-10, WAR-65, WAR-75 | 1115 | src/platform/galactic/live_game_session.cpp | Read-only retained campaign retreat policy publication; native midbattle solver remains unavailable and no tactical state/hash/codec changes are made.; basis: reviewed |
+| Camera_Distance | todo | application not recorded | — | 1157 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Camera_Shift_X | todo | application not recorded | — | 1157 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Camera_Shift_Y | todo | application not recorded | — | 1157 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Campaign_Set | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Description_Text | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Empire_Story_Name | todo | application not recorded | — | 683 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Good_Victory_Planet_Names | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Home_Location | partial | initial overview position and home selection (apps/viewer/src/galactic/galactic_mode.cpp); first home object for the local faction (apps/viewer/src/galactic/scene_content.cpp); authored campaign startup requests (src/campaign/setup.cpp); missing: home discovery/intelligence refresh remains legacy &#35;1153; dynamic persisted homes remain legacy &#35;1149 | WGP-41, WGP-42; WGP-42; WGS-09 | 1149 | apps/viewer/src/galactic/galactic_mode.cpp; apps/viewer/src/galactic/scene_content.cpp; src/campaign/setup.cpp | camera startup resolves the first authored home without an owned-planet fallback; discovery and persisted homes remain with their owning services; basis: reviewed |
+| Human_Victory_Conditions | applied | galactic victory (src/campaign/setup.cpp) | WGS-15, WGS-16, WGS-78, WGS-83 | — | src/campaign/setup.cpp | basis: reviewed |
+| Human_Victory_Planet_Names | applied | galactic victory (src/campaign/setup.cpp) | WGS-15, WGS-16, WGS-78, WGS-83 | — | src/campaign/setup.cpp | basis: reviewed |
+| Is_Autoresolve_Allowed | applied | whole class (src/platform/galactic/live_game_session.cpp) | WAR-10, WAR-65, WAR-75 | 1115 | src/platform/galactic/live_game_session.cpp | Read-only retained campaign retreat policy publication; native midbattle solver remains unavailable and no tactical state/hash/codec changes are made.; basis: reviewed |
+| Is_Listed | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Is_Multiplayer | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Is_Quickmatch_Allowed | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Is_Story_Campaign | partial | prepared galactic AI Game.IsStoryCampaign input (src/campaign/ai_perception_content.cpp); missing: story activation, dialogs and other non-AI consumers | WGA-423, WGS-10 | 1149 | src/campaign/ai_perception_content.cpp | AI reads immutable authored campaign state; other story owners remain on the ticket.; basis: reviewed |
+| Locations | partial | authored campaign startup requests (src/campaign/galaxy.cpp); authored campaign startup requests (src/campaign/setup.cpp); missing: neutral ordered planet/scene requests and campaign graph; scene-only instantiation requires the owning location provider | WGM-16; WGS-09 | 1149 | src/campaign/galaxy.cpp; src/campaign/setup.cpp | neutral ordered planet/scene requests and campaign graph; scene-only instantiation requires the owning location provider; basis: reviewed |
+| Markup_Filename | applied | whole class (src/campaign/ai_perception_content.cpp) | WGA-426, WGA-464 | — | src/campaign/ai_perception_content.cpp | First faction match loads authored markup and hint-set defaults per player; unreadable files retain diagnostics and leave that player's hint branch unavailable.; basis: reviewed |
+| Max_Tech_Level | partial | single-player advanced campaign technology options (apps/viewer/src/campaign_setup_screen.cpp); authored campaign player setup (src/campaign/setup.cpp); missing: Production/story tech side effects require the typed owning provider. | WGP-190, WGP-69, WGP-74; WGS-13 | 1149 | apps/viewer/src/campaign_setup_screen.cpp; src/campaign/setup.cpp | First matching authored maximum (sourced absent default 5) or custom minus-one maximum follows current-tech assignment and persists.; basis: reviewed |
+| Planet_Auto_Reveal | applied | whole class (src/campaign/setup.cpp) | WGS-04, WGUI-04 | — | src/campaign/setup.cpp | basis: reviewed |
+| Rebel_Story_Name | todo | application not recorded | — | 683 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Show_Completed_Tab | todo | application not recorded | — | 1149 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Sort_Order | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Special_Case_Production | partial | authored campaign startup requests (src/campaign/setup.cpp); missing: startup required initial-placement marks only; production allow-list and queues remain legacy &#35;682 | WGS-70 | 682 | src/campaign/setup.cpp | startup required initial-placement marks only; production allow-list and queues remain legacy &#35;682; basis: reviewed |
+| Starting_Active_Player | partial | campaign preview local faction and seats (apps/viewer/src/galactic/scene_content.cpp); galactic victory condition installation (src/campaign/setup.cpp); single-player starting-faction condition selection (src/sim/galactic/victory.cpp); missing: Full live player/seat setup and persisted starting-faction state remain with the session owner. | WGP-42; WGS-15; WGS-15 | 1149 | apps/viewer/src/galactic/scene_content.cpp; src/campaign/setup.cpp; src/sim/galactic/victory.cpp | Authored starting faction selects human versus AI victory lists for single player and the preview local seat; full session setup is not claimed.; basis: reviewed |
+| Starting_Credits | applied | authored campaign player setup (src/campaign/setup.cpp) | WGS-11, WGS-12, WGS-69 | — | src/campaign/setup.cpp | First matching authored value or admitted custom value initializes represented player credits; no cap clamp.; basis: reviewed |
+| Starting_Forces | partial | authored campaign startup requests (src/campaign/setup.cpp); missing: ordered active-owner placement requests, target inputs and human guard hook; WGS-U08 nested placement must be supplied or explicitly refused | WGS-70 | 1149 | src/campaign/setup.cpp | ordered active-owner placement requests, target inputs and human guard hook; WGS-U08 nested placement must be supplied or explicitly refused; basis: reviewed |
+| Starting_Tech_Level | partial | single-player advanced campaign technology options (apps/viewer/src/campaign_setup_screen.cpp); authored campaign player setup (src/campaign/setup.cpp); missing: Production/story tech side effects require the typed owning provider. | WGP-190, WGP-69, WGP-74; WGS-13, WGS-69 | 1149 | apps/viewer/src/campaign_setup_screen.cpp; src/campaign/setup.cpp | Authored/custom requests, including exact nonzero minus-one branch, precede delegated tech side effects; committed current value persists.; basis: reviewed |
+| Supports_Custom_Settings | partial | single-player advanced campaign technology options (apps/viewer/src/campaign_setup_screen.cpp); authored campaign player setup (src/campaign/setup.cpp); missing: Full menu filtering, tutorial/story visibility and network option UI remain WGS-U02. | WGP-190, WGP-69, WGP-74; WGS-12, WGS-13 | 1149 | apps/viewer/src/campaign_setup_screen.cpp; src/campaign/setup.cpp | Staging gates custom options; omitted support retains the sourced true constructor default. Accepted technology options enter the existing player setup model.; basis: reviewed |
+| Text_ID | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Trade_Routes | applied | whole class (src/campaign/galaxy.cpp) | WGM-16 | — | src/campaign/galaxy.cpp | basis: reviewed |
+| Tutorial | todo | application not recorded | — | 1150 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Underworld_Story_Name | todo | application not recorded | — | 683 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+
+## Campaign_Files, Trade_Route_Files
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| File | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+
+## CIN_GroundInfantry, GroundInfantry, GroundVehicle, HeroUnit, Props_Story
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Stealth_Capable | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+
+## CIN_SpaceUnit, MOV_Cinematic, SpaceUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Transport_Capacity | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+
+## CIN_SpaceUnit, Props_Story, SpaceUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Surface_Bombardment_Capable | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+
+## CommandBarComponent
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Dial2_Offset | applied | whole class (src/presentation/ui/hud_shell.cpp) | AB-08 | — | src/presentation/ui/hud_shell.cpp | matched by the field's name; the loader is table-driven; basis: auto |
+| Build_Dial_Offset | applied | whole class (src/presentation/ui/hud_shell.cpp) | AB-08 | — | src/presentation/ui/hud_shell.cpp | matched by the field's name; the loader is table-driven; basis: auto |
+| Build_Texture_Name | applied | whole class (src/presentation/ui/hud_shell.cpp) | AB-05 | — | src/presentation/ui/hud_shell.cpp | matched by the field's name; the loader is table-driven; basis: auto |
+| Can_Drag_Stack | partial | Pad_00..09 (apps/viewer/src/galactic/ground_hud.cpp); missing: other command-bar components | WGUI-41, WGUI-53, WGUI-54 | 654 | apps/viewer/src/galactic/ground_hud.cpp | Applied to ground organization components; other consumers retain their provider seams.; basis: reviewed |
+| Font_Point_Size | applied | authored black-market menu and encyclopedia (apps/viewer/src/galactic/black_market_hud.cpp); g_special_ability (apps/viewer/src/galactic/destruction_hud.cpp); i_main_organize, q1_0000..q3_0406, q1_fleet..q4_fleet, text_fleet1..3 (apps/viewer/src/galactic/galactic_fleet_hud.cpp); g_planet_name (apps/viewer/src/galactic/galactic_hud.cpp); encyclopedia_back, encyclopedia_header_text, encyclopedia_text (apps/viewer/src/galactic/galactic_hud.cpp); GHUD-S01 command-bar components (apps/viewer/src/galactic/galactic_hud.cpp); g_planet_value (apps/viewer/src/galactic/galactic_hud.cpp); GHUD-S09 ground organization components (apps/viewer/src/galactic/ground_hud.cpp); bm_close, bm_frame, bm_text_steal, bm_title, bm_title01, h_close, h_title, hero-action menu option components, target_type_back (apps/viewer/src/galactic/hero_action_hud.cpp); attack_button_single, choice_button_left, choice_button_right, text_attack_choice, text_attack_single (apps/viewer/src/galactic/pending_battle_hud.cpp); whole class (src/presentation/godot/ui/tactical_hud_build.cpp); generic_flytext (src/presentation/ui/hud_shell.cpp) | WGEP-141, WGEP-143; WGCH-151, WGCH-154; WGUI-42, WGUI-72, WGUI-73; WGUI-96; WGUI-70, WGUI-81; WGUI-33, WGUI-34, WGUI-35, WGUI-80, WGUI-94; WGUI-39; WGUI-41, WGUI-53, WGUI-54; WGUI-47; WGM-174, WGM-175; HCB-65; HCB-64 | — | apps/viewer/src/galactic/black_market_hud.cpp; apps/viewer/src/galactic/destruction_hud.cpp; apps/viewer/src/galactic/galactic_fleet_hud.cpp; apps/viewer/src/galactic/galactic_hud.cpp; apps/viewer/src/galactic/ground_hud.cpp; apps/viewer/src/galactic/hero_action_hud.cpp; apps/viewer/src/galactic/pending_battle_hud.cpp; src/presentation/godot/ui/tactical_hud_build.cpp; src/presentation/ui/hud_shell.cpp | matched by the field's name; the loader is table-driven HCB-64 applies the shared XML readout style to caller-prepared generic_flytext; bounty accounting remains outside presentation.; basis: reviewed |
+| Max_Bar_Level | applied | whole class (src/presentation/ui/hud_shell.cpp) | L-9 | — | src/presentation/ui/hud_shell.cpp | matched by the field's name; the loader is table-driven; basis: auto |
+| Size | partial | authored black-market menu and encyclopedia (apps/viewer/src/galactic/black_market_hud.cpp); encyclopedia_back, encyclopedia_header_text, encyclopedia_text (apps/viewer/src/galactic/galactic_hud.cpp); g_radar_view (apps/viewer/src/galactic/galactic_radar_hud.cpp); missing: other command-bar components | WGEP-141, WGEP-143; WGUI-70, WGUI-81; WGUI-56, WGUI-90 | 654 | apps/viewer/src/galactic/black_market_hud.cpp; apps/viewer/src/galactic/galactic_hud.cpp; apps/viewer/src/galactic/galactic_radar_hud.cpp | Galactic encyclopedia consumes authored pane/text sizes and radar consumes the authored view icon size; other command-bar component uses remain untraced.; basis: reviewed |
+| Stackable | todo | application not recorded | — | 654 | — | a data loader reads it; where the value goes is not traced |
+
+## Container
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Permanent_Weapon_Swap_Ability/Must_Be_Bought_On_Black_Market | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Disruptor_Merc_Team) |
+| Abilities/Proximity_Mines_Ability/Must_Be_Bought_On_Black_Market | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Merc_Team) |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 654 | — | — |
+| Build_Limit_Lifetime_Per_Player | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-25 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp | Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+| Galactic_Model_Name | partial | Galactic_Fleet container marker (apps/viewer/src/galactic/galactic_scene.cpp); missing: Other container presentation paths remain outside the galactic fleet marker. | WGP-16 | 650 | apps/viewer/src/galactic/galactic_scene.cpp | The Galactic_Fleet marker draws its authored model and applies its authored Z offset. Fleet model overrides remain a separate provider seam.; basis: reviewed |
+| Is_Indigenous_Unit_Corruptible | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Imp_Guard_Team) |
+| Tactical_Build_Cost_Multiplayer | todo | application not recorded | — | 654 | — | the M2 scene loads no object of this class; the skirmish economy applies the tag to the classes of the applied row (&#35;530) |
+| Tactical_Build_Prerequisites | todo | application not recorded | — | 654 | — | — |
+| Tactical_Build_Time_Seconds | todo | application not recorded | — | 654 | — | the M2 scene loads no object of this class; the skirmish economy applies the tag to the classes of the applied row (&#35;530) |
+| Tactical_Production_Queue | todo | application not recorded | — | 654 | — | the M2 scene loads no object of this class; the skirmish economy applies the tag to the classes of the applied row (&#35;530) |
+
+## Container, GenericHeroUnit, HeroUnit, Mobile_Defense_Unit, SecondaryStructure, SpaceBuildable, SpaceUnit, SpecialStructure, Squadron, StarBase, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Score_Cost_Credits | partial | live galactic automatic battle summary (apps/viewer/src/galactic/galactic_battle_dialog.cpp); loaded local space battle (apps/viewer/src/live_session_frame.cpp); live galactic campaign end (src/platform/galactic/campaign_scoring.cpp); missing: consumers outside loaded space and live galactic battle summaries | WAR-88, WBF-45; WBF-45; WBF-45, WGP-178 | 530 | apps/viewer/src/galactic/galactic_battle_dialog.cpp; apps/viewer/src/live_session_frame.cpp; src/platform/galactic/campaign_scoring.cpp | money the skirmish purchasing reads or should read (&#35;530, &#35;556) Results/scoring consumer covers the loaded local space closure; other gameplay and mode consumers are separate. Live GC summary filters confirmed original-type losses using the resolved Score_Cost_Credits threshold.; basis: reviewed |
+
+## Container, GenericHeroUnit, HeroUnit, SecondaryStructure, SpaceUnit, SpecialStructure, Squadron, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Political_Control | partial | explicit galactic control inputs (src/campaign/control.cpp); reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure, special structure category sources, unbound galactic object types | WGM-67; WGEP-23, WGEP-50, WGEP-69, WGM-69, WGS-90, WGS-94 | 1114 | src/campaign/control.cpp; src/campaign/live_setup.cpp | Authored values feed src/sim/galactic/control.cpp; resolved live presence and missing consumers stay explicit seams.; basis: reviewed |
+
+## Container, HeroUnit, Marker, SecondaryStructure, SpaceBuildable, SpaceStructure, SpaceUnit, SpecialStructure, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| GUI_Bracket_Size | applied | whole class (apps/viewer/src/world_ui_prepare.cpp) | WU-11 | — | apps/viewer/src/world_ui_prepare.cpp | basis: auto |
+
+## Container, HeroUnit, SecondaryStructure, SpaceUnit, SpecialStructure, Squadron, StarBase, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Required_Star_Base_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-22, WGEP-35 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp | Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Commander_Akbar, Luke_Skywalker. Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, E_Gravity_Well_Station, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks, E_Ground_Base_Shield, E_Ground_Base_Shield_Small (+52 more). Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Commander_Akbar, Luke_Skywalker. Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, E_Gravity_Well_Station, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks, E_Ground_Base_Shield, E_Ground_Base_Shield_Small (+52 more). Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+
+## Container, HeroUnit, SecondaryStructure, SpaceUnit, SpecialStructure, Squadron, TechBuilding, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Required_Special_Structures | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34 | 654 | src/campaign/live_setup.cpp | Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Commander_Akbar, Luke_Skywalker. Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, E_Gravity_Well_Station, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks, E_Ground_Base_Shield, E_Ground_Base_Shield_Small (+48 more). Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Commander_Akbar, Luke_Skywalker. Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, E_Gravity_Well_Station, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks, E_Ground_Base_Shield, E_Ground_Base_Shield_Small (+48 more).; basis: reviewed |
+
+## Container, HeroUnit, SecondaryStructure, SpaceUnit, SpecialStructure, Squadron, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Required_Timeline | todo | application not recorded | — | 654 | — | Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Chewbacca, Commander_Akbar, Han_Solo, Luke_Skywalker. Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, E_Gravity_Well_Station, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks, E_Ground_Base_Shield, E_Ground_Base_Shield_Small (+52 more). Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Commander_Akbar, Luke_Skywalker. Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, E_Gravity_Well_Station, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks, E_Ground_Base_Shield, E_Ground_Base_Shield_Small (+52 more). |
+
+## Container, HeroUnit, SpaceUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Political_Faction | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-23, WGEP-50, WGEP-69, WGM-69, WGS-90, WGS-94 | 654 | src/campaign/live_setup.cpp |  Initial placement authoring is retained by the validated galactic loaders (docs/galactic-types.md); parsing alone does not claim runtime application.; basis: reviewed |
+
+## Container, Marker, SecondaryStructure, SpaceBuildable, SpecialStructure, TechBuilding
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| SFXEvent_Build_Cancelled | applied | galactic production types (apps/viewer/src/galactic/galactic_audio.cpp) | WGEP-96, WGEP-97, WGP-183, WGP-63 | — | apps/viewer/src/galactic/galactic_audio.cpp | Galactic production plays the type SFX for the local builder when no speech is authored (WGP-183).; basis: reviewed |
+
+## Container, Marker, SecondaryStructure, SpecialStructure, TechBuilding
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| SFXEvent_Build_Complete | applied | galactic production types (apps/viewer/src/galactic/galactic_audio.cpp) | WGEP-96, WGEP-97, WGP-183, WGP-63 | — | apps/viewer/src/galactic/galactic_audio.cpp | Galactic production plays the type SFX for the local builder when no speech is authored (WGP-183).; basis: reviewed |
+| SFXEvent_Build_Started | applied | galactic production types (apps/viewer/src/galactic/galactic_audio.cpp) | WGEP-96, WGEP-97, WGP-183, WGP-63 | — | apps/viewer/src/galactic/galactic_audio.cpp | Galactic production plays the type SFX for the local builder when no speech is authored (WGP-183).; basis: reviewed |
+
+## Container, SecondaryStructure, SpaceBuildable, SpaceUnit, SpecialStructure, Squadron, StarBase, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Can_Be_Unlocked_By_Slicer | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-130, WGEP-147, WGEP-42 | 654 | src/campaign/live_setup.cpp; src/sim/galactic/production.cpp | Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, E_Ground_Base_Shield_Small, Ground_Cantina_E, Ground_Cantina_R, Ground_Cantina_U, Ground_Empire_Hypervelocity_Gun, Ground_Grand_Arena, Ground_Hutt_Palace_E (+26 more). Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, E_Ground_Base_Shield_Small, Ground_Cantina_E, Ground_Cantina_R, Ground_Cantina_U, Ground_Empire_Hypervelocity_Gun, Ground_Grand_Arena, Ground_Hutt_Palace_E (+26 more).; basis: reviewed |
+| Build_Initially_Locked | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-19; WGEP-130, WGEP-147, WGEP-42 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/sim/galactic/production.cpp | Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, E_Ground_Base_Shield_Small, E_Ground_Research_Facility, E_Ground_Turbolaser_Tower, Ground_Cantina_E, Ground_Cantina_R, Ground_Cantina_U, Ground_Empire_Hypervelocity_Gun (+31 more). Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, E_Ground_Base_Shield_Small, E_Ground_Research_Facility, E_Ground_Turbolaser_Tower, Ground_Cantina_E, Ground_Cantina_R, Ground_Cantina_U, Ground_Empire_Hypervelocity_Gun (+31 more). Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+
+## Container, SecondaryStructure, Squadron
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Tech_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-19, WGEP-22; WGEP-130, WGEP-147, WGEP-42 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/sim/galactic/production.cpp | the loader reads it for other classes; the M2 scene's objects of this class never have it read Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+
+## Container, SpaceUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Buzz_Droids_Ability/Must_Be_Bought_On_Black_Market | land-or-galactic | application not recorded | — | — | — | FOCU-BM-GATE |
+
+## Container, SpaceUnit, Squadron
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Expensive_Bribe_Cost | todo | application not recorded | — | 654 | — | — |
+
+## Container, SpaceUnit, Squadron, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Cheap_Bribe_Cost | todo | application not recorded | — | 654 | — | — |
+| Population_Value | partial | opt-in galactic production offers (src/campaign/setup.cpp); prepared campaign space entry (src/campaign/space_entry.cpp); whole class (src/presentation/ui/hud_shell.cpp); opt-in global galactic owned-list census (src/sim/galactic/production.cpp); whole class (src/skirmish/economy.cpp); missing: Live owned-list lifecycle/usability, modifier/filter providers and AI task budget payment remain with their owning services. | WGEP-50; WGT-07; CARD-17; WGEP-48, WGEP-49, WGEP-50, WGEP-62, WGEP-68, WGEP-69; PU-21 | 1129 | src/campaign/setup.cpp; src/campaign/space_entry.cpp; src/presentation/ui/hud_shell.cpp; src/sim/galactic/production.cpp; src/skirmish/economy.cpp | Original-type GC population and capacity feed partitioned census contributions; both actual queues reserve population. Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
+| Tactical_Bribe_Cost | todo | application not recorded | — | 654 | — | Mixed ground/space, space carriers on Container: StarViper_Team. Mixed ground/space, space carriers on Container: StarViper_Team. |
+| Unit_Abilities_Data/Unit_Ability/Must_Be_Bought_On_Black_Market | land-or-galactic | application not recorded | — | — | — | Mixed ground/space, space carriers on Container: StarViper_Team.; FOCU-BM-GATE |
+
+## Container, SpaceUnit, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Hyperspace | land-or-galactic | application not recorded | — | — | — |  Initial placement authoring is retained by the validated galactic loaders (docs/galactic-types.md); parsing alone does not claim runtime application.; SCOPE-GALACTIC |
+
+## Decal
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Random_Size_Offset | todo | application not recorded | — | 654 | — | — |
+
+## Difficulty_Adjustment
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bribe_Cost_Multiplier | todo | application not recorded | — | 737 | — | — |
+| Credit_Multiplier | applied | whole class (src/campaign/setup.cpp); whole class (src/sim/tactical/economy.cpp) | WGEP-16; WPR-12 | — | src/campaign/setup.cpp; src/sim/tactical/economy.cpp | Selected difficulty scales positive AI credit changes, including income, refunds and bonuses; human changes and debits remain unscaled.; basis: reviewed |
+| Galactic_AI_Contrast_Multiplier | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Galactic_AI_Goal_Cycle_Sleep_Duration | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Galactic_Build_Time_Multiplier | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-28, WGEP-32, WGUI-18 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
+| Space_Build_Time_Multiplier | partial | ship (src/skirmish/economy.cpp); missing: station | WBP-15 | 737 | src/skirmish/economy.cpp | Pad UC durations use selected difficulty; station queues retain their separate Normal-only consumer.; basis: reviewed |
+
+## Faction
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Automatic_Planetary_Corruption_Upgrade_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Bombardment_Blob_Size | todo | application not recorded | — | 654 | — | — |
+| Bombardment_Required_Orbital_Ships | todo | application not recorded | — | 654 | — | — |
+| Can_Control_Planets | applied | GC map-owner factions (src/campaign/conflict_entry.cpp); whole class (src/campaign/setup.cpp) | WGT-121; WGEP-03 | — | src/campaign/conflict_entry.cpp; src/campaign/setup.cpp | basis: reviewed |
+| Corruption_Galactic_Production_Price_Multipliers | applied | galactic corruption economy (src/sim/galactic/production.cpp) | WGEP-29 | — | src/sim/galactic/production.cpp | basis: reviewed |
+| Corruption_Galactic_Production_Time_Multipliers | applied | galactic corruption economy (src/sim/galactic/production.cpp) | WGEP-32 | — | src/sim/galactic/production.cpp | basis: reviewed |
+| Corruption_Tactical_Build_Pad_Price_Multipliers | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Tactical_Build_Pad_Time_Multipliers | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Tactical_Production_Price_Multipliers | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Tactical_Production_Time_Multipliers | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Credits_Accumulation_Factor | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
+| Displayed_Tech_Level_Adjustment | applied | admitted custom galactic tech requests (src/campaign/setup.cpp); galactic black-market pricing and absence (src/sim/galactic/economy_corruption.cpp) | WGS-13; WGEP-81 | — | src/campaign/setup.cpp; src/sim/galactic/economy_corruption.cpp | basis: reviewed |
+| Force_Alignment | applied | galactic (src/sim/galactic/income.cpp) | WGEP-75 | — | src/sim/galactic/income.cpp | Shared fiscal payment and forecast contribution (WGEP-06..09/75).; basis: reviewed |
+| Galactic_Advisor_Hints | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Home_Planet | applied | galactic victory (src/campaign/setup.cpp) | WGS-23 | — | src/campaign/setup.cpp | basis: reviewed |
+| Minimum_Visible_Base_Level | applied | whole class (src/campaign/setup.cpp) | WGUI-11, WGUI-98 | — | src/campaign/setup.cpp | basis: reviewed |
+| Multiplayer_Campaign_Heroes | partial | authored campaign player setup (src/campaign/setup.cpp); missing: Nested hero production/scene placement requires typed providers and a persistable owning model. | WGS-14 | 1149 | src/campaign/setup.cpp | Actual multiplayer/custom-hero gate; required home production and complete original-owned-type query guard ordered creation, including duplicates.; basis: reviewed |
+| Planet_Icon_Offset | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Planet_Icon_Scale | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| SFXEvent_Build_Impossible_Location_Blockaded | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Bunker_Garrisoned | todo | application not recorded | — | 654 | — | — |
+| SFXEvent_Corruption_Removed | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| SFXEvent_Enemy_Fleet_Approaching_Planet | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Exit_Into_Hyperspace | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| SFXEvent_GUI_Start_Campaign | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| SFXEvent_HUD_Lost_Tactical_Corruption_Mission | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| SFXEvent_HUD_Won_Tactical_Corruption_Mission | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| SFXEvent_Max_Credits_Limit_Reached | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Planet_Corrupted | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Planet_Gained_Control | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-27 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
+| SFXEvent_Planet_Lost_Control | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-27 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
+| SFXEvent_Sabotage_Success | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| SFXEvent_Slice_Failure | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| SFXEvent_Slice_Success | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| SFXEvent_Starbase_Ally_Upgraded | partial | whole class (apps/viewer/src/battle_audio_events.cpp); galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WPR-52; WGP-27 | 2004 | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Starbase_Enemy_Upgraded | partial | whole class (apps/viewer/src/battle_audio_events.cpp); galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WPR-52; WGP-27 | 2004 | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Starbase_Upgraded | partial | whole class (apps/viewer/src/battle_audio_events.cpp); galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WPR-52; WGP-27 | 2004 | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Strategic_Pop_Cap_Reached | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Tactical_Corruption_Mission_Commencing | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| SFXEvent_Tactical_Pop_Cap_Reached | applied | whole class (apps/viewer/src/battle_audio_events.cpp) | BA-63 | — | apps/viewer/src/battle_audio_events.cpp | basis: reviewed |
+| SFXEvent_Tactical_Unit_Cap_Reached | applied | whole class (apps/viewer/src/battle_audio_events.cpp) | BA-63 | — | apps/viewer/src/battle_audio_events.cpp | basis: reviewed |
+| Space_Skirmish_Unit_Buy_Credits | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
+| Space_Tactical_Unit_Cap | partial | prepared campaign space entry (src/campaign/space_entry.cpp); missing: Unsupported scene and qualification boundaries in docs/behaviour/galactic-space-entry.md | WGT-07 | 2006 | src/campaign/space_entry.cpp |  Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
+| Tech_Level_Icon_Name | todo | application not recorded | — | 654 | — | — |
+| Tech_Tree_Dialog_Name | todo | application not recorded | — | 654 | — | — |
+
+## Faction, GroundCompany, SpaceUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Maintenance_Cost | partial | galactic AI perception (src/script/foc/galactic_ai_economy.cpp); missing: other maintenance consumers | WGA-291 | 654 | src/script/foc/galactic_ai_economy.cpp | AI perception uses original fleet breakdown maintenance; this does not debit fiscal credits.; basis: reviewed |
+
+## Galactic_Markup
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Planets/*/Chokepoint | applied | whole class (src/campaign/ai_perception_content.cpp); whole class (src/script/foc/galactic_ai_markup.cpp) | WGA-427, WGA-428, WGA-464; WGA-464 | — | src/campaign/ai_perception_content.cpp; src/script/foc/galactic_ai_markup.cpp | basis: reviewed |
+| Planets/*/PriorityTarget | applied | whole class (src/campaign/ai_perception_content.cpp); whole class (src/script/foc/galactic_ai_markup.cpp) | WGA-427, WGA-428, WGA-464; WGA-464 | — | src/campaign/ai_perception_content.cpp; src/script/foc/galactic_ai_markup.cpp | basis: reviewed |
+
+## GameConstants
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Activated_Black_Market_Ability_Names | land-or-galactic | application not recorded | — | — | — | debug build: read only by the command bar black-market ability test (galactic) |
+| Activated_Corrupt_Planet_Ability_Names | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Activated_Destroy_Planet_Ability_Names | partial | live galactic destruction ability routing (src/campaign/live_setup.cpp); missing: authored target effect, model refresh and sound consumers | WGCH-137, WGCH-157, WGCH-183 | 760 | src/campaign/live_setup.cpp | Routes named activated destruction abilities into the live prepared host; presentation consumers remain seams.; basis: reviewed |
+| Activated_Remove_Corruption_Ability_Names | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Activated_Sabotage_Ability_Names | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Activated_Siphon_Credits_Ability_Names | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Activated_Slice_Ability_Names | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| AIUsesFogOfWarGalactic | applied | selected stock galactic AI perception and usability (src/campaign/ai_perception_content.cpp) | WGA-08, WGA-266 | — | src/campaign/ai_perception_content.cpp | SCOPE-GALACTIC; basis: reviewed |
+| AlwaysBypassAutoResolve | land-or-galactic | application not recorded | — | — | — | no getter reference in the debug build; auto-resolve is the campaign battle solver (docs/behaviour/walks/gc-movement-control.md WGM-46) and the one reader found of its sibling constants is the campaign attrition step |
+| Auto_Resolve_Tactical_Multiplier | partial | mid-tactical survival budget calculation (src/campaign/auto_resolve_round.cpp); missing: integrated mid-tactical allocation | WAR-40 | 2026 | src/campaign/auto_resolve_round.cpp | Pure arithmetic kernel is covered; full mid-tactical allocation needs interleaved death-projectile draws.; debug build: read only by the campaign auto-resolve attrition step; skirmish battles are never auto-resolved; basis: reviewed |
+| AutomaticAutoResolve | land-or-galactic | application not recorded | — | — | — | no getter reference in the debug build; auto-resolve is the campaign battle solver (docs/behaviour/walks/gc-movement-control.md WGM-46) and the one reader found of its sibling constants is the campaign attrition step |
+| AutoResolveAttritionAllowanceFactor | applied | whole class (src/campaign/auto_resolve_round.cpp) | WAR-44 | — | src/campaign/auto_resolve_round.cpp | Validated galactic data supplies authored values; the round consumer supplies only sourced omission defaults.; debug build: read by the galactic auto-resolve solver or its conflict service for loss allocation and the starbase downgrade (WAR-44) (docs/behaviour/walks/gc-autoresolve.md); basis: reviewed |
+| AutoResolveDisplayTime | partial | galactic round timing (src/campaign/auto_resolve_round.cpp); missing: auto-resolve progress dialog | WAR-28 | 2025 | src/campaign/auto_resolve_round.cpp | Validated galactic data supplies authored values; the round consumer supplies only sourced omission defaults.; debug build: read by the galactic auto-resolve solver or its conflict service for the round timing and the progress bars (WAR-28, WAR-67) (docs/behaviour/walks/gc-autoresolve.md); basis: reviewed |
+| AutoResolveLoserAttrition | applied | whole class (src/campaign/auto_resolve_round.cpp) | WAR-29, WAR-39 | — | src/campaign/auto_resolve_round.cpp | Validated galactic data supplies authored values; the round consumer supplies only sourced omission defaults.; debug build: read by the galactic auto-resolve solver or its conflict service for the combat round's loser attrition (WAR-29, WAR-39) (docs/behaviour/walks/gc-autoresolve.md); basis: reviewed |
+| AutoResolveTransportLosses | applied | whole class (src/campaign/auto_resolve_round.cpp) | WAR-38 | — | src/campaign/auto_resolve_round.cpp | Validated galactic data supplies authored values; the round consumer supplies only sourced omission defaults.; debug build: read by the galactic auto-resolve solver or its conflict service for the space transport losses (WAR-38) (docs/behaviour/walks/gc-autoresolve.md); basis: reviewed |
+| AutoResolveVoteDefaultTimeOut | land-or-galactic | application not recorded | — | — | — | no getter reference in the debug build; auto-resolve is the campaign battle solver (docs/behaviour/walks/gc-movement-control.md WGM-46) and the one reader found of its sibling constants is the campaign attrition step |
+| AutoResolveVoteDefaultToTactical | land-or-galactic | application not recorded | — | — | — | no getter reference in the debug build; auto-resolve is the campaign battle solver (docs/behaviour/walks/gc-movement-control.md WGM-46) and the one reader found of its sibling constants is the campaign attrition step |
+| AutoResolveWinnerAttrition | applied | whole class (src/campaign/auto_resolve_round.cpp) | WAR-29, WAR-39 | — | src/campaign/auto_resolve_round.cpp | Validated galactic data supplies authored values; the round consumer supplies only sourced omission defaults.; debug build: read by the galactic auto-resolve solver or its conflict service for the combat round's winner attrition (WAR-29, WAR-39) (docs/behaviour/walks/gc-autoresolve.md); basis: reviewed |
+| Battle_Pending_Message_Font_Size | land-or-galactic | application not recorded | — | — | — | debug build: read only by the campaign pending-battle message set-up |
+| Black_Market_Income_Mult_Max | applied | galactic corruption economy (src/sim/galactic/economy_corruption.cpp) | WGEP-14 | — | src/sim/galactic/economy_corruption.cpp | basis: reviewed |
+| Black_Market_Income_Mult_Min | applied | galactic corruption economy (src/sim/galactic/economy_corruption.cpp) | WGEP-14 | — | src/sim/galactic/economy_corruption.cpp | basis: reviewed |
+| Corrupt_Side_Leader_Name | land-or-galactic | application not recorded | — | — | — | debug build: read only by the campaign story set-up (sandbox objectives) |
+| Corrupt_Side_Name | todo | application not recorded | — | 1149 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Corruption_Choice_Benefit | applied | whole class (apps/viewer/src/galactic/corruption_hud.cpp) | WGCH-04, WGCH-49 | — | apps/viewer/src/galactic/corruption_hud.cpp | Prepared snapshot corruption menu consumes display tables; live campaign action host and retail layout capture remain seams.; basis: reviewed |
+| Corruption_Choice_Encyclopedia | applied | whole class (apps/viewer/src/galactic/corruption_hud.cpp) | WGCH-04, WGCH-49 | — | apps/viewer/src/galactic/corruption_hud.cpp | Prepared snapshot corruption menu consumes display tables; live campaign action host and retail layout capture remain seams.; basis: reviewed |
+| Corruption_Choice_Icon_Name | applied | whole class (apps/viewer/src/galactic/corruption_hud.cpp) | WGCH-04, WGCH-49 | — | apps/viewer/src/galactic/corruption_hud.cpp | Prepared snapshot corruption menu consumes display tables; live campaign action host and retail layout capture remain seams.; basis: reviewed |
+| Corruption_Choice_Income_Percentage | applied | galactic corruption economy (src/sim/galactic/economy_corruption.cpp) | WGEP-04, WGEP-13 | — | src/sim/galactic/economy_corruption.cpp | basis: reviewed |
+| Corruption_Choice_Name | applied | whole class (apps/viewer/src/galactic/corruption_hud.cpp) | WGCH-04, WGCH-49 | — | apps/viewer/src/galactic/corruption_hud.cpp | Prepared snapshot corruption menu consumes display tables; live campaign action host and retail layout capture remain seams.; basis: reviewed |
+| Corruption_Encyclopedia_Backdrop | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Encyclopedia_Complete | applied | whole class (apps/viewer/src/galactic/corruption_hud.cpp) | WGCH-49 | — | apps/viewer/src/galactic/corruption_hud.cpp | Independent prepared requirement satisfaction; exact retail pane placement remains capture-needed.; basis: reviewed |
+| Corruption_Encyclopedia_Header | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Encyclopedia_Incomplete | applied | whole class (apps/viewer/src/galactic/corruption_hud.cpp) | WGCH-49 | — | apps/viewer/src/galactic/corruption_hud.cpp | Independent prepared requirement satisfaction; exact retail pane placement remains capture-needed.; basis: reviewed |
+| Corruption_Encyclopedia_Left_Edge | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Encyclopedia_Money_Icon | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Encyclopedia_Spacing | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Line_Grow_Seconds | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Line_Radius | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Line_Start_End_Offset | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Mission_Requirement_Icon_Name | applied | whole class (apps/viewer/src/galactic/corruption_hud.cpp) | WGCH-04, WGCH-49 | — | apps/viewer/src/galactic/corruption_hud.cpp | Prepared snapshot corruption menu consumes display tables; live campaign action host and retail layout capture remain seams.; basis: reviewed |
+| Corruption_Particle_Line_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Path_Color | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Path_Offset | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Path_Width | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Planet_Icon | partial | galactic planet status icons (apps/viewer/src/galactic/galactic_hud.cpp); missing: per-type icons of corrupted planets (corruption layer and type publication) | GHUDL-15 | 1130 | apps/viewer/src/galactic/galactic_hud.cpp | Only the information entry is applied: an uncorrupted planet while the local faction benefits from corruption.; SCOPE-GALACTIC; basis: reviewed |
+| Corruption_Planet_Icon_Encyclopedia_Desc | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_Planet_Icon_Encyclopedia_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Countdowns_Font_Size | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Credit_Cap_Per_Planet | applied | whole class (src/campaign/setup.cpp); whole class (src/campaign/setup.cpp); whole class (src/campaign/space_rules.cpp); whole class (src/sim/galactic/session.cpp) | WGEP-17; WGEP-17; WGT-27; WGEP-17, WGEP-60 | — | src/campaign/setup.cpp; src/campaign/space_rules.cpp; src/sim/galactic/session.cpp | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket Opt-in base-income fiscal service; remaining income modifiers and production are separate services.; basis: reviewed |
+| Credits_Accumulation_Factor_Empire | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Credits_Accumulation_Factor_Rebel | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Credits_Display_Font_Name | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Credits_Display_Font_Size | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| CurrentPathCostCoefficientSpace | applied | whole class (src/units/unit_motion.cpp) | AV-13 | — | src/units/unit_motion.cpp | &#35;852 reassessment: the valid halved perturbation changes structural tables but proves no battle effect. Doubling fails battle construction because avoidance rules are out of range; the check retries with half (AV-13).; CHECK-842; basis: reviewed |
+| Debug_Hot_Key_Load_Campaign | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Default_Bounty_By_Category_MP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | WGCH-65/WGP-189: loaders read this only with campaign_scene enabled; campaign space economy applies current-type bounty. The standalone M2 skirmish cannot observe this consumer; strategic and auto-resolve death consumers remain separate.; basis: reviewed |
+| Default_Bounty_By_Category_SP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | WGCH-65/WGP-189: loaders read this only with campaign_scene enabled; campaign space economy applies current-type bounty. The standalone M2 skirmish cannot observe this consumer; strategic and auto-resolve death consumers remain separate.; basis: reviewed |
+| Depleted_Shield_Regen_Cap | applied | whole class (src/units/unit_durability.cpp) | DG-15 | — | src/units/unit_durability.cpp | basis: auto |
+| DesiredSpaceFOWCellSize | applied | whole class (src/sim/tactical/fog_cells.cpp) | PG-01, RO-1, V-06, V-18 | — | src/sim/tactical/fog_cells.cpp | basis: auto |
+| Distribute_Credit_Quantum | multiplayer | application not recorded | — | — | — | debug build: read only by the network money-distribution event (allies share credits) |
+| Event_Message_Default_Font_Size | todo | application not recorded | — | 654 | — | — |
+| Evil_Fleet_Maintenance_Cost_Factor | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Evil_Starship_Maintenance_Cost_Factor | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Fiscal_Cycle_Time_In_Secs | applied | whole class (src/campaign/setup.cpp) | WGEP-02, WGS-05 | — | src/campaign/setup.cpp | basis: reviewed |
+| Galactic_Zoom_Acceleration | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Galactic_Zoom_In_Station_Offset | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Garrisoned_Max_Attack_Distance_Multiplier | land-or-galactic | application not recorded | — | — | — | debug build: read only by ground weapon range and attack distance (garrisoned units) |
+| Good_Fleet_Maintenance_Cost_Factor | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Good_Starship_Maintenance_Cost_Factor | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| GUI_Darken_Level | todo | application not recorded | — | 654 | — | — |
+| GUI_Hilite_Level | todo | application not recorded | — | 654 | — | — |
+| GUI_Planet_Fade_Duration | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| GUI_Planet_Flash_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Hack_Super_Weapon_Cost | applied | live prepared hack price and direct nonhuman route (src/sim/galactic/ability_hack.cpp) | WGCH-109, WGCH-110, WGCH-111, WGCH-112, WGCH-139, WGCH-180, WGCH-181, WGCH-182, WGCH-57, WGCH-66 | — | src/sim/galactic/ability_hack.cpp | basis: reviewed |
+| Hack_Super_Weapon_Required_Type | applied | live exact current-type orbit match (src/sim/galactic/ability_hack.cpp) | WGCH-109, WGCH-110, WGCH-111, WGCH-112, WGCH-139, WGCH-180, WGCH-181, WGCH-182, WGCH-57, WGCH-66 | — | src/sim/galactic/ability_hack.cpp | basis: reviewed |
+| Income_Redistribution | land-or-galactic | application not recorded | — | — | — | no getter reference in the debug build; galactic fiscal tag; the inspected fiscal path does not read it (docs/behaviour/walks/gc-economy-production.md WGEP-15) |
+| Large_Coin_Stack_Size | todo | application not recorded | — | 654 | — | — |
+| Max_Galactic_Zoom_Distance | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Max_Galactic_Zoom_Speed | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Max_Skirmish_Credits | partial | staging credits slider upper bound (src/skirmish/inputs.cpp); missing: the selected credits as a battle's starting money | WSS-25 | 727 | src/skirmish/inputs.cpp | The staging's advanced dialog bounds its credits slider with it; the selected value does not reach a battle yet (skirmish tech and AI credit rules, legacy &#35;727).; basis: reviewed |
+| MaxCreditIncomeAlignmentBonus | applied | galactic (src/sim/galactic/income.cpp) | WGEP-07 | — | src/sim/galactic/income.cpp | Shared fiscal payment and forecast contribution (WGEP-06..09/75).; basis: reviewed |
+| MaxCreditIncomeAlignmentPenalty | applied | galactic (src/sim/galactic/income.cpp) | WGEP-07 | — | src/sim/galactic/income.cpp | Shared fiscal payment and forecast contribution (WGEP-06..09/75).; basis: reviewed |
+| MaximumFleetMovementDistance | applied | whole class (src/campaign/galaxy.cpp) | WGM-16 | — | src/campaign/galaxy.cpp | basis: reviewed |
+| MaximumGroundbaseLevel | partial | galactic AI base-level perception normalization (src/campaign/ai_perception_content.cpp); missing: Other base-level gameplay consumers outside the galactic AI perception provider | WGA-284 | 654 | src/campaign/ai_perception_content.cpp | basis: reviewed |
+| MaximumPoliticalControl | todo | application not recorded | — | 1114 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| MaximumSpecialStructures | todo | application not recorded | — | 654 | — | — |
+| MaximumSpecialStructuresSpace | todo | application not recorded | — | 654 | — | — |
+| MaximumStarbaseLevel | partial | galactic AI base-level perception normalization (src/campaign/ai_perception_content.cpp); missing: Other base-level gameplay consumers outside the galactic AI perception provider | WGA-284 | 654 | src/campaign/ai_perception_content.cpp | basis: reviewed |
+| Medium_Coin_Stack_Size | todo | application not recorded | — | 654 | — | — |
+| Min_Galactic_Zoom_Speed | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Min_Skirmish_Credits | partial | staging credits slider lower bound (src/skirmish/inputs.cpp); missing: the selected credits as a battle's starting money | WSS-25 | 727 | src/skirmish/inputs.cpp | The staging's advanced dialog bounds its credits slider with it; the selected value does not reach a battle yet (skirmish tech and AI credit rules, legacy &#35;727).; basis: reviewed |
+| Minimum_Tactical_Overrun_Time_In_Secs | multiplayer | application not recorded | — | — | — | debug build: read only by the overwhelming-odds service as its minimum elapsed time, which runs only in network multiplayer (docs/behaviour/walks/audio.md SND-65, docs/behaviour/walks/gc-tactical.md WGT-30) |
+| MinObstacleCostSpace | applied | whole class (src/sim/tactical/motion.cpp) | AV-13 | — | src/sim/tactical/motion.cpp | &#35;852 reassessment: the 9000-tick M2 check changes structural tables but observes no battle change; the cited application remains, and this scenario does not prove its effect.; CHECK-842; basis: reviewed |
+| MP_Color_Blue | applied | whole class (src/skirmish/inputs.cpp) | WSS-20 | — | src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Color_Cyan | applied | whole class (src/skirmish/inputs.cpp) | WSS-20 | — | src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Color_Eight | applied | whole class (src/skirmish/inputs.cpp) | WSS-20 | — | src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Color_Gray | applied | whole class (src/skirmish/inputs.cpp) | WSS-20 | — | src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Color_Green | applied | whole class (src/skirmish/inputs.cpp) | WSS-20 | — | src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Color_Orange | applied | whole class (src/skirmish/inputs.cpp) | WSS-20 | — | src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Color_Purple | applied | whole class (src/skirmish/inputs.cpp) | WSS-20 | — | src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Color_Red | applied | whole class (src/skirmish/inputs.cpp) | WSS-20 | — | src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Color_Yellow | applied | whole class (src/skirmish/inputs.cpp) | WSS-20 | — | src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Default_Allow_Auto_Resolve | partial | space option record (src/skirmish/inputs.cpp); missing: mode-qualified runtime consumers | WSS-22, WSS-24 | 654 | src/skirmish/inputs.cpp | Complete copied Defaults/Accept/Cancel record retains this field; no new space control or runtime execution is claimed. Prebuilt construction remains qualified by WSS-27/SS-U3; victory belongs to G7 and other mode-specific consumers remain separate.; basis: reviewed |
+| MP_Default_Allow_Heroes | applied | whole class (src/skirmish/economy.cpp); whole class (src/skirmish/inputs.cpp) | WSS-29; WSS-22, WSS-24 | — | src/skirmish/economy.cpp; src/skirmish/inputs.cpp | Authored space match default, copied options transaction and human/AI policy consumer.; basis: reviewed |
+| MP_Default_Allow_Random_Events | partial | space option record (src/skirmish/inputs.cpp); missing: mode-qualified runtime consumers | WSS-22, WSS-24 | 654 | src/skirmish/inputs.cpp | Complete copied Defaults/Accept/Cancel record retains this field; no new space control or runtime execution is claimed. Prebuilt construction remains qualified by WSS-27/SS-U3; victory belongs to G7 and other mode-specific consumers remain separate.; basis: reviewed |
+| MP_Default_Allow_SuperWeapons | applied | whole class (src/skirmish/economy.cpp); whole class (src/skirmish/inputs.cpp) | WSS-30; WSS-22, WSS-24 | — | src/skirmish/economy.cpp; src/skirmish/inputs.cpp | Authored space match default, copied options transaction and human/AI policy consumer.; basis: reviewed |
+| MP_Default_Credits | applied | whole class (src/skirmish/economy.cpp); whole class (src/skirmish/inputs.cpp) | PU-01; WSS-22, WSS-24 | — | src/skirmish/economy.cpp; src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Default_Free_Starting_Units | applied | whole class (src/skirmish/inputs.cpp); whole class (src/skirmish/start.cpp) | WSS-22, WSS-24; WSS-28 | — | src/skirmish/inputs.cpp; src/skirmish/start.cpp | Authored space match default, copied options transaction and human/AI policy consumer.; basis: reviewed |
+| MP_Default_Game_Timer | partial | space option record (src/skirmish/inputs.cpp); missing: mode-qualified runtime consumers | WSS-22, WSS-24 | 654 | src/skirmish/inputs.cpp | Complete copied Defaults/Accept/Cancel record retains this field; no new space control or runtime execution is claimed. Prebuilt construction remains qualified by WSS-27/SS-U3; victory belongs to G7 and other mode-specific consumers remain separate.; basis: reviewed |
+| MP_Default_Max_Tech_Level | applied | whole class (src/skirmish/economy.cpp); whole class (src/skirmish/inputs.cpp) | WPR-02; WSS-22, WSS-24 | — | src/skirmish/economy.cpp; src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Default_Pre_Built_Base | partial | space option record (src/skirmish/inputs.cpp); missing: mode-qualified runtime consumers | WSS-22, WSS-24 | 654 | src/skirmish/inputs.cpp | Complete copied Defaults/Accept/Cancel record retains this field; no new space control or runtime execution is claimed. Prebuilt construction remains qualified by WSS-27/SS-U3; victory belongs to G7 and other mode-specific consumers remain separate.; basis: reviewed |
+| MP_Default_Space_Tactical_Win_Condition | applied | space option record (src/skirmish/inputs.cpp); whole class (src/skirmish/inputs.cpp); staging win-condition choice (src/skirmish/setup.cpp) | WSS-22, WSS-24; WBF-08; WSS-31 | — | src/skirmish/inputs.cpp; src/skirmish/setup.cpp | The copied space options record retains the authored field, the staging's win-condition list edits it and the start options carry the choice; the WBF-08 typed default consumer remains applied.; basis: reviewed |
+| MP_Default_Start_Tech_Level | applied | whole class (src/skirmish/economy.cpp); whole class (src/skirmish/inputs.cpp) | WPR-02; WSS-22, WSS-24 | — | src/skirmish/economy.cpp; src/skirmish/inputs.cpp | basis: reviewed |
+| MP_Default_Win_Condition | partial | space option record (src/skirmish/inputs.cpp); missing: mode-qualified runtime consumers | WSS-22, WSS-24 | 654 | src/skirmish/inputs.cpp | Complete copied Defaults/Accept/Cancel record retains this field; no new space control or runtime execution is claimed. Prebuilt construction remains qualified by WSS-27/SS-U3; victory belongs to G7 and other mode-specific consumers remain separate.; basis: reviewed |
+| MP_Default_Win_Condition_Float_Param | partial | space option record (src/skirmish/inputs.cpp); missing: mode-qualified runtime consumers | WSS-22, WSS-24 | 654 | src/skirmish/inputs.cpp | Complete copied Defaults/Accept/Cancel record retains this field; no new space control or runtime execution is claimed. Prebuilt construction remains qualified by WSS-27/SS-U3; victory belongs to G7 and other mode-specific consumers remain separate.; basis: reviewed |
+| MP_Default_Win_Condition_Int_Param | partial | space option record (src/skirmish/inputs.cpp); missing: mode-qualified runtime consumers | WSS-22, WSS-24 | 654 | src/skirmish/inputs.cpp | Complete copied Defaults/Accept/Cancel record retains this field; no new space control or runtime execution is claimed. Prebuilt construction remains qualified by WSS-27/SS-U3; victory belongs to G7 and other mode-specific consumers remain separate.; basis: reviewed |
+| Multiplayer_Losing_Team_Bonus_Credit_Percentage | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
+| OffMapCostPenalty | todo | application not recorded | — | 654 | — | — |
+| Particle_Brightness_Per_Corruption_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Particle_Energy_Per_Corruption_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Particle_Scale_Per_Corruption_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Pay_As_You_Go | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-28, WGEP-32, WGUI-18 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
+| Planet_Ability_Icon_Names | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Planet_Ability_RGBs | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Planet_Ability_Text_IDs | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Planet_Reveal_Delay_Time | applied | whole class (src/campaign/setup.cpp) | GFC-21, WGUI-02 | — | src/campaign/setup.cpp | basis: reviewed |
+| Political_Control_Change_Time_Seconds | partial | explicit galactic control inputs (src/campaign/control.cpp); missing: campaign runtime binding | WGM-73 | 1114 | src/campaign/control.cpp | Authored values feed src/sim/galactic/control.cpp; resolved live presence and missing consumers stay explicit seams.; basis: reviewed |
+| Political_Income_Curve | applied | curve-evaluator (src/sim/galactic/income.cpp); live-political-source-ledger (src/sim/galactic/income.cpp) | WGEP-63; WGEP-08, WGEP-75 | — | src/sim/galactic/income.cpp | Distinct-x authored interpolation feeds current political control and its saved fiscal source. Positive zero contribution removes it; neutral/nonpositive curve retains it. Preview is pure. Duplicate-x authoring remains the named WGEP-63/U-03 refusal. |
+| Political_Income_Quadratic | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Production_Speed_Factor | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-28, WGEP-32, WGUI-18 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
+| Production_Speed_Mod_Base_Vs_Tech_0 | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-28, WGEP-32, WGUI-18 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
+| Production_Speed_Mod_Base_Vs_Tech_1 | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-28, WGEP-32, WGUI-18 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
+| Production_Speed_Mod_Base_Vs_Tech_2 | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-28, WGEP-32, WGUI-18 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
+| Production_Speed_Mod_Base_Vs_Tech_3 | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-28, WGEP-32, WGUI-18 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
+| Production_Speed_Mod_Base_Vs_Tech_4 | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-28, WGEP-32, WGUI-18 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
+| Progressive_Taxation | land-or-galactic | application not recorded | — | — | — | no getter reference in the debug build; galactic fiscal tag; the inspected fiscal path does not read it (docs/behaviour/walks/gc-economy-production.md WGEP-15) |
+| Raid_Force_Required_Faction | land-or-galactic | application not recorded | — | — | — | debug build: read only by the galactic fleet raid-capability test |
+| Random_Story_Empire_Construction | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Random_Story_Empire_Destroy | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Random_Story_Max_Triggers | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Random_Story_Rebel_Construction | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Random_Story_Rebel_Destroy | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Random_Story_Reward_Empire_Buildable | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Random_Story_Reward_Empire_Unit | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Random_Story_Reward_Rebel_Buildable | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Random_Story_Reward_Rebel_Unit | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Random_Story_Rewards | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Random_Story_Triggers | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| RetreatAutoResolveLoserAttrition | applied | whole class (src/campaign/auto_resolve_round.cpp) | WAR-29, WAR-39 | — | src/campaign/auto_resolve_round.cpp | Validated galactic data supplies authored values; the round consumer supplies only sourced omission defaults.; debug build: read by the galactic auto-resolve solver or its conflict service for the combat round's loser attrition during a retreat (WAR-29, WAR-39) (docs/behaviour/walks/gc-autoresolve.md); basis: reviewed |
+| RetreatAutoResolveWinnerAttrition | applied | whole class (src/campaign/auto_resolve_round.cpp) | WAR-29, WAR-39 | — | src/campaign/auto_resolve_round.cpp | Validated galactic data supplies authored values; the round consumer supplies only sourced omission defaults.; debug build: read by the galactic auto-resolve solver or its conflict service for the combat round's winner attrition during a retreat (WAR-29, WAR-39) (docs/behaviour/walks/gc-autoresolve.md); basis: reviewed |
+| Sabotage_Particle_Effect | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Saliency_Size | todo | application not recorded | — | 654 | — | — |
+| Ships_Per_Stack | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Skirmish_Buy_Credits | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
+| Space_Auto_Resolve_Delay_Seconds | land-or-galactic | application not recorded | — | — | — | debug build: read by the galactic auto-resolve solver or its conflict service for the space conflict's dialog auto-resolve timer (WAR-06) (docs/behaviour/walks/gc-autoresolve.md) |
+| Space_Capture_Allowed_Countdown_Seconds | land-or-galactic | application not recorded | — | — | — | debug build: read only by the campaign-only single-player space capture point countdown (docs/behaviour/walks/build-pads.md WBP-04: multiplayer has none) |
+| Space_Collidable_Grid_Cull_Size | todo | application not recorded | — | 654 | — | — |
+| Space_Large_Ship_Grid_Cull_Size | todo | application not recorded | — | 654 | — | — |
+| Starting_Galactic_Camera_Position | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Strategic_Queue_Tactical_Battles | todo | application not recorded | — | 1115 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Tactical_Build_Time_Multiplier | applied | whole class (src/skirmish/economy.cpp) | PU-13 | — | src/skirmish/economy.cpp | basis: reviewed |
+| Tactical_Overrun_Multiple | multiplayer | application not recorded | — | — | — | debug build: read only by the overwhelming-odds audio service, which runs only in network multiplayer (docs/behaviour/walks/audio.md SND-65) |
+| TradeRouteMovementFactor | todo | application not recorded | — | 680 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| TurnInPlaceSlowdownCapital | applied | whole class (src/units/unit_motion.cpp) | MV-01 | — | src/units/unit_motion.cpp | &#35;852 reassessment: the slowdown applies to face-target motion orders (MV-01); structural tables change but the 9000-tick scenario observes no resulting difference.; CHECK-842; basis: reviewed |
+| UNUSED_Max_Hero_Ground_Forces_On_Planet | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| UNUSED_Max_Non_Hero_Ground_Forces_On_Planet | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| WaitOperatorCostCoefficient | applied | whole class (src/sim/tactical/motion.cpp) | AV-12 | — | src/sim/tactical/motion.cpp | &#35;852 reassessment: the 9000-tick M2 check changes structural tables but observes no battle change; the cited application remains, and this scenario does not prove its effect.; CHECK-842; basis: reviewed |
+| Win_Lose_Message_Font_Size | applied | whole class (src/presentation/ui/battle_messages.cpp) | BE-03 | — | src/presentation/ui/battle_messages.cpp | basis: reviewed |
+
+## GenericHeroUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Corruption_Ability/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Saboteur, Underworld_Saboteur_Exec_Demo) |
+| Abilities/Corruption_Ability/Activation_Style | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Saboteur, Underworld_Saboteur_Exec_Demo) |
+| Abilities/Corruption_Ability/Causes_Despawn | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Saboteur, Underworld_Saboteur_Exec_Demo) |
+| Abilities/Corruption_Ability/Initially_Enabled | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Saboteur, Underworld_Saboteur_Exec_Demo) |
+| Abilities/Corruption_Ability/SFXEvent_Activate | land-or-galactic | application not recorded | — | — | — | BA-55: effective authoring supplies only land or galactic payload consumers for these classes; no M2 space target.; SCOPE-GALACTIC |
+| Abilities/Enhance_Defense_Ability/Stacking_Category | partial | GC space scene (src/campaign/space_rules.cpp); missing: other modes and persistent story/corruption producer | WGT-49, WGT-50, WGT-51 | 760 | src/campaign/space_rules.cpp | Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
+| Abilities/Galactic_Sabotage_Ability/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Saboteur, Underworld_Saboteur_Exec_Demo) |
+| Abilities/Galactic_Sabotage_Ability/Activation_Style | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Saboteur, Underworld_Saboteur_Exec_Demo) |
+| Abilities/Galactic_Sabotage_Ability/Can_Destroy_Special_Structure | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Saboteur, Underworld_Saboteur_Exec_Demo) |
+| Abilities/Galactic_Sabotage_Ability/Causes_Despawn | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Saboteur, Underworld_Saboteur_Exec_Demo) |
+| Abilities/Galactic_Sabotage_Ability/Initially_Enabled | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Saboteur, Underworld_Saboteur_Exec_Demo) |
+| Abilities/Galactic_Sabotage_Ability/Sabotage_Cost_Increase_Factor | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Saboteur, Underworld_Saboteur_Exec_Demo) |
+| Abilities/Neutralize_Hero_Ability/Cost_Mod_By_Base_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Bounty_Hunter_E, Generic_Bounty_Hunter_R) |
+| Abilities/Neutralize_Hero_Ability/Cost_Mod_By_Previous_Neutralizations | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Bounty_Hunter_E, Generic_Bounty_Hunter_R) |
+| Abilities/Neutralize_Hero_Ability/General_Major_Hero_Cost_Mod | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Bounty_Hunter_E, Generic_Bounty_Hunter_R) |
+| Abilities/Neutralize_Hero_Ability/General_Minor_Hero_Cost_Mod | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Bounty_Hunter_E, Generic_Bounty_Hunter_R) |
+| Abilities/Siphon_Credits_Ability/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Smuggler_E, Generic_Smuggler_R, Generic_Smuggler_R_Tutorial) |
+| Abilities/Siphon_Credits_Ability/Activation_Style | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Smuggler_E, Generic_Smuggler_R, Generic_Smuggler_R_Tutorial) |
+| Abilities/Siphon_Credits_Ability/Causes_Despawn | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Smuggler_E, Generic_Smuggler_R, Generic_Smuggler_R_Tutorial) |
+| Abilities/Siphon_Credits_Ability/Initially_Enabled | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Smuggler_E, Generic_Smuggler_R, Generic_Smuggler_R_Tutorial) |
+| Abilities/Siphon_Credits_Ability/Max_Siphon_Percentage | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Smuggler_E, Generic_Smuggler_R, Generic_Smuggler_R_Tutorial) |
+| Abilities/Siphon_Credits_Ability/Min_Siphon_Percentage | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Smuggler_E, Generic_Smuggler_R, Generic_Smuggler_R_Tutorial) |
+| Abilities/Siphon_Credits_Ability/Siphon_Duration_In_Cycles | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Smuggler_E, Generic_Smuggler_R, Generic_Smuggler_R_Tutorial) |
+| Abilities/System_Spy_Ability/See_Base_Levels | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Probe_Droid) |
+| Abilities/System_Spy_Ability/See_Credit_Income | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Probe_Droid) |
+| Abilities/System_Spy_Ability/See_Credit_Income_Breakdown | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Probe_Droid) |
+| Abilities/System_Spy_Ability/See_Current_Production | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Probe_Droid) |
+| Abilities/System_Spy_Ability/See_Political_Control | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Probe_Droid) |
+| Abilities/System_Spy_Ability/See_Political_Control_Breakdown | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Probe_Droid) |
+| Abilities/System_Spy_Ability/See_Special_Structures | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Probe_Droid) |
+| Blob_Shadow_Below_Detail_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Generic_Commander_00, Generic_Field_Commander_Empire, Generic_Field_Commander_Rebel, Hutt_Field_Commander, R_General_Rieekan_Commander, Squad_Generic_Field_Commander_Empire, Squad_Generic_Field_Commander_Rebel, Underworld_Saboteur (+1 more)) |
+| Can_Hyperspace_Without_Activating_Ability | applied | whole class (src/campaign/fleets.cpp) | WGM-83 | — | src/campaign/fleets.cpp | basis: reviewed |
+| CanCellStack | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Generic_Commander_00, Generic_Field_Commander_Empire, Generic_Field_Commander_Rebel, Hutt_Field_Commander, R_General_Rieekan_Commander, Squad_Generic_Field_Commander_Empire, Squad_Generic_Field_Commander_Rebel, Underworld_Saboteur (+1 more)) |
+| No_Reflection_Below_Detail_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Generic_Commander_00, Generic_Field_Commander_Empire, Generic_Field_Commander_Rebel, Hutt_Field_Commander, R_General_Rieekan_Commander, Squad_Generic_Field_Commander_Empire, Squad_Generic_Field_Commander_Rebel, Underworld_Saboteur (+1 more)) |
+| No_Refraction_Below_Detail_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Generic_Commander_00, Generic_Field_Commander_Empire, Generic_Field_Commander_Rebel, Hutt_Field_Commander, R_General_Rieekan_Commander, Squad_Generic_Field_Commander_Empire, Squad_Generic_Field_Commander_Rebel, Underworld_Saboteur (+1 more)) |
+
+## GenericHeroUnit, HeroUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Neutralize_Hero_Ability/Cost_Mod_By_Planetary_Corruption_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Abilities/Siphon_Credits_Ability/SFXEvent_Activate | land-or-galactic | application not recorded | — | — | — | BA-55: effective authoring supplies only land or galactic payload consumers for these classes; no M2 space target.; SCOPE-GALACTIC |
+| Ranking_In_Category | todo | application not recorded | — | 654 | — | Hero metadata and carried riders do not become ordinary selected space speakers; their ranking application remains pending. |
+
+## GenericHeroUnit, HeroUnit, SecondaryStructure, SpaceBuildable, SpaceUnit, SpecialStructure, StarBase, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Size_Value | todo | application not recorded | — | 654 | — | Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on HeroUnit: Boba_Fett, Boba_Fett_NoStealth, Bossk, Captain_Piet, Chewbacca, Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune (+15 more). Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, Defense_Satellite, Destroyable_Asteroid_Huge, Destroyable_Asteroid_Large, Destroyable_Asteroid_Medium, Destroyable_Asteroid_Small (+77 more). Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Arc_Hammer, Biggs_XWing, Eclipse_Super_Star_Destroyer, Escort_TIE_Fighter, Executor_Super_Star_Destroyer (+50 more). Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Commander_Akbar, Luke_Skywalker. Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, Defense_Satellite, Destroyable_Asteroid_Huge, Destroyable_Asteroid_Large, Destroyable_Asteroid_Medium, Destroyable_Asteroid_Small (+77 more). Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Arc_Hammer, Biggs_XWing, Eclipse_Super_Star_Destroyer, Escort_TIE_Fighter, Executor_Super_Star_Destroyer (+50 more). |
+
+## GenericHeroUnit, HeroUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Neutralization_Cost | todo | application not recorded | — | 654 | — | Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on HeroUnit: Boba_Fett, Boba_Fett_NoStealth, Bossk, Captain_Piet, Chewbacca, Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune (+15 more). Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Home_One, Sundered_Heart, Sundered_Heart_Cinematic_Clone. Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Commander_Akbar, Luke_Skywalker. Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Home_One, Sundered_Heart, Sundered_Heart_Cinematic_Clone. |
+
+## GenericHeroUnit, Mobile_Defense_Unit, SpaceUnit, StarBase, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Energy_Capacity | applied | whole class (src/units/unit_durability.cpp) | EN-01, WCC-46, WCC-80 | — | src/units/unit_durability.cpp | basis: auto |
+
+## GenericHeroUnit, SpecialStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Battlefield_Modifier_Ability/Stacking_Category | partial | GC space scene (src/campaign/space_rules.cpp); space upgrade objects (Stealth_Duration_Multiplier) (src/units/unit_tables_profiles.cpp); missing: the other battlefield modifier fields (legacy &#35;760) | WGT-49, WGT-50, WGT-51; WST-03 | 760 | src/campaign/space_rules.cpp; src/units/unit_tables_profiles.cpp | Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. WST-03: applied for the cloak-duration modifier (largest per category, categories summed). GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
+
+## Goals
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| */Build_Time_Delay_Tolerance | partial | space tactical goals (src/script/foc/ai_engine.hpp); missing: galactic and land goals | SAE-05, SAE-09 | 737 | src/script/foc/ai_engine.hpp | Space tactical activation applies the limit; the tactical estimate remains an explicitly unverified conservative policy.; basis: reviewed |
+
+## GroundBuildable, GroundStructure, Props_Generic, Props_Story, SecondaryStructure, SpaceBuildable, SpaceStructure, SpecialStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Base_Level_Available | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+
+## GroundBuildable, GroundStructure, SpecialStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Tactical_Sell_Credits | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+
+## GroundCompany, GroundInfantry, HeroCompany, HeroUnit, Indigenous_Unit, Props_Story, Slave_Unit, SpaceUnit, Squadron, StarBase
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| IsBuildable | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+
+## GroundCompany, SpaceUnit, SpecialStructure, Squadron, StarBase
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Slice_Cost_Credits | partial | live registered theft types (src/sim/galactic/ability_theft.cpp); missing: AI action routing, ordinary selector activation | WGCH-33, WGCH-54 | 1143 | src/sim/galactic/ability_theft.cpp | basis: reviewed |
+
+## GUIDialogs
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Fonts/*/Combo_Box/Size | applied | whole class (src/presentation/ui/theme.cpp) | B-04, FM-03, L-4 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/Edit_Box/Size | applied | whole class (src/presentation/ui/theme.cpp) | B-04, FM-03, L-4 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/Global_Default/Size | applied | whole class (src/presentation/ui/theme.cpp) | B-04, FM-03, L-4 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/IME_Edit_Box/Size | applied | whole class (src/presentation/ui/theme.cpp) | B-04, FM-03, L-4 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/L_Text/Size | applied | whole class (src/presentation/ui/theme.cpp) | B-04, FM-03, L-4 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/List_Box/Size | applied | whole class (src/presentation/ui/theme.cpp) | B-04, FM-03, L-4 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/Overlay_Caption_Text/Bottom_Color | applied | whole class (src/presentation/godot/ui/kit_text.cpp) | none recorded | — | src/presentation/godot/ui/kit_text.cpp | matched by the field's name; the loader is table-driven; basis: auto |
+| Fonts/*/Overlay_Caption_Text/Character_Padding | applied | whole class (src/presentation/godot/ui/theme_builder.cpp) | none recorded | — | src/presentation/godot/ui/theme_builder.cpp | matched by the field's name; the loader is table-driven; basis: auto |
+| Fonts/*/Overlay_Caption_Text/Emboss | applied | whole class (src/presentation/ui/theme.cpp) | none recorded | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/Overlay_Caption_Text/Name | applied | whole class (src/presentation/ui/theme.cpp) | AB-44, DG-11, R-SKY-01, S-45, S-49 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/Overlay_Caption_Text/Outline | applied | whole class (src/presentation/ui/theme.cpp) | BP-14, HD-20, MM-09, WCC-70 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/Overlay_Caption_Text/Size | applied | whole class (src/presentation/ui/theme.cpp) | B-04, FM-03, L-4 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/Overlay_Caption_Text/Stretch_Factor | applied | whole class (src/presentation/ui/layout.cpp) | none recorded | — | src/presentation/ui/layout.cpp | matched by the field's name; the loader is table-driven; basis: auto |
+| Fonts/*/Overlay_Caption_Text/Top_Color | applied | whole class (src/presentation/godot/ui/kit_text.cpp) | none recorded | — | src/presentation/godot/ui/kit_text.cpp | matched by the field's name; the loader is table-driven; basis: auto |
+| Fonts/*/Push_Button/Size | applied | whole class (src/presentation/ui/theme.cpp) | B-04, FM-03, L-4 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/R_Text/Size | applied | whole class (src/presentation/ui/theme.cpp) | B-04, FM-03, L-4 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Fonts/*/Size | applied | whole class (src/presentation/ui/theme.cpp) | B-04, FM-03, L-4 | — | src/presentation/ui/theme.cpp | a presentation parse site that uses the value where it reads it; basis: auto |
+| Textures/*/Combo_Box_Left_Cap | applied | whole class (src/presentation/godot/ui/kit_controls.cpp) | none recorded | — | src/presentation/godot/ui/kit_controls.cpp | basis: auto |
+
+## HardPoint
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Repair_Cost_Per_Frame | applied | whole class (src/sim/tactical/durability.cpp); whole class (src/units/unit_durability.cpp) | WSL-41, WSL-42; HR-01 | — | src/sim/tactical/durability.cpp; src/units/unit_durability.cpp | Live station command and partitioned repair service apply the authored values; zero amount still pays without gain.; CHECK-842; basis: reviewed |
+
+## HeroUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Black_Market_Ability/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Silri, Tyber_Zann, Tyber_Zann_Passenger, Tyber_Zann_Prologue, Tyber_Zann_Prologue_Cin, UM06_Tyber_Zann, Urai_Fen, Urai_Fen_Prologue) |
+| Abilities/Black_Market_Ability/Causes_Despawn | partial | authored live buyer binding (src/campaign/live_setup.cpp); live black-market ability host (src/sim/galactic/ability_host.cpp); galactic corruption economy (src/sim/galactic/economy_corruption.cpp); missing: external generic-service lifecycle producer, ordinary action-selector preparation gesture | WGCH-70, WGCH-71; WGCH-70, WGCH-71, WGEP-80; WGCH-70, WGEP-55 | 1130 | src/campaign/live_setup.cpp; src/sim/galactic/ability_host.cpp; src/sim/galactic/economy_corruption.cpp | The live host binds authored buyers, verifies retained typed facts, uses the shared account and schedules real actor consumption; queued commands and market selection are live. Ordinary preparation selection and external dynamic-service writes remain named seams.; basis: reviewed |
+| Abilities/Black_Market_Ability/Initially_Enabled | partial | authored live buyer binding (src/campaign/live_setup.cpp); live black-market ability host (src/sim/galactic/ability_host.cpp); missing: external generic-service lifecycle producer, ordinary action-selector preparation gesture | WGCH-70, WGCH-71; WGCH-70, WGCH-71, WGEP-80 | 1130 | src/campaign/live_setup.cpp; src/sim/galactic/ability_host.cpp | The live host binds authored buyers, verifies retained typed facts, uses the shared account and schedules real actor consumption; queued commands and market selection are live. Ordinary preparation selection and external dynamic-service writes remain named seams.; basis: reviewed |
+| Abilities/Black_Market_Ability/Max_Respawn_Times | partial | authored live buyer binding (src/campaign/live_setup.cpp); live black-market ability host (src/sim/galactic/ability_host.cpp); galactic corruption economy (src/sim/galactic/corruption_model.cpp); missing: external generic-service lifecycle producer, ordinary action-selector preparation gesture | WGCH-70, WGCH-71; WGCH-70, WGCH-71, WGEP-80; WGCH-38, WGEP-81 | 1130 | src/campaign/live_setup.cpp; src/sim/galactic/ability_host.cpp; src/sim/galactic/corruption_model.cpp | The live host binds authored buyers, verifies retained typed facts, uses the shared account and schedules real actor consumption; queued commands and market selection are live. Ordinary preparation selection and external dynamic-service writes remain named seams.; basis: reviewed |
+| Abilities/Black_Market_Ability/Min_Respawn_Times | partial | authored live buyer binding (src/campaign/live_setup.cpp); live black-market ability host (src/sim/galactic/ability_host.cpp); galactic corruption economy (src/sim/galactic/corruption_model.cpp); missing: external generic-service lifecycle producer, ordinary action-selector preparation gesture | WGCH-70, WGCH-71; WGCH-70, WGCH-71, WGEP-80; WGCH-38, WGEP-81 | 1130 | src/campaign/live_setup.cpp; src/sim/galactic/ability_host.cpp; src/sim/galactic/corruption_model.cpp | The live host binds authored buyers, verifies retained typed facts, uses the shared account and schedules real actor consumption; queued commands and market selection are live. Ordinary preparation selection and external dynamic-service writes remain named seams.; basis: reviewed |
+| Abilities/Black_Market_Ability/Price_Modifier | applied | galactic corruption economy (src/sim/galactic/corruption_model.cpp) | WGEP-58 | — | src/sim/galactic/corruption_model.cpp | basis: reviewed |
+| Abilities/Black_Market_Ability/Tech_Level_Adjustment | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Silri, Tyber_Zann, Tyber_Zann_Passenger, Tyber_Zann_Prologue, Tyber_Zann_Prologue_Cin, UM06_Tyber_Zann, Urai_Fen, Urai_Fen_Prologue) |
+| Abilities/Find_Weakness_Ability/Stacking_Category | todo | application not recorded | — | 760 | — | — |
+| Abilities/Hero_Protection_Ability/Neutralization_Cost_Multiplier | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo, Jabba_The_Hutt) |
+| Abilities/Hero_Protection_Ability/Stacking_Category | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo, Jabba_The_Hutt) |
+| Abilities/Neutralize_Hero_Ability/Cost_Mod_By_Base_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Boba_Fett, Bossk, IG-88, Mara_Jade) |
+| Abilities/Neutralize_Hero_Ability/Cost_Mod_By_Previous_Neutralizations | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Boba_Fett, Bossk, IG-88, Mara_Jade) |
+| Abilities/Neutralize_Hero_Ability/General_Major_Hero_Cost_Mod | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Boba_Fett, Bossk, IG-88, Mara_Jade) |
+| Abilities/Neutralize_Hero_Ability/General_Minor_Hero_Cost_Mod | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Boba_Fett, Bossk, IG-88, Mara_Jade) |
+| Abilities/Political_Control_Protection_Ability/@Name | todo | application not recorded | — | 760 | — | — |
+| Abilities/Political_Control_Protection_Ability/Activation_Style | todo | application not recorded | — | 760 | — | — |
+| Abilities/Political_Transition_Bonus_Ability/@Name | todo | application not recorded | — | 760 | — | — |
+| Abilities/Political_Transition_Bonus_Ability/Stacking_Category | todo | application not recorded | — | 760 | — | — |
+| Abilities/Political_Transition_Bonus_Ability/Time_Reduction_Percentage | todo | application not recorded | — | 760 | — | — |
+| Abilities/Reduce_Production_Price_Ability/Applicable_Unit_Categories | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | 760 | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/Applicable_Unit_Types | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | 760 | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Remove_Corruption_Ability/SFXEvent_Activate | land-or-galactic | application not recorded | — | — | — | BA-55: effective authoring supplies only land or galactic payload consumers for these classes; no M2 space target.; SCOPE-GALACTIC |
+| Abilities/Siphon_Credits_Ability/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo) |
+| Abilities/Siphon_Credits_Ability/Activation_Style | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo) |
+| Abilities/Siphon_Credits_Ability/Causes_Despawn | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo) |
+| Abilities/Siphon_Credits_Ability/Initially_Enabled | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo) |
+| Abilities/Siphon_Credits_Ability/Max_Respawn_Time | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo) |
+| Abilities/Siphon_Credits_Ability/Max_Siphon_Percentage | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo) |
+| Abilities/Siphon_Credits_Ability/Min_Respawn_Time | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo) |
+| Abilities/Siphon_Credits_Ability/Min_Siphon_Percentage | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo) |
+| Abilities/Siphon_Credits_Ability/Siphon_Duration_In_Cycles | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Han_Solo) |
+| Abilities/Slicer_Ability/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Droid_R2D2) |
+| Abilities/Slicer_Ability/Chance_Affinity_Modifier | partial | live typed theft preparation (src/campaign/live_setup.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-170, WGCH-33, WGCH-36 | 1143 | src/campaign/live_setup.cpp | Live host retains exact price/chance/timer and executes real debit/unlock/consumption; ordinary selector routing follows in the host series.; basis: reviewed |
+| Abilities/Slicer_Ability/Chance_Modifier_By_Base_Level | partial | live typed theft preparation (src/campaign/live_setup.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-170, WGCH-33, WGCH-36 | 1143 | src/campaign/live_setup.cpp | Live host retains exact price/chance/timer and executes real debit/unlock/consumption; ordinary selector routing follows in the host series.; basis: reviewed |
+| Abilities/Slicer_Ability/Chance_Modifier_By_Planet_Difficulty | partial | live typed theft preparation (src/campaign/live_setup.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-170, WGCH-33, WGCH-36 | 1143 | src/campaign/live_setup.cpp | Live host retains exact price/chance/timer and executes real debit/unlock/consumption; ordinary selector routing follows in the host series.; basis: reviewed |
+| Abilities/Slicer_Ability/Cost_Affinity_Modifier | partial | live typed theft preparation (src/campaign/live_setup.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-170, WGCH-33, WGCH-36 | 1143 | src/campaign/live_setup.cpp | Live host retains exact price/chance/timer and executes real debit/unlock/consumption; ordinary selector routing follows in the host series.; basis: reviewed |
+| Abilities/Slicer_Ability/Cost_Multiplier_By_Planet_Tech_Availability | partial | live typed theft preparation (src/campaign/live_setup.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-170, WGCH-33, WGCH-36 | 1143 | src/campaign/live_setup.cpp | Live host retains exact price/chance/timer and executes real debit/unlock/consumption; ordinary selector routing follows in the host series.; basis: reviewed |
+| Abilities/Slicer_Ability/Max_Respawn_Time_Per_Tech_Level | partial | live typed theft preparation (src/campaign/live_setup.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-170, WGCH-33, WGCH-36 | 1143 | src/campaign/live_setup.cpp | Live host retains exact price/chance/timer and executes real debit/unlock/consumption; ordinary selector routing follows in the host series.; basis: reviewed |
+| Abilities/Slicer_Ability/Min_Respawn_Time_Per_Tech_Level | partial | live typed theft preparation (src/campaign/live_setup.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-170, WGCH-33, WGCH-36 | 1143 | src/campaign/live_setup.cpp | Live host retains exact price/chance/timer and executes real debit/unlock/consumption; ordinary selector routing follows in the host series.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Base_Levels | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Droid_R2D2, General_Dodonna, Mara_Jade); SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Grand_Admiral_Thrawn) |
+| Abilities/System_Spy_Ability/See_Credit_Income | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Droid_R2D2, General_Dodonna); SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Grand_Admiral_Thrawn) |
+| Abilities/System_Spy_Ability/See_Credit_Income_Breakdown | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Droid_R2D2, General_Dodonna); SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Grand_Admiral_Thrawn) |
+| Abilities/System_Spy_Ability/See_Current_Production | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Droid_R2D2, General_Dodonna); SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Grand_Admiral_Thrawn) |
+| Abilities/System_Spy_Ability/See_Political_Control | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Droid_R2D2, General_Dodonna); SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Grand_Admiral_Thrawn) |
+| Abilities/System_Spy_Ability/See_Political_Control_Breakdown | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Droid_R2D2, General_Dodonna); SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Grand_Admiral_Thrawn) |
+| Abilities/System_Spy_Ability/See_Special_Structures | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Droid_R2D2, General_Dodonna, Mara_Jade); SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Grand_Admiral_Thrawn) |
+| Blob_Shadow_Below_Detail_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Boba_Fett, Boba_Fett_NoStealth, Bossk, Chewbacca, Cuddles_The_Rancor, Cuddles_The_Rancor_Death_Clone_00, Cuddles_The_Rancor_Death_Clone_01, Darth_Vader (+21 more)) |
+| Bribe_Modifier_On_Corrupted_Planets | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Bribe_Modifier_On_Uncorrupted_Planets | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| CanCellStack | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Boba_Fett, Bossk, Chewbacca, Cuddles_The_Rancor, Cuddles_The_Rancor_Death_Clone_00, Cuddles_The_Rancor_Death_Clone_01, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune (+20 more)) |
+| Destroy_When_Used_As_Corruption_Prereq | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Energy_Capacity | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Chewbacca) |
+| SFXEvent_Tactical_Build_Cancelled | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Luke_Skywalker_Jedi, Obi_Wan_Kenobi, Yoda) |
+| SFXEvent_Tactical_Build_Complete | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Luke_Skywalker_Jedi, Obi_Wan_Kenobi, Yoda) |
+| SFXEvent_Tactical_Build_Started | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Luke_Skywalker_Jedi, Obi_Wan_Kenobi, Yoda) |
+| Spawn_Planet | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Unit_Abilities_Data/Unit_Ability/Must_Be_Bought_On_Black_Market | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Bossk) |
+
+## HeroUnit, SecondaryStructure, SpaceBuildable, SpaceUnit, SpecialStructure, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Influences_Capture_Point | applied | whole class (src/sim/tactical/pads.cpp) | WBP-02, WBP-04 | — | src/sim/tactical/pads.cpp | basis: reviewed |
+
+## HeroUnit, SecondaryStructure, SpaceUnit, SpecialStructure, Squadron, StarBase, TechBuilding, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Cost_Credits | partial | galactic squadron packing (src/campaign/fleets.cpp); reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); loaded local space battle (src/platform/battle_scoring.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., objects and modes outside the loaded local space battle, other objects and consumers outside the live galactic closure | WGM-24; WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-29, WGEP-30; WBF-46 | 682 | src/campaign/fleets.cpp; src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/platform/battle_scoring.cpp | money the skirmish purchasing reads or should read (&#35;530, &#35;556) Results/scoring consumer covers the loaded local space closure; other gameplay and mode consumers are separate. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+
+## HeroUnit, SecondaryStructure, SpaceUnit, SpecialStructure, Squadron, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Required_Planets | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34 | 682 | src/campaign/live_setup.cpp | Parsed into the independent galactic type table (src/units/galactic_types.cpp, docs/galactic-types.md); application belongs to the consuming GC ticket.; basis: reviewed |
+
+## HeroUnit, SpaceUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| GalacticBehavior | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+
+## HeroUnit, SpecialStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Galactic_Influence_Range | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Hyperspace_Fleet_Reveal_Range | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+
+## HeroUnit, SpecialStructure, Squadron, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Combat_Bonus_Ability/Stacking_Category | partial | automatic space command sources (src/sim/tactical/session_economy.cpp); missing: ground and nonautomatic combat bonuses | WHE-13, WHE-14, WHE-18, WHE-19, WHE-53, WHE-55 | 937 | src/sim/tactical/session_economy.cpp | WHE-13..19/53..55: automatic space command effects, category aggregation and source cleanup; ground/nonautomatic handlers keep their own scope.; basis: reviewed |
+
+## HeroUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Reduce_Production_Price_Ability/@Name | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. |
+| Abilities/Reduce_Production_Price_Ability/Price_Reduction_Percentage | applied | whole class (src/sim/galactic/income.cpp) | WGEP-31, WGEP-54, WGEP-74 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/Stacking_Category | applied | whole class (src/sim/galactic/income.cpp) | WGEP-31, WGEP-54, WGEP-74 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/Unit_Strength_Category | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. |
+| Abilities/Remove_Corruption_Ability/@Name | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on HeroUnit: Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo. Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. |
+| Abilities/Remove_Corruption_Ability/Activation_Style | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on HeroUnit: Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo. Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. |
+| Abilities/Remove_Corruption_Ability/Causes_Despawn | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on HeroUnit: Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo. Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. |
+| Abilities/Remove_Corruption_Ability/Corruption_Removal_Cost_Multiplier | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Abilities/Remove_Corruption_Ability/Corruption_Removal_Time_In_Secs | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Abilities/Remove_Corruption_Ability/Initially_Enabled | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on HeroUnit: Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo. Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. |
+
+## Indigenous_Unit, Squadron
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Required_Tech_Structure | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+
+## Marker
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Capture_Point_Radius | todo | application not recorded | — | 654 | — | — |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 654 | — | — |
+| Cash_Point_Credits_Per_Second | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
+
+## Marker, MiscObject, Projectile
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Influences_Capture_Point | todo | application not recorded | — | 654 | — | Mixed ground/space, space carriers on MiscObject: Dummy_Barrage_Target. Mixed ground/space, space carriers on MiscObject: Dummy_Barrage_Target. |
+
+## Marker, MiscObject, SecondaryStructure, SpaceBuildable, SpaceProp, SpaceStructure, SpaceUnit, SpecialStructure, StarBase, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Radar_Icon_Size | applied | whole class (src/presentation/ui/minimap.cpp) | MM-06, MM-08 | — | src/presentation/ui/minimap.cpp | basis: auto |
+
+## Marker, MultiplayerStructureMarker, SpacePrimarySkydome, SpaceSecondarySkydome
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Galactic_Model_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+
+## Marker, SecondaryStructure, SpaceBuildable
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Energy_Capacity | todo | application not recorded | — | 654 | — | the loader reads it for other classes; the M2 scene's objects of this class never have it read |
+
+## Marker, SecondaryStructure, SpaceBuildable, SpaceStructure, SpecialStructure, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| No_Reflection_Below_Detail_Level | todo | application not recorded | — | 654 | — | Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, Defense_Satellite, Defense_Satellite_Laser, Defense_Satellite_Laser_Small, Defense_Satellite_Missile, Destroyable_Asteroid_Huge (+81 more). Mixed ground/space, space carriers on UniqueUnit: Houndstooth, Houndstooth_Ground_Prop, Houndstooth_Landing, IG-2000, IG2000_Ground_Prop, IG2000_Landing, Luke_Jedi_XWing, Luke_XWing (+17 more). Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, Defense_Satellite, Defense_Satellite_Laser, Defense_Satellite_Laser_Small, Defense_Satellite_Missile, Destroyable_Asteroid_Huge (+81 more). Mixed ground/space, space carriers on UniqueUnit: Houndstooth, Houndstooth_Ground_Prop, Houndstooth_Landing, IG-2000, IG2000_Ground_Prop, IG2000_Landing, Luke_Jedi_XWing, Luke_XWing (+17 more). |
+| No_Refraction_Below_Detail_Level | todo | application not recorded | — | 654 | — | Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, Defense_Satellite, Defense_Satellite_Laser, Defense_Satellite_Laser_Small, Defense_Satellite_Missile, Destroyable_Asteroid_Huge (+81 more). Mixed ground/space, space carriers on UniqueUnit: Houndstooth, Houndstooth_Ground_Prop, Houndstooth_Landing, IG-2000, IG2000_Ground_Prop, IG2000_Landing, Luke_Jedi_XWing, Luke_XWing (+17 more). Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, Defense_Satellite, Defense_Satellite_Laser, Defense_Satellite_Laser_Small, Defense_Satellite_Missile, Destroyable_Asteroid_Huge (+81 more). Mixed ground/space, space carriers on UniqueUnit: Houndstooth, Houndstooth_Ground_Prop, Houndstooth_Landing, IG-2000, IG2000_Ground_Prop, IG2000_Landing, Luke_Jedi_XWing, Luke_XWing (+17 more). |
+
+## Marker, StarBase
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | partial | galactic reference pages (apps/viewer/src/galactic/reference_catalog.cpp); encyclopedia header (src/presentation/ui/hud_shell.cpp); missing: simulation population capacity consumer, UI consumers outside galactic reference pages | GREF-14; CARD-17 | 1129 | apps/viewer/src/galactic/reference_catalog.cpp; src/presentation/ui/hud_shell.cpp | GC-only census application: original-type population/capacity contributes through src/sim/galactic/production.cpp&#35;population_totals (WGEP-48/62/68/69). Outside the tactical M2 scene; GC coverage is recorded in statuses-galactic.json. Live owned-list lifecycle/usability remains supplied by the owning services.; basis: reviewed |
+
+## Marker, UpgradeObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Is_Community_Property | todo | application not recorded | — | 654 | — | — |
+
+## MiscObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| CanCellStack | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Proximity_Mine) |
+
+## Mobile_Defense_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Blob_Shadow_Below_Detail_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| Capture_Point_Radius | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| Influences_Capture_Point | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| No_Reflection_Below_Detail_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| No_Refraction_Below_Detail_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| Political_Control | todo | application not recorded | — | 1114 | — | Parsed into the independent galactic type table (src/units/galactic_types.cpp, docs/galactic-types.md); application belongs to the consuming GC ticket. |
+| Ranking_In_Category | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| SFXEvent_Tactical_Build_Cancelled | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| SFXEvent_Tactical_Build_Complete | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| SFXEvent_Tactical_Build_Started | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| Size_Value | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| Tactical_Build_Attachment_Bone_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
+| Tactical_Buildable_Objects_Multiplayer | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit) |
+
+## Mobile_Defense_Unit, SecondaryStructure, SpaceBuildable, SpecialStructure, StarBase
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Tactical_Buildable_Objects_Campaign | applied | retained campaign upgrade holders (src/campaign/space_entry.cpp); whole class (src/skirmish/economy.cpp); whole class (src/units/unit_tables_profiles.cpp) | WGT-116; WGT-26; WGT-26 | — | src/campaign/space_entry.cpp; src/skirmish/economy.cpp; src/units/unit_tables_profiles.cpp | Applied to loaded campaign space producers and upgrades; ground battle admission and individual upgrade abilities belong to their owning subsystems.; basis: reviewed |
+
+## Particle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| No_Particle_Below_Detail_Level | todo | application not recorded | — | 654 | — | Mixed ground/space, space carriers on Particle: Large_Damage_Land, Large_Damage_Space, Medium_Damage_Land, Medium_Damage_Space, Medium_Dud, Projectile_Dirt_Collide, Projectile_Shield_Absorb_Small, Rain_Splash (+7 more). Mixed ground/space, space carriers on Particle: Large_Damage_Land, Large_Damage_Space, Medium_Damage_Land, Medium_Damage_Space, Medium_Dud, Projectile_Dirt_Collide, Projectile_Shield_Absorb_Small, Rain_Splash (+7 more). |
+
+## Planet
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/@SubObjectList | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Abilities/Galaxy_Wide_Upgrade_Ability/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Abilities/Galaxy_Wide_Upgrade_Ability/Land_Upgrade_Type | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Abilities/Galaxy_Wide_Upgrade_Ability/Space_Upgrade_Type | partial | ordered campaign galaxy upgrade creation at origin (src/campaign/space_entry.cpp); prepared campaign space entry (src/campaign/space_entry_stock.cpp); missing: Unsupported scene and qualification boundaries in docs/behaviour/galactic-space-entry.md | WGT-113, WGT-117; WGT-15 | 2006 | src/campaign/space_entry.cpp; src/campaign/space_entry_stock.cpp |  Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md.; SCOPE-GALACTIC; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Abilities/Reduce_Production_Price_Ability/Applicable_Unit_Categories | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | — | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/Applicable_Unit_Types | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | — | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/Excluded_Unit_Types | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | — | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/Galaxy_Wide | applied | whole class (src/sim/galactic/income.cpp) | WGEP-31, WGEP-54, WGEP-74 | — | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/Price_Reduction_Percentage | applied | whole class (src/sim/galactic/income.cpp) | WGEP-31, WGEP-54, WGEP-74 | — | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/Stacking_Category | applied | whole class (src/sim/galactic/income.cpp) | WGEP-31, WGEP-54, WGEP-74 | — | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/Unit_Strength_Category | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Abilities/Reduce_Production_Time_Ability/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Abilities/Reduce_Production_Time_Ability/Applicable_Unit_Categories | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | — | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Time_Ability/Applicable_Unit_Types | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | — | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Time_Ability/Excluded_Unit_Types | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | — | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Time_Ability/Galaxy_Wide | applied | whole class (src/sim/galactic/income.cpp) | WGEP-31, WGEP-54, WGEP-74 | — | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Time_Ability/Stacking_Category | applied | whole class (src/sim/galactic/income.cpp) | WGEP-31, WGEP-54, WGEP-74 | — | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Time_Ability/Time_Reduction_Percentage | applied | whole class (src/sim/galactic/income.cpp) | WGEP-31, WGEP-54, WGEP-74 | — | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Time_Ability/Unit_Strength_Category | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Abilities/Reduce_Technology_Price_Ability/@Name | applied | whole class (src/sim/galactic/economy_corruption.cpp) | WGEP-166, WGEP-167, WGEP-168, WGEP-169, WGEP-170 | — | src/sim/galactic/economy_corruption.cpp | Effective authored names distinguish ability sources; the live planet object owns their aggregate row, capture transfers it and ruins removes it. |
+| Abilities/Reduce_Technology_Price_Ability/Price_Reduction_Percentage | applied | whole class (src/sim/galactic/economy_corruption.cpp) | WGEP-166, WGEP-167, WGEP-168, WGEP-169, WGEP-170 | — | src/sim/galactic/economy_corruption.cpp | The negative authored percentage reaches the current owner's shared technology-price ledger and actual research/ordinary-market prices. |
+| Abilities/System_Spy_Ability/@Name | todo | application not recorded | — | 1153 | — | Read into the authored definition/content identity; modifier text identity uses the source planet original name under WGUI-21. Named ability action lookup remains with the action-interface owner.; basis: reviewed |
+| Abilities/System_Spy_Ability/Activation_Style | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/Causes_Despawn | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/Duration_In_Secs | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/Initially_Enabled | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Base_Levels | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Credit_Income | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Credit_Income_Breakdown | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Current_Production | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Fleet_Contents | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Ground_Company_Contents | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Major_Stealth_Heroes | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Minor_Stealth_Heroes | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Most_Powerful_Ship | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Num_Fleets | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Num_Ground_Companies | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Political_Control | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Political_Control_Breakdown | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Abilities/System_Spy_Ability/See_Special_Structures | applied | galactic automatic planet spies (src/sim/galactic/observer_service.cpp) | WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-24, WGUI-98 | — | src/sim/galactic/observer_service.cpp | Loaded through system_spy_definitions; initial influence and current-owner callbacks apply per-player effects. Ground activation remains the action-interface producer; global registration ordering remains GFS-U01.; basis: reviewed |
+| Additional_Population_Capacity | partial | galactic reference pages (apps/viewer/src/galactic/reference_catalog.cpp); opt-in global galactic owned-list census (src/sim/galactic/production.cpp); missing: Live owned-list lifecycle/usability, modifier/filter providers and AI task budget payment remain with their owning services. | GREF-14; WGEP-48, WGEP-49, WGEP-50, WGEP-62, WGEP-68, WGEP-69 | 1129 | apps/viewer/src/galactic/reference_catalog.cpp; src/sim/galactic/production.cpp | Original-type GC population and capacity feed partitioned census contributions; both actual queues reserve population.; basis: reviewed |
+| Always_Instantiate_Galactic | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Behavior | applied | whole class (src/data/galactic/galactic_world.cpp) | WGS-01a | — | src/data/galactic/galactic_world.cpp | WGS-01a also accepts the authored GalacticBehavior spelling for Planet mod definitions; the current stock census has no Planet/GalacticBehavior pair. |
+| Camera_Aligned | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_1_Credit_Cost | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Failure_Bink_Hologram_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_1_Failure_Speech_Event | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_1_Mission_Briefing | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Mission_Commencing_Speech_Event | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_1_Required_Mission_Count | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Required_Mission_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Required_Unit_Count | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Required_Unit_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Success_Bink_Hologram_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_1_Success_Credit_Bonus | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Success_Speech_Event | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_1_Success_Unlock_Unit_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Tactical_Game_Mode | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Tactical_Map_Name | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Tactical_Script_Name | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_1_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_2_Credit_Cost | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_2_Failure_Bink_Hologram_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_2_Failure_Speech_Event | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_2_Mission_Briefing | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_2_Required_Mission_Count | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_2_Required_Mission_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_2_Required_Unit_Count | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_2_Required_Unit_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_2_Success_Bink_Hologram_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_2_Success_Speech_Event | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_2_Success_Unlock_Unit_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_2_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_3_Credit_Cost | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_3_Failure_Bink_Hologram_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_3_Failure_Speech_Event | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_3_Mission_Briefing | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_3_Required_Mission_Count | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_3_Required_Mission_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_3_Required_Unit_Count | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_3_Required_Unit_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Corruption_3_Success_Bink_Hologram_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_3_Success_Speech_Event | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Corruption_3_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 1140 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; basis: reviewed |
+| Describe_Advantage | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); campaign space loading (src/presentation/ui/loading_screen.cpp); missing: full planet-info dialog and ordinary planet encyclopedia, land and other mission loading | WGUI-167, WGUI-168; WGP-31 | 3355 | apps/viewer/src/galactic/galactic_hud.cpp; src/presentation/ui/loading_screen.cpp | Inherited mounted metadata supplies selected bonus icon, localized title and first authored encyclopedia entry; no stock planet-name assumptions.; basis: reviewed |
+| Describe_Tactical | partial | campaign space loading (src/presentation/ui/loading_screen.cpp); missing: land and other mission loading | WGP-31 | 2299 | src/presentation/ui/loading_screen.cpp | Campaign space loading localizes and wraps the actual planet description in the non-selectable tactical list.; basis: reviewed |
+| Describe_Wildlife | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Destroyed_Galactic_Model_Name | todo | application not recorded | — | 1994 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Destroyed_Space_Tactical_Map | todo | application not recorded | — | 1989 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Encyclopedia_Text | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); missing: full planet-info dialog and ordinary planet encyclopedia | WGUI-167, WGUI-168 | 3355 | apps/viewer/src/galactic/galactic_hud.cpp | Inherited mounted metadata supplies selected bonus icon, localized title and first authored encyclopedia entry; no stock planet-name assumptions.; basis: reviewed |
+| Encyclopedia_Weather_Info | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Encyclopedia_Weather_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Force_Strength | applied | galactic (src/sim/galactic/income.cpp) | WGEP-75 | — | src/sim/galactic/income.cpp | Shared fiscal payment and forecast contribution (WGEP-06..09/75). |
+| Galactic_Influence_Range | partial | planet-self automatic spy influence (src/sim/galactic/observer_service.cpp); missing: other galactic influence consumers | WGUI-101, WGUI-102, WGUI-24 | 1114 | src/sim/galactic/observer_service.cpp | Effective authored range selects event-time spy targets; zero/nonpositive stays local. Other influence lifecycle consumers retain their existing ticket.; basis: reviewed |
+| Galactic_Position | applied | whole class (apps/viewer/src/galactic/galactic_scene.cpp); whole class (src/campaign/galaxy.cpp) | WGP-04; WGM-16 | — | apps/viewer/src/galactic/galactic_scene.cpp; src/campaign/galaxy.cpp | basis: reviewed |
+| GUI_Model_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Hyperspace_Fleet_Reveal_Range | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Land_Tactical_Map | todo | application not recorded | — | 1989 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Mass | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Max_Space_Base | todo | application not recorded | — | 682 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Name_Adjust | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Planet_Ability_Description | deferred | application not recorded | — | 3355 | — | Parsed and preserved; no retail reader found: all-symbol search plus direct displacement scan (WGUI-167). Distinct from Describe_Advantage and first Encyclopedia_Text, which supply the bonus popup. |
+| Planet_Ability_Icon | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); missing: galaxy ability filter, quick reference and production summary | WGUI-167, WGUI-168 | 2987 | apps/viewer/src/galactic/galactic_hud.cpp | Inherited mounted metadata supplies selected bonus icon, localized title and first authored encyclopedia entry; no stock planet-name assumptions.; basis: reviewed |
+| Planet_Ability_Name | deferred | application not recorded | — | 3355 | — | Parsed and preserved; no retail reader found: all-symbol search plus direct displacement scan (WGUI-167). Distinct from Describe_Advantage and first Encyclopedia_Text, which supply the bonus popup. |
+| Planet_Black_Market_Influences | applied | galactic corruption economy (src/sim/galactic/economy_corruption.cpp) | WGEP-14 | — | src/sim/galactic/economy_corruption.cpp | basis: reviewed |
+| Planet_Black_Market_Modifier | applied | galactic corruption economy (src/sim/galactic/economy_corruption.cpp) | WGEP-58 | — | src/sim/galactic/economy_corruption.cpp | basis: reviewed |
+| Planet_Capture_Bonus_Reward | partial | explicit galactic control inputs (src/campaign/control.cpp); missing: fiscal ledger reward payment | WGM-76 | 1114 | src/campaign/control.cpp | Authored values feed src/sim/galactic/control.cpp; resolved live presence and missing consumers stay explicit seams.; basis: reviewed |
+| Planet_Corruption_Removal_Base_Cost | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Planet_Credit_Value | applied | whole class (src/campaign/setup.cpp); whole class (src/sim/galactic/session.cpp) | WGEP-05; WGEP-03, WGEP-05 | — | src/campaign/setup.cpp; src/sim/galactic/session.cpp | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket Opt-in base-income fiscal service; remaining income modifiers and production are separate services.; basis: reviewed |
+| Planet_Destroyed_Credit_Value | partial | live ruined planet base income input (src/campaign/live_setup.cpp); fiscal base income of a ruined planet (src/sim/galactic/ability_ruins.cpp); missing: initial startup destroyed value is carried by the setup base, omitted-value default unverified | WGCH-143, WGCH-176; WGCH-143, WGCH-176, WGEP-05 | 682 | src/campaign/live_setup.cpp; src/sim/galactic/ability_ruins.cpp | Authored destroyed value selected by the fiscal owner once the control owner marks the planet ruined.; basis: reviewed |
+| Planet_Groundbase_Stealth | applied | whole class (src/campaign/setup.cpp) | WGUI-10, WGUI-103 | — | src/campaign/setup.cpp | basis: reviewed |
+| Planet_Is_Destroyable_By_TSW | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Planet_Is_Mining_Colony | applied | whole class (src/campaign/setup.cpp) | WGEP-10 | — | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Planet_Restricted_Unit_Categories | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Planet_Restricted_Unit_Types | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Planet_Retains_Residual_Influence | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Planet_Slice_Affinity_Types | partial | live typed theft preparation (src/sim/galactic/ability_theft.cpp); missing: AI action routing, ordinary selector activation | WGCH-33 | 1143 | src/sim/galactic/ability_theft.cpp | basis: reviewed |
+| Planet_Slice_Difficulty_Rating | partial | live typed theft preparation (src/sim/galactic/ability_theft.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-33 | 1143 | src/sim/galactic/ability_theft.cpp | basis: reviewed |
+| Planet_Starbase_Stealth | applied | whole class (src/campaign/setup.cpp) | WGUI-10, WGUI-103 | — | src/campaign/setup.cpp | basis: reviewed |
+| Planet_Surface_Accessible | todo | application not recorded | — | 1115 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Planet_Tech_Availability_Rating | partial | live typed theft preparation (src/sim/galactic/ability_theft.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-33 | 1143 | src/sim/galactic/ability_theft.cpp | basis: reviewed |
+| Political_Control | partial | explicit galactic control inputs (src/campaign/control.cpp); missing: campaign runtime binding, political faction resolution | WGM-69 | 1114 | src/campaign/control.cpp | Authored values feed src/sim/galactic/control.cpp; resolved live presence and missing consumers stay explicit seams.; basis: reviewed |
+| Potential_Indigenous_Power | partial | galactic enemy raw-ground force (src/script/foc/galactic_ai_forces.cpp); missing: Indigenous presence and affiliated-type Lua queries; tactical spawner and survivor lifecycle | WGA-184, WGA-273, WGA-274 | 2684 | src/script/foc/galactic_ai_forces.cpp | basis: reviewed |
+| Pre_Lit | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Space_Tactical_Map | partial | prepared campaign space entry (src/campaign/space_entry_stock.cpp); missing: Unsupported scene and qualification boundaries in docs/behaviour/galactic-space-entry.md | WGT-04 | 2006 | src/campaign/space_entry_stock.cpp | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
+| Special_Structures | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Special_Structures_Land | todo | application not recorded | — | 682 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Special_Structures_Space | todo | application not recorded | — | 682 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Terrain | partial | live galactic auto-resolve (src/campaign/auto_resolve_live.cpp); missing: other tactical consumers | WAR-18, WAR-35 | 1965 | src/campaign/auto_resolve_live.cpp |  Live galactic auto-resolve reads the effective authored value; other tactical consumers remain outside this adapter.; basis: reviewed |
+| The_Force | applied | galactic (src/sim/galactic/income.cpp) | WGEP-75 | — | src/sim/galactic/income.cpp | Shared fiscal payment and forecast contribution (WGEP-06..09/75). |
+
+## Projectile
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| CanCellStack | todo | application not recorded | — | 654 | — | Mixed ground/space, space carriers on HeroUnit: Boba_Fett, Bossk, Chewbacca, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo, IG-88 (+11 more). |
+| Projectile_Ion_Stun_Stack_Duration | applied | whole class (src/units/unit_combat.cpp) | DG-01, IS-01 | — | src/units/unit_combat.cpp | basis: auto |
+
+## Props_Story, SecondaryStructure, SpaceUnit, SpecialStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Is_Interdictor | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+
+## SecondaryStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Base_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); StarBase (src/script/foc/ai_perception.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure, SecondaryStructure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-24, WGEP-41; SAE-02 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/script/foc/ai_perception.cpp | The AI reads the owned live starbase level; secondary structure consumers remain deferred. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+| Maximum_Destruction_Survivor_Count | todo | application not recorded | — | 654 | — | — |
+| Next_Level_Base | todo | application not recorded | — | 654 | — | — |
+| Reinforcement_Prevention_Radius | todo | application not recorded | — | 654 | — | the M2 scene loads no object of this class; the skirmish economy applies the tag to the classes of the applied row (&#35;530) |
+| Tactical_Buildable_Objects_Multiplayer | partial | Skirmish_Merchant_Dock (src/skirmish/economy.cpp); missing: other secondary structures | WBP-33, WBP-34, WPR-33 | 654 | src/skirmish/economy.cpp | ordinary captured space producers use their owner's faction menu and the normal queue; other secondary structures remain outside this consumer; basis: reviewed |
+
+## SecondaryStructure, SpaceBuildable, SpecialStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Capture_Point_Radius | applied | whole class (src/sim/tactical/session_step_systems.cpp) | WBP-04 | — | src/sim/tactical/session_step_systems.cpp | basis: reviewed |
+| Capture_Point_Transition_Time_Seconds | applied | whole class (src/sim/tactical/pads.cpp) | WHZ-44, WHZ-45 | — | src/sim/tactical/pads.cpp | basis: reviewed |
+| Is_Community_Property | applied | whole class (apps/viewer/src/battle_input.cpp) | WBP-02 | — | apps/viewer/src/battle_input.cpp | basis: reviewed |
+| Ownership_Sticks | applied | whole class (src/sim/tactical/pads.cpp) | WHZ-43 | — | src/sim/tactical/pads.cpp | basis: reviewed |
+
+## SecondaryStructure, SpaceUnit, SpecialStructure, Squadron, StarBase, TechBuilding, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Time_Seconds | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-32 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp | Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, E_Gravity_Well_Station, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks, E_Ground_Base_Shield, E_Ground_Base_Shield_Small (+51 more). Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, E_Gravity_Well_Station, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks, E_Ground_Base_Shield, E_Ground_Base_Shield_Small (+51 more). Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+
+## SecondaryStructure, SpaceUnit, SpecialStructure, TechBuilding
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Tab_Special_Structures | partial | observer-local galactic production choices (apps/viewer/src/galactic/planet_hud.cpp); missing: tactical build menus and unavailable galactic production providers | WGUI-91 | 654 | apps/viewer/src/galactic/planet_hud.cpp | Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, E_Gravity_Well_Station, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks, E_Ground_Base_Shield, E_Ground_Base_Shield_Small (+51 more). Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, E_Gravity_Well_Station, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks, E_Ground_Base_Shield, E_Ground_Base_Shield_Small (+51 more).; basis: reviewed |
+
+## SecondaryStructure, StarBase
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Prev_Level_Base | applied | whole class (src/script/foc/ai_perception.cpp) | SAE-02 | — | src/script/foc/ai_perception.cpp | Qualifying station actors resolve predecessor metadata for damage-derived allied base-level perception.; basis: reviewed |
+
+## SpaceBuildable
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Income_Stream_Ability/Owner_Income_Percentage | todo | application not recorded | — | 760 | — | — |
+| Tactical_Build_Cost_Multiplayer | applied | whole class (src/script/foc/ai_execution.cpp); whole class (src/sim/tactical/session_economy.cpp); SpaceBuildable (src/sim/tactical/session_economy.cpp) | WAS-26, WBP-47, WBP-48; WBP-10, WBP-11; WBP-30, WBP-31, WBP-32 | — | src/script/foc/ai_execution.cpp; src/sim/tactical/session_economy.cpp | basis: reviewed |
+| Tactical_Build_Time_Seconds | applied | whole class (src/skirmish/economy.cpp) | WBP-15 | — | src/skirmish/economy.cpp | basis: reviewed |
+| Tactical_Buildable_Constructed | applied | SpaceBuildable (src/sim/tactical/session_economy.cpp); whole class (src/sim/tactical/session_step_economy.cpp) | WBP-30, WBP-31, WBP-32; WBP-18, WBP-19 | — | src/sim/tactical/session_economy.cpp; src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Tactical_Buildable_Objects_Multiplayer | applied | whole class (src/skirmish/economy.cpp); N_Orbital_Construction_Pod (src/skirmish/economy.cpp) | WBP-06; WBP-33, WBP-34, WPR-33 | — | src/skirmish/economy.cpp | basis: reviewed |
+
+## SpaceBuildable, SpaceUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Tractor_Beam_Attack_Ability/Stacking_Category | partial | ship (src/sim/tactical/session_step_commands.cpp); missing: U-09: excluded locomotor identity, exact timer scaling and AI/autofire policy | WHE-26, WHE-27, WHE-57, WHE-58, WHE-59, WHE-60 | 940 | src/sim/tactical/session_step_commands.cpp | G7 applies traced beam services, target geometry, hardpoint lock/loss and source/category tractor speed. U-09 uses supported ship locomotors and conservative recharge; atlas animation remains separate.; basis: reviewed |
+
+## SpaceBuildable, SpecialStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Tactical_Build_Start_Lower_Z | todo | application not recorded | — | 654 | — | — |
+
+## SpaceBuildable, SpecialStructure, StarBase
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Income_Stream_Ability/@Name | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Empire_Ground_Mining_Facility, Imperial_Command_Center, Rebel_Command_Center, Rebel_Ground_Mining_Facility, U_Ground_Palace. Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Empire_Ground_Mining_Facility, Imperial_Command_Center, Rebel_Command_Center, Rebel_Ground_Mining_Facility, U_Ground_Palace. |
+| Abilities/Income_Stream_Ability/Base_Income_Value | applied | whole class (src/skirmish/economy.cpp) | WBP-22, WPR-11 | — | src/skirmish/economy.cpp | basis: reviewed |
+| Abilities/Income_Stream_Ability/Base_Interval_In_Secs | applied | whole class (src/skirmish/economy.cpp) | WBP-22, WPR-11 | — | src/skirmish/economy.cpp | basis: reviewed |
+| Abilities/Income_Stream_Ability/Full_Amount_To_Everyone | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WBP-23, WPR-12 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Abilities/Income_Stream_Ability/Split_Favors_Owner | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Empire_Ground_Mining_Facility, Imperial_Command_Center, Rebel_Command_Center, Rebel_Ground_Mining_Facility, U_Ground_Palace. Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Empire_Ground_Mining_Facility, Imperial_Command_Center, Rebel_Command_Center, Rebel_Ground_Mining_Facility, U_Ground_Palace. |
+| Abilities/Income_Stream_Ability/Split_Income_With_Allies | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WBP-23, WPR-12 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+
+## SpaceBuildable, UpgradeObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Tactical_Build_Cost_Campaign | applied | whole class (src/skirmish/economy.cpp); whole class (src/units/unit_tables_profiles.cpp) | WGT-26; WGT-26 | — | src/skirmish/economy.cpp; src/units/unit_tables_profiles.cpp | Applied to loaded campaign space producers and upgrades; ground battle admission and individual upgrade abilities belong to their owning subsystems.; basis: reviewed |
+
+## SpaceProp
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Collidable_By_Projectile_Living | partial | map object (src/sim/tactical/pads.cpp); loaded map props (src/units/unit_tables_decode.cpp); missing: projectile damage to map-only props outside combat profiles | WBP-50; WSU-13 | 649 | src/sim/tactical/pads.cpp; src/units/unit_tables_decode.cpp | WBP-50: effective living-projectile collision admits loaded map props to capture and palette queries; default false excludes stock hazard volumes while their movement/damage services remain active. Projectile damage outside combat profiles remains deferred. Loaded map props apply the same mouse admission before picking: neutral noncollidable fields pass a right click through to the move point; impassable asteroids retain contacts.; basis: reviewed |
+
+## SpaceStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Energy_Capacity | applied | ship (src/units/unit_durability.cpp) | EN-01, WCC-46, WCC-80, WHZ-50, WHZ-51 | — | src/units/unit_durability.cpp | WHZ-50/51, RO-2: capture points and positive-hull, living-projectile-collidable map objects enter the live ship closure; other map-only structures remain outside it.; basis: reviewed |
+
+## SpaceUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Laser_Defense_Ability/Must_Be_Bought_On_Black_Market | land-or-galactic | application not recorded | — | — | — | FOCU-BM-GATE |
+| Abilities/Leech_Shields_Ability/Must_Be_Bought_On_Black_Market | land-or-galactic | application not recorded | — | — | — | FOCU-BM-GATE |
+| Abilities/Planet_Destruction_Ability/@Name | applied | live galactic destruction ability binding (src/campaign/live_setup.cpp) | WGCH-137, WGCH-157, WGCH-183 | — | src/campaign/live_setup.cpp | basis: reviewed |
+| Abilities/Planet_Destruction_Ability/Activation_Style | todo | application not recorded | — | 760 | — | — |
+| Abilities/Planet_Destruction_Ability/SFXEvent_Target_Affected | todo | application not recorded | — | 760 | — | — |
+| Abilities/Planet_Destruction_Ability/Target_Particle_Bone_Name | todo | application not recorded | — | 760 | — | — |
+| Abilities/Planet_Destruction_Ability/Target_Particle_Effect | todo | application not recorded | — | 760 | — | — |
+| Build_Countdown_Text_ID | todo | application not recorded | — | 654 | — | — |
+| Build_Countdown_Text_RGBA | todo | application not recorded | — | 654 | — | — |
+| Build_Countdown_Timer | todo | application not recorded | — | 654 | — | — |
+| Build_Music_Completed | todo | application not recorded | — | 654 | — | — |
+| Build_Speech_Completed | partial | loaded space tactical production types (apps/viewer/src/battle_audio_events.cpp); galactic production types (apps/viewer/src/galactic/galactic_audio.cpp); missing: tactical land production | BA-60, BA-73, BA-74, SND-35; WGEP-96, WGEP-97, WGP-183, WGP-63 | 654 | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/galactic/galactic_audio.cpp | English speech queues precede tactical/generic SFX; failed stream playback does not fall back. Galactic production queues the local builder's authored speech before the type SFX (WGP-183).; basis: reviewed |
+| Build_Speech_Countdowns | todo | application not recorded | — | 654 | — | — |
+| Build_Speech_Stopped | partial | loaded space tactical production types (apps/viewer/src/battle_audio_events.cpp); galactic production types (apps/viewer/src/galactic/galactic_audio.cpp); missing: tactical land production | BA-61, BA-73, BA-74, SND-38; WGEP-96, WGEP-97, WGP-183, WGP-63 | 654 | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/galactic/galactic_audio.cpp | English speech queues precede tactical/generic SFX; failed stream playback does not fall back. Galactic production queues the local builder's authored speech before the type SFX (WGP-183).; basis: reviewed |
+| Build_Speech_Underway | partial | loaded space tactical production types (apps/viewer/src/battle_audio_events.cpp); galactic production types (apps/viewer/src/galactic/galactic_audio.cpp); missing: tactical land production | BA-60, BA-73, BA-74, SND-35; WGEP-96, WGEP-97, WGP-183, WGP-63 | 654 | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/galactic/galactic_audio.cpp | English speech queues precede tactical/generic SFX; failed stream playback does not fall back. Galactic production queues the local builder's authored speech before the type SFX (WGP-183).; basis: reviewed |
+| Disallows_Hyperspace_Retreat | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Galactic_Fleet_Override_Icon_Index | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Galactic_Fleet_Override_Model_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Tech_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); whole class (src/script/foc/ai_selection.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); whole class (src/skirmish/ai.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-19, WGEP-22; PL-20; WGEP-130, WGEP-147, WGEP-42; PL-20, PL-30, PU-11, PU-13 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/script/foc/ai_selection.cpp; src/sim/galactic/production.cpp; src/skirmish/ai.cpp | PL-20: tactical AI team selection weights each proposed type by Tech_Level / 5 * 2. The 450-tick M2 perturbation changes full tables and the battle at completed tick 140, with matching 1/4-worker outcomes, after GS-11 restores real build-pad classification in the fixed-force world without economy. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+
+## SpaceUnit, Squadron
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Sensor_Jamming_Ability/Must_Be_Bought_On_Black_Market | land-or-galactic | application not recorded | — | — | — | FOCU-BM-GATE |
+| Override_Bounty_MP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | WGCH-65/WGP-189: loaders read this only with campaign_scene enabled; campaign space economy applies current-type bounty. The standalone M2 skirmish cannot observe this consumer; strategic and auto-resolve death consumers remain separate.; basis: reviewed |
+| Override_Bounty_SP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | WGCH-65/WGP-189: loaders read this only with campaign_scene enabled; campaign space economy applies current-type bounty. The standalone M2 skirmish cannot observe this consumer; strategic and auto-resolve death consumers remain separate.; basis: reviewed |
+| Piracy_Value_Credits | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+
+## SpaceUnit, Squadron, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Limit_Lifetime_Per_Player | partial | whole class (include/eawr/presentation/ui/production.hpp); whole class (include/eawr/sim/tactical/economy.hpp); reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WPR-61, WPR-62, WPR-63; WPR-33; WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-25 | 682 | include/eawr/presentation/ui/production.hpp; include/eawr/sim/tactical/economy.hpp; src/campaign/live_setup.cpp; src/campaign/setup.cpp | Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+| Build_Tab_Space_Units | applied | observer-local galactic production choices (apps/viewer/src/galactic/planet_hud.cpp); whole class (src/skirmish/start.cpp) | WGUI-91; MAT-15 | — | apps/viewer/src/galactic/planet_hud.cpp; src/skirmish/start.cpp | applied only to the demo attract's pool return (the type is listed in the setup record); the skirmish build menus follow Tactical_Buildable_Objects_Multiplayer, not this flag; basis: reviewed |
+| Tactical_Build_Cost_Multiplayer | applied | whole class (src/script/foc/ai_execution.cpp); whole class (src/skirmish/economy.cpp) | WAS-26; PU-12 | — | src/script/foc/ai_execution.cpp; src/skirmish/economy.cpp | basis: reviewed |
+| Tactical_Build_Time_Seconds | applied | whole class (src/skirmish/economy.cpp) | PU-13 | — | src/skirmish/economy.cpp | basis: reviewed |
+| Tactical_Production_Queue | applied | whole class (src/skirmish/economy.cpp) | PU-10 | — | src/skirmish/economy.cpp | basis: reviewed |
+
+## SpaceUnit, Squadron, UniqueUnit, UpgradeObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Tactical_Build_Prerequisites | applied | whole class (include/eawr/presentation/ui/production.hpp); whole class (include/eawr/sim/tactical/economy.hpp) | WPR-61, WPR-62, WPR-63; WPR-33 | — | include/eawr/presentation/ui/production.hpp; include/eawr/sim/tactical/economy.hpp | basis: reviewed |
+
+## SpaceUnit, StarBase
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Reinforcement_Prevention_Radius | applied | whole class (src/skirmish/economy.cpp) | PU-31 | — | src/skirmish/economy.cpp | basis: reviewed |
+
+## SpaceUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Stealth_Ability/Must_Be_Bought_On_Black_Market | land-or-galactic | application not recorded | — | — | — | FOCU-BM-GATE |
+| Prevents_Story_Campaign_Autoresolve | partial | represented conflicting force types with confirmed prevention (src/platform/galactic/live_game_session.cpp); missing: unrepresented outer fleet and container types | WAR-10, WAR-65, WAR-75 | 2026 | src/platform/galactic/live_game_session.cpp | WAR-10 positive-only retained story policy: flattened manifests cannot prove a negative for omitted parents; unknown keeps the solver dialog closed. Complete relevant roster qualification remains with the retreat provider.; basis: reviewed |
+| Space_Override_Population_Value | todo | application not recorded | — | 654 | — | — |
+
+## SpaceUnit, UniqueUnit, UpgradeObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Limit_Current_Per_Player | partial | whole class (include/eawr/presentation/ui/production.hpp); whole class (include/eawr/sim/tactical/economy.hpp); reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WPR-61, WPR-62, WPR-63; WPR-33; WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-25 | 682 | include/eawr/presentation/ui/production.hpp; include/eawr/sim/tactical/economy.hpp; src/campaign/live_setup.cpp; src/campaign/setup.cpp | Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+
+## SpecialStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Planet_Income_Bonus_Ability/@Name | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on SpecialStructure: Empire_Ground_Mining_Facility, Rebel_Ground_Mining_Facility, U_Ground_Palace. Mixed ground/space, space carriers on SpecialStructure: Empire_Ground_Mining_Facility, Rebel_Ground_Mining_Facility, U_Ground_Palace. |
+| Abilities/Planet_Income_Bonus_Ability/Absolute_Income_Modifier | applied | whole class (src/sim/galactic/income.cpp) | WGEP-10 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Planet_Income_Bonus_Ability/Additional_Multiplier_On_Mining_Colonies | applied | whole class (src/sim/galactic/income.cpp) | WGEP-10 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Planet_Income_Bonus_Ability/Percentage_Income_Modifier | applied | whole class (src/sim/galactic/income.cpp) | WGEP-10 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Planet_Income_Bonus_Ability/Specific_Mod_Source_Text | partial | galactic reference pages (apps/viewer/src/galactic/reference_catalog.cpp); missing: UI consumers outside galactic reference pages | GREF-13 | 760 | apps/viewer/src/galactic/reference_catalog.cpp | Mixed ground/space, space carriers on SpecialStructure: Empire_Ground_Mining_Facility, Rebel_Ground_Mining_Facility, U_Ground_Palace. Mixed ground/space, space carriers on SpecialStructure: Empire_Ground_Mining_Facility, Rebel_Ground_Mining_Facility, U_Ground_Palace.; basis: reviewed |
+| Abilities/Planet_Income_Gambling_Ability/@Name | todo | application not recorded | — | 760 | — | — |
+| Abilities/Planet_Income_Gambling_Ability/Chance_To_Win | applied | whole class (src/sim/galactic/income.cpp) | GFC-09, WGEP-11, WGEP-76, WGEP-77 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Planet_Income_Gambling_Ability/Evaluation_Interval_In_Secs | applied | whole class (src/sim/galactic/income.cpp) | GFC-09, WGEP-11, WGEP-76, WGEP-77 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Planet_Income_Gambling_Ability/Max_Income_Modifier | applied | whole class (src/sim/galactic/income.cpp) | GFC-09, WGEP-11, WGEP-76, WGEP-77 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Planet_Income_Gambling_Ability/Min_Income_Modifier | applied | whole class (src/sim/galactic/income.cpp) | GFC-09, WGEP-11, WGEP-76, WGEP-77 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Build_Max_Instances_Per_Planet | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
+| Build_Requires_Initial_Placement | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); authored campaign startup requests (src/campaign/setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure, startup special-placement marks only; production admission remains legacy &#35;654 | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGS-70; WGEP-26 | 654 | src/campaign/live_setup.cpp; src/campaign/setup.cpp | startup special-placement marks only; production admission remains legacy &#35;654 Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+| Energy_Capacity | applied | whole class (src/units/unit_durability.cpp) | EN-01, WCC-46, WCC-80 | — | src/units/unit_durability.cpp | WSW-01/14/21: planetary SPECIAL_WEAPON sources do not use ordinary space-body inputs.; basis: auto |
+| Reinforcement_Prevention_Radius | todo | application not recorded | — | 654 | — | the skirmish economy applies this tag only to unit-table types; these object classes do not reach that application path |
+| Sabotage_Cost_Credits | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Shield_Upgraded_Color | todo | application not recorded | — | 654 | — | — |
+| SpaceAutoResolveHitRate | foc-ignores | application not recorded | — | — | — | Read and stored for the auto-resolve solver; only unreachable routines use it; WAR-73. Re-read in the Focumentation cross-check (the wiki lists the name only); static reading, a runtime check may be wanted.; WAR-73 |
+| SpaceAutoResolveStunRate | foc-ignores | application not recorded | — | — | — | Read and stored for the auto-resolve solver; only unreachable routines use it; WAR-73. Re-read in the Focumentation cross-check (the wiki lists the name only); static reading, a runtime check may be wanted.; WAR-73 |
+| Tactical_Build_Cost_Multiplayer | todo | application not recorded | — | 654 | — | the skirmish economy applies this tag only to unit-table types; these object classes do not reach that application path |
+| Tactical_Build_Time_Seconds | todo | application not recorded | — | 654 | — | the skirmish economy applies this tag only to unit-table types; these object classes do not reach that application path |
+| Tactical_Buildable_Constructed | todo | application not recorded | — | 654 | — | — |
+| Tech_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); whole class (src/script/foc/ai_selection.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); whole class (src/skirmish/ai.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-19, WGEP-22; PL-20; WGEP-130, WGEP-147, WGEP-42; PL-20, PL-30, PU-11, PU-13 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/script/foc/ai_selection.cpp; src/sim/galactic/production.cpp; src/skirmish/ai.cpp | WSW-01/14/21: planetary SPECIAL_WEAPON sources do not use ordinary space-body inputs. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+| Tutorial_Sabotage_Cost_Credits | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+
+## SpecialStructure, StarBase
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Income_Stream_Mod_Ability/Affects_All_Allied_Sources | todo | application not recorded | — | 760 | — | — |
+| Abilities/Income_Stream_Mod_Ability/Income_Additive_Value | todo | application not recorded | — | 760 | — | — |
+| Abilities/Income_Stream_Mod_Ability/Income_Multiplier | todo | application not recorded | — | 760 | — | — |
+| Abilities/Income_Stream_Mod_Ability/Interval_Multiplier | todo | application not recorded | — | 760 | — | — |
+| Abilities/Income_Stream_Mod_Ability/Reverse_Application_Logic | todo | application not recorded | — | 760 | — | — |
+| Abilities/Income_Stream_Mod_Ability/Stacking_Category | todo | application not recorded | — | 760 | — | — |
+| Abilities/Income_Stream_Mod_Ability/Target_Stream_Source | todo | application not recorded | — | 760 | — | — |
+| Tactical_Buildable_Objects_Multiplayer | applied | whole class (src/skirmish/economy.cpp) | PU-10 | — | src/skirmish/economy.cpp | basis: reviewed |
+
+## SpecialStructure, StarBase, UpgradeObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Income_Stream_Mod_Ability/@Name | todo | application not recorded | — | 760 | — | — |
+
+## SpecialStructure, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Blob_Shadow_Below_Detail_Level | todo | application not recorded | — | 654 | — | Mixed ground/space, space carriers on HeroUnit: Boba_Fett, Boba_Fett_NoStealth, Bossk, Chewbacca, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo (+12 more). Mixed ground/space, space carriers on UniqueUnit: Houndstooth, Houndstooth_Ground_Prop, Houndstooth_Landing, IG-2000, IG2000_Ground_Prop, IG2000_Landing, Luke_Jedi_XWing, Luke_XWing (+17 more). Mixed ground/space, space carriers on UniqueUnit: Houndstooth, Houndstooth_Ground_Prop, Houndstooth_Landing, IG-2000, IG2000_Ground_Prop, IG2000_Landing, Luke_Jedi_XWing, Luke_XWing (+17 more). |
+
+## SpecialStructure, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/System_Spy_Ability/See_Base_Levels | todo | application not recorded | — | 760 | — | — |
+| Abilities/System_Spy_Ability/See_Credit_Income | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
+| Abilities/System_Spy_Ability/See_Credit_Income_Breakdown | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
+| Abilities/System_Spy_Ability/See_Current_Production | todo | application not recorded | — | 760 | — | — |
+| Abilities/System_Spy_Ability/See_Political_Control | todo | application not recorded | — | 760 | — | — |
+| Abilities/System_Spy_Ability/See_Political_Control_Breakdown | todo | application not recorded | — | 760 | — | — |
+| Abilities/System_Spy_Ability/See_Special_Structures | todo | application not recorded | — | 760 | — | — |
+
+## Squadron, UniqueUnit, UpgradeObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Limit_Current_For_All_Allies | applied | whole class (include/eawr/presentation/ui/production.hpp); whole class (include/eawr/sim/tactical/economy.hpp) | WPR-61, WPR-62, WPR-63; WPR-33 | — | include/eawr/presentation/ui/production.hpp; include/eawr/sim/tactical/economy.hpp | basis: reviewed |
+
+## StarBase
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Income_Stream_Ability/Activation_Style | todo | application not recorded | — | 760 | — | — |
+| Abilities/Income_Stream_Ability/Initially_Enabled | todo | application not recorded | — | 760 | — | — |
+| Abilities/Income_Stream_Mod_Ability/Activation_Style | todo | application not recorded | — | 760 | — | — |
+| Abilities/Income_Stream_Mod_Ability/Initially_Enabled | todo | application not recorded | — | 760 | — | — |
+| Base_Level | partial | station display preload (apps/viewer/src/galactic/scene_content.cpp); reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); prepared campaign space entry (src/campaign/space_entry_stock.cpp); StarBase (src/script/foc/ai_perception.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure, SecondaryStructure | none recorded; WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-24, WGEP-41; WGT-09; SAE-02 | 682 | apps/viewer/src/galactic/scene_content.cpp; src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/campaign/space_entry_stock.cpp; src/script/foc/ai_perception.cpp | The AI reads the owned live starbase level; secondary structure consumers remain deferred. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter. Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md. Station display follows HUD recipe GHUD-S78 in docs/behaviour/gc-hud-inventory.md; this inventory recipe is not a numeric-rule ID.; basis: reviewed |
+| Build_Tab_Space_Station | applied | observer-local galactic production choices (apps/viewer/src/galactic/planet_hud.cpp); station display preload (apps/viewer/src/galactic/scene_content.cpp) | WGUI-91; none recorded | — | apps/viewer/src/galactic/planet_hud.cpp; apps/viewer/src/galactic/scene_content.cpp | The authored flag admits station display assets and, after higher-priority category flags, station build choices; GUI_Row independently selects the row.; basis: reviewed |
+| Next_Level_Base | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WPR-52 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Tech_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); whole class (src/script/foc/ai_selection.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); whole class (src/skirmish/ai.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-19, WGEP-22; PL-20; WGEP-130, WGEP-147, WGEP-42; PL-20, PL-30, PU-11, PU-13 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/script/foc/ai_selection.cpp; src/sim/galactic/production.cpp; src/skirmish/ai.cpp | &#35;852 reassessment: full structural tables change and AI type setup copies the value (PU-11, PL-20); this scenario proves no resulting effect. The earlier tables-identical/read-and-dropped claim is false. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+
+## Story
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Event/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Branch | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Event_Param1 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Event_Param2 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Event_Param3 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Event_Param4 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Event_Param5 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Event_Param6 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Event_Param7 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Event_Type | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Perpetual | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Prereq | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Event/Reward_Param1 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param10 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param11 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param12 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param13 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param14 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param2 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param3 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param4 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param5 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param6 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param7 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param8 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Param9 | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Reward_Type | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Story_Chapter | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Story_Dialog | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Story_Dialog_Popup | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Event/Story_Tag | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+
+## Story_Mode_Plots
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Active_Plot | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Lua_Script | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+| Suspended_Plot | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
+
+## TechBuilding
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Advances_Tech_Level | partial | galactic production offers (src/campaign/setup.cpp); missing: other production consumers (legacy &#35;654) | WGEP-42 | 654 | src/campaign/setup.cpp | Numeric target level is retained from authoring and applied to galactic production offers, including checkpoint persistence; zero means no upgrade.; basis: reviewed |
+| Build_Limit_Current_Per_Player | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-25 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp | Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+| Build_Time_Reduced_By_Multiple_Factories | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
+
+## TechBuilding, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Tech_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); whole class (src/script/foc/ai_selection.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); whole class (src/skirmish/ai.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-19, WGEP-22; PL-20; WGEP-130, WGEP-147, WGEP-42; PL-20, PL-30, PU-11, PU-13 | 682 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/script/foc/ai_selection.cpp; src/sim/galactic/production.cpp; src/skirmish/ai.cpp | Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+
+## TradeRoute
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Credit_Gain_Factor | applied | galactic (src/sim/galactic/income.cpp) | WGEP-09 | — | src/sim/galactic/income.cpp | Shared fiscal payment and forecast contribution (WGEP-06..09/75). |
+| HS_Speed_Factor | applied | whole class (src/campaign/galaxy.cpp) | WGM-16, WGM-17 | — | src/campaign/galaxy.cpp | basis: reviewed |
+| Point_A | applied | whole class (src/campaign/galaxy.cpp) | WGM-16 | — | src/campaign/galaxy.cpp | basis: reviewed |
+| Point_B | applied | whole class (src/campaign/galaxy.cpp) | WGM-16 | — | src/campaign/galaxy.cpp | basis: reviewed |
+| Political_Control_Gain | partial | explicit galactic control inputs (src/campaign/control.cpp); missing: campaign runtime binding | WGM-70 | 1114 | src/campaign/control.cpp | Authored values feed src/sim/galactic/control.cpp; resolved live presence and missing consumers stay explicit seams.; basis: reviewed |
+
+## TransportUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Energy_Capacity | todo | application not recorded | — | 650 | — | WHE-07/49: the M2 resolver touches carried heroes, unselected transports and unique creation templates as metadata; the generic body or ability consumer for other classes is not applied to these scene objects. |
+| Override_Bounty_MP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | Campaign space current-type bounty value; strategic and auto-resolve death consumers remain separate. |
+| Override_Bounty_SP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | Campaign space current-type bounty value; strategic and auto-resolve death consumers remain separate. |
+| Tech_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-130, WGEP-147, WGEP-42 | 650 | src/campaign/live_setup.cpp; src/sim/galactic/production.cpp | WHE-07/49: the M2 company resolver touches carried hero or unselected transport metadata without deploying its body; the generic loader consumer for other classes is not applied to these scene objects.; basis: reviewed |
+
+## UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Concentrate_Fire_Attack_Ability/Stacking_Category | applied | Home One concentrate fire (src/sim/tactical/session_abilities.cpp) | WHE-24, WHE-25 | — | src/sim/tactical/session_abilities.cpp | Target-centred same-owner recruitment, named handler gates and source-keyed target defense contribution.; basis: reviewed |
+| Abilities/Maximum_Firepower_Attack_Ability/@Name | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Veers_AT_AT_Walker, Veers_AT_AT_Walker_Death_Clone, Veers_AT_AT_Walker_Deployed_Death_Clone) |
+| Abilities/Maximum_Firepower_Attack_Ability/Activation_Style | partial | craft, ship, squadron (src/sim/tactical/abilities.cpp); missing: concrete nested-handler effects | WHE-09, WHE-10 | 936 | src/sim/tactical/abilities.cpp | WHE-09/10/12/14: typed handler infrastructure applies gates, exact-type filter precedence, scheduling and cleanup. Concrete effects and unknown default activation policies remain separate; no hero ability is enabled by metadata alone.; basis: reviewed |
+| Abilities/Maximum_Firepower_Attack_Ability/Applicable_Unit_Categories | partial | craft, ship, squadron (src/sim/tactical/abilities.cpp); missing: concrete nested-handler effects | WHE-14 | 936 | src/sim/tactical/abilities.cpp | WHE-09/10/12/14: typed handler infrastructure applies gates, exact-type filter precedence, scheduling and cleanup. Concrete effects and unknown default activation policies remain separate; no hero ability is enabled by metadata alone.; basis: reviewed |
+| Abilities/Maximum_Firepower_Attack_Ability/Applicable_Unit_Types | partial | craft, ship, squadron (src/sim/tactical/abilities.cpp); missing: concrete nested-handler effects | WHE-14 | 936 | src/sim/tactical/abilities.cpp | WHE-09/10/12/14: typed handler infrastructure applies gates, exact-type filter precedence, scheduling and cleanup. Concrete effects and unknown default activation policies remain separate; no hero ability is enabled by metadata alone.; basis: reviewed |
+| Abilities/Maximum_Firepower_Attack_Ability/Owner_Particle_Bone_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Veers_AT_AT_Walker, Veers_AT_AT_Walker_Death_Clone, Veers_AT_AT_Walker_Deployed_Death_Clone) |
+| Abilities/Maximum_Firepower_Attack_Ability/Owner_Particle_Effect | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Veers_AT_AT_Walker, Veers_AT_AT_Walker_Death_Clone, Veers_AT_AT_Walker_Deployed_Death_Clone) |
+| Abilities/Maximum_Firepower_Attack_Ability/SFXEvent_Activate | land-or-galactic | application not recorded | — | — | — | BA-55: effective UniqueUnit authoring is the land AT-AT; nested kind recognition is not a space action.; SCOPE-LAND |
+| Abilities/Reduce_Production_Price_Ability/Applicable_Unit_Categories | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | 936 | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Reduce_Production_Price_Ability/Applicable_Unit_Types | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | 936 | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Abilities/Remove_Corruption_Ability/SFXEvent_Activate | land-or-galactic | application not recorded | — | — | — | BA-55: land shield-flare or galactic corruption payload; no M2 space target.; SCOPE-GALACTIC |
+| Build_Limit_Lifetime_For_All_Allies | applied | whole class (include/eawr/presentation/ui/production.hpp); whole class (include/eawr/sim/tactical/economy.hpp) | WPR-61, WPR-62, WPR-63; WPR-33 | — | include/eawr/presentation/ui/production.hpp; include/eawr/sim/tactical/economy.hpp | basis: reviewed |
+
+## UpgradeObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Abilities/Battlefield_Modifier_Ability/Base_Shield_Upgrade | todo | application not recorded | — | 760 | — | — |
+| Abilities/Battlefield_Modifier_Ability/Capture_Point_Time_Multiplier | todo | application not recorded | — | 760 | — | — |
+| Abilities/Battlefield_Modifier_Ability/Enable_Planetary_Bombardment | todo | application not recorded | — | 760 | — | — |
+| Abilities/Battlefield_Modifier_Ability/Stacking_Category | partial | space upgrade objects (Stealth_Duration_Multiplier) (src/units/unit_tables_profiles.cpp); missing: the other battlefield modifier fields (legacy &#35;760) | WST-03 | 760 | src/units/unit_tables_profiles.cpp | WST-03: only the cloak-duration upgrades contribute this stacking category; other battlefield modifier consumers remain partial.; basis: reviewed |
+| Abilities/Bounty_On_Faction_Ability/@Name | applied | whole class (src/sim/tactical/session_step_commands.cpp) | WGCH-164, WGP-189 | — | src/sim/tactical/session_step_commands.cpp | Campaign space upgrade sources; strategic bounty and fly text remain separate consumers. |
+| Abilities/Bounty_On_Faction_Ability/Apply_To_All_Allies | applied | whole class (src/sim/tactical/session_step_commands.cpp) | WGCH-164, WGP-189 | — | src/sim/tactical/session_step_commands.cpp | Campaign space upgrade sources; strategic bounty and fly text remain separate consumers. |
+| Abilities/Bounty_On_Faction_Ability/Bounty_Percentage_Amount | applied | whole class (src/sim/tactical/session_step_commands.cpp) | WGCH-164, WGP-189 | — | src/sim/tactical/session_step_commands.cpp | Campaign space upgrade sources; strategic bounty and fly text remain separate consumers. |
+| Abilities/Bounty_On_Faction_Ability/Stacking_Category | applied | whole class (src/sim/tactical/session_step_commands.cpp) | WGCH-164, WGP-189 | — | src/sim/tactical/session_step_commands.cpp | Campaign space upgrade sources; strategic bounty and fly text remain separate consumers. |
+| Abilities/Bounty_On_Faction_Ability/Target_Faction_Names | applied | whole class (src/sim/tactical/session_step_commands.cpp) | WGCH-164, WGP-189 | — | src/sim/tactical/session_step_commands.cpp | Campaign space upgrade sources; strategic bounty and fly text remain separate consumers. |
+| Abilities/Combat_Bonus_Ability/Stacking_Category | applied | whole class (src/sim/tactical/session_economy.cpp) | WPR-51 | — | src/sim/tactical/session_economy.cpp | basis: reviewed |
+| Abilities/Garrison_Upgrade_Ability/@Name | todo | application not recorded | — | 760 | — | — |
+| Abilities/Garrison_Upgrade_Ability/Activation_Style | todo | application not recorded | — | 760 | — | — |
+| Abilities/Garrison_Upgrade_Ability/Apply_To_All_Allies | todo | application not recorded | — | 760 | — | — |
+| Abilities/Income_Stream_Mod_Ability/Affects_All_Allied_Sources | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
+| Abilities/Income_Stream_Mod_Ability/Income_Additive_Value | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
+| Abilities/Income_Stream_Mod_Ability/Income_Multiplier | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
+| Abilities/Income_Stream_Mod_Ability/Interval_Multiplier | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
+| Abilities/Income_Stream_Mod_Ability/Reverse_Application_Logic | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
+| Abilities/Income_Stream_Mod_Ability/Stacking_Category | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
+| Abilities/Income_Stream_Mod_Ability/Target_Stream_Source | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
+| Abilities/Starbase_Upgrade_Ability/@Name | todo | application not recorded | — | 760 | — | — |
+| Abilities/Starbase_Upgrade_Ability/Activation_Style | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WPR-52 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Destroy_Previous_Upgrade_Level | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WPR-22 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Previous_Upgrade_Level_Type | applied | campaign galaxy-upgrade first-level admission (src/campaign/space_entry.cpp); whole class (src/sim/tactical/session_step_economy.cpp) | WGT-117; WPR-22 | — | src/campaign/space_entry.cpp; src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Show_In_Sidebar_While_Building | todo | application not recorded | — | 654 | — | — |
+| Tactical_Build_Cost_Multiplayer | applied | whole class (src/script/foc/ai_execution.cpp) | WAS-26 | — | src/script/foc/ai_execution.cpp | The generic tactical cost consumes accepted AI production funds independently of the queue-calculated selection price.; basis: reviewed |
+| Tactical_Build_Increments_Tech_Level | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WPR-22 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Tactical_Build_Time_Seconds | todo | application not recorded | — | 540 | — | PU-20: upgrades are listed but are not unit-table types; the skirmish economy does not build or apply their production data |
+| Tactical_Destruction_Decrements_Tech_Level | todo | application not recorded | — | 654 | — | — |
+| Tactical_Production_Queue | todo | application not recorded | — | 540 | — | PU-20: upgrades are listed but are not unit-table types; the skirmish economy does not build or apply their production data |

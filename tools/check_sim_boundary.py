@@ -51,6 +51,11 @@ DIRECT_IO_FUNCTIONS = {
     "remove",
     "write",
 }
+LOCALE_FUNCTIONS = {"tolower", "toupper", "isalpha", "isalnum", "isdigit", "isspace", "isupper", "islower",
+                    "isprint", "iscntrl", "ispunct", "isgraph", "isxdigit", "setlocale", "localeconv",
+                    "towlower", "towupper", "strtod", "strtof", "strtold"}
+CLOCK_FUNCTIONS = {"time", "clock", "gettimeofday", "clock_gettime", "timespec_get",
+                   "QueryPerformanceCounter", "GetTickCount", "GetTickCount64"}
 
 
 @dataclass(frozen=True, order=True)
@@ -93,7 +98,7 @@ def discover_project_files(root: Path) -> tuple[list[Path], list[Violation]]:
     violations: list[Violation] = []
     for boundary_root in (root / prefix / component
                           for prefix in ("include/eawr", "src")
-                          for component in ("sim", "units", "skirmish")):
+                          for component in ("sim", "units", "skirmish", "script/foc", "script/authoritative")):
         if not boundary_root.is_dir():
             violations.append(
                 Violation(
@@ -251,8 +256,22 @@ def ast_violations(tree: dict[str, Any], target: Path, root: Path) -> list[Viola
                 )
             referenced = node.get("referencedDecl", {})
             referenced_name = referenced.get("name") if isinstance(referenced, dict) else None
+            if kind == "DeclRefExpr" and referenced.get("kind") in {"FunctionDecl", "CXXMethodDecl"}:
+                if referenced_name in LOCALE_FUNCTIONS:
+                    violations.add(Violation(display, line, column, "SIM_BOUNDARY_LOCALE",
+                                             f"ambient-locale function '{referenced_name}' is forbidden"))
+                clock_read = referenced_name in CLOCK_FUNCTIONS or (
+                    referenced_name == "now" and any(name in referenced.get("type", {}).get("qualType", "")
+                                                     for name in ("chrono", "time_point")))
+                if clock_read and display != "src/sim/tactical/diagnostic_timer.hpp":
+                    violations.add(Violation(display, line, column, "SIM_BOUNDARY_CLOCK",
+                                             f"decision clock '{referenced_name}' is forbidden; use diagnostic timing"))
             if (kind == "DeclRefExpr" and referenced_name in DIRECT_IO_FUNCTIONS
-                    and referenced.get("kind") == "FunctionDecl"):
+                    and referenced.get("kind") == "FunctionDecl"
+                    # std::remove(first, last, value) is an integer/container algorithm,
+                    # distinct from the C file-removal function with one path argument.
+                    and (referenced_name != "remove"
+                         or referenced.get("type", {}).get("qualType", "").startswith("int (const char *"))):
                 violations.add(
                     Violation(
                         display,
@@ -311,6 +330,8 @@ def compile_ast(path: Path, root: Path, clang: str, generated: Path | None = Non
     for component in ("units", "skirmish", "data"):
         if display.startswith((f"src/{component}/", f"include/eawr/{component}/")):
             namespace = component
+    if display.startswith(("src/script/", "include/eawr/script/")):
+        namespace = "script"
     if display == "src/scene/scene.cpp":
         # Scene also contains presentation float math; only this setup decoder
         # belongs to the authoritative numeric boundary.
@@ -329,6 +350,7 @@ def compile_ast(path: Path, root: Path, clang: str, generated: Path | None = Non
         str(path),
     ]
     command.extend(["-I", str(root / "third_party/pugixml/src")])
+    command.extend(["-I", str(root / "src/script/sflua"), "-I", str(root / "third_party/lua/include")])
     if generated is not None:
         command.extend(["-I", str(generated)])
     if depfile is not None:

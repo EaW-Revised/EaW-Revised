@@ -10,6 +10,7 @@ int main() {
     test_plan_policy();
     test_quad_geometry();
     test_finite_rotation_boundary();
+    test_billboard_radian_rotation();
     test_stream_validation();
     test_fixed_seed_streams();
     test_particle_detail_gates();
@@ -41,6 +42,7 @@ int main() {
     test_attachment_determinism();
     test_attachment_merge_stats();
     test_heat_pixel_change_bound();
+    test_default_worker_count_table();
     test_batch_matches_serial();
     test_attachment_batch_matches_serial();
     test_attachment_batch_requires_stats();

@@ -60,6 +60,9 @@ struct CommandBonusProfile {
     std::uint32_t slot{};
     UpgradeBonus bonus;
     FactionId specific_faction{};
+    bool battlefield{}, all_allies{}; // WGT-50: player ledger, not a recipient-type filter
+    math::Fixed reveal_delta{};
+    std::vector<PlayerId> enabled_players; // WGT-49: explicit locks override authored default
     bool apply_to_self{}; // WHE-53: the debug build's creation flag defaults off
     friend bool operator==(const CommandBonusProfile&, const CommandBonusProfile&) = default;
 };
@@ -74,13 +77,47 @@ struct IncomeModifier {
     friend bool operator==(const IncomeModifier&, const IncomeModifier&) = default;
 };
 
+// WST-03: one cloak-duration contribution, (Stealth_Duration_Multiplier - 1), to its holder's owner
+// (and, with all_allies, the owner's allies). Category maximum, categories summed.
+struct StealthDurationModifier {
+    std::uint32_t stacking_category{};
+    math::Fixed percentage{};
+    bool all_allies{};
+    friend bool operator==(const StealthDurationModifier&, const StealthDurationModifier&) = default;
+};
+
+// WRB-05: Enable_Ability on an upgrade object: the nested ability (by its authored name, lower case)
+// it switches on for the listed types, for its holder and, when `all_allies`, the holder's allies.
+struct AbilityEnableRule {
+    std::string ability_name;
+    std::vector<TypeId> applicable; // sorted, unique
+    bool all_allies{};
+    friend bool operator==(const AbilityEnableRule&, const AbilityEnableRule&) = default;
+};
+
 struct UpgradeProfile {
+    struct Bounty {
+        math::Fixed percentage{};
+        std::int32_t category{};
+        std::vector<FactionId> factions{};
+        bool all_allies{};
+        friend bool operator==(const Bounty&, const Bounty&) = default;
+    };
     TypeId type{};
     bool level_up{};
     bool increments_tech{};
     TypeId removes_previous{};
     std::vector<UpgradeBonus> bonuses;
     std::vector<IncomeModifier> income_modifiers{};
+    std::vector<StealthDurationModifier> stealth_duration{};
+    std::vector<AbilityEnableRule> ability_enables{}; // WRB-05
+    struct SpecialUnlock {
+        bool all_allies{}, reverse{};
+        friend bool operator==(const SpecialUnlock&, const SpecialUnlock&) = default;
+    };
+    std::vector<SpecialUnlock> special_unlocks{};
+    bool consume_after_special_fire{};
+    std::vector<Bounty> bounties{};
     friend bool operator==(const UpgradeProfile&, const UpgradeProfile&) = default;
 };
 
@@ -164,6 +201,8 @@ struct EconomyPlayer {
     std::uint32_t start_tech{};       // WPR-02
     std::uint32_t max_tech{};
     math::Fixed credit_multiplier{math::Fixed::from_raw(math::Fixed::scale)}; // WPR-12: positive AI changes only
+    std::optional<math::Fixed> credit_cap{}; // WGT-27: absent in skirmish
+    std::optional<math::Fixed> strategic_credits{}; // WGA-53/54: retained AI balance
     friend constexpr bool operator==(const EconomyPlayer&, const EconomyPlayer&) noexcept = default;
 };
 
@@ -203,6 +242,7 @@ struct HeroDeployment {
 };
 
 struct EconomyRules {
+    bool campaign{}; // WGT-26/28: identity reserves, campaign costs and restrictions
     SkirmishMatchPolicy match_policy{};        // replay binding, not a ledger field
     PadRules pads;                            // WBP-01..19: object services, never producer queues
     std::vector<EconomyPlayer> players;        // strictly increasing player ID
@@ -211,6 +251,8 @@ struct EconomyRules {
     std::vector<PreventionProfile> prevention; // strictly increasing type
     std::vector<FootprintProfile> footprints;  // strictly increasing type: every unit and map object type
     std::vector<HeroDeployment> heroes; // WHE-49: strictly increasing purchase type
+    std::vector<std::pair<TypeId, std::uint32_t>> campaign_population; // WGT-19/28; no ship menu needed
+    std::vector<FactionId> campaign_playable_factions; // WGT-116: includes background allies without a command seat
     TypeFlags disabled_types;                 // RG-04: indexed flags, sorted IDs for validation
     std::uint32_t max_queue{5};                // PU-14: a human player's queue length
     // PU-31: the playable bounds in the plane, when the map declares them.
@@ -221,6 +263,8 @@ struct EconomyRules {
     std::vector<UpgradeProfile> upgrades; // WPR-22, WPR-51, WPR-52, increasing type
     std::vector<CommandBonusProfile> command_bonuses; // WHE-53: sorted (type, declared slot)
     std::vector<PadSaleProfile> pad_sales; // increasing completed type
+    std::vector<std::pair<TypeId, math::Fixed>> bounty_values{}; // WGCH-65: current type, selected mode
+    bool bounty_collection_enabled{true};
     [[nodiscard]] bool empty() const noexcept { return players.empty(); }
     [[nodiscard]] const EconomyPlayer* player(PlayerId id) const noexcept;
     [[nodiscard]] const StationMenu* menu(TypeId station, FactionId faction) const noexcept;
@@ -296,6 +340,8 @@ struct PlayerEconomy {
     std::vector<std::uint64_t> pool_tokens{};
     std::uint64_t next_pool_token{1};
     std::uint64_t next_queue_entry_id{1};
+    math::Fixed campaign_extra_releases{}; // WGA-54: authoritative credit bridge
+    math::Fixed collected_bounty{}; // WGCH-65: rounded payments, independent of credit cap
     friend bool operator==(const PlayerEconomy&, const PlayerEconomy&) = default;
 };
 
@@ -414,7 +460,7 @@ struct ArrivalState {
 // whole lane D at frame 0 and 0 from frame 149. Each d(k) is rounded to Q24, and the tail is the
 // exact sum of the rounded steps.
 [[nodiscard]] math::Fixed arrival_tail(std::uint32_t frame) noexcept;
-// Where an arriving unit stands after `state.frame` frames: exit âˆ’ direction Ã— tail.
+// Where an arriving unit stands after `state.frame` frames: exit Ã¢Ë†â€™ direction Ãƒâ€” tail.
 [[nodiscard]] core::Result<math::Vec3> arrival_position(const ArrivalState& state);
 // PU-37, PU-38: how a projectile hit is taken by a unit whose arrival is `arrival` (null: not
 // arriving). Nothing, the hit dropped, while it is hidden (arrival frames 0 to 34); else the
@@ -429,6 +475,13 @@ struct ArrivalState {
 
 // A player's economy in a snapshot (#530): credits, population (PU-21), both queues with each
 // entry's frames and, for the front, its completion frame, and the pool.
+struct ReserveView {
+    std::uint64_t token{};
+    TypeId type{};
+    std::uint32_t population{}; // WGT-19/28: original purchase type, including retained variants
+    bool restricted{}; // WR-09: qualified campaign location restriction
+    friend bool operator==(const ReserveView&, const ReserveView&) = default;
+};
 struct EconomyView {
     PlayerId player{};
     math::Fixed credits{};
@@ -444,6 +497,9 @@ struct EconomyView {
     std::uint32_t tech_level{};
     std::vector<std::uint64_t> pool_tokens{};
     friend bool operator==(const EconomyView&, const EconomyView&) = default;
+    bool special_weapons_enabled{}; // WSW-12/46: per player; manual hardpoint availability remains separate.
+    math::Fixed campaign_extra_releases{};
+    std::vector<ReserveView> reserves{}; // local-owner rows, in current pool order
 };
 
 } // namespace eawr::sim::tactical

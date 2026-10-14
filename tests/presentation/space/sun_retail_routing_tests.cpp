@@ -363,15 +363,20 @@ void test_admission_closed() {
                                    "apps/viewer/src/space_environment.cpp", "apps/sky_scan/main.cpp"};
     // Build outputs copied into the tree (the viewer's GDExtension and its debug symbols under
     // apps/viewer/project/bin) carry the policy's symbol names; they are not source (#882).
-    const std::set<std::string> build_outputs{".pdb", ".dll", ".exp", ".lib", ".ilk", ".obj", ".o", ".a", ".so",
+    const std::set<std::string> build_outputs{".map", ".pdb", ".dll", ".exp", ".lib", ".ilk", ".obj", ".o", ".a", ".so",
                                               ".dylib", ".exe"};
     for (const char* directory : {"src", "apps", "include"}) {
         std::error_code error;
         for (std::filesystem::recursive_directory_iterator it(root / directory, error), end; !error && it != end;
              it.increment(error)) {
+            const auto path = it->path().lexically_normal();
+            if (it->is_directory() && path.filename() == "bin"
+                && path.parent_path().parent_path() == (root / "apps/viewer").lexically_normal()) {
+                it.disable_recursion_pending();
+                continue;
+            }
             if (!it->is_regular_file()) continue;
             if (build_outputs.count(it->path().extension().string()) != 0) continue;
-            const auto path = it->path().lexically_normal();
             ++scanned;
             required.erase(path.lexically_relative(root).generic_string());
             if (owned.count(path) != 0) continue;

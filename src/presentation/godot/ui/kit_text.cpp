@@ -103,7 +103,7 @@ void KitText::draw(CanvasItem& owner, const KitTextStyle& style, const String& t
         }
     };
     if (style.outline) {
-        const int size = std::max(1, static_cast<int>(std::lround(2.0F * scale)));
+        const int size = std::max(1, static_cast<int>(std::lround(style.outline_pixels * scale)));
         const Color colour(outline_colour.r, outline_colour.g, outline_colour.b, outline_colour.a * alpha);
         if (wrap) {
             style.font->draw_multiline_string_outline(item_, origin, text, horizontal, width, style.size, -1, size, colour);
@@ -125,6 +125,7 @@ EawrUiLabel::EawrUiLabel() {
     set_theme_type_variation("EawrUi");
     set_texture_repeat(CanvasItem::TEXTURE_REPEAT_DISABLED);
     set_mouse_filter(MOUSE_FILTER_IGNORE);
+    track_oversampling(*this);
 }
 
 void EawrUiLabel::set_text(const String& text) {

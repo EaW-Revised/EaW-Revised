@@ -2,9 +2,7 @@
 
 #include <algorithm>
 #include <bit>
-#include <chrono>
 #include <cmath>
-#include <cstdio>
 
 namespace eawr::script::foc::ai {
 
@@ -13,15 +11,15 @@ using namespace engine_internal;
 // EX-11: every 0.1 s each unfinished build task takes a free store object of its type, the one
 // the plan's potential plan reserved first; a type the free store no longer holds fails.
 void Engine::prepare_producers() const {
-    if (producers_prepared_ || host_->world == nullptr || host_->view == nullptr) return;
+    if (producers_prepared_ || !host_->ai_world->available() || host_->view == nullptr) return;
     producers_prepared_ = true;
     const auto add = [&](const ViewUnit& unit) {
-        const auto owner = std::find_if(host_->world->players().begin(), host_->world->players().end(),
+        const auto owner = std::find_if(host_->ai_world->players().begin(), host_->ai_world->players().end(),
             [&](const auto& player) { return player.player_id == unit.owner; });
-        if (owner == host_->world->players().end()) return;
-        const bool pad = host_->world->pads().contains(unit.id);
-        for (const auto& player : host_->world->players()) {
-            const auto* menu = host_->world->economy().menu(unit.type, pad ? player.faction_id : owner->faction_id);
+        if (owner == host_->ai_world->players().end()) return;
+        const bool pad = host_->ai_world->pads().contains(unit.id);
+        for (const auto& player : host_->ai_world->players()) {
+            const auto* menu = host_->ai_world->economy().menu(unit.type, pad ? player.faction_id : owner->faction_id);
             if (menu == nullptr) continue;
             for (const auto& option : menu->options) {
                 if (build_option(player.player_id, option.type, unit.id) == nullptr) continue;
@@ -32,7 +30,7 @@ void Engine::prepare_producers() const {
     };
     // Preserve pad-first and ascending entity order; live admission and reservations are
     // rechecked by producer(), since earlier plans can reserve a pad in this same service.
-    for (const auto& [id, state] : host_->world->pads()) {
+    for (const auto& [id, state] : host_->ai_world->pads()) {
         static_cast<void>(state);
         ++producer_work_.entities;
         if (const auto* unit = host_->view->find(id)) add(*unit);
@@ -40,7 +38,7 @@ void Engine::prepare_producers() const {
     for (const auto& unit : host_->view->units) {
         ++producer_work_.entities;
         const auto* info = host_->type(unit.type);
-        if (info != nullptr && info->star_base && !host_->world->pads().contains(unit.id)) add(unit);
+        if (info != nullptr && info->star_base && !host_->ai_world->pads().contains(unit.id)) add(unit);
     }
 }
 
@@ -50,7 +48,7 @@ sim::EntityId Engine::producer(const tactical::PlayerId player, const tactical::
     if (found == producers_.end()) return 0;
     for (const auto id : found->second) {
         ++producer_work_.candidates;
-        if (host_->world->pads().contains(id)) {
+        if (host_->ai_world->pads().contains(id)) {
             if (preferred != 0 && preferred != id) continue;
             bool reserved = pad_reservations_.contains(id);
             for (const auto& [plan_id, plan] : running_) {
@@ -59,23 +57,24 @@ sim::EntityId Engine::producer(const tactical::PlayerId player, const tactical::
             }
             if (reserved) continue;
         }
-        if (host_->world->build_allowed(player, id, type)) return id;
+        if (host_->ai_world->build_allowed(player, id, type)) return id;
     }
     return 0;
 }
 
 const tactical::BuildOption* Engine::build_option(const tactical::PlayerId player, const tactical::TypeId type,
     const sim::EntityId producer_id) const {
-    if (host_->world == nullptr) return nullptr;
-    return host_->world->build_option(player, producer_id, type);
+    if (!host_->ai_world->available()) return nullptr;
+    return host_->ai_world->build_option(player, producer_id, type);
 }
 
-void Engine::observe_purchases(PlayerAi& player, const tactical::TacticalSnapshot& snapshot) {
+void Engine::observe_purchases(PlayerAi& player, const World& world) {
+    mark_native_state_changed();
     // WAS-26/WBP-48: consume only accepted station work. A pad consumes its
     // reservation after precheck; a request yielding no child refunds that cost once.
     // Read every tick, so queue cancellation before the next execution service cannot
     // be mistaken for an unstarted purchase and refunded a second time on release.
-    for (const auto& event : snapshot.events()) {
+    for (const auto& event : world.events()) {
         if ((event.kind != tactical::EventKind::order_accepted && event.kind != tactical::EventKind::order_rejected)
             || (event.order != tactical::OrderKind::buy && event.order != tactical::OrderKind::pad_build)) continue;
         if (event.player != player.player) continue;
@@ -104,6 +103,8 @@ void Engine::observe_purchases(PlayerAi& player, const tactical::TacticalSnapsho
 }
 
 void Engine::service_execution(PlayerAi& player, const bool direct_pad_only) {
+    mark_native_state_changed();
+    if (player.galactic) { service_galactic_execution(player); return; }
     std::set<std::uint64_t> touched;
     for (BuildTask& task : player.tasks) {
         if (direct_pad_only && !task.direct_pad) continue;
@@ -128,7 +129,7 @@ void Engine::service_execution(PlayerAi& player, const bool direct_pad_only) {
                 const auto* option = build_option(player.player, task.type, task.producer);
                 task.prepaid = player.reserved_credits.contains(plan->goal);
                 if (option == nullptr || (!task.prepaid && host_->credits(player.player) < option->price)
-                    || !host_->world->build_allowed(player.player, task.producer, task.type)) {
+                    || !host_->ai_world->build_allowed(player.player, task.producer, task.type)) {
                     task.finished = task.failed = true; continue;
                 }
                 task.pad_build = option->kind == tactical::BuildKind::structure;
@@ -139,13 +140,7 @@ void Engine::service_execution(PlayerAi& player, const bool direct_pad_only) {
                         || reservation->second.type != task.type)) {
                         task.finished = task.failed = true; continue;
                     }
-                    const auto* pad = host_->view->find(task.producer);
-                    const auto state = host_->world->pads().find(task.producer);
-                    const auto* profile = pad != nullptr ? host_->world->economy().pads.point(pad->type) : nullptr;
-                    if (profile == nullptr || state == host_->world->pads().end()
-                        || !tactical::pad_construction_allowed(*profile, state->second, player.player,
-                            host_->world->players(), host_->view->capture_candidates,
-                            host_->world->economy().pads, task.producer, pad->position)) {
+                    if (!host_->ai_world->construction_allowed(player.player, task.producer)) {
                         task.finished = task.failed = true; continue;
                     }
                 }
@@ -180,20 +175,18 @@ void Engine::service_execution(PlayerAi& player, const bool direct_pad_only) {
                 if (!task.pad_build) buy.arguments.push_back(Value{task.prepaid});
                 orders_.push_back(std::move(buy));
                 task.issued = static_cast<std::uint64_t>(frame_);
-                task.child_floor = host_->world->next_entity_id();
+                task.child_floor = host_->ai_world->next_entity_id();
                 record(plan, player.player, "buy", std::to_string(task.type));
             } else if (task.pad_build) {
-                const auto pad = host_->world->pads().find(task.producer);
-                const auto* profile = host_->world->economy().pads.child(task.type);
-                const auto* child = pad != host_->world->pads().end() ? host_->view->find(pad->second.constructed) : nullptr;
-                const auto constructor = pad != host_->world->pads().end()
-                    ? host_->world->construction().find(pad->second.under_construction) : host_->world->construction().end();
-                if (pad != host_->world->pads().end() && pad->second.constructed >= task.child_floor
+                const auto pad = host_->ai_world->pads().find(task.producer);
+                const auto* profile = host_->ai_world->economy().pads.child(task.type);
+                const auto* child = pad != host_->ai_world->pads().end() ? host_->view->find(pad->second.constructed) : nullptr;
+                if (pad != host_->ai_world->pads().end() && pad->second.constructed >= task.child_floor
                     && child != nullptr && profile != nullptr && child->type == profile->constructed && child->owner == player.player) {
                     task.finished = true;
                     tf->second.units.push_back(pad->second.constructed);
                 } else if (task.issued < static_cast<std::uint64_t>(frame_)
-                    && (constructor == host_->world->construction().end() || constructor->second.builder != player.player)) {
+                    && !host_->ai_world->constructing_for(pad != host_->ai_world->pads().end() ? pad->second.under_construction : 0, player.player)) {
                     // WBP-18/27/48: rejection, cancellation or death clears the constructor
                     // link. The production block must fail and relinquish its pad.
                     task.finished = task.failed = true;
@@ -284,8 +277,9 @@ std::optional<math::Vec3> reinforcement_candidate(const math::Vec3& requested, c
 }
 
 void Engine::service_reinforcements(PlayerAi& player) {
-    if (host_->world == nullptr) return;
-    const auto players = host_->world->players();
+    mark_native_state_changed();
+    if (!host_->ai_world->available()) return;
+    const auto players = host_->ai_world->players();
     const auto owner = std::lower_bound(players.begin(), players.end(), player.player,
         [](const tactical::Player& entry, const tactical::PlayerId id) { return entry.player_id < id; });
     if (owner == players.end() || owner->player_id != player.player) return;
@@ -296,7 +290,7 @@ void Engine::service_reinforcements(PlayerAi& player) {
         const auto* plan = tf != taskforces_.end() ? this->plan(tf->second.plan) : nullptr;
         if (plan == nullptr || plan->player != player.player) continue;
         if (block.reinforcing != 0) {
-            if (const auto result = host_->world->reinforcement_search_result(player.player, block.id)) {
+            if (const auto result = host_->ai_world->reinforcement_search_result(player.player, block.id)) {
                 block.reinforcement_attempt = result->next_attempt;
                 work_.reinforcement_candidates += result->candidates;
                 work_.reinforcement_search_ns += result->nanoseconds;
@@ -313,7 +307,7 @@ void Engine::service_reinforcements(PlayerAi& player) {
                     && (unit.purchase_type != 0 ? unit.purchase_type : unit.type) == block.reinforcing
                     && !unit.craft && !player.assigned.contains(unit.id)
                     // EX-13: the arrival signal attaches the ship, not its hyperspace spawn.
-                    && !host_->world->arrivals().contains(unit.id);
+                    && !host_->ai_world->arriving(unit.id);
             });
             if (arrived != units.end()) {
                 tf->second.units.push_back(arrived->id);
@@ -335,7 +329,7 @@ void Engine::service_reinforcements(PlayerAi& player) {
         if (block.reinforcing != 0) continue;
         if (tf->second.pooled.empty()) {
             block.finished = std::none_of(tf->second.units.begin(), tf->second.units.end(),
-                [&](const auto unit) { return host_->world->arrivals().contains(unit); });
+                [&](const auto unit) { return host_->ai_world->arriving(unit); });
             continue;
         }
         const auto purchase = tf->second.pooled.front();
@@ -351,7 +345,7 @@ void Engine::service_reinforcements(PlayerAi& player) {
             Value{authoritative::Handle{handle_type, purchase.token}},
             Value{authoritative::Handle{handle_block, block.id}}, Value::number(real(block.reinforcement_attempt))};
         orders_.push_back(std::move(reinforce));
-        block.entity_floor = host_->world->next_entity_id() - 1;
+        block.entity_floor = host_->ai_world->next_entity_id() - 1;
         block.reinforcing = type;
         block.pool_token = purchase.token;
         block.issued = static_cast<std::uint64_t>(frame_);

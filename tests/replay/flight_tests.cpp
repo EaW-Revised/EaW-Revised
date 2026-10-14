@@ -217,7 +217,7 @@ void test_nose_bank_and_turn(const std::int64_t turbo) {
 // C-19 (FM-03): the wanted bank is the heading change still to go, up to Bank_Turn_Angle, so a
 // small correction banks a little and a large turn banks fully; the roll gets there at its rate.
 void test_bank_follows_the_turn() {
-    const tactical::CraftProfile profile = x_wing();
+    tactical::CraftProfile profile = x_wing();
     // The destination keeps its world bearing (x, y) from the craft, so the heading change still
     // to go is that bearing less the turn so far.
     const auto bank_after = [&](const std::int64_t x, const std::int64_t y, const int frames) {
@@ -249,6 +249,14 @@ void test_bank_follows_the_turn() {
     const auto small = bank_after(1000, 87, 1); // a 5-degree bearing: the bank is the gap
     expect(real(small.roll) < -4.9 && real(small.roll) > -5.0,
         "FM-03: a 5-degree correction banks 5 degrees, not 40, got " + std::to_string(real(small.roll)));
+    profile.bank_angle = units(360);
+    expect(bank_after(-1000, 1000, 7).roll == units(-42),
+        "FM-03: a bank of 360 is neither wrapped to zero nor capped at the stock bank");
+    profile.bank_angle = units(-40);
+    expect(bank_after(-1000, 1000, 1).roll == units(6),
+        "FM-03: a negative bank uses the upper limit when the turn passes the lower limit");
+    expect(bank_after(-1000, -1000, 1).roll == units(-6),
+        "FM-03: a negative bank tests the lower limit first for a right turn");
 }
 
 // C-20 (FM-06): a craft flying east sent to a point behind it pitches up through the vertical,

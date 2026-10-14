@@ -1,6 +1,7 @@
 #include "battle_input.hpp"
 
 #include "eawr/presentation/ui/command_sink.hpp"
+#include "eawr/presentation/ui/world_ui.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
@@ -46,12 +47,13 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
 
     const auto& latest = live.battle_frame().latest;
     const units::UnitTables* tables = live.tables();
-    if (cards_snapshot_ == latest && cards_selection_ == selection_.units() && cards_slots_ == card_slots_
+    if (cards_pending_revision_ == live.pending_revision() && cards_snapshot_ == latest && cards_selection_ == selection_.units() && cards_slots_ == card_slots_
         && card_tables_ == tables) {
         refresh_abilities(live);
         return;
     }
     cards_snapshot_ = latest;
+    cards_pending_revision_ = live.pending_revision();
     cards_selection_ = selection_.units();
     cards_slots_ = card_slots_;
     card_units_.clear();
@@ -126,12 +128,12 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
     const auto second_ability_of = [](const units::UnitType* type) {
         return type == nullptr || type->abilities.size() < 2 ? ui::ability_none : ui::ability_index(type->abilities[1].type);
     };
-    // Get_Health_Percent: the hull over its maximum (FoC's hardpoint-weighted display health is on
-    // the fidelity list).
-    const auto health_of = [](const sim::tactical::TacticalInstance& instance) {
+    // Get_Health_Percent: the display health (WSU-52, L-9), shared with the world bars.
+    const sim::tactical::DurabilityTable* durability_table = live.durability();
+    const auto health_of = [durability_table](const sim::tactical::TacticalInstance& instance) {
         if (!instance.durability || instance.durability->max_hull.raw() <= 0) return 1.0;
-        return std::clamp(static_cast<double>(instance.durability->hull.raw())
-                              / static_cast<double>(instance.durability->max_hull.raw()), 0.0, 1.0);
+        return static_cast<double>(ui::display_health(*instance.durability,
+            durability_table != nullptr ? durability_table->find(instance.type_id) : nullptr));
     };
     // #435: the selection holds a squadron as its team container (#424). The card model reads a
     // squadron through its craft, so a container stands for its live craft here, and every card's
@@ -265,6 +267,8 @@ bool BattleInput::ability_click(const std::size_t index, const bool right, const
         note("ability " + std::string(ui::ability_name(ability_bar_.buttons[index].ability)) + ": nothing can take it");
         return false;
     }
+    cancel_special_target("ability");
+    beacon_targeting_ = false;
     ++ability_requests_;
     note_commands_.owner = this;
     // #561 (AB-11): a targeted activation first takes its target from the next world click.

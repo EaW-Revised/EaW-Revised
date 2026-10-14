@@ -50,7 +50,9 @@ inline constexpr std::string_view unsupported_consumer = "EAWR-FOG-0006";
 // the host node's viewport/scenario; one node bootstraps any number of entities.
 class GodotRenderer final : public Renderer {
 public:
-    explicit GodotRenderer(godot::Node3D& host, std::shared_ptr<GodotShaderCache> shaders = {});
+    // A presentation overlay shares the scene without replacing its camera/environment.
+    explicit GodotRenderer(godot::Node3D& host, std::shared_ptr<GodotShaderCache> shaders = {},
+        bool attach_scene = true);
     ~GodotRenderer() override;
 
     GodotRenderer(GodotRenderer&&) noexcept;
@@ -118,6 +120,51 @@ public:
     [[nodiscard]] core::Result<void> register_shared_texture_array(
         std::string_view name, std::span<const assets::Texture> layers, std::uint32_t edge);
     [[nodiscard]] std::size_t shared_texture_count() const noexcept;
+
+    // #2856: GPU memory accounting for the whole process (every renderer).
+    // `live` resources hold `live_bytes`; `unique` distinct contents among
+    // them would hold `unique_bytes` if each were uploaded once; `reuses`
+    // counts requests served by a resident copy instead. Bytes are
+    // this adapter's estimates; the device_* fields are Godot's own counters.
+    struct GpuMemoryCategory final {
+        std::uint64_t live{}, live_bytes{}, unique{}, unique_bytes{};
+        std::uint64_t compressed_bytes{}, uncompressed_bytes{}, uploads{}, reuses{};
+    };
+    // #3027 GM-04: the adaptive texture budget. `device_bytes` is the device-local memory the
+    // budget was taken from (0: unknown, unconstrained) and `source` where it came from;
+    // `texture_budget` is what the pool may hold now (nine tenths of the device less
+    // `other_bytes`, the device memory outside the pool), `resident_bytes` what it holds;
+    // `drop` top mips are left out of every texture now, at least `minimum_drop` (the detail
+    // setting); `downsized` textures were rebuilt smaller after their upload; `over_budget`
+    // checks (uploads and frames) still found the pool over budget at the deepest drop;
+    // `rebuild_failures` rebuilds the engine refused (those textures keep their older drop);
+    // `constrained` is whether a device budget applies at all (texture_budget means nothing
+    // without one).
+    struct TextureBudgetFacts final {
+        std::uint64_t device_bytes{};
+        std::string source;
+        std::uint64_t texture_budget{}, other_bytes{}, resident_bytes{};
+        std::uint32_t drop{}, minimum_drop{};
+        std::uint64_t downsized{}, over_budget{}, rebuild_failures{};
+        bool constrained{};
+    };
+    struct GpuMemory final {
+        GpuMemoryCategory textures, texture_arrays, meshes;
+        std::uint64_t device_textures{}, device_buffers{}, device_total{};
+        TextureBudgetFacts budget{};
+        std::uint64_t deferred{}, admissions{}, evictions{}, dormant{}, admission_failures{};
+    };
+    [[nodiscard]] static GpuMemory gpu_memory();
+    // Off: every texture upload creates its own GPU copy (the footprint
+    // before content sharing), for measurement only. On by default.
+    static void set_texture_sharing(bool enabled) noexcept;
+    // GM-04: take the budget from `bytes` of device memory instead of the device's own figure
+    // (a forced small budget for tests and small-card checks); 0 goes back to the device's.
+    static void set_device_memory_override(std::uint64_t bytes);
+    // GM-04 measurement switch: no budget, no device probe and no counter reads.
+    static void disable_texture_budget();
+    // GM-04: the texture detail setting: drop at least this many top mips (0..4) everywhere.
+    static void set_texture_mip_drop(std::uint32_t levels);
     [[nodiscard]] core::Result<void> retain(sim::AssetId asset_id) override;
     [[nodiscard]] core::Result<void> release(sim::AssetId asset_id) override;
     [[nodiscard]] std::vector<ResourceReference> resources() const override;
@@ -151,7 +198,10 @@ public:
     // a scalar, or a non-finite value fails with EAWR-RENDER-0001. A failure
     // changes nothing.
     [[nodiscard]] core::Result<void> set_material_scalar(sim::AssetId asset_id, std::string_view binding,
-                                                         float value);
+                                                       float value);
+    // Same contract for an existing finite vector3 binding, including fog variants.
+    [[nodiscard]] core::Result<void> set_material_vector3(sim::AssetId asset_id, std::string_view binding,
+                                                         const std::array<float, 3>& value);
     // Presentation ordering for backdrop transparents, including any later fog variant.
     [[nodiscard]] core::Result<void> set_material_priority(sim::AssetId asset_id, std::int32_t priority);
     // Presentation-only: the entity's own light scale RGB (FoC's per-object
@@ -228,6 +278,10 @@ public:
         bool skeleton_posed{};
     };
     [[nodiscard]] std::vector<InstanceEvidence> instance_evidence() const;
+    // GPU qualification: the live skeleton palette, read from RenderingServer.
+    [[nodiscard]] std::optional<std::array<float, 12>> bone_evidence(sim::EntityId entity, std::int32_t bone) const;
+    // Hide a submitted instance without retiring its live skeleton/pose.
+    void set_instance_visible(sim::EntityId entity, bool visible);
     void set_camera(const FixedCamera& camera);
 
     // Scene lighting (P1-04). Without a call to set_lighting every legacy

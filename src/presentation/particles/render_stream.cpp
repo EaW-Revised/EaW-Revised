@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <chrono>
 #include <limits>
 #include <utility>
 
@@ -116,6 +117,8 @@ EmitterFrame emitter_frame_from_render(const std::array<float, 16>& m) {
 }
 
 void VertexStream::clear() {
+    axis_samples = axis_reversed = 0;
+    axis_max_sine_error = 0;
     vertices.clear();
     indices.clear();
     quads = 0;
@@ -166,20 +169,24 @@ bool intersects(const ParticleBounds& bounds, const CullingFrame& frame) noexcep
     return true;
 }
 
-void build_stream(const EmitterRenderPlan& plan, const std::span<const Particle> particles,
-                  const CameraFrame& camera, VertexStream& stream) {
+template<class ParticleAt>
+void build_stream_impl(const EmitterRenderPlan& plan, const std::size_t particle_count,
+                       const ParticleAt& particle_at, const CameraFrame& camera, VertexStream& stream,
+                       StreamBuildTimings* const timing) {
     if (!plan.drawable) return;
     const bool xy = plan.family == RenderFamily::xy_aligned;
     stream.sorted_particles.clear();
     stream.sort_candidates = 0;
     const bool sorting = plan.sort_particles && plan.depth_test;
-    if (sorting) {
-        if (!finite(camera.position)) return;
-        for (const auto& particle : particles) {
+    const bool slot_order = !sorting && plan.legacy_slot_order && plan.blend == Blend::alpha;
+    if (sorting || slot_order) {
+        if (sorting && !finite(camera.position)) return;
+        for (std::size_t index = 0; index < particle_count; ++index) {
+            const Particle& particle = particle_at(index);
             if (particle.emitter_index == plan.emitter_index && particle.draw_eligible && finite(particle.position))
                 stream.sorted_particles.push_back(&particle);
         }
-        stream.sort_candidates = stream.sorted_particles.size();
+        stream.sort_candidates = sorting ? stream.sorted_particles.size() : 0;
         const auto distance = [&](const Particle* particle) {
             const double x = static_cast<double>(particle->position.x) - camera.position.x;
             const double y = static_cast<double>(particle->position.y) - camera.position.y;
@@ -188,15 +195,27 @@ void build_stream(const EmitterRenderPlan& plan, const std::span<const Particle>
         };
         // PS-32: squared distance, farthest first. Stable IDs break equal-distance
         // ties deterministically without stable_sort's temporary allocation.
+        // The MIT alo-viewer reference (same revision cited above),
+        // ParticleEmitterInstance::AllocateParticle / QuadParticleRenderer,
+        // fills free primitive indices backwards and draws indices forwards.
+        // CPU logical slots are allocated forwards, so descending logical
+        // slots reproduce that order, including slots reused after retirement.
+        // Birth-ID order instead puts young grey keys over older gold keys.
+        const auto sort_start = timing != nullptr ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         std::sort(stream.sorted_particles.begin(), stream.sorted_particles.end(),
             [&](const auto* a, const auto* b) {
+                if (slot_order) return a->draw_slot != b->draw_slot
+                    ? a->draw_slot > b->draw_slot : a->id < b->id;
                 const double da = distance(a), db = distance(b);
                 return da != db ? da > db : a->id < b->id;
             });
+        if (timing != nullptr) timing->sort_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - sort_start).count();
     }
-    const auto count = sorting ? stream.sorted_particles.size() : particles.size();
+    const auto count = sorting || slot_order ? stream.sorted_particles.size() : particle_count;
     for (std::size_t index = 0; index < count; ++index) {
-        const Particle& particle = sorting ? *stream.sorted_particles[index] : particles[index];
+        const Particle& particle = sorting || slot_order ? *stream.sorted_particles[index] : particle_at(index);
         if (particle.emitter_index != plan.emitter_index || !particle.draw_eligible) continue;
         if (!finite(particle.position) || !std::isfinite(particle.size)) continue;
         const float size = particle.size;
@@ -206,11 +225,22 @@ void build_stream(const EmitterRenderPlan& plan, const std::span<const Particle>
                 // authored length stretches the backward corner of a diamond.
                 if (!finite(particle.motion_velocity) || !finite(camera.right) || !finite(camera.up)
                     || !std::isfinite(plan.tail_size)) continue;
-                const float x = dot(particle.motion_velocity, camera.right);
-                const float y = dot(particle.motion_velocity, camera.up);
-                const float speed = std::hypot(x, y);
+                const float raw_x = dot(particle.motion_velocity, camera.right);
+                const float raw_y = dot(particle.motion_velocity, camera.up);
+                const float speed = std::hypot(raw_x, raw_y);
+                // MD-08: perspective motion is tangent to this particle's sight ray.
+                // Keep MD-07's projected speed for tail length, independently of direction.
+                const Vec3 forward = normalized(cross(camera.up, camera.right));
+                const Vec3 ray = particle.position - camera.position;
+                const float depth = dot(ray, forward);
+                Vec3 tangent = particle.motion_velocity;
+                if (depth > 1.0e-6F && std::isfinite(depth))
+                    tangent = tangent - ray * (dot(tangent, forward) / depth);
+                const float x = dot(tangent, camera.right);
+                const float y = dot(tangent, camera.up);
+                const float axis_speed = std::hypot(x, y);
                 if (!std::isfinite(speed)) continue;
-                if (speed == 0.0F) {
+                if (!(axis_speed > 1.0e-6F) || !std::isfinite(axis_speed)) {
                     append_quad(stream, particle, camera.right, camera.up,
                         {{{-size, size}, {-size, -size}, {size, size}, {size, -size}}}, particle.rotation);
                     continue;
@@ -220,12 +250,36 @@ void build_stream(const EmitterRenderPlan& plan, const std::span<const Particle>
                 if (!std::isfinite(reference) || reference < 0.0F) continue;
                 const float limit = std::max(reference, speed);
                 const float stretch = limit == 0.0F ? 1.0F : 1.0F + plan.tail_size * speed / limit;
-                const Vec3 backward = camera.right * (-x / speed) + camera.up * (-y / speed);
-                const Vec3 across = camera.right * (-y / speed) + camera.up * (x / speed);
+                const Vec3 backward = camera.right * (-x / axis_speed) + camera.up * (-y / axis_speed);
+                const Vec3 across = camera.right * (-y / axis_speed) + camera.up * (x / axis_speed);
                 // MD-07: keep the UV center on the unstretched across diagonal,
                 // at the particle anchor, so the glow joins the projectile head.
+                const auto first = stream.vertices.size();
                 append_quad(stream, particle, backward, across,
                     {{{size * stretch, 0}, {0, size}, {0, -size}, {-size, 0}}}, 0.0F);
+                if (camera.collect_axis_diagnostics && stream.vertices.size() == first + 4) {
+                    // Independent point projection of generated head/tail and one frame's motion.
+                    const auto project = [&](const Vec3 point) -> std::optional<Vec3> {
+                        const Vec3 offset = point - camera.position;
+                        const float z = dot(offset, forward);
+                        if (!(z > 1.0e-6F)) return std::nullopt;
+                        return Vec3{dot(offset, camera.right) / z, dot(offset, camera.up) / z, 0};
+                    };
+                    const auto tail = project(stream.vertices[first].position);
+                    const auto head = project(stream.vertices[first + 3].position);
+                    const auto start = project(particle.position);
+                    const auto end = project(particle.position + particle.motion_velocity * (1.0F / 30.0F));
+                    if (tail && head && start && end) {
+                        const Vec3 drawn = normalized(*head - *tail);
+                        const Vec3 travel = normalized(*end - *start);
+                        if (length(drawn) > 0 && length(travel) > 0) {
+                            ++stream.axis_samples;
+                            stream.axis_max_sine_error = std::max(stream.axis_max_sine_error,
+                                static_cast<double>(length(cross(drawn, travel))));
+                            if (dot(drawn, travel) < 0) ++stream.axis_reversed;
+                        }
+                    }
+                }
                 continue;
             }
             // Kite: the quad plane contains the velocity and faces the camera;
@@ -257,8 +311,22 @@ void build_stream(const EmitterRenderPlan& plan, const std::span<const Particle>
         const Vec3 axis_y = xy ? Vec3{0.0F, 1.0F, 0.0F} : camera.up;
         append_quad(stream, particle, axis_x, axis_y,
             {{{-size, size}, {-size, -size}, {size, size}, {size, -size}}},
-            particle.rotation * 2.0F * pi, plan.triangles);
+            particle.rotation, plan.triangles); // PS-29: CPU orientation is already radians.
     }
+}
+
+void build_stream(const EmitterRenderPlan& plan, const std::span<const Particle> particles,
+                  const CameraFrame& camera, VertexStream& stream, StreamBuildTimings* const timing) {
+    build_stream_impl(plan, particles.size(), [&](const std::size_t index) -> const Particle& {
+        return particles[index];
+    }, camera, stream, timing);
+}
+
+void build_stream_subset(const EmitterRenderPlan& plan, const std::span<const Particle* const> particles,
+                         const CameraFrame& camera, VertexStream& stream, StreamBuildTimings* const timing) {
+    build_stream_impl(plan, particles.size(), [&](const std::size_t index) -> const Particle& {
+        return *particles[index];
+    }, camera, stream, timing);
 }
 
 std::uint64_t stream_hash(const VertexStream& stream, std::uint64_t seed) {

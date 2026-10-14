@@ -7,6 +7,7 @@ import argparse
 import json
 import pathlib
 import re
+import struct
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "common"))
@@ -107,7 +108,7 @@ def compare_bundle(evidence: pathlib.Path, fixtures: pathlib.Path, targets: tupl
                     except (ValueError, KeyError, TypeError) as error:
                         raise ValueError(f"{path}: invalid tick-zero census: {error}") from error
                     # Frozen EAWRTST setup hash, independently checked by the skirmish CLI test.
-                    if state != "8e6f2dbdb28a4ede544df23ab6550b7e6ee837ca9040e2a2b2d8760dcb74fa8a":
+                    if state != "78697a3cd28322cd6f19b659de3b131a7cb8d6cf312e7dcfb684d63689cdaeda":
                         raise ValueError(f"{path}: skirmish tick-zero state differs from frozen setup")
                     rows = required_bytes(directory / f"skirmish-workers-{workers}.snapshots.csv").splitlines()
                     if len(rows) < 2 or rows[1] != f"0,{snapshot}".encode():
@@ -118,13 +119,55 @@ def compare_bundle(evidence: pathlib.Path, fixtures: pathlib.Path, targets: tupl
                     raise ValueError(f"{path}: skirmish {kind} differs across targets/workers")
 
 
+def galactic_cases(corpus: pathlib.Path) -> list[tuple[str, pathlib.Path, list[tuple[int, str]]]]:
+    """The explicit corpus inventory prevents missing fixtures from silently reducing coverage."""
+    try:
+        names = json.loads((corpus / "manifest.json").read_text(encoding="utf-8"))["cases"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ValueError(f"invalid galactic corpus manifest: {error}") from error
+    if (not isinstance(names, list) or not names
+            or any(not isinstance(name, str) or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) is None for name in names)
+            or len(set(names)) != len(names)):
+        raise ValueError("galactic corpus needs unique nonempty case names")
+    cases = []
+    for name in names:
+        replay = corpus / f"{name}.eawr-gcreplay"
+        try:
+            data = eawr_evidence_io.read_bytes(replay)
+        except OSError as error:
+            raise ValueError(f"missing galactic replay {replay}: {error}") from error
+        if len(data) < 96 or data[:8] != b"EAWRGCR\0":
+            raise ValueError(f"{replay}: expected EAWRGCR header")
+        pins = read_rows(corpus / f"{name}.hashes.csv")
+        ticks = struct.unpack_from("<Q", data, 88)[0]
+        if not pins or len(pins) != ticks:
+            raise ValueError(f"{name}: pinned row count differs from replay final tick {ticks}")
+        cases.append((name, replay, pins))
+    return cases
+
+
+def compare_galactic_bundle(evidence: pathlib.Path, corpus: pathlib.Path, targets: tuple[str, ...]) -> None:
+    for name, _, pins in galactic_cases(corpus):
+        for target in targets:
+            directory = evidence / f"replay-evidence-{target}"
+            try:
+                identity = eawr_evidence_io.read_text(directory / "target.txt").strip()
+            except OSError as error:
+                raise ValueError(f"missing target identity: {error}") from error
+            if identity != target:
+                raise ValueError(f"target identity mismatch: expected {target!r}, found {identity!r}")
+            for workers in (1, 2, 4, 8):
+                candidate = f"{name}/{target}/workers-{workers}"
+                rows = read_rows(directory / f"{name}-workers-{workers}.hashes.csv")
+                compare(f"{name}/pins", pins, candidate, rows)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-root", type=pathlib.Path, required=True)
     parser.add_argument(
         "--audit",
         type=pathlib.Path,
-        required=True,
         help="frozen independent original-v1 audit JSON",
     )
     parser.add_argument(
@@ -135,13 +178,22 @@ def main() -> int:
     )
     parser.add_argument("--tactical-fixtures", type=pathlib.Path,
                         help="also require tactical-v2 bundles and skirmish tick-zero evidence")
+    parser.add_argument("--galactic-corpus", type=pathlib.Path,
+                        help="require EAWRGCR corpus pins on 1/2/4/8 workers; may run without --audit")
     args = parser.parse_args()
     targets = tuple(args.targets) if args.targets else DEFAULT_TARGETS
     if len(targets) != len(set(targets)):
         print("duplicate target names are not permitted", file=sys.stderr)
         return 2
+    if args.audit is None and (args.galactic_corpus is None or args.tactical_fixtures is not None):
+        parser.error("--audit is required unless checking only --galactic-corpus")
 
     try:
+        if args.galactic_corpus is not None:
+            compare_galactic_bundle(args.evidence_root, args.galactic_corpus, targets)
+        if args.audit is None:
+            print(f"galactic replay pins agree across {len(targets)} named targets and 1/2/4/8 workers")
+            return 0
         try:
             audit = json.loads(args.audit.read_text(encoding="utf-8"))
             expected = [

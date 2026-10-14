@@ -252,7 +252,7 @@ bool MapMode::State::compose_placements(const assets::Map& map,
             for (const assets::MaterialParameter& parameter : submesh.parameters) {
                 authored.bindings.push_back({parameter.name, parameter.value});
             }
-            if (authored.program == "MeshAdditiveVColor.fx") {
+            if (legacy::reads_effect_time(authored)) {
                 authored.bindings.push_back({"eawr_effect_time", 0.0F});
             }
             float tree_sway = 0.0F;
@@ -345,7 +345,7 @@ bool MapMode::State::compose_placements(const assets::Map& map,
                 posed_bounds(submesh, upload.bone, upload.pose ? &*upload.pose : nullptr,
                     upload.minimum, upload.maximum);
                 ++renderer_assets;
-                if (material.program == "MeshAdditiveVColor.fx") effect_clock_assets.push_back(upload.renderer_asset);
+                if (legacy::reads_effect_time(material)) effect_clock_assets.push_back(upload.renderer_asset);
                 uploads.emplace(std::make_tuple(asset.asset_id, index, colour), std::move(upload));
             }
         }

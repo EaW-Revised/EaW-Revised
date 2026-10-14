@@ -23,6 +23,7 @@ binary lookups and authoring extracts remain in ignored research output.
 | TCFA-12 | `ThreatExpansionDistance` changes forward expansion when space pathfinding considers threat. Defer until threat-aware pathfinding is implemented. The distance/turn-rate threat factors remain `deferred`: the verified threat-zone construction uses range, look-ahead, minimum radius and cap, not these authored factors; their other readers or parser absence remain unverified. | Debug build: space path configuration and threat-zone construction; effective constants 600, 0.5 and 4.0. |
 | TCFA-13 | `ShowUnitAIPlanAttachment` adds diagnostic AI plan/movement text to the unit tooltip. Mark it `presentation-later`; it is not a simulation control. | Debug build: tooltip population; stock False in effective XML. |
 | TCFA-14 | Preserve existing `foc-ignores` decisions for `Is_Bomber`, `Number_per_Squadron`, `Autoresolve_Health` and `AITechLevelProductionTimeWeight`. Their DB-NOTAG evidence is a whole-image parser/string/template scan, not an inference from this audit's missing consumers. | Registry DB-NOTAG evidence; effective XML contains these authored names. |
+| TCFA-15 | The loader accepts only `Goal_Category` under `Plans`; goal activation has no named-plan consumer. The effective stock skirmish faction players all select `Test_Space`, which authors no `Plans/Name`. Named switches are authored by galactic defaults and campaign intervention templates (survey below). Retain both rows as `deferred` with the GC AI owner for named-plan semantics and support; do not claim a whole-tag galactic boundary because `SandboxHuman` also lists intervention templates for Space and Land. | Static consumer audit: `ai_data.cpp#load_ai_data` and `categories`, `ai_goals.cpp` category activation; effective faction, player, template, campaign and intervention-goal XML survey. |
 
 ## Static AI loader trace
 
@@ -84,6 +85,7 @@ evidence; only the reviewed decisions above change here.
 | `Faction/SFXEvent_HUD_Last_Landing_Zone_Lost` | land-or-galactic | TCFA-01 |
 | `Faction/Skirmish_Land_Bomber` | land-or-galactic | SCOPE-LAND |
 | `Faction/Squadron_Icon_Name` | presentation-later | TCFA-02 |
+| `GameConstants/Bombing_Run_Reduction_Per_Squadron_Percent` | land-or-galactic | TCFA-01 |
 | `GameConstants/Indigenous_Spawn_Destruction_Reward` | land-or-galactic | TCFA-03 |
 | `GameConstants/Max_Bombing_Run_Interval_Seconds` | land-or-galactic | TCFA-01 |
 | `GameConstants/Min_Bombing_Run_Interval_Seconds` | land-or-galactic | TCFA-01 |
@@ -143,3 +145,72 @@ evidence; only the reviewed decisions above change here.
 | `SpaceUnit/Autoresolve_Health` | foc-ignores | DB-NOTAG |
 | `Squadron/Autoresolve_Health` | foc-ignores | DB-NOTAG |
 | `StarBase/Autoresolve_Health` | foc-ignores | DB-NOTAG |
+
+## TCFA-15 stock named-plan scope
+
+Stock space skirmish chooses the faction's `Basic_AI` (WSS-35): `BasicEmpire`,
+`BasicRebel` and `AI_Player_Underworld` in `factions.xml` and
+`expansion_factions.xml`. Each player's `Templates/Space` selects only
+`Test_Space` from `basicgenerictemplates.xml`. Its plan switches turn categories
+on and turn `Macro_Goal` off; neither switch authors `Name`. Thus no named-plan
+switch is selected by these stock space-skirmish controllers.
+
+The complete effective `data/xml/ai/templates` survey finds six templates with
+named switches:
+
+| Template | Turn_On/Plans/Name | Turn_Off/Plans/Name | Stock scope |
+|---|---|---|---|
+| `Basic_Empire_Default` | none | `RebelAdvanceTechPlan` | `BasicEmpire` Galactic template |
+| `Basic_Rebel_Default` | none | `EmpireAdvanceTechPlan`, `PlantSpyPlan` | `BasicRebel` Galactic template |
+| `Underworld_Galactic_Default` | none | `EmpireAdvanceTechPlan`, `PlantSpyPlan`, `RebelAdvanceTechPlan` | `AI_Player_Underworld` Galactic template |
+| `All_Interventions_Template` | 31 intervention names listed below | none | `SandboxHuman` lists it for Galactic, Space and Land; campaign intervention controller |
+| `Rebel_Main_Campaign_Act_1_Interventions` | `Intervention_Upgrade_Space_Station`, `Intervention_Build_Ion_Cannons`, `Intervention_Build_Light_Vehicle_Factories`, `Intervention_Build_Heavy_Vehicle_Factories`, `Intervention_Build_Space_Units`, `Intervention_Build_Land_Units` | none | Campaign intervention template; no direct player-template reference |
+| `Rebel_Main_Campaign_Act_3_Interventions` | `Intervention_Conquer_Pirate_Planet`, `Intervention_Credit_Windfall`, `Intervention_Land_Unit_Windfall`, `Intervention_Space_Unit_Windfall` | none | Campaign intervention template; no direct player-template reference |
+
+`All_Interventions_Template` names:
+
+- `Intervention_Upgrade_Space_Station`
+- `Intervention_Build_Ion_Cannons`
+- `Intervention_Build_Light_Vehicle_Factories`
+- `Intervention_Build_Heavy_Vehicle_Factories`
+- `Intervention_Accumulate_Credits`
+- `Intervention_Build_Space_Units`
+- `Intervention_Build_Land_Units`
+- `Intervention_Conquer_Pirate_Planet`
+- `Intervention_Scout`
+- `Intervention_Credit_Windfall`
+- `Intervention_Land_Unit_Windfall`
+- `Intervention_Space_Unit_Windfall`
+- `Intervention_Tech_Windfall`
+- `Intervention_Indigenous_Revolt`
+- `Intervention_Planet_Windfall`
+- `Intervention_Hunt_Capital_Ships`
+- `Intervention_Rebel_Smuggler`
+- `Intervention_Pirate_Ambush`
+- `Intervention_Vader_Favor`
+- `Intervention_Imperial_Traitor`
+- `Intervention_Rebel_Sabotage`
+- `Intervention_Rebel_Revolt`
+- `Intervention_Pirate_Defection`
+- `Intervention_Refugee_Escort`
+- `Intervention_Confront_Boba`
+- `Intervention_Pirate_Rescue`
+- `Intervention_Pirate_Enlightenment`
+- `Intervention_Pirate_Enlightenment_b`
+- `Intervention_Show_of_Strength`
+- `Intervention_Fleet_Rescue`
+- `Intervention_Empire_Oppression`
+
+`SandboxHuman` is assigned through campaign `AI_Player_Control` entries rather
+than the three playable factions' `Basic_AI`. All 32 goals in
+`ai/goals/interventiongoals.xml` author `GameMode` as `Galactic`. The three
+intervention templates come from `interventiontemplates.xml`; the three default
+templates come from `basicempiretemplates.xml`, `basicrebeltemplates.xml` and
+`ai_templates_underworld.xml` respectively.
+
+This is a stock-data scope decision, not debug-build evidence for switch timing,
+priority, cancellation of running plans or enable/disable semantics. Those facts
+remain unverified and belong with the GC AI owner's named-plan support work.
+Mod-authored space templates can still name plans; that unsupported case remains
+explicitly deferred. No AI loader or goal-activation behaviour changes follow
+from this survey.

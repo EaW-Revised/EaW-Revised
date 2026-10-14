@@ -1,4 +1,5 @@
 #include "tactical_ai_internal.hpp"
+#include "tactical_ai_world.hpp"
 
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
@@ -518,6 +519,77 @@ void test_replay() {
     expect(!tactical::validate_replay(untargeted), "AB-61: an ion shot without a target is rejected");
 }
 
+// FD-04 (#740): a squadron using its ION_CANNON_SHOT does not turn on a squadron that attacks it in
+// its own combat cell. The Y-wings dogfight an Empire squadron (container 5, serviced before them)
+// until their shot locks onto the frigate; from then on, while the shot is on, the Y-wings keep the
+// frigate as their target, their craft never take the attackers, and the lock-on is not renewed.
+void test_retaliation_skips_ion_shot() {
+    constexpr eawr::sim::EntityId enemy = 5;
+    constexpr eawr::sim::EntityId enemy_a = 6;
+    constexpr eawr::sim::EntityId enemy_b = 7;
+    constexpr std::uint64_t activation = 20;
+    auto initial = setup();
+    initial.units.insert(initial.units.begin(), {unit(enemy, squadron_type, empire, at(-600, 300)),
+        unit(enemy_a, craft_type, empire, at(-600, 300)), unit(enemy_b, craft_type, empire, at(-610, 310))});
+    initial.squadrons.insert(initial.squadrons.begin(), tactical::Squadron{enemy, {enemy_a, enemy_b}});
+    auto tough = durability();
+    tough.profiles[0].max_hull = units(60000);
+    const std::vector<tactical::PlayerCommand> commands{{{1, rebel, 1}, {container}, tactical::AttackPayload{enemy}},
+        {{1, empire, 1}, {enemy}, tactical::AttackPayload{container}}, shot(activation, 2, container, frigate)};
+    const auto observe = [&](const eawr::sim::PartitionExecutor& executor) {
+        std::vector<std::string> rows;
+        auto created = tactical::TacticalSession::create(initial, sensors(), tough, motion(), std::nullopt, combat(),
+            tactical::VictoryRules{}, abilities({rebel, empire}));
+        expect(static_cast<bool>(created), "the FD-04 session builds: " + (created ? std::string{} : created.error().message));
+        if (!created) return rows;
+        auto session = std::move(created).value();
+        for (const auto& command : commands) expect(session.submit(command).has_value(), "an FD-04 command submits");
+        bool fought = false;
+        std::size_t shot_ticks = 0;
+        for (std::uint64_t tick = 0; tick < 240; ++tick) {
+            const auto stepped = session.step(executor);
+            if (!stepped) {
+                expect(false, "step failed: " + stepped.error().message);
+                break;
+            }
+            rows.push_back(stepped.value().state_sha256);
+            const auto squadron = session.squadron_state(container);
+            const auto slots = session.ability_state(container);
+            const bool active = slots && slots->slots.front().active;
+            std::optional<tactical::Order> order;
+            for (const auto& state : session.units()) {
+                if (state.entity_id == container) order = state.order;
+            }
+            if (stepped.value().completed_tick < activation) {
+                fought = fought || (squadron && squadron->cell && squadron->target == enemy);
+                continue;
+            }
+            if (!active) continue;
+            ++shot_ticks;
+            expect(squadron && squadron->target == frigate,
+                "FD-04: the squadron on its ion shot keeps the frigate at tick " + std::to_string(stepped.value().completed_tick));
+            expect(order && order->issued_tick == activation,
+                "FD-04: no retaliation renews the lock-on at tick " + std::to_string(stepped.value().completed_tick));
+            // The craft take the locked target from the frame after the switch-on.
+            if (stepped.value().completed_tick <= activation + 1) continue;
+            for (const auto craft : {craft_a, craft_b}) {
+                const auto state = session.combat_state(craft);
+                expect(state && state->attack_target != enemy && state->attack_target != enemy_a && state->attack_target != enemy_b,
+                    "FD-04: no Y-wing takes the attackers at tick " + std::to_string(stepped.value().completed_tick));
+            }
+        }
+        expect(fought, "FD-04: the squadrons dogfight in one cell before the shot");
+        expect(shot_ticks > 10, "FD-04: the ion shot stays on while the attackers fight in its cell");
+        return rows;
+    };
+    const eawr::sim::InlineExecutor inline_executor;
+    const auto reference = observe(inline_executor);
+    for (const std::size_t workers : {2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(observe(executor) == reference, "FD-04 hashes match with " + std::to_string(workers) + " workers");
+    }
+}
+
 // The player's shot hashes the same at every worker count.
 void test_workers() {
     const eawr::sim::InlineExecutor inline_executor;
@@ -538,6 +610,7 @@ int main() {
     test_member_orders();
     test_autofire();
     test_replay();
+    test_retaliation_skips_ion_shot();
     test_workers();
     if (failures != 0) {
         std::cerr << failures << " ion shot contract test(s) failed\n";

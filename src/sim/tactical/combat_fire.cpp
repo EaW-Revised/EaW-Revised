@@ -20,10 +20,21 @@ core::Result<bool> manual_target_admissible(const CombatWorld& world, const Comb
     return combat_detail::UnitCombat(world, unit).admit_manual(target, hardpoint);
 }
 
+core::Result<CombatStep> step_planetary_fire(const CombatWorld& world, const CombatUnit& unit,
+    const CombatUnit& target) {
+    if (!unit.profile || !unit.profile->planetary_weapon || unit.profile->weapons.size() != 1)
+        return core::Result<CombatStep>::success(CombatStep{});
+    CombatState state;
+    state.weapons.resize(1);
+    auto source = unit;
+    source.combat = &state;
+    return UnitCombat(world, source).fire_planetary(target);
+}
+
 namespace combat_detail {
 
 UnitCombat::UnitCombat(const CombatWorld& world, const CombatUnit& unit)
-        : world_(world), unit_(unit), profile_(*unit.profile), state_(*unit.combat) {}
+        : world_(world), unit_(unit), profile_(*unit.profile), state_(*unit.combat), charged_blast_(unit.charged_blast) {}
 
 core::Result<CombatStep> UnitCombat::run() {
         if (state_.weapons.size() != profile_.weapons.size()) {
@@ -31,6 +42,7 @@ core::Result<CombatStep> UnitCombat::run() {
                 "combat state does not match the type's weapons"));
         }
         ship_target();
+        point_object_turret_target();
         // OR-23: an ordered hardpoint lasts while the order's target stands and so does it; then
         // the unit goes back to picking the target's nearest hardpoint (OR-24).
         if (state_.attack_hardpoint != no_hardpoint) {
@@ -45,15 +57,40 @@ core::Result<CombatStep> UnitCombat::run() {
         for (std::uint32_t slot = 0; slot < profile_.weapons.size(); ++slot) {
             service_weapon(slot);
         }
+        // FS-33/FC-61: the later turret turn adjusts only when object tracking is off.
+        for (std::uint32_t slot = 0; slot < profile_.weapons.size(); ++slot) {
+            auto& turret = state_.weapons[slot].turret;
+            // FC-60/61: a retained out-of-range target holds, without starting a rest timer.
+            if (turret && turret->target == invalid_entity_id) idle_object_turret(profile_.weapons[slot], *turret);
+        }
         if (error_) {
             return core::Result<CombatStep>::failure(std::move(*error_));
         }
         return core::Result<CombatStep>::success(
             CombatStep{std::move(state_), std::move(events_), face_, energy_spent_, std::move(aim_offsets_),
-                std::move(manual_fired_), std::move(manual_feedback_)});
+                std::move(manual_fired_), std::move(manual_feedback_), charged_blast_});
     }
 
-bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, CombatRandom& random, const bool burst_begun) {
+core::Result<CombatStep> UnitCombat::fire_planetary(const CombatUnit& target) {
+    CombatRandom random(world_.seed, world_.frame, unit_.id, 0);
+    static_cast<void>(attempt(0, target.id, random, true, &target));
+    if (error_) return core::Result<CombatStep>::failure(std::move(*error_));
+    return core::Result<CombatStep>::success(CombatStep{std::move(state_), std::move(events_),
+        {}, {}, std::move(aim_offsets_), {}, {}, charged_blast_});
+}
+
+bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, CombatRandom& random,
+    const bool burst_begun, const CombatUnit* planetary_target) {
+        if (!unit_.weapons_enabled) return false; // WR-44/46: covers direct/manual/burst fire too
+        // WAD-34, FD-54: these gates read the budget after each earlier successful attempt.
+        if (charged_blast_ && charged_blast_->charge_remaining != 0) return false;
+        const bool charged = charged_blast_ && charged_blast_->shots_remaining != 0;
+        if (charged && !profile_.weapons[slot].special) return false;
+        std::optional<WeaponProfile> blast;
+        if (charged && profile_.weapons[slot].charged_shot) {
+            blast = profile_.weapons[slot];
+            blast->shot = blast->charged_shot;
+        }
         // AB-66 (#561): while the squadron's ION_CANNON_SHOT is on, a craft's hardpoint fires only
         // the override shot, at the ion target, until the craft has fired it; otherwise nothing.
         std::optional<WeaponProfile> ion;
@@ -68,7 +105,8 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
             barrage = profile_.weapons[slot];
             barrage->shot = barrage->barrage_shot;
         }
-        const auto& authored = ion ? *ion : barrage ? *barrage : profile_.weapons[slot];
+        // WAD-35: charged selection precedes the ordinary unit-ability override.
+        const auto& authored = ion ? *ion : barrage ? *barrage : blast ? *blast : profile_.weapons[slot];
         const auto& assignment = state_.weapons[slot].manual;
         std::optional<WeaponProfile> posed;
         if (authored.requires_manual_target && assignment && authored.manual_turret) {
@@ -79,52 +117,56 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         // manual-only guns wait for their dedicated assignment consumer.
         if (weapon.special && !weapon.shot) return false;
         if (weapon.requires_manual_target && (!assignment || assignment->target != target_id)) return false;
-        // WWP-49: squadron craft resolve an object weapon's team target from their own team's
-        // centre. Hardpoint weapons retain their separate target-selection route (WWP-19).
-        const auto reference = weapon.hardpoint == object_weapon && unit_.squadron_centre
-            ? *unit_.squadron_centre : unit_.position;
-        const auto* held = world_.find(target_id);
-        const auto* target = world_.resolve_target(held, reference);
-        if (target == nullptr || target->profile == nullptr || !visible_to_me(*target) || restricted(weapon, *target)) {
+        // WWP-49: only a parent with ordinary targeting substitutes its centre for the next
+        // muzzle. A team's target metadata alone is not an ordinary combat binding.
+        // A hardpoint weapon takes a random craft of the team each attempt (WWP-19).
+        const bool own_weapon = weapon.hardpoint == object_weapon;
+        const bool muzzled = own_weapon && !weapon.muzzles.empty();
+        const auto muzzle_index = muzzled ? state_.weapons[slot].next_muzzle % weapon.muzzles.size() : std::size_t{0};
+        const auto* parent = own_weapon ? world_.find(world_.container_of(unit_.id)) : nullptr;
+        const auto reference = parent != nullptr && parent->combat != nullptr ? parent->position
+            : muzzled ? world_point(unit_, weapon.muzzles[muzzle_index]) : unit_.position;
+        const auto* held = planetary_target ? planetary_target : world_.find(target_id);
+        const auto* target = planetary_target ? planetary_target
+            : own_weapon                         ? world_.resolve_target(held, reference)
+                                                 : world_.random_member(held, random);
+        if (target == nullptr || target->profile == nullptr
+            || (planetary_target && !stealth_targetable(*target))
+            || (!planetary_target && (!visible_to_me(*target) || restricted(weapon, *target)))) {
             return false;
         }
-        if (!hostile(*target)) return false; // WHZ-51: retained and direct targets use the same gate
+        if (!planetary_target && !hostile(*target)) return false; // WHZ-51; WSW-20 continuation retains its target.
+        if (weapon.object_turret_required) {
+            const auto& turret = state_.weapons[slot].turret;
+            if (!turret || !turret->ready) return false;
+        }
         if (ion && target->id != unit_.ion_target && world_.container_of(target->id) != unit_.ion_target) {
             return false;
         }
         const auto midpoint = world_point(unit_, local_midpoint(weapon));
-        // The nearest live targetable hardpoint (spatial distance from the shooter, first on a
-        // tie), else the aim-point search.
+        // WWP-47: the object weapon's next muzzle bone, else the unit's origin. The shot leaves it,
+        // the lead starts there and the weapon's cone opens about the unit's facing there (WWP-53).
         std::optional<Aim> aim;
-        // WWP-49: resolving a team for the object weapon clears any aimed hardpoint.
-        if (weapon.hardpoint == object_weapon && target != held) {
-            auto point = target->position;
-            if (target->profile != nullptr) {
-                point.z = take(math::add(point.z, target->profile->ranged_target_z_adjust));
-            }
-            aim = Aim{point, no_hardpoint};
-        }
+        // WWP-49: a team container resolved to one of its craft has no aimed hardpoint; a hardpoint
+        // weapon's random craft goes straight to the R-10 aim-point search (WWP-19).
+        const bool resolved_craft = target != held;
+        // A hardpoint weapon aims at the nearest live targetable hardpoint (WWP-16), else the
+        // aim-point search. For the unit's own weapon the targeting service has attached the unit's
+        // best hardpoint (WCC-18) to the attack target when it acquired it (G-W3, OR-24), so it is
+        // the weapon's aimed hardpoint just like an ordered one (WWP-50).
         // OR-25: the ordered hardpoint of the ordered target, with no fallback to another point.
-        if (!aim && target_id == state_.attack_target && state_.direct) {
+        if (!resolved_craft && target_id == state_.attack_target && state_.direct) {
             if (const auto* ordered = standing_hardpoint(*target, state_.attack_hardpoint)) {
                 aim = Aim{world_point(*target, ordered->position), ordered->hardpoint};
             }
         }
-        if (!aim && target->profile != nullptr) {
-            // WWP-16/72: nearest-hardpoint distance starts at the shooter's adjusted position.
+        if (!aim && !resolved_craft) {
+            // WWP-16/72: the hardpoint distance starts at the shooter's adjusted position.
             auto reference_point = unit_.position;
             reference_point.z = take(math::add(reference_point.z, profile_.ranged_target_z_adjust));
-            const TargetHardpoint* nearest = nullptr;
-            math::Vec3 nearest_point{};
-            for (const auto& hardpoint : target->profile->hardpoints) {
-                if (!hardpoint.targetable || hardpoint_destroyed_on(*target, hardpoint.hardpoint)) continue;
-                const auto point = world_point(*target, hardpoint.position);
-                if (nearest == nullptr || closer(reference_point, point, nearest_point)) {
-                    nearest = &hardpoint;
-                    nearest_point = point;
-                }
-            }
-            if (nearest != nullptr) aim = Aim{nearest_point, nearest->hardpoint};
+            const auto* chosen = own_weapon ? best_hardpoint(world_.table, &profile_, *target, unit_.position)
+                                            : nearest_hardpoint(*target, reference_point);
+            if (chosen != nullptr) aim = Aim{world_point(*target, chosen->position), chosen->hardpoint};
             // AB-61: an ion shot at a hardpoint aims at it while it stands (else as above).
             if (ion && unit_.ion_target_hardpoint != no_hardpoint) {
                 for (const auto& hardpoint : target->profile->hardpoints) {
@@ -136,18 +178,38 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
                 }
             }
         }
+        if (!aim && own_weapon) {
+            // WWP-50: no hardpoint to aim at: a keyed draw over the target type's Target_Bones (at
+            // their bind positions until animated poses exist), else the height-adjusted position
+            // (WWP-72). There is no range test in the choice; the reach test below is G-05's.
+            if (!target->profile->target_bones.empty()) {
+                const auto& bones = target->profile->target_bones;
+                const auto pick = random.uniform(0, static_cast<std::uint32_t>(bones.size() - 1));
+                aim = Aim{world_point(*target, bones[pick]), no_hardpoint};
+            } else {
+                auto point = target->position;
+                point.z = take(math::add(point.z, target->profile->ranged_target_z_adjust));
+                aim = Aim{point, no_hardpoint};
+            }
+        }
         if (!aim) {
             aim = choose_aim(weapon, midpoint, *target, random, RangeMetric::spatial);
             if (!aim) return false;
         }
         // W-05 / WWP-21: planar aim distance includes the target's loaded soft radius.
         const auto reach = take(math::add(weapon.range, target_soft_radius(world_.motion, *target)));
-        if (!within_range(midpoint, aim->point, reach, RangeMetric::planar)) {
+        if (!planetary_target && !within_range(midpoint, aim->point, reach, RangeMetric::planar)) {
             return false;
         }
-        auto origin = weapon.fire_a;
-        if (weapon.has_fire_b && random.uniform(0, 99) >= 50U) origin = weapon.fire_b;
+        // WWP-47: the weapon takes its next muzzle and advances the index before the launch can fail
+        // on its lead or cone (debug build), so a rejected shot still uses its muzzle up.
+        if (muzzled) state_.weapons[slot].next_muzzle = static_cast<std::uint32_t>((muzzle_index + 1) % weapon.muzzles.size());
+        auto origin = muzzled ? weapon.muzzles[muzzle_index] : weapon.fire_a;
+        if (!muzzled && weapon.has_fire_b && random.uniform(0, 99) >= 50U) origin = weapon.fire_b;
+        if (muzzled && state_.weapons[slot].turret) origin = object_turret_muzzle(weapon, *state_.weapons[slot].turret, origin);
         const auto muzzle = world_point(unit_, origin);
+        // WWP-53: the object weapon's cone is tested at its muzzle; the range above stays the unit's.
+        const auto cone_origin = muzzled ? muzzle : midpoint;
         // W-10, W-11: the shot leads the target; the weapon must point at the led point.
         const auto led = lead(weapon, *target, aim->point, muzzle);
         if (!led) return false;
@@ -158,7 +220,7 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
             const auto spatial = take(math::length(math::Vec3{take(math::subtract(led->x, muzzle.x)),
                 take(math::subtract(led->y, muzzle.y)), take(math::subtract(led->z, muzzle.z))}));
             scattered = scatter(weapon, spatial, *target, *led, random);
-            if (!pointable(weapon, midpoint, scattered)) return false;
+            if (!pointable(weapon, cone_origin, scattered)) return false;
         } else {
             if (!pointable(weapon, midpoint, *led)) return false;
             const auto planar = take(math::length(math::Vec2{
@@ -166,7 +228,10 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
             scattered = scatter(weapon, planar, *target, *led, random);
         }
         events_.push_back(CombatEvent{world_.frame, CombatEventKind::weapon_fired, unit_.id, weapon.hardpoint,
-            target->id, aim->hardpoint, muzzle, scattered, ion ? fired_ability_shot : barrage ? fired_barrage_shot : 0U});
+            target->id, aim->hardpoint, muzzle, scattered,
+            (ion ? fired_ability_shot : barrage ? fired_barrage_shot : 0U) | (charged ? fired_charged_shot : 0U)});
+        // FS-35: spend inside creation, so the next hardpoint can read ordinary state at zero.
+        if (charged) --charged_blast_->shots_remaining;
         // MS-03: the scatter off the led point, taken into the target's frame for a homing
         // projectile to keep.
         const math::Vec3 off{take(math::subtract(scattered.x, led->x)),
@@ -186,6 +251,16 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         return true;
     }
 
+math::Fixed UnitCombat::delay_factor(const WeaponProfile& weapon) const noexcept {
+    if (!unit_.full_salvo || weapon.hardpoint == object_weapon || weapon.full_salvo_delay.raw() == one_raw) {
+        return unit_.weapon_delay;
+    }
+    // Both factors are validated to [0, 64] x [-64, 64]: the exact product fits.
+    const auto raw = unit_.weapon_delay.raw() * weapon.full_salvo_delay.raw();
+    const auto half = one_raw / 2;
+    return math::Fixed::from_raw(raw >= 0 ? (raw + half) / one_raw : -((-raw + half) / one_raw));
+}
+
 void UnitCombat::spend_pulse(const WeaponProfile& weapon, WeaponState& state, CombatRandom& random) {
         if (state.pulses_left != 0) --state.pulses_left;
         // IS-06: an ion stun's fire rate lengthens a hardpoint's recharge and gaps and shortens its
@@ -196,7 +271,7 @@ void UnitCombat::spend_pulse(const WeaponProfile& weapon, WeaponState& state, Co
             const auto hundredths = random.uniform(weapon.min_recharge_hundredths, weapon.max_recharge_hundredths);
             auto frames = hundredths * logical_frames_per_second / 100U;
             if (weapon.hardpoint == object_weapon) frames += random.uniform(0, object_recharge_jitter_frames);
-            state.countdown = scaled_weapon_delay(frames, unit_.weapon_delay, true);
+            state.countdown = scaled_weapon_delay(frames, delay_factor(weapon), true);
             state.pulses_left = weapon.pulse_count;
             // WAD-38: object weapons divide the full recharge by the mode's rate and
             // truncate the refilled pulse count; their jitter is drawn before scaling.
@@ -211,7 +286,7 @@ void UnitCombat::spend_pulse(const WeaponProfile& weapon, WeaponState& state, Co
                 state.pulses_left = fire_rate_pulses(weapon.pulse_count, unit_.fire_rate);
             }
         } else {
-            state.countdown = scaled_weapon_delay(weapon.pulse_delay_frames, unit_.weapon_delay, false);
+            state.countdown = scaled_weapon_delay(weapon.pulse_delay_frames, delay_factor(weapon), false);
             if (weapon.hardpoint == object_weapon && object_rate.raw() != math::Fixed::scale) {
                 state.countdown = object_rate.raw() > 0
                     ? static_cast<std::uint32_t>(static_cast<std::int64_t>(state.countdown) * one_raw / object_rate.raw()) : 0;
@@ -305,16 +380,27 @@ void UnitCombat::service_weapon(const std::uint32_t slot) {
         }
         // WSQ-47: the team setter also hands an autonomous target to its members' hardpoints.
         // Ordinary ships retain their player-order gate.
+        // WWP-05/FD-06: clearing a dead ordered target in ship targeting must
+        // not turn this hardpoint's death-frame service into idle opportunity fire.
+        const auto held = unit_.combat->attack_target;
+        if ((unit_.combat->direct || unit_.target_prepared) && held != invalid_entity_id) {
+            const auto* previous = world_.find(held);
+            if (previous == nullptr || (previous->durability && previous->durability->hull.raw() <= 0)) return;
+        }
         const auto attack = state_.direct || unit_.target_prepared ? state_.attack_target : invalid_entity_id;
         if (attack != invalid_entity_id) {
             const auto* target = world_.resolve_target(world_.find(attack), unit_.position);
             if (target == nullptr || restricted(weapon, *target)) return;
         }
-        if (attack == invalid_entity_id && !weapon.opportunity_when_idle) return;
+        // R-01: an AI owner's quick-recharge hardpoint counts both flags as on.
+        const bool forced = weapon.ai_opportunity_forced && unit_.ai_owned;
+        if (attack == invalid_entity_id && !weapon.opportunity_when_idle && !forced) return;
         if (attack != invalid_entity_id && attempt(slot, attack, random)) return;
-        if (attack != invalid_entity_id && !weapon.opportunity_when_targeting) return;
+        if (attack != invalid_entity_id && !weapon.opportunity_when_targeting && !forced) return;
         Opportunity opportunity(*this, slot, random);
-        const auto outcome = service_opportunity(world_.frame, OpportunityGates{}, state.opportunity, opportunity);
+        OpportunityGates gates;
+        gates.parent_suppressed = unit_.stealth_on; // R-05, WST-10
+        const auto outcome = service_opportunity(world_.frame, gates, state.opportunity, opportunity);
         if (outcome.acquired) {
             // The acquisition event goes before the shot that confirmed it.
             events_.insert(events_.end() - 1, CombatEvent{world_.frame, CombatEventKind::target_acquired, unit_.id,

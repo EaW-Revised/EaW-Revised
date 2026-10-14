@@ -52,6 +52,7 @@ public:
     void set_clock(std::function<double()> clock) { clock_ = std::move(clock); }
 
     [[nodiscard]] const presentation::ui::AbilityBar& bar() const noexcept { return bar_; }
+    [[nodiscard]] std::optional<std::size_t> hovered_button() const noexcept { return hovered_; }
     // A shown button's mesh on the screen, by its index in the bar.
     [[nodiscard]] std::optional<godot::Rect2> button_rect(std::size_t index) const;
     [[nodiscard]] std::optional<std::size_t> button_at(const godot::Vector2& point) const;

@@ -431,6 +431,19 @@ bool Player::sampled(const Pose& pose) const noexcept {
 }
 std::size_t Player::bone_count() const noexcept { return bones_.size(); }
 
+core::Result<void> Player::apply_bone_transform(Pose& pose, const std::size_t bone, const Matrix& transform) const {
+    if (!sampled(pose) || pose.bones.size() != bones_.size() || bone >= bones_.size() || !finite(transform))
+        return core::Result<void>::failure(failure(diagnostic_codes::invalid_request, "invalid procedural bone pose"));
+    pose.bones[bone].local_asset = multiply(pose.bones[bone].local_asset, transform);
+    for (std::size_t index = bone; index < bones_.size(); ++index) {
+        const auto parent_index = bones_[index].parent;
+        const Matrix parent = parent_index < 0 ? identity_matrix() : pose.bones[static_cast<std::size_t>(parent_index)].model_asset;
+        pose.bones[index].model_asset = multiply(parent, pose.bones[index].local_asset);
+        pose.bones[index].skin_asset = multiply(pose.bones[index].model_asset, bones_[index].inverse_bind);
+    }
+    return core::Result<void>::success();
+}
+
 core::Result<AttachmentTransform> Player::attachment(const Pose& pose, const std::string_view bone_name,
     const AttachmentSpace space, const Matrix& render_world) const {
     if (!sampled(pose))

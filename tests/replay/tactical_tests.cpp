@@ -3,6 +3,7 @@
 #include "eawr/sim/replay.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
+#include "eawr/sim/tactical/admission.hpp"
 
 #include <algorithm>
 #include <array>
@@ -257,6 +258,33 @@ void test_format(const std::string& fixtures) {
         "truncated header is malformed");
 }
 
+void test_special_fire_format(const std::string& fixtures) {
+    auto replay = load_fixture(fixtures);
+    replay.commands.clear();
+    for (const auto admission : {tactical::SpecialFireAdmission::player,
+            tactical::SpecialFireAdmission::ai_object, tactical::SpecialFireAdmission::ai_taskforce}) {
+        replay.commands.push_back({{0, 1, replay.commands.size()}, {1}, tactical::SpecialFirePayload{2, admission}});
+    }
+    const auto encoded = tactical::write_replay(replay);
+    expect(static_cast<bool>(encoded), "special fire admission routes serialize");
+    if (encoded) {
+        const auto parsed = tactical::parse_replay(encoded.value(), "special-fire");
+        expect(parsed && parsed.value() == replay, "special fire source, target and admission survive replay");
+        const auto rewritten = parsed ? tactical::write_replay(parsed.value()) : encoded;
+        expect(rewritten && rewritten.value() == encoded.value(), "special fire replay bytes are stable");
+    }
+    auto invalid = replay;
+    invalid.commands.front().units.push_back(2);
+    expect(!tactical::write_replay(invalid), "special fire cannot name multiple sources");
+    invalid = replay;
+    std::get<tactical::SpecialFirePayload>(invalid.commands.front().payload).target = 0;
+    expect(!tactical::write_replay(invalid), "special fire rejects a zero target");
+    invalid = replay;
+    std::get<tactical::SpecialFirePayload>(invalid.commands.front().payload).admission =
+        static_cast<tactical::SpecialFireAdmission>(3);
+    expect(!tactical::write_replay(invalid), "special fire rejects an unknown admission route");
+}
+
 void test_match_policy_format(const std::string& fixtures) {
     const auto legacy_bytes = read_bytes(fixtures + "/tactical-v2.eawr-replay");
     const auto legacy = load_fixture(fixtures);
@@ -328,6 +356,61 @@ void test_match_policy_format(const std::string& fixtures) {
         : eawr::core::Result<tactical::TacticalReplay>::failure(squadron_bytes.error());
     expect(squadron_bytes && squadron_bytes.value()[8] == 5 && squadron && squadron.value() == replay,
         "v5 retains the squadron table beside tagged policy records");
+}
+
+void test_native_scene_format(const std::string& fixtures) {
+    auto replay = load_fixture(fixtures);
+    tactical::ReplaySkirmishSetup map;
+    map.map = "data/art/maps/renamed_campaign.ted";
+    map.map_sha256 = std::string(64, 'b'); map.victory_condition = 2;
+    for (const auto& player : replay.setup.players) if (player.commandable())
+        map.slots.push_back({player.player_id, player.player_id == 1, {}, {}});
+    replay.setup.skirmish = map;
+    replay.setup.first_free_entity_id = replay.setup.units.back().entity_id + 1;
+    const auto without_native = tactical::write_replay(replay);
+    replay.setup.native_scene = tactical::ReplayNativeScene{true,
+        {"Mod_Carrier", "Mod_Station"}, {"Mod_Nebula"}, {"Mod_Carrier", "Mod_Fighter"}};
+    const auto encoded = tactical::write_replay(replay);
+    expect(encoded && tactical::parse_replay(encoded.value()).value() == replay,
+        "native campaign metadata round-trips renamed loader roots and multiplayer policy");
+    if (!encoded || !without_native) return;
+    const auto reference = run_replay(replay, eawr::sim::InlineExecutor{}, false);
+    for (const auto workers : {1U, 2U, 4U, 8U})
+        expect(run_replay(replay, ReverseInline(workers), true) == reference,
+            "native load metadata preserves deterministic tactical state across workers");
+    auto plain = replay; plain.setup.native_scene.reset();
+    expect(tactical::write_replay(plain).value() == without_native.value(),
+        "omitted native scene leaves ordinary tactical replay bytes unchanged");
+    auto invalid = replay; invalid.setup.skirmish.reset();
+    expect(!tactical::write_replay(invalid), "native scene cannot omit native map identity");
+    invalid = replay; invalid.setup.first_free_entity_id.reset();
+    expect(!tactical::write_replay(invalid), "native scene requires campaign allocator context");
+    invalid = replay; invalid.setup.native_scene->battle_types.clear();
+    expect(!tactical::write_replay(invalid), "native scene refuses empty battle closure");
+    invalid = replay; invalid.setup.native_scene->source_types.push_back("mod_carrier");
+    expect(!tactical::write_replay(invalid), "native scene refuses case-insensitive duplicate roots");
+    invalid = replay; invalid.setup.native_scene->source_types.front() = std::string(65536, 'x');
+    expect(static_cast<bool>(tactical::validate_setup(invalid.setup)), "file metadata limits never refuse a live campaign setup");
+    expect(!tactical::write_replay(invalid), "native scene refuses oversized names");
+    const auto header = static_cast<std::size_t>(encoded.value()[10]) + 256U * encoded.value()[11];
+    std::size_t record = 108;
+    while (record < header && (encoded.value()[record] != tactical::replay_extension_native_scene
+        || encoded.value()[record + 1] != 0)) {
+        record += 4U + encoded.value()[record + 2] + 256U * encoded.value()[record + 3];
+    }
+    expect(record < header, "native scene extension has its reserved tag");
+    if (record >= header) return;
+    auto bytes = encoded.value(); bytes[record + 4] = 2;
+    expect(!tactical::parse_replay(bytes), "native scene refuses unknown body version");
+    bytes = encoded.value(); bytes[record + 8] = 2;
+    expect(!tactical::parse_replay(bytes), "native scene refuses unknown flags");
+    bytes = encoded.value();
+    for (std::size_t i = 0; i < 4; ++i) bytes[record + 12 + i] = 255;
+    expect(!tactical::parse_replay(bytes), "native scene refuses oversized counts before allocation");
+    bytes = encoded.value(); bytes[record + 16] = 0; bytes[record + 17] = 0;
+    expect(!tactical::parse_replay(bytes), "native scene refuses empty encoded names");
+    bytes = encoded.value(); bytes.resize(header - 1);
+    expect(!tactical::parse_replay(bytes), "native scene refuses truncated header bodies");
 }
 
 void test_skirmish_setup_format(const std::string& fixtures) {
@@ -450,7 +533,7 @@ void test_golden_across_workers(const std::string& fixtures, const Golden& golde
 // serial, loses its name or changes its partition count fails here. A new partitioned phase
 // adds its name to `required` and to the phase map.
 void test_phase_map(const std::string& fixtures) {
-    const std::vector<std::string_view> required{"gather", "movement", "targeting", "unit-systems", "visibility"};
+    const std::vector<std::string_view> required{"gather", "movement", "hull-service", "combat-input-refresh", "targeting", "unit-systems", "visibility"};
     const auto replay = load_fixture(fixtures);
     auto created = tactical::TacticalSession::from_replay(replay);
     expect(static_cast<bool>(created), "phase map fixture session is created");
@@ -776,7 +859,178 @@ void test_sparse_registry_commit() {
 
 } // namespace
 
+namespace {
+void test_human_seat_admission() {
+    static_assert(!std::is_same_v<eawr::sim::SeatId, tactical::PlayerId>);
+    static_assert(sizeof(eawr::sim::SeatId) == sizeof(std::uint32_t));
+    const auto classify = []<std::size_t... Index>(std::index_sequence<Index...>) {
+        unsigned engine_count = 0;
+        ((engine_count += tactical::payload_authority(tactical::CommandPayload{
+            std::variant_alternative_t<Index, tactical::CommandPayload>{}}) == tactical::PayloadAuthority::engine_only), ...);
+        return engine_count;
+    };
+    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 5U,
+        "CP-1: every payload is classified; damage, credits, reveal, reservation debit and campaign releases are engine-only");
+    tactical::SeatBinding binding{{1}, 2};
+    tactical::SeatCommand intent{{0, {1}, 0}, 2, {10}, tactical::StopPayload{}};
+    tactical::SeatAdmission admission;
+    auto admitted = admission.admit(binding, intent);
+    expect(admitted && admitted.value().issuer == intent.key && admitted.value().command.key.player_id == 2,
+        "ADR-020: admitted command retains seat provenance and authorizes its owning faction");
+    expect(!admission.admit(binding, intent), "a duplicate seat cursor is refused");
+    auto other_seat = binding;
+    other_seat.seat = {2};
+    auto other_intent = intent;
+    other_intent.key.seat = {2};
+    expect(static_cast<bool>(admission.admit(other_seat, other_intent)),
+        "same-faction seats have independent sequence cursors");
+    expect(!tactical::admit_human_command(binding, other_intent), "CP-2: payload cannot spoof authenticated seat");
+    auto wrong_faction = intent;
+    wrong_faction.player = 1;
+    expect(!tactical::admit_human_command(binding, wrong_faction), "CP-6: seat cannot claim another faction");
+    auto observer = binding;
+    observer.observer = true;
+    expect(!tactical::admit_human_command(observer, intent), "read-only battle observer cannot issue orders");
+    observer.observer = false;
+    observer.active = false;
+    expect(!tactical::admit_human_command(observer, intent), "inactive seat cannot issue orders");
+    for (const auto& payload : {tactical::CommandPayload{tactical::DamagePayload{}},
+        tactical::CommandPayload{tactical::CreditGrantPayload{}}, tactical::CommandPayload{tactical::RevealAllPayload{}},
+        tactical::CommandPayload{tactical::AiReservationDebitPayload{}}, tactical::CommandPayload{tactical::BuyPayload{1, true}},
+        tactical::CommandPayload{tactical::ReinforcePayload{1, {}, 99}},
+        tactical::CommandPayload{tactical::SpecialFirePayload{10, tactical::SpecialFireAdmission::ai_object}},
+        tactical::CommandPayload{tactical::SpecialFirePayload{10, tactical::SpecialFireAdmission::ai_taskforce}}}) {
+        auto privileged = intent;
+        privileged.payload = payload;
+        expect(!tactical::admit_human_command(binding, privileged), "human admission refuses every engine-only entry route");
+    }
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}, {2, 0, 2, tactical::player_flag_commandable}};
+    setup.units = {{10, 1, 2}};
+    auto created = tactical::TacticalSession::create(setup);
+    expect(static_cast<bool>(created), "seat admission fixture creates");
+    if (!created) return;
+    auto& world = created.value();
+    auto routed = world.submit_human(binding, intent, 7);
+    expect(routed && routed.value().issuer == intent.key && routed.value().command.key.sequence == 7,
+        "session boundary binds issuer and returns original seat key beside derived child sequence");
+    auto privileged = intent;
+    privileged.key.sequence = 1;
+    privileged.payload = tactical::DamagePayload{};
+    expect(!world.submit_human(binding, privileged, 8), "session boundary rejects privileged human order");
+    const auto stepped = world.step(eawr::sim::InlineExecutor{});
+    expect(static_cast<bool>(stepped), "admitted faction command executes");
+    expect(world.record().commands.size() == 1, "refused human command never enters replay stream");
+    tactical::PlayerCommand trusted{{1, 2, 8}, {10}, tactical::DamagePayload{}};
+    expect(static_cast<bool>(world.submit(trusted)), "engine/replay path remains available for privileged payloads");
+}
+} // namespace
+
+namespace {
+void test_beacons() {
+    using eawr::sim::math::Fixed;
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 7, 1, tactical::player_flag_commandable},
+        {2, 7, 1, tactical::player_flag_commandable}, {3, 8, 2, tactical::player_flag_commandable}};
+    setup.beacon_rules = {{1, 101, 3}, {2, 102, 5}};
+    const eawr::sim::math::Vec3 first{Fixed::from_raw(Fixed::scale), {}, {}};
+    const eawr::sim::math::Vec3 replacement{Fixed::from_raw(5 * Fixed::scale), {}, {}};
+    tactical::TacticalReplay replay{setup, 8, {
+        {{0, 1, 0}, {}, tactical::BeaconPayload{first}},
+        {{1, 2, 0}, {}, tactical::BeaconPayload{}},
+        {{2, 1, 1}, {}, tactical::BeaconPayload{replacement}}}};
+    const auto bytes = tactical::write_replay(replay);
+    expect(static_cast<bool>(bytes), "HCB-12: beacon rules and position commands encode");
+    if (!bytes) return;
+    const auto decoded = tactical::parse_replay(bytes.value());
+    expect(decoded && decoded.value() == replay, "HCB-12: beacon setup and commands round-trip exactly");
+    if (!decoded) return;
+    auto bad_extension = bytes.value();
+    bad_extension[112] = 2; // This fixture has only extension 9; its body begins here.
+    expect(!tactical::parse_replay(bad_extension), "unknown beacon rules versions reject");
+    bad_extension = bytes.value();
+    bad_extension[116] = 65;
+    expect(!tactical::parse_replay(bad_extension), "beacon rules cannot exceed the player bound");
+    auto bad_units = replay;
+    bad_units.commands.front().units = {1};
+    expect(!tactical::write_replay(bad_units), "beacons never accept a forged unit list");
+    auto bad_position = replay;
+    std::get<tactical::BeaconPayload>(bad_position.commands.front().payload).position.x = Fixed::from_raw(std::int64_t{1} << 43);
+    expect(!tactical::write_replay(bad_position), "beacon points retain command coordinate bounds");
+    auto bad_rules = setup;
+    bad_rules.beacon_rules.front().lifetime_frames = 0;
+    expect(!tactical::validate_setup(bad_rules), "beacon lifetime must be positive");
+    bad_rules = setup;
+    bad_rules.beacon_rules.push_back(bad_rules.beacon_rules.front());
+    expect(!tactical::validate_setup(bad_rules), "beacon rules cannot duplicate an issuer");
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto made = tactical::TacticalSession::from_replay(decoded.value());
+        expect(static_cast<bool>(made), "beacon replay creates a session");
+        if (!made) continue;
+        auto world = std::move(made).value();
+        std::vector<std::string> hashes;
+        for (std::uint64_t tick = 0; tick < replay.final_tick_count; ++tick) {
+            const auto advanced = world.step(ReverseInline{workers});
+            expect(static_cast<bool>(advanced), "beacons step on every worker count");
+            if (!advanced) break;
+            hashes.push_back(world.state_sha256());
+            const auto own = world.snapshot()->visible_beacons(1);
+            const auto ally = world.snapshot()->visible_beacons(2);
+            expect(own == ally && world.snapshot()->visible_beacons(3).empty()
+                && world.snapshot()->visible_beacons(99).empty(), "HCB-12c: only known allies see beacon records");
+            if (tick == 0) expect(own.size() == 1 && own.front().expires_tick == 3, "authored lifetime begins at the placement tick");
+            if (tick == 2) expect(own.size() == 2 && own.front().position == replacement
+                && own.front().sequence == 1 && own.front().expires_tick == 5,
+                "HCB-12b: replacement retains the other issuer and refreshes lifetime");
+            if (tick == 5) expect(own.size() == 1 && own.front().player == 2, "replacement expires at its exact command-tick deadline");
+            if (tick == 6) expect(own.empty(), "independent issuer deadline expires independently");
+        }
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "beacon hashes equal on 1/2/4/8 workers");
+        expect(world.record() == replay, "beacons remain in canonical replay command order");
+    }
+    auto made = tactical::TacticalSession::create(setup);
+    if (!made) return;
+    auto world = std::move(made).value();
+    tactical::SeatBinding binding{{1}, 1};
+    tactical::SeatCommand seat{{0, {1}, 0}, 1, {}, tactical::BeaconPayload{first}};
+    expect(static_cast<bool>(world.submit_human(binding, seat, 0)), "beacons use trusted human seat admission");
+    const auto before = world.canonical_state_bytes();
+    expect(!world.step(FailingExecutor{}) && world.canonical_state_bytes() == before,
+        "a failed tick commits no beacon state");
+    expect(static_cast<bool>(world.step(eawr::sim::InlineExecutor{})), "failed beacon tick can be retried");
+    expect(world.snapshot()->visible_beacons(1).size() == 1, "retry publishes one beacon");
+    auto different = tactical::TacticalSession::create(setup);
+    if (different) {
+        auto other = std::move(different).value();
+        auto different_seat = seat;
+        different_seat.payload = tactical::BeaconPayload{replacement};
+        expect(static_cast<bool>(other.submit_human(binding, different_seat, 0)),
+            "alternate beacon position admits");
+        expect(static_cast<bool>(other.step(eawr::sim::InlineExecutor{})), "alternate beacon position steps");
+        expect(other.state_sha256() != world.state_sha256(), "canonical state includes active beacon position");
+    }
+    auto unavailable = tactical::TacticalSession::create(setup);
+    if (unavailable) {
+        auto other = std::move(unavailable).value();
+        expect(static_cast<bool>(other.submit({{0, 3, 0}, {}, tactical::BeaconPayload{first}})),
+            "wire admits a declared player before rules reject unavailable beacons");
+        const auto advanced = other.step(eawr::sim::InlineExecutor{});
+        expect(advanced && std::any_of(advanced.value().snapshot->events().begin(), advanced.value().snapshot->events().end(),
+            [](const auto& event) { return event.kind == tactical::EventKind::order_rejected
+                && event.reason == tactical::RejectReason::beacon_unavailable; }),
+            "a faction without a beacon rule gets the allocated rejection");
+        expect(other.snapshot()->visible_beacons(3).empty(), "rejected beacons create no presentation record");
+    }
+}
+}
+
 int main(const int argc, const char* const argv[]) {
+    if (argc == 2 && std::string_view(argv[1]) == "--beacon-only") {
+        test_beacons();
+        return failures == 0 ? 0 : 1;
+    }
     if (argc != 2) {
         std::cerr << "usage: tactical_contract_tests <fixture-dir>\n";
         return 2;
@@ -796,8 +1050,11 @@ int main(const int argc, const char* const argv[]) {
         return 1;
     }
     test_format(fixtures);
+    test_human_seat_admission();
+    test_special_fire_format(fixtures);
     test_match_policy_format(fixtures);
     test_skirmish_setup_format(fixtures);
+    test_native_scene_format(fixtures);
     test_golden_across_workers(fixtures, golden);
     test_phase_map(fixtures);
     test_live_submission_and_recording(fixtures, golden);

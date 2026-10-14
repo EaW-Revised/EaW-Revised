@@ -44,6 +44,7 @@ def generate(census, review):
     infrastructure = []
     supported = set(review["supported_capabilities"])
     hp_types = set(review["weapon_hardpoints"])
+    special_units = set(review.get("special_weapon_units", []))
     locomotors = set(review["locomotors"])
     for name, u in sorted(units.items()):
         reasons = set()
@@ -57,6 +58,7 @@ def generate(census, review):
             gaps = sorted({weapons["hardpoints"][hp]["type"] for hp in u["weapons"]["hardpoints"]
                            if (weapons["hardpoints"][hp]["type"] or "").startswith("HARD_POINT_WEAPON_")
                            and weapons["hardpoints"][hp]["type"] not in hp_types
+                           and not (weapons["hardpoints"][hp]["type"] == "HARD_POINT_WEAPON_SPECIAL" and name in special_units)
                            and not (weapons["hardpoints"][hp]["type"] == "HARD_POINT_WEAPON_MASS_DRIVER" and "mass-driver" in supported)})
             if gaps:
                 infrastructure.append({"unit": name, "reason": "Required station infrastructure is retained; unsupported weapons: " + ", ".join(gaps) + "."})
@@ -78,7 +80,8 @@ def generate(census, review):
                 continue
             if not kind.startswith("HARD_POINT_WEAPON_"):
                 continue
-            if kind not in hp_types:
+            admitted_special = kind == "HARD_POINT_WEAPON_SPECIAL" and name in special_units
+            if kind not in hp_types and not admitted_special:
                 if kind == "HARD_POINT_WEAPON_MASS_DRIVER":
                     if "mass-driver" not in supported:
                         reasons.add("Mass-driver weapons are unsupported (legacy #1046).")

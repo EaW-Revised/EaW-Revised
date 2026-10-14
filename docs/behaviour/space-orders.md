@@ -107,11 +107,33 @@ guard differ from a move only for craft.
   zero when |D| is less than the approach distance. With no meeting the prediction frame is the
   current frame. FoC clamps the predicted position to the map bounds; the remake has none there.
   The check of OR-06 uses the prediction frame of the unit's last mapping.
+  For a destination with a bound attachment, the static prediction reader starts from that
+  attachment's world position, falling back to the parent position without a bound attachment
+  (debug build EFA-01; OR-24, OR-25). The remake uses its resolved aim for footprinted types in
+  the none/static layer, and for a footprint-less target without motion. Both the mapped slot
+  and the movement-end test use that point. Guards keep the parent position. Footprinted moving
+  space layers retain tracked parent prediction; footprint-less movers preserve the existing
+  motion-presence fallback (OR-U13). Evidence tags EFA-nn are opaque debug-build IDs whose map
+  stays private.
+  Ordinary input initially supplies no attachment; the movement coordinator chooses the first
+  member's best attachment when the destination has none or its attachment is destroyed, and
+  publishes it to matching formation destinations before subsequent mapping (EFA-02/03).
+  The point reader itself does not replace a destroyed attachment: it reads the authored bound
+  point until that publication (EFA-04). The remake retains its existing OR-U2/OR-24 boundary:
+  it maps the resolved live aim on the order tick and resolves it again at OR-06 checks, rather
+  than retaining the native coordinator's attachment identity and allocated phase.
+  The station body does not require an approach around it for line of fire: a shot that
+  collides with its intended parent routes damage to the aimed attachment (DG-39), including
+  a far-side one. Hazard avoidance remains WHZ-06/07; fields and solid asteroids keep their
+  existing path filters and retries.
 - **OR-08** (research E452-11; project) An approach ends when the order is replaced (A-03 extends to
   attack-move and guard), or when the unit's player-ordered target is dropped (T-01: dead, gone or
-  fogged). A target fogged to the unit's owner is not followed while fogged. *Project:* when the
-  approach ends the unit keeps its current movement; FoC's reaction to a lost coordinator target
-  is not traced (OR-U3).
+  fogged). A target the unit's owner does not see (fogged, or stealthed and the unit cannot target
+  stealth) is not followed. Instead (WMV-13), the order's point becomes where the owner last
+  saw it: at the order's checks (OR-06), a unit whose movement has ended plans a move there, and
+  within 40 units of it in the plane the order becomes a move to where the unit stands and the
+  unit drops its attack target. A unit whose order names a unit its owner has never seen keeps its
+  current movement.
 
 ### Attack-move
 
@@ -249,6 +271,15 @@ Evidence tags HO-nn are opaque IDs from the FoC debug build; their map stays pri
 - **C-13** (OR-20, OR-25; DG-39) A shooter ordered onto the farther of a corvette's two hardpoints,
   with the hull's mesh in front of both, damages that hardpoint until it is destroyed; the hull and the
   nearer hardpoint (which an attack on the unit hits) take nothing meanwhile.
+- **C-14** (OR-04 to OR-07, OR-25) A capital ship attacks a static station whose only standing
+  attachment is beyond the centre. Ordinary and explicit attacks map to the attachment's
+  range slot on the order tick, retain that path through reevaluation, reach range, fire and
+  damage the attachment. Every tick agrees on 1/2/4/8 workers. Controls cover an object
+  attack-move, a rotated attachment, parent-position guard and moving-layer prediction, and
+  reapproach after the selected attachment dies while a farther one survives. A moving target
+  on a real path predicts the same parent slot with or without an attachment. Static targets
+  without hardpoints, or with all hardpoints destroyed while their hull survives, use the parent
+  fallback; native retained-state closure for the latter mod-authored case remains unverified.
 
 ## Unknowns
 
@@ -259,16 +290,18 @@ Evidence tags HO-nn are opaque IDs from the FoC debug build; their map stays pri
   capitals) at frames staggered by coordinator ID, remaps a whole layer when any ship needs it, and
   staggers the new plans by `SpacePathfindFrameDelayDelta`; the remake checks each unit at its
   own order's interval.
-- **OR-U3** What a ship does when its coordinator's target unit dies or leaves is not traced; the
-  remake keeps its current movement (the least visible choice).
+- **OR-U3** Settled by walk 4's WMV-13 (debug build): a ship that loses sight of its order's unit
+  flies to the last observed position and drops the target there (OR-08). A dead target still ends
+  the approach with the unit's current movement.
 - **OR-U4** No rig recording of an attack on a target out of range, an attack-move or a guard
   exists; the rules rest on the debug build. A recording (fog off) of a corvette ordered to attack a
   frigate 3000 units away, and of a guard of a moving frigate, would confirm the stop distance and
   the check interval.
-- **OR-U6** `MovementReevaluationFrameCount` (10) and `Space_Guard_Range` (750) are the motion
-  rules' defaults, FoC's `gameconstants.xml` values; the unit tables read them at the next FoC
-  identity re-pin, as `SpacePathfindFrameDelayDelta` (FM-U8), so the pinned content identity and
-  the M2 start stay unchanged. The GameConstants audit (movement-constant coverage audit) takes all three in one re-pin (data-driven guard range and reevaluation).
+- **OR-U6** `MovementReevaluationFrameCount` (10) and `Space_Guard_Range` (750) come from
+  `gameconstants.xml` through the unit tables (`units::motion_table`, required constants); the
+  motion rules' literals are only the defaults of a table built by hand. Reading them adds the two scalars to
+  the content identity, so the pinned game identities (m2-start, S-15, S-28, S-51) are stale until
+  the batch regeneration; with the stock values (10 and 750) no behaviour changes.
 - **OR-U5** FoC aims the approach at its best target hardpoint (G-W3) and adds the target's soft
   radius; the remake adds the loaded soft radius and measures to the nearest live hardpoint, as A-07 (or to the ordered
   hardpoint, OR-25).
@@ -292,3 +325,7 @@ Evidence tags HO-nn are opaque IDs from the FoC debug build; their map stays pri
   the box but off those meshes misses unless the override sphere covers it; types without mesh
   geometry retain WSU-11's box fallback. Remaining picking limits are listed in
   [battle selection](foc-battle-selection.md).
+- **OR-U13** Footprint-less movers retain the existing parent path prediction. The debug build
+  branches on the authored space layer instead, including none/land; the remake's motion-presence
+  fallback lacks that layer distinction. This pre-existing gap is outside the static station
+  attachment correction.

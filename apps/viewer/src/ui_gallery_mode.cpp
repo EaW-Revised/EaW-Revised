@@ -74,6 +74,24 @@ bool UiGalleryMode::State::load() {
     }
     filesystem.emplace(std::move(mounted.value()));
 
+    const auto load_fonts = [this]() {
+        // The font cache is its own loose layer at fonts/; a missing directory is an empty cache.
+        const std::filesystem::path directory = cache_directory();
+        const vfs::MountSpec mount{.layer_id = "font-cache", .data_root = directory,
+                                   .loose_logical_prefix = std::string(model::font_cache_prefix), .active_archives = {}};
+        auto font_mount = vfs::Vfs::mount(std::span<const vfs::MountSpec>(&mount, 1));
+        if (font_mount) font_filesystem.emplace(std::move(font_mount.value()));
+        const vfs::Vfs unmounted;
+        fonts = std::make_unique<FontProvider>(
+            model::load_font_cache(font_filesystem ? *font_filesystem : unmounted, ViewerPath::utf8(directory)));
+    };
+
+    // The credits page needs the data and the fonts, not the skin.
+    if (!options.credits.empty()) {
+        load_fonts();
+        return true;
+    }
+
     // The HUD page loads its own shell, textures and fonts (TacticalHud).
     if (!options.hud.empty()) return true;
 
@@ -113,15 +131,7 @@ bool UiGalleryMode::State::load() {
         notes.push_back("text database: " + core::format_diagnostic(loaded_text.error()) + "; captions show their keys");
     }
 
-    // The font cache is its own loose layer at fonts/; a missing directory is an empty cache.
-    const std::filesystem::path directory = cache_directory();
-    const vfs::MountSpec mount{.layer_id = "font-cache", .data_root = directory,
-                               .loose_logical_prefix = std::string(model::font_cache_prefix), .active_archives = {}};
-    auto font_mount = vfs::Vfs::mount(std::span<const vfs::MountSpec>(&mount, 1));
-    if (font_mount) font_filesystem.emplace(std::move(font_mount.value()));
-    const vfs::Vfs unmounted;
-    fonts = std::make_unique<FontProvider>(
-        model::load_font_cache(font_filesystem ? *font_filesystem : unmounted, ViewerPath::utf8(directory)));
+    load_fonts();
 
     const model::LayoutRules rules = options.rules == "retail" ? model::LayoutRules::retail
                                                                 : model::LayoutRules::aspect_correct;
@@ -167,7 +177,9 @@ bool UiGalleryMode::State::load() {
 bool UiGalleryMode::requested() {
     const PackedStringArray arguments = OS::get_singleton()->get_cmdline_user_args();
     for (int64_t index = 0; index < arguments.size(); ++index) {
-        if (utf8(arguments[index]) == "--eawr-ui-gallery") return true;
+        const std::string argument = utf8(arguments[index]);
+        if (argument == "--eawr-ui-gallery" || argument == "--eawr-message-box" || argument == "--eawr-load-game" ||
+            argument == "--eawr-credits") return true;
     }
     return false;
 }
@@ -191,6 +203,15 @@ UiGalleryMode::Options UiGalleryMode::from_command_line() {
         else if (argument == "--eawr-ui-hud") options.hud = value;
         else if (argument == "--eawr-ui-hud-map") options.hud_map = value;
         else if (argument == "--eawr-ui-hud-cards") options.hud_cards = value;
+        else if (argument == "--eawr-ui-hud-readouts") options.hud_readouts = value;
+        else if (argument == "--eawr-ui-hud-flytext") options.hud_flytext = value;
+        else if (argument == "--eawr-message-box") options.message_box = value;
+        else if (argument == "--eawr-load-game") options.load_game = value;
+        else if (argument == "--eawr-credits") options.credits = value;
+        else if (argument == "--eawr-replay-store") options.replay_store = ViewerPath{value}.native();
+        else if (argument == "--eawr-save-replay-fixture") options.save_replay_fixture = ViewerPath{value}.native();
+        else if (argument == "--eawr-save-dir") options.save_directory = ViewerPath{value}.native();
+        else if (argument == "--eawr-load-launcher") options.load_launcher = value;
         else consumed = false;
         if (consumed) ++index;
     }
@@ -218,6 +239,20 @@ bool UiGalleryMode::ready(Node3D& host) {
         state.failure = "--eawr-ui-rules must be aspect or retail";
         return fail();
     }
+    if (!state.options.message_box.empty() && !state.options.dialog.empty()) {
+        state.failure = "--eawr-message-box and --eawr-ui-dialog are different pages";
+        return fail();
+    }
+    if (!state.options.load_game.empty() && (!state.options.message_box.empty() || !state.options.dialog.empty())) {
+        state.failure = "--eawr-load-game is a page of its own";
+        return fail();
+    }
+    if (!state.options.credits.empty() &&
+        (!state.options.message_box.empty() || !state.options.dialog.empty() || !state.options.load_game.empty() ||
+         !state.options.movie.empty() || !state.options.hud.empty())) {
+        state.failure = "--eawr-credits is a page of its own";
+        return fail();
+    }
     const Vector2 size = host.get_viewport()->get_visible_rect().size;
     if (size.x < 1.0F || size.y < 1.0F) {
         state.failure = "the viewport has no size";
@@ -230,6 +265,7 @@ bool UiGalleryMode::ready(Node3D& host) {
 
     CanvasLayer* layer = memnew(CanvasLayer);
     host.add_child(layer);
+    state.layer = layer;
     auto* root = memnew(Control);
     root->set_position(Vector2());
     root->set_size(size);
@@ -243,6 +279,9 @@ bool UiGalleryMode::ready(Node3D& host) {
     root->add_child(fill);
     if (!state.options.hud.empty()) state.build_hud_page(host);
     else if (state.movie) state.build_movie_page(*root, size);
+    else if (!state.options.message_box.empty()) state.build_box_page(host, *root);
+    else if (!state.options.load_game.empty()) state.build_load_game_page(*root);
+    else if (!state.options.credits.empty()) state.build_credits_page(*root);
     else if (state.options.dialog.empty()) state.build_controls(*root);
     else state.build_dialog_page(*root);
     if (!state.failure.empty()) return fail();
@@ -257,15 +296,55 @@ std::optional<int> UiGalleryMode::process() {
         --state.frames;
         return std::nullopt;
     }
+    if (state.credits_screen != nullptr) state.sample_credits();
+    const bool credits_scripted = state.options.credits == "script" || state.options.credits == "script-click";
+    const bool scripted = !state.options.message_box.empty() || state.options.load_game == "script"
+        || state.options.load_game == "saves" || state.options.load_game == "save-replay" || credits_scripted;
+    if (scripted && state.failure.empty() && !state.run_box_script()) return std::nullopt;
+    if (state.options.credits == "live" && state.failure.empty()) {
+        // Open until the roll ends or is skipped; the first frame is captured when a capture is wanted.
+        if (!state.box_captured) {
+            state.box_captured = true;
+            if (!state.options.capture_path.empty() && !state.capture()) return 2;
+        }
+        if (!state.credits_closed) return std::nullopt;
+    }
+    if (state.options.load_game == "live" && state.failure.empty()) {
+        // Open until Cancel or Play; the first frame is captured when a capture is wanted.
+        if (!state.box_captured) {
+            state.box_captured = true;
+            if (!state.options.capture_path.empty() && !state.capture()) return 2;
+        }
+        if (!state.load_closed && !state.load_play && !state.load_save) return std::nullopt;
+    }
     if (state.movie_player && std::chrono::steady_clock::now() < state.movie_deadline) return std::nullopt;
     state.completed = true;
     if (state.movie_player) {
         const auto decoded = validate_hud_movie(*state.movie_player, *state.movie);
         if (!decoded) state.failure = core::format_diagnostic(decoded.error());
     }
-    state.status = state.capture() ? "captured" : "failed";
+    if (scripted || state.options.load_game == "live" || state.options.credits == "live") {
+        // The capture is the open box or screen, taken before the scripted clicks (run_box_script).
+        for (const State::BoxStepResult& step : state.box_step_results) {
+            if (!step.problem.empty() && state.failure.empty()) state.failure = step.name + ": " + step.problem;
+        }
+        state.status = state.failure.empty() ? "captured" : "failed";
+    } else {
+        state.status = state.capture() ? "captured" : "failed";
+    }
     const bool written = state.write_report();
     return state.failure.empty() && written ? 0 : 2;
+}
+
+std::optional<UiGalleryMode::ReplayRequest> UiGalleryMode::take_replay_request() {
+    State& state = *state_;
+    if (!state.load_play) return std::nullopt;
+    ReplayRequest request{ViewerPath{state.load_play->first}.native(), state.load_play->second};
+    state.load_play.reset();
+    // The page's nodes go with the layer; the host starts the replay mode in its place.
+    if (state.layer != nullptr) state.layer->queue_free();
+    state.layer = nullptr;
+    return request;
 }
 
 } // namespace eawr::presentation::godot_backend

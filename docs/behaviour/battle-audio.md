@@ -4,7 +4,15 @@
 
 # Space battle audio
 
-BA-85: A countdown-spawned projectile enters ordinary death presentation and
+BA-86: A Harmonic Bomb payload projectile does not request the source unit's
+`SFXEvent_Fire`; other ability payloads keep the fire cue until their own rule is sourced. Harmonic Bomb creates its object directly and starts its countdown,
+recharge and optional `SFXEvent_Target_Ability`; clicking the ability uses its
+`SFXEvent_GUI_Unit_Ability_Activated` through the existing GUI route. Slave I's
+stock activation requests `Unit_Ability_Boba_Fett`, while its drop requests no
+`Unit_Slave_1_Fire`. Ordinary weapon projectiles retain BA-14. Evidence: debug
+build spawned-object activation, WHE-61, effective ability XML and owner audio observation.
+
+**BA-85:** A countdown-spawned projectile enters ordinary death presentation and
 requests `Death_SFXEvent_Start_Die` once at its own position, independently of
 blast recipients. This route does not request `Projectile_SFXEvent_Detonate`,
 even when authored: that cue belongs to ordinary projectile contacts (BA-15).
@@ -53,6 +61,8 @@ is marked as such.
 | BA-09 | There are 32 3D voices. With all busy, the candidate is the playing sound with the highest priority number, the farthest among equals (switching to a higher number keeps the distance of the one it replaced, as FoC's loop does). It is stopped for the new sound when its priority number is not lower and it is farther; otherwise the new sound does not play. The 2D pool's size is not modelled (16 voices; the battle's 2D sounds are the one-instance unit responses). | AU-07, AU-08 |
 
 ### 3D
+
+BA-10 presentation policy: the stock numbers are authored values, with no sourced missing-tag defaults. Missing or invalid spatial settings produce EAWR-AUDIO-0301 and preserve playback through the existing 2D path without spatial attenuation. This degraded mode is a project choice for incomplete mods, not a claim about retail fallback. SND-46 supplies silent ambient moving-delay defaults for absent tags; EAWR-AUDIO-0302 reports invalid ranges.
 
 | ID | Rule | Evidence |
 |---|---|---|
@@ -116,7 +126,7 @@ Audio clips verify audible output; XML and admission counts alone establish no r
 
 | ID | Rule | Evidence |
 |---|---|---|
-| BA-84 | Local pane opening requests faction `Reinforcements_Selection_SFXEvent`; closing, an idempotent open and permission refusal add no selection cue. A valid pooled-type placement start requests `Reinforcements_Pick_Landing_Zone_SFXEvent`; an already active drag adds none. A valid arrival submitted to the local scheduler requests type `SFXEvent_Command_Fleet_Move`, else faction `Reinforcements_Enroute_SFXEvent`. Invalid drops and refused submission add no en-route cue. These are ordinary nonspatial starts, separate from authoritative cap refusal and frame-35 spatial arrival. Muting output leaves cue admission/reporting active. | WR-07/11/16; debug-build placement/drop cross-check |
+| BA-84 | Local pane opening requests faction `Reinforcements_Selection_SFXEvent`; closing, an idempotent open and permission refusal add no selection cue. A valid pooled-type placement start requests `Reinforcements_Pick_Landing_Zone_SFXEvent`; an already active drag adds none. A valid arrival submitted to the local scheduler requests type `SFXEvent_Fleet_Move`, else faction `Reinforcements_Enroute_SFXEvent`. Invalid drops and refused submission add no en-route cue. These are ordinary nonspatial starts, separate from authoritative cap refusal and frame-35 spatial arrival. Muting output leaves cue admission/reporting active. | WR-07/11/16; debug-build placement/drop cross-check and fleet-move tag-table lookup |
 
 `Reinforcements_Ready_SFXEvent` services a pending-garrison countdown, not ordinary space
 skirmish pool completion; that caller remains outside this M2 path.
@@ -185,6 +195,15 @@ Refused ability presses follow BA-28. The ability-active loop
 Some expanded heroes author beam loops; those remain unimplemented. No default loop is supplied.
 
 BA-50's faction effect and BA-52's command-bar voice have separate callers.
+
+**Owner decision (legacy EAWR-2415), deliberate deviation from BA-50:** ability GUI
+toggles and activation cues are requested only for units owned by the local viewer
+seat. Allied AI and other players, including LAN teammates, are silent on this
+viewer; their own viewer uses its own seat. This includes S-foils, TURBO, DEFEND,
+POWER_TO_WEAPONS, Lure and Buzz Droids' `GUI_Buzz_Droids_SFX`. Local script/AI
+switches still play once per switch. Unit voices and world effects retain their
+existing admission rules. BA-50 above records the original FoC rule; SND-26 in
+the audio walk records this override.
 The debug build's successful faction-effect route does not check the UI-request
 flag, selection, fog or camera distance. Lua activation retains its enabled
 sound flag while clearing the UI-request flag; that flag gates refusal feedback
@@ -199,8 +218,8 @@ not grant an AI or script activation the command-bar unit voice.
 | ID | Rule | Evidence |
 |---|---|---|
 | BA-53 | A valid player confirmation of a targeted ability requests the first source object's `SFXEvent_Target_Ability`, attached to that source, rather than the target or terrain point. Arming, cancelling, deactivating and autofire changes do not request it. Invalid targeting uses BA-28. The event's authored 2D/3D mode, admission and sample rules remain in force. This acknowledgement precedes simulation success; it is not an activation notification for every affected unit or for AI/script beam commands. | debug build: targeted action acknowledgement; effective XML |
-| BA-54 | A successful spawned-object ability also requests its source's `SFXEvent_Target_Ability` on the source object, including script/AI activation. Suppress this request if that same event is already playing anywhere, so player confirmation and the spawn do not double it. The viewer observes changes to the existing `started_tick` of HARMONIC_BOMB and WEAKEN_ENEMY through each retained logical snapshot; inactive instant slots still carry the birth. The zero-position fallback controls where the payload spawns, not where this cue attaches. | debug build: spawned-object ability execution; WHE-61; effective XML |
-| BA-55 | No implemented M2 action invokes cluster-bomb, point-laser defense, stealth or maximum-firepower payload effects. Maximum-firepower authoring belongs to the land AT-AT; merely recognizing its nested type does not implement its action. Their effect cues have explicit deferred or land scope, rather than being treated as applied. None of the reachable nested concentrate/beam/ion payloads authors `SFXEvent_Activate`. | effective XML survey; implemented ability consumers in `src/sim/tactical/abilities.cpp` and `src/sim/tactical/session_step_commands.cpp`; debug-build payload type lookup |
+| BA-54 | A successful spawned-object ability also requests its source's `SFXEvent_Target_Ability` on the source object, including script/AI activation. Owner deviation (2026-10-10): ability voice lines are heard only for the local player's orders, decided per viewer seat. The resolved event's `Localize`, `Is_Unit_Response_VO`, `Is_HUD_VO` or `Is_Ambient_VO` flags identify speech; other world/effect cues remain audible for AI. This applies to buzz droids, harmonic bomb, weaken enemy, cluster bomb, reveal ping, corrupt systems, blast and self-destruct start, including craft-authored cues used by squadron containers. Suppress this request if that same event is already playing anywhere, so player confirmation and the spawn do not double it. The viewer observes changes to the existing `started_tick` of HARMONIC_BOMB and WEAKEN_ENEMY through each retained logical snapshot; inactive instant slots still carry the birth. The zero-position fallback controls where the payload spawns, not where this cue attaches. | debug build: spawned-object ability execution; WHE-61; effective XML; owner ability-voice decision (legacy EAWR-2870) |
+| BA-55 | No implemented M2 action invokes cluster-bomb or maximum-firepower payload effects; point-laser defense is implemented (WLD-05, WLD-12: its zap sound is started on the Crusader at each shot it shoots down, its on/off voice lines are BA-52). Space stealth is implemented (WST-01 to WST-15); its on and off voice lines are the ordinary ability presentation and its reveal cue is WST-14, while the handler's own `SFXEvent_Activate` stays deferred (whether the handler plays it is not traced; the Vengeance authors it empty). Maximum-firepower authoring belongs to the land AT-AT; merely recognizing its nested type does not implement its action. Their effect cues have explicit deferred or land scope, rather than being treated as applied. None of the reachable nested concentrate/beam/ion payloads authors `SFXEvent_Activate`. | effective XML survey; implemented ability consumers in `src/sim/tactical/abilities.cpp` and `src/sim/tactical/session_step_commands.cpp`; debug-build payload type lookup |
 | BA-56 | TSW button feedback belongs to a tactical superweapon stage request. On an in-range, ready, destroyable-target power-up transition, activation voice and weapon power-up start as unattached SFX, followed by the authored music override. Approach, 60/30/15/5-second warnings and arrival in range use the local faction's speech entries, selected for the owner or enemy relationship. Special-weapon readiness is separate: after its ready frame, with battlefield special weapons enabled, local/allied sources use their own `SFXEvent_Special_Weapon_Ready`, else the local faction's indexed `SFXEvent_HUD_Special_Weapon_Ready`; enemies use the indexed enemy entry. Stock space skirmish authors planetary ion-cannon and hypervelocity use upgrades at higher station levels, and land has its own weapons. M2 has the superweapon option and purchase filtering, but no implemented weapon firing/readiness or TSW stage. Existing upgrade-completion audio remains BA-60; a purchase never synthesizes TSW power-up or a second readiness cue. | debug build: stage request, power-up, approach speech and special-weapon service routes; effective XML; current space command consumers |
 
 Reachable ability cue audit (effective XML, including the expanded M2 hero roster):
@@ -217,9 +236,9 @@ Reachable ability cue audit (effective XML, including the expanded M2 hero roste
 | HARMONIC_BOMB | Slave I has no authored target cue; BA-54 remains silent unless data authors one |
 | WEAKEN_ENEMY | Sundered Heart `Unit_Energy_Flux_Antilles`; BA-53/54 |
 
-Cluster-bomb and point-laser defense are authored on MC30 and Crusader respectively,
-but their action consumers are unavailable. Space stealth on Vengeance, Phantom and
-Peacebringer is also unavailable. Land payloads (force powers, grenade, repair, hack,
+Cluster-bomb is authored on MC30, but its action consumer is unavailable. Point-laser defense
+(Crusader) plays its authored zap sound per shot it shoots down (WLD-12). Space stealth on Vengeance, Phantom and
+Peacebringer is implemented (WST-01 to WST-15). Land payloads (force powers, grenade, repair, hack,
 shield flare, maximum firepower) and galactic corruption/credit effects stay outside
 this space audit. Existing hero beam-loop authoring does not justify a general loop.
 The underlying barrage consumer does not override the disabled ability entries in
@@ -423,10 +442,14 @@ SND-68 is a qualified construction unlock, not a universal station-upgrade annou
 The debug build requires requested unlock processing and notification, plus an affiliated
 type with `Build_Initially_Locked` and `Build_Can_Be_Unlocked_By_Slicer`, below the
 resulting tech level and absent from the player's unlocked list. Only a newly added type
-allows local faction `SFXEvent_New_Construction_Options_Available`. The skirmish economy
+allows local faction `SFXEvent_New_Construction_Options_Available`, once per assignment
+even when multiple types were added (WGEP-130/147). The platform retains the setter's
+qualified recipient in its bounded presentation journal; the viewer resolves the
+authored local faction SFX through its existing sound path. Empty faction events,
+unchanged unlock lists and nonlocal recipients are silent. The skirmish economy
 has no slicer unlocked-list state; ordinary station or tech upgrades therefore retain
-their own cues and stay silent on this route. The qualified unlock consumer belongs to
-the galactic implementation (legacy EAWR-1644).
+their own cues and stay silent on this route. Strategic research requests unlock
+processing and notification; tactical tech completion requests neither (SND-68).
 
 ## Not modelled (fidelity list)
 

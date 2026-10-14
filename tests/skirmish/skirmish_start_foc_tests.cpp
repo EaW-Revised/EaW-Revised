@@ -2,6 +2,135 @@
 
 namespace skirmish_start_test_support {
 
+void foc_player_peacebringer_blast(const eawr::units::LoadInput& input) {
+    auto extended = input;
+    extended.types = {"The_Peacebringer", "Tartan_Patrol_Cruiser", "Skirmish_Underworld_Star_Base_1",
+        "Skirmish_Underworld_Star_Base_2", "Skirmish_Underworld_Star_Base_3",
+        "Skirmish_Underworld_Star_Base_4", "Skirmish_Underworld_Star_Base_5"};
+    for (const auto type : eawr::units::pinned_m2_types()) extended.types.emplace_back(type);
+    for (const auto obstacle : eawr::units::pinned_m2_obstacles()) extended.obstacles.emplace_back(obstacle);
+    const auto tables = eawr::units::load_unit_tables(extended);
+    expect(static_cast<bool>(tables), "WHE-35: installed Peacebringer tables load");
+    if (!tables) return;
+    auto fixture = skirmish::m2_fixture();
+    fixture.slots = {{1, "Underworld", 0, true, {"The_Peacebringer"}},
+                     {2, "Empire", 1, true, {"Tartan_Patrol_Cruiser"}}};
+    fixture.free_starting_units = false;
+    const auto inputs = skirmish::read_start_inputs(fixture, *input.filesystem, *input.catalog, tables.value());
+    expect(static_cast<bool>(inputs), "WHE-35: installed Peacebringer player fixture binds");
+    if (!inputs) return;
+    const auto start = skirmish::build_start(fixture, inputs.value());
+    const auto content = skirmish::session_content(tables.value());
+    if (!start) std::cerr << "Peacebringer start: " << start.error().message << '\n';
+    if (!content) std::cerr << "Peacebringer content: " << content.error().message << '\n';
+    expect(start && content, "RG-03: admitted Peacebringer skirmish starts");
+    if (!start || !content) return;
+    const auto economy = skirmish::economy_rules(start.value(), inputs.value(), tables.value());
+    expect(static_cast<bool>(economy), "RG-04: installed Peacebringer producer menus bind");
+    bool obtainable = false;
+    if (economy) for (const auto& menu : economy.value().menus)
+        if (menu.station == skirmish::type_id("Skirmish_Underworld_Star_Base_5"))
+            for (const auto& option : menu.options) if (option.type == skirmish::type_id("The_Peacebringer"))
+                obtainable = option.available && option.disabled_reason.empty();
+    expect(obtainable, "RG-04: the installed level-five Underworld menu offers an enabled Peacebringer purchase");
+    const auto ship = std::find_if(start.value().units.begin(), start.value().units.end(), [](const auto& unit) {
+        return unit.state.type_id == skirmish::type_id("The_Peacebringer") && unit.state.owner == 1;
+    });
+    expect(ship != start.value().units.end(), "WHE-35: player's Peacebringer exists");
+    if (ship == start.value().units.end()) return;
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(start.value().setup, content.value().sensors,
+            content.value().durability, content.value().motion, std::nullopt, content.value().combat,
+            {}, content.value().abilities);
+        expect(static_cast<bool>(created), "WHE-35: installed player BLAST session creates");
+        if (!created) return;
+        auto world = std::move(created).value();
+        expect(static_cast<bool>(world.submit({{1, 1, 0}, {ship->state.entity_id},
+            tactical::AbilityPayload{tactical::AbilityKind::blast, tactical::AbilityAction::activate}})),
+            "WHE-35: player Peacebringer BLAST submits");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (int tick = 0; tick < 153; ++tick) {
+            const auto stepped = world.step(executor);
+            expect(static_cast<bool>(stepped), "WHE-35: installed BLAST steps");
+            if (!stepped) return;
+            hashes.push_back(stepped.value().state_sha256);
+            expect(stepped.value().diagnostics.empty(), "RG-03: player BLAST command is accepted");
+            const auto state = world.ability_state(ship->state.entity_id);
+            if (tick >= 1) expect(state && state->charged_blast, "WHE-36: live Peacebringer retains the charge or unfired budget");
+            if (state && state->charged_blast && tick >= 1 && tick <= 151)
+                expect(state->charged_blast->charge_remaining == static_cast<std::uint32_t>(151 - tick),
+                    "FC-62: installed five-second charge counts admitted polls exactly");
+            if (state && state->charged_blast && tick == 151)
+                expect(state->charged_blast->charged_presentation && state->charged_blast->shots_remaining == 2,
+                    "WHE-36/FSC-59: completion counts both installed healthy SPECIAL guns without requiring a target");
+        }
+        if (baseline.empty()) baseline = hashes;
+        else expect(hashes == baseline, "WHE-35: installed BLAST equals on 1/2/4/8 workers");
+    }
+    std::cout << "FoC player Peacebringer BLAST: admitted, 150 charge polls, two SPECIAL budget, 1/2/4/8 PASS\n";
+}
+
+void foc_player_lure(const eawr::units::LoadInput& input) {
+    auto extended = input;
+    extended.types = {"A_Wing_Squadron", "TIE_Fighter_Squadron"};
+    for (const auto type : eawr::units::pinned_m2_types()) extended.types.emplace_back(type);
+    for (const auto obstacle : eawr::units::pinned_m2_obstacles()) extended.obstacles.emplace_back(obstacle);
+    const auto tables = eawr::units::load_unit_tables(extended);
+    expect(static_cast<bool>(tables), "WLU-01: installed A-wing tables load");
+    if (!tables) return;
+    auto fixture = skirmish::m2_fixture();
+    fixture.slots = {{1, "Rebel", 0, true, {"A_Wing_Squadron"}},
+                     {2, "Empire", 1, true, {"TIE_Fighter_Squadron"}}};
+    fixture.free_starting_units = false;
+    const auto inputs = skirmish::read_start_inputs(fixture, *input.filesystem, *input.catalog, tables.value());
+    expect(static_cast<bool>(inputs), "WLU-01: installed player fixture binds");
+    if (!inputs) return;
+    const auto start = skirmish::build_start(fixture, inputs.value());
+    const auto content = skirmish::session_content(tables.value());
+    expect(start && content, "RG-03: admitted Rebel A-wing skirmish starts");
+    if (!start || !content) return;
+    const auto squadron = std::find_if(start.value().units.begin(), start.value().units.end(), [](const auto& unit) {
+        return unit.state.type_id == skirmish::type_id("A_Wing_Squadron") && unit.state.owner == 1;
+    });
+    expect(squadron != start.value().units.end(), "WLU-01: player squadron exists");
+    if (squadron == start.value().units.end()) return;
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(start.value().setup, content.value().sensors,
+            content.value().durability, content.value().motion, std::nullopt, content.value().combat,
+            {}, content.value().abilities);
+        expect(static_cast<bool>(created), "WLU-02: installed player session creates");
+        if (!created) return;
+        auto world = std::move(created).value();
+        expect(static_cast<bool>(world.submit({{1, 1, 0}, {squadron->state.entity_id},
+            tactical::AbilityPayload{tactical::AbilityKind::lure, tactical::AbilityAction::activate}})),
+            "WLU-02: player squadron LURE submits");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (int tick = 0; tick < 40; ++tick) {
+            const auto stepped = world.step(executor);
+            expect(static_cast<bool>(stepped), "WLU-02: installed LURE steps");
+            if (!stepped) return;
+            hashes.push_back(stepped.value().state_sha256);
+            expect(stepped.value().diagnostics.empty(), "RG-03: player LURE is accepted");
+        }
+        std::size_t luring = 0;
+        for (const auto& unit : start.value().setup.units) {
+            if (unit.type_id != skirmish::type_id("A-Wing") || unit.owner != 1) continue;
+            const auto state = world.ability_state(unit.entity_id);
+            const auto* profile = content.value().abilities.find(unit.type_id);
+            const auto slot = profile ? tactical::ability_slot(*profile, tactical::AbilityKind::lure) : std::nullopt;
+            if (state && slot && state->slots[*slot].active) ++luring;
+        }
+        expect(luring == 5, "WLU-02: squadron activation switches on all five installed craft");
+        if (baseline.empty()) baseline = hashes;
+        else expect(hashes == baseline, "WLU-02: installed LURE equals on 1/2/4/8 workers");
+    }
+    std::cout << "FoC player Rebel A-wing LURE: five active craft, accepted command, 1/2/4/8 PASS\n";
+}
+
 namespace {
 
 void foc_station_refill(const skirmish::SkirmishStart& start, const eawr::units::UnitTables& tables) {
@@ -642,6 +771,8 @@ void foc_start(const std::filesystem::path& fixtures) {
     input.catalog = &catalog.value().catalog;
     input.filesystem = &filesystem.value();
     input.model = access.model;
+    foc_player_lure(input);
+    foc_player_peacebringer_blast(input);
     auto tables = eawr::units::load_unit_tables(input);
     expect(static_cast<bool>(tables), "FoC unit tables load");
     if (!tables) return;
@@ -738,7 +869,7 @@ void foc_start(const std::filesystem::path& fixtures) {
     for (const auto& unit : start.units) craft += unit.role == skirmish::UnitRole::craft ? 1U : 0U;
     expect(craft_expected > 0 && craft == craft_expected && start.setup.squadrons.size() == 5,
            "#75: every craft of the five squadron companies, one squadron each");
-    expect(start.units.size() == 35 + craft_expected, "12 lobby units, 23 map objects and the squadron craft");
+    expect(start.units.size() == 37 + craft_expected, "12 lobby units, 23 map objects, two planetary sources and the squadron craft");
     for (std::size_t index = 0; index < lobby.size() && index < start.units.size(); ++index) {
         expect(start.units[index].type == lobby[index].first && start.units[index].record == lobby[index].second,
                "SK-20 to SK-22 unit " + std::to_string(index + 1) + " " + lobby[index].first);
@@ -785,7 +916,7 @@ void foc_start(const std::filesystem::path& fixtures) {
     expect(census && census.value().find("\"sensor_profiles\": " + std::to_string(sensors.size())) != std::string::npos,
            "the fixture census binds the sensor table");
 
-    const auto bytes = tactical::write_replay({start.setup, 30, {}});
+    const auto bytes = tactical::write_replay({skirmish::recording_setup(fixture, start), 30, {}});
     const auto committed = read_file(fixtures / "m2-start.eawr-replay");
     expect(bytes && committed && bytes.value() == *committed, "the FoC start writes the committed replay");
     const auto session = tactical::TacticalSession::create(start.setup);
@@ -803,7 +934,7 @@ void foc_start(const std::filesystem::path& fixtures) {
                "omitted skirmish options retain the pinned M2 fixture");
         if (selected) {
             auto rebuilt = skirmish::build_start(selected.value(), inputs.value());
-            const auto replay = rebuilt ? tactical::write_replay({rebuilt.value().setup, 30, {}})
+            const auto replay = rebuilt ? tactical::write_replay({skirmish::recording_setup(selected.value(), rebuilt.value()), 30, {}})
                                         : eawr::core::Result<std::vector<std::uint8_t>>::failure(rebuilt.error());
             expect(replay && bytes && replay.value() == bytes.value(), "options default writes byte-identical M2 replay");
         }

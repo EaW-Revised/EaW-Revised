@@ -28,14 +28,25 @@ public:
     UnitCombat(const CombatWorld& world, const CombatUnit& unit);
 
     core::Result<CombatStep> run();
-    core::Result<bool> admit_manual(const CombatUnit& target, std::uint32_t hardpoint);
+    core::Result<CombatStep> fire_planetary(const CombatUnit& target);
+    core::Result<bool> admit_manual(const CombatUnit& target, std::uint32_t hardpoint,
+        std::optional<math::Fixed> soft_radius = std::nullopt);
     math::Vec3 manual_angles(const ManualTurretProfile& turret, const math::Vec3& point);
     math::Vec3 manual_rotate(const math::Vec3& value, const math::Vec3& pivot,
         const std::array<math::Vec3, 3>& axes, math::Fixed angle, bool pitch, bool direction);
     WeaponProfile manual_pose(const WeaponProfile& weapon, const ManualWeaponState& state);
     void manual_turret(const WeaponProfile& weapon, ManualWeaponState& state);
+    bool point_object_turret(const WeaponProfile& weapon, WeaponState::TurretState& state,
+        const CombatUnit& target);
+    void point_object_turret_target();
+    void advance_object_turret(const ManualTurretProfile& profile, WeaponState::TurretState& state);
+    void idle_object_turret(const WeaponProfile& weapon, WeaponState::TurretState& state);
+    math::Vec3 object_turret_muzzle(const WeaponProfile& weapon, const WeaponState::TurretState& state,
+        math::Vec3 muzzle);
     [[nodiscard]] CombatState target_state(math::Fixed divert, EntityId formation_target,
         math::Vec3 diversion_anchor, const FormationAttackContext* formation);
+    [[nodiscard]] core::Result<CombatState> retaliation_state(const CombatUnit& attacker,
+        math::Fixed divert, math::Vec3 anchor, const FormationAttackContext* formation);
 
     // --- shared helpers ---------------------------------------------------------------------
 
@@ -52,7 +63,13 @@ public:
         return take(math::transform_point(owner.transform, local), owner.position);
     }
 
+    [[nodiscard]] bool stealth_targetable(const CombatUnit& target) const noexcept {
+        // WST-11 (WCC-13, WWP-13, R-08): an uncountered stealthed enemy is neither kept, found nor fired at.
+        return target.team == unit_.team || !target.stealth_invisible || profile_.target_stealth;
+    }
+
     [[nodiscard]] bool visible_to_me(const CombatUnit& target) const noexcept {
+        if (!stealth_targetable(target)) return false;
         return target.team == unit_.team || (target.visible_to & (std::uint64_t{1} << unit_.player_index)) != 0U;
     }
 
@@ -120,13 +137,18 @@ public:
 
     // Attempt_Fire_At_Target (R-13 and the audit's firing attempt): on success the shot is
     // recorded and the weapon's burst and recharge advance.
-    bool attempt(const std::uint32_t slot, const EntityId target_id, CombatRandom& random, const bool burst_begun = false);
+    bool attempt(const std::uint32_t slot, const EntityId target_id, CombatRandom& random,
+        const bool burst_begun = false, const CombatUnit* planetary_target = nullptr);
 
     // One pulse of the burst (W-06, W-06a): while pulses remain the countdown becomes the pulse
     // delay; after the last the recharge, and the burst refills. The object weapon's recharge
     // adds a draw of 0 to 10 frames. AB-21: an active ability's weapon delay multiplier
     // lengthens the gap within a burst and shortens, never lengthens, the recharge after it.
     void spend_pulse(const WeaponProfile& weapon, WeaponState& state, CombatRandom& random);
+
+    // WAB-80: the weapon delay factor of one hardpoint: the unit's ability multiplier, times the
+    // hardpoint's full-salvo multiplier while FULL_SALVO is on (rounded to Q24).
+    [[nodiscard]] math::Fixed delay_factor(const WeaponProfile& weapon) const noexcept;
 
     // W-10: the shot leads the target, which keeps the velocity of its last frame's move. No lead
     // without a projectile.
@@ -236,6 +258,9 @@ public:
 
     [[nodiscard]] bool damaged(const CombatUnit& target);
 
+    // WCC-15: the held target is sticky (its estimated time to death is within the threshold).
+    [[nodiscard]] bool sticky(const CombatUnit& target) const;
+
     // Is_Better_Target (T-04).
     [[nodiscard]] bool better(const CombatUnit& candidate, const std::optional<math::Fixed> candidate_priority,
         const CombatUnit* current, const std::optional<math::Fixed> current_priority);
@@ -265,8 +290,8 @@ public:
     // Service_Space_Based_Targeting's facing branch (A-04 to A-07; research AT-01 to AT-13): a
     // unit at rest whose player-ordered target is within its attack distance turns in place
     // toward the target's nearest live hardpoint, adjusted for firepower, when that heading lies
-    // more than 10 degrees from its own. FoC's Auto_Rotate_For_Space_Targeting is false, so
-    // only an attack order (or a type without hardpoints) turns a unit.
+    // more than 10 degrees from its own. With Auto_Rotate_For_Space_Targeting false (FoC's
+    // value) only an attack order (or a type without hardpoints) turns a unit.
     void face_target();
 
 private:
@@ -274,6 +299,7 @@ private:
     const CombatUnit& unit_;
     const CombatProfile& profile_;
     CombatState state_;
+    std::optional<ChargedBlastState> charged_blast_{};
     math::Fixed scan_divert_{};
     std::optional<math::Vec3> diversion_anchor_;
     EntityId formation_target_{};

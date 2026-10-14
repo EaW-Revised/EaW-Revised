@@ -5,6 +5,10 @@
 // eawr_script_foc.
 
 #include "eawr/script/foc/tactical_ai.hpp"
+#include "ai_equations.hpp"
+#include "eawr/script/foc/galactic_ai.hpp"
+#include "ai_world.hpp"
+#include "ai_find_target.hpp"
 
 #include "eawr/script/numeric/q24_boundary.hpp"
 #include "eawr/sim/math/geometry.hpp"
@@ -64,8 +68,6 @@ inline Value boolean(bool value) { return Value{value}; }
 inline Value number(LuaNumber value) { return Value::number(value); }
 inline Value handle(std::uint32_t kind, std::uint64_t id) { return Value{Handle{kind, id}}; }
 
-inline LuaNumber lua_double(double value) { return LuaNumber::from_repr(std::bit_cast<std::uint64_t>(value)); }
-
 inline std::string upper(std::string_view text) {
     std::string out(text);
     for (char& character : out) {
@@ -81,159 +83,6 @@ inline const Handle* as_handle(const Value& value, std::uint32_t kind) {
 
 inline const std::string* as_text(const Value& value) { return std::get_if<std::string>(&value.data); }
 
-// ---- The completed tick as the bindings read it -------------------------------------------
-
-struct ViewUnit {
-    sim::EntityId id{};
-    tactical::TypeId type{};
-    tactical::PlayerId owner{};
-    tactical::TeamId team{};
-    math::Vec3 position{};
-    math::Quat rotation{math::identity_quat()};
-    std::optional<math::Fixed> hull;     // durability hull and maximum, when it has any
-    std::optional<math::Fixed> max_hull;
-    std::optional<math::Fixed> max_shields;
-    std::uint64_t visible_to{};          // snapshot player bits
-    sim::EntityId attack_target{};       // weapon target: combat eligibility and in-range events
-    sim::EntityId formation_target{};    // commanded formation target: Lua object queries
-    bool moving{};                       // a planned path or turn
-    bool formation_moving{};             // formation point travel for Lua order queries
-    tactical::OrderKind order{tactical::OrderKind::none};
-    sim::EntityId order_target{};
-    bool container{};                    // a squadron's team container
-    bool craft{};                        // a squadron member
-    // #449 perception inputs.
-    LuaNumber health{LuaNumber(1)};      // Get_Health_Percent: hull over maximum, 1 without durability
-    LuaNumber shield{};                  // Get_Shield_Percent: shield over maximum, 0 without shields
-    bool engines_online{true};
-    std::vector<bool> hardpoint_destroyed; // HardPoints order
-    sim::EntityId squadron{};            // a craft's team container
-    std::vector<sim::EntityId> members;  // a container's live craft
-    std::vector<tactical::AbilityStatus> abilities; // #76: the snapshot's (none on a container)
-    tactical::TypeId purchase_type{}; // SAE-11/WHE-49: logical identity; combat still reads type
-    std::uint64_t purchase_token{}; // SAE-11: distinguish concurrent arrivals of the same type
-};
-
-struct ViewPlayer {
-    tactical::PlayerId id{};
-    tactical::TeamId team{};
-    std::size_t snapshot_index{};
-};
-
-struct WorldView {
-    std::uint64_t tick{};
-    std::vector<ViewUnit> units; // ascending ID
-    std::vector<ViewPlayer> players; // ascending ID
-    std::vector<tactical::CaptureCandidate> capture_candidates; // prepared with the unit rows
-
-    [[nodiscard]] const ViewUnit* find(sim::EntityId id) const {
-        const auto found = std::lower_bound(units.begin(), units.end(), id,
-            [](const ViewUnit& unit, sim::EntityId key) { return unit.id < key; });
-        return found != units.end() && found->id == id ? &*found : nullptr;
-    }
-    [[nodiscard]] const ViewPlayer* player(tactical::PlayerId id) const {
-        for (const ViewPlayer& entry : players) {
-            if (entry.id == id) return &entry;
-        }
-        return nullptr;
-    }
-};
-
-// WNO-11/13: forced object queries consume requester-specific raw fog, including AI.
-inline bool object_fogged(const WorldView& view, const ViewUnit& unit, tactical::PlayerId player) {
-    const ViewPlayer* viewer = view.player(player);
-    return viewer == nullptr || viewer->snapshot_index >= 64 ||
-        (unit.visible_to & (std::uint64_t{1} << viewer->snapshot_index)) == 0;
-}
-
-inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSession& world, const tactical::TacticalSnapshot& snapshot,
-    const sim::PartitionExecutor* executor = nullptr) {
-    auto view = std::make_shared<WorldView>();
-    view->tick = world.completed_tick();
-    const auto snapshot_players = snapshot.players();
-    for (std::size_t index = 0; index < snapshot_players.size(); ++index) {
-        view->players.push_back(ViewPlayer{snapshot_players[index].player_id, snapshot_players[index].team_id, index});
-    }
-    std::map<sim::EntityId, const tactical::TacticalInstance*> instances;
-    for (const auto& instance : snapshot.instances()) instances.emplace(instance.entity_id, &instance);
-    std::map<sim::EntityId, const tactical::Squadron*> containers;
-    std::map<sim::EntityId, sim::EntityId> craft;
-    std::map<sim::EntityId, std::pair<sim::EntityId, bool>> formations;
-    for (const auto& squadron : world.squadrons()) {
-        containers.emplace(squadron.container, &squadron);
-        if (const auto state = world.squadron_state(squadron.container)) {
-            formations.emplace(squadron.container,
-                std::pair{state->target, state->mode == tactical::SquadronMode::move});
-        }
-        for (const sim::EntityId member : squadron.members) craft.emplace(member, squadron.container);
-    }
-    const auto fraction = [](math::Fixed part, math::Fixed whole) {
-        if (whole.raw() <= 0) return LuaNumber(0);
-        return numeric::from_fixed(part) / numeric::from_fixed(whole);
-    };
-    const auto units = world.units();
-    view->units.resize(units.size());
-    view->capture_candidates.resize(units.size());
-    const sim::InlineExecutor inline_executor;
-    const auto prepared = (executor != nullptr ? *executor : inline_executor).execute_phase("ai-world-view",
-        sim::tick_partition_count, [&](const std::size_t partition) {
-      const auto range = sim::partition_range(partition, units.size());
-      for (auto index = range.begin; index < range.end; ++index) {
-        const tactical::UnitState& unit = units[index];
-        ViewUnit entry;
-        entry.id = unit.entity_id;
-        entry.type = unit.type_id;
-        entry.purchase_type = tactical::purchase_identity(unit);
-        entry.purchase_token = unit.purchase_token;
-        entry.owner = unit.owner;
-        entry.position = unit.position;
-        entry.rotation = unit.rotation;
-        entry.order = unit.order.kind;
-        entry.order_target = unit.order.target;
-        if (const auto squadron = containers.find(unit.entity_id); squadron != containers.end()) {
-            entry.container = true;
-            entry.members = squadron->second->members;
-        }
-        if (const auto member = craft.find(unit.entity_id); member != craft.end()) {
-            entry.craft = true;
-            entry.squadron = member->second;
-        }
-        if (const auto instance = instances.find(unit.entity_id); instance != instances.end()) {
-            entry.team = instance->second->team;
-            entry.visible_to = instance->second->visible_to;
-            entry.abilities = instance->second->abilities;
-            if (const auto& durability = instance->second->durability) {
-                entry.hull = durability->hull;
-                entry.max_hull = durability->max_hull;
-                entry.health = fraction(durability->hull, durability->max_hull);
-                entry.max_shields = durability->max_shields;
-                if (durability->shields && durability->max_shields) {
-                    entry.shield = fraction(*durability->shields, *durability->max_shields);
-                }
-                entry.engines_online = durability->engines_online;
-                for (const auto& hardpoint : durability->hardpoints) {
-                    entry.hardpoint_destroyed.push_back(hardpoint.state == tactical::HardpointState::destroyed);
-                }
-            }
-        }
-        if (const auto combat = world.combat_state(unit.entity_id)) entry.attack_target = combat->attack_target;
-        if (const auto motion = world.motion_state(unit.entity_id)) entry.moving = motion->kind != tactical::MotionKind::none;
-        // FH-23: a squadron (and its craft) reports the formation target before a weapon
-        // target. Its container travels through the formation, without a ship motion state.
-        const auto formation = formations.find(entry.craft ? entry.squadron : entry.id);
-        if (formation != formations.end()) {
-            entry.formation_target = formation->second.first;
-            entry.formation_moving = formation->second.second;
-        }
-        view->units[index] = std::move(entry);
-        view->capture_candidates[index] = {{unit.entity_id, unit.owner, unit.position}, unit.type_id,
-            !world.arrivals().contains(unit.entity_id)};
-      }
-    });
-    if (!prepared) throw std::runtime_error("AI world view preparation failed: " + prepared.error().message);
-    return view;
-}
-
 // ---- Host state shared by the bindings and the engine -------------------------------------
 
 // One friendly entry of a contrast list: a category mask or an exact type, and its weight.
@@ -245,6 +94,14 @@ struct ContrastEntry {
 
 struct Host {
     AiSetup setup;
+    bool ai_suspended{}; // FD-72: ordered host gate, never written from a Lua worker.
+    bool suspension_used{};
+    std::shared_ptr<const ai::World> ai_world;
+    // FT-05/07: immutable selected-manager/source/execution queries during Lua.
+    std::shared_ptr<const ai::FindTargetQueries> find_target_queries;
+    // Ordered native owner only. Partitioned Lua bindings must retain the
+    // immediate-action scheduler seam rather than mutate this capability.
+    std::shared_ptr<galactic_ai::Actions> galactic_execution;
     // SAE-02/03: borrowed immutable world during the barrier's script service.
     const tactical::TacticalSession* world{};
     std::shared_ptr<const tactical::TacticalSnapshot> snapshot;
@@ -266,6 +123,7 @@ struct Host {
         return found == types.end() ? nullptr : found->second;
     }
     [[nodiscard]] const tactical::EconomyView* economy(tactical::PlayerId id) const {
+        if (ai_world) return ai_world->account(id);
         if (!snapshot) return nullptr;
         for (const auto& account : snapshot->economy()) if (account.player == id) return &account;
         return nullptr;
@@ -292,6 +150,16 @@ struct Host {
     }
 };
 
+// Ordinary completed-view reads remain available without the opt-in provider.
+// Once installed, private GC writes are consulted before that view.
+inline core::Result<ValueList> galactic_immediate_query(BindingContext& context, const Host& host,
+    std::string_view name, const ValueList& arguments) {
+    if (!host.ai_world || host.ai_world->goal_mode() != "GALACTIC") return none();
+    auto result = context.query_immediate(name, arguments);
+    if (!result && result.error().code == authoritative::codes::missing_api) return none();
+    return result;
+}
+
 inline const ViewUnit* live_object(const Host& host, const Value& value) {
     const Handle* found = as_handle(value, handle_game_object);
     return found == nullptr ? nullptr : host.view->find(found->id);
@@ -305,9 +173,24 @@ inline Value position_value(const math::Vec3& position) {
     return Value{std::move(list)};
 }
 
-// A position argument: a game object (its position) or a position list {x, y, z}.
+// A position wrapper (Find_Best_Local_Threat_Center): planar x and y as
+// binary32 bits in the handle id, so it round-trips exactly; z is 0.
+inline Value position_handle(LuaNumber x, LuaNumber y) {
+    return handle(handle_position, (std::uint64_t{ai::binary32_bits(x)} << 32U) | ai::binary32_bits(y));
+}
+
+inline std::optional<math::Vec3> position_of_handle(const Handle& wrapper) {
+    auto x = numeric::to_fixed(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id >> 32U)));
+    auto y = numeric::to_fixed(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id & 0xffffffffU)));
+    if (!x || !y) return std::nullopt;
+    return math::Vec3{x.value(), y.value(), {}};
+}
+
+// A position argument: a game object (its position), a position wrapper or a
+// position list {x, y, z}.
 inline std::optional<math::Vec3> position_of(const Host& host, const Value& value) {
     if (const ViewUnit* unit = live_object(host, value)) return unit->position;
+    if (const Handle* wrapper = as_handle(value, handle_position)) return position_of_handle(*wrapper);
     const auto* list = std::get_if<std::vector<Value>>(&value.data);
     if (list == nullptr || list->size() != 3) return std::nullopt;
     math::Vec3 out;
@@ -329,6 +212,25 @@ struct UnitDestination {
 
 // FH-42: attack-target accepts objects directly or through an AI target.
 const ViewUnit* destination_object(const Host& host, const Value& value);
+
+// WSW-13/14/16: planetary admission is category-only, independent of fog and range.
+inline bool planetary_fire_ready(const Host& host, const ViewUnit& source, const ViewUnit& target,
+    tactical::PlayerId player) {
+    const auto* permission = host.economy(player);
+    const auto* target_type = host.type(target.type);
+    return source.planetary_weapon && permission != nullptr && permission->special_weapons_enabled &&
+        source.planetary_weapon->readiness.raw() >= math::Fixed::scale && target_type != nullptr &&
+        (!target.hull || target.hull->raw() > 0) &&
+        !host.allied(source.owner, target.owner) &&
+        (source.planetary_weapon->valid_targets & target_type->category_bits) != 0;
+}
+
+inline void issue_special_fire(BindingContext& context, const ViewUnit& source, const ViewUnit& target,
+    tactical::PlayerId player, tactical::SpecialFireAdmission admission) {
+    context.issue_command(std::string(verb_special_fire), {
+        number(LuaNumber(static_cast<std::int64_t>(player))), handle(handle_game_object, source.id),
+        handle(handle_game_object, target.id), number(LuaNumber(static_cast<std::int64_t>(admission)))});
+}
 
 // FH-41: movement takes a point; attack-move and guard may retain an object.
 std::optional<UnitDestination> unit_destination(const Host& host, const ViewUnit& mover,
@@ -392,7 +294,9 @@ inline AbilityView ability_view(const Host& host, const ViewUnit& unit, tactical
             result.autofire = result.autofire && status.autofire;
         }
     };
-    if (unit.container) {
+    if (unit.container && kind == tactical::AbilityKind::buzz_droids) {
+        add(unit); // WAB-70: a team ability the container holds itself (AB-60)
+    } else if (unit.container) {
         for (const sim::EntityId member : unit.members) {
             if (const ViewUnit* craft = host.view->find(member)) add(*craft);
         }
@@ -402,6 +306,36 @@ inline AbilityView ability_view(const Host& host, const ViewUnit& unit, tactical
     if (!result.has) return AbilityView{false, false, false, false};
     return result;
 }
+
+// WTA-34: a team answers the projectile queries for its leader, its first live craft.
+inline const ViewUnit* projectile_leader(const Host& host, const ViewUnit& unit) {
+    if (!unit.container) return &unit;
+    return unit.members.empty() ? nullptr : host.view->find(unit.members.front());
+}
+
+// WTA-34, Get_All_Projectile_Types: the projectile of every standing hardpoint in HardPoints
+// order, then the object weapon's.
+inline std::vector<tactical::TypeId> projectile_types_of(const Host& host, const ViewUnit& unit) {
+    std::vector<tactical::TypeId> types;
+    const ViewUnit* leader = projectile_leader(host, unit);
+    const AiType* type = leader != nullptr ? host.type(leader->type) : nullptr;
+    if (type == nullptr) return types;
+    for (std::size_t index = 0; index < type->hardpoint_projectiles.size(); ++index) {
+        const bool destroyed = index < leader->hardpoint_destroyed.size() && leader->hardpoint_destroyed[index];
+        if (!destroyed && type->hardpoint_projectiles[index] != 0) types.push_back(type->hardpoint_projectiles[index]);
+    }
+    if (type->object_projectile != 0) types.push_back(type->object_projectile);
+    return types;
+}
+
+// WTA-34: whether a projectile type is in one of the categories an ability's query tests.
+inline bool projectile_in_categories(const Host& host, tactical::TypeId projectile, std::uint32_t mask) {
+    const auto& categories = host.setup.content.projectile_categories;
+    const auto found = categories.find(projectile);
+    return found != categories.end() && (found->second & mask) != 0;
+}
+inline constexpr std::uint32_t laser_defense_categories = ai_projectile_missile | ai_projectile_rocket | ai_projectile_mptl_rocket;
+inline constexpr std::uint32_t missile_shield_categories = ai_projectile_rocket | ai_projectile_mptl_rocket;
 
 // Whether the unit's type (or a container's craft's) authors the ability, cut ones included.
 inline bool authored_ability(const Host& host, const ViewUnit& unit, const std::string& ability) {
@@ -420,26 +354,67 @@ inline bool authored_ability(const Host& host, const ViewUnit& unit, const std::
 // only a script warning, a cut one (AB-03) is reported, and a modelled one that is ready is
 // switched on or off by an ability command. The four power modes take no target; the targeted
 // ION_CANNON_SHOT (#561, AB-69) is not switched from Lua: its autofire serves the engine's players.
-inline void request_ability(BindingContext& context, const Host& host, const ViewUnit& unit, const std::string& ability,
+// Answers whether a BUZZ_DROIDS activation was issued (WAB-76: the unit call reports it to its script).
+inline bool request_ability(BindingContext& context, const Host& host, const ViewUnit& unit, const std::string& ability,
     const Value* on) {
     const auto kind = tactical::ability_kind(ability);
     if (kind == tactical::AbilityKind::none) {
         if (authored_ability(host, unit, ability)) {
             context.report(authoritative::codes::unsupported_api, "Activate_Ability(" + ability + ") ignored: the ability is cut (#76)");
         }
-        return;
+        return false;
     }
     const auto view = ability_view(host, unit, kind);
-    if (!view.has || !view.ready) return;
+    if (!view.has || !view.ready) return false;
     if (kind == tactical::AbilityKind::ion_cannon_shot) {
         context.report(authoritative::codes::unsupported_api,
             "Activate_Ability(" + ability + ") ignored: a targeted ability is not switched from Lua (#561)");
-        return;
+        return false;
+    }
+    if (kind == tactical::AbilityKind::buzz_droids || kind == tactical::AbilityKind::corrupt_systems
+        || (kind == tactical::AbilityKind::weaken_enemy && on != nullptr && std::get_if<bool>(&on->data) == nullptr)) {
+        // WAB-76: FoC turns the second argument into an area marker at its position (an object's
+        // position or a point) and activates the ability there. WHE-61: Weaken Enemy
+        // switches on at a supplied position; a boolean keeps the owner-position path.
+        std::optional<math::Vec3> point;
+        if (on != nullptr) {
+            if (const ViewUnit* object = destination_object(host, *on)) point = object->position;
+            else point = position_of(host, *on);
+        }
+        if (!point) {
+            context.report(authoritative::codes::unsupported_api, "Activate_Ability(" + ability + ") ignored: expects a target position");
+            return false;
+        }
+        ValueList arguments;
+        arguments.push_back(number(LuaNumber(static_cast<std::int64_t>(unit.owner))));
+        arguments.push_back(handle(handle_game_object, unit.id));
+        arguments.push_back(number(LuaNumber(static_cast<std::int64_t>(kind))));
+        arguments.push_back(number(LuaNumber(static_cast<std::int64_t>(tactical::AbilityAction::activate))));
+        arguments.push_back(number(numeric::from_fixed(point->x)));
+        arguments.push_back(number(numeric::from_fixed(point->y)));
+        arguments.push_back(number(numeric::from_fixed(point->z)));
+        context.issue_command(std::string(verb_ability), std::move(arguments));
+        return true;
+    }
+    if (kind == tactical::AbilityKind::leech_shields) {
+        // WLS-04: targeted Lua activation uses a live object; stock skirmish scripts do not call it.
+        const bool* flag = on != nullptr ? std::get_if<bool>(&on->data) : nullptr;
+        const auto* target = on != nullptr ? destination_object(host, *on) : nullptr;
+        if (!target && (flag == nullptr || *flag)) return false;
+        ValueList arguments;
+        arguments.push_back(number(LuaNumber(static_cast<std::int64_t>(unit.owner))));
+        arguments.push_back(handle(handle_game_object, unit.id));
+        arguments.push_back(number(LuaNumber(static_cast<std::int64_t>(kind))));
+        arguments.push_back(number(LuaNumber(static_cast<std::int64_t>(target
+            ? tactical::AbilityAction::activate : tactical::AbilityAction::deactivate))));
+        if (target) arguments.push_back(handle(handle_game_object, target->id));
+        context.issue_command(std::string(verb_ability), std::move(arguments));
+        return true;
     }
     const bool* flag = on != nullptr ? std::get_if<bool>(&on->data) : nullptr;
     if (flag == nullptr) {
         context.report(authoritative::codes::unsupported_api, "Activate_Ability(" + ability + ") ignored: expects true or false");
-        return;
+        return false;
     }
     ValueList arguments;
     arguments.push_back(number(LuaNumber(static_cast<std::int64_t>(unit.owner))));
@@ -448,6 +423,7 @@ inline void request_ability(BindingContext& context, const Host& host, const Vie
     const auto action = *flag ? tactical::AbilityAction::activate : tactical::AbilityAction::deactivate;
     arguments.push_back(number(LuaNumber(static_cast<std::int64_t>(action))));
     context.issue_command(std::string(verb_ability), std::move(arguments));
+    return false;
 }
 
 } // namespace detail

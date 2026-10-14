@@ -128,8 +128,12 @@ states so they can be looked at; its requests only add a report line.
 
 - Hunt uses its existing icon, hotkey and ordinary ready/active states. A paired retail button
   capture remains part of the Hunt eye check.
-- The targeting pointer of AB-11 (battle pointer set, battle cursors), the activation and deactivation sounds, the
-  tooltip and the hero and land key bindings are not implemented.
+- Ability encyclopedia names, descriptions and independent authored overrides
+  follow CARD-15 in [unit cards](foc-unit-cards.md), sourced from the effective
+  object/language data and paired retail ability-hover stills. Disabled-button
+  diagnostic reasons are not appended to this sourced encyclopedia text.
+- The targeting pointer of AB-11 (battle pointer set, battle cursors), the activation
+  and deactivation sounds, and the hero and land key bindings remain separate work.
 - Whether FoC's targeting also ends on a click on a friendly unit, or keeps waiting, is not traced;
   the remake cancels (the least visible choice: nothing is ordered).
 - A remapped key map (the options' keyboard page) is not read; the defaults are used.

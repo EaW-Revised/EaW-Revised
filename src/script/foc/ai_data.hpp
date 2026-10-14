@@ -51,6 +51,7 @@ struct GoalType {
     Real activation_tracking_duration{};
     Real per_activation_failure_desire_adjust{};
     std::vector<std::string> is_like;        // upper-case goal names
+    std::set<std::string> global_exclusions; // WGA-57 reference-counted proposal exclusions
 };
 
 // One entry of a goal-function set: the goal and the equation that scores its desire.
@@ -61,23 +62,34 @@ struct GoalFunction {
 
 struct Template {
     std::string name;
+    int priority{1}; // WGA-09: independent setting precedence
+    std::string trigger, untrigger;
     std::map<std::string, std::string, std::less<>> budget; // category (upper) -> equation
+    std::map<std::string, Real, std::less<>> tactical_allowances;
     std::set<std::string> goals_on;   // goal categories, upper case
     std::set<std::string> goals_off;
     std::set<std::string> plans_on;   // plan goal categories, upper case
     std::set<std::string> plans_off;
+    std::set<std::string> goal_types_on, goal_types_off;
+    std::set<std::string> plan_types_on, plan_types_off, plan_names_on, plan_names_off;
 };
 
 struct PlayerType {
     std::string name;
     std::vector<std::string> function_sets; // upper case, in order
     std::vector<std::string> space_templates;
+    std::vector<std::string> galactic_templates;
+    std::map<std::string, std::string, std::less<>> freestore; // mode -> authored script
     std::map<std::string, std::string, std::less<>> difficulty; // EASY/NORMAL/HARD -> adjustment name
 };
 
 struct Difficulty {
     Real space_contrast_multiplier{real(1)};
     Real space_goal_cycle_sleep{};
+    Real galactic_contrast_multiplier{real(1)};
+    Real galactic_build_time_multiplier{real(1)};
+    Real galactic_goal_cycle_sleep{};
+    Real credit_multiplier{real(1)};
 };
 
 // gameconstants.xml values of the space perception grid and targets; engine defaults where
@@ -90,10 +102,15 @@ struct Constants {
     Real threat_range_cap{real(1000)};         // AI_SpaceThreatRangeCap (engine default)
     Real area_threat_scale{real(1)};           // AI_SpaceAreaThreatScaleFactor
     Real threat_decay_step{real(1)};           // AI_SpaceThreatDecayStep (engine default)
+    // FT-09: authored safety thresholds for planet/land execution paths.
+    Real low_threat_tolerance{};
+    Real medium_threat_tolerance{};
+    Real high_threat_tolerance{};
     Real health_low_threshold{};               // Health_Low_Percent_Threshold
 };
 
 struct AiData {
+    std::map<std::string, std::uint32_t, std::less<>> goal_categories; // WGA-10 registered enum
     std::map<std::string, GoalType, std::less<>> goals;                           // upper-case name
     std::map<std::string, std::vector<GoalFunction>, std::less<>> function_sets;  // upper-case name
     std::map<std::string, Template, std::less<>> templates;                       // upper-case name
@@ -109,5 +126,9 @@ struct AiData {
 // `xml` holds ai_xml_files() by logical path; `converters` give Converter[...] constants.
 [[nodiscard]] core::Result<AiData> load_ai_data(
     const std::map<std::string, std::string, std::less<>>& xml, const ConverterFunction& converters);
+// Same validated parser, explicit mode closure; tactical required files stay unchanged.
+[[nodiscard]] core::Result<AiData> load_ai_data_files(
+    const std::map<std::string, std::string, std::less<>>& xml, const ConverterFunction& converters,
+    const std::vector<std::string>& paths);
 
 } // namespace eawr::script::foc::ai

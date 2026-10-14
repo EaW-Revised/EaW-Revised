@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -55,15 +56,35 @@ struct DebrisPose {
 };
 
 // The prop at its spawn: its ship's position and facing (yaw about +Z, bank roll about the
-// forward axis, pitch zero as the tactical session has none), with the hardpoint's attachment
+// forward axis, and FM-02 pitch), with the hardpoint's attachment
 // point given in the ship's unit frame (scaled and turned by the +90 model turn, +X forward)
 // placed by that facing.
 [[nodiscard]] DebrisPose debris_spawn(const std::array<double, 3>& ship_position, double ship_yaw_degrees,
-                                      double ship_roll_degrees, const std::array<double, 3>& attachment);
+                                      double ship_roll_degrees, const std::array<double, 3>& attachment,
+                                      double ship_pitch_degrees = 0.0);
 
 // The prop `frames` logical frames after its spawn (fractional between frames): the spawn
 // pose plus `frames` times the motion.
 [[nodiscard]] DebrisPose debris_pose(const DebrisPose& spawn, const DebrisMotion& motion, double frames);
+
+// WCC-71 (BP-37): a killed unit's destroyable hardpoints self-destruct, in HardPoints order,
+// before the unit's own death explosion. One still standing at the kill is destroyed as a hit
+// destroys it (its death explosion and Death_Explosion_SFXEvent, its breakoff prop), without the
+// hardpoint-lost announcement. One already destroyed plays its death explosion again, silently.
+struct SelfDestructHardpoint {
+    std::uint32_t hardpoint{};
+    bool standing{};
+    friend constexpr bool operator==(const SelfDestructHardpoint&, const SelfDestructHardpoint&) noexcept = default;
+};
+
+// The hardpoints `unit`, killed at a tick, self-destructs: from `before`, the snapshot of the
+// tick before the kill (the last one that lists the unit), and the kill tick's `events`. A
+// hardpoint whose hardpoint_destroyed is among `events` was destroyed by a hit in the kill tick,
+// so it no longer stands at the self-destruct. Destroyable means a maximum health above zero.
+// Empty without `before`, when it does not list the unit or the unit has no durability: what
+// stood is unknown and nothing more is shown (the least visible choice).
+[[nodiscard]] std::vector<SelfDestructHardpoint> self_destruct_hardpoints(
+    const sim::tactical::TacticalSnapshot* before, sim::EntityId unit, std::span<const sim::tactical::Event> events);
 
 // The rest are remake rules of the view (docs/behaviour/battle-presentation.md), not FoC
 // behaviour.

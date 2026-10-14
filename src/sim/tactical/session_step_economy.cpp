@@ -39,6 +39,17 @@
 
 namespace eawr::sim::tactical {
 
+void session_detail::Tick::note_pool_return(const UnitState& unit, const bool garrison, const bool team_member) {
+    // MAT-15: only in an attract session, only for an object that is neither a garrison unit nor a team
+    // member, and only for a type the setup lists (Build_Tab_Space_Units). The company type of a
+    // purchased team is its purchase identity.
+    if (!impl_->setup.attract_pool || garrison || team_member) return;
+    const auto& types = impl_->setup.attract_pool->types;
+    const auto type = purchase_identity(unit);
+    if (!std::binary_search(types.begin(), types.end(), type)) return;
+    pool_returns_.push_back({unit.owner, type});
+}
+
 core::Result<void> session_detail::Tick::pad_lifecycle() {
     auto& tick_work = gather_.value().tick_work.value();
     auto& respawns = staging_.value().respawns.value();
@@ -137,7 +148,7 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
             const auto hull = math::multiply(final_health->max_hull, fraction.value());
             if (!hull) return core::Result<void>::failure(hull.error());
             pad->second.constructed = final_id;
-            events.push_back(Event{tick, EventKind::pad_construction_completed, state.builder, 0, final_id});
+            events.push_back(Event{tick, EventKind::pad_construction_completed, state.builder, id, final_id});
             pending_productions_.push_back({state.builder, profile->constructed, tick});
             final.durability->hull = hull.value();
             const auto transform = unit_transform(final);
@@ -257,10 +268,13 @@ core::Result<void> session_detail::Tick::station_upgrades() {
             auto replacement = impl_->new_unit(UnitState{replacement_id, menu->next_level, old.state.owner,
                 old.state.position, old.state.rotation, {}}, tick);
             replacement.state.garrison_enabled = old.state.garrison_enabled; // FL-13: upgrades preserve the object flag
+            replacement.garrison_unit = old.garrison_unit; // WU-37: replacement retains object provenance
             // 2. Carry hardpoints by list index; disabled/destroyed become disabled at 0.1.
             if (replacement.durability && old.durability) {
                 carry_station_hardpoints(*impl_->health_profile(old), *old.durability, *replacement.durability);
             }
+            // WSW-48: transferred disabled state immediately updates the allied gate.
+            publish_special_hardpoints(replacement);
             // WPR-53 (project): references follow the logical station; invalid slots fall back to hull.
             const auto* replacement_health = impl_->health_profile(replacement);
             const auto transfer = [&](EntityId& target, std::uint32_t& hardpoint) {
@@ -322,8 +336,8 @@ core::Result<void> session_detail::Tick::station_upgrades() {
             });
             for (auto& earner : earners) if (earner.first == held.station) earner.first = replacement_id;
             // WPR-56 (project), FL-02/08: reconcile by squadron type, never by an old entry index.
-            const auto* new_hangar = squadron_table.find_spawner(menu->next_level);
-            const auto* old_hangar = squadron_table.find_spawner(old.state.type_id);
+            const auto* new_hangar = squadron_table.find_spawner(menu->next_level, old.state.owner);
+            const auto* old_hangar = squadron_table.find_spawner(old.state.type_id, old.state.owner);
             // WFO-12: a station born during object service waits for a subsequent traversal.
             auto next_hangar = initial_spawner(impl_->setup.seed, frame + 1, replacement_id);
             if (new_hangar != nullptr) {
@@ -401,6 +415,18 @@ core::Result<void> session_detail::Tick::economy() {
         production_census_visits += survivors.size();
     }
     static_cast<void>(impl_->prune_upgrade_holders(ledgers, survivors));
+    // MAT-15: the attract's destroyed objects rejoin their owners' pools, in destruction order, before this
+    // frame's production completes. An owner without an account (neutral objects) returns nothing.
+    for (const auto& returned : pool_returns_) {
+        const auto account = std::find_if(ledgers.begin(), ledgers.end(),
+            [&](const PlayerEconomy& entry) { return entry.player == returned.owner; });
+        if (account == ledgers.end()) continue;
+        account->pool.push_back(returned.type);
+        account->pool_tokens.push_back(account->next_pool_token++);
+        ++account->pool_version;
+        ++account->pool_additions;
+        account->pool_addition_frame = tick;
+    }
     const auto increase_tech = [&](const PlayerId owner, const bool same_faction) {
         for (auto& account : ledgers) {
             if (!impl_->allied(owner, account.player)) continue;
@@ -533,6 +559,7 @@ core::Result<void> session_detail::Tick::economy() {
 core::Result<void> session_detail::Tick::bonuses() {
     const auto& ledgers = staging_.value().ledgers.value();
     const auto& next_id = staging_.value().next_id.value();
+    const auto& events = impacts_.value().events.value();
     auto& instances = systems_.value().instances.value();
     auto& survivors = surviving_.value().survivors.value();
     // WPR-51: existing and newly created units, on disjoint partition slots.
@@ -551,10 +578,12 @@ core::Result<void> session_detail::Tick::bonuses() {
                 });
     }));
     auto& bonus_profile_evaluations = bonuses_.value().bonus_profile_evaluations.emplace(0);
+    const bool campaign_birth = impl_->economy.campaign && std::any_of(events.begin(), events.end(),
+        [](const auto& event) { return event.kind == EventKind::order_accepted && event.order == OrderKind::reinforce; });
     const bool command_events = !impl_->economy.command_bonuses.empty()
-        && (next_id != impl_->next_id || survivors.size() != impl_->handles.size());
+        && (next_id != impl_->next_id || survivors.size() != impl_->handles.size() || campaign_birth);
     if (command_events) {
-        auto ledger = impl_->update_command_ledger(survivors, impl_->next_id, executor);
+        auto ledger = impl_->update_command_ledger(survivors, campaign_birth ? 0 : impl_->next_id, executor);
         if (!ledger) return core::Result<void>::failure(ledger.error());
         bonuses_.value().command_ledger.emplace(std::move(ledger).value());
     }
@@ -563,7 +592,7 @@ core::Result<void> session_detail::Tick::bonuses() {
             impl_->command_ledger.sources.begin(), [](const auto& before, const auto& after) {
                 return before.id == after.id && before.profile == after.profile;
             }));
-    if (!impl_->bonus_categories.empty() && (sources_changed || next_id != impl_->next_id || command_events)) {
+    if (!impl_->bonus_categories.empty() && (sources_changed || next_id != impl_->next_id || command_events || campaign_birth)) {
         // Rebuild once per source change, by player/type; births only read the cached result.
         if (sources_changed) {
             std::map<EntityId, TypeId> containers;
@@ -575,14 +604,14 @@ core::Result<void> session_detail::Tick::bonuses() {
             bonus_profile_evaluations = impl_->ownership_keys.size();
         }
         std::array<std::optional<core::Diagnostic>, tick_partition_count> bonus_errors{};
-        const auto first_bonus_unit = sources_changed || command_sources_changed ? std::size_t{0} : static_cast<std::size_t>(
+        const auto first_bonus_unit = sources_changed || command_sources_changed || campaign_birth ? std::size_t{0} : static_cast<std::size_t>(
             std::lower_bound(survivors.begin(), survivors.end(), impl_->next_id,
                 [](const LiveUnit& unit, const EntityId id) { return unit.state.entity_id < id; }) - survivors.begin());
         const bool shared_modifiers = !impl_->economy.command_bonuses.empty() || !impl_->concentrate_effects.empty();
         if (shared_modifiers) {
             const auto& ledger = bonuses_.value().command_ledger ? *bonuses_.value().command_ledger : impl_->command_ledger;
             const auto changed = impl_->apply_command_bonuses(survivors, ledger, ledgers,
-                sources_changed || command_sources_changed ? 0 : impl_->next_id, executor);
+                sources_changed || command_sources_changed || campaign_birth ? 0 : impl_->next_id, executor);
             if (!changed) return changed;
         }
         const auto applied = executor.execute_phase("upgrade-bonuses", tick_partition_count, [&](const std::size_t partition) {
@@ -596,7 +625,10 @@ core::Result<void> session_detail::Tick::bonuses() {
                     const auto changed = impl_->apply_bonuses(unit, bonuses);
                     if (!changed) { bonus_errors[partition] = changed.error(); break; }
                 }
-                instances[index] = impl_->instance_for(unit, math::to_matrix(unit.state.rotation, unit.state.position).value(), tick + 1);
+                // WWP-73: modifier publication retains the banked frame already used by weapons.
+                const auto transform = unit_transform(unit);
+                if (!transform) { bonus_errors[partition] = transform.error(); break; }
+                instances[index] = impl_->instance_for(unit, transform.value(), tick + 1);
             }
         });
         if (!applied) return core::Result<void>::failure(applied.error());

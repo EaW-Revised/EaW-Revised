@@ -335,15 +335,18 @@ private:
         auto stepped = value.step(probe);
         expect(static_cast<bool>(stepped), "battle step succeeds");
         if (!stepped) break;
-        // The projectile phase runs partitioned, after targeting and before the unit systems.
+        // Flight and hull service precede targeting; ordinary systems follow firing.
         if (flying) {
             const auto find = [&](const std::string_view name) {
                 return static_cast<std::size_t>(std::find(probe.names.begin(), probe.names.end(), name) - probe.names.begin());
             };
             result.projectile_phase = true;
-            expect(find("targeting") < find("projectiles") && find("projectiles") < find("unit-systems")
+            expect(find("projectiles") < find("hull-service")
+                    && find("hull-service") < find("combat-input-refresh")
+                    && find("combat-input-refresh") < find("targeting")
+                    && find("targeting") < find("unit-systems")
                     && find("unit-systems") < probe.names.size(),
-                "tick " + std::to_string(tick) + ": the projectiles phase runs between targeting and unit-systems");
+                "tick " + std::to_string(tick) + ": projectiles and hull service run before targeting and unit-systems");
         }
         result.rows.push_back(std::to_string(stepped.value().completed_tick) + ',' + stepped.value().state_sha256 + ','
             + stepped.value().snapshot->sha256());
@@ -596,6 +599,10 @@ int main(int argc, char** argv) {
     test_shield_loss();
     test_arrival_in_battle();
     test_hardpoint_destroyed();
+    test_lost_shooter_withdraws_shots();
+    test_same_frame_retarget_after_kill();
+    test_hull_drag_before_fire();
+    test_hull_drag_lost_weapon_same_frame();
     test_meshes();
     test_mesh_hits();
     test_craft_sphere();

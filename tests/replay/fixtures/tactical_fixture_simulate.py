@@ -305,6 +305,17 @@ def simulate_durability(players, initial, commands, profiles) -> dict[str, objec
 
     for tick in range(DURABILITY_TICKS):
         events = []
+        # WFO-23/WCC-30/31: hull constraints precede object weapons and later commands.
+        for unit_id in sorted(units):
+            profile = durability.profile(units[unit_id])
+            if profile is None:
+                continue
+            destroyed, dead = durability.service(unit_id, profile)
+            events.extend(destruction(tick, "hardpoint_destroyed", units[unit_id], i) for i in destroyed)
+            if dead:
+                events.append(destruction(tick, "unit_destroyed", units[unit_id]))
+                del units[unit_id]
+                del durability.health[unit_id]
         for command in commands:
             if command.tick != tick:
                 continue
@@ -336,16 +347,6 @@ def simulate_durability(players, initial, commands, profiles) -> dict[str, objec
                     events.append(destruction(tick, "unit_destroyed", unit))
                     del units[unit_id]
                     del durability.health[unit_id]
-        for unit_id in sorted(units):
-            profile = durability.profile(units[unit_id])
-            if profile is None:
-                continue
-            destroyed, dead = durability.service(unit_id, profile)
-            events.extend(destruction(tick, "hardpoint_destroyed", units[unit_id], i) for i in destroyed)
-            if dead:
-                events.append(destruction(tick, "unit_destroyed", units[unit_id]))
-                del units[unit_id]
-                del durability.health[unit_id]
         completed = tick + 1
         state = state_bytes(players, units, completed, next_id, DURABILITY_SEED, DURABILITY_CONTENT, durability)
         snapshot = snapshot_bytes(players, units, completed, events, sensors, durability)

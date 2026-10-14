@@ -1,6 +1,8 @@
 // Observe a real lobby skirmish, including its economy and AI purchase decisions.
 // Usage: ai_progression_probe GAME_ROOT MAP DIFFICULTY TICKS WORKERS OUT_DIR [MODE] [--gate]
-// MODE: control, team-empire, team-rebel, human-mines-empire, human-mines-rebel.
+// MODE: control, team-empire, team-rebel, human-mines-empire, human-mines-rebel, or duel:FACTION:FACTION
+// (two AI players, any factions, e.g. duel:Underworld:Empire). superweapons.csv samples population room,
+// special-weapon permission and each planetary source's readiness every 300 ticks (#1933).
 // MAP is a logical TED path; DIFFICULTY is Normal_Default or Hard_Default.
 // Outputs are private observations, never regenerated replay fixtures.
 #include "eawr/data/xml.hpp"
@@ -8,19 +10,24 @@
 #include "eawr/scene/scene.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 #include "eawr/skirmish/ai.hpp"
+#include "eawr/skirmish/roster_gate.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <charconv>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -57,6 +64,19 @@ std::string quoted(const std::string& value) {
     for (const auto ch : value) { if (ch == '"') out += '"'; out += ch; }
     return out + '"';
 }
+std::string environment(const char* name) {
+#ifdef _WIN32
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return {};
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr ? value : "";
+#endif
+}
 struct Type {
     std::string name;
     std::size_t category{7};
@@ -78,9 +98,25 @@ int run(int argc, char** argv) {
     const bool human_mines = mode == "human-mines-empire" || mode == "human-mines-rebel";
     const bool gate = argc == 9 && std::string_view(argv[8]) == "--gate";
     if (argc == 9 && !gate) throw std::runtime_error("expected --gate");
-    if (mode != "control" && mode != "team-empire" && mode != "team-rebel" && !human_mines)
+    std::vector<std::string> duel;
+    if (mode.starts_with("duel:")) {
+        for (std::size_t begin = 5; begin <= mode.size();) {
+            const auto end = std::min(mode.find(':', begin), mode.size());
+            duel.push_back(mode.substr(begin, end - begin));
+            begin = end + 1;
+        }
+        if (duel.size() != 2 || duel[0].empty() || duel[1].empty()) throw std::runtime_error("duel needs two factions");
+    } else if (mode != "control" && mode != "team-empire" && mode != "team-rebel" && !human_mines) {
         throw std::runtime_error("unknown lobby mode");
-    const std::filesystem::path root(argv[1]), out(argv[6]);
+    }
+    // GAME_ROOT "env" reads EAWR_EAW_GAME_ROOT, so CTest can register the probe (skipped without it).
+    std::filesystem::path root(argv[1]);
+    if (root == "env") {
+        const auto installed = environment("EAWR_EAW_GAME_ROOT");
+        if (installed.empty()) { std::cout << "SKIPPED: EAWR_EAW_GAME_ROOT not set\n"; return 0; }
+        root = installed;
+    }
+    const std::filesystem::path out(argv[6]);
     const auto ticks = number(argv[4]), workers = number(argv[5]);
     if (ticks > tactical::max_ticks || workers > eawr::platform::ThreadWorkerAdapter::max_worker_count)
         throw std::runtime_error("tick or worker limit exceeded");
@@ -95,7 +131,9 @@ int run(int argc, char** argv) {
     options.seed = 67;
     options.match = take(skirmish::read_match_defaults(filesystem));
     options.slots = std::vector<skirmish::LobbySlot>{{1, "Empire", 0, false, {}, {}}, {2, "Rebel", 1, false, {}, {}}};
-    if (mode != "control") {
+    if (!duel.empty()) {
+        options.slots = std::vector<skirmish::LobbySlot>{{1, duel[0], 0, false, {}, {}}, {2, duel[1], 1, false, {}, {}}};
+    } else if (mode != "control") {
         const bool empire = mode == "team-empire" || mode == "human-mines-empire";
         const std::string ally = empire ? "Empire" : "Rebel";
         const std::string enemy = empire ? "Rebel" : "Empire";
@@ -113,16 +151,51 @@ int run(int argc, char** argv) {
     load.difficulty = argv[3];
     auto tables = take(eawr::units::load_unit_tables(load));
     auto inputs = take(skirmish::read_start_inputs(fixture, filesystem, catalog.catalog, tables));
+    // As the live viewer (SC-01): reload with the lobby factions' start types the map's tables lack
+    // (an Underworld slot's forces and station); Empire/Rebel lobbies need none.
+    std::set<std::string> missing;
+    const auto lower = [](std::string text) {
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return text;
+    };
+    const auto need = [&](const std::string& type) {
+        if (!skirmish::roster_disabled_types().contains(skirmish::type_id(type)) && !tables.find(type)) missing.insert(type);
+    };
+    for (const auto& slot : fixture.slots) {
+        for (const auto& type : slot.fleet) need(type);
+        for (const auto& forces : inputs.faction_forces)
+            if (lower(forces.faction) == lower(slot.faction))
+                for (const auto& type : forces.space_skirmish_default_forces) need(type);
+        const std::string station = "team_" + std::string(slot.team < 10 ? "0" : "") + std::to_string(slot.team) + "_space_station";
+        for (const auto& placement : inputs.placements) {
+            if (!placement.marker || lower(placement.type) != station) continue;
+            for (const auto& candidate : placement.marker_for) {
+                std::string affiliations = candidate.affiliation;
+                std::replace(affiliations.begin(), affiliations.end(), ',', ' ');
+                std::istringstream names(affiliations);
+                std::string faction;
+                while (names >> faction) if (lower(faction) == lower(slot.faction)) need(candidate.type);
+            }
+        }
+    }
+    if (!missing.empty()) {
+        for (const auto type : eawr::units::pinned_m2_types()) load.types.emplace_back(type);
+        load.types.insert(load.types.end(), missing.begin(), missing.end());
+        for (const auto type : eawr::units::pinned_m2_obstacles()) load.obstacles.emplace_back(type);
+        tables = take(eawr::units::load_unit_tables(load));
+        inputs.tables = &tables;
+    }
     auto start = take(skirmish::build_start(fixture, inputs));
     auto content = take(skirmish::session_content(tables, skirmish::human_slots(fixture)));
     content.fog = take(skirmish::fog_rules(inputs));
+    content.map_box = skirmish::map_box(inputs);
     auto economy = take(skirmish::economy_rules(start, inputs, tables));
     auto setup = skirmish::ai_setup(start, inputs, tables);
     setup.journal = std::make_shared<foc::AiJournal>();
     check(skirmish::enable_goal_system(filesystem, setup));
     auto modules = take(skirmish::ai_modules(filesystem, setup));
     auto world = take(tactical::TacticalSession::create(start.setup, content.sensors, content.durability,
-        content.motion, content.fog, content.combat, skirmish::victory_rules(start, tables), content.abilities, economy));
+        content.motion, content.fog, content.combat, skirmish::victory_rules(start, tables), content.abilities, economy, content.map_box));
     auto session = take(foc::create_session(std::move(world), setup, modules));
     session.set_authoritative_hash(false); // same setting as the live viewer
     std::map<tactical::TypeId, Type> types;
@@ -156,15 +229,76 @@ int run(int argc, char** argv) {
     hashes << "tick,sha256\n";
     events << "tick,player,sequence,kind,order,unit,reason\n";
     combat << "tick,player,shooter,type,class,target,target_type\n";
-    std::ofstream decisions(out / "decisions.csv");
-    decisions << "tick,player,decision,type,kind,reason\n";
-    const auto purchase_kind = [&](tactical::TypeId type) {
-        const auto* upgrade = economy.upgrade(type);
-        return upgrade != nullptr ? (upgrade->level_up ? "station_upgrade" : "research") : "unit";
+    std::ofstream superweapons(out / "superweapons.csv");
+    superweapons << "tick,player,population,population_cap,room,special_enabled,source,source_type,readiness,recharge_until,target\n";
+    const auto sample_superweapons = [&](const tactical::TacticalSnapshot& snapshot) {
+        for (const auto& account : snapshot.economy()) {
+            const auto room = account.population_cap - std::min(account.population, account.population_cap);
+            const auto line = [&] {
+                superweapons << snapshot.completed_tick() << ',' << account.player << ',' << account.population << ','
+                    << account.population_cap << ',' << room << ',' << (account.special_weapons_enabled ? 1 : 0);
+            };
+            bool any = false;
+            for (const auto& unit : snapshot.instances()) {
+                if (unit.owner != account.player || !unit.planetary_weapon) continue;
+                any = true;
+                line();
+                superweapons << ',' << unit.entity_id << ',' << types[unit.type_id].name << ','
+                    << credits(unit.planetary_weapon->readiness) << ',' << unit.planetary_weapon->state.recharge_until << ','
+                    << unit.planetary_weapon->state.target << '\n'; // 0: no target
+            }
+            if (!any) { line(); superweapons << ",0,,0,0,0\n"; }
+        }
     };
     const auto type_name = [&](tactical::TypeId type) {
         const auto found = types.find(type);
         return found != types.end() ? found->second.name : std::to_string(type);
+    };
+    std::ofstream decisions(out / "decisions.csv");
+    decisions << "tick,player,decision,type,kind,reason\n";
+    // Actual wallet and queue observations keep prepaid reservations distinct from purchase quotes.
+    std::ofstream wallets(out / "wallets.csv"), queues(out / "queues.csv"), menus(out / "menus.csv");
+    wallets << std::setprecision(17);
+    queues << std::setprecision(17);
+    menus << std::setprecision(17);
+    wallets << "tick,player,credits\n";
+    queues << "tick,player,queue,entry,type,station,price,frames,complete_frame,state\n";
+    menus << "station,faction,type,kind,price,human_frames,ai_frames\n";
+    for (const auto& menu : economy.menus) for (const auto& option : menu.options)
+        menus << type_name(menu.station) << ',' << menu.faction << ',' << type_name(option.type) << ','
+            << static_cast<unsigned>(option.kind) << ',' << credits(option.price) << ','
+            << option.build_frames << ',' << option.ai_build_frames << '\n';
+    using QueueKey = std::pair<tactical::PlayerId, std::uint64_t>;
+    std::map<QueueKey, std::pair<std::size_t, tactical::QueueEntry>> observed_queues;
+    const auto queue_row = [&](tactical::PlayerId player, std::size_t index,
+        const tactical::QueueEntry& entry, const char* state) {
+        queues << session.completed_tick() << ',' << player << ',' << index << ',' << entry.entry_id
+            << ',' << type_name(entry.type) << ',' << entry.station << ',' << credits(entry.paid) << ','
+            << entry.frames << ',' << entry.complete_frame << ',' << state << '\n';
+    };
+    const auto observe_accounts = [&] {
+        std::set<QueueKey> present;
+        for (const auto& ledger : session.world().ledgers()) {
+            wallets << session.completed_tick() << ',' << ledger.player << ',' << credits(ledger.credits) << '\n';
+            for (std::size_t index = 0; index < ledger.queues.size(); ++index) for (const auto& entry : ledger.queues[index]) {
+                const auto key = std::pair{ledger.player, entry.entry_id};
+                present.insert(key);
+                const auto previous = observed_queues.find(key);
+                if (previous != observed_queues.end() && previous->second.second == entry) continue;
+                observed_queues[key] = {index, entry};
+                queue_row(ledger.player, index, entry, "present");
+            }
+        }
+        for (auto previous = observed_queues.begin(); previous != observed_queues.end();) {
+            if (present.contains(previous->first)) { ++previous; continue; }
+            queue_row(previous->first.first, previous->second.first, previous->second.second, "removed");
+            previous = observed_queues.erase(previous);
+        }
+    };
+    const auto purchase_kind = [&](tactical::TypeId type) {
+        const auto* upgrade = economy.upgrade(type);
+        if (upgrade == nullptr) return "unit";
+        return upgrade->level_up ? "station_upgrade" : upgrade->special_unlocks.empty() ? "research" : "special_use";
     };
     std::set<std::tuple<std::uint64_t, tactical::PlayerId, tactical::TypeId, std::size_t>> completions;
     std::map<Key, tactical::RejectReason> rejections;
@@ -225,6 +359,7 @@ int run(int argc, char** argv) {
         }
     };
     observe();
+    observe_accounts();
     const eawr::platform::ThreadWorkerAdapter executor(static_cast<std::size_t>(workers));
     for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
         std::vector<tactical::PlayerCommand> human_input;
@@ -245,6 +380,7 @@ int run(int argc, char** argv) {
             }
         }
         auto result = take(session.step(executor, human_input));
+        observe_accounts();
         hashes << tick << ',' << result.world.state_sha256 << '\n';
         for (const auto& unit : result.world.snapshot->instances()) identities[unit.entity_id] = {unit.owner, unit.type_id};
         for (const auto& event : result.world.snapshot->events()) {
@@ -272,9 +408,40 @@ int run(int argc, char** argv) {
         }
         for (const auto& diagnostic : result.scripts.diagnostics)
             std::cerr << "tick " << tick << ": " << diagnostic.code << ' ' << diagnostic.message << '\n';
+        if (tick % 300 == 0 || tick == ticks) sample_superweapons(*result.world.snapshot);
         if (tick % 1800 == 0 || tick == ticks) observe();
     }
     const auto record = session.record();
+    std::ofstream transactions(out / "transactions.csv"), income_profiles(out / "income-profiles.csv");
+    transactions << std::setprecision(17);
+    income_profiles << std::setprecision(17);
+    transactions << "tick,player,sequence,kind,accepted,amount,prepaid,type,producer\n";
+    for (const auto& command : record.commands) {
+        const bool admitted = accepted.contains({command.key.tick, command.key.player_id, command.key.sequence});
+        Fixed amount{};
+        tactical::TypeId type{};
+        bool prepaid{};
+        bool monetary = true;
+        if (const auto* grant = std::get_if<tactical::CreditGrantPayload>(&command.payload)) amount = grant->amount;
+        else if (const auto* debit = std::get_if<tactical::AiReservationDebitPayload>(&command.payload)) amount = debit->amount;
+        else if (const auto* buy = std::get_if<tactical::BuyPayload>(&command.payload)) { type = buy->type; prepaid = buy->prepaid; }
+        else if (const auto* pad = std::get_if<tactical::PadBuildPayload>(&command.payload)) type = pad->type;
+        else if (!std::holds_alternative<tactical::CancelPayload>(command.payload)
+            && !std::holds_alternative<tactical::PadSellPayload>(command.payload)) monetary = false;
+        if (!monetary) continue;
+        transactions << command.key.tick << ',' << command.key.player_id << ',' << command.key.sequence << ','
+            << tactical::to_string(tactical::order_kind(command.payload)) << ',' << (admitted ? 1 : 0) << ','
+            << credits(amount) << ',' << (prepaid ? 1 : 0) << ',' << (type ? type_name(type) : "") << ','
+            << (command.units.empty() ? 0 : command.units.front()) << '\n';
+    }
+    income_profiles << "type,base_per_frame,bonus_per_frame,hardpoint,split,full_amount_to_everyone\n";
+    for (const auto& stream : economy.income) {
+        income_profiles << type_name(stream.source) << ',' << credits(stream.per_frame) << ",0,"
+            << tactical::always_on << ',' << stream.split_with_allies << ',' << stream.full_amount_to_everyone << '\n';
+        for (const auto& bonus : stream.bonuses)
+            income_profiles << type_name(stream.source) << ",0," << credits(bonus.per_frame) << ',' << bonus.hardpoint
+                << ',' << stream.split_with_allies << ',' << stream.full_amount_to_everyone << '\n';
+    }
     const auto bytes = take(tactical::write_replay(record));
     std::ofstream replay(out / "battle.eawr-replay", std::ios::binary);
     replay.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
@@ -289,7 +456,7 @@ int run(int argc, char** argv) {
                 << ",goal," << quoted(event.detail) << '\n';
     std::ofstream table(out / "minutes.csv"), purchases(out / "purchases.csv");
     purchases << "tick,player,type,class,price\n";
-    table << "tick,minute,player,credits,income_last_minute,station_level,tech_level,mines,ship_shots,structure_shots";
+    table << "tick,minute,player,credits,wallet_reconciliation_residual,station_level,tech_level,mines,ship_shots,structure_shots";
     for (const auto name : classes) table << ",buys_" << name << ",alive_" << name;
     table << '\n';
     std::map<tactical::PlayerId, double> previous_wallet, previous_spend, previous_grants;
@@ -343,9 +510,12 @@ int run(int argc, char** argv) {
         << "\nstart_tech=" << start.match.start_tech << "\nmax_tech=" << start.match.max_tech
         << "\ncredits=" << credits(start.match.credits) << "\nmode=" << mode
         << "\nempty extra fleets, fog on, economy on\n"
-        << "income_last_minute = wallet delta + accepted build prices - explicit grants; refunds are not subtracted\n";
+        << "wallet_reconciliation_residual = wallet delta + accepted build quotes - explicit grants; includes reservations and refunds, not mining income\n"
+        << "transactions amounts are payloads; buy prices and manufacturing start/duration are in queues.csv; menus.csv retains authored prices/times\n"
+        << "income-profiles.csv is authored source rate metadata, not observed payments after modifiers/damage\n";
     if (session.world().outcome()) receipt << "battle decided at tick " << session.world().outcome()->decided_tick << '\n';
-    if (!table || !hashes || !events || !combat || !plans || !replay || !receipt || !purchases || !decisions)
+    if (!superweapons || !table || !hashes || !events || !combat || !plans || !replay || !receipt || !purchases || !decisions
+        || !wallets || !queues || !menus || !transactions || !income_profiles)
         throw std::runtime_error("could not write probe outputs");
     if (gate) {
         if (ticks != 27000) throw std::runtime_error("team gate requires fifteen game minutes");

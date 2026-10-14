@@ -9,8 +9,10 @@
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/pads.hpp"
+#include "eawr/scene/scene.hpp"
 
 #include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/theme_db.hpp>
 #include <godot_cpp/classes/world3d.hpp>
 #include <godot_cpp/variant/basis.hpp>
@@ -110,7 +112,9 @@ std::optional<Rect2> WorldUiView::atlas_region(const std::string& name) const {
     return found->second;
 }
 
-void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live) {
+void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live,
+                          const std::shared_ptr<GodotShaderCache>& shaders) {
+    prepare_waypoints(filesystem, shaders);
     // WU-51/52: resolve text and fonts once; the reticle pass only selects a cached name.
     std::optional<data::ui::TextDatabase> text_database;
     if (auto loaded = data::ui::load_language_text_database(filesystem, "ENGLISH")) {
@@ -119,6 +123,8 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
         unresolved_.push_back("hardpoint text: " + core::format_diagnostic(loaded.error()));
     }
     std::string tooltip_face, tooltip_small_face;
+    reticle_sizes_ = ui::hardpoint_reticle_sizes(filesystem);
+    if (!reticle_sizes_) unresolved_.push_back("hardpoint reticle screen sizes: missing/invalid GameConstants; reticles disabled");
     // WSU-36: validated VFS XML controls render admission, independently of the sim grid.
     if (auto constants = data::load_document(filesystem, "data/xml/gameconstants.xml")) {
         for (const auto& node : constants.value().root.children) {
@@ -139,8 +145,7 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
     }
     // WU-46: compare identical world frames with/without ability art, including
     // the moving background seen through translucent squadron identity pixels.
-    const char* ability_art_control = std::getenv("EAWR_WORLD_ABILITY_ART_CONTROL");
-    ability_art_enabled_ = ability_art_control == nullptr || std::string_view(ability_art_control) != "off";
+    ability_art_enabled_ = OS::get_singleton()->get_environment("EAWR_WORLD_ABILITY_ART_CONTROL") != String("off");
     // WU-43..WU-45: validated component data, with the UI's existing missing-font fallback.
     const Ref<Font> fallback_font = ThemeDB::get_singleton()->get_fallback_font();
     FontProvider tooltip_fonts(ui::load_font_cache(filesystem));
@@ -291,6 +296,74 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
             ui_type.hardpoints.push_back(std::move(hardpoint));
         }
         types_.emplace(id, std::move(ui_type));
+    }
+}
+
+void WorldUiView::prepare_waypoints(const vfs::Vfs& filesystem, const std::shared_ptr<GodotShaderCache>& shaders) {
+    waypoint_assets_.clear();
+    if (auto constants = data::load_document(filesystem, "data/xml/gameconstants.xml")) {
+        for (const auto& node : constants.value().root.children) {
+            const auto name = lower(node.name);
+            if (name == "waypointflagmodelname" || name == "waypointlinetexturename") {
+                data::tag_trace::used(node);
+                (name == "waypointflagmodelname" ? waypoint_model_ : waypoint_texture_) = trim(node.raw_text);
+            } else if (name == "waypointlinelanddashlength" || name == "waypointlinelandgaplength"
+                || name == "waypointlinelanddashvelocity") {
+                const auto value = number(trim(node.raw_text));
+                if (!value || *value < 0.0F) { unresolved_.push_back(node.name + ": invalid waypoint dash value"); continue; }
+                data::tag_trace::used(node);
+                if (name == "waypointlinelanddashlength") waypoint_dash_ = *value;
+                else if (name == "waypointlinelandgaplength") waypoint_gap_ = *value;
+                else waypoint_velocity_ = *value;
+            }
+        }
+    }
+    if (!waypoint_texture_.empty()) {
+        const auto dot = waypoint_texture_.find_last_of('.');
+        const auto image = standalone(filesystem, waypoint_texture_.substr(0, dot));
+        if (image.is_valid()) {
+            const auto pixel = image->get_image()->get_pixel(0, 0);
+            waypoint_colour_ *= pixel; // OF-05: line-list UVs are all (0,0).
+        }
+    }
+    if (waypoint_model_.empty()) return;
+    auto loaded = assets::load_model(filesystem, "data/art/models/" + waypoint_model_);
+    if (!loaded) { unresolved_.push_back("waypoint flag: " + core::format_diagnostic(loaded.error())); return; }
+    waypoint_renderer_ = std::make_unique<GodotRenderer>(*host_, shaders, false);
+    const auto& model = loaded.value();
+    for (const auto& mesh : model.meshes) for (const auto& submesh : mesh.submeshes) {
+        if (!mesh.visible || lower(submesh.shader) == "meshshadowvolume.fx") continue;
+        const auto* selector = scene::find_legacy_selector(submesh.shader);
+        if (!selector) { unresolved_.push_back("waypoint flag shader: " + submesh.shader); continue; }
+        MaterialDescription material;
+        material.program = std::string(selector->program);
+        material.technique = std::string(selector->technique);
+        material.pass_name = std::string(selector->pass);
+        material.pass = selector->transparent ? RenderPass::transparent : RenderPass::opaque;
+        std::string texture;
+        for (const auto& parameter : submesh.parameters) {
+            material.bindings.push_back({parameter.name, parameter.value});
+            if (parameter.name == "BaseTexture" && std::holds_alternative<std::string>(parameter.value))
+                texture = std::get<std::string>(parameter.value);
+        }
+        std::optional<assets::Texture> texels;
+        const auto dot = texture.find_last_of('.');
+        for (const auto suffix : {".dds", ".tga"}) {
+            const auto path = "data/art/textures/" + texture.substr(0, dot) + suffix;
+            if (!filesystem.stat(path)) continue;
+            if (auto value = assets::load_texture(filesystem, path)) texels = std::move(value).value();
+            if (texels) break;
+        }
+        if (!texels) { unresolved_.push_back("waypoint flag texture: " + texture); continue; }
+        auto geometry = model;
+        geometry.meshes = {mesh};
+        geometry.meshes.front().submeshes = {submesh};
+        const auto asset = static_cast<sim::AssetId>(waypoint_assets_.size() + 1);
+        if (auto uploaded = waypoint_renderer_->upload(asset, geometry, *texels, material); !uploaded) {
+            unresolved_.push_back("waypoint flag: " + core::format_diagnostic(uploaded.error())); continue;
+        }
+        waypoint_renderer_->set_casts_shadows(asset, false);
+        waypoint_assets_.push_back(asset);
     }
 }
 

@@ -10,16 +10,41 @@
 #include "eawr/sim/world.hpp"
 #include "ui_test_support.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <new>
 #include <iostream>
+#include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <vector>
+
+namespace allocation_probe {
+bool armed{};
+std::size_t count{};
+}
+
+void* operator new(const std::size_t size) {
+    if (allocation_probe::armed) ++allocation_probe::count;
+    if (void* memory = std::malloc(size == 0 ? 1 : size)) return memory;
+    throw std::bad_alloc();
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 namespace {
 using namespace eawr;
@@ -174,7 +199,7 @@ void clicks_and_boxes() {
     expect(ui::minimum_drag_select_distance == 100.0F && ui::minimum_drag_distance == 4.0F,
            "GameConstants.xml drag distances");
 
-    selection.retain(std::vector<sim::EntityId>{2, 3});
+    selection.retain_sorted(std::vector<sim::EntityId>{2, 3});
     expect(selection.units() == std::vector<sim::EntityId>{2, 3}, "destroyed units leave the selection");
 }
 
@@ -806,6 +831,453 @@ void hardpoint_mesh_orders() {
     }
 }
 
+// #1067: the selection before its membership set, kept as the order reference. Every path scans the
+// vector linearly, exactly as the old code did; the real Selection must agree with it on units,
+// groups and the focus point after each step.
+struct LinearSelection {
+    std::vector<sim::EntityId> selected;
+    std::array<std::vector<sim::EntityId>, ui::control_group_count> groups{};
+    std::map<sim::EntityId, std::size_t> numbers;
+    std::optional<std::size_t> last_group;
+    double last_frame{};
+
+    static const ui::BattleUnit* find(std::span<const ui::BattleUnit> units, const sim::EntityId entity) {
+        for (const ui::BattleUnit& candidate : units) {
+            if (candidate.entity == entity) return &candidate;
+        }
+        return nullptr;
+    }
+    bool has(const sim::EntityId entity) const {
+        return std::find(selected.begin(), selected.end(), entity) != selected.end();
+    }
+    void add(const sim::EntityId entity) {
+        if (!has(entity)) selected.push_back(entity);
+    }
+    bool click(const std::optional<sim::EntityId> picked, const ui::Modifiers modifiers,
+               std::span<const ui::BattleUnit> units, const ui::ScreenRect& view) {
+        const ui::BattleUnit* picked_unit = picked ? find(units, *picked) : nullptr;
+        if (picked_unit == nullptr) {
+            if (picked || selected.empty()) return false;
+            selected.clear();
+            return true;
+        }
+        if (!picked_unit->own || !picked_unit->selectable || picked_unit->neutral) return false;
+        if (modifiers.shift) {
+            const auto found = std::find(selected.begin(), selected.end(), picked_unit->entity);
+            if (found != selected.end()) selected.erase(found);
+            else selected.push_back(picked_unit->entity);
+            return true;
+        }
+        if (modifiers.ctrl) return type_on_screen(picked_unit->type, units, view);
+        if (selected.size() == 1 && selected.front() == picked_unit->entity) return false;
+        selected.assign(1, picked_unit->entity);
+        return true;
+    }
+    bool box(const ui::ScreenRect& rect, const bool shift, std::span<const ui::BattleUnit> units,
+             std::span<const ui::SquadronIcon> icons) {
+        bool icon_found = false;
+        for (const ui::SquadronIcon& icon : icons) {
+            if (!icon.own || !icon.selectable || !rect.contains_quad(icon.rect)) continue;
+            add(icon.entity);
+            icon_found = true;
+        }
+        bool found = false;
+        for (const ui::BattleUnit& candidate : units) {
+            if (!candidate.own || !candidate.selectable || candidate.neutral || !candidate.locomotion
+                || candidate.decoration || !candidate.screen || !rect.contains_origin(*candidate.screen)) continue;
+            if (!shift && !found) selected.clear();
+            found = true;
+            add(candidate.entity);
+        }
+        return found || icon_found;
+    }
+    bool type_on_screen(const tactical::TypeId type, std::span<const ui::BattleUnit> units, const ui::ScreenRect& view) {
+        bool added = false;
+        for (const ui::BattleUnit& candidate : units) {
+            if (!candidate.own || !candidate.selectable || candidate.neutral || candidate.decoration
+                || candidate.type != type || !candidate.screen || !view.contains_origin(*candidate.screen)) continue;
+            if (has(candidate.entity)) continue;
+            selected.push_back(candidate.entity);
+            added = true;
+        }
+        return added;
+    }
+    bool craft_type_on_screen(const tactical::TypeId craft_type, std::span<const ui::BattleUnit> units,
+                              const ui::ScreenRect& view) {
+        bool added = false;
+        for (const ui::BattleUnit& candidate : units) {
+            if (!candidate.own || !candidate.selectable || candidate.neutral || candidate.decoration
+                || candidate.part == sim::invalid_entity_id || candidate.part_type != craft_type) continue;
+            if (!candidate.screen || !view.contains_origin(*candidate.screen) || has(candidate.entity)) continue;
+            selected.push_back(candidate.entity);
+            added = true;
+        }
+        return added;
+    }
+    void retain(std::span<const sim::EntityId> alive) {
+        const auto gone = [alive](const sim::EntityId entity) {
+            return std::find(alive.begin(), alive.end(), entity) == alive.end();
+        };
+        std::erase_if(selected, gone);
+        for (auto& group : groups) {
+            std::erase_if(group, [this, &gone](const sim::EntityId entity) {
+                if (!gone(entity)) return false;
+                numbers.erase(entity);
+                return true;
+            });
+        }
+    }
+    bool replace(std::span<const sim::EntityId> entities) {
+        std::vector<sim::EntityId> next;
+        for (const sim::EntityId entity : entities) {
+            if (std::find(next.begin(), next.end(), entity) == next.end()) next.push_back(entity);
+        }
+        if (next == selected) return false;
+        selected = std::move(next);
+        return true;
+    }
+    void replace_entity(const sim::EntityId previous, const sim::EntityId replacement) {
+        const auto transfer = [=](std::vector<sim::EntityId>& members) {
+            std::replace(members.begin(), members.end(), previous, replacement);
+            for (auto at = members.begin(); at != members.end(); ++at) {
+                members.erase(std::remove(at + 1, members.end(), *at), members.end());
+            }
+        };
+        transfer(selected);
+        for (auto& members : groups) transfer(members);
+    }
+    void owner_changed(const sim::EntityId entity, const tactical::PlayerId previous, const tactical::PlayerId current,
+                       const tactical::PlayerId observer) {
+        if (previous == current || previous != observer) return;
+        std::erase(selected, entity);
+        for (auto& members : groups) std::erase(members, entity);
+        numbers.erase(entity);
+    }
+    void assign_group(const std::size_t group) {
+        for (const auto entity : groups.at(group)) numbers.erase(entity);
+        for (auto& members : groups) std::erase_if(members, [this](const sim::EntityId entity) { return has(entity); });
+        groups.at(group) = selected;
+        for (const auto entity : selected) numbers[entity] = group;
+    }
+    std::optional<ui::Vec3f> recall_group(const std::size_t group, const bool add_group, const double frame,
+                                          std::span<const ui::BattleUnit> alive) {
+        if (!add_group) selected.clear();
+        return selected_group(group, frame, alive);
+    }
+    std::optional<ui::Vec3f> add_to_group(const std::size_t group, const double frame,
+                                          std::span<const ui::BattleUnit> alive) {
+        auto& members = groups.at(group);
+        for (const sim::EntityId entity : selected) {
+            for (std::size_t other = 0; other < groups.size(); ++other) {
+                if (other != group) std::erase(groups[other], entity);
+            }
+            if (std::find(members.begin(), members.end(), entity) == members.end()) members.push_back(entity);
+            numbers[entity] = group;
+        }
+        return selected_group(group, frame, alive);
+    }
+    std::optional<ui::Vec3f> selected_group(const std::size_t group, const double frame,
+                                            std::span<const ui::BattleUnit> alive) {
+        double sum_x = 0.0;
+        double sum_y = 0.0;
+        std::size_t count = 0;
+        for (const sim::EntityId entity : groups.at(group)) {
+            const ui::BattleUnit* found = find(alive, entity);
+            if (found == nullptr) continue;
+            add(entity);
+            sum_x += found->position[0];
+            sum_y += found->position[1];
+            ++count;
+        }
+        std::optional<ui::Vec3f> focus;
+        if (count > 0 && last_group == group && frame >= last_frame && frame - last_frame < ui::control_group_double_tap_frames) {
+            focus = ui::Vec3f{static_cast<float>(sum_x / static_cast<double>(count)),
+                              static_cast<float>(sum_y / static_cast<double>(count)), 0.0F};
+        }
+        last_group = group;
+        last_frame = frame;
+        return focus;
+    }
+};
+
+bool same_state(const ui::Selection& real, const LinearSelection& reference, const sim::EntityId highest_entity) {
+    if (real.units() != reference.selected) return false;
+    for (std::size_t group = 0; group < ui::control_group_count; ++group) {
+        if (real.group(group) != reference.groups[group]) return false;
+    }
+    for (sim::EntityId entity = 0; entity <= highest_entity; ++entity) {
+        const auto number = reference.numbers.find(entity);
+        const std::optional<std::size_t> expected =
+            number == reference.numbers.end() ? std::nullopt : std::optional<std::size_t>(number->second);
+        if (real.group_of(entity) != expected) return false;
+        if (real.contains(entity) != reference.has(entity)) return false;
+    }
+    return true;
+}
+
+// A small deterministic generator so the sequences are the same on every compiler.
+struct Lcg {
+    std::uint64_t state{0x9E3779B97F4A7C15ULL};
+    std::uint32_t next(const std::uint32_t bound) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return static_cast<std::uint32_t>((state >> 33) % bound);
+    }
+};
+
+// #1067: selection order and group state equal the linear-scan behaviour through random sequences of
+// every path that used to scan the selection.
+void membership_order_matches_linear_reference() {
+    constexpr sim::EntityId population = 120;
+    Lcg random;
+    std::vector<ui::BattleUnit> units;
+    for (sim::EntityId entity = 1; entity <= population; ++entity) {
+        auto each = unit(entity, static_cast<tactical::TypeId>(random.next(4)), random.next(6) != 0, {},
+                         std::array{static_cast<float>(random.next(1000)), static_cast<float>(random.next(700))});
+        each.position = {static_cast<float>(random.next(500)), static_cast<float>(random.next(500)), 0.0F};
+        each.decoration = random.next(15) == 0;
+        each.neutral = random.next(20) == 0;
+        each.locomotion = random.next(10) != 0;
+        each.selectable = random.next(12) != 0;
+        if (random.next(5) == 0) {
+            each.part = 1000 + entity;
+            each.part_type = static_cast<tactical::TypeId>(random.next(3));
+        }
+        units.push_back(each);
+    }
+    // Repeated craft volumes of one squadron share its container entity.
+    for (sim::EntityId repeat = 0; repeat < 12; ++repeat) units.push_back(units[random.next(population)]);
+    std::vector<ui::SquadronIcon> icons;
+    for (sim::EntityId index = 0; index < 30; ++index) {
+        const float x = static_cast<float>(random.next(900));
+        const float y = static_cast<float>(random.next(600));
+        icons.push_back({static_cast<sim::EntityId>(1 + random.next(population)), random.next(5) != 0, random.next(8) != 0,
+                         {x, y, x + 24.0F, y + 24.0F}});
+    }
+
+    ui::Selection real;
+    LinearSelection reference;
+    bool equal = true;
+    std::size_t steps = 0;
+    const auto compare = [&] {
+        ++steps;
+        equal = equal && same_state(real, reference, population + 20);
+    };
+    double frame = 0.0;
+    for (int step = 0; step < 600; ++step) {
+        const std::uint32_t kind = random.next(14);
+        const float x = static_cast<float>(random.next(900));
+        const float y = static_cast<float>(random.next(600));
+        const ui::ScreenRect rect{x, y, x + static_cast<float>(40 + random.next(400)), y + static_cast<float>(40 + random.next(300))};
+        const auto type = static_cast<tactical::TypeId>(random.next(4));
+        const auto group = static_cast<std::size_t>(random.next(ui::control_group_count));
+        const auto pick = static_cast<sim::EntityId>(1 + random.next(population + 5)); // some picks name nothing
+        frame += random.next(40);
+        std::vector<sim::EntityId> some;
+        for (std::uint32_t count = random.next(60); count > 0; --count) {
+            some.push_back(static_cast<sim::EntityId>(1 + random.next(population)));
+        }
+        switch (kind) {
+        case 0:
+        case 1: {
+            const bool shift = random.next(2) != 0;
+            const bool a = real.box(rect, shift, units, icons);
+            const bool b = reference.box(rect, shift, units, icons);
+            equal = equal && a == b;
+            break;
+        }
+        case 2: {
+            const bool shift = random.next(2) != 0;
+            const bool a = real.box(rect, shift, units);
+            const bool b = reference.box(rect, shift, units, {});
+            equal = equal && a == b;
+            break;
+        }
+        case 3: {
+            const bool a = real.type_on_screen(type, units, viewport);
+            const bool b = reference.type_on_screen(type, units, viewport);
+            equal = equal && a == b;
+            break;
+        }
+        case 4: {
+            const bool a = real.craft_type_on_screen(type, units, viewport);
+            const bool b = reference.craft_type_on_screen(type, units, viewport);
+            equal = equal && a == b;
+            break;
+        }
+        case 5: {
+            const ui::Modifiers modifiers{random.next(3) == 0, random.next(3) == 0, false};
+            const bool a = real.click(pick, modifiers, units, viewport);
+            const bool b = reference.click(pick, modifiers, units, viewport);
+            equal = equal && a == b;
+            break;
+        }
+        case 6: {
+            const bool a = real.replace(some);
+            const bool b = reference.replace(some);
+            equal = equal && a == b;
+            break;
+        }
+        case 7: {
+            const auto from = static_cast<sim::EntityId>(1 + random.next(population + 10));
+            const auto to = static_cast<sim::EntityId>(1 + random.next(population + 10));
+            real.replace_entity(from, to);
+            reference.replace_entity(from, to);
+            break;
+        }
+        case 8: {
+            std::vector<sim::EntityId> alive;
+            for (sim::EntityId entity = 1; entity <= population + 10; ++entity) {
+                if (random.next(10) != 0) alive.push_back(entity);
+            }
+            real.retain_sorted(alive);
+            reference.retain(alive);
+            break;
+        }
+        case 9:
+            real.assign_group(group);
+            reference.assign_group(group);
+            break;
+        case 10: {
+            const auto a = real.add_to_group(group, frame, units);
+            const auto b = reference.add_to_group(group, frame, units);
+            equal = equal && a == b;
+            break;
+        }
+        case 11: {
+            const bool add_group = random.next(2) != 0;
+            const auto a = real.recall_group(group, add_group, frame, units);
+            const auto b = reference.recall_group(group, add_group, frame, units);
+            equal = equal && a == b;
+            break;
+        }
+        case 12: {
+            const auto entity = static_cast<sim::EntityId>(1 + random.next(population));
+            real.owner_changed(entity, 1, 2, 1);
+            reference.owner_changed(entity, 1, 2, 1);
+            break;
+        }
+        default:
+            real.clear();
+            reference.selected.clear();
+            break;
+        }
+        compare();
+    }
+    expect(steps == 600 && equal, "#1067: every selection path keeps the linear-scan order, groups and focus");
+}
+
+// #1067: the counted membership work of a large selection grows with the units touched, not with
+// their square. A linear contains over 2000 units is about two million comparisons; every bound
+// below is a small multiple of 2000.
+void membership_work_is_linear() {
+    constexpr sim::EntityId count = 2000;
+    std::vector<ui::BattleUnit> units;
+    std::vector<sim::EntityId> expected;
+    for (sim::EntityId entity = 1; entity <= count; ++entity) {
+        // Scrambled IDs, so the selection order is the unit order and not the sorted order.
+        const sim::EntityId id = (entity * 7919) % 100003 + 1;
+        units.push_back(unit(id, 1 + static_cast<tactical::TypeId>(entity % 2), true, {},
+                             std::array{static_cast<float>(entity % 1000), static_cast<float>(entity % 700)}));
+        units.back().part = entity % 3 == 0 ? 500000 + entity : sim::invalid_entity_id;
+        units.back().part_type = 7;
+        expected.push_back(id);
+    }
+    const auto bound = [&](const std::uint64_t before, const ui::Selection& selection, const std::uint64_t multiple) {
+        return selection.membership_operations() - before <= multiple * count;
+    };
+
+    ui::Selection selection;
+    expect(selection.box({0.0F, 0.0F, 1000.0F, 700.0F}, false, units) && selection.units() == expected,
+           "#1067: a 2000-unit box selects in unit order");
+    expect(bound(0, selection, 2), "#1067: a 2000-unit box makes at most 2N membership operations");
+    std::uint64_t before = selection.membership_operations();
+    expect(!selection.type_on_screen(1, units, viewport) && !selection.type_on_screen(2, units, viewport)
+               && selection.units() == expected,
+           "#1067: type-on-screen over a full selection adds nothing");
+    expect(bound(before, selection, 2), "#1067: type-on-screen over 2000 units makes at most 2N operations");
+    before = selection.membership_operations();
+    expect(!selection.craft_type_on_screen(7, units, viewport) && selection.units() == expected,
+           "#1067: craft-type-on-screen over a full selection adds nothing");
+    expect(bound(before, selection, 2), "#1067: craft-type-on-screen over 2000 units makes at most 2N operations");
+
+    ui::Selection typed;
+    expect(typed.type_on_screen(1, units, viewport) && typed.units().size() == count / 2,
+           "#1067: type-on-screen selects every unit of the type");
+    expect(bound(0, typed, 1), "#1067: type-on-screen into an empty selection makes at most N operations");
+
+    before = selection.membership_operations();
+    selection.assign_group(1);
+    expect(selection.group(1) == expected && bound(before, selection, 3), "#1067: assigning a 2000-unit group stays linear");
+    before = selection.membership_operations();
+    selection.add_to_group(2, 10.0, units);
+    expect(selection.group(2) == expected && selection.group(1).empty() && bound(before, selection, 8),
+           "#1067: moving 2000 units to another group stays linear");
+    before = selection.membership_operations();
+    selection.recall_group(2, false, 12.0, units);
+    expect(selection.units() == expected && bound(before, selection, 6), "#1067: recalling a 2000-unit group stays linear");
+
+    before = selection.membership_operations();
+    selection.replace_entity(expected.front(), expected.back());
+    expect(selection.units().size() == count - 1 && bound(before, selection, 8),
+           "#1067: a replacement over 2000 members stays linear");
+    before = selection.membership_operations();
+    std::vector<sim::EntityId> alive = expected;
+    alive.pop_back();
+    std::sort(alive.begin(), alive.end());
+    selection.retain_sorted(alive);
+    expect(bound(before, selection, 32), "#1067: retaining stored members uses at most logarithmic alive probes");
+
+    before = selection.membership_operations();
+    std::vector<sim::EntityId> doubled = expected;
+    doubled.insert(doubled.end(), expected.begin(), expected.end());
+    selection.replace(doubled);
+    expect(selection.units() == expected && bound(before, selection, 8),
+           "#1067: replace de-duplicates 4000 entries in one pass and keeps the first of each");
+}
+
+// #1067: liveness refresh must never build temporary alive or selection containers, even on
+// the first populated call. The allocation hook observes library allocations independently of
+// the production work counter. Sparse IDs keep the budget independent of the largest identity.
+void retention_has_no_frame_allocations() {
+    std::vector<sim::EntityId> alive;
+    for (sim::EntityId id = 1; id <= 32768; ++id) alive.push_back(id * 7919);
+    ui::Selection selection;
+    const auto measure = [&] {
+        allocation_probe::count = 0;
+        allocation_probe::armed = true;
+        selection.retain_sorted(alive);
+        allocation_probe::armed = false;
+        return allocation_probe::count;
+    };
+    const auto empty_work = selection.membership_operations();
+    const auto empty_allocations = measure();
+    expect(empty_allocations == 0 && selection.membership_operations() == empty_work,
+           "#1067: empty selection and groups retain without allocation or membership work");
+    const std::array<sim::EntityId, 3> chosen{alive.back(), alive.front(), alive[100]};
+    selection.replace(chosen);
+    selection.assign_group(1);
+    const auto before = selection.membership_operations();
+    const auto populated_allocations = measure();
+    expect(populated_allocations == 0 && selection.membership_operations() - before <= 6 * 17
+               && selection.units() == std::vector<sim::EntityId>(chosen.begin(), chosen.end()),
+           "#1067: populated retention probes only six stored memberships without allocation");
+    allocation_probe::count = 0;
+    allocation_probe::armed = true;
+    for (int frame = 0; frame < 100; ++frame) selection.retain_sorted(alive);
+    allocation_probe::armed = false;
+    expect(allocation_probe::count == 0, "#1067: steady-state retention allocates zero over 100 frames");
+    selection.clear(); // Groups survive clear and must still be swept.
+    alive.pop_back();
+    const auto group_allocations = measure();
+    expect(group_allocations == 0 && selection.empty() && !selection.group_of(chosen[0])
+               && selection.group(1) == std::vector<sim::EntityId>({chosen[1], chosen[2]}),
+           "#1067: group-only retention removes a destroyed member without allocation");
+    alive.clear();
+    const auto removal_allocations = measure();
+    expect(removal_allocations == 0 && selection.group(1).empty() && !selection.group_of(chosen[1]),
+           "#1067: empty alive input clears groups without allocation");
+}
+
 int main() {
     {
         ui::Selection previous, allied;
@@ -833,7 +1305,7 @@ int main() {
         selected.clear();
         selected.replace_entity(1, 7);
         selected.replace_entity(7, 9); // two replacement events in one presentation frame
-        selected.retain(std::array<sim::EntityId, 3>{2, 3, 9});
+        selected.retain_sorted(std::array<sim::EntityId, 3>{2, 3, 9});
         expect(selected.empty() && selected.group(1) == std::vector<sim::EntityId>({9, 2}),
             "WPR-52: unselected station transfers its group through batched replacements");
         expect(selected.group(2) == std::vector<sim::EntityId>({3}), "WPR-52: other group membership survives");
@@ -859,6 +1331,9 @@ int main() {
     right_clicks();
     modifier_orders();
     replay_invariance();
+    membership_order_matches_linear_reference();
+    membership_work_is_linear();
+    retention_has_no_frame_allocations();
     if (test::ui::failures() != 0) {
         std::cerr << test::ui::failures() << " battle input contract(s) failed\n";
         return 1;

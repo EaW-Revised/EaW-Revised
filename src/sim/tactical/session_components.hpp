@@ -8,6 +8,9 @@ struct StableId {
     EntityId value{};
 };
 
+// WU-37: presence retains the object's garrison birth mark through gather and commit.
+struct GarrisonUnit { bool value{true}; };
+
 struct Identity {
     TypeId type_id{};
     PlayerId owner{};
@@ -27,8 +30,34 @@ struct Placement {
     math::Quat rotation{};
 };
 
+// WWP-51: translations at the two preceding logical frames; no model-cache state.
+struct PositionHistory {
+    math::Vec3 previous{}, before_previous{};
+    friend bool operator==(const PositionHistory&, const PositionHistory&) = default;
+};
+struct PositionHistoryComponent { PositionHistory value; };
+
 struct CurrentOrder {
     Order value{};
+};
+
+struct Waypoint {
+    MovePayload move;
+    CommandKey key;
+    bool repeat{};
+    friend bool operator==(const Waypoint&, const Waypoint&) = default;
+};
+
+// HCB-58/59: chronological destinations, including the current queued leg while active.
+struct WaypointRoute {
+    // HCB-59: retained coordinator identity also exists without queued points.
+    std::optional<CommandKey> coordinator;
+    std::vector<Waypoint> points;
+    bool active{};
+    friend bool operator==(const WaypointRoute&, const WaypointRoute&) = default;
+};
+struct Waypoints {
+    WaypointRoute value;
 };
 
 // Present only on units whose type has a durability profile.
@@ -60,6 +89,8 @@ struct FormationWait {
     CommandKey order{};
     std::uint32_t rank{};
     bool sliced{};
+    // FC-68/FD-64: an exhausted search retains this leg until a strict two-second retry.
+    std::optional<std::uint64_t> failure_frame{};
     friend bool operator==(const FormationWait&, const FormationWait&) = default;
 };
 
@@ -84,10 +115,24 @@ struct Approaching {
     Approach value;
 };
 
+// WMV-10, WMV-13 (#719): where the owner last saw the unit an order on a unit (attack,
+// attack-move, guard) names. Kept every frame the owner sees that unit, while the order stands.
+struct Sighting {
+    EntityId target{};
+    math::Vec3 point{};
+    friend bool operator==(const Sighting&, const Sighting&) = default;
+};
+
+struct Sighted {
+    Sighting value;
+};
+
 // Present only on ion-stunned units (#561, IS-03), until the stun is serviced away.
 struct IonStunned {
     IonStunState value;
 };
+
+struct CorruptedSystems { CorruptSystemsState value; };
 
 // WR-41: authored defense duration may extend beyond locomotion release.
 struct ArrivalVulnerability {

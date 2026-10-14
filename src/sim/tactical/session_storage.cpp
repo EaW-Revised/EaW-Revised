@@ -54,7 +54,9 @@ LiveUnit TacticalSession::Impl::live_at(const EntityId id, const entt::entity ha
         const auto* upgraded = registry.try_get<UpgradeModifiers>(handle);
         const auto* asteroid = registry.try_get<AsteroidContact>(handle);
         const auto* nebula = registry.try_get<NebulaState>(handle);
-        return LiveUnit{
+        const auto* corrupt = registry.try_get<CorruptedSystems>(handle);
+        const auto* sighted = registry.try_get<Sighted>(handle);
+        auto result = LiveUnit{
             UnitState{
                 id,
                 identity.type_id,
@@ -85,6 +87,17 @@ LiveUnit TacticalSession::Impl::live_at(const EntityId id, const entt::entity ha
             false, // engine-recovery scratch starts clear on each gathered tick
             nebula != nullptr ? std::optional(nebula->value) : std::nullopt,
         };
+        result.corrupt = corrupt != nullptr ? std::optional(corrupt->value) : std::nullopt;
+        result.sighting = sighted != nullptr ? std::optional(sighted->value) : std::nullopt;
+        result.garrison_unit = registry.all_of<GarrisonUnit>(handle);
+        if (const auto* route = registry.try_get<Waypoints>(handle)) result.waypoints = route->value;
+        if (const auto* history = registry.try_get<PositionHistoryComponent>(handle)) result.position_history = history->value;
+        return result;
+    }
+
+bool TacticalSession::Impl::garrison_marked(const EntityId id) const {
+        const auto found = handles.find(id);
+        return found != handles.end() && registry.all_of<GarrisonUnit>(found->second);
     }
 
 std::vector<LiveUnit> TacticalSession::Impl::sorted_live() const {
@@ -105,13 +118,18 @@ std::vector<UnitState> TacticalSession::Impl::sorted_units() const {
 void TacticalSession::Impl::rebuild(const std::vector<LiveUnit>& units, const bool reverse) {
         registry.clear();
         handles.clear();
+        radar_roster.clear();
+        waypoint_queues_present = false;
         std::fill(committed_ownership_counts.begin(), committed_ownership_counts.end(), 0);
         const auto insert = [this](const LiveUnit& unit) {
             const auto& state = unit.state;
+            auto radar = radar_slots(state.type_id);
+            if (!radar.empty()) radar_roster.emplace(state.entity_id, std::move(radar));
             const auto owned = ownership_slot(state.owner, purchase_identity(state));
             if (owned != ownership_keys.size()) ++committed_ownership_counts[owned];
             const auto handle = registry.create();
             emplace_component<StableId>(handle, state.entity_id);
+            if (unit.garrison_unit) emplace_component<GarrisonUnit>(handle);
             emplace_component<Identity>(handle, state.type_id, state.owner, state.purchase_type,
                 state.purchase_token, state.barrage_source, state.garrison_enabled);
             emplace_component<Placement>(handle, state.position, state.rotation);
@@ -135,6 +153,9 @@ void TacticalSession::Impl::rebuild(const std::vector<LiveUnit>& units, const bo
             if (unit.approach) {
                 emplace_component<Approaching>(handle, *unit.approach);
             }
+            if (unit.sighting) {
+                emplace_component<Sighted>(handle, *unit.sighting);
+            }
             if (unit.ion_stun) {
                 emplace_component<IonStunned>(handle, *unit.ion_stun);
             }
@@ -146,6 +167,12 @@ void TacticalSession::Impl::rebuild(const std::vector<LiveUnit>& units, const bo
             }
             if (unit.asteroid_contact) emplace_component<AsteroidContact>(handle, *unit.asteroid_contact);
             if (unit.nebula) emplace_component<NebulaState>(handle, *unit.nebula);
+            if (unit.corrupt) emplace_component<CorruptedSystems>(handle, *unit.corrupt);
+            if (unit.waypoints) {
+                waypoint_queues_present |= !unit.waypoints->points.empty();
+                emplace_component<Waypoints>(handle, *unit.waypoints);
+            }
+            if (unit.position_history) emplace_component<PositionHistoryComponent>(handle, *unit.position_history);
             handles.emplace(state.entity_id, handle);
         };
         if (reverse) {
@@ -182,6 +209,7 @@ void TacticalSession::Impl::commit_optional(const entt::entity handle, std::opti
     }
 
 void TacticalSession::Impl::commit_units(std::vector<LiveUnit>& units, std::uint64_t& writes) {
+        waypoint_queues_present = false;
         auto next = units.begin();
         for (auto it = handles.begin(); it != handles.end();) {
             while (next != units.end() && next->state.entity_id < it->first) ++next;
@@ -227,6 +255,12 @@ void TacticalSession::Impl::commit_units(std::vector<LiveUnit>& units, std::uint
                 if (order.value != state.order) { order.value = state.order; ++writes; }
             }
             auto carried = state.contained.empty() ? std::optional<std::vector<CarriedObject>>{} : std::optional(state.contained);
+            const bool marked = registry.all_of<GarrisonUnit>(handle);
+            if (unit.garrison_unit != marked) {
+                if (unit.garrison_unit) emplace_component<GarrisonUnit>(handle);
+                else registry.remove<GarrisonUnit>(handle);
+                ++writes;
+            }
             commit_optional<CarriedHeroes>(handle, carried, writes);
             commit_optional<Health>(handle, unit.durability, writes);
             commit_optional<AsteroidContact>(handle, unit.asteroid_contact, writes);
@@ -244,7 +278,13 @@ void TacticalSession::Impl::commit_units(std::vector<LiveUnit>& units, std::uint
             commit_optional<Waiting>(handle, unit.formation, writes);
             commit_optional<Abilities>(handle, unit.abilities, writes);
             commit_optional<Approaching>(handle, unit.approach, writes);
+            commit_optional<Sighted>(handle, unit.sighting, writes);
             commit_optional<IonStunned>(handle, unit.ion_stun, writes);
+            commit_optional<CorruptedSystems>(handle, unit.corrupt, writes);
+            // Derive the next tick's readiness gate in this existing stable commit, before the route is moved.
+            waypoint_queues_present |= unit.waypoints && !unit.waypoints->points.empty();
+            commit_optional<Waypoints>(handle, unit.waypoints, writes);
+            commit_optional<PositionHistoryComponent>(handle, unit.position_history, writes);
             auto* vulnerable = registry.try_get<ArrivalVulnerability>(handle);
             if (!unit.arrival_vulnerable_until) {
                 if (vulnerable != nullptr) { registry.remove<ArrivalVulnerability>(handle); ++writes; }

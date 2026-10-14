@@ -1,6 +1,7 @@
 #include "viewer_path.hpp"
 #include "map_mode_internal.hpp"
 #include "startup_trace.hpp"
+#include "gpu_memory_trace.hpp"
 #include "render_profile_viewport.hpp"
 
 namespace eawr::presentation::godot_backend {
@@ -138,6 +139,7 @@ bool MapMode::State::write_report() const {
         << ", \"kind\": " << json(map_kind)
         << ", \"semantic_complete\": " << (semantic_complete ? "true" : "false") << "},\n";
     startup_trace.write(output);
+    gpu_memory_trace.write(output);
     if (hud) output << "  \"hud\": " << hud->report_json() << ",\n";
     output << "  \"perf_overlay\": " << perf_report_json() << ",\n";
     write_report_scene(output);

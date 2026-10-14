@@ -41,7 +41,6 @@ namespace tactical = sim::tactical;
 [[nodiscard]] std::optional<tactical::Footprint> footprint_of(const std::string& id, const std::string& layer_name,
     const std::optional<Fixed>& scale_factor, const SpaceFootprint& data, std::optional<core::Diagnostic>& error) {
     const auto layer = space_layer(layer_name);
-    if (layer == tactical::SpaceLayer::none) return std::nullopt;
     const Fixed scale = scale_factor.value_or(Fixed::from_raw(Fixed::scale));
     const auto times = [&](const Fixed value) {
         auto product = sim::math::multiply(magnitude(value), scale);
@@ -61,26 +60,42 @@ namespace tactical = sim::tactical;
     footprint.nebula = data.hazard.nebula;
     footprint.impassable_asteroid = data.hazard.impassable_asteroid;
     footprint.obstacle_offset = {data.hazard.obstacle_offset.x, data.hazard.obstacle_offset.y};
-    const Fixed box_x = data.collision_x.value_or(Fixed{});
-    const Fixed box_y = data.collision_y.value_or(Fixed{});
+    // ML-24: a static non-obstacle with an authored zero obstacle radius remains scenery.
+    // Its inherited layer must not activate the model-bound collision fallback.
+    const bool scenery = layer == tactical::SpaceLayer::static_object && !data.space_obstacle
+        && data.obstacle_radius == std::optional<Fixed>{Fixed{}};
+    const Fixed box_x = scenery ? Fixed{} : data.collision_x.value_or(Fixed{});
+    const Fixed box_y = scenery ? Fixed{} : data.collision_y.value_or(Fixed{});
     if (positive(data.custom_hard_x) && positive(data.custom_hard_y)) {
         footprint.x_extent = times(*data.custom_hard_x);
         footprint.y_extent = times(*data.custom_hard_y);
-    } else if (data.collision_x) {
+    } else if (!scenery && data.collision_x) {
         footprint.x_extent = times(positive(data.custom_hard_x) ? *data.custom_hard_x : box_x);
         footprint.y_extent = times(positive(data.custom_hard_y) ? *data.custom_hard_y : box_y);
     }
-    if (positive(data.custom_soft_radius)) {
-        footprint.radius = times(*data.custom_soft_radius);
-    } else if (positive(data.obstacle_radius)) {
-        footprint.radius = times(*data.obstacle_radius);
-    } else if (data.collision_x) {
-        footprint.radius = times(std::max(magnitude(box_x), magnitude(box_y)));
+    // WWP-21: model geometry must exist before either soft-radius override is read.
+    // The loader supplies collision extents only after resolving the type's model.
+    if (data.collision_x) {
+        if (positive(data.custom_soft_radius)) {
+            footprint.radius = times(*data.custom_soft_radius);
+        } else if (positive(data.obstacle_radius)) {
+            footprint.radius = times(*data.obstacle_radius);
+        } else if (!scenery) {
+            footprint.radius = times(std::max(magnitude(box_x), magnitude(box_y)));
+        }
     }
     return footprint;
 }
 
 } // namespace
+
+core::Result<tactical::Footprint> detail::space_footprint(const std::string& id,
+    const std::optional<Fixed>& scale_factor, const SpaceFootprint& data) {
+    std::optional<core::Diagnostic> error;
+    const auto footprint = footprint_of(id, {}, scale_factor, data, error);
+    if (error) return core::Result<tactical::Footprint>::failure(*error);
+    return core::Result<tactical::Footprint>::success(*footprint);
+}
 
 core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
     using Result = core::Result<tactical::MotionTable>;
@@ -116,6 +131,26 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
     if (!arc) return Result::failure(failure("MaxRotationsSpace: " + arc.error().message));
     table.rules.arc_degrees = arc.value();
     table.rules.expansion_distance = *expansion;
+    // OR-06, OR-14: the approach re-check interval and the guard range (required constants of the
+    // loader). A table built by hand keeps the MotionRules defaults (10 frames, 750 units); an
+    // authored value that is no whole number of frames or is negative is refused.
+    if (const auto interval = scalar("MovementReevaluationFrameCount")) {
+        if (interval->raw() <= 0 || interval->raw() % Fixed::scale != 0 || interval->raw() / Fixed::scale > (1 << 16)) {
+            return Result::failure(failure("MovementReevaluationFrameCount must be a whole number of frames, 1 to 65536"));
+        }
+        table.rules.reevaluation_frames = static_cast<std::uint32_t>(interval->raw() / Fixed::scale);
+    }
+    if (const auto max_waypoints = scalar("MaxWaypointsPerPath")) {
+        if (max_waypoints->raw() < 0 || max_waypoints->raw() % Fixed::scale != 0
+            || max_waypoints->raw() / Fixed::scale > (1 << 16)) {
+            return Result::failure(failure("MaxWaypointsPerPath must be a whole number, 0 to 65536"));
+        }
+        table.rules.max_waypoints = static_cast<std::uint32_t>(max_waypoints->raw() / Fixed::scale);
+    }
+    if (const auto guard = scalar("Space_Guard_Range")) {
+        if (guard->raw() < 0) return Result::failure(failure("Space_Guard_Range must not be negative"));
+        table.rules.guard_range = *guard;
+    }
     for (const auto& unit : tables.units) {
         if (unit.kind != UnitKind::ship || !unit.movement.max_speed || !unit.movement.max_rate_of_turn) continue;
         const auto& movement = unit.movement;
@@ -171,7 +206,8 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
             *path_cost, *occupation, *cutoff, *expansions_factor, *rotation_step, *forward_step, *expansions, *tries,
             *interval, *windows, *search_increment};
         for (const auto& unit : tables.units) {
-            if (unit.kind == UnitKind::squadron || unit.kind == UnitKind::craft) continue;
+            if (unit.kind == UnitKind::squadron || unit.kind == UnitKind::craft || unit.planetary_weapon) continue;
+            if (space_layer(unit.movement.space_layer) == tactical::SpaceLayer::none) continue;
             if (auto footprint = footprint_of(unit.id, unit.movement.space_layer, unit.scale_factor, unit.footprint, error)) {
                 footprint->asteroid_damage = unit.footprint.hazard.asteroid_damage;
                 footprint->locomotor = unit.locomotion;
@@ -179,6 +215,7 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
             }
         }
         for (const auto& obstacle : tables.obstacles) {
+            if (space_layer(obstacle.space_layer) == tactical::SpaceLayer::none) continue;
             if (auto footprint = footprint_of(obstacle.id, obstacle.space_layer, obstacle.scale_factor, obstacle.footprint,
                     error)) {
                 table.footprints.push_back(*footprint);
@@ -264,6 +301,16 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
         squadron.idle_chase_range = unit.idle_chase_range.value_or(Fixed{});
         squadron.attack_move_response_range = unit.attack_move_response_range.value_or(Fixed{});
         squadron.formation_tolerance = unit.formation_error_tolerance.value_or(Fixed{});
+        squadron.autonomous_move_extension_vs_attacker = unit.autonomous_move_extension_vs_attacker.value_or(Fixed{});
+        // WMV-44: only an explicit zero maximum returns the authored override directly.
+        // An omitted maximum retains the debug build's nonzero type default and speed ratio.
+        const auto& member_movement = solo ? unit.movement : unit.team_movement;
+        const Fixed formation_deceleration = member_movement.deceleration.value_or(Fixed{});
+        // WMV-44/E2675-01: the debug-build type maximum defaults to 0.25.
+        const Fixed type_maximum = member_movement.max_speed.value_or(Fixed::from_raw(Fixed::scale / 4));
+        squadron.formation_type_max_speed = scaled(type_maximum, unit.id + " formation Max_Speed");
+        squadron.formation_deceleration = type_maximum.raw() == 0
+            ? formation_deceleration : scaled(formation_deceleration, unit.id + " formation OverrideDeceleration");
         squadrons.squadrons.push_back(std::move(squadron));
     }
     std::sort(squadrons.craft.begin(), squadrons.craft.end(),

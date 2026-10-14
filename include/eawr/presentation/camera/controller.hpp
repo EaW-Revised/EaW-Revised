@@ -46,6 +46,11 @@ struct TacticalFrame final {
     friend bool operator==(const TacticalFrame&, const TacticalFrame&) = default;
 };
 
+// HCB-11d: local movie director; the host supplies an already-visible subject
+// and keeps its tactical controller intact for return.
+[[nodiscard]] core::Result<TacticalFrame> movie_frame(const TacticalFrame& tactical,
+    const std::array<float, 3>& subject, double elapsed_seconds);
+
 // Orbit pitch range, degrees down from the horizon (negative looks up from
 // below). A valid range satisfies -89 <= min < max <= 89, so the view is never
 // vertical. Space uses the XML Pitch_Min..Pitch_Max, as FoC clamps its tilt

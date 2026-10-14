@@ -79,6 +79,22 @@ void test_hit_pipeline() {
     expect(outcome && state.shields.raw() == 0 && state.hardpoints[0].raw() == 0
             && outcome.value().damage.destroyed_hardpoint == std::optional<std::uint32_t>(0),
         "DG-11: what the shield leaves goes to the named hardpoint");
+    // WCC-46, DG-20: scripted damage meets the shield armor with the default damage type. Type 0
+    // is Damage_Default here (x2 against shield armor 1): a scripted 40 takes 80 of the shield, and
+    // the hardpoint sees what is left divided by 2 (WCC-49).
+    auto defaulted = value;
+    defaulted.default_damage_type = 0;
+    state = tactical::full_durability(profile);
+    scripted.amount = units(40);
+    outcome = tactical::apply_hit(profile, defaulted, state, scripted, 700);
+    expect(outcome && state.shields.raw() == 20 * one && state.hardpoints[0].raw() == 90 * one,
+        "WCC-46, DG-20: a scripted 40 takes 80 of the shield through the default damage type's multiplier");
+    state = tactical::full_durability(profile);
+    scripted.amount = units(70);
+    outcome = tactical::apply_hit(profile, defaulted, state, scripted, 701);
+    // 70 x 2 = 140 on a 100 shield; 40 left, divided back by 2 = 20 on the hardpoint (no hull armor).
+    expect(outcome && state.shields.raw() == 0 && state.hardpoints[0].raw() == 70 * one,
+        "WCC-49, DG-20: the remainder of a scripted hit is divided back by the same multiplier");
     auto storm_rules = value;
     storm_rules.ion_storm_disable_seconds = units(5);
     state = tactical::full_durability(profile);

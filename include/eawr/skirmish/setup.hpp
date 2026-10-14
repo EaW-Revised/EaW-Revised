@@ -21,6 +21,10 @@ struct SetupMap final {
     std::string preview_path;
     std::vector<std::byte> embedded_preview;
     assets::MapLobbyMetadata metadata;
+    // The map's authored display name without the capacity prefix, and the planet its root
+    // names (assets::Map::context_name): the battle loading screen's title (BLD-02, BLD-09).
+    std::string display_name;
+    std::optional<std::string> context_name;
 };
 
 // WSS-03/04: ordinary space staging leaves owner/terrain/game type unrestricted.

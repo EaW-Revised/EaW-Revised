@@ -63,7 +63,8 @@
 - **WTA-02** (debug build; FH-10, FH-11) The freestore script is attached before its first
   service. Each frame, when `now - LastService > ServiceRate`, its threads are pumped. The same test
   with `UnitServiceRate` and `LastUnitService` calls `On_Unit_Service(unit)` for every freestore
-  unit (FH-11). Retail runs this check with the execution service, every 0.1 s.
+  unit (FH-11). Retail runs this check with the execution service, every 0.1 s: after the player's
+  goal service and planning, before its build tasks.
 - **WTA-03** (debug build; GS-05; data `difficultyadjustments.xml`) After each full proposal pass,
   the goal system sleeps `Space_AI_Goal_Cycle_Sleep_Duration` × 30 frames. The value is 15 s on
   Easy and 0 on Normal and Hard. **This is the re-plan cadence.** No timer re-plans a running plan:
@@ -78,7 +79,10 @@
   per targetable weapon hardpoint, or one for itself when it has none. An entry's zone radius is its
   fire range plus speed × `AI_SpaceThreatLookAheadTime`. The radius is clamped to at least half a
   cell diagonal and at most `AI_SpaceThreatRangeCap`.
-- **WTA-05** (debug build ETA-01; PG-03) An object's zones are built at its first service. After
+- **WTA-05** (debug build ETA-01 and S3030-E04; PG-03) Combat tracking requires the
+  object type's authored `UNIT_AI` behavior. A squadron container without it is excluded while
+  its admitted craft contribute their own power; an authored tracking container can still join.
+  An admitted object's zones are built at its first service. After
   that its unit-AI service re-zones it every 300 frames, when its transform has changed since the
   last zoning.
 - **WTA-06** (debug build; PG-05 to PG-08) The force in a rectangle, the total force, the force
@@ -102,14 +106,21 @@
   capped at (int)(20 / max(1, AI players) + 0.5) and at least 1. Each non-trivial pair's desire
   equation is evaluated from the perception tokens (PE-06 to PE-30). A pair with a desire above 0
   becomes a proposal.
-- **WTA-10** (debug build; GS-30, GS-31) Maintenance orders the active goals by desire. It then
+- **WTA-10** (debug build; GS-30, GS-31) Maintenance refreshes active goals from their current
+  applicable targets, including global goals, then orders them by desire. Tactical active goals
+  whose raw desire is strictly between 0.01 and 40 receive a tapering ranking preference of
+  `(1 - (raw - 0.01) / 39.99) * 1.6`; sorting, replacement and weighted category draws use it
+  while the stored raw desire stays unchanged. It then
   takes the categories in order of their template budget equation, largest first. Each category's
   proposals are culled to its active count plus 2.
-  - With no proposals, a category's active goals stay.
+  - With no proposals, active goals are still trimmed: cullable goals with current desire at or
+    below zero leave, while protected plans can keep zero desire.
   - Otherwise, finished goals and goals whose plan ended leave.
   - A goal at or above the best candidate's desire (or whose plan cannot be removed) stays while
     its contrast still holds.
   - All the other goals become removable, and the best proposals take the freed places.
+  - The final kept set is trimmed for cullable nonpositive desire too; abandonment removes the
+    plan script and releases its remaining resources.
 - **WTA-11** (debug build; GS-32, AI-G08) Activation, goal outcomes and plan outcomes are recorded
   with an expiry of `Activation_Tracking_Duration` / `Tracking_Duration` × 30 frames. Every 10 s
   the learning service drops the expired records. A goal whose activation fails takes its
@@ -158,11 +169,17 @@
   `Attack_Move` and `Guard_Target` give each mover the order. A mover whose movement ends signals
   `Unit_Move_Finished` and leaves the block. The block finishes when no mover is left, except that
   an attack or attack-move on a visible enemy object finishes only when that object dies.
+  An attack on an object orders only squadron and `TARGETING` movers to attack; any other mover moves
+  to the object. Attack admission refuses a non-hostile target (WHZ-51): a refused mover gets no order,
+  leaves the move list and signals nothing, so with every mover refused the block waits until the
+  TaskForce empties, the target dies or the target's new owner is no enemy. A target that turns enemy
+  leaves it waiting, because the refused movers send no signal.
 - **WTA-20** (debug build; EX-40, EX-44) Plan events call `<TaskForce>_<Event>` when the plan
   defines it, else `Default_<Event>`: `Unit_Destroyed`, `No_Units_Remaining`, `Target_In_Range`,
   `Original_Target_Destroyed`, `Current_Target_Destroyed`, `Unit_Move_Finished` and
   `Unit_Damaged(tf, unit, attacker, deliberate)`. Unit_Damaged is raised by WTA-31, and at most one
   is queued per TaskForce between pumps.
+  A squadron member raises `Target_In_Range` through its container (EX-46).
 
 ### What a plan sets on its units
 
@@ -223,6 +240,21 @@
 
   **A positioned unit therefore attacks from the side of the target that its enemies defend
   least.**
+
+  The formation target query checks current hostility to the formation's member owner and
+  skips escort destinations. A nonhostile query returns no attack target without deleting
+  the stored object destination. If the same destination remains live, a later change back
+  to hostile can expose that object again (debug-build query recheck, U-05/WHZ-51).
+  The remake therefore retains the previous object across its positioning point move while
+  silently refusing nonhostile positioning. It can resume when hostility returns while that
+  point-move order remains. A removed object, an idle or different order, or a replacement
+  destination ends the bridge's retention. The debug-build destination setter overwrites the stored
+  destination on replacement (or clears the stack first in its clearing mode); a new point
+  destination does not inherit the previous object. TaskForce and direct object-script orders
+  therefore discard the bridge target, while positioning stores only its own point move's target.
+  The direct object-script clear follows this same ordinary destination-replacement rule.
+  No hostile formation target leaves the positioning deadline unchanged (FC-20), so a due
+  operation can resume on the next service after hostility returns.
 - **WTA-28** (debug build ETA-04) The **ideal attack position**.
   - Let s = min(the length of the target's world-bounds extent in the plane, attack distance / 2).
   - Build four boxes of half-size s, one per quadrant around the target point (the aimed
@@ -238,7 +270,9 @@
   attacker, the attacker is replaced by its container when it is a team member (a craft counts as
   its squadron). A damaged signal carries the attacker and **deliberate**, which is true when the
   attacker's target is this unit. Then the unit **retaliates**:
-  - A team container without its own targeting behaviour fires through its leader.
+  - A team container without its own targeting behaviour fires through its leader. The
+    normalized attacker retains the company's type, category and priority, rather than the
+    craft leader's category (debug build).
   - Retaliation is skipped when:
     - the attacker's category is restricted for this unit;
     - the attacker is of an untargetable kind;
@@ -253,6 +287,18 @@
     never ordered. Whether a ship keeps its formation after its order ends is walk 4's (U-07).
   - **The attack order is not direct.** It sets the target but does not turn the unit to face
     AI ship facing before combat (legacy EAWR-668).
+- The WTA-29 gate uses the type's `Attack_Category_Restrictions`, separately from its usable weapons' `Fire_Category_Restrictions`. No stock FoC space type authors the former. The retaliation interface rejects `SPECIAL_WEAPON` attackers before the ordinary WCC-25 exception. The ordinary suitability interface also requires attack reach or permitted formation diversion; a damage notification does not force a scan or extend a ship's reach (debug build; EUS-23 boundary re-read).
+- Space implementation boundary: scripted damage and stored delayed-area metadata have no attacker identity, so they cannot nominate a retaliation target. Current escort-hit notifications establish escort threat; historical per-attacker escort threat remains with general damage tracking (legacy EAWR-701). Nearby `Disregard_Space_Layer_For_Guard_Attack_Move` has no stock FoC author and therefore grants no ship diversion here.
+- Company category and priority metadata is published in the immutable combat world, so
+  an acquired company remains suitable through later ordinary scans (WCC-25, WSQ-45).
+  This target-only metadata does not give the company weapons or active combat state.
+- The whole-unit weapons-enabled interface gate is covered by the refusal contract;
+  no runtime mode producer currently writes that flag. Destroyed and individually
+  disabled guns use the existing weapon state. Runtime whole-unit disabling remains
+  at the existing mode-flag boundary.
+- The authored attacker extension is bound for Squadron purchase types. Container and
+  standalone-body tag consumers retain the movement coverage boundary (legacy EAWR-649)
+  recorded in the [squadron audit](squadrons.md); their ordinary UNIT_AI admission still applies.
 - **WTA-30** (debug build ETA-07; WCC-82) **Damage tracking**, every 30 frames per unit.
   - Each hit adds the hull and shield it took to the unit's window.
   - For an attacker that is a valid target and can be hit by projectiles, the hit also adds the
@@ -285,11 +331,14 @@ These rules run in the plan's Lua, on the TaskForce's thread, in this order. The
 executed by our host as scripts. What matters for this walk is what the engine calls answer.
 
 - **WTA-34** A structure attacker is ignored. Then, in order:
-  - `Respond_To_MinRange_Attacks`;
+  - `Respond_To_MinRange_Attacks`. The type query `Get_Min_Range` answers the type's authored
+    `Targeting_Min_Attack_Distance` (0 when absent), and `Get_Max_Range` its unscaled
+    `Targeting_Max_Attack_Distance` (debug build);
   - a crush divert;
   - the abilities, whichever applies first: `INVULNERABILITY` below 0.2 shield, `Defend` below 0.8
     shield, and `SENSOR_JAMMING` / `MISSILE_SHIELD` or `LASER_DEFENSE` against the attacker's
-    current projectile type.
+    current projectile type. `MISSILE_SHIELD` answers only for ROCKET and MPTL_ROCKET types, `LASER_DEFENSE`
+    also for MISSILE (WLD-09, WLD-10).
 - **WTA-35** A **deliberate** hit on a fighter by a fighter releases the fighter from its
   TaskForce, and it attacks its attacker (`BUZZ_DROIDS` first where the unit has it).
 - **WTA-36** Otherwise the unit **flees** when any of these holds:
@@ -299,7 +348,9 @@ executed by our host as scripts. What matters for this walk is what the engine c
   - it is below 0.7 and the attacker is good against it;
   - it is below 0.4 and it is not good against the attacker.
 
-  Pirates and Hutts never flee.
+  Pirates and Hutts never flee. "A hero" is the type query `Is_Hero`. It first takes the hero the type
+  builds: its first company unit, else its first squadron unit, else the type itself. It answers
+  true when that type authors `Is_Named_Hero` or `Is_Special_Weapon_In_Space` (debug build).
 - **WTA-37** A fleeing unit switches `Power_To_Weapons` off. Where a healer exists it goes to heal
   (none in M2). It releases from its TaskForce when the attacker is good against it, it is a hero,
   or its hull is below 0.33.
@@ -391,10 +442,10 @@ executed by our host as scripts. What matters for this walk is what the engine c
 | PL-01 to PL-45 | same (WTA-12 to WTA-17). PL-30 omits the difficulty scaling of the contrast, which is 1.0 on Normal (WTA-15) |
 | EX-10 to EX-52 | same (WTA-18 to WTA-20, WTA-31) |
 | DT-01 to DT-03 | same (WTA-30, WTA-33) |
-| DT-04 | **wrong**. `Get_Time_Till_Dead` and `Get_Rate_Of_Damage_Taken` are tracked (WTA-30, WTA-32), and the time till death counts destroyable hardpoints before the hull |
+| DT-04 | same (WTA-30, WTA-32) |
 | FT-01 to FT-11 | same (WTA-40) |
 | Fidelity list, "Abilities … are not simulated" | stale since the space ability implementation work (legacy EAWR-76): `Activate_Ability` switches the simulated abilities (FH-24, WTA-25) |
-| Fidelity list, "time-to-death is not estimated" | differs (WTA-32, G-05) |
+| Fidelity list, "time-to-death is not estimated" | removed |
 | The tactical AI host's `Enable_Attack_Positioning`, `Set_Targeting_Priorities` and `Lock_Current_Orders` (accepted, no effect) | differ (WTA-21 to WTA-24; G-01, G-03, G-04) |
 | AI-G03 difficulty "Normal" | same for M2; the other levels are missing (G-07) |
 | space-fighters FD-04 (squadron retaliation) | same; the unit-AI retaliation (WTA-29) is a separate rule, and applies to the squadron container too |
@@ -413,22 +464,22 @@ Ours:
 
 | Rule | Ours | Verdict |
 |---|---|---|
-| WTA-01, WTA-02 | `Engine` service order; freestore every tick (fidelity list) | same |
+| WTA-01, WTA-02 | `Engine` service order; the freestore's service tests run inside the execution service, before the build tasks (`Engine::before_service` execution hook) | same |
 | WTA-03 | Normal's sleep 0 | same for M2 |
 | WTA-04 to WTA-06 | `ai_perception.cpp` | same |
 | WTA-07 | AI fog off (SK-45) | same for M2 |
 | WTA-08 to WTA-20 | `ai_goals.cpp`, `ai_selection.cpp`, `ai_plans.cpp` | same |
 | WTA-21, WTA-22 | `Set_Targeting_Priorities` accepted with no effect: members keep their type's set | **missing (G-01)** |
-| WTA-23, WTA-26 to WTA-28 | `Enable_Attack_Positioning` accepted with no effect; no positioning | **missing (G-03)** |
+| WTA-23, WTA-26 to WTA-28 | `Enable_Attack_Positioning` sets the members' flag (`plan_bindings.cpp`); `Engine::service_attack_positioning` (`ai_taskforces.cpp`) positions each flagged unit every 150 frames on the perception grid. Project choices below; `Keep_Moving_In_Battle` is not read (no M2 type sets it) | same, with the project choices of G-03 |
 | WTA-24 | `Lock_Current_Orders` accepted with no effect: a released fleeing unit is at once free for the free store and for new plans | **missing (G-04)** |
 | WTA-25 | FH-24, AB-44 | same |
-| WTA-29 | squadrons retaliate (FD-04); a ship, a station or a squadron container does not retarget on damage | **missing (G-02)** |
-| WTA-30 | the AI engine keeps the threat lists (DT-01, DT-02); the rate is tracked only for units running `DEFEND`'s script; broader damage tracking is pending (legacy EAWR-701) | same (threat); differs rate, target stickiness and damage tracking (legacy EAWR-701) |
+| WTA-29 | `session_step_combat.cpp` groups accepted damage notifications and evaluates retaliation in a partitioned phase: UNIT_AI admission, craft-to-team attacker normalization, team leader routing, non-direct target assignment, suitability/priority/direct-order and retained-formation gates. FD-04 remains the craft service. Historical moving-escort threats await WTA-30 (legacy EAWR-701). | matches the ordinary space damage path; historical escort boundary remains |
+| WTA-30 | the AI engine keeps the threat lists (DT-01, DT-02); the simulation keeps the rate for every `DAMAGE_TRACKING` unit (WCC-82) (legacy EAWR-701) | same |
 | WTA-31 | `last_hits_` → `Unit_Damaged` | same |
-| WTA-32 | `Get_Time_Till_Dead` answers 1,000,000 and `Get_Rate_Of_Damage_Taken` answers 0, always | **differs (G-05)** |
+| WTA-32 | `Get_Rate_Of_Damage_Taken` and `Get_Time_Till_Dead` read the unit's damage tracking through the AI view (`host.hpp`, `tactical::time_to_death`) | same |
 | WTA-33 | DT-03 | same |
 | WTA-34, WTA-35, WTA-37 | scripts run as data | same |
-| WTA-36 | runs, but its time-till-death test never fires (G-05) | differs (G-05) |
+| WTA-36 | runs, with the time-till-death test of WTA-32 | same |
 | WTA-38, WTA-39 | `Get_Most_Defended_Position` answers nil, so a kite goes towards the nearest friendly | **differs (G-06)** |
 | WTA-40 | FT-01 to FT-11 | same |
 | WTA-41 to WTA-43 | data | same |
@@ -437,8 +488,8 @@ Ours:
 | WTA-46 | only the contrast multiplier and the goal-cycle sleep are read | missing for Easy and Hard (G-07) |
 | WTA-47 | `Get_Difficulty` answers "Normal" | same for M2 |
 
-Counts over the 47 rules: **same 32**, **differs 5** (WTA-30's rate, WTA-32, WTA-36, WTA-38,
-WTA-39), **missing 10** (WTA-21 to WTA-24 and WTA-26 to WTA-29, gaps G-01 to G-04; WTA-45 and WTA-46,
+Counts over the 47 rules: **same 40**, **differs 2** (WTA-38,
+WTA-39), **missing 5** (WTA-21, WTA-22 and WTA-24, gaps G-01 and G-04; WTA-45 and WTA-46,
 which no M2 input reaches).
 
 ### The gaps, by impact on the M2 battle
@@ -446,10 +497,10 @@ which no M2 input reaches).
 | Gap | Rules | What | Size |
 |---|---|---|---|
 | G-01 AI plan targeting priorities (legacy EAWR-729) | WTA-21, WTA-22 | `Set_Targeting_Priorities`. Plans give their units the `*_Attack_Move` and `Bomber_Hit_And_Run` sets as a runtime override. In the four common M2 plans, AI fighters, bombers and corvettes stop taking frigates and capitals as opportunity targets. AI frigates stop taking capitals. Every attack-moving AI ship ranks the target's shield generator first when it picks a hardpoint together with best-hardpoint priority and distance selection (legacy EAWR-702). | M |
-| G-02 unit-AI damage retaliation (legacy EAWR-730) | WTA-29 | Unit-AI retaliation. A damaged unit with no target, or whose attacker outranks its target, attacks the attacker non-direct: no turn, AI ship facing before combat (legacy EAWR-668). This applies to every `UNIT_AI` unit, human-owned ones included, but a ship in a formation never does (WMV-17, U-07). | S to M |
-| G-03 least-defended attack positioning (legacy EAWR-731) | WTA-23, WTA-26 to WTA-28 | Attack positioning. In `destroyunit`, `destroyunitminimal` and `flankplan`, each unit moves every 150 frames to the least-defended quadrant around its target when that point is beyond its attack distance, and otherwise at the target. | M |
+| G-02 historical escort-threat boundary (legacy EAWR-701) | WTA-29, WTA-30, WMV-17 | Ordinary space retaliation is applied, including self-threat and same-frame escort-hit extension. A moving escort's older per-attacker threat entries need the general damage-tracking interface; until then its formation conservatively refuses that diversion. | with damage tracking |
+| G-03 least-defended attack positioning (legacy EAWR-731) | WTA-23, WTA-26 to WTA-28 | **Done.** In `destroyunit`, `destroyunitminimal` and `flankplan`, each unit moves every 150 frames to the least-defended quadrant around its target when that point is beyond its attack distance, and otherwise at the target. Project choices (unverified, see the capture need): (1) the distance WTA-27 compares is the unit's planar distance to the ideal position (the target's own distance to a box centre is at most s x sqrt(2) <= 0.71 x the attack distance, so the literal reading never moves the unit); (2) the first positioning runs at the first AI service after the flag is switched on; later eligible work follows FC-20: an eligible hostile target advances the deadline by 150 frames, while no hostile target leaves it untouched; (3) the quadrant boxes are tried +x+y, -x+y, -x-y, +x-y; (4) the target point is the target's position (the AI's view has no hardpoint positions) and the attack order goes at the target, not a hardpoint; (5) the target's world-bounds extent is its collision box times `Scale_Factor` (the PL-02 placement box); (6) a team's attack distance is its first craft type's (an M2 squadron has one craft type), so no random draw; a type without `Targeting_Max_Attack_Distance` is not positioned; (7) the remake orders each unit separately, so the split from the formation is implicit; while a unit holds the point attack move of its last positioning, that positioning's target stays its attack target (the remake's point order keeps no object, U-05), and an attack the unit already has is not ordered again. | M |
 | G-04 locked fleeing-unit orders (legacy EAWR-732) | WTA-24 | `Lock_Current_Orders`. A kiting unit keeps its flee move, and the free store does not take it back until the move ends. | S |
-| G-05 damage-rate and time-to-death queries (legacy EAWR-733) | WTA-30, WTA-32, WTA-36 | Answer `Get_Time_Till_Dead` and `Get_Rate_Of_Damage_Taken` from the unit's damage tracking after the target stickiness and damage tracking work (legacy EAWR-701). A ship whose destroyable hardpoints are about to fall then flees. | S after the target stickiness and damage tracking work (legacy EAWR-701) |
+| G-05 damage-rate and time-to-death queries (legacy EAWR-733) | WTA-30, WTA-32, WTA-36 | **Done.** `Get_Time_Till_Dead` and `Get_Rate_Of_Damage_Taken` answer from the unit's damage tracking. A ship whose destroyable hardpoints are about to fall flees. | S |
 | G-06 best-defended kite position (legacy EAWR-734) | WTA-38, WTA-39 | `Get_Most_Defended_Position`: the kite point is the best-defended cell near the unit, not the nearest friendly. | S |
 | G-07 AI difficulty multipliers (legacy EAWR-735) | WTA-45, WTA-46 | Difficulty levels other than Normal: health, shield, damage, build-time and credit multipliers on the AI's objects, the 15 s Easy sleep, and AI production in skirmish context. | M (nice-to-have) |
 
@@ -491,11 +542,8 @@ which no M2 input reaches).
 - AI fighters and corvettes in a sweep or a destroy plan shoot at frigates and capitals that FoC's
   would pass by. The AI's capital ships go for the nearest hardpoint instead of the shield
   generator G-01, best-hardpoint priority and distance selection (legacy EAWR-702).
-- An idle ship that is shot does not answer the attacker until its own scan finds it (G-02).
-- AI ships in a destroy or flank plan all attack from where they arrive. FoC's work round to the
-  quiet side (G-03).
-- A badly damaged AI ship that should break off stays in the fight (G-05). One that does break
-  off is taken straight back by a plan (G-04), or flees towards the nearest friendly rather than
+- An idle UNIT_AI ship answers a suitable attacker on the damage frame, without turning or adding a destination. A ship with a retained move formation does not, including after move completion (WTA-29, WMV-17).
+- A badly damaged AI ship that does break off (G-05, done) is taken straight back by a plan (G-04), or flees towards the nearest friendly rather than
   the defended cell (G-06).
 
 ## Settled questions from the unverified sweep

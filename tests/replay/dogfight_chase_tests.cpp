@@ -144,15 +144,15 @@ void test_can_follow() {
     expect(behind && !behind.value(), "FD-05: a craft behind cannot be followed");
     const auto far = tactical::in_follow_cone(self, at(501, 0), yaw, pitch);
     expect(far && !far.value(), "FD-05: a craft beyond the attack distance cannot be followed");
-    expect(tactical::within_combat_cell_reach(at(200, 200), tactical::CombatCell{0, 0}),
+    expect(tactical::within_combat_cell_reach(at(200, 200), tactical::CombatCell{0, 0}, tactical::MapBox{}),
         "FD-03: the cell point itself is within reach");
-    expect(tactical::within_combat_cell_reach(at(400, 200), tactical::CombatCell{0, 0}),
+    expect(tactical::within_combat_cell_reach(at(400, 200), tactical::CombatCell{0, 0}, tactical::MapBox{}),
         "FD-03: 200 units off the point is within 283");
-    expect(!tactical::within_combat_cell_reach(at(484, 200), tactical::CombatCell{0, 0}),
+    expect(!tactical::within_combat_cell_reach(at(484, 200), tactical::CombatCell{0, 0}, tactical::MapBox{}),
         "FD-03: 284 units off the point is beyond 400 / sqrt(2)");
-    const auto odd = tactical::combat_cell_of(at(250, 450));
+    const auto odd = tactical::combat_cell_of(at(250, 450), tactical::MapBox{});
     expect(odd.y == 1 && odd.x == 0, "WU-25: odd rows are shifted by half a cell");
-    const auto odd_point = tactical::combat_cell_point(odd, units(7));
+    const auto odd_point = tactical::combat_cell_point(odd, units(7), tactical::MapBox{});
     expect(odd_point.x == units(400) && odd_point.y == units(600) && odd_point.z == units(7), "WU-25: an odd row's cell point");
 }
 
@@ -163,6 +163,7 @@ void test_can_follow() {
 [[nodiscard]] Session fight_to_the_end(const bool third) {
     Session fixture;
     fixture.setup.seed = seed;
+    fixture.box = {units(-2400), units(-2400)}; // WDF-05: the fight lies below the world origin
     fixture.setup.players = players();
     fixture.setup.units = {unit(10, trio_type, empire, at(-350, 0)), unit(11, craft_type, empire, at(-350, 0)),
         unit(12, craft_type, empire, at(-370, 20)), unit(13, craft_type, empire, at(-370, -20)),
@@ -213,7 +214,7 @@ void test_fight_end() {
         // FM-24 (#687): it holds the point of the idle cell it claims there, at most a cell's
         // half-diagonal (85 units) plus a frame's flight off.
         expect(settled->idle_cell.has_value()
-                && settled->anchor == tactical::idle_cell_point(*settled->idle_cell, settled->anchor.z),
+                && settled->anchor == tactical::idle_cell_point(*settled->idle_cell, settled->anchor.z, fixture.box),
             "C-24 (FM-24): it holds an idle cell's point");
         expect(distance({settled->anchor.x, settled->anchor.y, Fixed{}}, {leader_before->x, leader_before->y, Fixed{}}) < 100.0,
             "C-24 (FD-09): it holds the idle cell where its leader was when the fight ended");
@@ -242,6 +243,20 @@ void test_fight_end() {
 // snapshots list it as spinning, and spin_away_ended follows the SP-04/SP-06 service interval.
 void test_spin_in_dogfight() {
     auto fixture = fight_to_the_end(false);
+    // FS-18/20: put the attacking roster later in service registration so the
+    // dying enemy remains the chased recipient exercised by this spin control.
+    for (auto& unit : fixture.setup.units) if (unit.owner == empire) unit.entity_id += 20;
+    for (auto& squadron : fixture.setup.squadrons) if (squadron.container == 10) {
+        squadron.container = 30;
+        for (auto& member : squadron.members) member += 20;
+    }
+    for (auto& order : fixture.orders) if (order.unit == 10) order.unit = 30;
+    std::sort(fixture.setup.units.begin(), fixture.setup.units.end(), [](const auto& left, const auto& right) {
+        return left.entity_id < right.entity_id;
+    });
+    std::sort(fixture.setup.squadrons.begin(), fixture.setup.squadrons.end(), [](const auto& left, const auto& right) {
+        return left.container < right.container;
+    });
     fixture.motion.squadrons.craft[0].spin_away = tactical::SpinAwayProfile{units(1), units(2)};
     std::optional<std::uint64_t> destroyed;
     std::optional<std::uint64_t> started;
@@ -262,7 +277,7 @@ void test_spin_in_dogfight() {
             if (!death_roll) death_roll = craft.roll;
         }
         if (!destroyed) {
-            for (const auto id : {11U, 12U, 13U}) {
+            for (const auto id : {31U, 32U, 33U}) {
                 const auto craft = session.craft_state(id);
                 chased = chased || (craft && craft->chase == 21);
             }

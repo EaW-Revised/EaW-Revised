@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <limits>
 
 // CPU behavior is ported from the MIT-licensed alo-viewer revision
@@ -13,6 +14,20 @@ namespace eawr::presentation::particles {
 namespace {
 
 constexpr float pi=3.14159265358979323846F;
+
+class PhaseTimer final {
+public:
+    explicit PhaseTimer(double* destination) : destination_(destination) {
+        if (destination_ != nullptr) start_ = std::chrono::steady_clock::now();
+    }
+    ~PhaseTimer() {
+        if (destination_ != nullptr) *destination_ += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start_).count();
+    }
+private:
+    double* destination_;
+    std::chrono::steady_clock::time_point start_{};
+};
 
 Vec3 operator+(const Vec3 a,const Vec3 b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
 Vec3 operator-(const Vec3 a,const Vec3 b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
@@ -106,6 +121,44 @@ float sample_track(const ScalarTrack& track,const float time,const float fallbac
     const auto& previous=*(next-1);
     const auto width=next->time-previous.time;return width>0?mix(previous.value,next->value,(time-previous.time)/width,track.interpolation):next->value;
 }
+std::uint8_t color_byte(const float value){
+    return static_cast<std::uint8_t>(saturated(value)*255.0F);
+}
+std::array<std::uint8_t,32> legacy_color_cache(const ScalarTrack& track){
+    // PS-53: authored byte interpolation is quantized at each i/32 sample.
+    std::array<std::uint8_t,32> cache{};
+    for(std::size_t i=0;i<cache.size();++i){
+        const float age=static_cast<float>(i)/32.0F;
+        if(track.keys.empty()){cache[i]=255;continue;}
+        const auto next=std::find_if(track.keys.begin()+1,track.keys.end(),
+            [&](const ScalarKey& key){return age<=key.time;});
+        if(age<=track.keys.front().time||track.keys.size()==1){
+            cache[i]=color_byte(track.keys.front().value);continue;
+        }
+        if(next==track.keys.end()){cache[i]=color_byte(track.keys.back().value);continue;}
+        const auto& previous=*(next-1);
+        const float width=next->time-previous.time;
+        float weight=width>0?saturated((age-previous.time)/width):0.0F;
+        if(track.interpolation==Interpolation::step)weight=0.0F;
+        else if(track.interpolation==Interpolation::smooth)weight=(1.0F-std::cos(pi*weight))*0.5F;
+        const float first=static_cast<float>(color_byte(previous.value));
+        const float last=static_cast<float>(color_byte(next->value));
+        const float t=width>0?(age-previous.time)/width:1.0F;
+        const float value=first+(last-first)*(track.interpolation==Interpolation::linear?t:weight);
+        cache[i]=static_cast<std::uint8_t>(std::clamp(value,0.0F,255.0F));
+    }
+    return cache;
+}
+float cached_color(const std::array<std::uint8_t,32>& cache,const float relative){
+    // PS-53: the first lookup interval holds sample zero; the last holds 31/32.
+    const float position=saturated(relative)*31.0F;
+    const auto index=static_cast<std::size_t>(position);
+    if(index==0)return static_cast<float>(cache.front());
+    if(index>=31)return static_cast<float>(cache.back());
+    const float weight=position-static_cast<float>(index);
+    return std::trunc(static_cast<float>(cache[index])*(1.0F-weight)
+        +static_cast<float>(cache[index+1])*weight);
+}
 bool has(const EmitterDefinition& emitter,const std::uint32_t id){return std::find(emitter.modifier_ids.begin(),emitter.modifier_ids.end(),id)!=emitter.modifier_ids.end();}
 void saturating_add(std::size_t& target,const std::size_t value){
     target=value>std::numeric_limits<std::size_t>::max()-target?
@@ -190,6 +243,10 @@ CpuSystem::CpuSystem(SystemDefinition definition,const std::uint32_t seed,const 
             finite(emitter)&&emitter.particles_per_interval>0.0F&&emitter.spawn_interval>0.0F&&mesh_count_fits;
         emitters_.push_back({emitter.start_delay,valid&&(emitter.creator_id==34||mesh)&&
             (mesh||emitter.parent_emitter==EmitterDefinition::no_parent)});
+        if(valid&&definition_.version==AloParticleVersion::legacy_v1){
+            emitters_.back().color_cache={legacy_color_cache(emitter.red),legacy_color_cache(emitter.green),
+                legacy_color_cache(emitter.blue),legacy_color_cache(emitter.alpha)};
+        }
     }
     for(std::size_t index=0;index<definition_.emitters.size();++index){
         if(definition_.emitters[index].creator_id!=35)continue;
@@ -461,6 +518,9 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
     }
     if(emitter.inward_speed!=0.0F)particle.radial_velocity=normalized(particle.position-origin_)*emitter.inward_speed;
     particle.motion_velocity=particle.velocity+particle.radial_velocity;
+    // PS-51: total birth motion is available to kites even at zero residual age.
+    if(emitter.inherit_emitter_motion&&emitter.parent_emitter==EmitterDefinition::no_parent)
+        particle.motion_velocity+=emitter_velocity_*emitter.inherited_velocity_scale;
     particle.inherited_speed_limit=inherited_speed_limit_;
     particle.previous_position=particle.position;
     const float saved_time=time_;time_=spawn_time;
@@ -471,14 +531,17 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
 void CpuSystem::update_particle(Particle& particle,const EmitterDefinition& emitter,const float delta){
     const float lifetime=particle.death_time-particle.spawn_time;
     const float relative=lifetime>0?saturated((time_-particle.spawn_time)/lifetime):1.0F;
-    particle.color={sample_track(emitter.red,relative,1),sample_track(emitter.green,relative,1),sample_track(emitter.blue,relative,1),sample_track(emitter.alpha,relative,1)};
     if(definition_.version==AloParticleVersion::legacy_v1){
-        const auto channel=[](const float track,const float offset){
-            return std::clamp(std::trunc(saturated(track)*255)+offset,0.0F,255.0F)/255;
+        const auto& cache=emitters_[particle.emitter_index].color_cache;
+        const auto channel=[&](const std::size_t index,const float offset){
+            return std::clamp(cached_color(cache[index],relative)+offset,0.0F,255.0F)/255;
         };
-        particle.color={channel(particle.color.x,particle.color_offset.x),channel(particle.color.y,particle.color_offset.y),
-            channel(particle.color.z,particle.color_offset.z),channel(particle.color.w,particle.color_offset.w)};
-    }else if(has(emitter,53)){particle.color.x=saturated(particle.color.x+particle.color_offset.x);particle.color.y=saturated(particle.color.y+particle.color_offset.y);particle.color.z=saturated(particle.color.z+particle.color_offset.z);particle.color.w=saturated(particle.color.w+particle.color_offset.w);}
+        particle.color={channel(0,particle.color_offset.x),channel(1,particle.color_offset.y),
+            channel(2,particle.color_offset.z),channel(3,particle.color_offset.w)};
+    }else{
+        particle.color={sample_track(emitter.red,relative,1),sample_track(emitter.green,relative,1),sample_track(emitter.blue,relative,1),sample_track(emitter.alpha,relative,1)};
+        if(has(emitter,53)){particle.color.x=saturated(particle.color.x+particle.color_offset.x);particle.color.y=saturated(particle.color.y+particle.color_offset.y);particle.color.z=saturated(particle.color.z+particle.color_offset.z);particle.color.w=saturated(particle.color.w+particle.color_offset.w);}
+    }
     particle.size=std::max(0.0F,particle.size_scale*sample_track(emitter.size,relative,1));
     // PS-30: integer square root, including nonsquare authored frame counts.
     const int grid=std::max(1,static_cast<int>(std::sqrt(static_cast<double>(emitter.texture_size))));
@@ -753,6 +816,7 @@ void CpuSystem::follow(Particle& particle,const EmitterMotion& motion) const{
 }
 
 void CpuSystem::follow_emitter(){
+    PhaseTimer timer(measure_phases_ ? &phase_ms_[1] : nullptr);
     const EmitterMotion motion=emitter_motion();
     for(Particle& particle:particles_){
         if(definition_.emitters[particle.emitter_index].translater_id!=26||frozen(particle.emitter_index))continue;
@@ -782,6 +846,8 @@ void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats,const
     auto& events=events_;
     events.clear();
     std::size_t write{};
+    {
+    PhaseTimer timer(measure_phases_ ? &phase_ms_[1] : nullptr);
     for(std::size_t read=0;read<particles_.size();++read){auto particle=particles_[read];const auto& emitter=definition_.emitters[particle.emitter_index];
         if(frozen(particle.emitter_index)){particles_[write++]=particle;continue;}
         if(time_>=particle.death_time||(detail_.local>0.7F&&emitter.killer_id==21&&particle.position.z<0)){
@@ -797,6 +863,8 @@ void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats,const
         particles_[write++]=particle;
     }
     particles_.resize(write);
+    }
+    PhaseTimer emission_timer(measure_phases_ ? &phase_ms_[0] : nullptr);
     // Stable IDs remain ascending through compaction and append. Binary lookup
     // avoids rebuilding allocating hash nodes for every particle each update.
     const auto find_parent=[&](const std::uint64_t id){

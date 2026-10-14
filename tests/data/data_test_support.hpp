@@ -27,4 +27,7 @@ void override_contracts(const eawr::data::Catalog& catalog, const eawr::vfs::Vfs
 
 // tag_trace_tests.cpp
 void tag_trace_contracts();
+
+// retail_values_tests.cpp
+void retail_value_contracts();
 } // namespace eawr::tests::data_contracts

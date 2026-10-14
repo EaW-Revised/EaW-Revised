@@ -26,8 +26,11 @@ namespace path_bench {
     }
     auto filesystem = eawr::vfs::Vfs::mount(specs);
     if (!filesystem) return fail("the FoC vfs does not mount");
-    auto catalog = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
-    if (!catalog) return fail("the FoC catalog does not load");
+    auto catalog = eawr::data::load_catalog_strict(filesystem.value(), eawr::data::Profile::foc);
+    if (!catalog) return fail("the FoC catalog does not load: " + eawr::core::format_diagnostic(catalog.error()));
+    if (!catalog.value().health.clean()) {
+        std::cerr << "path_bench: catalog load: " << eawr::data::describe_load_health(catalog.value().health) << '\n';
+    }
     eawr::scene::VfsAssetCache cache(filesystem.value());
     const auto access = cache.access();
     eawr::units::LoadInput input;
@@ -43,6 +46,7 @@ namespace path_bench {
     if (!start) return fail("the M2 start does not build");
     auto content = skirmish::session_content(tables.value());
     if (!content) return fail("the session content does not build");
+    content.value().map_box = skirmish::map_box(inputs.value());
     Content out{start.value(), std::move(content).value(), skirmish::victory_rules(start.value(), tables.value()),
         skirmish::ai_setup(start.value(), inputs.value(), tables.value()), {}, {}};
     // SAE-01: this fixed-force path regression has no economy and retains its campaign goals.
@@ -170,7 +174,8 @@ void append_ship_rows(std::string& rows, const tactical::TacticalSession& world,
 [[nodiscard]] std::optional<Run> run(const Content& content, const std::string& selection, const std::size_t workers,
     const Options& options, Probe& probe, eawr::bench::Sampler* sampler) {
     auto world = tactical::TacticalSession::create(content.start.setup, content.content.sensors,
-        content.content.durability, content.content.motion, std::nullopt, content.content.combat, content.victory);
+        content.content.durability, content.content.motion, std::nullopt, content.content.combat, content.victory,
+        tactical::AbilityTable{}, tactical::EconomyRules{}, content.content.map_box);
     if (!world) {
         std::cerr << "path_bench: " << world.error().message << '\n';
         return std::nullopt;

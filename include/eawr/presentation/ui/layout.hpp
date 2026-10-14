@@ -111,6 +111,16 @@ struct ShellPlacement {
 [[nodiscard]] PixelRect shell_to_screen(const data::ui::ReferenceRect& rect, const ShellPlacement& shell,
                                         ReferencePoint shell_offset = {}) noexcept;
 
+// GHUD-S63: a command-bar text sits on its bone origin plus its authored `Text_Offset` (shell units, y up). `x` is
+// that point's screen x; `y_shift` is the screen-pixel move (y down) the offset's y adds to a baseline placed from
+// the bone origin, so a positive authored y raises the text.
+struct TextAnchor {
+    double x{};
+    double y_shift{};
+};
+[[nodiscard]] TextAnchor text_anchor(const data::ui::ReferenceRect& bone_origin, ReferencePoint text_offset,
+                                     const ShellPlacement& shell, ReferencePoint shell_offset = {}) noexcept;
+
 // A rect in `.rc` dialog units: top-left origin, y down.
 struct RcRect {
     std::int32_t x{};

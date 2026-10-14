@@ -7,8 +7,10 @@
 // Its fonts come from `--eawr-font-cache <dir>`, EAWR_FONT_CACHE or the
 // checkout's out/fonts, as for `--eawr-ui-gallery`.
 
+#include "battle_content.hpp"
 #include "map_mode_internal.hpp"
 #include "viewer_path.hpp"
+#include "ui/kit.hpp"
 
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
@@ -19,6 +21,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -197,7 +200,8 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
     hud = std::make_unique<TacticalHud>(*hud_options);
     // Over the 3D view on its own canvas layer. The host routes world input after
     // the GUI, so the HUD's hit mask keeps its clicks off the world (UI-I1).
-    if (!hud->build(*filesystem, catalog ? &*catalog : nullptr, context_name, host)) {
+    const auto& planet_context = options.campaign_planet ? options.campaign_planet : context_name;
+    if (!hud->build(*filesystem, catalog ? &*catalog : nullptr, planet_context, host)) {
         failure = "--eawr-hud tactical: " + hud->failure();
         hud.reset();
         return false;
@@ -208,16 +212,30 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
     // Quit Game drive the live session; scripted hud=<name> gestures find them by name.
     if (live_session) {
         LiveSessionView* live = live_session.get();
+        // BE-06: LAN currently has no replay-permission setting; assume allowed.
+        hud->set_replay_writer(live->multiplayer(), [live](std::string& error) { return live->finished_replay_bytes(error); });
+        hud->set_movie_handler([this] { if (space) set_movie_mode(!space->live_camera_movie()); });
         hud->set_time_handlers({[live] { live->press_pause(); }, [live] { live->press_fast_forward(); },
                                 [live] { live->resume(); }, [live] { live->quit(); }});
         if (battle) {
             TacticalHud* named = hud.get();
-            battle->set_hud_point([named](const std::string& name) { return named->control_point(name); });
+            // #1923: while the loading screen shows, its own Begin button is the "begin" a hand reaches.
+            battle->set_hud_point([named, this](const std::string& name) -> std::optional<std::array<float, 2>> {
+                if (name == "begin" && loading != nullptr && loading->shown()) {
+                    if (const auto rect = loading->begin_rect()) {
+                        const godot::Vector2 centre = rect->get_center();
+                        return std::array<float, 2>{centre.x, centre.y};
+                    }
+                }
+                return named->control_point(name);
+            });
             BattleInput* input = battle.get();
+            hud->set_special_weapon_handler([input, live] { input->special_weapon_click(*live); });
+            hud->set_beacon_handler([input, live] { input->beacon_click(*live); });
             hud->set_order_handler([input, live](const std::string_view name) {
                 const ui::OrderMode mode = name == "attack" ? ui::OrderMode::attack
                     : name == "attack_move" ? ui::OrderMode::attack_move : name == "guard" ? ui::OrderMode::guard
-                    : name == "move" ? ui::OrderMode::move : ui::OrderMode::none;
+                    : name == "waypoint" ? ui::OrderMode::waypoint : name == "move" ? ui::OrderMode::move : ui::OrderMode::none;
                 input->command_click(mode, name == "stop", *live, ui::CommandOrigin::hud_button);
             });
         }
@@ -302,7 +320,10 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
                 static_cast<void>(live->cancel_build(queue, entry_id));
             });
             production->set_pick([this, input](const std::size_t slot) {
-                if (live_session->reinforcement_allowed() && slot < pool_types.size()) input->begin_placement(pool_types[slot], *live_session);
+                if (!live_session->reinforcement_allowed() || input->placing() || slot >= pool_types.size()) return;
+                if (live_session->economy().campaign && (slot >= pool_tokens.size()
+                    || !live_session->select_campaign_reinforcement(pool_tokens[slot]))) return;
+                input->begin_placement(pool_types[slot], *live_session);
             });
             production->set_open([live] { live->reinforcement_feedback(LiveSessionView::ReinforcementFeedback::Kind::pane); });
             production->set_drag([input](const Vector2 point) { input->placement_move({point.x, point.y}); },
@@ -348,7 +369,7 @@ void MapMode::State::sync_cards() {
     if (live_session && live_session->order_input()) {
         const auto mode = live_session->order_input()->mode();
         hud->set_order_mode(mode == ui::OrderMode::attack ? "attack" : mode == ui::OrderMode::attack_move ? "attack_move"
-            : mode == ui::OrderMode::guard ? "guard" : mode == ui::OrderMode::move ? "move" : "");
+            : mode == ui::OrderMode::waypoint ? "waypoint" : mode == ui::OrderMode::guard ? "guard" : mode == ui::OrderMode::move ? "move" : "");
     }
     if (battle->production_station()) {
         if (EawrUnitCards* cards = hud->unit_cards(); cards && production_menu_cache.refresh(battle->build_buttons())) {
@@ -379,6 +400,33 @@ void MapMode::State::sync_cards() {
         hud->set_unit_cards(battle->card_layout(), battle->card_units());
     }
     hud->set_ability_bar(battle->ability_bar());
+    bool ability_hover{};
+    if (auto* abilities = hud->ability_buttons(); abilities && hud->shell_shown()) {
+        if (const auto index = abilities->hovered_button()) {
+            const auto& button = abilities->bar().buttons[*index];
+            if (!button.units.empty()) {
+                const auto& units = battle->card_units();
+                const auto source = std::find_if(units.begin(), units.end(), [&](const auto& unit) {
+                    return unit.id == button.units.front();
+                });
+                if (source != units.end()) {
+                    hud->set_ability_hover(source->type, button.ability, button.component);
+                    ability_hover = true;
+                }
+            }
+        }
+    }
+    if (hud->unit_cards() && !ability_hover) {
+        const auto hovered = hud->shell_shown() ? battle->encyclopedia_unit() : std::nullopt;
+        const auto identity = hovered ? std::optional(std::pair{hovered->entity, hovered->type}) : std::nullopt;
+        if (identity != encyclopedia_world_hover || encyclopedia_ability_hover) {
+            encyclopedia_world_hover = identity;
+            const auto name = hovered ? minimap_type_names.find(hovered->type) : minimap_type_names.end();
+            hud->set_world_hover(hovered && name != minimap_type_names.end()
+                ? std::optional(std::pair{static_cast<std::uint64_t>(hovered->entity), name->second}) : std::nullopt);
+        }
+    }
+    encyclopedia_ability_hover = ability_hover;
 }
 
 void MapMode::State::sync_production() {
@@ -390,11 +438,20 @@ void MapMode::State::sync_production() {
         return name != minimap_type_names.end() ? name->second : std::to_string(type);
     };
     auto& view = production_view;
+    view.garrison_progress.reset();
+    if (const auto* timer = live.local_garrison_timer()) {
+        view.garrison_progress = presentation::ui::hud_timer_progress(
+            static_cast<std::uint64_t>(std::max(0.0, live.presented_tick())), timer->due_frame, timer->duration_frames);
+    }
     view.notifications = live.reinforcement_notifications();
     view.notification_seconds = live.reinforcement_notification_tick() / sim::tactical::logical_frames_per_second;
     view.reinforcement_allowed = live.reinforcement_allowed() && overview_ui.tactical_shell;
+    view.tactical_population.clear();
     if (!view.reinforcement_allowed && battle->placing()) battle->cancel();
     if (const sim::tactical::EconomyView* economy = live.local_economy()) {
+        // WPR-04/41: only registered arrivals count; station capacity and queued
+        // purchases do not change the tactical ledger readout.
+        view.tactical_population = presentation::ui::population_text(economy->population, economy->population_cap);
         // Queue identities change only on purchase, cancellation or completion. Keep the
         // owned names and vectors between frames; progress and its short label update in place.
         if (production_queues != economy->queues) {
@@ -403,13 +460,13 @@ void MapMode::State::sync_production() {
             for (const auto& slot : presentation::ui::layout_build_queue(economy->queues, 0))
                 view.queue.push_back({slot.component, name_of(slot.type), slot.progress, slot.percent, slot.entry_id});
         }
-        const auto frame = static_cast<std::uint64_t>(std::max(0.0, live.presented_tick()));
+        const auto presented_frame = static_cast<std::uint64_t>(std::max(0.0, live.presented_tick()));
         for (auto& slot : view.queue) {
             if (!slot.percent) continue;
             const auto kind = slot.component < presentation::ui::queue_slot_count
                 ? sim::tactical::BuildQueue::upgrades : sim::tactical::BuildQueue::units;
             const auto& front = economy->queues[static_cast<std::size_t>(kind)].front();
-            const auto left = front.complete_frame > frame ? front.complete_frame - frame : 0U;
+            const auto left = front.complete_frame > presented_frame ? front.complete_frame - presented_frame : 0U;
             const auto remaining = std::min<std::uint64_t>(left, front.frames);
             slot.progress = front.frames > 0 ? static_cast<double>(front.frames - remaining) / static_cast<double>(front.frames) : 0.0;
             std::array<char, 4> label{};
@@ -419,8 +476,14 @@ void MapMode::State::sync_production() {
             slot.percent->assign(label.data(), static_cast<std::size_t>(formatted.ptr - label.data()) + 1);
         }
         view.credits = presentation::ui::credits_text(economy->credits);
+        view.tactical_tech = presentation::ui::TacticalTechView{
+            static_cast<std::int32_t>(economy->tech_level),
+            presentation::ui::hud_faction_from(live.local_faction()).value_or(presentation::ui::HudFaction::rebel),
+            true, true}; // HCB-61: this viewer hosts multiplayer-style space skirmishes.
         // PU-21: a type's population value from the station menus.
         const auto population_of = [&live](const sim::tactical::TypeId type) {
+            if (live.economy().campaign) for (const auto& [id, population] : live.economy().campaign_population)
+                if (id == type) return population;
             for (const sim::tactical::StationMenu& menu : live.economy().menus) {
                 if (const sim::tactical::BuildOption* option = menu.find(type)) return option->population;
             }
@@ -430,15 +493,19 @@ void MapMode::State::sync_production() {
         const std::size_t pending = live.pending_reinforcements();
         if (production_pool_cache.refresh(*economy) || pending != production_pool_pending) {
             production_pool_pending = pending;
-            const auto pool = presentation::ui::layout_pool(live.reinforcement_pool(),
-                economy->population + live.pending_reinforcement_population(), economy->population_cap, population_of);
+            const auto used = economy->population;
+            const auto pool = live.economy().campaign
+                ? presentation::ui::layout_campaign_pool(live.campaign_reinforcement_pool(), used, economy->population_cap)
+                : presentation::ui::layout_pool(live.reinforcement_pool(), used, economy->population_cap, population_of);
             view.pool.clear();
             pool_types.clear();
+            pool_tokens.clear();
             for (const auto& slot : pool) {
                 view.pool.push_back({slot.slot, name_of(slot.type), slot.text, slot.enabled});
                 pool_types.push_back(slot.type);
+                pool_tokens.push_back(slot.token);
             }
-            view.population = presentation::ui::population_text(economy->population + live.pending_reinforcement_population(),
+            view.population = presentation::ui::population_text(economy->population,
                                                                 economy->population_cap);
             view.rows = presentation::ui::pool_rows(pool.size());
         }
@@ -446,10 +513,47 @@ void MapMode::State::sync_production() {
     hud->production()->show(view, live.presented_tick() / sim::tactical::logical_frames_per_second);
 }
 
+void MapMode::State::set_movie_mode(const bool on) {
+    if (!space || !hud || !live_session) return;
+    if (on && live_session->phase() != LiveSessionView::Phase::running) return;
+    const auto& visible = live_session->visible_units();
+    if (!on || visible.empty()) {
+        space->live_camera_movie(false, {});
+        hud->set_movie_mode(false);
+        movie_subject = 0;
+        return;
+    }
+    auto subject = std::find_if(visible.begin(), visible.end(), [](const auto& unit) { return unit.own; });
+    if (subject == visible.end()) subject = visible.begin();
+    movie_subject = subject->entity;
+    const auto target = presentation::space::render_from_source({static_cast<float>(subject->position[0]),
+        static_cast<float>(subject->position[1]), static_cast<float>(subject->position[2])});
+    space->live_camera_movie(true, {target.x, target.y, target.z});
+    hud->set_movie_mode(space->live_camera_movie());
+    // Movie entry cancels an armed world order without issuing it.
+    if (battle) {
+        battle->command_click(ui::OrderMode::none, false, *live_session, ui::CommandOrigin::hud_button);
+        battle->cancel();
+    }
+}
+
 void MapMode::State::sync_overview_ui() {
     if (!live_session || !space) return;
     const std::string level = space->live_camera_overview();
     const auto is_level = [](const std::string& value) { return value == "off" || value == "overview" || value == "map"; };
+    bool movie = space->live_camera_movie();
+    if (movie) {
+        const auto& visible = live_session->visible_units();
+        const auto subject = std::find_if(visible.begin(), visible.end(),
+            [this](const auto& unit) { return unit.entity == movie_subject; });
+        if (subject == visible.end()) { set_movie_mode(false); movie = false; }
+        else {
+            const auto target = presentation::space::render_from_source({static_cast<float>(subject->position[0]),
+                static_cast<float>(subject->position[1]), static_cast<float>(subject->position[2])});
+            space->live_camera_movie(true, {target.x, target.y, target.z});
+        }
+    }
+    if (hud) hud->set_movie_mode(movie);
     const bool on = level == "overview" || level == "map";
     const bool first = overview_level.empty();
     if (level != overview_level) {
@@ -461,7 +565,8 @@ void MapMode::State::sync_overview_ui() {
         overview_level = level;
     }
     // V-5a: x1 and x2 hide the same set.
-    overview_ui = presentation::ui::overview_ui(on);
+    overview_ui = presentation::ui::overview_ui(on || movie);
+    if (movie) overview_ui.world_markers = false;
     if (hud) hud->set_overview(!overview_ui.tactical_shell);
     if (battle) {
         battle->set_overview_ui(overview_ui);
@@ -508,6 +613,9 @@ void MapMode::State::sync_minimap() {
     const auto& latest = live_session->battle_frame().latest;
     if (!bounds || !latest) return;
     const LiveSessionView& live = *live_session;
+    const auto local_radar = std::find_if(latest->players().begin(), latest->players().end(),
+        [&](const auto& player) { return player.player_id == live.local_player(); });
+    const bool display_enemies = local_radar != latest->players().end() && local_radar->radar_enabled;
     fill_type_names();
     if (!minimap_height) {
         // MM-09: the mean height of the lobby players' radar-visible units, taken once there are any
@@ -574,10 +682,10 @@ void MapMode::State::sync_minimap() {
                         (corner & 4U) ? mesh.bounds_max.z : mesh.bounds_min.z};
                     auto point = local;
                     if (frames && mesh.bone >= 0 && static_cast<std::size_t>(mesh.bone) < frames.value().size()) {
-                        const auto& frame = frames.value()[static_cast<std::size_t>(mesh.bone)];
-                        for (std::size_t row = 0; row < 3; ++row) point[row] = to_double(frame.rows[row][3])
-                            + to_double(frame.rows[row][0]) * local[0] + to_double(frame.rows[row][1]) * local[1]
-                            + to_double(frame.rows[row][2]) * local[2];
+                        const auto& bone_frame = frames.value()[static_cast<std::size_t>(mesh.bone)];
+                        for (std::size_t row = 0; row < 3; ++row) point[row] = to_double(bone_frame.rows[row][3])
+                            + to_double(bone_frame.rows[row][0]) * local[0] + to_double(bone_frame.rows[row][1]) * local[1]
+                            + to_double(bone_frame.rows[row][2]) * local[2];
                     }
                     // The model's fixed quarter turn precedes the instance's own yaw.
                     point = {-point[1] * scale, point[0] * scale, point[2] * scale};
@@ -623,6 +731,7 @@ void MapMode::State::sync_minimap() {
         auto blip = make_blip(entity, instance.type_id, instance.owner,
             sim::tactical::players_hostile(latest->players(), instance.owner, live.local_player()));
         blip.radar = live.radar_state(entity);
+        blip.radar.display_enemies = display_enemies;
         blip.in_nebula = instance.in_nebula;
         const auto pose = live.unit_frame(entity);
         blip.x = pose ? pose->position[0] : to_double(instance.fixed_transform.rows[0][3]);
@@ -630,10 +739,10 @@ void MapMode::State::sync_minimap() {
         blip.yaw_degrees = pose ? pose->yaw_degrees : 0.0;
         const auto* type = live.tables() ? live.tables()->find(blip.type) : nullptr;
         blip.radar.capital_layer = type && type->movement.space_layer == "Capital";
-        if (const auto* profile = live.economy().pads.point(instance.type_id)) {
+        if (const auto* pad_profile = live.economy().pads.point(instance.type_id)) {
             const auto capture_colour = [&](const sim::tactical::PlayerId owner) {
                 auto fallback = owner_colour(owner);
-                if (profile->community_property) {
+                if (pad_profile->community_property) {
                     const auto player = std::find_if(radar_players.begin(), radar_players.end(),
                         [owner](const auto& p) { return p.player == owner; });
                     // WNO-43: Neutral capture endpoints use faction colour, not community fallback.
@@ -655,14 +764,18 @@ void MapMode::State::sync_minimap() {
             blip.capture = presentation::ui::MinimapCaptureColour{raw_fog, capture_colour(instance.owner),
                 capture_colour(target), pad ? to_double(pad->state.progress) : 0.0};
         }
-        if (hud->minimap_looks(blip.type).draw_to_scale && space_population) {
-            const auto shown = std::lower_bound(visible.begin(), visible.end(), entity,
-                [](const auto* unit, const auto id) { return unit->entity < id; });
-            if (shown != visible.end() && (*shown)->entity == entity) if (const auto box = space_population->live_ship_box((*shown)->ship)) {
-                for (std::size_t row = 0; row < 2; ++row) for (std::size_t axis = 0; axis < 3; ++axis) {
-                    blip.world_half_size[row] += std::abs(to_double(box->model_to_world.rows[row][axis]))
-                        * static_cast<double>(box->high[axis] - box->low[axis]) * 0.5;
-                }
+        const auto shown = std::lower_bound(visible.begin(), visible.end(), entity,
+            [](const auto* unit, const auto id) { return unit->entity < id; });
+        const auto box = space_population && shown != visible.end() && (*shown)->entity == entity
+            ? space_population->live_ship_box((*shown)->ship) : std::nullopt;
+        // MM-17: current visibility and pick-box availability do not establish model absence.
+        if (space_population) if (const auto ship = live.composed_ship(entity)) {
+            blip.radar.model_present = space_population->live_ship_model_present(*ship);
+        }
+        if (hud->minimap_looks(blip.type).draw_to_scale && box) {
+            for (std::size_t row = 0; row < 2; ++row) for (std::size_t axis = 0; axis < 3; ++axis) {
+                blip.world_half_size[row] += std::abs(to_double(box->model_to_world.rows[row][axis]))
+                    * static_cast<double>(box->high[axis] - box->low[axis]) * 0.5;
             }
         }
         view.units.push_back(std::move(blip));
@@ -694,11 +807,22 @@ void MapMode::State::sync_minimap() {
         if (type == nullptr || type->team_type.empty()) continue;
         blip.type = type->team_type;
         blip.team = true; // MM-17: model-free team extent, independent of member spread
+        blip.radar.display_enemies = display_enemies;
         blip.x = pose->x;
         blip.y = pose->y;
         blip.yaw_degrees = pose->yaw_degrees;
         // WHZ-25/MM-12: the published team hazard state still controls nebula suppression.
         blip.in_nebula = container->in_nebula;
+        view.units.push_back(std::move(blip));
+    }
+    for (const auto& beacon : live.visible_beacons()) {
+        presentation::ui::MinimapUnit blip;
+        blip.id = std::numeric_limits<sim::EntityId>::max() / 16U + beacon.player;
+        blip.type = live.beacon_type(beacon.type);
+        blip.owner_colour = owner_colour(beacon.player);
+        blip.x = to_double(beacon.position.x);
+        blip.y = to_double(beacon.position.y);
+        blip.team = true; // authored icon scale, independent of a model bounding box.
         view.units.push_back(std::move(blip));
     }
     std::sort(view.units.begin(), view.units.end(), [](const auto& left, const auto& right) { return left.id < right.id; });
@@ -715,6 +839,7 @@ void MapMode::State::sync_minimap() {
         memory.capture_point = stored.capture_point;
         memory.previously_revealed = true;
         memory.retained_model = true;
+        memory.display_enemies = display_enemies;
         memory.x = stored.position[0];
         memory.y = stored.position[1];
         memory.yaw_degrees = stored.yaw;
@@ -734,17 +859,155 @@ void MapMode::State::sync_minimap() {
     hud->set_minimap(view);
 }
 
+void MapMode::State::open_loading_screen(Node3D& host, const assets::Map& map) {
+    loading = options.loading;
+    // BLD-12: a setup host waits for Begin; a campaign host releases its
+    // retained-child readiness after scene preparation instead.
+    if (loading != nullptr) {
+        live_options.begin_barrier = options.loading_begin_barrier && live_begin_barrier(static_cast<bool>(options.lan));
+        return;
+    }
+    if (!live_options.begin_barrier.value_or(live_options.real_time) || !filesystem) return;
+    auto* screen = memnew(EawrLoadingScreen);
+    EawrLoadingScreen::Options screen_options;
+    screen_options.content = options.content ? options.content
+        : std::make_shared<const BattleContent>(BattleContent{filesystem, catalog, profile, layers});
+    screen_options.map_path = options.map_path;
+    screen_options.context_name = map.context_name;
+    if (!screen->build(host, std::move(screen_options))) {
+        // The battle still starts, behind the HUD's own Begin (WBF-10), and the report says why.
+        loading_failure = screen->failure();
+        memdelete(screen);
+        return;
+    }
+    loading = screen;
+}
+
+void MapMode::State::load_report(const std::size_t stage, const std::uint64_t done, const std::uint64_t total) {
+    load_progress.report(stage, done, total);
+    if (loading != nullptr) loading->report(load_progress);
+}
+
+void MapMode::State::begin_battle() {
+    // BLD-13: Begin starts the battle and the screen leaves in the same frame.
+    if (live_session) live_session->begin();
+    if (loading != nullptr) loading->dismiss();
+    sync_battle_hud();
+}
+
 void MapMode::State::sync_battle_hud() {
-    if (!hud || !live_session) return;
+    if (!live_session) return;
+    const bool waiting = live_session->phase() == LiveSessionView::Phase::loading
+        || live_session->phase() == LiveSessionView::Phase::ready;
+    // A battle that began some other way (a time-panel press) takes the screen with it.
+    if (loading != nullptr && loading->shown() && !waiting) loading->dismiss();
+    if (!hud) return;
     const presentation::ui::TimeControls& time = live_session->time();
     const bool running = live_session->phase() == LiveSessionView::Phase::running;
-    hud->set_begin(live_session->phase() == LiveSessionView::Phase::ready);
-    hud->set_time_view({time.paused(), time.state() == presentation::ui::TimeState::fast_forward,
-                        running && time.pause_enabled(), running && time.fast_forward_enabled()});
     const auto& end = live_session->battle_end();
-    if (end && end->ended_frame) hud->set_results(live_session->results());
-    hud->set_battle(end ? std::optional<bool>(end->result == presentation::ui::BattleResult::victory) : std::nullopt,
-                    end && end->ended_frame);
+    const auto lan = live_session->lan_view();
+    const bool departure = live_session->multiplayer() && lan.phase == LanPhase::ended && lan.victory.has_value();
+    const bool results_shown = departure || (end && end->ended_frame);
+    if (battle) {
+        hud->set_special_weapon(battle->special_weapon_button(*live_session));
+        hud->set_beacon(battle->beacon_enabled(*live_session), battle->beacon_targeting());
+    }
+    hud->set_begin(live_session->phase() == LiveSessionView::Phase::ready && (loading == nullptr || !loading->shown()));
+    hud->set_time_view({time.paused(), time.state() == presentation::ui::TimeState::fast_forward,
+                        running && !live_session->multiplayer() && time.pause_enabled(), running && !live_session->multiplayer() && time.fast_forward_enabled(),
+                        live_session->multiplayer(), time.speed_step()});
+    if (live_session->multiplayer()) {
+        if (!lan_overlay) {
+            auto* layer = memnew(CanvasLayer); layer->set_layer(40); perf_host->add_child(layer);
+            lan_overlay = memnew(Control); layer->add_child(lan_overlay);
+            lan_incident = memnew(Control); lan_incident->set_theme(hud->hud()->get_theme());
+            lan_incident->set_oversampling_with_scale(CanvasItem::OVERSAMPLING_WITH_SCALE_ENABLED);
+            lan_incident->set_size(Vector2(1280, 96)); lan_incident->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            layer->add_child(lan_incident);
+            auto* incident = memnew(EawrUiLabel); incident->set_name("LanIncidentText"); incident->set_role("L_Text"); incident->set_wrap(true);
+            incident->set_position(Vector2(24, 20)); incident->set_size(Vector2(950, 72));
+            incident->set_mouse_filter(Control::MOUSE_FILTER_IGNORE); lan_incident->add_child(incident);
+            auto* retry = memnew(EawrUiButton); retry->set_name("LanIncidentSave"); retry->set_toggle_mode(true);
+            retry->set_text(String::utf8(hud->localized_text("TEXT_BUTTON_SAVE", "Save").c_str()));
+            retry->set_position(Vector2(1030, 20)); retry->set_size(Vector2(200, 36)); lan_incident->add_child(retry);
+            lan_overlay->set_size(Vector2(820, 280));
+            lan_overlay->set_oversampling_with_scale(CanvasItem::OVERSAMPLING_WITH_SCALE_ENABLED);
+            lan_overlay->set_theme(hud->hud()->get_theme());
+            lan_overlay->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            auto* lan_frame = memnew(EawrUiFrame); lan_frame->set_size(Vector2(820, 280));
+            lan_frame->set_mouse_filter(Control::MOUSE_FILTER_IGNORE); lan_overlay->add_child(lan_frame);
+            auto* message = memnew(EawrUiLabel); message->set_name("LanStatus");
+            message->set_role("L_Text"); message->set_wrap(true);
+            message->set_position(Vector2(24, 20)); message->set_size(Vector2(772, 190));
+            message->set_mouse_filter(Control::MOUSE_FILTER_IGNORE); lan_overlay->add_child(message);
+            auto* leave = memnew(EawrUiButton); leave->set_name("LanLeave");
+            leave->set_text(String::utf8(hud->localized_text("TEXT_BUTTON_DISCONNECT_QUIT", "Leave").c_str())); leave->set_toggle_mode(true);
+            leave->set_position(Vector2(280, 228)); leave->set_size(Vector2(200, 36));
+            lan_overlay->add_child(leave);
+            auto* rejoin = memnew(EawrUiButton); rejoin->set_name("LanRejoin");
+            rejoin->set_text("Rejoin"); rejoin->set_toggle_mode(true);
+            rejoin->set_position(Vector2(590, 228)); rejoin->set_size(Vector2(200, 36));
+            lan_overlay->add_child(rejoin);
+            auto* save = memnew(EawrUiButton); save->set_name("LanSaveDiagnostic");
+            save->set_text(String::utf8(hud->localized_text("TEXT_BUTTON_SAVE", "Save").c_str()));
+            save->set_toggle_mode(true); save->set_position(Vector2(24, 228)); save->set_size(Vector2(200, 36));
+            save->set_tooltip_text("Confirm automatically saved diagnostic details, or retry the local save"); lan_overlay->add_child(save);
+        }
+        auto view = live_session->lan_view();
+        if (lan_recovered_notice.advance(view, live_session->presented_tick(), time.paused()) && options.lan) {
+            options.lan->acknowledge_recovery(); view = live_session->lan_view();
+        }
+        const auto message = lan_message(view);
+        const bool can_leave = lan_escape_aborts(view);
+        auto* leave = static_cast<EawrUiButton*>(lan_overlay->get_node<Node>("LanLeave"));
+        leave->set_visible(can_leave);
+        if (leave->is_pressed()) {
+            leave->set_pressed_no_signal(false);
+            if (can_leave) live_session->quit();
+        }
+        auto* rejoin = static_cast<EawrUiButton*>(lan_overlay->get_node<Node>("LanRejoin"));
+        const bool recovered = view.recovery == LanRecovery::recovered;
+        rejoin->set_text(recovered ? String::utf8(hud->localized_text("TEXT_BUTTON_OK", "OK").c_str()) : String("Rejoin"));
+        rejoin->set_visible(view.rejoin_enabled || recovered);
+        if (rejoin->is_pressed()) {
+            rejoin->set_pressed_no_signal(false);
+            if (options.lan && recovered) options.lan->acknowledge_recovery();
+            else if (view.rejoin_enabled && options.lan) (void)options.lan->rejoin();
+        }
+        auto* save = static_cast<EawrUiButton*>(lan_overlay->get_node<Node>("LanSaveDiagnostic"));
+        save->set_visible(view.diagnostic_available);
+        if (save->is_pressed()) {
+            save->set_pressed_no_signal(false);
+            if (view.diagnostic_available && options.lan) (void)options.lan->save_diagnostic_details();
+        }
+        lan_overlay->set_visible(!message.empty() && !results_shown);
+        const auto incident_text = lan_incident_message(view);
+        lan_incident->set_visible(!incident_text.empty() && !results_shown && lan_gameplay_enabled(view));
+        static_cast<EawrUiLabel*>(lan_incident->get_node<Node>("LanIncidentText"))->set_text(String::utf8(incident_text.c_str()));
+        auto* retry = static_cast<EawrUiButton*>(lan_incident->get_node<Node>("LanIncidentSave"));
+        retry->set_visible(view.diagnostic_available);
+        if (retry->is_pressed()) {
+            retry->set_pressed_no_signal(false);
+            if (view.diagnostic_available && options.lan) (void)options.lan->save_diagnostic_details();
+        }
+        const auto size = perf_host->get_viewport()->get_visible_rect().size;
+        const float scale = std::min(size.x / 1280.0F, size.y / 720.0F);
+        lan_incident->set_scale(Vector2(scale, scale));
+        lan_overlay->set_position(((size - Vector2(820, 280) * scale) * 0.5F).round());
+        if (lan_overlay->get_scale() != Vector2(scale, scale)) {
+            lan_overlay->set_scale(Vector2(scale, scale));
+            refresh_text_oversampling(*lan_overlay);
+        }
+        static_cast<EawrUiLabel*>(lan_overlay->get_node<Node>("LanStatus"))->set_text(String::utf8(message.c_str()));
+
+    }
+    if (results_shown) {
+        auto results = live_session->results();
+        results.status_message = live_session->multiplayer() ? lan_message(lan) : std::string{};
+        hud->set_results(results);
+    }
+    hud->set_battle(departure ? lan.victory : end ? std::optional<bool>(end->result == presentation::ui::BattleResult::victory) : std::nullopt,
+                    departure || (end && end->ended_frame));
 }
 
 } // namespace eawr::presentation::godot_backend

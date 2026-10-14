@@ -44,6 +44,8 @@ std::vector<std::byte> byte_vector(const std::initializer_list<unsigned> values)
 void particle_texture_contracts();
 void upload_identity_contracts();
 void instance_resource_contracts();
+void gpu_memory_ledger_contracts();
+void texture_budget_contracts();
 
 // renderer_submission_tests.cpp
 void missing_asset_wait_contracts();

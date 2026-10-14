@@ -4,6 +4,7 @@
 // (drawing, the pointer, the commands) runs in the viewer (tests/presentation/renderer).
 
 #include "eawr/presentation/ui/production.hpp"
+#include "eawr/platform/campaign_tactical_view.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
@@ -221,6 +222,40 @@ void test_pool() {
     expect(ui::pool_rows(0) == 0 && ui::pool_rows(4) == 0 && ui::pool_rows(5) == 1 && ui::pool_rows(20) == 4
                && ui::pool_rows(40) == 4,
            "PU-67: rows past the first");
+}
+
+void test_campaign_pool() {
+    const std::vector<tactical::ReserveView> rows{{110, x_wing, 1, true},
+        {111, x_wing, 8, false}, {112, x_wing, 1, false}, {120, y_wing, 3, false}};
+    const auto slots = ui::layout_campaign_pool(rows, 24, 25);
+    expect(slots.size() == 2 && slots[0].type == x_wing && slots[0].count == 3
+        && slots[0].text == "x3" && slots[0].enabled && slots[0].token == 112,
+        "WGM-48/WR-09: same-type card chooses an unrestricted original-population identity");
+    expect(!slots[1].enabled && slots[1].token == 0, "original purchase population disables a full-cap reserve");
+    expect(!ui::layout_campaign_pool(rows, 26, 25)[0].enabled, "campaign admission above cap stays unavailable");
+    expect(ui::layout_campaign_pool(rows, 0, 25, 1).size() == 1, "campaign slots retain shared authored capacity");
+    ui::PoolLayoutCache cache;
+    tactical::EconomyView economy; economy.reserves = rows;
+    expect(cache.refresh(economy) && !cache.refresh(economy), "unchanged reserve facts reuse tray storage");
+    economy.reserves[2].restricted = true;
+    expect(cache.refresh(economy), "restriction publication changes rebuild even with unchanged pool version");
+
+    tactical::RetreatView retreat; retreat.player = 1; retreat.auto_resolve_allowed = true;
+    eawr::platform::CampaignTacticalView view; view.player = 1; view.retreat = &retreat;
+    expect(!view.solver_dialog_allowed(), "missing withdrawal policy never enables a solver dialog");
+    view.policy = eawr::platform::CampaignRetreatPolicy{99, false, false, false};
+    expect(view.solver_dialog_allowed(), "qualified local retreat and independent policy admit the dialog");
+    view.policy->story_prevented.reset();
+    expect(!view.solver_dialog_allowed(), "omitted outer-fleet/container prevention facts keep the solver dialog closed");
+    for (unsigned flag = 0; flag < 3; ++flag) {
+        view.policy = eawr::platform::CampaignRetreatPolicy{99, flag == 0, flag == 1, flag == 2};
+        expect(!view.solver_dialog_allowed(), "multiplayer, planet and story exclusions independently select direct retreat");
+    }
+    view.policy = eawr::platform::CampaignRetreatPolicy{99, false, false, false};
+    retreat.refusal = tactical::RetreatRefusal::prevention;
+    expect(!view.solver_dialog_allowed(), "retreat prevention also gates the solver dialog");
+    retreat.refusal = tactical::RetreatRefusal::none; retreat.auto_resolve_allowed = false;
+    expect(!view.solver_dialog_allowed(), "published native solver unavailability remains authoritative");
 }
 
 void test_texts() {
@@ -496,6 +531,7 @@ int main() {
     test_menu_limits();
     test_queue();
     test_pool();
+    test_campaign_pool();
     test_texts();
     test_pool_notifications();
     test_warmed_pool_allocations();

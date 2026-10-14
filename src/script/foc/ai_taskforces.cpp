@@ -1,18 +1,94 @@
 #include "ai_engine_internal.hpp"
+#include "galactic_ai_actions.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
-#include <chrono>
 #include <cmath>
-#include <cstdio>
+#include <stdexcept>
 
 namespace eawr::script::foc::ai {
 
 using namespace engine_internal;
 
+std::optional<galactic_ai::MovementReach> Engine::galactic_movement_reach(std::uint64_t plan_id) const {
+    const auto* retained = plan(plan_id); if (!retained) return {};
+    const auto* player = player_ai(retained->player); if (!player || !player->galactic) return {};
+    const Goal* goal{};
+    for (const auto& row : player->active) if (row.id == retained->goal) goal = &row;
+    if (!goal || goal->function >= player->functions.size()) return {};
+    const auto& reach = player->functions[goal->function].goal->reachability;
+    using Reach = galactic_ai::MovementReach;
+    for (const auto& [name, value] : {std::pair{"FRIENDLY_ONLY", Reach::friendly_only},
+        {"FRIENDLY_IGNORE_THREAT", Reach::friendly_ignore_threat}, {"ENEMY_DESTINATION", Reach::enemy_destination},
+        {"ENEMY_UNDEFENDED", Reach::enemy_undefended}, {"SINGLE_HOP_DISCONNECTED", Reach::single_hop_disconnected}, {"ANY", Reach::any}})
+        if (reach == name) return value;
+    return {};
+}
+
+std::vector<std::uint64_t> Engine::galactic_movement_requests() const {
+    std::vector<std::uint64_t> requests;
+    for (const auto& [id, block] : blocks_) { (void)id; if (block.galactic_request && block.kind == Block::Kind::move) requests.push_back(block.galactic_request); }
+    return requests;
+}
+core::Result<void> Engine::validate_galactic_movement(std::uint64_t request,
+    std::uint64_t plan_id, std::uint64_t taskforce_id, std::uint64_t block_id, bool registered) const {
+    const auto invalid = [&] { return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request,
+        "native movement plan/taskforce/block association is invalid")); };
+    if (!request || !plan_id || plan_id >= next_plan_id_ || !taskforce_id || taskforce_id >= next_taskforce_id_
+        || (block_id >> 32) < first_plan_instance || (block_id >> 32) >= next_instance_) return invalid();
+    if (!registered) return core::Result<void>::success(); // retired wrappers keep historical actor IDs
+    const auto* retained_plan = plan(plan_id); const auto* retained_force = taskforce(taskforce_id); const auto* retained_block = block(block_id);
+    if (!retained_plan || !retained_force || !retained_block || retained_plan->exited
+        || retained_force->plan != plan_id || retained_block->instance != retained_plan->instance
+        || retained_block->taskforce != taskforce_id || retained_block->kind != Block::Kind::move
+        || retained_block->galactic_request != request) return invalid();
+    return core::Result<void>::success();
+}
+
+// WGA-202/204; EGA-BX02 qualifies the stock override/default event vocabulary.
+// Handler delivery stays explicitly deferred until the scheduler has a
+// synchronous handler-only API. Do not service the frozen parent here.
+core::Result<void> Engine::deliver_galactic_space_conflict(std::uint64_t request,
+    std::uint64_t plan_id, std::uint64_t taskforce_id, std::uint64_t block_id, bool begin,
+    authoritative::ScriptScheduler& scripts) {
+    if (auto valid = validate_galactic_movement(request, plan_id, taskforce_id, block_id, true); !valid) return valid;
+    const auto& retained_plan = running_.at(plan_id);
+    const auto& retained_force = taskforces_.at(taskforce_id);
+    const auto* player = player_ai(retained_plan.player);
+    if (!player || !player->galactic) return core::Result<void>::failure(detail::make_error(
+        authoritative::codes::invalid_request, "space conflict listener requires a retained galactic plan"));
+    const auto slots = scripts.thread_slots(retained_plan.instance);
+    if (!slots || retained_force.thread < 0 || static_cast<std::size_t>(retained_force.thread) >= slots.value().size()
+        || !slots.value()[static_cast<std::size_t>(retained_force.thread)]) return core::Result<void>::success();
+    const std::string_view event = begin ? "Space_Conflict_Begin" : "Space_Conflict_End";
+    const auto defined = [&](const std::string& name) {
+        const auto value = scripts.read_global(retained_plan.instance, name);
+        return value && !value.value().has_value(); // same authored-handler convention as emit_call
+    };
+    std::string name = retained_force.name + "_" + std::string(event);
+    if (!defined(name)) {
+        name = "Default_" + std::string(event);
+        if (!defined(name)) return core::Result<void>::success();
+    }
+    ScriptEvent call; call.key = {scripts.completed_tick() + 1, producer_foc_engine, retained_plan.instance, sequence_};
+    call.target = retained_plan.instance; call.kind = ScriptEvent::Kind::call; call.name = std::move(name);
+    call.arguments.push_back(Value{authoritative::Handle{handle_taskforce, retained_force.id}});
+    // Retain in the native archive while the parent is frozen. Its next real
+    // barrier assigns the admitted scheduler tick/global sequence before commit.
+    events_.push_back(std::move(call));
+    mark_native_state_changed(); ++sequence_;
+    record(&retained_plan, retained_plan.player, "event", retained_force.name + "_" + std::string(event));
+    return core::Result<void>::success();
+}
+
 // ---- Unit orders (EX-30 stand-ins: the tactical orders the M2 simulation has) -----------------
 
 void Engine::issue_move(const Plan& plan, const ViewUnit& unit, const math::Vec3& destination) {
+    mark_native_state_changed();
+    // U-05: a new destination replaces the positioning point move's retained object.
+    if (auto retained = positioning_.find(unit.id); retained != positioning_.end())
+        retained->second.target = sim::invalid_entity_id;
     authoritative::ScriptCommand command;
     command.issuer = plan.instance;
     command.sequence = order_sequence_++;
@@ -27,6 +103,9 @@ void Engine::issue_move(const Plan& plan, const ViewUnit& unit, const math::Vec3
 
 void Engine::issue_order(const Plan& plan, const ViewUnit& unit, const std::string_view verb, const sim::EntityId target,
     const math::Vec3& destination) {
+    mark_native_state_changed();
+    if (auto retained = positioning_.find(unit.id); retained != positioning_.end())
+        retained->second.target = sim::invalid_entity_id;
     authoritative::ScriptCommand command;
     command.issuer = plan.instance;
     command.sequence = order_sequence_++;
@@ -44,6 +123,9 @@ void Engine::issue_order(const Plan& plan, const ViewUnit& unit, const std::stri
 }
 
 void Engine::issue_attack(const Plan& plan, const ViewUnit& unit, sim::EntityId target) {
+    mark_native_state_changed();
+    if (auto retained = positioning_.find(unit.id); retained != positioning_.end())
+        retained->second.target = sim::invalid_entity_id;
     authoritative::ScriptCommand command;
     command.issuer = plan.instance;
     command.sequence = order_sequence_++;
@@ -55,24 +137,38 @@ void Engine::issue_attack(const Plan& plan, const ViewUnit& unit, sim::EntityId 
 }
 
 // EX-30: the move list is the TaskForce's live members that move; with an object destination
-// and an attack, each attacks it; an attack-move or guard orders each to the object or point
+// and an attack, each squadron or TARGETING member attacks it (EX-31: unless refused) and any
+// other member moves to it; an attack-move or guard orders each to the object or point
 // (FH-40, space-orders OR-12, OR-14); otherwise each moves to the destination point (an object
 // destination's position at the order).
 void Engine::order_block(Block& block, const TaskForce& taskforce, const Plan& plan) {
+    mark_native_state_changed();
     const WorldView& view = *host_->view;
     const ViewUnit* destination = block.destination_object != 0 ? view.find(block.destination_object) : nullptr;
     if (block.destination_object != 0 && destination == nullptr) {
         block.finished = true;
         return;
     }
+    // EX-31 (#3087): an attack on an object hands squadrons and TARGETING movers the attack order.
+    // Attack admission refuses a non-hostile target (WHZ-51): a refused mover gets no order and
+    // leaves the block silently. The other movers move to the object.
+    const bool attack = destination != nullptr && block.order == Block::Order::attack;
+    const bool hostile = destination != nullptr && destination->owner != 0 && !host_->neutral(destination->owner)
+        && !host_->allied(destination->owner, plan.player);
+    bool refused = false;
     for (const sim::EntityId member : taskforce.units) {
         const ViewUnit* unit = view.find(member);
         if (unit == nullptr) continue;
         const AiType* type = host_->type(unit->type);
         if (type == nullptr || !type->locomotor) continue;
+        const bool attacker = type->squadron || type->targeting;
+        if (attack && attacker && !hostile) {
+            refused = true;
+            continue;
+        }
         block.movers.push_back(member);
         block.ordered_tick[member] = static_cast<std::uint64_t>(frame_);
-        if (destination != nullptr && block.order == Block::Order::attack) {
+        if (attack && attacker) {
             issue_attack(plan, *unit, destination->id);
         } else if (block.order == Block::Order::attack_move || block.order == Block::Order::guard) {
             issue_order(plan, *unit, block.order == Block::Order::attack_move ? verb_attack_move : verb_guard,
@@ -81,7 +177,9 @@ void Engine::order_block(Block& block, const TaskForce& taskforce, const Plan& p
             issue_move(plan, *unit, destination != nullptr ? destination->position : block.destination);
         }
     }
-    if (block.movers.empty()) block.finished = true;
+    // With every mover refused no movement ever ends, so the block waits (EX-31).
+    if (block.movers.empty() && refused) block.held_owner = static_cast<std::int64_t>(destination->owner);
+    else if (block.movers.empty()) block.finished = true;
 }
 
 // EX-35: the ambush point lies on the target's side (its facing, the left or right normal, or
@@ -134,6 +232,7 @@ std::optional<math::Vec3> Engine::ambush_point(const Block& block, const Plan& p
 }
 
 void Engine::order_ambush(Block& block, const TaskForce& taskforce, const Plan& plan, bool fresh) {
+    mark_native_state_changed();
     block.last_update = frame_;
     const auto destination = ambush_point(block, plan);
     if (!destination) {
@@ -161,6 +260,7 @@ void Engine::order_ambush(Block& block, const TaskForce& taskforce, const Plan& 
 
 // EX-40: an event handler is <TaskForce>_<Event> when the plan defines it, else Default_<Event>.
 void Engine::emit_call(const Plan& plan, const TaskForce& taskforce, std::string_view event, ValueList arguments) {
+    mark_native_state_changed();
     std::string name = taskforce.name + "_" + std::string(event);
     if (!defines_function(plan.instance, name)) {
         name = "Default_" + std::string(event);
@@ -179,6 +279,7 @@ void Engine::emit_call(const Plan& plan, const TaskForce& taskforce, std::string
 
 // EX-41: events queued on the TaskForce's thread (Unit_Damaged, Unit_Diversion_Finished).
 void Engine::emit_thread_event(const Plan& plan, const TaskForce& taskforce, std::string_view event, ValueList arguments) {
+    mark_native_state_changed();
     if (taskforce.thread < 0) return;
     std::string name = taskforce.name + "_" + std::string(event);
     if (!defines_function(plan.instance, name)) {
@@ -205,7 +306,28 @@ bool Engine::defines_function(std::uint64_t instance, const std::string& name) c
     return value && !value.value().has_value();
 }
 
+// WGA-163/314: task return is distinct from an owner-change or creation offer.
+void Engine::return_galactic_actor(const TaskForce& force, sim::EntityId actor) {
+    const auto* running = plan(force.plan);
+    auto* player = running ? player_ai(running->player) : nullptr;
+    auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
+    if (!player || !player->galactic || !actions || !actions->qualified_freestore_available()) return;
+    auto& store = actions->qualified_freestore();
+    if (!store.facts(actor)) return; // Actual loss already retired its actor facts.
+    const Goal* goal{};
+    for (const auto* rows : {&player->active, &player->proposed})
+        for (const auto& row : *rows) if (row.id == running->goal) goal = &row;
+    if (goal && goal->potential) store.release_object(player->player, actor, goal->potential->id);
+    else {
+        const auto offered = store.offer(player->player, actor);
+        if (!offered) throw std::runtime_error(offered.error().message);
+    }
+}
+
 void Engine::remove_member(TaskForce& taskforce, sim::EntityId unit) {
+    if (std::find(taskforce.units.begin(), taskforce.units.end(), unit) != taskforce.units.end())
+        return_galactic_actor(taskforce, unit);
+    mark_native_state_changed();
     taskforce.units.erase(std::remove(taskforce.units.begin(), taskforce.units.end(), unit), taskforce.units.end());
     taskforce.last_target.erase(unit);
 }
@@ -213,7 +335,8 @@ void Engine::remove_member(TaskForce& taskforce, sim::EntityId unit) {
 // DT-01, DT-02: every 30 frames each damaged object's attackers lose (maximum hull + maximum
 // shield) x AI_SpaceThreatDecayStep (engine default 1, FoC data 0.05) of threat and leave at 0; each hit
 // adds its projectile's damage to the attacker's threat (a craft's hit counts for its squadron).
-void Engine::track_damage(const tactical::TacticalSnapshot& snapshot) {
+void Engine::track_damage(const World& world) {
+    mark_native_state_changed();
     const WorldView& view = *host_->view;
     if (frame_ % 30 == 0) {
         for (auto iterator = threats_.begin(); iterator != threats_.end();) {
@@ -238,7 +361,7 @@ void Engine::track_damage(const tactical::TacticalSnapshot& snapshot) {
         }
     }
     last_hits_.clear();
-    for (const tactical::CombatEvent& event : snapshot.combat_events()) {
+    for (const tactical::CombatEvent& event : world.combat_events()) {
         if (event.kind != tactical::CombatEventKind::projectile_hit) continue;
         const ViewUnit* shooter = view.find(event.shooter);
         const ViewUnit* victim = view.find(event.target);
@@ -258,9 +381,170 @@ void Engine::track_damage(const tactical::TacticalSnapshot& snapshot) {
     }
 }
 
+namespace {
+
+// EX-46: the target a member's Target_In_Range reports. A squadron container has no weapon state;
+// the debug build raises the signal from the container when the team leader (the first live craft)
+// reaches its firing state, and answers with the formation's enemy attack target. Here the leader
+// must hold that target and have it within its weapon reach in the plane.
+sim::EntityId in_range_target(const Host& host, const ViewUnit& unit) {
+    if (!unit.container) return unit.attack_target;
+    const WorldView& view = *host.view;
+    const ViewUnit* leader = nullptr;
+    for (const sim::EntityId member : unit.members) {
+        if ((leader = view.find(member)) != nullptr) break;
+    }
+    const ViewUnit* target = view.find(unit.formation_target);
+    if (leader == nullptr || target == nullptr || leader->attack_target != target->id) return sim::invalid_entity_id;
+    if (host.allied(unit.owner, target->owner)) return sim::invalid_entity_id;
+    const AiType* type = host.type(leader->type);
+    if (type == nullptr) return sim::invalid_entity_id;
+    Real reach = type->max_attack_distance;
+    for (const AiWeapon& weapon : type->weapons) {
+        const bool destroyed = weapon.hardpoint < leader->hardpoint_destroyed.size() && leader->hardpoint_destroyed[weapon.hardpoint];
+        if (weapon.destroyable && destroyed) continue;
+        if (reach < weapon.range) reach = weapon.range;
+    }
+    const Real distance_squared = engine_internal::xy_distance_squared(leader->position,
+        engine_internal::fixed(target->position.x), engine_internal::fixed(target->position.y));
+    return distance_squared <= to_single(reach * reach) ? target->id : sim::invalid_entity_id;
+}
+
+} // namespace
+
+// ObjectScript_PointDefense (WLD-10, AI-32). The script updates once a second (its ServiceRate); the
+// remake spreads the objects over the second by entity ID (the phase is unverified). For a non-human
+// owner it switches LASER_DEFENSE on when the ability is ready and the deadly enemy of the object
+// fires a projectile type that laser defence affects. A human owner's autofire path never runs: the
+// ability does not support autofire.
+void Engine::service_point_defence() {
+    mark_native_state_changed();
+    const WorldView& view = *host_->view;
+    for (const ViewUnit& unit : view.units) {
+        const AiType* type = host_->type(unit.type);
+        if (type == nullptr || !type->point_defence_script || static_cast<std::uint64_t>(frame_) % 30 != unit.id % 30) continue;
+        if (player_ai(unit.owner) == nullptr) continue;
+        const auto ability = detail::ability_view(*host_, unit, tactical::AbilityKind::laser_defense);
+        if (!ability.has || !ability.ready || ability.active) continue;
+        const sim::EntityId deadly = deadly_enemy({unit.id});
+        const ViewUnit* enemy = deadly != 0 ? view.find(deadly) : nullptr;
+        if (enemy == nullptr) continue;
+        const auto projectiles = detail::projectile_types_of(*host_, *enemy);
+        if (std::none_of(projectiles.begin(), projectiles.end(), [&](const tactical::TypeId projectile) {
+                return detail::projectile_in_categories(*host_, projectile, detail::laser_defense_categories);
+            })) continue;
+        authoritative::ScriptCommand command;
+        command.sequence = order_sequence_++;
+        command.verb = std::string(verb_ability);
+        command.arguments.push_back(Value::number(numeric::LuaNumber(static_cast<std::int64_t>(unit.owner))));
+        command.arguments.push_back(Value{authoritative::Handle{handle_game_object, unit.id}});
+        command.arguments.push_back(Value::number(numeric::LuaNumber(static_cast<std::int64_t>(tactical::AbilityKind::laser_defense))));
+        command.arguments.push_back(Value::number(numeric::LuaNumber(static_cast<std::int64_t>(tactical::AbilityAction::activate))));
+        orders_.push_back(std::move(command));
+        record(nullptr, unit.owner, "ability", "point defence unit " + std::to_string(unit.id));
+    }
+}
+
+ThreatCenter local_threat_center(const std::vector<const ViewUnit*>& objects, Real radius_squared,
+    const std::function<Real(const ViewUnit&)>& power, const std::function<Real(Real, Real)>& draw) {
+    struct Center { Real x{}, y{}; };
+    if (objects.empty()) return {};
+    const std::size_t count = std::min<std::size_t>((objects.size() + 3) / 4, 10);
+    std::vector<Center> centers(count);
+    if (count == 1) {
+        for (const ViewUnit* object : objects) {
+            centers[0].x = to_single(centers[0].x + fixed(object->position.x));
+            centers[0].y = to_single(centers[0].y + fixed(object->position.y));
+        }
+        centers[0].x = to_single(centers[0].x / real(static_cast<std::int64_t>(objects.size())));
+        centers[0].y = to_single(centers[0].y / real(static_cast<std::int64_t>(objects.size())));
+    } else {
+        Real min_x = fixed(objects.front()->position.x), max_x = min_x;
+        Real min_y = fixed(objects.front()->position.y), max_y = min_y;
+        for (const ViewUnit* object : objects) {
+            min_x = std::min(min_x, fixed(object->position.x)); max_x = std::max(max_x, fixed(object->position.x));
+            min_y = std::min(min_y, fixed(object->position.y)); max_y = std::max(max_y, fixed(object->position.y));
+        }
+        for (Center& center : centers) {
+            const auto y = draw(min_y, max_y);
+            const auto x = draw(min_x, max_x);
+            center = {x, y};
+        }
+        for (std::size_t round = 0; round < 5; ++round) {
+            std::vector<Center> sums(count);
+            std::vector<std::int64_t> members(count);
+            for (const ViewUnit* object : objects) {
+                std::size_t nearest = 0;
+                Real distance = xy_distance_squared(object->position, centers[0].x, centers[0].y);
+                for (std::size_t index = 1; index < count; ++index) {
+                    const Real candidate = xy_distance_squared(object->position, centers[index].x, centers[index].y);
+                    if (candidate < distance) { nearest = index; distance = candidate; }
+                }
+                sums[nearest].x = to_single(sums[nearest].x + fixed(object->position.x));
+                sums[nearest].y = to_single(sums[nearest].y + fixed(object->position.y));
+                ++members[nearest];
+            }
+            for (std::size_t index = 0; index < count; ++index) if (members[index] != 0) {
+                centers[index] = {to_single(sums[index].x / real(members[index])), to_single(sums[index].y / real(members[index]))};
+            }
+        }
+    }
+    ThreatCenter best;
+    for (const Center& center : centers) {
+        Real threat{};
+        for (const ViewUnit* object : objects) {
+            if (xy_distance_squared(object->position, center.x, center.y) <= radius_squared)
+                threat = to_single(threat + power(*object));
+        }
+        if (threat >= best.threat) best = {center.x, center.y, threat};
+    }
+    return best;
+}
+
+// WHE-67/68: the IG-2000 object script collects nearby shielded enemies (or its deadly enemy),
+// then casts at the strongest local threat center. Like AI-32, entity IDs spread the one-second
+// service over frames; the original object's relative service phase remains unverified.
+void Engine::service_corrupt_systems() {
+    mark_native_state_changed();
+    const WorldView& view = *host_->view;
+    for (const ViewUnit& source : view.units) {
+        const AiType* type = host_->type(source.type);
+        if (type == nullptr || !type->corrupt_systems_script || player_ai(source.owner) == nullptr || host_->neutral(source.owner)
+            || static_cast<std::uint64_t>(frame_) % 30 != source.id % 30) continue;
+        const auto ability = detail::ability_view(*host_, source, tactical::AbilityKind::corrupt_systems);
+        if (!ability.has || !ability.ready) continue;
+        const sim::EntityId deadly = deadly_enemy({source.id});
+        std::vector<const ViewUnit*> nearby;
+        for (const ViewUnit& enemy : view.units) {
+            if (host_->allied(source.owner, enemy.owner) || host_->neutral(enemy.owner) || enemy.id == source.id
+                || (enemy.hull && *enemy.hull <= math::Fixed{})
+                || (enemy.shield <= Real{} && enemy.id != deadly)) continue;
+            if (xy_distance_squared(enemy.position, fixed(source.position.x), fixed(source.position.y)) > real(700 * 700)) continue;
+            nearby.push_back(&enemy);
+        }
+        if (nearby.empty()) continue;
+        // WHE-68: coordinate draws are ordered Y then X in the shared random stream.
+        const ThreatCenter destination = local_threat_center(nearby, real(300 * 300),
+            [&](const ViewUnit& enemy) { return power(enemy); },
+            [&](Real low, Real high) { return sync_.uniform(low, high); });
+        if (destination.threat <= real(1000)) continue;
+        authoritative::ScriptCommand command;
+        command.sequence = order_sequence_++;
+        command.verb = std::string(verb_ability);
+        command.arguments = {Value::number(real(static_cast<std::int64_t>(source.owner))),
+            Value{authoritative::Handle{handle_game_object, source.id}},
+            Value::number(real(static_cast<std::int64_t>(tactical::AbilityKind::corrupt_systems))),
+            Value::number(real(static_cast<std::int64_t>(tactical::AbilityAction::activate))),
+            Value::number(destination.x), Value::number(destination.y), Value::number(Real{})};
+        orders_.push_back(std::move(command));
+        record(nullptr, source.owner, "ability", "corrupt systems unit " + std::to_string(source.id));
+    }
+}
+
 // EX-42 to EX-45: member deaths, No_Units_Remaining, Target_In_Range and Unit_Damaged, and the
 // plan target's destruction, in plan then TaskForce order.
 void Engine::service_taskforce_events() {
+    mark_native_state_changed();
     const WorldView& view = *host_->view;
     for (auto& [plan_id, plan] : running_) {
         if (plan.exited) continue;
@@ -284,10 +568,13 @@ void Engine::service_taskforce_events() {
                 }
                 if (!pending) emit_call(plan, tf, "No_Units_Remaining", {});
             }
+            // Galactic roster deaths/no-units above use the completed persistent
+            // identities. Tactical target-range and ability signals have no parent analogue.
+            if (host_->ai_world && host_->ai_world->goal_mode() == "GALACTIC") continue;
             for (const sim::EntityId member : tf.units) {
                 const ViewUnit* unit = view.find(member);
                 if (unit == nullptr) continue;
-                const sim::EntityId target = unit->attack_target;
+                const sim::EntityId target = in_range_target(*host_, *unit);
                 sim::EntityId& last = tf.last_target[member];
                 if (target != 0 && target != last && view.find(target) != nullptr) {
                     ValueList arguments;
@@ -298,8 +585,14 @@ void Engine::service_taskforce_events() {
                 last = target;
             }
             // WHZ-23/24, WAB-34: environmental signals already name a craft's container.
-            if (host_->snapshot) {
-                for (const auto& signal : host_->snapshot->events()) {
+            if (host_->ai_world) {
+                for (const auto& signal : host_->ai_world->events()) {
+                    // WSW-34/37: the retained source's online signal drives Empire retries.
+                    if (signal.kind == tactical::EventKind::special_weapon_ready) {
+                        if (view.find(signal.unit) != nullptr && std::find(tf.units.begin(), tf.units.end(), signal.unit) != tf.units.end())
+                            emit_call(plan, tf, "Special_Weapon_Online", {Value{authoritative::Handle{handle_game_object, signal.unit}}});
+                        continue;
+                    }
                     if (signal.kind != tactical::EventKind::ability_cancelled && signal.kind != tactical::EventKind::ability_ready) continue;
                     if (view.find(signal.unit) == nullptr || std::find(tf.units.begin(), tf.units.end(), signal.unit) == tf.units.end()) continue;
                     const auto kind = static_cast<tactical::AbilityKind>(signal.sequence);
@@ -351,11 +644,141 @@ void Engine::service_taskforce_events() {
     }
 }
 
+// WTA-28: of the four boxes of half-size `half` around the target point, one per quadrant, the one
+// with the least enemy force for `player` (PG-05, unnormalised); a tie keeps the first. The ideal
+// position is its centre at height 0. Project choices (walk tactical-ai, G-03): the quadrants are
+// tried in the order +x+y, -x+y, -x-y, +x-y, and the target point is the target's position (the
+// AI's view has no hardpoint positions, so an aimed hardpoint is not used).
+math::Vec3 Engine::ideal_attack_position(const ViewUnit& target, const Real half, const tactical::PlayerId player) const {
+    static constexpr std::array<std::array<std::int64_t, 2>, 4> quadrants{{{1, 1}, {-1, 1}, {-1, -1}, {1, -1}}};
+    const Real x = fixed(target.position.x);
+    const Real y = fixed(target.position.y);
+    const Real size = to_single(half * real(2));
+    std::optional<Real> least;
+    Real best_x = x;
+    Real best_y = y;
+    for (const auto& [sx, sy] : quadrants) {
+        const Real cx = to_single(x + real(sx) * half);
+        const Real cy = to_single(y + real(sy) * half);
+        const Rect box{to_single(cx - half), to_single(cy - half), size, size};
+        const Real force = grid_.force(*host_, *host_->view, box, ~std::uint64_t{0}, player, false, Real{}, 0);
+        if (!least || force < *least) {
+            least = force;
+            best_x = cx;
+            best_y = cy;
+        }
+    }
+    math::Vec3 ideal{};
+    if (auto value = numeric::to_fixed(best_x)) ideal.x = value.value();
+    if (auto value = numeric::to_fixed(best_y)) ideal.y = value.value();
+    return ideal;
+}
+
+// WTA-26, WTA-27: every 150 frames a flagged unit with a locomotor whose formation has an attack
+// target, other than a team attacking a team, is positioned. Farther than its attack distance
+// from the ideal position (WTA-28) it moves there as an attack move; otherwise it attacks the
+// target. The remake orders each unit on its own, so the split from the formation is implicit.
+// Project choices (walk tactical-ai, G-03): the distance compared is the unit's planar distance
+// to the ideal position; a team's attack distance is its first craft type's (M2 squadrons have
+// one craft type); a type without an attack distance is not positioned; while a unit holds the
+// point attack move of its last positioning, that positioning's target stays its formation's
+// attack target (the remake's point order keeps no object); an attack the unit already has is
+// not ordered again.
+void Engine::service_attack_positioning() {
+    const WorldView& view = *host_->view;
+    for (auto entry = positioning_.begin(); entry != positioning_.end();) {
+        const ViewUnit* unit = view.find(entry->first);
+        if (unit == nullptr) {
+            entry = positioning_.erase(entry);
+            continue;
+        }
+        AttackPositioning& state = entry->second;
+        ++entry;
+        if (frame_ < state.next) continue;
+        const AiType* type = host_->type(unit->type);
+        if (type == nullptr || !type->locomotor) continue;
+        // The formation's attack target: an attack, or an attack move on an object (U-05); a
+        // squadron's formation target; else the target of its last positioning move.
+        sim::EntityId target_id{};
+        const bool attacking = unit->order == tactical::OrderKind::attack || unit->order == tactical::OrderKind::attack_move;
+        if (attacking && unit->order_target != sim::invalid_entity_id) {
+            target_id = unit->order_target;
+        } else if (unit->container && unit->formation_target != sim::invalid_entity_id) {
+            target_id = unit->formation_target;
+        } else if (unit->order == tactical::OrderKind::attack_move) {
+            target_id = state.target;
+        }
+        state.target = sim::invalid_entity_id;
+        const ViewUnit* target = target_id != sim::invalid_entity_id && target_id != unit->id ? view.find(target_id) : nullptr;
+        if (target == nullptr || (unit->container && (target->container || target->craft))) continue;
+        // U-05/WHZ-51: expose an object only while hostile, without erasing the retained
+        // destination. A later ownership change can expose the same live object again.
+        if (target->owner == 0 || host_->neutral(unit->owner) || host_->neutral(target->owner)
+            || host_->allied(unit->owner, target->owner)) {
+            state.target = target_id;
+            continue;
+        }
+        // FC-20: no formation attack target leaves the expired deadline untouched.
+        state.next = frame_ + attack_positioning_frames;
+        Real distance = type->max_attack_distance;
+        if (type->squadron) {
+            if (const AiType* craft = host_->type(type->squadron_unit)) distance = craft->max_attack_distance;
+        }
+        if (!(Real{} < distance)) continue;
+        Real extent{};
+        if (const AiType* target_type = host_->type(target->type)) {
+            extent = square_root(to_single(target_type->bounds_half_x * target_type->bounds_half_x
+                + target_type->bounds_half_y * target_type->bounds_half_y));
+        }
+        const Real reach = to_single(distance / real(2));
+        const Real half = extent < reach ? extent : reach;
+        const math::Vec3 ideal = ideal_attack_position(*target, half, unit->owner);
+        Plan issuer;
+        issuer.instance = state.instance;
+        issuer.player = unit->owner;
+        const auto running = plan_of_instance_.find(state.instance);
+        const Plan* source = running != plan_of_instance_.end() ? plan(running->second) : nullptr;
+        if (to_single(distance * distance) < xy_distance_squared(unit->position, fixed(ideal.x), fixed(ideal.y))) {
+            issue_order(issuer, *unit, verb_attack_move, sim::invalid_entity_id, ideal);
+            state.target = target->id;
+            record(source, unit->owner, "attack_position", "unit " + std::to_string(unit->id) + " target "
+                + std::to_string(target->id) + " at " + show(fixed(ideal.x)) + " " + show(fixed(ideal.y)));
+        } else if (unit->order != tactical::OrderKind::attack || unit->order_target != target->id) {
+            issue_attack(issuer, *unit, target->id);
+            record(source, unit->owner, "attack_position", "unit " + std::to_string(unit->id) + " attacks "
+                + std::to_string(target->id));
+        }
+    }
+}
+
 // EX-31 to EX-34: movement blocks finish when every mover has stopped (a point, or an object
 // that is not a visible enemy), when an attacked object dies, or when the TaskForce is empty.
 void Engine::service_blocks() {
+    mark_native_state_changed();
     const WorldView& view = *host_->view;
     for (auto& [id, block] : blocks_) {
+        if (block.kind == Block::Kind::galactic_invade && block.galactic_request) {
+            const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host_->galactic_execution.get());
+            const auto* invasion = actions ? actions->invasion_status(block.galactic_request) : nullptr;
+            if (!invasion) throw std::runtime_error("invasion block lost its retained explicit queue owner");
+            block.finished = invasion->state == sim::galactic::GalacticSession::NativeInvasion::State::completed;
+            block.result = invasion->success; continue;
+        }
+        if ((host_->ai_world && host_->ai_world->goal_mode() == "GALACTIC" && block.kind == Block::Kind::move)
+            || block.galactic_request || block.kind == Block::Kind::galactic_land
+            || block.kind == Block::Kind::galactic_launch || block.kind == Block::Kind::galactic_form) {
+            // Native movement advances only when Lua stages its completion poll.
+            // Tactical Motion flags and two-frame delays cannot finish it.
+            if (block.galactic_request) {
+                auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
+                if (!actions || !actions->movements().contains(block.galactic_request))
+                    throw std::runtime_error("galactic block requires its retained native request owner");
+                const auto& status = actions->movements().at(block.galactic_request);
+                if (block.finished != status.finished || block.galactic_actor != status.actor) mark_native_state_changed();
+                block.finished = status.finished; block.galactic_actor = status.actor;
+            }
+            continue;
+        }
         if (block.finished || block.kind == Block::Kind::produce || block.kind == Block::Kind::reinforce) continue;
         if (block.kind == Block::Kind::ambush) {
             const auto tf = taskforces_.find(block.taskforce);
@@ -408,6 +831,11 @@ void Engine::service_blocks() {
         }
         const bool enemy_object = destination != nullptr && destination->owner != 0 &&
             !host_->neutral(destination->owner) && !host_->allied(destination->owner, plan->second.player);
+        if (block.held_owner >= 0) {
+            // EX-31 (#3087): every mover was refused; an ownership change to a non-enemy ends the wait.
+            if (static_cast<std::int64_t>(destination->owner) != block.held_owner && !enemy_object) block.finished = true;
+            continue;
+        }
         std::vector<sim::EntityId> arrived;
         for (const sim::EntityId mover : block.movers) {
             const ViewUnit* unit = view.find(mover);

@@ -40,12 +40,15 @@ struct PoolLayoutCache {
     std::uint32_t population{};
     std::uint32_t cap{};
     std::uint64_t rebuilds{};
-    [[nodiscard]] bool refresh(const sim::tactical::EconomyView& economy) noexcept {
-        if (version && *version == economy.pool_version && population == economy.population && cap == economy.population_cap)
+    std::vector<sim::tactical::ReserveView> reserves;
+    [[nodiscard]] bool refresh(const sim::tactical::EconomyView& economy) {
+        if (version && *version == economy.pool_version && population == economy.population && cap == economy.population_cap
+            && reserves == economy.reserves)
             return false;
         version = economy.pool_version;
         population = economy.population;
         cap = economy.population_cap;
+        reserves = economy.reserves;
         ++rebuilds;
         return true;
     }
@@ -189,6 +192,7 @@ struct PoolSlot {
     std::uint32_t count{};
     std::string text;                   // PU-66: "x<n>" when more than one, else empty
     bool enabled{};                     // PU-66: its population fits the room
+    std::uint64_t token{};              // WGM-48: exact displayed campaign identity, zero for ordinary pools
 };
 
 // WR-08/EUS-14: count by definition identity, then traverse TypeId keys up to `slots`.
@@ -197,6 +201,9 @@ struct PoolSlot {
 [[nodiscard]] std::vector<PoolSlot> layout_pool(std::span<const sim::tactical::TypeId> pool,
     std::uint32_t population, std::uint32_t population_cap,
     const std::function<std::uint32_t(sim::tactical::TypeId)>& population_of,
+    std::size_t slots = pool_columns * pool_row_limit);
+[[nodiscard]] std::vector<PoolSlot> layout_campaign_pool(std::span<const sim::tactical::ReserveView> reserves,
+    std::uint32_t population, std::uint32_t population_cap,
     std::size_t slots = pool_columns * pool_row_limit);
 
 // PU-67: the pane's extra rows past the first for `filled` slots (0 to 4).

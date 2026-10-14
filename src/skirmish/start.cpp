@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -138,6 +139,25 @@ using sim::tactical::PlayerId;
     return value.value();
 }
 
+// A squadron slot offset turned about the vertical axis by `yaw_degrees` counter-clockwise.
+[[nodiscard]] core::Result<Vec3> turn_offset(const Vec3 offset, const Fixed yaw_degrees) {
+    using Out = core::Result<Vec3>;
+    auto full_turn = Fixed::from_integer(360);
+    if (!full_turn) return Out::failure(full_turn.error());
+    auto turns = sim::math::divide(yaw_degrees, full_turn.value());
+    if (!turns) return Out::failure(turns.error());
+    const Fixed angle = sim::math::wrap_turn(turns.value());
+    const Fixed sine = sim::math::sin_turn(angle);
+    const Fixed cosine = sim::math::cos_turn(angle);
+    Fixed x_cos, y_sin, x_sin, y_cos, x, y;
+    if (!sim::math::try_multiply(offset.x, cosine, x_cos) || !sim::math::try_multiply(offset.y, sine, y_sin)
+        || !sim::math::try_multiply(offset.x, sine, x_sin) || !sim::math::try_multiply(offset.y, cosine, y_cos)
+        || !sim::math::try_subtract(x_cos, y_sin, x) || !sim::math::try_add(x_sin, y_cos, y)) {
+        return Out::failure(fixture_error("squadron offset turn overflows"));
+    }
+    return Out::success(Vec3{x, y, offset.z});
+}
+
 [[nodiscard]] std::optional<Fixed> times(const Fixed value, const std::int32_t count) {
     auto factor = Fixed::from_integer(count);
     if (!factor) return std::nullopt;
@@ -195,7 +215,10 @@ using sim::tactical::PlayerId;
 
 class Builder final {
 public:
-    Builder(const Fixture& fixture, const StartInputs& inputs) : fixture_(fixture), inputs_(inputs) {}
+    Builder(const Fixture& fixture, const StartInputs& inputs,
+        const std::optional<std::span<const SelectedStartUnit>> selected = std::nullopt, bool map_first = false,
+        const MapObjectFilter& map_filter = {})
+        : fixture_(fixture), inputs_(inputs), selected_(selected), map_first_(map_first), map_filter_(map_filter) {}
 
     Result run() {
         if (inputs_.tables == nullptr) return Result::failure(detail::error(diagnostic_codes::input, "no unit tables"));
@@ -213,19 +236,65 @@ public:
         }
         start_.setup.seed = fixture_.seed;
         start_.setup.content_identity = units::content_identity(*inputs_.tables);
+        start_.identity = match_identity(inputs_);
         const auto policy = replay_policy(start_.match);
         if (policy.disabled_flags() != 0) start_.setup.match_policy = policy;
-        for (std::size_t index = 0; index < fixture_.slots.size(); ++index) {
-            if (auto added = add_lobby_player(index); !added) return Result::failure(added.error());
+        if (fixture_.placed) {
+            // MAT-08: a demo map has no lobby; its placed forces are the start.
+            if (!fixture_.slots.empty()) return Result::failure(fixture_error("a placed-forces start has no lobby slots"));
+            if (auto added = add_placed_forces(); !added) return Result::failure(added.error());
+            // MAT-15: the attract returns a destroyed force's type to its owner's pool; the setup carries
+            // the loaded content's Build_Tab_Space_Units set, so the session reads no content tags.
+            sim::tactical::AttractPoolReturn pool;
+            for (const auto& type : inputs_.tables->units) {
+                if (type.build_tab_space_units) pool.types.push_back(type_id(type.id));
+            }
+            std::sort(pool.types.begin(), pool.types.end());
+            pool.types.erase(std::unique(pool.types.begin(), pool.types.end()), pool.types.end());
+            start_.setup.attract_pool = std::move(pool);
+        } else {
+            for (std::size_t index = 0; index < fixture_.slots.size(); ++index) {
+                if (auto added = add_lobby_player(index); !added) return Result::failure(added.error());
+            }
         }
-        if (auto added = add_map_objects(); !added) return Result::failure(added.error());
+        if (map_first_ && !fixture_.placed) if (auto added = add_map_objects(); !added) return Result::failure(added.error());
+        if (selected_ && !fixture_.placed) for (const auto& selection : *selected_) {
+            if (selection.role != UnitRole::station && selection.role != UnitRole::fleet)
+                return Result::failure(fixture_error("selected force needs a station or fleet role"));
+            if (std::none_of(fixture_.slots.begin(), fixture_.slots.end(), [&](const auto& slot) { return slot.slot == selection.owner; }))
+                return Result::failure(fixture_error("selected force owner is not an installed player"));
+            const auto marker = std::find_if(inputs_.placements.begin(), inputs_.placements.end(),
+                [&](const auto& value) { return value.record == selection.marker && value.marker; });
+            if (marker == inputs_.placements.end()) return Result::failure(fixture_error("selected force marker is missing"));
+            if (auto added = add_unit(selection.owner, selection.type, selection.role, *marker); !added)
+                return Result::failure(added.error());
+            start_.units.back().state.garrison_enabled = selection.garrison_enabled;
+            const auto use = selection.role == UnitRole::station ? MarkerUse::station : MarkerUse::spawn;
+            if (std::none_of(start_.markers.begin(), start_.markers.end(), [&](const auto& value) {
+                return value.record == selection.marker && value.player == selection.owner && value.use == use;
+            })) start_.markers.push_back({selection.marker, marker->type, selection.owner, use,
+                *marker->position, marker->orientation_degrees->z});
+        }
+        if (!map_first_ && !fixture_.placed) if (auto added = add_map_objects(); !added) return Result::failure(added.error());
         if (auto added = add_squadron_craft(); !added) return Result::failure(added.error());
         if (auto placed = place_companies(); !placed) return Result::failure(placed.error());
+        if (!selected_ && !fixture_.placed) if (auto added = add_special_weapons(); !added) return Result::failure(added.error());
         if (auto checked = check_ids(); !checked) return Result::failure(checked.error());
         add_launches();
         for (const auto& player : start_.players) start_.setup.players.push_back(player.player);
+        for (const auto& player : start_.players) {
+            if (!player.player.commandable() || fixture_.placed) continue;
+            const auto faction = std::find_if(inputs_.factions.begin(), inputs_.factions.end(),
+                [&](const auto& value) { return detail::iequals(value.name, player.faction); });
+            if (faction == inputs_.factions.end() || !faction->beacon) continue;
+            auto rule = *faction->beacon;
+            rule.player = player.player.player_id;
+            start_.setup.beacon_rules.push_back(rule);
+        }
+        std::sort(start_.setup.beacon_rules.begin(), start_.setup.beacon_rules.end(),
+            [](const auto& left, const auto& right) { return left.player < right.player; });
         for (const auto& unit : start_.units) start_.setup.units.push_back(unit.state);
-        if (start_.match.free_starting_units) for (const auto& player : start_.players) {
+        if (!selected_ && start_.match.free_starting_units) for (const auto& player : start_.players) {
             if (!player.lobby) continue;
             const auto forces = std::find_if(inputs_.faction_forces.begin(), inputs_.faction_forces.end(),
                 [&](const auto& value) { return detail::iequals(value.faction, player.faction); });
@@ -258,7 +327,7 @@ private:
         }
         std::uint32_t within_team = 0;
         for (std::size_t other = 0; other < index; ++other) {
-            if (fixture_.slots[other].team == slot.team
+            if (!selected_ && fixture_.slots[other].team == slot.team
                 && !detail::iequals(fixture_.slots[other].faction, slot.faction)) {
                 return Void::failure(fixture_error("Players sharing a team must choose the same faction."));
             }
@@ -272,6 +341,12 @@ private:
         player.lobby = true;
         player.human = slot.human;
         player.start_side = prefix.substr(0, prefix.size() - 1);
+        if (selected_) {
+            // Conflict selection supplies its own authored markers; lobby spawn/capacity and
+            // multiplayer economy/colour policy do not constrain this placement seam.
+            start_.players.push_back(std::move(player));
+            return Void::success();
+        }
         // SK-30, SK-31 (#530): MP_Default_Credits, the station's income, its build queue and
         // the faction's population cap (economy_rules builds them for the session).
         if (inputs_.tables != nullptr) {
@@ -295,7 +370,7 @@ private:
         const auto bases = markers_named(inputs_, prefix + "Base_Position_Marker");
         const auto spawns = markers_named(inputs_, prefix + "Spawn_Point_Marker");
         // WSS-54/61: spawns are per player; station markers belong to the team.
-        if (spawns.size() <= within_team || (start_.match.pre_built_base && stations.empty())) {
+        if (spawns.size() <= within_team || (!selected_ && start_.match.pre_built_base && stations.empty())) {
             return Void::failure(fixture_error(player.start_side + " has too few "
                 + (spawns.size() <= within_team ? "spawn" : "station") + " markers for slot "
                 + std::to_string(slot.slot)));
@@ -322,7 +397,7 @@ private:
             }
         }
 
-        if (start_.match.pre_built_base && within_team == 0) {
+        if (!selected_ && start_.match.pre_built_base && within_team == 0) {
             // WSS-61: replace each authored station once, owned by the team's first player.
             for (const auto* station_marker : stations) {
                 const MapPlacement& station = *station_marker;
@@ -340,7 +415,7 @@ private:
         }
 
         std::vector<std::pair<std::string, UnitRole>> companies;
-        if (start_.match.free_starting_units) {
+        if (!selected_ && start_.match.free_starting_units) {
             const auto forces = std::find_if(inputs_.faction_forces.begin(), inputs_.faction_forces.end(),
                 [&](const FactionForces& entry) { return detail::iequals(entry.faction, slot.faction); });
             if (forces == inputs_.faction_forces.end()) {
@@ -348,7 +423,7 @@ private:
             }
             for (const auto& type : forces->space_skirmish_default_forces) companies.emplace_back(type, UnitRole::free_unit);
         }
-        for (const auto& type : slot.fleet) companies.emplace_back(type, UnitRole::fleet);
+        if (!selected_) for (const auto& type : slot.fleet) companies.emplace_back(type, UnitRole::fleet);
         for (const auto& [type, role] : companies) {
             // RG-05: skip unsupported default and authored fleet ships; keep the station.
             if (roster_disabled_types().contains(type_id(type))) continue;
@@ -393,6 +468,70 @@ private:
         return Void::success();
     }
 
+    core::Result<void> add_special_weapons() {
+        using Void = core::Result<void>;
+        // WSW-01: shared source transform, or the origin without a candidate.
+        // WSW-44: multiple-candidate ordering remains unverified; retain the
+        // project's reverse creation order until a covering capture resolves it.
+        Vec3 position{};
+        Fixed yaw{};
+        sim::math::Quat rotation = sim::math::identity_quat();
+        std::uint32_t record{};
+        for (auto it = inputs_.placements.rbegin(); it != inputs_.placements.rend(); ++it) {
+            if (!it->special_weapon_source) continue;
+            // WSW-01: scenic source backdrops may carry pitch/roll; their
+            // authored position and yaw remain valid in the tactical setup.
+            auto transform = pose(*it, false);
+            if (!transform) return Void::failure(transform.error());
+            auto raised = layer_position(transform.value().first, it->layer_z_adjust);
+            if (!raised) return Void::failure(raised.error());
+            position = raised.value(); yaw = transform.value().second; record = it->record;
+            // WSW-01: copy the object's facing Rz(yaw) Ry(pitch) Rx(roll).
+            // The backdrop's model quarter-turn is not part of that facing.
+            const auto yaw_part = yaw_rotation(it->orientation_degrees->z);
+            const auto pitch_part = yaw_rotation(it->orientation_degrees->y);
+            const auto roll_part = yaw_rotation(it->orientation_degrees->x);
+            if (!yaw_part) return Void::failure(yaw_part.error());
+            if (!pitch_part) return Void::failure(pitch_part.error());
+            if (!roll_part) return Void::failure(roll_part.error());
+            const auto pitch = pitch_part.value();
+            const auto roll = roll_part.value();
+            auto combined = sim::math::compose(yaw_part.value(), {Fixed{}, pitch.z, Fixed{}, pitch.w});
+            if (!combined) return Void::failure(combined.error());
+            combined = sim::math::compose(combined.value(), {roll.z, Fixed{}, Fixed{}, roll.w});
+            if (!combined) return Void::failure(combined.error());
+            auto normalized = sim::math::normalize(combined.value());
+            if (!normalized) return Void::failure(normalized.error());
+            rotation = normalized.value();
+            break;
+        }
+        for (const auto& player : start_.players) {
+            const auto faction = std::find_if(inputs_.factions.begin(), inputs_.factions.end(),
+                [&](const auto& entry) { return detail::iequals(entry.name, player.faction); });
+            if (faction == inputs_.factions.end() || !faction->playable) continue;
+            std::set<std::uint32_t> registered;
+            for (const auto& name : faction->standalone_special_weapons) {
+                if (name.empty()) continue;
+                const auto* type = inputs_.tables->find(name);
+                if (!type || !type->planetary_weapon || type->planetary_weapon->index >= 2
+                    || !registered.insert(type->planetary_weapon->index).second)
+                    return Void::failure(fixture_error("unsupported standalone special weapon mapping: " + name));
+                const auto raised = layer_position(position, type->movement.layer_z_adjust);
+                if (!raised) return Void::failure(raised.error());
+                StartUnit unit;
+                unit.state.entity_id = static_cast<sim::EntityId>(start_.units.size() + 1U);
+                unit.state.type_id = type_id(type->id);
+                unit.state.owner = player.player.player_id;
+                unit.state.position = raised.value();
+                unit.state.rotation = rotation;
+                unit.type = type->id; unit.role = UnitRole::special_weapon;
+                unit.record = record; unit.yaw_degrees = yaw;
+                start_.units.push_back(std::move(unit));
+            }
+        }
+        return Void::success();
+    }
+
     // SK-04: every placement that is neither a marker nor a SpaceProp is a map object. Retail
     // then remaps its ownership by faction (docs/skirmish-start.md, retail map-object
     // ownership): after the lobby, one player per non-playable faction that
@@ -414,6 +553,14 @@ private:
         for (std::size_t index = 0; index < factions.size(); ++index) {
             const StartFaction& faction = factions[index];
             if (faction.playable || !faction.multiplayer_player) continue;
+            if (map_first_) {
+                const auto installed = std::find_if(start_.players.begin(), start_.players.end(), [&](const auto& p) { return detail::iequals(p.faction, faction.name); });
+                if (installed != start_.players.end()) {
+                    player_of[index] = installed->player.player_id;
+                    if (faction.neutral && !neutral_player) neutral_player = installed->player.player_id;
+                    continue;
+                }
+            }
             StartPlayer player;
             player.player = {next_player, next_team, faction_id(faction.name), 0U};
             player.faction = faction.name;
@@ -451,9 +598,17 @@ private:
                     owner = neutral_player;
                 }
             }
+            if (!owner && map_first_ && (faction.playable || map_filter_)) {
+                const auto installed = std::find_if(start_.players.begin(), start_.players.end(), [&](const auto& p) { return detail::iequals(p.faction, faction.name); });
+                if (installed != start_.players.end()) owner = installed->player.player_id;
+            }
             if (!owner) {
                 start_.removed.push_back({placement.record, placement.type, faction.name,
                     faction.playable ? Removal::playable_faction : Removal::no_player});
+                continue;
+            }
+            if (map_filter_ && !map_filter_(placement, faction, *owner)) {
+                start_.removed.push_back({placement.record, placement.type, faction.name, Removal::campaign_branch});
                 continue;
             }
             auto where = pose(placement, false);
@@ -482,6 +637,98 @@ private:
         return Void::success();
     }
 
+    // MAT-08, MAT-09: a demo map's start. Every map-object placement stays, owned by the player of the
+    // editor faction its owner index names (an index past the factions is the Neutral one); no
+    // ownership deletion applies. A player exists for each faction that owns something; its id is its
+    // editor index plus one and it stands on its own team. A type in the unit tables becomes a force
+    // (role placed), anything else an inert map object as in a lobby start. The retail pass that
+    // deleted playable factions' objects belongs to the lobby start only.
+    core::Result<void> add_placed_forces() {
+        using Void = core::Result<void>;
+        const auto& factions = inputs_.factions;
+        const auto neutral_faction = std::find_if(factions.begin(), factions.end(),
+            [](const StartFaction& faction) { return faction.neutral; });
+        struct Kept final {
+            const MapPlacement* placement{};
+            std::size_t faction{};
+        };
+        std::vector<Kept> kept;
+        std::set<std::size_t> owners;
+        for (const auto& placement : inputs_.placements) {
+            if (!is_map_object_placement(placement)) continue;
+            if (!placement.owner_index || *placement.owner_index < 0) {
+                return Void::failure(fixture_error("map object record " + std::to_string(placement.record) + " ("
+                    + placement.type + ") has no owner index"));
+            }
+            auto index = static_cast<std::size_t>(*placement.owner_index);
+            if (index >= factions.size()) {
+                if (neutral_faction == factions.end()) {
+                    return Void::failure(fixture_error("map object record " + std::to_string(placement.record) + " ("
+                        + placement.type + ") has an owner index past the factions and there is no neutral faction"));
+                }
+                index = static_cast<std::size_t>(neutral_faction - factions.begin());
+            }
+            if (roster_disabled_types().contains(type_id(placement.type))) {
+                start_.removed.push_back({placement.record, placement.type, factions[index].name, Removal::roster_gated});
+                continue;
+            }
+            kept.push_back({&placement, index});
+            owners.insert(index);
+        }
+        std::map<std::size_t, PlayerId> player_of;
+        for (const std::size_t index : owners) {
+            const auto controlled = std::find_if(fixture_.placed->ai.begin(), fixture_.placed->ai.end(),
+                [&](const auto& entry) { return entry.first == index; });
+            StartPlayer player;
+            const auto id = static_cast<PlayerId>(index + 1U);
+            if (id > sim::tactical::max_players) return Void::failure(fixture_error("too many editor players"));
+            player.player = {id, static_cast<std::uint32_t>(index), faction_id(factions[index].name),
+                controlled == fixture_.placed->ai.end() ? 0U : sim::tactical::player_flag_commandable};
+            player.faction = factions[index].name;
+            player.owner_index = static_cast<std::int32_t>(index);
+            if (controlled != fixture_.placed->ai.end()) player.ai_player_type = controlled->second;
+            player_of[index] = id;
+            start_.players.push_back(std::move(player));
+        }
+        for (const Kept& entry : kept) {
+            const MapPlacement& placement = *entry.placement;
+            auto where = pose(placement, false);
+            if (!where) return Void::failure(where.error());
+            auto rotation = yaw_rotation(where.value().second);
+            if (!rotation) return Void::failure(rotation.error());
+            auto position = layer_position(where.value().first, placement.layer_z_adjust); // SK-05
+            if (!position) return Void::failure(position.error());
+            StartUnit unit;
+            unit.state.entity_id = static_cast<sim::EntityId>(start_.units.size() + 1U);
+            unit.state.type_id = type_id(placement.type);
+            unit.state.owner = player_of.at(entry.faction);
+            unit.state.position = position.value();
+            unit.state.rotation = rotation.value();
+            unit.type = placement.type;
+            unit.role = UnitRole::map_object;
+            unit.record = placement.record;
+            unit.yaw_degrees = where.value().second;
+            if (placement.orientation_degrees->x != Fixed{} || placement.orientation_degrees->y != Fixed{}) {
+                unit.dropped_orientation_degrees = placement.orientation_degrees;
+            }
+            unit.victory_relevant = placement.victory_relevant;
+            unit.hull = placement.hull;
+            if (const auto* type = inputs_.tables->find(placement.type)) {
+                unit.role = UnitRole::placed;
+                unit.combat_power = combat_power(*inputs_.tables, *type);
+                unit.reveal_range = units::sensor_range(*type);
+                unit.victory_relevant = type->victory_relevant;
+                unit.hull = type->hull;
+                if (type->kind == units::UnitKind::squadron) {
+                    unit.craft = static_cast<std::uint32_t>(type->members.size());
+                    if (!type->members.empty()) unit.craft_type = type->members.front().craft;
+                }
+            }
+            start_.units.push_back(std::move(unit));
+        }
+        return Void::success();
+    }
+
     // #75: every squadron company is its squadron's team container; its craft follow the map
     // objects, in company then member order. Each craft is created on the company's marker and
     // placed on its own by place_companies() (PL-01, space-fighters FC-02): retail gives the craft
@@ -500,8 +747,20 @@ private:
                 const auto* craft = inputs_.tables->find(member.craft);
                 if (craft == nullptr) return Void::failure(fixture_error("craft type " + member.craft + " is not in the unit tables"));
                 // SK-05: the craft is created at its company's point raised by its own height;
-                // place_companies() then moves it to its free point at that height.
-                auto position = layer_position(company.state.position, craft->movement.layer_z_adjust);
+                // place_companies() then moves it to its free point at that height. A demo map's
+                // placed company has no marker to search from: its craft stand on their
+                // Squadron_Offsets slots turned by the company's yaw (MAT-08).
+                Vec3 at = company.state.position;
+                if (company.role == UnitRole::placed && member.offset) {
+                    auto turned = turn_offset(*member.offset, company.yaw_degrees);
+                    if (!turned) return Void::failure(turned.error());
+                    const auto x = sum(at.x, turned.value().x);
+                    const auto y = sum(at.y, turned.value().y);
+                    const auto z = sum(at.z, turned.value().z);
+                    if (!x || !y || !z) return Void::failure(fixture_error("squadron offset overflows"));
+                    at = {*x, *y, *z};
+                }
+                auto position = layer_position(at, craft->movement.layer_z_adjust);
                 if (!position) return Void::failure(position.error());
                 StartUnit unit;
                 unit.state.entity_id = static_cast<sim::EntityId>(start_.units.size() + 1U);
@@ -683,6 +942,9 @@ private:
 
     const Fixture& fixture_;
     const StartInputs& inputs_;
+    std::optional<std::span<const SelectedStartUnit>> selected_;
+    bool map_first_{};
+    MapObjectFilter map_filter_{};
     SkirmishStart start_;
 };
 
@@ -710,6 +972,8 @@ std::string_view to_string(const UnitRole role) noexcept {
     case UnitRole::fleet: return "fleet";
     case UnitRole::map_object: return "map_object";
     case UnitRole::craft: return "craft";
+    case UnitRole::special_weapon: return "special_weapon";
+    case UnitRole::placed: return "placed";
     }
     return "station";
 }
@@ -718,6 +982,8 @@ std::string_view to_string(const Removal reason) noexcept {
     switch (reason) {
     case Removal::playable_faction: return "playable_faction";
     case Removal::no_player: return "no_player";
+    case Removal::roster_gated: return "roster_gated";
+    case Removal::campaign_branch: return "campaign_branch";
     }
     return "playable_faction";
 }
@@ -747,6 +1013,20 @@ bool is_map_object_placement(const MapPlacement& placement) noexcept {
     // WHZ-01: authored hazard participation admits space props to the simulation.
     return !placement.marker && !placement.type.empty()
         && (placement.space_hazard || !detail::iequals(placement.element, "SpaceProp"));
+}
+
+std::vector<std::string> placed_force_types(const std::vector<MapPlacement>& placements) {
+    std::vector<std::string> types;
+    for (const MapPlacement& placement : placements) {
+        if (!is_map_object_placement(placement) || placement.space_hazard
+            || detail::iequals(placement.element, "SpaceProp")) continue;
+        if (roster_disabled_types().contains(type_id(placement.type))) continue;
+        types.push_back(placement.type);
+    }
+    std::sort(types.begin(), types.end());
+    types.erase(std::unique(types.begin(), types.end(),
+        [](const std::string& a, const std::string& b) { return detail::iequals(a, b); }), types.end());
+    return types;
 }
 
 std::map<sim::tactical::TypeId, std::string> map_object_type_names(const std::vector<MapPlacement>& placements) {
@@ -816,10 +1096,19 @@ core::Result<SkirmishStart> build_start(const Fixture& fixture, const StartInput
     return start;
 }
 
+core::Result<SkirmishStart> build_selected_start(const Fixture& fixture, const StartInputs& inputs,
+    const std::span<const SelectedStartUnit> selected, const bool map_first, const MapObjectFilter& map_filter) {
+    auto start = Builder(fixture, inputs, selected, map_first, map_filter).run();
+    if (start) start.value().victory_condition = fixture.victory_condition.value_or(inputs.space_victory_condition);
+    return start;
+}
+
 sim::tactical::TacticalSetup recording_setup(const Fixture& fixture, const SkirmishStart& start) {
     auto setup = start.setup;
+    setup.match_identity = start.identity;
     sim::tactical::ReplaySkirmishSetup metadata;
     metadata.map = start.map;
+    if (const auto canonical = vfs::canonicalize(metadata.map); canonical) metadata.map = canonical.value();
     metadata.map_sha256 = start.map_sha256;
     metadata.match = start.match;
     metadata.victory_condition = static_cast<std::uint32_t>(start.victory_condition);
@@ -829,8 +1118,19 @@ sim::tactical::TacticalSetup recording_setup(const Fixture& fixture, const Skirm
     return setup;
 }
 
+core::Result<void> validate_replay_identity(const sim::tactical::TacticalSetup& setup, const StartInputs& inputs) {
+    if (setup.match_identity) {
+        if (auto valid = sim::validate_match_identity(*setup.match_identity); !valid) return valid;
+        if (auto mismatch = sim::describe_mismatch(*setup.match_identity, match_identity(inputs)))
+            return core::Result<void>::failure(std::move(*mismatch));
+    }
+    return core::Result<void>::success();
+}
+
 core::Result<Fixture> replay_fixture(const Fixture& base, const StartInputs& inputs,
-    const sim::tactical::TacticalSetup& setup) {
+    const sim::tactical::TacticalSetup& setup, const bool check_identity) {
+    if (check_identity) if (auto valid = validate_replay_identity(setup, inputs); !valid)
+        return core::Result<Fixture>::failure(valid.error());
     auto fixture = base;
     fixture.seed = setup.seed;
     fixture.match = replay_match_options(setup, inputs.match_defaults);

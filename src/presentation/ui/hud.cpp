@@ -129,7 +129,8 @@ std::size_t HudViewModel::family_size(const std::string_view stem) const {
 ShellPlacement HudViewModel::placement(const ReferenceSpace& space) const noexcept {
     // D4 measures right extent from the authored origin; preserve FoC's safe
     // area placement, including its one-unit negative faceplate border.
-    return place_shell(space, visible_extent ? std::max(0.0F,visible_extent->right()) : 0.0);
+    return place_command_bar(space, visible_extent ? std::max(0.0F,visible_extent->right()) : 0.0,
+        shell_placement);
 }
 bool HudViewModel::hit_test(const ReferencePoint point) const noexcept {
     if (!visible_extent || !contains(*visible_extent,point)) return false;
@@ -145,8 +146,13 @@ bool HudViewModel::hit_test_screen(const ReferencePoint point, const ReferenceSp
     return hit_test({(point.x-placed.left)/placed.scale,(placed.bottom-point.y)/placed.scale});
 }
 HudViewModel hud_view_model(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
-                           const std::uint32_t variant, const ShellMaskLookup& masks) {
+                           const std::uint32_t variant, const ShellMaskLookup& masks,
+                           const ShellOrigin manual_origin) {
     HudViewModel out;
+    const auto separator = shell.model_path().find_last_of("/\\");
+    const std::string_view model_name = std::string_view(shell.model_path()).substr(
+        separator == std::string::npos ? 0 : separator + 1);
+    out.shell_placement = command_bar_placement(catalog.shell_for_model(model_name), manual_origin);
     for (const auto* anchor : shell.for_variant(variant)) {
         if (catalog.find(anchor->name)) {
             // Shell placeholder visibility and XML Hidden are initialization

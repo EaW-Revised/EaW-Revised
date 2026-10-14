@@ -11,6 +11,7 @@
 
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
+#include "eawr/script/authoritative/clock_rng.hpp"
 #include "eawr/sim/world.hpp"
 #include "harness.hpp"
 #include "persist_scenario.hpp"
@@ -22,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <new>
@@ -70,7 +72,7 @@ bool trace_attempts = false;
 // State hash of the persistence scenario after the last tick, the same on every
 // target (docs/lua-persistence.md): a change means the encoding or the script
 // semantics changed.
-constexpr std::string_view golden_final_hash = "bbdc97fdde790a1874c9feebdef46f97960baf24030e80533c823f604128f218";
+constexpr std::string_view golden_final_hash = "46be48e271773f638988dd2308495d63ca848504578d0426810f7c6d9c325fc7";
 
 auth::SessionConfig persistence_config() {
     auth::SessionConfig config = default_config();
@@ -196,7 +198,136 @@ void compare_continuation(const Run& reference, const Run& continued, int saved,
 
 // ---- roundtrip ----
 
+void pinned_manifest_identity() {
+    auth::ModuleManifest modules;
+    expect(modules.add("B.lua", "return 2").has_value(), "identity: add second module");
+    expect(modules.add("./A.lua", std::string("return 1\0tail", 13)).has_value(), "identity: add binary module");
+    const auto pinned_modules = modules;
+    // The unchanged manifest algorithm is the oracle for the cached save identity.
+    const auto recomputed = modules.digest();
+    auto original = auth::ScriptScheduler::create(persistence_config(), modules);
+    expect(original.has_value(), "identity: create scheduler");
+    if (!original) return;
+    const auto saved = original.value().save();
+    expect(saved.has_value(), "identity: save scheduler");
+    if (!saved) return;
+    // The save contains the u32-length-framed digest, including embedded zero bytes.
+    const std::string framed = std::string("\x40\0\0\0", 4) + recomputed;
+    expect(saved.value().find(framed) != std::string::npos,
+        "identity: cached digest equals the independently recomputed manifest digest");
+    expect(modules.add("C.lua", "return 3").has_value(), "identity: extend caller's manifest");
+    expect(modules.digest() != recomputed, "identity: caller's extended manifest has another digest");
+    const auto pinned_save = original.value().save();
+    expect(pinned_save && pinned_save.value() == saved.value(), "identity: caller edits do not change pinned save bytes");
+    auto restored = auth::ScriptScheduler::create(persistence_config(), pinned_modules);
+    expect(restored && restored.value().load(saved.value()).has_value(), "identity: same modules accept the save");
+    if (restored) {
+        const auto repeated = restored.value().save();
+        expect(repeated && repeated.value() == saved.value(), "identity: load and re-save retain exact bytes");
+    }
+    auto changed = auth::ScriptScheduler::create(persistence_config(), std::move(modules));
+    expect(changed.has_value(), "identity: create scheduler with changed modules");
+    if (changed) {
+        const auto refused = changed.value().load(saved.value());
+        expect(!refused && refused.error().message.find("other modules") != std::string::npos,
+            "identity: changed modules reject the cached save identity");
+    }
+}
+
 void run_roundtrip() {
+    std::string query_reference;
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        const std::map<std::string, std::string> modules{{"Query.lua",
+            "Root_Executed()\nRoots = (Roots or 0) + 1\ncount = 0\nfunction Query() count = count + 1; Test_Report(count, GetCurrentTime.Frame()) end\n"},
+            {"Timer.lua", "Register_Event('Fired', function() Test_Report('fired', GetCurrentTime.Frame()) end)\nfunction Start() Test_Timer(1, 'Fired') end\n"}};
+        auto config = default_config(); config.query_clock = true;
+        auto root_executions = std::make_shared<unsigned>(0);
+        const auto fresh = [&] {
+            auto session = make_session(modules, config);
+            expect(session.scheduler->register_binding("Root_Executed", [root_executions](auth::BindingContext&, const auth::ValueList&) {
+                ++*root_executions; return eawr::core::Result<auth::ValueList>::success({});
+            }).has_value(), "root execution observer");
+            return session;
+        };
+        auto query = fresh();
+        expect(query.scheduler->create_instance(1, "Query.lua").has_value(), "persistent query instance");
+        const auto invoke = [&](Session& session, std::uint64_t frame) {
+            auth::ScriptEvent event; event.kind = auth::ScriptEvent::Kind::call;
+            event.key = {session.scheduler->completed_tick() + 1, 16, 1, 0}; event.target = 1; event.name = "Query";
+            expect(session.scheduler->submit_event(event).has_value(), "persistent query event");
+            auth::ServiceOptions options; options.time_tick = frame;
+            auto report = session.scheduler->service(executor, options);
+            expect(report && report.value().commands.size() == 1, "persistent query result");
+            return report && !report.value().commands.empty() ? auth::test::text(report.value().commands.front()) : std::string{};
+        };
+        expect(invoke(query, 9000) == "1#0 report 1 9000", "sparse query before save");
+        const auto bytes = query.scheduler->save().value();
+        auto resumed = fresh();
+        expect(resumed.scheduler->load(bytes).has_value() && resumed.scheduler->save().value() == bytes,
+            "query load reconstructs Lua without root execution and re-saves exact bytes");
+        // Host inspection interns its key under the sandbox's logical memory
+        // accounting. Give both trajectories the same inspection inputs.
+        const auto original_roots = query.scheduler->read_global(1, "Roots");
+        const auto restored_roots = resumed.scheduler->read_global(1, "Roots");
+        expect(*root_executions == 1 && std::get<LuaNumber>(original_roots.value()->data) == LuaNumber(1)
+            && std::get<LuaNumber>(restored_roots.value()->data) == LuaNumber(1),
+            "load executes neither a root callback nor its initializer");
+        const auto with_clock_bound = [&](std::uint64_t bound) {
+            std::string patched = bytes, marker(8, '\0');
+            for (unsigned byte = 0; byte < 8; ++byte) marker[byte] = static_cast<char>((std::uint64_t{9000} >> (8U * byte)) & 255U);
+            // This fixture's first integer 9000 is the upstream clock header,
+            // before the same value in its instance. Lua numbers use b64 words.
+            const auto offset = patched.find(marker);
+            expect(offset != std::string::npos, "query clock header located");
+            if (offset != std::string::npos) for (unsigned byte = 0; byte < 8; ++byte)
+                patched[offset + byte] = static_cast<char>((bound >> (8U * byte)) & 255U);
+            return patched;
+        };
+        const auto before_bad_load = resumed.scheduler->state_hash().value();
+        expect(!resumed.scheduler->load(with_clock_bound(8999)) && resumed.scheduler->state_hash().value() == before_bad_load,
+            "instance time above the saved query bound refuses transactionally");
+        expect(!resumed.scheduler->load(with_clock_bound(auth::max_script_tick)) && resumed.scheduler->state_hash().value() == before_bad_load,
+            "out-of-format saved query bound refuses transactionally");
+        auth::ServiceOptions backwards; backwards.time_tick = 8999;
+        const auto before_backwards = resumed.scheduler->state_hash().value();
+        expect(!resumed.scheduler->service(executor, backwards) && resumed.scheduler->state_hash().value() == before_backwards,
+            "loaded query clock retains its monotonic bound");
+        expect(query.scheduler->state_hash().value() == resumed.scheduler->state_hash().value(),
+            "matching host inspections preserve equal state before query continuation");
+        const auto uninterrupted = invoke(query, 27000); const auto continued = invoke(resumed, 27000);
+        expect(uninterrupted == "1#1 report 2 27000" && continued == "1#1 report 2 27000",
+            "sparse query continuation preserves state and independent mode time");
+        const auto digest = query.scheduler->state_hash().value();
+        expect(resumed.scheduler->state_hash().value() == digest, "query continuation hash equals uninterrupted run");
+        if (query_reference.empty()) query_reference = digest;
+        else expect(query_reference == digest, "query persistence equals on 1/2/4/8 workers");
+        auto normal = make_session(modules);
+        expect(!normal.scheduler->load(bytes), "normal profile rejects query save identity");
+        auto galactic_config = default_config(); galactic_config.galactic_clock = true;
+        auto galactic = make_session(modules, galactic_config);
+        expect(!galactic.scheduler->load(bytes), "galactic profile rejects query save identity");
+        expect(!query.scheduler->load(normal.scheduler->save().value()), "query profile rejects normal save identity");
+        auto timer = fresh();
+        expect(timer.scheduler->create_instance(1, "Timer.lua").has_value(), "query timer instance");
+        auth::ScriptEvent start; start.kind = auth::ScriptEvent::Kind::call;
+        start.key = {1, 16, 1, 0}; start.target = 1; start.name = "Start";
+        expect(timer.scheduler->submit_event(start).has_value(), "start query timer");
+        auth::ServiceOptions time; time.time_tick = 0;
+        expect(timer.scheduler->service(executor, time).has_value(), "query timer starts at upstream zero");
+        const auto timer_bytes = timer.scheduler->save().value();
+        auto timer_resumed = fresh();
+        expect(timer_resumed.scheduler->load(timer_bytes).has_value() && timer_resumed.scheduler->save().value() == timer_bytes,
+            "pending upstream-time timer survives exact save/load");
+        time.time_tick = 90000;
+        const auto fire = timer.scheduler->service(executor, time); const auto restored_fire = timer_resumed.scheduler->service(executor, time);
+        expect(fire && restored_fire && fire.value().commands.size() == 1 && restored_fire.value().commands.size() == 1
+            && auth::test::text(fire.value().commands.front()) == "1#0 report fired 90000"
+            && auth::test::text(restored_fire.value().commands.front()) == "1#0 report fired 90000",
+            "one-second timer fires after sparse upstream jump rather than thirty invocations");
+        expect(timer.scheduler->state_hash().value() == timer_resumed.scheduler->state_hash().value(), "timer continuation matches uninterrupted state");
+    }
+    pinned_manifest_identity();
     const eawr::sim::InlineExecutor inline_executor;
     const Run reference = reference_run(inline_executor);
     std::size_t lines = 0;
@@ -295,6 +426,54 @@ void run_workers() {
     drive(first, inline_executor, 1, 45, hashes);
     auto bytes = first.scheduler->save();
     expect(bytes.has_value(), "scenario save");
+    // Separate sandboxes can be captured in parallel; the public save bytes
+    // and state hash still match the serial writer, including suspended threads.
+    struct SaveExecutor final : eawr::sim::PartitionExecutor {
+        const eawr::sim::PartitionExecutor& delegate;
+        mutable std::size_t save_phases{};
+        mutable std::size_t save_partitions{};
+        explicit SaveExecutor(const eawr::sim::PartitionExecutor& source) : delegate(source) {}
+        std::size_t worker_count() const noexcept override { return delegate.worker_count(); }
+        eawr::core::Result<void> execute(std::size_t count,
+            const std::function<void(std::size_t)>& partition) const override {
+            return delegate.execute(count, partition);
+        }
+        eawr::core::Result<void> execute_phase(std::string_view name, std::size_t count,
+            const std::function<void(std::size_t)>& partition) const override {
+            if (name == "script-save") { ++save_phases; save_partitions += count; }
+            return delegate.execute_phase(name, count, partition);
+        }
+    };
+    const auto serial_hash = first.scheduler->state_hash();
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        const SaveExecutor capture(pool);
+        const auto parallel_bytes = first.scheduler->save(capture);
+        const auto parallel_hash = first.scheduler->state_hash(capture);
+        expect(bytes && parallel_bytes && bytes.value() == parallel_bytes.value(),
+            "24-instance parallel save: byte-identical on " + std::to_string(workers) + " workers");
+        expect(serial_hash && parallel_hash && serial_hash.value() == parallel_hash.value(),
+            "24-instance parallel save: hash-identical on " + std::to_string(workers) + " workers");
+        expect(capture.save_phases == (workers == 1 ? 0U : 2U)
+            && capture.save_partitions == (workers == 1 ? 0U : 2U * eawr::sim::tick_partition_count),
+            "24-instance parallel save: one partitioned phase per capture");
+    }
+    struct RefusingExecutor final : eawr::sim::PartitionExecutor {
+        std::size_t worker_count() const noexcept override { return 8; }
+        eawr::core::Result<void> execute(std::size_t,
+            const std::function<void(std::size_t)>&) const override {
+            eawr::core::Diagnostic reason;
+            reason.code = auth::codes::invalid_request;
+            reason.message = "capture executor failed";
+            return eawr::core::Result<void>::failure(std::move(reason));
+        }
+    };
+    const auto refused = first.scheduler->save(RefusingExecutor{});
+    expect(!refused && refused.error().message == "capture executor failed",
+        "parallel save propagates executor refusal");
+    const auto unchanged = first.scheduler->save();
+    expect(bytes && unchanged && bytes.value() == unchanged.value(),
+        "executor refusal leaves the scheduler unchanged");
     Session second = make();
     expect(bytes.has_value() && second.scheduler->load(bytes.value()).has_value(), "scenario load");
     const eawr::platform::ThreadWorkerAdapter executor(4);

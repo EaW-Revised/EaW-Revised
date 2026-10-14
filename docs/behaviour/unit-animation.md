@@ -38,6 +38,30 @@ headless replay hashes do not change.
   (UC-E6, UC-E7)
 - **UA-05 Turret turn.** The turret behaviour requests only `POWERDOWN` and `POWERUP`. Aiming turns
   the turret and barrel bones procedurally from the `Turret_*` tags; it is not a clip. (UC-E8)
+  Ordinary space objects declaring `TURRET` reject desired angles outside the authored yaw/pitch
+  extents, take one shortest wrapped yaw step and one pitch step by `Turret_Rotate_Speed` per
+  pointing call, and report ready only when both angles have arrived. Yaw rotates the turret;
+  pitch rotates the barrel, or the turret when no barrel exists. `Turret_XY_Only` omits pitch.
+  The firing attempt waits for readiness and uses the posed muzzle. The viewer appends the
+  procedural transforms to the sampled pose in reusable bone storage. (UC-E8; WWP-17)
+  Ordinary space targeting invokes pointing on each admitted turn with a target in range;
+  it does not read weapon recharge/pulse countdowns. Tracking therefore continues during
+  recharge and firing reads readiness without taking a second step. The separate turret
+  service does not adjust a tracked target. A cleared target starts the authored
+  `Turret_Rotate_To_Rest_Delay_Sec` hold; equality holds and strict expiry releases
+  per-call steps toward `Turret_Rest_Angle`. Reacquisition cancels the hold.
+  Fresh current/desired angles start at zero. (FS-33, FC-60/61, FD-51)
+  `Turret_Rotate_To_Rest_Delay_Sec` and `Turret_XY_Only` are unauthored in stock.
+  Both are recognized by the object-definition engine-tag catalog on main (legacy EAWR-2321),
+  now carried into Skirmish as `docs/tag-coverage/engine-tags.json` (ET-T053).
+  The XY-only absent-tag default is false.
+  Its absent-tag default is two seconds; equality still holds before the first later
+  admitted return step. (FC-61; debug build EFSB-06)
+  `ordinary_object_turret_runtime_boundaries` retains UFS-29's timestamp-zero/float
+  normalization and indirect disable, power, construction, ownership and save/load producers.
+  Nearby `Apply_Y_Turret_Rotate_To_Axis` / `Apply_Z_Turret_Rotate_To_Axis` selectors are not
+  applied here: the retained pointing path directly builds local Y pitch and Z yaw transforms
+  (UC-E8); alternate-axis consumers and deployed land extents remain deferred.
 - **UA-06 X-wing S-foils.** `DEPLOY` plays when the `SPOILER_LOCK` ability is switched on and
   `UNDEPLOY` when it is switched off, at `Deployment_Anim_Rate`, blended over 1/30 s, starting at the
   frame that mirrors the current clip's remaining frames. Attacking does not move the S-foils.
@@ -46,8 +70,20 @@ headless replay hashes do not change.
 - **UA-07 Death clone.** A destroyed unit whose type lists a `Death_Clone` is replaced by an
   object of the clone type. Retail picks the clone by the killing blow's damage type, then the
   `Damage_Misc` entry, then the unit's own type. The clone appears at the unit's position and
-  facing, owned by the neutral player, coloured like the unit, and keeps the unit's velocity for a
-  spin-away. (UC-E3)
+  facing, owned by the neutral player and coloured like the unit. Its velocity is recorded from
+  the dying unit's translation over the two previous logical frames, converted to distance per
+  second. That velocity is used only if the clone's `Spin_Away_On_Death` activates; it does not
+  make every death clone drift. For ordinary space breakup clones without a spin-away, the
+  death handling changes no root position or facing: the `DIE` clip moves the breakup pieces
+  while the root stays at the death pose.
+  (UC-E3; debug build; [space-fighter-deaths](space-fighter-deaths.md) SP-03, SP-05 to SP-07)
+  `Star_Destroyer_Death_Clone` and `Calamari_Cruiser_Death_Clone` declare neither spin-away nor
+  a movement behaviour. Their `Max_Speed` 0.25,
+  `Max_Rate_Of_Turn` 0.4, `Max_Thrust` 0.05, `Max_Rate_Of_Roll` 0.02 and `Bank_Turn_Angle` 5
+  therefore do not drive death-root motion: there is no acceleration, speed cap, turn or roll
+  from those tags in the ordinary death path. Spin-away instead follows its inherited-speed
+  spline for `Spin_Away_On_Death_Time`, turns using the type's turn limit and rolls 20 degrees
+  per logical frame (SP-05 to SP-08). Clip speed, piece visibility and lifetime remain UA-08/UA-11.
 - **UA-08 Death clip.** The clone plays `Specific_Death_Anim_Type` (default `DIE`) variant
   `Specific_Death_Anim_Index` (default: drawn) once, blended in over 0.5 s at speed 1 from frame 0,
   and holds its last frame. If the clip cannot start and the type has `Remove_Upon_Death`, the
@@ -55,6 +91,10 @@ headless replay hashes do not change.
   pose it has. Once the clip has ended, or at once when it never started, and
   `Death_Persistence_Duration` seconds (default −1: never) have passed, it fades out over
   `Death_Fade_Time` (default 0.25 s) and is removed. (UC-E4, UC-E4b, UC-E4c, UC-E9)
+  Debug build, on the lifetime of large-ship wrecks (legacy EAWR-1874): the persistence is the type's own tag. The game constant
+  `Override_Death_Persistence_Duration` (30 s) is copied onto a clone's death data only when the dying
+  object is infantry, so it never touches a ship or station clone. A clone with persistence −1 is never
+  faded or removed by the death behaviour, whatever its clip does; it also stays when the clip has ended.
 - **UA-11 Bone visibility.** Every frame a model draws each mesh only while the bone it hangs on
   (a skin's visibility bone) is visible in the pose; a clip's visibility keys hide pieces, and a
   held last frame keeps them hidden. A death clip that ends with every piece hidden leaves the
@@ -66,6 +106,13 @@ headless replay hashes do not change.
   death explosion; with `Spin_Away_On_Death` it first spirals away along a spline for
   `Spin_Away_On_Death_Time` with the chance `Spin_Away_On_Death_Chance` (a synchronized draw).
   (UC-E4) The rules are [space-fighter-deaths](space-fighter-deaths.md) SP-01 to SP-09 (fighter death outcomes).
+  The effective XML has 17 direct `Spin_Away_On_Death` declarations on `SpaceUnit` or
+  `UniqueUnit` types, all fighter craft with `FIGHTER_LOCOMOTOR`; none is a capital death clone.
+  The other five declarations are land aircraft or bombing-run types. The remake reads the
+  space craft's chance/time into its spin-away profile and presents the resulting spinning
+  snapshots, including solo craft ([space-fighter-deaths](space-fighter-deaths.md) SP-P1 to SP-P4).
+  This existing path supplies the optional root motion; it is separate from the capital breakup
+  clones.
 
 ### Project policy
 
@@ -151,18 +198,33 @@ clip when they die.
   caught a spin-away (UA-10, a 0.2 or 0.4 chance per kill), so the spin-away itself has no retail
   reference yet.
 
+- **UA-R5** (rig recording, 2026-10-07, retail image, `-StagingProbe wrecks`, fog off, AI suspended,
+  weapon kills: a Star Destroyer and a Calamari cruiser taken to about 10 % hull and finished by local ships, so
+  the `Damage_Normal` clone is used; 30 stills each dated in game seconds since the kill) The Star Destroyer
+  hull is in large pieces with fire and sparks at +4.6 s, still shows one hull piece at +19 s, +27 s and +31 s,
+  a small piece at +47.8 s and nothing at +61.9 s, +63.5 s, +69 s and +74 s. The Calamari cruiser hull burns at
+  +9.5 s, is still a hull at +42 s and +52 s, a fragment at +55.9 s and gone at +68.9 s. That is the 60 s `DIE`
+  clip of UA-08 with its visibility keys (UA-11), and the same pieces as ours at the same ages (the Calamari
+  ours at +2, +10, +30, +60 s: hull to +30 s, final bursts at +60 s). Neither wreck visibly drifts across the
+  stills (the camera stays where the kill happened). A separate debug-damage run (all four hull classes killed by
+  script) found every clone object still present at +109.5 s and +195.7 s, so no clone is removed after its clip
+  (UA-08, UA-C6).
+
 ## Unknowns
 
 - A FoC rig capture of the Coruscant lobby start (fog off) shows the Rebel X-wings flying with
   their S-foils open and no ability used, which is the bind pose the view draws (UA-06). Deaths
   now have retail references (UA-R1, UA-R2); no rig recording shows a firing unit yet. Whether
   the corvette's wreck ends empty (UA-C6) is not visible in the footage: its pieces are gone by 5 s.
-- Which damage type a projectile kill carries is unverified (UA-P1).
+- Which damage type a projectile kill carries is unverified (UA-P1). The retail stills of UA-R5 were weapon
+  kills and showed the breakup clone, which supports the `Damage_Normal` entry for a projectile kill.
+- Frigate wrecks (a 5 s clip) have no retail stills from a weapon kill: only that the clone object stays
+  (UA-R5). Whether a frigate hull is drawn empty after 5 s is not seen.
 - The clone keeps its unit's position, height included: FoC creates it without its own
   `Layer_Z_Adjust` (space-movement LZ-02, per-unit flight heights).
 - Spin-away deaths (UA-10) move the unit, so the simulation runs them (fighter death outcomes,
   space-fighter-deaths SP-P1); the fighter itself still leaves the session at once.
-- The procedural turret aim of UA-05 is not modelled.
+- UA-05 ordinary object turret aim is applied; procedural manual hardpoint mesh pose remains missing.
 - 27 FoC clips outside M2 fail the strict track binding (the `binding_failed` rows of
   `tests/presentation/animation/corpus_association_foc.tsv`); whether retail binds them by a
   looser rule is unverified.

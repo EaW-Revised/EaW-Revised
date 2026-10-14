@@ -100,7 +100,30 @@ void TacticalHud::State::run_probe() {
 std::string TacticalHud::report_json() const {
     const State& state = *state_;
     std::ostringstream output;
-    output << "{\"mode\": \"tactical\", \"faction\": " << json(model::to_string(state.options.faction))
+    const auto& special = state.special_view;
+    output << "{\"movie_camera\": {\"active\": " << (state.movie ? "true" : "false")
+           << ", \"presses\": " << (state.movie_button ? state.movie_button->presses() : 0)
+           << ", \"letterbox_height\": ";
+    if (state.movie_height) output << *state.movie_height;
+    else output << "null";
+    output << "}, \"beacon_button\": {\"presses\": "
+           << (state.beacon_button ? state.beacon_button->presses() : 0) << ", \"icon\": "
+           << (state.beacon_button && state.beacon_button->icon_shown() ? "true" : "false") << ", \"overlay\": "
+           << json(state.beacon_button ? state.beacon_button->overlay_name() : "none") << "}, ";
+    output << "\"retreat_button\": {\"present\": " << (state.retreat_button ? "true" : "false")
+           << ", \"presses\": " << (state.retreat_button ? state.retreat_button->presses() : 0)
+           << ", \"icon\": " << (state.retreat_button && state.retreat_button->icon_shown() ? "true" : "false")
+           << ", \"overlay\": " << json(state.retreat_button ? state.retreat_button->overlay_name() : "none")
+           << ", \"enabled\": " << (state.retreat_view.enabled ? "true" : "false")
+           << ", \"flashing\": " << (state.retreat_view.flashing ? "true" : "false")
+           << ", \"dial\": " << state.retreat_view.dial;
+    if (state.retreat_button != nullptr && state.retreat_button->is_visible_in_tree()) {
+        const Rect2 hit(state.retreat_button->get_global_position() + state.retreat_button->hit_rect().position,
+            state.retreat_button->hit_rect().size);
+        output << ", \"hit_rect\": " << rect_json(hit);
+    }
+    output << "}, ";
+    output << "\"mode\": \"tactical\", \"faction\": " << json(model::to_string(state.options.faction))
            << ", \"rules\": " << json(state.options.rules == model::LayoutRules::retail ? "retail" : "aspect")
            << ", \"shell_model\": " << json(state.shell_model) << ", \"atlas\": " << json(state.atlas_path)
            << ", \"faceplate_masks\": " << state.faceplates << ", \"meshes\": [";
@@ -155,6 +178,13 @@ std::string TacticalHud::report_json() const {
         }
         output << "]}";
     }
+    output << ", \"special_weapon\": {\"source\": " << special.source
+        << ", \"availability\": " << json(model::to_string(special.availability))
+        << ", \"readiness\": " << static_cast<double>(special.readiness.raw()) / sim::math::Fixed::scale
+        << ", \"dial\": " << special.dial() << ", \"pulses_left\": " << special.pulses_left
+        << ", \"target_action\": " << special.target_action << ", \"icon\": " << json(state.special_icon)
+        << ", \"enabled\": " << (special.enabled() ? "true" : "false")
+        << ", \"targeting\": " << (special.targeting ? "true" : "false") << '}';
     if (state.cards != nullptr) output << ", \"unit_cards\": " << state.cards->report_json();
     if (state.production != nullptr) output << ", \"production\": " << state.production->report_json();
     if (state.abilities != nullptr) output << ", \"ability_buttons\": " << state.abilities->report_json();
@@ -180,6 +210,7 @@ std::string TacticalHud::report_json() const {
                << rect_json(Rect2(button->get_position() + button->hit_rect().position, button->hit_rect().size))
                << ", \"pressed\": " << (button->is_pressed() ? "true" : "false")
                << ", \"disabled\": " << (button->is_disabled() ? "true" : "false")
+               << ", \"tooltip\": " << json(button->get_tooltip_text().utf8().get_data())
                << ", \"presses\": " << button->presses() << "}";
     }
     output << "}";

@@ -47,6 +47,16 @@ std::optional<std::int64_t> q24_from_binary32_bits(const std::uint32_t bits) noe
 
 } // namespace detail
 
+sim::tactical::MapBox map_box_of_extents(const std::optional<std::pair<std::uint32_t, std::uint32_t>>& extents) {
+    if (!extents) return {};
+    const auto width = detail::q24_from_binary32_bits(extents->first);
+    const auto height = detail::q24_from_binary32_bits(extents->second);
+    if (!width || !height || *width <= 0 || *height <= 0) return {};
+    return {sim::math::Fixed::from_raw(-(*width / 2)), sim::math::Fixed::from_raw(-(*height / 2))};
+}
+
+sim::tactical::MapBox map_box(const StartInputs& inputs) { return map_box_of_extents(inputs.map_extents); }
+
 core::Result<std::optional<sim::tactical::FogRules>> fog_rules(const StartInputs& inputs) {
     using FogResult = core::Result<std::optional<sim::tactical::FogRules>>;
     if (!inputs.map_extents) return FogResult::success(std::nullopt);

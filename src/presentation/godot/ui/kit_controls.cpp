@@ -38,6 +38,15 @@ const Color hover_colour(1.0F, 1.0F, 1.0F, 0.15F);
     return ImageTexture::create_from_image(image);
 }
 
+// The colour at the centre of a skin piece, or a transparent black when the skin has none (or only a
+// compressed one): the drop-down list takes its backing and its rim colour from the skin's own pieces.
+[[nodiscard]] Color piece_colour(const Ref<Texture2D>& texture) {
+    if (texture.is_null()) return Color(0.0F, 0.0F, 0.0F, 0.0F);
+    const Ref<Image> image = texture->get_image();
+    if (image.is_null() || image->is_empty() || image->is_compressed()) return Color(0.0F, 0.0F, 0.0F, 0.0F);
+    return image->get_pixel(image->get_width() / 2, image->get_height() / 2);
+}
+
 void apply_text_colours(Control& control, const KitTextStyle& style, std::initializer_list<const char*> names) {
     for (const char* name : names) control.add_theme_color_override(name, style.top);
 }
@@ -134,6 +143,7 @@ void EawrUiSlider::_gui_input(const Ref<InputEvent>& event) {
     if (button.is_null() || button->get_button_index() != MOUSE_BUTTON_LEFT) return;
     if (button->is_pressed()) {
         held_ = part_at(button->get_position());
+        if (held_ != Part::none) ++edit_revision_;
         if (held_ == Part::minus) set_value(get_value() - step);
         if (held_ == Part::plus) set_value(get_value() + step);
         if (held_ == Part::track) set_from_track(button->get_position().x);
@@ -179,6 +189,7 @@ EawrUiList::EawrUiList() {
     set_theme_type_variation("EawrUi");
     set_texture_repeat(CanvasItem::TEXTURE_REPEAT_DISABLED);
     if (VScrollBar* bar = get_v_scroll_bar()) bar->connect("draw", callable_mp(this, &EawrUiList::draw_scroll_tab));
+    track_oversampling(*this);
 }
 
 void EawrUiList::apply_skin() {
@@ -275,11 +286,26 @@ EawrUiCombo::EawrUiCombo() {
     set_texture_repeat(CanvasItem::TEXTURE_REPEAT_DISABLED);
     set_text_alignment(HORIZONTAL_ALIGNMENT_CENTER);
     set_focus_mode(FOCUS_NONE);
+    track_oversampling(*this);
+    get_popup()->connect("about_to_popup", callable_mp(this, &EawrUiCombo::scale_retail_list));
+}
+
+void EawrUiCombo::scale_retail_list() {
+    if (!retail_list_) return;
+    // A popup is a separate Window: it does not inherit the menu CanvasItem scale.
+    // Its contents use the same scale as the owning combo before minimum-size layout.
+    get_popup()->set_content_scale_factor(std::max(0.01F, static_cast<float>(get_global_transform_with_canvas().get_scale().x)));
 }
 
 void EawrUiCombo::set_forced_state(const KitState state) {
     forced_ = state;
     queue_redraw();
+}
+
+void EawrUiCombo::set_retail_list(const bool retail) {
+    if (retail_list_ == retail) return;
+    retail_list_ = retail;
+    if (is_inside_tree()) apply_skin();
 }
 
 void EawrUiCombo::apply_skin() {
@@ -310,15 +336,54 @@ void EawrUiCombo::apply_skin() {
 
     if (PopupMenu* popup = get_popup()) {
         popup->begin_bulk_theme_override();
-        popup->add_theme_stylebox_override("panel", texture_box(icon(*this, "Small_Frame_Background"), true));
-        popup->add_theme_stylebox_override("hover", flat_box(selection_colour));
-        popup->add_theme_font_override("font", style.font);
-        popup->add_theme_font_size_override("font_size", style.size);
-        popup->add_theme_color_override("font_color", style.top);
-        popup->add_theme_color_override("font_hover_color", style.top);
+        if (!retail_list_) {
+            popup->add_theme_stylebox_override("panel", texture_box(icon(*this, "Small_Frame_Background"), true));
+            popup->add_theme_stylebox_override("hover", flat_box(selection_colour));
+            popup->add_theme_font_override("font", style.font);
+            popup->add_theme_font_size_override("font_size", style.size);
+            popup->add_theme_color_override("font_color", style.top);
+            popup->add_theme_color_override("font_hover_color", style.top);
+        } else {
+            apply_retail_list(*popup);
+        }
         popup->end_bulk_theme_override();
     }
     applying_ = false;
+}
+
+// The drop-down list as the retail rig capture shows it: the small frame's gold rim around the skin's
+// translucent background (the rows beneath show through), and the entries in the list font,
+// left aligned, without a mark beside the chosen one (#3167).
+void EawrUiCombo::apply_retail_list(PopupMenu& popup) {
+    const KitTextStyle entries = kit_text_style(*this, "List_Box");
+    const Border rim = small_border(*this);
+    const float scale = piece_scale(*this);
+    const Color background = piece_colour(icon(*this, "Small_Frame_Background"));
+    Ref<StyleBoxFlat> panel = flat_box(background);
+    const Color edge = piece_colour(icon(*this, "Small_Frame_Left"));
+    panel->set_border_color(Color(edge.r, edge.g, edge.b, 1.0F));
+    panel->set_border_width(SIDE_LEFT, static_cast<int>(std::round(rim.left)));
+    panel->set_border_width(SIDE_TOP, static_cast<int>(std::round(rim.top)));
+    panel->set_border_width(SIDE_RIGHT, static_cast<int>(std::round(rim.right)));
+    panel->set_border_width(SIDE_BOTTOM, static_cast<int>(std::round(rim.bottom)));
+    panel->set_content_margin(SIDE_LEFT, rim.left + std::round(3.0F * scale));
+    panel->set_content_margin(SIDE_TOP, rim.top + std::round(2.0F * scale));
+    panel->set_content_margin(SIDE_RIGHT, rim.right + std::round(3.0F * scale));
+    panel->set_content_margin(SIDE_BOTTOM, rim.bottom + std::round(2.0F * scale));
+    popup.add_theme_stylebox_override("panel", panel);
+    for (const char* name : {"radio_checked", "radio_unchecked", "radio_checked_disabled",
+                             "radio_unchecked_disabled", "checked", "unchecked", "checked_disabled",
+                             "unchecked_disabled"}) {
+        popup.add_theme_icon_override(name, empty_texture());
+    }
+    popup.add_theme_stylebox_override("hover", flat_box(selection_colour));
+    popup.add_theme_font_override("font", entries.font);
+    popup.add_theme_font_size_override("font_size", entries.size);
+    popup.add_theme_color_override("font_color", entries.top);
+    popup.add_theme_color_override("font_hover_color", entries.top);
+    popup.add_theme_color_override("font_outline_color", outline_colour);
+    popup.add_theme_constant_override("outline_size", entries.outline ? std::max(1, static_cast<int>(scale)) : 0);
+    popup.add_theme_constant_override("v_separation", static_cast<int>(std::round(2.0F * scale)));
 }
 
 void EawrUiCombo::_notification(const int what) {
@@ -344,6 +409,7 @@ void EawrUiCombo::_draw() {
 EawrUiEdit::EawrUiEdit() {
     set_theme_type_variation("EawrUi");
     set_texture_repeat(CanvasItem::TEXTURE_REPEAT_DISABLED);
+    track_oversampling(*this);
 }
 
 void EawrUiEdit::set_ime(const bool ime) {

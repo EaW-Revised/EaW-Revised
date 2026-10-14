@@ -1,0 +1,22 @@
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask anything about building, running or modding with EaW Revised. When someone answers your question,
+        please mark that reply as the answer so others find it.
+
+        Something broken? Use a [bug report](https://github.com/EaW-Revised/EaW-Revised/issues/new?template=bug_report.yml)
+        instead. Want a new feature? Post it on the [Ideas board](https://github.com/EaW-Revised/EaW-Revised/discussions/categories/ideas).
+        Please do not attach game files or paste decompiler output.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What you tried, your platform and the release or commit, and any mods in use.

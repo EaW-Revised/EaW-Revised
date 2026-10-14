@@ -7,6 +7,17 @@ std::string_view battle_cursor(const CursorInput& input) noexcept {
     if (input.camera_pan) return "POINTER_MAP_SCROLLING_MODE";
     if (input.camera_rotate) return "POINTER_MAP_ROTATING_MODE";
     if (input.hud) return "POINTER_NORMAL";
+    // WSW-15/31: the target action selects the cursor independently of weapon index.
+    if (input.special_weapon) {
+        if (!input.special_weapon_valid) return "POINTER_ATTACK_WITH_SPECIAL_WEAPON_INVALID";
+        switch (*input.special_weapon) {
+        case 0: return "POINTER_ATTACK_WITH_SPECIAL_WEAPON_0";
+        case 1: return "POINTER_ATTACK_WITH_SPECIAL_WEAPON_1";
+        case 2: return "POINTER_ATTACK_WITH_SPECIAL_WEAPON_2";
+        default: return "POINTER_ATTACK_WITH_SPECIAL_WEAPON_INVALID";
+        }
+    }
+    if (input.mode == OrderMode::waypoint) return input.passable ? "POINTER_WAYPOINT_PLACEMENT" : "POINTER_CANT_MOVE";
     if (input.mode == OrderMode::attack) return input.passable && input.hostile && input.own_selection
         ? "POINTER_ATTACK_ONLY_MODE_UNIT_TARGETED" : "POINTER_ATTACK_ONLY_MODE_NO_UNIT_TARGETED";
     if (input.mode == OrderMode::move) return input.passable

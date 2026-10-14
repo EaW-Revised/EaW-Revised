@@ -5,6 +5,8 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
@@ -47,6 +49,7 @@ public:
         double idle_sample_ms{};
         double idle_upload_ms{};
         GodotParticleBackend::FrameWork particle_work{};
+        particles::RegistryTimings emitter_timing{}, effects_timing{}, debris_timing{};
         double bookkeeping_ms{};
         double hud_ms{};
         double audio_ms{};
@@ -65,6 +68,13 @@ public:
         double ai_worst_ms{};
         double lua_ms{};
         double lua_worst_ms{};
+        double world_ms{};
+        double worker_ms{};
+        double serial_ms{};
+        double sim_fog_ms{};
+        double sim_lock_ms{};
+        double sim_publish_ms{};
+        std::vector<std::pair<std::string, double>> worker_phases;
         // #888: the main thread's wall-clock ms in the space view's snapshot build and renderer
         // submit, and the pieces that submit carried.
         double submit_ms{};
@@ -74,6 +84,7 @@ public:
 
     // The path of --eawr-perf-trace, nothing without it, or an error text.
     [[nodiscard]] static std::optional<std::string> parse(const godot::PackedStringArray& arguments, std::string& error);
+    [[nodiscard]] static bool fine_particle_timings() noexcept { return fine_particle_timings_; }
 
     [[nodiscard]] bool open(const std::string& path, std::string& error);
     // Monotonic entry-to-entry and extension/external intervals; engine delta and
@@ -84,6 +95,7 @@ public:
     [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }
 
 private:
+    static bool fine_particle_timings_;
     std::ofstream output_;
     godot::RID viewport_;
     std::uint64_t frames_{};

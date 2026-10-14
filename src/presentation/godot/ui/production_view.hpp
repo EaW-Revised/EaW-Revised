@@ -16,6 +16,9 @@
 //   and the close button. A left press on an enabled slot starts placing that type (PU-68).
 
 #include "ui/kit.hpp"
+#include "ui/build_queue_dial.hpp"
+#include "ui/hud_icon_text.hpp"
+#include "ui/hud_timer.hpp"
 
 #include "eawr/presentation/ui/fonts.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
@@ -47,9 +50,18 @@ public:
     struct Setup final {
         std::vector<presentation::ui::HudQueueSlot> queue;
         std::optional<presentation::ui::HudIconText> credits;
+        std::optional<presentation::ui::HudIconText> population;
+        godot::Ref<godot::Font> population_font;
+        std::function<presentation::ui::TextCell(std::int32_t)> population_cell;
+        std::optional<presentation::ui::HudIconText> tactical_tech;
+        godot::Ref<godot::Font> tech_font;
+        std::function<presentation::ui::TextCell(std::int32_t)> tech_cell;
+        std::string tech_label;
+        std::optional<presentation::ui::HudTimerStyle> reinforcement_counter;
+        std::optional<presentation::ui::HudTimerStyle> garrison_respawn_counter;
         std::optional<presentation::ui::HudShellButton> reinforce;
         std::optional<presentation::ui::HudReinforcePane> pane;
-        data::ui::Rgba8 queue_tint{255, 128, 128, 215}; // GameConstants Right_Queue_Tint
+        std::optional<data::ui::Rgba8> queue_tint; // GameConstants Right_Queue_Tint
         std::function<godot::Ref<godot::Texture2D>(const std::string& texture)> texture;
         // The same lookup without a warning when the texture is missing: FoC names the credits
         // icon i_icon_money_big.tga, which no FoC archive holds (PU-65).
@@ -82,6 +94,10 @@ public:
         std::optional<std::string> credits;
         std::vector<PoolView> pool;
         std::string population;
+        std::string tactical_population;
+        std::optional<presentation::ui::TacticalTechView> tactical_tech;
+        std::optional<double> reinforcement_progress;
+        std::optional<double> garrison_progress;
         std::size_t rows{};
         bool reinforcement_allowed{true}; // WR-07/19: permission, command bar, pending victory
         std::uint64_t notifications{};
@@ -180,8 +196,7 @@ private:
     };
     std::vector<DialArt> dial_art_;
     std::vector<godot::Ref<godot::Texture2D>> queue_icons_;
-    godot::Ref<godot::ArrayMesh> dial_mesh_;
-    godot::StringName completion_parameter_{"completion"};
+    BuildQueueDialRenderer dial_renderer_;
     std::optional<presentation::ui::ShellPlacement> art_placement_;
     std::uint64_t art_builds_{};
     std::uint64_t art_frames_{};
@@ -198,6 +213,11 @@ private:
     std::vector<std::unique_ptr<KitText>> pool_texts_;
     KitText credits_text_;
     KitText population_text_;
+    HudIconTextRenderer tactical_population_;
+    HudIconTextRenderer tactical_tech_;
+    std::string tech_text_;
+    HudTimerRenderer reinforcement_timer_, garrison_timer_;
+    bool garrison_timer_created_{};
     KitText close_text_;
     godot::Vector2 laid_out_{-1.0F, -1.0F};
     std::uint64_t cancels_{};

@@ -6,31 +6,31 @@
       "path": "src/units/unit_abilities.cpp",
       "start": "[[nodiscard]] std::uint32_t frames(",
       "end": "} // namespace eawr::units",
-      "sha256_lf": "96648fae00589253c3861c88ac27dcc4e8153b22abdba106eca463ba5ba50fdc"
+      "sha256_lf": "d68e7f1ebabab6b8e1a71571d1a1fa9d61a1f87352b7566f8b14ba4fe54279a1"
     },
     "src/units/unit_tables_profiles.cpp#load_spawner": {
       "path": "src/units/unit_tables_profiles.cpp",
       "start": "std::vector<SpawnEntry> Loader::spawn_list(",
       "end": "void Loader::load_abilities(",
-      "sha256_lf": "9344205318ba136c7cb751ad54f8a203711ceb64a70014b02c75e09c62570ea5"
+      "sha256_lf": "f4c98b202fd87e6c9be09eabb0676a66ddeb8e53b772267b35838d246d8273a0"
     },
     "src/units/unit_tables_profiles.cpp#load_abilities": {
       "path": "src/units/unit_tables_profiles.cpp",
       "start": "void Loader::load_abilities(",
       "end": "void Loader::load_production(",
-      "sha256_lf": "da1e5f5dbc2e349c2a94ad55cf458e9de794d131532f713f2d8c4f54b3d87ffe"
+      "sha256_lf": "0ff3eec3af46da623512fb2907444d5621c6eefda6f634732cac919ed857f5c6"
     },
     "src/sim/tactical/abilities.cpp#ability_service": {
       "path": "src/sim/tactical/abilities.cpp",
-      "start": "constexpr std::array<KindName, 16> kind_names",
+      "start": "constexpr std::array<KindName, ",
       "end": "} // namespace eawr::sim::tactical",
-      "sha256_lf": "43bf3c8888ab649d29872d500d651a7266cd01ab2f8f81156581e611a8776c34"
+      "sha256_lf": "c72e5c9b14ae1455fb4a73e81eda10b25b5e585fa522fe0714547eaeb6194456"
     },
     "src/skirmish/economy.cpp#economy_rules": {
       "path": "src/skirmish/economy.cpp",
       "start": "namespace eawr::skirmish {",
       "end": "} // namespace eawr::skirmish",
-      "sha256_lf": "44979d29cb8ca2935b5c9e7c0e4f0ce6ec9f988de935124d9febdf77f72e70e2"
+      "sha256_lf": "8a32e5bc320ec0abaff1929c64d0284b4d257c1248b1c9fe166c5d27ae49be5e"
     },
     "src/data/xml_registry.cpp#layer_rank": {
       "path": "src/data/xml_registry.cpp",
@@ -54,31 +54,31 @@
       "path": "src/skirmish/start.cpp",
       "start": "class Builder final {",
       "end": "\n} // namespace\n",
-      "sha256_lf": "60e5d00096ac5d12a2d2869dbf5e9f025fa7caf2f6e9e3ab256cf5a59f18f924"
+      "sha256_lf": "c6c8c2b8b8378bde1a381b961c233c73ac994a2f09307ed7cbb270a8fa56652d"
     },
     "src/script/foc/tactical_ai_bindings.cpp#plan_bindings": {
       "path": "src/script/foc/tactical_ai_bindings.cpp",
       "start": "void register_globals(",
       "end": "} // namespace tactical_ai_detail",
-      "sha256_lf": "d2c11000cde8f95f93e8293039c0c81201ad08a6356db6ac3fb9ddfc7782005d"
+      "sha256_lf": "70bbee1e81641eaa2f5a0e34cd90fa3050118a7f8fed791aaf8bc2699dac02d3"
     },
     "src/script/foc/tactical_ai.cpp#unsupported_plan_calls": {
       "path": "src/script/foc/tactical_ai.cpp",
       "start": "std::vector<std::string> unsupported_plan_calls()",
       "end": "} // namespace eawr::script::foc",
-      "sha256_lf": "a61ae1c319a934ff52089865ca2b110bfe4a9bc3086ab0a1cbbbd368fa1b0e5b"
+      "sha256_lf": "ab661cc1856be117b045d7d5326cae2e84ebf7d4329d95cd4cadb6b4587789ef"
     },
     "src/sim/tactical/session_abilities.cpp#ability_helpers": {
       "path": "src/sim/tactical/session_abilities.cpp",
       "start": "std::optional<AbilityState> TacticalSession::Impl::entering_abilities(",
       "end": "std::vector<AbilityStatus> TacticalSession::Impl::ability_statuses(",
-      "sha256_lf": "8e66e8a15cad5dddf54490c09ddf31bcd33cc0ab9cd10e970b829e19daca51e6"
+      "sha256_lf": "1f2249b6c424a438e713638cf18689623c1c82e33f5f3df18a086d7c70e2144a"
     },
     "src/sim/tactical/session_step_commands.cpp#apply_ability": {
       "path": "src/sim/tactical/session_step_commands.cpp",
       "start": "    const auto apply_ability =",
       "end": "    // Commands phase: serial, in canonical (tick, player, sequence) order.",
-      "sha256_lf": "b5b582a7511c466650f41b692541e97d14431908752fb575e2d3c67c2f905da4"
+      "sha256_lf": "a24e3e849ed0f0eb07fa391e83c2910ee3ac0fdaad108fdc4c0f45842c7bc86f"
     },
     "src/sim/tactical/session_step_combat.cpp#ion_team_service": {
       "path": "src/sim/tactical/session_step_combat.cpp",
@@ -88,9 +88,9 @@
     },
     "src/sim/tactical/session_step_commands.cpp#ability_phase": {
       "path": "src/sim/tactical/session_step_commands.cpp",
-      "start": "    auto& replans = tracked_.value().replans.emplace();",
+      "start": "    auto& replans = tracked_.value().replans.value();\n    auto& self_destructs = tracked_.value().self_destructs.emplace();",
       "end": "    const auto& table = impl_->motion;\n    const auto& frame = tracked_.value().frame.emplace",
-      "sha256_lf": "9e262972f8227e494bd331d4fe10fd6f7d3f8f8ad8a4ffaf3e601dd90eec4bef"
+      "sha256_lf": "31d887b1e66da10e58d3ad3f3dbfe4ee88f0bae55b13605127629963e0200c15"
     },
     "src/sim/tactical/fighters_spawner.cpp#service_spawner": {
       "path": "src/sim/tactical/fighters_spawner.cpp",
@@ -102,19 +102,19 @@
       "path": "src/script/foc/ai_selection.cpp",
       "start": "bool Engine::select_units(",
       "end": "bool Engine::test_target_contrast(",
-      "sha256_lf": "907cfbf82678088221f288ca2a6eb3d4bfde7a68007b5beb6a9061b8a3496ff8"
+      "sha256_lf": "e38f3ba70e40072a45153a798aad1a4340687e2771d78564ca325825a87534b8"
     },
     "src/script/foc/ai_execution.cpp#economy_execution": {
       "path": "src/script/foc/ai_execution.cpp",
       "start": "sim::EntityId Engine::producer(",
       "end": "} // namespace eawr::script::foc::ai",
-      "sha256_lf": "55c49a4701c23edbb37713eb271432516abcc9782428c21027aefa1244e27da8"
+      "sha256_lf": "97ba0f19574efb8513b13ea83b07586b40957fbfe9712efb4ebb80c620e395ea"
     },
     "src/script/foc/ai_taskforces.cpp#guard_blocks": {
       "path": "src/script/foc/ai_taskforces.cpp",
       "start": "void Engine::service_blocks() {",
       "end": "} // namespace eawr::script::foc::ai",
-      "sha256_lf": "487ef64887deab57c00fc62eafa84855d86e6405b97f6e1eaf6b46a3f1e17b6d"
+      "sha256_lf": "abec1ca79ff2a224ea2845af7c1144a16e99b914dbb8f3192d3f17243aea54e4"
     },
     "src/data/xml.cpp#find_game_object": {
       "path": "src/data/xml.cpp",
@@ -138,7 +138,7 @@
       "path": "src/sim/tactical/session_storage.cpp",
       "start": "void TacticalSession::Impl::commit_units(std::vector<LiveUnit>& units,",
       "end": "} // namespace eawr::sim::tactical",
-      "sha256_lf": "4d6a50257bc2ec0e1c1d40bc52e1c5e33c9a186e39713e2492316ddd38731616"
+      "sha256_lf": "be86a70b1539270be5cafaafad990ce417ef5ca7108a169f0e69973e6e59cc06"
     },
     "src/sim/tactical/pads.cpp#respawn_after_death": {
       "path": "src/sim/tactical/pads.cpp",
@@ -150,25 +150,25 @@
       "path": "src/sim/tactical/session_step_economy.cpp",
       "start": "    // WBP-16/18/19: ordered lifecycle commit",
       "end": "    mark(\"survivors\", false);",
-      "sha256_lf": "e3798b081a4b79fc85652f9d2a3983797a65bf78e559f08c652002277daa59f9"
+      "sha256_lf": "37ccf0b1efb1426fc420e97fd5de55bb7d4b371e047d58219960dd0ad5a75e22"
     },
     "src/sim/tactical/session_step_economy.cpp#income_and_launch": {
       "path": "src/sim/tactical/session_step_economy.cpp",
       "start": "    std::erase_if(earners, [&](const auto& entry) {\n        const auto* source = survivor(entry.first);",
       "end": "    return core::Result<void>::success();\n}\n\ncore::Result<void> session_detail::Tick::bonuses()",
-      "sha256_lf": "551344a28ebb1d793a035e75775896dd869f909901851d29a54bcc195d9e64e3"
+      "sha256_lf": "537db6ef0321972f0f5a060cddc243ac44b941fb22a2a4facd0d08b62e4df3a8"
     },
     "src/sim/tactical/session_step_fighters.cpp#hangar_lifecycle": {
       "path": "src/sim/tactical/session_step_fighters.cpp",
       "start": "    // Hangar phase (#75, FL-01 to FL-06):",
       "end": "    return core::Result<void>::success();\n}\n\nconst LiveUnit* session_detail::Tick::survivor",
-      "sha256_lf": "92bad6386078ad5d1bc8a0dfb013f994f6280a3c0566402aae37eb14e845306b"
+      "sha256_lf": "88460b52ac5b86e04856bea4c506127e1eef0adf7c51e42986875465ba796b90"
     },
     "src/sim/tactical/session_step_economy.cpp#upgrade_bonus_phase": {
       "path": "src/sim/tactical/session_step_economy.cpp",
       "start": "    // WPR-51: existing and newly created units, on disjoint partition slots.",
       "end": "    return core::Result<void>::success();\n}\n\n} // namespace eawr::sim::tactical",
-      "sha256_lf": "2391e2eee1405bf1c391cd4dceaf6fc724acf28f3f52af701704e4672e6eb501"
+      "sha256_lf": "736022f9e1c48a918e7a62b3081de1caa42f70dfa8653f9324e76b80f2e213ba"
     }
   }
 }

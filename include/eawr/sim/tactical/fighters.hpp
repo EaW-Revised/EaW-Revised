@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <vector>
+#include <map>
 
 // Fighter squadrons (P2-12, #75; docs/behaviour/space-fighters.md): launch and replenishment
 // from carriers and stations (FL rules), the retail fighter locomotor (FM rules), attack runs
@@ -58,8 +59,16 @@ struct SquadronProfile {
     math::Fixed idle_chase_range{};      // Idle_Chase_Range
     math::Fixed attack_move_response_range{}; // Attack_Move_Response_Range (#452, FO-05)
     math::Fixed formation_tolerance{};   // Squadron_Formation_Error_Tolerance
+    math::Fixed autonomous_move_extension_vs_attacker{}; // WMV-17: threat to team or escort
+    math::Fixed formation_deceleration{}; // WMV-44: this member type, not its child craft
+    math::Fixed formation_type_max_speed{}; // WMV-44: scaled own type maximum; zero bypasses the ratio
     friend bool operator==(const SquadronProfile&, const SquadronProfile&) = default;
 };
+
+// WMV-44: resolve this member's override using its live team's base-speed limit and its
+// own speed modifier. Neither a child's deceleration nor a child's modifier is substituted.
+[[nodiscard]] core::Result<math::Fixed> formation_member_deceleration(const SquadronProfile& profile,
+    math::Fixed team_base_max_speed, math::Fixed speed_factor);
 
 // A reserve of this size never runs out (FL-02).
 inline constexpr std::int32_t unlimited_reserve = -1;
@@ -96,6 +105,7 @@ struct SquadronTable {
     std::vector<CraftProfile> craft;        // strictly increasing type_id
     std::vector<SquadronProfile> squadrons; // strictly increasing type_id
     std::vector<SpawnerProfile> spawners;   // strictly increasing type_id
+    std::map<std::pair<TypeId, PlayerId>, SpawnerProfile> campaign_spawners; // WGT-58: content-bound owner-tech selections
     // FO-11 (#599): gameconstants.xml FormationMinimumSideError and FormationMaximumSideError, the
     // side error a squadron of a group move ignores and the one its lane steer divides by. A
     // maximum of zero (a table without the constants) turns the lane steer off.
@@ -103,8 +113,8 @@ struct SquadronTable {
     math::Fixed side_error_max{};
     [[nodiscard]] const CraftProfile* find_craft(TypeId type_id) const noexcept;
     [[nodiscard]] const SquadronProfile* find_squadron(TypeId type_id) const noexcept;
-    [[nodiscard]] const SpawnerProfile* find_spawner(TypeId type_id) const noexcept;
-    [[nodiscard]] bool empty() const noexcept { return craft.empty() && squadrons.empty() && spawners.empty(); }
+    [[nodiscard]] const SpawnerProfile* find_spawner(TypeId type_id, PlayerId owner = 0) const noexcept;
+    [[nodiscard]] bool empty() const noexcept { return craft.empty() && squadrons.empty() && spawners.empty() && campaign_spawners.empty(); }
     friend bool operator==(const SquadronTable&, const SquadronTable&) = default;
 };
 
@@ -153,7 +163,7 @@ enum class SquadronDiversion : std::uint8_t {
 };
 
 // A cell of the fighter combat grid (#457, FD-02; foc-battle-world-ui WU-25): 400-unit cells from
-// the world origin, every odd row shifted by half a cell along x.
+// the map box's low corner (WDF-05), every odd row shifted by half a cell along x.
 struct CombatCell {
     std::int32_t x{};
     std::int32_t y{};
@@ -162,12 +172,14 @@ struct CombatCell {
 
 inline constexpr std::int64_t combat_cell_size = 400;
 
-// WU-25: the cell a point lies in, and a cell's point (its centre, odd rows half a cell further
-// along x) at height `z`.
-[[nodiscard]] CombatCell combat_cell_of(const math::Vec3& point) noexcept;
-[[nodiscard]] math::Vec3 combat_cell_point(CombatCell cell, math::Fixed z) noexcept;
+// WU-25, WDF-05: the cell a point lies in, and a cell's point (its centre, odd rows half a cell
+// further along x) at height `z`. A point's row is the truncated (y - min_y) / size; on an odd row
+// x moves back half a cell and is clamped to min_x; the column is the truncated (x - min_x) /
+// size. The cell's point is min + index x size + size / 2.
+[[nodiscard]] CombatCell combat_cell_of(const math::Vec3& point, const MapBox& box) noexcept;
+[[nodiscard]] math::Vec3 combat_cell_point(CombatCell cell, math::Fixed z, const MapBox& box) noexcept;
 // FD-03: whether `point` lies within 400 / sqrt(2) of the cell point in the plane.
-[[nodiscard]] bool within_combat_cell_reach(const math::Vec3& point, CombatCell cell) noexcept;
+[[nodiscard]] bool within_combat_cell_reach(const math::Vec3& point, CombatCell cell, const MapBox& box) noexcept;
 
 // FO-09, FO-10 (#599): a squadron's place in the formation of a group move. The formation flies
 // one straight path from `origin` along `direction` (a unit vector in the plane); the squadron's
@@ -183,19 +195,20 @@ struct SquadronLane {
 };
 
 // FM-23 (#687, debug build; walk 1 WSQ-08): the idle grid, 120-unit cells laid out as the combat
-// grid (from the world origin, WU-27), each held by at most one squadron of any side.
+// grid (from the map box's low corner, WDF-05, WU-27), each held by at most one squadron of any side.
 inline constexpr std::int64_t idle_cell_size = 120;
 // FM-24 (walk 1 WSQ-09): at most this many cells are examined for a free one.
 inline constexpr std::uint32_t idle_cell_search_limit = 64;
 
-[[nodiscard]] CombatCell idle_cell_of(const math::Vec3& point) noexcept;
-[[nodiscard]] math::Vec3 idle_cell_point(CombatCell cell, math::Fixed z) noexcept;
+[[nodiscard]] CombatCell idle_cell_of(const math::Vec3& point, const MapBox& box) noexcept;
+[[nodiscard]] math::Vec3 idle_cell_point(CombatCell cell, math::Fixed z, const MapBox& box) noexcept;
 // FM-24: the idle cell a squadron reverting to idle at `desired` claims when it holds none: the
 // cell under `desired` when free, else the free cell nearest `desired` (squared, in the plane) in
 // the first ring around it that has one, rings searched row by row from the low corner and the
 // first strictly nearest kept. None after `idle_cell_search_limit` cells without a free one.
 // `taken` lists the cells other squadrons hold.
-[[nodiscard]] std::optional<CombatCell> idle_cell_claim(const math::Vec3& desired, std::span<const CombatCell> taken);
+[[nodiscard]] std::optional<CombatCell> idle_cell_claim(
+    const math::Vec3& desired, std::span<const CombatCell> taken, const MapBox& box);
 
 // WMV-17/18: a team can retain a completed position formation before any player order.
 // An autonomous split copies completion history and may replace that base position.
@@ -205,8 +218,70 @@ struct SquadronFormationState {
     bool complete{};
     bool has_reached_done{};
     bool attack_override{};
+    EntityId attack_target{}; // WDF-03: movement destination, independent of team sharing
+    std::uint32_t attack_hardpoint{attack_hull}; // WSQ-15: retained destination attachment, including implicit attacks
     friend bool operator==(const SquadronFormationState&, const SquadronFormationState&) = default;
 };
+
+// FS-40/41: installed geometry and independent container/member progress. The
+// accepted destination is retained separately in SquadronFormationState.
+struct SquadronPathTracker {
+    std::uint32_t segment{};
+    bool started{};
+    math::Fixed turn_scale{math::Fixed::from_raw(math::Fixed::scale)};
+    math::Fixed speed_scale{math::Fixed::from_raw(math::Fixed::scale)};
+    friend bool operator==(const SquadronPathTracker&, const SquadronPathTracker&) = default;
+};
+
+struct SquadronAttackRoute {
+    std::uint64_t identity{};
+    std::vector<math::Vec3> nodes;
+    std::map<EntityId, SquadronPathTracker> trackers;
+    math::Fixed aside{};
+    math::Vec3 start_facing{};
+    math::Fixed ahead{};
+    std::vector<math::Fixed> node_speeds;
+    friend bool operator==(const SquadronAttackRoute&, const SquadronAttackRoute&) = default;
+};
+
+struct SquadronAttackPath {
+    EntityId target{};
+    math::Vec3 cached_position{};
+    std::uint64_t next_refresh_frame{};
+    std::uint64_t collision_identity{};
+    std::uint64_t stack_changed_frame{};
+    EntityId escorted_destination{};
+    bool initialization_pending{};
+    std::optional<std::uint64_t> failure_frame{}; // FC-68; absent before any failed attempt
+    std::vector<SquadronAttackRoute> stack; // active tracker is the last entry
+    friend bool operator==(const SquadronAttackPath&, const SquadronAttackPath&) = default;
+};
+
+// FC-71/FSC-72: immutable observations supplied by the later formation turn.
+// Exceptional movement producers keep their UFS-36 interface qualification.
+struct SquadronAttackRefresh {
+    math::Vec3 target_position{};
+    math::Fixed effective_reach{};
+    EntityId escorted_destination{};
+    bool completed_or_stopping{};
+    bool in_attack_reach{};
+    bool pursuing{};
+    bool shared_cell{};
+    bool visible{true};
+    bool repath_permitted{true};
+    bool protected_destination{};
+    bool attack_positioning{true};
+};
+
+// Due visits consume the interval before any retain/refusal gate.
+[[nodiscard]] bool refresh_squadron_attack_path(SquadronAttackPath& path,
+    std::uint64_t frame, const SquadronAttackRefresh& observation);
+[[nodiscard]] bool squadron_attack_initialization_due(const SquadronAttackPath& path,
+    std::uint64_t frame) noexcept;
+enum class SquadronPathAdmission : std::uint8_t { refused, inserted, active };
+// FC-72: insertion has no result-age parameter; active and started remain separate.
+[[nodiscard]] SquadronPathAdmission install_squadron_attack_path(SquadronAttackPath& path,
+    SquadronAttackRoute route, std::uint64_t frame);
 
 // A squadron's orders and target (FT rules). Hashed state.
 struct SquadronState {
@@ -218,7 +293,7 @@ struct SquadronState {
     SquadronMode mode{SquadronMode::idle};
     EntityId escorted{};
     math::Vec3 anchor{};       // idle: the point it holds
-    EntityId target{};         // the formation's attack target, zero for none
+    EntityId target{};         // the shared team target, zero for none
     // #531: the hardpoint of `target` a player attack order named (attack_hull for none); hashed
     // only when set, so sessions without a hardpoint order keep their hashes.
     std::uint32_t target_hardpoint{attack_hull};
@@ -239,6 +314,8 @@ struct SquadronState {
     // a squadron moved alone has zero slot offsets. Hashed only while set.
     std::optional<SquadronLane> lane{};
     std::optional<SquadronFormationState> formation{}; // WMV-17/18, independent of FA-07
+    std::optional<SquadronAttackPath> attack_path{}; // SQAP v2, FS-40..42
+    bool garrison_unit{}; // WU-37: birth provenance, retained independently of live members (GRSN).
     friend bool operator==(const SquadronState&, const SquadronState&) = default;
 };
 
@@ -349,6 +426,28 @@ struct LaneFlight {
     bool individual_speed{}; // one member: use each craft's current maximum (AB-24)
 };
 
+// FD-65: current segment and mapped side correction, independent of target motion.
+[[nodiscard]] core::Result<std::optional<LaneFlight>> squadron_attack_flight(
+    const SquadronAttackPath& path, EntityId member, const math::Vec3& centre,
+    math::Fixed speed, math::Fixed side_error_min, math::Fixed side_error_max);
+
+// FD-68: half-plane progress is independent of current target/range. The leader
+// advances all trackers; only admitted member movement marks each one started.
+[[nodiscard]] std::uint32_t squadron_attack_segment(const SquadronAttackPath& path,
+    EntityId leader, const math::Vec3& position) noexcept;
+void advance_squadron_attack_path(SquadronAttackPath& path, EntityId leader,
+    const math::Vec3& position, std::span<const EntityId> admitted);
+void squadron_attack_combat_boundary(SquadronState& state, bool in_strafe_reach, bool shared_cell);
+
+struct MotionRules;
+// FS-40/FD-65: unobstructed squadron geometry retains the supplied legal end
+// and current start facing. Prediction, obstacle mapping and clipping are UFS-34.
+[[nodiscard]] core::Result<SquadronAttackRoute> plan_squadron_attack_route(
+    const CraftProfile& craft, const MotionRules& rules, EntityId container,
+    std::span<const EntityId> roster, std::uint64_t frame, const math::Vec3& centre,
+    math::Fixed yaw, math::Fixed speed, const math::Vec3& destination,
+    std::optional<math::Vec3> current_facing = std::nullopt);
+
 // What one craft's frame reads (copied before the phase, never written by it).
 struct CraftFrame {
     const CraftView* self{};
@@ -371,10 +470,12 @@ struct CraftFrame {
     // WSQ-17, FO-10: the path direction, leader's sideways lane steer and the speed
     // every craft forms up at, including on a move alone.
     std::optional<LaneFlight> lane{};
+    std::optional<LaneFlight> attack_lane{}; // FD-65: installed attack segment
     // #457: the squadron's dogfight, its combat cell, and the craft this one chases while its
     // chase timer runs (FD-05), null for none.
     DogfightFlight dogfight{DogfightFlight::none};
     CombatCell cell{};
+    MapBox box{}; // WDF-05: the grids' low corner, for the cell point
     const CraftView* chase{};
     // FD-10: the ships to steer around, ascending ID.
     std::span<const CraftObstacle> obstacles{};
@@ -400,6 +501,13 @@ inline constexpr std::int64_t max_out_of_combat_defense = 1;
 
 // FD-06: a chase lasts ten seconds.
 inline constexpr std::uint64_t chase_frames = 300;
+
+// FD-06/FD-25 (FSC-26): the serial chase-claim commit. `views` are in ascending ID; `scanners`
+// index them in that order and `candidates[i]` lists scanner i's followable craft in cell/roster
+// order. Claims run in object service rank, last-created craft first: each scanner whose timer
+// has run out takes its first candidate whose timer has run out, and both timers restart.
+void claim_chases(std::span<CraftView> views, std::span<const std::size_t> scanners,
+    std::span<const std::vector<EntityId>> candidates, std::uint64_t frame_number);
 
 // One frame of a craft's locomotor (FM-01 to FM-23, FA-01 to FA-06, FD-01 to FD-10).
 [[nodiscard]] core::Result<CraftStep> step_craft(const CraftFrame& frame);
@@ -437,13 +545,14 @@ struct GroupSlot {
 [[nodiscard]] core::Result<std::vector<GroupSlot>> squadron_group_slots(
     std::span<const GroupSquadron> squadrons, const math::Vec3& destination);
 
-// A squadron of one formation on its move this frame (FO-10, FO-11): its team container's
-// position, its lane, its craft's `Max_Speed` and `Min_Speed`.
+// A member of one formation on its move this frame (FO-10, FO-11, WMV-44): its container's
+// or standalone object's position, lane, craft speeds, and member type's deceleration.
 struct LaneMember {
     math::Vec3 position{};
     SquadronLane lane{};
     math::Fixed max_speed{};
     math::Fixed min_speed{};
+    math::Fixed deceleration{}; // WMV-42/44: zero is the formation default, without flight fallback
 };
 
 // FO-10, FO-11 (#599): how each squadron of one formation flies this frame: its leader's sideways

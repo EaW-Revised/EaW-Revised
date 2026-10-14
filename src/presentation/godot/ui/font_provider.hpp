@@ -32,7 +32,10 @@ public:
     [[nodiscard]] presentation::ui::ResolvedFont resolve(const presentation::ui::FontRequest& request,
                                                          std::string_view language) const;
     // The engine font of a resolved face; never null.
-    [[nodiscard]] godot::Ref<godot::Font> font(const presentation::ui::ResolvedFont& resolved);
+    [[nodiscard]] godot::Ref<godot::Font> font(const presentation::ui::ResolvedFont& resolved, bool bold = false);
+    // GHUD-S66: opt-in command text, with integer glyph advances and a bold
+    // request. Other screens keep font() and their existing raster settings.
+    [[nodiscard]] godot::Ref<godot::Font> command_font(const presentation::ui::ResolvedFont& resolved, int pixels);
     // The FontFile of a cached face, or null.
     [[nodiscard]] godot::Ref<godot::FontFile> cached_font(std::string_view face) const;
 
@@ -41,6 +44,7 @@ private:
     std::map<std::string, godot::Ref<godot::FontFile>> files_;
     std::vector<std::string> system_families_;
     std::map<std::string, godot::Ref<godot::SystemFont>> system_fonts_;
+    std::map<std::string, godot::Ref<godot::Font>> command_fonts_;
 };
 
 } // namespace eawr::presentation::godot_backend

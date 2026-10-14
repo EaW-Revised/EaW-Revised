@@ -2,6 +2,7 @@
 
 #include "motion_internal.hpp"
 #include "tactical_internal.hpp"
+#include "eawr/sim/tactical/combat.hpp"
 
 #include <algorithm>
 #include <array>
@@ -16,7 +17,7 @@ using math::Fixed;
 using math::Vec3;
 using motion_detail::Calc;
 using motion_detail::whole;
-constexpr std::size_t point_limit = 2048;
+constexpr std::size_t point_limit = rocket_point_limit;
 constexpr Fixed arc_tolerance = Fixed::from_raw(17); // RFL-04: 0.000001 rounded to Q24
 
 Vec3 add(Calc& q, const Vec3& a, const Vec3& b) {
@@ -35,7 +36,12 @@ Vec3 evaluate(Calc& q, const RocketSegment& segment, const Fixed t) {
 
 // RFL-04: midpoint chord convergence, not fixed tessellation or arc inversion.
 Fixed arc_length(Calc& q, const RocketSegment& segment, const Fixed low,
-    const Fixed high, const std::uint32_t depth, bool& bounded) {
+    const Fixed high, const std::uint32_t depth, bool& bounded, RocketPathWork& work) {
+    if (!bounded || work.arc_visits == rocket_arc_visit_limit) {
+        bounded = false;
+        return {};
+    }
+    ++work.arc_visits;
     const auto first = evaluate(q, segment, low);
     const auto last = evaluate(q, segment, high);
     const auto chord = q.length(sub(q, last, first));
@@ -50,8 +56,9 @@ Fixed arc_length(Calc& q, const RocketSegment& segment, const Fixed low,
         bounded = false;
         return Fixed{};
     }
-    return q.add(arc_length(q, segment, low, mid, depth + 1, bounded),
-        arc_length(q, segment, mid, high, depth + 1, bounded));
+    const auto left = arc_length(q, segment, low, mid, depth + 1, bounded, work);
+    const auto right = arc_length(q, segment, mid, high, depth + 1, bounded, work);
+    return q.add(left, right);
 }
 
 bool append_segment(Calc& q, std::vector<Vec3>& points, const Vec3& from,
@@ -106,13 +113,17 @@ std::vector<Fixed> second_derivatives(Calc& q, const std::vector<Fixed>& values)
     return second;
 }
 
-core::Result<void> build_path(Calc& q, FlightState& flight, const std::vector<Vec3>& points) {
+core::Result<void> build_path(Calc& q, FlightState& flight, const std::vector<Vec3>& points,
+    RocketPathWork* diagnostics = nullptr) {
     bool bounded = true;
-    flight.path_initialized = true;
-    flight.path.clear();
-    flight.path_distance = Fixed{};
+    RocketPathWork local_work;
+    auto& work = diagnostics ? *diagnostics : local_work;
+    std::vector<RocketSegment> path;
     // RFL-06: a retained unevaluable route fails lookup at the current pose.
-    if (points.size() < 3) return core::Result<void>::success();
+    if (points.size() < 3) {
+        flight.path_initialized = true; flight.path.clear(); flight.path_distance = {};
+        return core::Result<void>::success();
+    }
     const std::array<std::vector<Fixed>, 3> coordinates = [&] {
         std::array<std::vector<Fixed>, 3> result;
         for (const auto& point : points) {
@@ -134,12 +145,71 @@ core::Result<void> build_path(Calc& q, FlightState& flight, const std::vector<Ve
             return Vec3{polynomial[0][k], polynomial[1][k], polynomial[2][k]};
         };
         RocketSegment segment{coefficient(0), coefficient(1), coefficient(2), coefficient(3), {}};
-        segment.length = arc_length(q, segment, Fixed{}, whole(1), 0, bounded);
-        flight.path.push_back(segment);
+        segment.length = arc_length(q, segment, Fixed{}, whole(1), 0, bounded, work);
+        if (!bounded) break;
+        path.push_back(segment);
     }
     if (!q.ok()) return core::Result<void>::failure(q.error("rocket spline evaluation"));
     if (!bounded) return core::Result<void>::failure(
         diagnostic(diagnostic_codes::invalid_setup, "rocket arc evaluation exceeds its subdivision bound"));
+    flight.path_initialized = true;
+    flight.path = std::move(path);
+    flight.path_distance = {};
+    return core::Result<void>::success();
+}
+
+Vec3 cross(Calc& q, const Vec3& a, const Vec3& b) {
+    return {q.sub(q.mul(a.y, b.z), q.mul(a.z, b.y)),
+        q.sub(q.mul(a.z, b.x), q.mul(a.x, b.z)),
+        q.sub(q.mul(a.x, b.y), q.mul(a.y, b.x))};
+}
+
+Vec3 offset_axis(Calc& q, const Vec3& value) {
+    const auto length = q.length(value);
+    return length.raw() == 0 ? Vec3{} : Vec3{q.div(value.x, length), q.div(value.y, length), q.div(value.z, length)};
+}
+
+bool append_offset_segment(Calc& q, std::vector<Vec3>& points, const Vec3& from,
+    const Vec3& to, const FlightProfile& profile, const Fixed offset_scale,
+    CombatRandom* random, RocketPathWork& work) {
+    const auto begin = points.size();
+    if (!append_segment(q, points, from, to, profile.curve_distance)) return false;
+    work.control_points = std::max(work.control_points, points.size());
+    const auto offset = q.mul(profile.curve_offset, offset_scale);
+    if (offset.raw() == 0 || points.size() <= begin + 1) return q.ok();
+    // RFL-03: the spatial axes depend on the segment midpoint as well as its direction.
+    const auto backward = sub(q, from, to);
+    const auto anchor = add(q, scale(q, add(q, from, to), Fixed::from_raw(Fixed::scale / 2)),
+        Vec3{whole(1), whole(1), whole(1)});
+    const auto perpendicular = cross(q, anchor, backward);
+    const auto first = offset_axis(q, perpendicular);
+    // RFL-03: a positive scale on the first cross product cancels when the
+    // second axis is normalized. Use its unit vector to bound Q24 intermediates.
+    const auto second = offset_axis(q, cross(q, first, backward));
+    if (!random || !q.ok()) return false;
+    for (auto index = begin; index + 1 < points.size(); ++index) {
+        const auto turn = Fixed::from_raw(random->uniform(0, static_cast<std::uint32_t>(Fixed::scale - 1)));
+        const auto radius = q.mul(offset, Fixed::from_raw(random->uniform(0, static_cast<std::uint32_t>(Fixed::scale))));
+        const auto direction = add(q, scale(q, first, math::cos_turn(turn)), scale(q, second, math::sin_turn(turn)));
+        points[index] = add(q, points[index], scale(q, direction, radius));
+    }
+    return q.ok();
+}
+
+// RFL-05: trim removes controls starting at the selected segment, adds its
+// evaluated point and rebuilds; it does not merely shorten the cached last arc.
+core::Result<void> trim_path(Calc& q, FlightState& flight, std::vector<Vec3>& points, RocketPathWork& work) {
+    Fixed passed{};
+    for (std::size_t i = 0; i < flight.path.size(); ++i) {
+        const auto end = q.add(passed, flight.path[i].length);
+        if (flight.profile.authored_distance < end && flight.path[i].length.raw() > 0) {
+            const auto endpoint = evaluate(q, flight.path[i],
+                q.div(q.sub(flight.profile.authored_distance, passed), flight.path[i].length));
+            points.resize(i); points.push_back(endpoint);
+            return build_path(q, flight, points, &work);
+        }
+        passed = end;
+    }
     return core::Result<void>::success();
 }
 } // namespace
@@ -152,31 +222,64 @@ bool valid_flight(const FlightProfile& profile) noexcept {
         || !bounded(profile.straight_distance) || !bounded(profile.curve_offset)
         || (profile.lifetime && (profile.lifetime->raw() < 0 || profile.lifetime->raw() > 3600 * Fixed::scale))) return false;
     if (profile.kind != FlightKind::rocket) return true;
-    // G4 supplies the stock endpoint route. RFL-03/05/07 broader constructions stay gated.
-    return profile.curve_distance.raw() > 0 && profile.curve_offset.raw() == 0 && profile.target_radius;
+    return profile.curve_distance.raw() > 0;
 }
 
-core::Result<void> prepare_rocket_path(Projectile& projectile) {
+core::Result<void> prepare_rocket_path(Projectile& projectile, CombatRandom* random, RocketPathWork* diagnostics) {
     auto& flight = *projectile.flight;
+    if (flight.path_initialized) return core::Result<void>::success();
     if (!valid_flight(flight.profile)) return core::Result<void>::failure(
-        diagnostic(diagnostic_codes::invalid_setup, "unsupported rocket path profile (RFL-03/05)"));
+        diagnostic(diagnostic_codes::invalid_setup, "invalid rocket path profile (RFL-03/05)"));
+    if (flight.profile.curve_offset.raw() > 0 && !random) return core::Result<void>::failure(
+        diagnostic(diagnostic_codes::invalid_setup, "nonzero rocket offset requires synchronized draws (RFL-03)"));
+    RocketPathWork local_work;
+    auto& work = diagnostics ? *diagnostics : local_work;
+    work = {};
+    auto route = flight;
     Calc q;
     const auto delta = sub(q, flight.aim, projectile.position);
     const auto initial = std::min(flight.profile.straight_distance,
         q.div(q.length(delta.x, delta.y), whole(2)));
     std::vector<Vec3> points{projectile.position};
+    work.control_points = 1;
     Vec3 start = projectile.position;
     bool bounded = true;
     if (initial.raw() != 0) {
         const auto direction = scale(q, projectile.step, q.div(whole(1), projectile.speed));
         start = add(q, projectile.position, scale(q, direction, initial));
-        bounded = append_segment(q, points, projectile.position, start, flight.profile.curve_distance);
+        bounded = append_offset_segment(q, points, projectile.position, start, flight.profile,
+            Fixed::from_raw(Fixed::scale / 10), random, work);
     }
-    bounded = bounded && append_segment(q, points, start, flight.aim, flight.profile.curve_distance);
+    bounded = bounded && append_offset_segment(q, points, start, flight.aim, flight.profile, whole(1), random, work);
     if (!q.ok()) return core::Result<void>::failure(q.error("rocket path construction"));
     if (!bounded) return core::Result<void>::failure(
         diagnostic(diagnostic_codes::invalid_setup, "rocket path exceeds the control-point bound"));
-    return build_path(q, flight, points);
+    auto built = build_path(q, route, points, &work);
+    if (!built) return built;
+    if (!flight.profile.target_radius && !route.path.empty()) {
+        Fixed length{};
+        for (const auto& segment : route.path) length = q.add(length, segment.length);
+        const auto& last = route.path.back();
+        const auto samples = std::clamp(q.div(last.length, whole(10)).ceil_to_integer(), std::int64_t{1}, std::int64_t{100});
+        // RFL-04/05: only the final two presentation samples are needed. Keep
+        // their difference unnormalized, including when the allowance is negative.
+        const auto late = evaluate(q, last, q.div(whole(samples - 1), whole(samples)));
+        const auto tangent = sub(q, evaluate(q, last, whole(1)), late);
+        work.tangent_samples += 2;
+        const auto endpoint = add(q, flight.aim, scale(q, tangent, q.sub(flight.profile.authored_distance, length)));
+        bounded = append_offset_segment(q, points, flight.aim, endpoint, flight.profile,
+            Fixed::from_raw(Fixed::scale * 3 / 10), random, work);
+        if (!q.ok()) return core::Result<void>::failure(q.error("rocket extension construction"));
+        if (!bounded) return core::Result<void>::failure(
+            diagnostic(diagnostic_codes::invalid_setup, "rocket extension exceeds the control-point bound"));
+        built = build_path(q, route, points, &work);
+        if (!built) return built;
+        built = trim_path(q, route, points, work);
+        if (!built) return built;
+    }
+    if (!q.ok()) return core::Result<void>::failure(q.error("rocket path construction"));
+    flight = std::move(route);
+    return core::Result<void>::success();
 }
 
 core::Result<void> repath_rocket(Projectile& projectile, const Vec3& source, const Vec3& previous_step) {

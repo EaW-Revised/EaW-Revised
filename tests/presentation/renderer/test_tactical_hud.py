@@ -42,6 +42,19 @@ FACEPLATES = {
 
 
 class TacticalHudStructure(unittest.TestCase):
+    def test_resume_rollover_uses_token_art_and_leaves_absent_art_silent(self):
+        # TM-14: present art resolves normally (including missing-file diagnostics);
+        # no authored hover art leaves the base and caption without an extra quad.
+        hud = (UI / "tactical_hud_build.cpp").read_text(encoding="utf-8")
+        rollover = hud[hud.index("// TM-14:"):hud.index("if (!overlay.pause_text")]
+        self.assertIn("resume_component->list(data::ui::Field::mouse_over_texture_name)", rollover)
+        self.assertNotIn("->text(", rollover)
+        self.assertIn("if (!rollover.empty() && !rollover.front().empty()) {", rollover)
+        self.assertIn('state.command_texture(rollover.front(), "Resume rollover")', rollover)
+        self.assertNotIn("true", rollover)  # Do not silence a named missing asset.
+        overlay = (UI / "battle_overlay.cpp").read_text(encoding="utf-8")
+        self.assertIn("if (style_.pause_rollover.is_valid()) resume_->set_rollover(style_.pause_rollover);", overlay)
+
     def test_the_hud_is_wired_into_the_map_mode_the_gallery_and_the_build(self):
         build = source_text("apps/viewer/CMakeLists.txt")
         for source in ("src/map_mode_hud.cpp", "src/presentation/godot/ui/tactical_hud.cpp",
@@ -195,10 +208,7 @@ class TacticalHudGraphical(unittest.TestCase):
         shutil.rmtree(cls.cache, ignore_errors=True)
 
     def assert_hud_diagnostics(self, hud):
-        # #1632: the authored Resume rollover has no texture. Keep every other
-        # diagnostic fatal so this accepted warning cannot mask a HUD failure.
-        known_resume_warning = "EAWR-UI-0322 [warning] : Resume rollover texture  cannot be drawn"
-        self.assertEqual([row for row in hud["diagnostics"] if row != known_resume_warning], [])
+        self.assertEqual(hud["diagnostics"], [])
 
     def assert_shell(self, hud, faction):
         self.assert_hud_diagnostics(hud)

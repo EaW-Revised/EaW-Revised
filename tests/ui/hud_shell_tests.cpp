@@ -5,14 +5,20 @@
 
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/data/xml.hpp"
+#include "eawr/data/retail_values.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
+#include "eawr/presentation/ui/hud_flytext.hpp"
+#include "eawr/presentation/ui/unit_cards.hpp"
+#include "eawr/presentation/ui/world_encyclopedia.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
+#include "eawr/presentation/ui/retreat_button.hpp"
 #include "ui_test_support.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -79,7 +85,13 @@ data::ui::ShellAnchors synthetic_shell() {
         shell.add(std::move(slot));
     }
     shell.add(anchor("Text_Credits_tactical", {190, 228, 90, 20}));
+    shell.add(anchor("Text_Planetary_Pop", {130, 228, 40, 20}));
     shell.add(anchor("b_reinforcement", {240, 125, 30, 30}));
+    shell.add(anchor("b_special_weapon", {210, 125, 30, 30}));
+    shell.add(anchor("b_retreat", {200, 160, 36, 36}));
+    auto tech = anchor("Text_Tactical_Tech", {64, 214, 50, 12});
+    tech.origin = assets::Vec2f{64, 220};
+    shell.add(std::move(tech));
     std::size_t order = 0;
     for (const auto name : ui::tactical_order_buttons) {
         shell.add(anchor(std::string(name), {260.0F + 30.0F * static_cast<float>(order++), 205, 24, 24}));
@@ -93,6 +105,17 @@ data::ui::CommandBarCatalog synthetic_catalog() {
   <Mega_Texture_Name>MT_CommandBar</Mega_Texture_Name></CommandBarComponent>
 <CommandBarComponent Name="i_main_skirmish"><Type>Shell</Type><Model_Name>i_tactical_controls.alo</Model_Name></CommandBarComponent>
 <CommandBarComponent Name="radar"><Type>Button</Type><Size>171 175</Size></CommandBarComponent>
+<CommandBarComponent Name="generic_flytext"><Type>TextButton</Type><No_Shell>True</No_Shell>
+  <Font_Name>Custom-Flytext</Font_Name><Font_Point_Size>11</Font_Point_Size><Text_Color>20 40 60 80</Text_Color>
+  <Text_Emboss>True</Text_Emboss><Text_Outline>True</Text_Outline><Text_Offset>3 -5</Text_Offset>
+  <Left_Justified>True</Left_Justified></CommandBarComponent>
+<CommandBarComponent Name="b_special_weapon"><Type>Button</Type><Blank_Texture_Name>back.tga</Blank_Texture_Name>
+  <Icon_Alternate_Texture_Name>ion.tga hyper.tga plasma.tga</Icon_Alternate_Texture_Name>
+  <Build_Texture_Name>dial.tga</Build_Texture_Name></CommandBarComponent>
+<CommandBarComponent Name="b_retreat"><Type>Button</Type><Blank_Texture_Name>retreat-back.tga</Blank_Texture_Name>
+  <Icon_Alternate_Texture_Name>retreat-a.tga retreat-b.tga</Icon_Alternate_Texture_Name>
+  <Selected_Texture_Name>retreat-over.tga</Selected_Texture_Name><Disabled_Texture_Name>retreat-off.tga</Disabled_Texture_Name>
+  <Build_Texture_Name>retreat-dial.tga</Build_Texture_Name><Click_Shift>True</Click_Shift></CommandBarComponent>
 <CommandBarComponent Name="s_select_00"><Type>TextButton</Type><Font_Name>EmpireAtWar-Medium</Font_Name>
   <Font_Point_Size>6</Font_Point_Size><Text_Outline>True</Text_Outline><Text_Offset2>0 -16</Text_Offset2></CommandBarComponent>
 <CommandBarComponent Name="s_health_00"><Type>Bar</Type><Bar_Texture_Name>back.tga back.tga back.tga</Bar_Texture_Name>
@@ -135,10 +158,24 @@ data::ui::CommandBarCatalog synthetic_catalog() {
 <CommandBarComponent Name="Text_Credits_tactical"><Type>TextButton</Type><Icon_Texture_Name>i_icon_money_big.tga</Icon_Texture_Name>
   <Font_Point_Size>7</Font_Point_Size><Text_Color>255 212 33 255</Text_Color><Right_Justified>True</Right_Justified>
   <Blink_Duration>0.5</Blink_Duration><Blink_Rate>0.25</Blink_Rate></CommandBarComponent>
+<CommandBarComponent Name="Text_Planetary_Pop"><Type>TextButton</Type><Icon_Texture_Name>population.tga</Icon_Texture_Name>
+  <Font_Name>Arial Bold</Font_Name><Font_Point_Size>6</Font_Point_Size><Text_Color>255 212 33 255</Text_Color>
+  <Right_Justified>True</Right_Justified><Text_Offset>-10 0</Text_Offset></CommandBarComponent>
 <CommandBarComponent Name="b_reinforcement"><Type>Button</Type>
   <Icon_Alternate_Texture_Name>i_button_skirmish_reinforcements.tga i_button_skirmish_reinforcements.tga special.tga</Icon_Alternate_Texture_Name>
   <Blank_Texture_Name>pad.tga</Blank_Texture_Name><Flash_Texture_Name>flash.tga</Flash_Texture_Name>
   <Click_Shift>Yes</Click_Shift><Selected_Alpha>Yes</Selected_Alpha></CommandBarComponent>
+<CommandBarComponent Name="Text_Tactical_Tech"><Type>TextButton</Type>
+  <Font_Name>Arial Bold</Font_Name><Font_Point_Size>8</Font_Point_Size><Text_Color>255 212 33 255</Text_Color>
+  <Left_Justified>True</Left_Justified><Text_Offset>3 -2</Text_Offset></CommandBarComponent>
+<CommandBarComponent Name="reinforcement_counter"><Type>TextButton</Type>
+  <No_Shell>True</No_Shell><Icon_Texture_Name>reinforce.tga</Icon_Texture_Name>
+  <Blank_Texture_Name>dark.tga</Blank_Texture_Name><Build_Texture_Name>timer.tga</Build_Texture_Name>
+  <Scale>0.6</Scale><Color>10 20 30 40</Color><Blink_Duration>10</Blink_Duration>
+  <Blink_Rate>0.2</Blink_Rate><Blink_Fade>True</Blink_Fade></CommandBarComponent>
+<CommandBarComponent Name="garrison_respawn_counter"><Type>TextButton</Type>
+  <No_Shell>True</No_Shell><Icon_Texture_Name>garrison.tga</Icon_Texture_Name>
+  <Build_Texture_Name>garrison-dial.tga</Build_Texture_Name><Scale>0.9</Scale></CommandBarComponent>
 </CommandBarComponents>)";
     for (const auto name : ui::tactical_order_buttons) {
         const std::string component = std::string(name);
@@ -160,6 +197,57 @@ data::ui::CommandBarCatalog synthetic_catalog() {
     return catalog;
 }
 
+// HCB-15 (#3078): b_retreat keeps its authored slot and art; its state follows the published view.
+void retreat_button() {
+    const auto retreat = ui::hud_shell(synthetic_shell(), synthetic_catalog(), ui::HudFaction::underworld).retreat;
+    expect(retreat && retreat->button.rect.x == 200 && retreat->button.rect.y == 160 && retreat->button.rect.width == 36
+        && retreat->button.normal == "retreat-a.tga" && retreat->blank == "retreat-back.tga"
+        && retreat->button.pressed == "retreat-over.tga" && retreat->button.disabled == "retreat-off.tga"
+        && retreat->build == "retreat-dial.tga" && retreat->button.click_shift,
+        "HCB-15: b_retreat keeps its shell slot, first alternate icon, state art and dial");
+    data::ui::ShellAnchors without;
+    without.add(anchor("radar", {14.5F, 10.5F, 175, 175}, "MeshAdditive.fx", "i_scan_lines.tga", false, 0));
+    expect(!ui::hud_shell(without, synthetic_catalog(), ui::HudFaction::rebel).retreat,
+        "HCB-15: a shell without the b_retreat anchor draws no retreat control");
+
+    using sim::tactical::RetreatPhase;
+    using sim::tactical::RetreatRefusal;
+    expect(ui::retreat_button_view(std::nullopt, 100, false) == ui::RetreatButtonView{},
+        "HCB-15a: no published view keeps the skirmish glyph disabled, without a dial");
+    sim::tactical::RetreatView view;
+    view.player = 1; view.lockout_frames = 300; view.refusal = RetreatRefusal::lockout;
+    const auto locked = ui::retreat_button_view(view, 75, false);
+    expect(!locked.enabled && !locked.flashing && std::abs(locked.dial - 0.25) < 1e-9,
+        "HCB-15b: the opening lockout disables the button and fills the dial with the elapsed share");
+    view.refusal = RetreatRefusal::none;
+    expect(ui::retreat_button_view(view, 400, false) == ui::RetreatButtonView{true, false, 1.0},
+        "HCB-15b: an eligible player gets an enabled button without a dial");
+    expect(ui::retreat_button_view(view, 400, true) == ui::RetreatButtonView{},
+        "HCB-15b: a decided battle disables the button");
+    for (const auto refusal : {RetreatRefusal::prevention, RetreatRefusal::superweapon, RetreatRefusal::other_player}) {
+        view.refusal = refusal;
+        expect(ui::retreat_button_view(view, 400, false).enabled,
+            "HCB-15b: prevention, superweapon and another player's retreat refuse the press, not the button");
+    }
+    for (const auto refusal : {RetreatRefusal::tutorial, RetreatRefusal::faction, RetreatRefusal::invalid_player,
+        RetreatRefusal::wrong_mode, RetreatRefusal::battle_decided}) {
+        view.refusal = refusal;
+        expect(!ui::retreat_button_view(view, 400, false).enabled, "HCB-15b: gated retreat disables the button");
+    }
+    view.refusal = RetreatRefusal::none;
+    view.state.phase = RetreatPhase::countdown; view.state.player = 1;
+    expect(ui::retreat_button_view(view, 400, false) == ui::RetreatButtonView{true, true, 1.0},
+        "HCB-15b: the local countdown flashes the still-enabled button, whose press cancels");
+    view.state.forced = true;
+    expect(ui::retreat_button_view(view, 400, false) == ui::RetreatButtonView{true, true, 1.0},
+        "HCB-15b: the local forced countdown keeps the enabled blink, with no command on press");
+    view.state.forced = false;
+    view.state.player = 2; view.refusal = RetreatRefusal::other_player;
+    expect(!ui::retreat_button_view(view, 400, false).flashing, "HCB-15b: another player's countdown does not flash");
+    view.state.player = 1; view.refusal = RetreatRefusal::none; view.state.phase = RetreatPhase::escaping;
+    expect(!ui::retreat_button_view(view, 400, false).enabled, "the escape phase disables the button");
+}
+
 void shell_parts() {
     const auto shell = synthetic_shell();
     const auto catalog = synthetic_catalog();
@@ -170,9 +258,23 @@ void shell_parts() {
 
     const auto rebel = ui::hud_shell(shell, catalog, ui::HudFaction::rebel);
     expect(rebel.diagnostics.empty(), "the synthetic shell has every P2-20a part");
-    expect(rebel.order_buttons.size() == 5U, "five authored order controls exclude deferred waypoint semantics");
+    data::ui::CommandBarCatalog missing_level_catalog;
+    for (auto component : catalog.components()) {
+        if (component.name == "s_health_00") {
+            std::erase_if(component.fields, [](const auto& field) { return field.field == data::ui::Field::max_bar_level; });
+        }
+        missing_level_catalog.add(std::move(component));
+    }
+    const auto missing_level = ui::hud_shell(shell, missing_level_catalog, ui::HudFaction::rebel);
+    expect(missing_level.diagnostics.size() == 1 && missing_level.diagnostics.front().code == "EAWR-UI-0320"
+               && missing_level.diagnostics.front().message.find("Max_Bar_Level") != std::string::npos,
+           "a missing bar level reports the existing HUD diagnostic family");
+    expect(!missing_level.card_slots.empty() && missing_level.card_slots.front().health
+               && missing_level.card_slots.front().health->max_level == 10,
+           "a missing bar level keeps the FoC fallback of ten");
+    expect(rebel.order_buttons.size() == 6U, "six authored order controls include waypoint mode");
     for (const auto& button : rebel.order_buttons) {
-        expect(button.name != "c_button03" && button.normal == button.name + ".tga"
+        expect(button.normal == button.name + ".tga"
                    && button.mouse_over == "over.tga" && button.pressed == "selected.tga"
                    && button.blank == "blank.tga" && button.click_shift && button.selected_alpha,
                "order controls retain their icon, state art and authored pressed flags");
@@ -266,15 +368,60 @@ void shell_parts() {
     data::ui::ShellAnchors bare;
     bare.add(anchor("Rebel_Faceplate_ALT1", {-1, -1, 1078, 284}, "MeshAlpha.fx", "face_rebel.tga", true, -1));
     const auto partial = ui::hud_shell(bare, catalog, ui::HudFaction::empire);
-    expect(partial.diagnostics.size() == 15U && !partial.minimap && partial.queue_slots.empty() && !partial.credits
+    expect(partial.diagnostics.size() == 18U && !partial.minimap && partial.queue_slots.empty() && !partial.credits && !partial.population
                && !partial.reinforcement && !partial.options && !partial.planet_name
                && partial.panel_buttons.empty() && partial.order_buttons.empty(),
-           "a missing faceplate, radar, options button, panel button, planet name, credits text and reinforcements "
-           "button and five command buttons are reported once each; a shell without queue slots shows no queue");
+           "a missing faceplate, radar, options button, panel button, planet name, credits and population text and reinforcements "
+           "button and six command buttons are reported once each; a shell without queue slots shows no queue");
 
     for (const auto* text : {"empire", "Rebel", "UNDERWORLD"}) expect(ui::hud_faction_from(text).has_value(), "factions parse");
     expect(!ui::hud_faction_from("pirate"), "an unknown faction is refused");
     expect(ui::alt_variant(ui::HudFaction::underworld) == 2U, "Underworld is ALT2");
+}
+
+// GHUD-S63: the emblem index follows the authored side names, not literal faction names.
+void allegiance_emblem_indices() {
+    const ui::SideNames retail{"Rebel", "Empire", "Underworld"};
+    expect(ui::allegiance_emblem_index("Rebel", retail) == 0, "good side is entry 0");
+    expect(ui::allegiance_emblem_index("EMPIRE", retail) == 1, "evil side is entry 1, case-insensitively");
+    expect(ui::allegiance_emblem_index("underworld", retail) == 2, "corrupt side is entry 2");
+    expect(ui::allegiance_emblem_index("Pirates", retail) == 3, "the Pirates literal is entry 3");
+    expect(ui::allegiance_emblem_index("Hutts", retail) == 4, "any other faction is entry 4");
+    expect(ui::allegiance_emblem_index("Neutral", retail) == 4, "Neutral is entry 4");
+    // A mod-shaped table: sides renamed and reordered, plus an extra faction.
+    const ui::SideNames mod{"Alliance", "Imperium", "Cartel"};
+    expect(ui::allegiance_emblem_index("Alliance", mod) == 0, "a renamed good side keeps entry 0");
+    expect(ui::allegiance_emblem_index("Cartel", mod) == 2, "a renamed corrupt side keeps entry 2");
+    expect(ui::allegiance_emblem_index("Rebel", mod) == 4, "a retail name that is no longer a side is entry 4");
+    expect(ui::allegiance_emblem_index("Mandalore", mod) == 4, "an extra faction is entry 4");
+    // A missing side name matches no faction, not the empty string.
+    expect(ui::allegiance_emblem_index("", ui::SideNames{}) == 4, "empty names match nothing");
+    expect(ui::allegiance_emblem_index("Rebel", ui::SideNames{"", "Empire", ""}) == 4, "an unset good side is not Rebel");
+}
+
+// GHUD-S52: the focused organize shell's alternate is the planet's terrain index, not the faction; the
+// land_art family is kept with its index for every faction, and nothing is hard-coded to the stock range.
+void organize_shell_alternates() {
+    data::ui::ShellAnchors organize;
+    organize.add(anchor("Planet_structure_00", {0, 0, 4, 4}, "MeshAlpha.fx", "structure.tga", true, 1));
+    for (const int index : {0, 1, 2, 3, 12, 40})
+        organize.add(anchor("land_art_ALT" + std::to_string(index), {0, 0, 100, 50}, "MeshAlpha.fx",
+                            "land.tga", true, 0));
+    const auto catalog = synthetic_catalog();
+    const auto filtered = ui::hud_shell(organize, catalog, ui::HudFaction::rebel);
+    expect(filtered.meshes.size() == 2U, "by faction only the faction's variant panel is kept (the old look)");
+    for (const auto faction : {ui::HudFaction::empire, ui::HudFaction::rebel, ui::HudFaction::underworld}) {
+        const auto look = ui::hud_shell(organize, catalog, faction, true);
+        expect(look.meshes.size() == 7U, "every panel and the plain mesh are kept for any faction");
+        std::vector<std::uint32_t> kept;
+        std::size_t plain = 0;
+        for (const auto& mesh : look.meshes) {
+            if (mesh.alternate) kept.push_back(*mesh.alternate); else ++plain;
+        }
+        std::sort(kept.begin(), kept.end());
+        expect(plain == 1U && kept == std::vector<std::uint32_t>{0, 1, 2, 3, 12, 40},
+               "panel indexes past the stock range survive (a mod's larger Zoomed_Terrain_Index)");
+    }
 }
 
 struct Expected {
@@ -359,12 +506,39 @@ void planet_names() {
     test::ui::write_text(xml / "GameObjectFiles.xml",
                          "<Game_Object_Files><File>planets.xml</File><File>units.xml</File></Game_Object_Files>");
     test::ui::write_text(xml / "planets.xml", "<Planets><Planet Name=\"Coruscant\"><Text_ID> TEXT_OBJECT_STAR_SYSTEM_CORUSCANT"
-                                              " </Text_ID></Planet><Planet Name=\"Nameless\"/>"
+                                              " </Text_ID></Planet><Planet Name=\"Modded_System_42\"><Text_ID>"
+                                              "TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Text_ID></Planet><Planet Name=\"Nameless\"/>"
                                               "<Planet Name=\"Unlisted\"><Text_ID>TEXT_NOT_THERE</Text_ID></Planet></Planets>");
     for (const auto* registry : {"HardpointDataFiles.xml", "FactionFiles.xml", "CampaignFiles.xml", "SFXEventFiles.xml"})
         test::ui::write_text(xml / registry, "<Files/>");
     test::ui::write_text(xml / "units.xml", R"xml(<Units>
 <SpaceUnit Name="Kuat"><Text_ID>TEXT_UNIT</Text_ID></SpaceUnit>
+<SpaceProp Name="HoverAsteroid"><Behavior>SPACE_OBSTACLE, IDLE</Behavior>
+<Is_Impassable_Asteroid>Yes</Is_Impassable_Asteroid><Is_Valid_Target>No</Is_Valid_Target><Text_ID/></SpaceProp>
+<SpaceProp Name="HoverValid"><Variant_Of_Existing_Type>HoverAsteroid</Variant_Of_Existing_Type>
+<Is_Valid_Target>Yes</Is_Valid_Target><Text_ID>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Text_ID></SpaceProp>
+<SpaceProp Name="HoverSelectable"><Variant_Of_Existing_Type>HoverAsteroid</Variant_Of_Existing_Type>
+<SpaceBehavior>selectable</SpaceBehavior></SpaceProp>
+<SpaceProp Name="HoverTooltip"><Variant_Of_Existing_Type>HoverAsteroid</Variant_Of_Existing_Type>
+<Behavior>SPACE_OBSTACLE, dummy_tooltip</Behavior></SpaceProp>
+<SpaceProp Name="HoverInherited"><Variant_Of_Existing_Type>HoverTooltip</Variant_Of_Existing_Type></SpaceProp>
+<SpaceProp Name="HoverNearMatch"><Behavior>NOT_SELECTABLE DUMMY_TOOLTIP_EXTRA</Behavior></SpaceProp>
+<SpaceUnit Name="Popup"><Encyclopedia_Text>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT, TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Encyclopedia_Text>
+<MP_Encyclopedia_Text>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</MP_Encyclopedia_Text>
+<Encyclopedia_Unit_Class>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Encyclopedia_Unit_Class>
+<Encyclopedia_Good_Against>CardUpgrade, Missing, Kuat, CardUpgrade</Encyclopedia_Good_Against>
+<Encyclopedia_Vulnerable_To>Missing CardUpgrade</Encyclopedia_Vulnerable_To>
+<Population_Value>2</Population_Value><Unit_Abilities_Data SubObjectList="Yes"><Unit_Ability>
+<Type>POWER_TO_WEAPONS</Type><Alternate_Name_Text>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Alternate_Name_Text>
+<Alternate_Description_Text>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Alternate_Description_Text>
+<Alternate_Icon_Name>overridden-ability.tga</Alternate_Icon_Name></Unit_Ability></Unit_Abilities_Data></SpaceUnit>
+<Squadron Name="PopupSquadron"><Squadron_Units>Popup, Kuat</Squadron_Units><Population_Value>1</Population_Value></Squadron>
+<Squadron Name="CycleA"><Squadron_Units>CycleB</Squadron_Units></Squadron>
+<Squadron Name="CycleB"><Squadron_Units>CycleA</Squadron_Units></Squadron>
+<SpaceUnit Name="EmptyMP"><Encyclopedia_Text>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Encyclopedia_Text>
+<MP_Encyclopedia_Text> , </MP_Encyclopedia_Text></SpaceUnit>
+<SpaceUnit Name="UnknownMP"><Encyclopedia_Text>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Encyclopedia_Text>
+<MP_Encyclopedia_Text>TEXT_UNKNOWN</MP_Encyclopedia_Text></SpaceUnit>
 <UpgradeObject Name="CardUpgrade"><Icon_Name>owner-icon.tga</Icon_Name>
 <Text_ID>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Text_ID><Tactical_Build_Cost_Multiplayer>950</Tactical_Build_Cost_Multiplayer>
 <Is_Visible_On_Radar>No</Is_Visible_On_Radar><Radar_Icon_Name>owner-radar.tga</Radar_Icon_Name>
@@ -386,11 +560,45 @@ void planet_names() {
     expect(static_cast<bool>(text), "planet fixture text DB loads");
     if (!text) return;
     const auto* objects = &catalog.value().catalog;
+    expect(!ui::world_encyclopedia_admitted("HoverAsteroid", objects)
+        && !ui::world_encyclopedia_admitted("HoverValid", objects),
+        "CARD-20: impassable mouse contacts and valid-target/name metadata alone admit no world tooltip");
+    expect(ui::world_encyclopedia_admitted("HoverSelectable", objects)
+        && ui::world_encyclopedia_admitted("HoverTooltip", objects)
+        && ui::world_encyclopedia_admitted("HoverInherited", objects),
+        "CARD-20: selectable and dummy-tooltip behaviours, including inherited mod data, admit invalid-target types");
+    expect(!ui::world_encyclopedia_admitted("HoverNearMatch", objects)
+        && !ui::world_encyclopedia_admitted("Missing", objects)
+        && !ui::world_encyclopedia_admitted("HoverSelectable", nullptr),
+        "CARD-20: exact behaviour tokens and an effective game-object definition are required");
+    const auto ability = ui::ability_card_looks("PopupSquadron", ui::ability_index("POWER_TO_WEAPONS"), objects, &text.value());
+    expect(ability.name == "Coruscant" && ability.description == "Coruscant" && ability.icon == "overridden-ability.tga",
+        "squadron ability hover uses first craft and independently authored localized overrides");
+    const auto cycle = ui::ability_card_looks("CycleA", ui::ability_index("POWER_TO_WEAPONS"), objects, &text.value());
+    expect(cycle.name.empty() && cycle.description.empty() && cycle.icon.empty(),
+        "cyclic squadron ability roster terminates without an encyclopedia");
+    const auto squadron_popup = ui::unit_card_looks("PopupSquadron", objects, &text.value());
+    expect(squadron_popup.ability_icons == std::vector<std::string>{"overridden-ability.tga"} && squadron_popup.population == -1,
+        "static ability art is independent of live activation/ownership; population belongs to the company type");
     const auto legacy = objects->resolve("CardUpgrade");
     expect(legacy && legacy.value().category == data::Category::ability, "HUD fixture warms the global ability winner");
     const auto card = ui::unit_card_looks("CardUpgrade", objects, &text.value());
     expect(card.icon == "owner-icon.tga" && card.name == "Coruscant" && card.build_cost == 950,
            "build card icon, title and cost come from the owning game object despite a same-name ability");
+    const auto popup = ui::unit_card_looks("Popup", objects, &text.value());
+    expect(popup.description == "Coruscant" && popup.unit_class == "Coruscant",
+           "P-2/P-3: skirmish uses the multiplayer list and localized class key");
+    expect(popup.good_against_icons == std::vector<std::string>{"owner-icon.tga", "", ""}
+        && popup.vulnerable_to_icons == std::vector<std::string>{"", "owner-icon.tga"},
+        "P-4: three icons maximum, missing type and missing icon occupy blank slots, owning namespace resolves");
+    expect(ui::unit_card_looks("Popup", objects, &text.value(), false).description == "Coruscant\nCoruscant",
+           "P-1/P-2: campaign retains ordinary comma-separated description lines");
+    const auto empty_mp = ui::unit_card_looks("EmptyMP", objects, &text.value());
+    expect(empty_mp.description == "Coruscant\nCoruscant" && empty_mp.good_against_icons.empty()
+        && empty_mp.vulnerable_to_icons.empty() && empty_mp.unit_class.empty(),
+        "P-1/P-2/P-4: empty MP list falls back to space-separated lines and absent matchups stay absent");
+    expect(ui::unit_card_looks("UnknownMP", objects, &text.value()).description.empty(),
+           "P-2: nonempty MP list replaces generic text even if localization is missing");
     const auto radar = ui::minimap_type_looks("CardUpgrade", objects);
     expect(!radar.visible && radar.icon == "owner-radar.tga", "radar type looks use the same owning object namespace");
 
@@ -398,6 +606,10 @@ void planet_names() {
     expect(found.source == ui::PlanetNameSource::text && found.text == "Coruscant"
                && found.text_id == "TEXT_OBJECT_STAR_SYSTEM_CORUSCANT" && found.diagnostics.empty(),
            "a map's planet resolves through its Text_ID, case-insensitively");
+    const auto renamed = ui::planet_name(std::string("Modded_System_42"), objects, &text.value());
+    expect(renamed.source == ui::PlanetNameSource::text && renamed.text == "Coruscant"
+        && renamed.context == "Modded_System_42" && renamed.text_id == found.text_id,
+        "a renamed campaign planet resolves its authored Text_ID without a stock name list");
     for (const auto* context : {"Nameless", "Unlisted", "Kuat", "Nowhere"}) {
         const auto fallback = ui::planet_name(std::string(context), objects, &text.value());
         expect(fallback.source == ui::PlanetNameSource::context_name && fallback.text == context
@@ -459,6 +671,36 @@ void reinforcement_panes() {
            "a missing database diagnoses the absent label without substituting hardcoded text");
 }
 
+// GHUD-S52: the retail focused organize shell holds one land_art panel per stock terrain index.
+void organize_corpus() {
+    auto filesystem = test::ui::foc_corpus("organize shell");
+    if (!filesystem) return;
+    auto catalog = data::ui::load_command_bar(*filesystem);
+    if (!catalog) return;
+    const auto* component = catalog.value().catalog.find("i_main_organize");
+    expect(component != nullptr, "FoC's catalogue names the organize shell");
+    if (!component) return;
+    auto shell = data::ui::load_shell_anchors(*filesystem, component->text(data::ui::Field::model_name));
+    expect(static_cast<bool>(shell), "the FoC organize shell loads");
+    if (!shell) return;
+    const auto look = ui::hud_shell(shell.value().shell, catalog.value().catalog, ui::HudFaction::empire, true);
+    std::set<std::uint32_t> panels;
+    for (const auto& mesh : look.meshes) {
+        if (mesh.alternate && mesh.name.starts_with("land_art_ALT")) panels.insert(*mesh.alternate);
+    }
+    std::set<std::uint32_t> stock;
+    // land_art_ALT8 (the destroyed-planet alternate) is authored hidden, so it is not a decorative mesh.
+    for (std::uint32_t index = 0; index <= 12; ++index) if (index != 8U) stock.insert(index);
+    if (panels != stock) {
+        for (const auto& anchor : shell.value().shell.anchors()) {
+            if (anchor.name.starts_with("land_art_ALT"))
+                std::cout << "organize panel " << anchor.name << " shader=" << anchor.shader << " texture=" << anchor.base_texture
+                          << " visible=" << anchor.visible << " triangles=" << anchor.triangles.size() << '\n';
+        }
+    }
+    expect(panels == stock, "the organize shell keeps its visible land_art panels whatever the faction");
+}
+
 void corpus() {
     auto filesystem = test::ui::foc_corpus("HUD shell");
     if (!filesystem) return;
@@ -470,6 +712,9 @@ void corpus() {
     auto shell = data::ui::load_shell_anchors(*filesystem, model);
     expect(static_cast<bool>(shell), "the FoC tactical shell loads");
     if (!shell) return;
+    const auto timing = ui::encyclopedia_timing(*filesystem);
+    expect(timing && near(timing->delay, 0.75) && near(timing->minimum, 1.0) && near(timing->fade_rate, 4.0),
+        "encyclopedia timing comes from the mounted effective constants");
     // #349: the retail button art sizes, from MT_CommandBar, around the bones.
     auto atlas = assets::load_mega_texture(*filesystem, ui::command_bar_mega_texture(catalog.value().catalog));
     expect(static_cast<bool>(atlas), "MT_CommandBar's directory loads");
@@ -529,6 +774,10 @@ void corpus() {
         const auto hud = ui::hud_shell(shell.value().shell, catalog.value().catalog, faction);
         expect(hud.diagnostics.empty(), "the FoC shell has every P2-20a part");
         expect(hud.ability_buttons.size() == 24U, "#454: the FoC shell has special_button_00 to _23");
+        expect(hud.population && hud.population->text.name == "Text_Planetary_Pop"
+            && hud.population->text.point_size == 6 && hud.population->text_offset.x == -10
+            && hud.population->right_justified && hud.population->text.colour.r == 255,
+            "tactical population retains its own authored component, distinct from galactic Text_Pop_Cap");
         std::cout << "HUD shell corpus " << ui::to_string(faction) << ":";
         for (const auto& mesh : hud.meshes) std::cout << ' ' << mesh.name << '(' << mesh.texture << ')';
         std::cout << '\n';
@@ -543,6 +792,50 @@ void corpus() {
     auto text = data::ui::load_language_text_database(*filesystem, "ENGLISH");
     expect(objects && text, "FoC objects and text load");
     if (!objects || !text) return;
+    // CARD-20: inventory the actual predicate over every effective stock type
+    // that the existing space mouse-admission path can publish for world hover.
+    std::size_t hover_types{};
+    std::size_t admitted_types{};
+    std::vector<std::string> excluded_types;
+    for (const auto& definition : objects.value().catalog.definitions()) {
+        if (!definition.namespace_winner || definition.category != data::Category::game_object) continue;
+        const auto effective = objects.value().catalog.resolve(definition.id, data::Category::game_object);
+        if (!effective) continue;
+        const auto field = [&](const std::string_view tag) {
+            const auto* found = effective.value().value(tag);
+            return found ? std::string_view(found->value.raw_text) : std::string_view{};
+        };
+        const auto& kind = definition.type_name;
+        if (field("Space_Model_Name").empty() && field("SpaceBehavior").empty()
+            && kind != "SpaceUnit" && kind != "SpaceProp" && kind != "SpaceStructure"
+            && kind != "StarBase" && kind != "Squadron") continue;
+        const auto flag = [&](const std::string_view tag, const bool fallback = false) {
+            return data::retail::boolean(field(tag)).value_or(fallback);
+        };
+        std::set<std::string> behaviors;
+        for (const auto tag : {std::string_view{"Behavior"}, std::string_view{"SpaceBehavior"}}) {
+            const auto raw = field(tag);
+            auto begin = raw.find_first_not_of(" ,\t\r\n");
+            while (begin != std::string_view::npos) {
+                const auto end = raw.find_first_of(" ,\t\r\n", begin);
+                std::string token(raw.substr(begin, end == std::string_view::npos ? end : end - begin));
+                for (char& c : token) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+                behaviors.insert(std::move(token));
+                begin = end == std::string_view::npos ? end : raw.find_first_not_of(" ,\t\r\n", end);
+            }
+        }
+        const bool mouse = behaviors.contains("SELECTABLE") || behaviors.contains("TACTICAL_BUILD_OBJECTS")
+            || behaviors.contains("DUMMY_TOOLTIP") || flag("Is_Impassable_Asteroid")
+            || (flag("Collidable_By_Projectile_Living") && flag("Is_Valid_Target", true));
+        if (!mouse) continue;
+        ++hover_types;
+        if (ui::world_encyclopedia_admitted(definition.id, &objects.value().catalog)) ++admitted_types;
+        else excluded_types.push_back(definition.id + " [" + kind + "]");
+    }
+    std::sort(excluded_types.begin(), excluded_types.end());
+    std::cout << "CARD-20 stock world-hover audit: " << hover_types << " mouse-admitted types, "
+              << admitted_types << " encyclopedia-admitted, " << excluded_types.size() << " excluded\n";
+    for (const auto& type : excluded_types) std::cout << "CARD-20 excluded: " << type << '\n';
     const auto reactor = ui::unit_card_looks("US_BlackMarket_Reactors_L1_Upgrade", &objects.value().catalog, &text.value());
     expect(reactor.icon == "i_multi_black_market_eng1.tga" && reactor.build_cost == 850,
            "stock same-name Underworld build card keeps its owning upgrade icon and price");
@@ -561,9 +854,211 @@ void corpus() {
 } // namespace
 
 void hud_shell_contracts() {
+    const auto fly_style = ui::hud_flytext_style(synthetic_catalog());
+    expect(fly_style && fly_style->text.face == "Custom-Flytext" && fly_style->text.point_size == 11
+        && fly_style->text.colour.r == 20 && fly_style->text.colour.a == 80
+        && fly_style->text.emboss && fly_style->text.outline && fly_style->left_justified
+        && fly_style->text_offset.x == 3 && fly_style->text_offset.y == -5,
+        "HCB-64: flytext uses the shared XML readout style, including mod font/colour/offset overrides");
+    expect(!ui::hud_flytext_style(data::ui::CommandBarCatalog{}), "HCB-64: missing flytext stays absent");
+    ui::HudFlyTextView award{"+250", 100, {320, 240}, false};
+    const auto fresh = ui::hud_flytext_presentation(award, 100);
+    const auto held = ui::hud_flytext_presentation(award, 130);
+    const auto faded = ui::hud_flytext_presentation(award, 145);
+    const auto end = ui::hud_flytext_presentation(award, 160);
+    expect(fresh && fresh->text == "+250" && fresh->alpha == 255 && fresh->position.y == 240
+        && held && held->alpha == 255 && near(held->position.y, 205)
+        && faded && faded->alpha == 127 && near(faded->position.y, 187.5)
+        && end && end->alpha == 0 && near(end->position.y, 170)
+        && !ui::hud_flytext_presentation(award, 161) && !ui::hud_flytext_presentation(award, 99),
+        "HCB-64: logical age moves 70 screen pixels over 60 frames, fades after 30, expires after 60");
+    award.behind_camera = true;
+    expect(!ui::hud_flytext_presentation(award, 100), "HCB-64: a behind-camera projection hides the feedback");
+    award.behind_camera = false;
+    award.text.clear();
+    expect(!ui::hud_flytext_presentation(award, 100), "HCB-64: an empty caller value has no feedback");
+    award.text = "+1";
+    award.created_frame = UINT64_MAX - 30;
+    expect(ui::hud_flytext_presentation(award, UINT64_MAX)->alpha == 255,
+        "HCB-64: frame subtraction remains safe at the integer limit");
+    {
+        test::ui::TempTree tree("queue-timing");
+        const std::array mounts{vfs::MountSpec{"base", tree.root, "data", {}}};
+        for (const auto& [tint, delay] : std::array{
+            std::pair{"255, 128, 128, 215", "750"}, std::pair{"12, 34, 56, 78", "125"}}) {
+            test::ui::write_text(tree.root / "XML/GameConstants.xml", "<GameConstants><Right_Queue_Tint>"
+                + std::string(tint) + "</Right_Queue_Tint><Encyclopedia_Delay>" + delay + "</Encyclopedia_Delay>"
+                "<Encyclopedia_Min_Display_Time>1</Encyclopedia_Min_Display_Time>"
+                "<Encyclopedia_Fade_Rate>4</Encyclopedia_Fade_Rate></GameConstants>");
+            auto mounted = vfs::Vfs::mount(mounts);
+            expect(static_cast<bool>(mounted), "queue and timing fixture mounts");
+            if (!mounted) continue;
+            const auto colour = ui::production_queue_tint(mounted.value());
+            auto timing = ui::encyclopedia_timing(mounted.value());
+            const bool modified = std::string_view(delay) == "125";
+            expect(colour && *colour == (modified ? data::ui::Rgba8{12, 34, 56, 78} : data::ui::Rgba8{255, 128, 128, 215}),
+                "PU-63: perturbed XML tint reaches production presentation");
+            expect(timing && std::abs(timing->delay - (modified ? 0.125 : 0.75)) < 0.00001,
+                "CARD-18: perturbed XML milliseconds become hover seconds");
+            if (timing) {
+                timing->service(5, 0.0, true);
+                timing->service(5, 0.2, true);
+                expect((timing->shown == 5) == modified, "CARD-18: XML delay changes hover admission");
+            }
+        }
+        for (const auto raw : {"", "-1,2,3,4", "1,2,3,256", "1,2,3,4,5", "1,2,three,4", "1.5,2,3,4", "1,2,3,99999999999999999"}) {
+            test::ui::write_text(tree.root / "XML/GameConstants.xml", "<GameConstants><Right_Queue_Tint>"
+                + std::string(raw) + "</Right_Queue_Tint></GameConstants>");
+            auto mounted = vfs::Vfs::mount(mounts);
+            expect(mounted && !ui::production_queue_tint(mounted.value()), "malformed queue tint has no stock fallback");
+        }
+    }
+    {
+        test::ui::TempTree tree("movie-letterbox");
+        const std::array mounts{vfs::MountSpec{"base", tree.root, "data", {}}};
+        for (const auto& [value, valid] : std::array{
+            std::pair{"0.085f", true}, std::pair{"0.12", true}, std::pair{"0", true},
+            std::pair{"-0.1", false}, std::pair{"0.5", false}, std::pair{"nan", false},
+            std::pair{"0.1junk", false}}) {
+            test::ui::write_text(tree.root / "XML/GameConstants.xml",
+                std::string("<GameConstants><Camera_FX_Manager_Letterbox_Height> ") + value
+                + " </Camera_FX_Manager_Letterbox_Height></GameConstants>");
+            auto mounted = vfs::Vfs::mount(mounts);
+            expect(static_cast<bool>(mounted), "movie letterbox fixture mounts");
+            if (!mounted) continue;
+            const auto height = ui::movie_letterbox_height(mounted.value());
+            expect(static_cast<bool>(height) == valid, "HCB-11c: letterbox validates the authored fraction");
+            if (height && std::string_view(value) == "0.12")
+                expect(near(height.value(), 0.12), "HCB-11c: a mod's letterbox height reaches presentation");
+        }
+    }
+    {
+        test::ui::TempTree tree("beacon-delay");
+        const std::array mounts{vfs::MountSpec{"base", tree.root, "data", {}}};
+        for (const auto& [value, valid] : std::array{
+            std::pair{"5000", true}, std::pair{"1200", true}, std::pair{"0", true},
+            std::pair{"-1", false}, std::pair{"nan", false}, std::pair{"5000ms", false}}) {
+            test::ui::write_text(tree.root / "XML/GameConstants.xml",
+                std::string("<GameConstants><BeaconPlaceDelay> ") + value + " </BeaconPlaceDelay></GameConstants>");
+            auto mounted = vfs::Vfs::mount(mounts);
+            expect(static_cast<bool>(mounted), "beacon delay fixture mounts");
+            if (!mounted) continue;
+            const auto delay = ui::beacon_place_delay(mounted.value());
+            expect(delay.has_value() == valid, "HCB-12a: beacon delay validates authored milliseconds");
+            if (delay && std::string_view(value) == "1200")
+                expect(near(*delay, 1.2), "HCB-12a: a mod's beacon delay reaches presentation in seconds");
+        }
+    }
+    const auto tech_shell = ui::hud_shell(synthetic_shell(), synthetic_catalog(), ui::HudFaction::rebel);
+    expect(tech_shell.tactical_tech && tech_shell.tactical_tech->text.face == "Arial Bold"
+        && tech_shell.tactical_tech->text.point_size == 8 && tech_shell.tactical_tech->left_justified
+        && tech_shell.tactical_tech->origin.x == 64 && tech_shell.tactical_tech->text_offset.y == -2,
+        "HCB-61: tactical tech uses authored font, origin, offset and left justification");
+    expect(ui::tactical_tech_text("Technologie", {4, ui::HudFaction::rebel, false, true}) == "Technologie 4",
+        "HCB-61: campaign tech uses the supplied localized label and displayed level");
+    expect(ui::tactical_tech_text("Tech", {3, ui::HudFaction::empire, true, true}).empty(),
+        "HCB-61: multiplayer space hides tech");
+    expect(ui::tactical_tech_text("Tech", {3, ui::HudFaction::underworld, false, true}).empty(),
+        "HCB-61: Consortium campaign hides tech");
+    expect(ui::tactical_tech_text("Tech", {3, ui::HudFaction::underworld, true, false}) == "Tech 3",
+        "HCB-61: multiplayer land retains tech for Consortium");
+    expect(tech_shell.reinforcement_counter && tech_shell.garrison_respawn_counter
+        && tech_shell.reinforcement_counter->button.normal == "reinforce.tga"
+        && tech_shell.reinforcement_counter->button.blank == "dark.tga"
+        && tech_shell.reinforcement_counter->build == "timer.tga"
+        && near(tech_shell.reinforcement_counter->button.scale, 0.6)
+        && tech_shell.reinforcement_counter->colour.a == 40
+        && tech_shell.garrison_respawn_counter->button.normal == "garrison.tga"
+        && near(tech_shell.garrison_respawn_counter->button.scale, 0.9),
+        "HCB-62: independent timer art is authored without any shell or unit-card anchor");
+    expect(!ui::hud_timer_style(synthetic_catalog(), "unknown")
+        && !ui::hud_timer_style(synthetic_catalog(), "s_select_00"),
+        "HCB-62: missing components and shell-bound cards are not timer styles");
+    expect(ui::hud_timer_progress(100, 700, 600) == 0.0
+        && ui::hud_timer_progress(400, 700, 600) == 0.5
+        && !ui::hud_timer_progress(700, 700, 600)
+        && !ui::hud_timer_progress(800, 700, 600)
+        && !ui::hud_timer_progress(1, std::nullopt, 600)
+        && !ui::hud_timer_progress(1, 2, 0),
+        "WSL-29: timer progress starts at zero and disappears at expiry, absent wait or zero delay");
+    expect(ui::hud_timer_progress(0, UINT64_MAX, 600) == 0.0,
+        "HCB-62: a future deadline clamps without unsigned underflow");
+    ui::EncyclopediaTiming timing{0.75, 1.0, 4.0};
+    timing.service(5, 0.0, true);
+    timing.service(5, 0.74, true);
+    expect(timing.shown == 0, "encyclopedia waits for the complete hover delay");
+    timing.service(5, 0.01, true);
+    expect(timing.shown == 5 && timing.alpha > 0, "encyclopedia admits the delayed candidate");
+    timing.service(5, 0.25, true);
+    expect(timing.alpha == 1, "encyclopedia fades in at the authored rate");
+    timing.service(0, 0.25, true);
+    expect(timing.shown == 5, "encyclopedia keeps its minimum display time after hover leaves");
+    timing.service(0, 1.0, false);
+    expect(timing.shown == 0 && timing.alpha == 0, "an unadmitted candidate cannot restart the popup");
+    timing = {0.75, 1.0, 4.0};
+    timing.service(5, 0, true);
+    timing.service(5, 0.5, true);
+    timing.service(6, 0.5, true);
+    expect(timing.candidate == 6 && timing.hovered_seconds == 0 && timing.shown == 0,
+           "switching hover identities discards the previous candidate's delay");
+    timing.service(6, 0.5, true);
+    expect(timing.shown == 0, "the replacement candidate waits for its own full delay");
+    timing.service(6, 0.25, true);
+    expect(timing.shown == 6 && timing.remaining == 1 && timing.alpha == 1,
+           "the replacement candidate starts its own minimum display time");
+    timing.service(7, 0.25, true);
+    expect(timing.candidate == 7 && timing.hovered_seconds == 0 && timing.shown == 6,
+           "a new hover identity keeps the displayed popup while restarting admission");
+    timing.service(7, 0.5, true);
+    expect(timing.shown == 6 && timing.alpha == 1, "the old popup remains during the new hover delay");
+    timing.service(7, 0.25, true);
+    expect(timing.shown == 7 && timing.remaining == 1 && timing.alpha == 1,
+           "switching the displayed popup restarts its minimum time and fade");
+    timing.service(7, 0.5, false);
+    expect(timing.candidate == 0 && timing.shown == 7 && timing.alpha == 1,
+           "disabled admission clears the candidate but retains minimum display");
+    timing.service(7, 0.375, false);
+    expect(timing.shown == 7 && timing.alpha == 1, "the popup holds until its minimum expires");
+    timing.service(7, 0.125, false);
+    expect(timing.shown == 7 && timing.remaining == 0 && timing.alpha == 0.5,
+           "disabled admission fades the old popup at the authored rate");
+    timing.service(7, 0.125, false);
+    expect(timing.shown == 0 && timing.alpha == 0, "fade completion clears the displayed identity");
+    timing.service(7, 0.5, true);
+    expect(timing.candidate == 7 && timing.hovered_seconds == 0 && timing.shown == 0,
+           "reenabling admission starts a fresh hover delay");
+    timing.service(7, 0.5, true);
+    expect(timing.shown == 0, "disabled elapsed time does not count toward admission");
+    timing.service(7, 0.25, true);
+    expect(timing.shown == 7 && timing.alpha == 1, "the readmitted identity appears after its own delay");
+    const auto special = ui::hud_shell(synthetic_shell(), synthetic_catalog(), ui::HudFaction::rebel).special_weapon;
+    expect(special && special->button.alternates == std::vector<std::string>{"ion.tga", "hyper.tga", "plasma.tga"}
+        && special->build == "dial.tga" && special->button.rect.width == 30,
+        "WSW-28/29: special slot retains authored faction icons, dial and hit rectangle");
+    for (const auto faction : {ui::HudFaction::rebel, ui::HudFaction::empire, ui::HudFaction::underworld}) {
+        const auto shell = ui::hud_shell(synthetic_shell(), synthetic_catalog(), faction);
+        const auto expected = faction == ui::HudFaction::rebel ? "ion.tga"
+            : faction == ui::HudFaction::empire ? "hyper.tga" : "plasma.tga";
+        expect(shell.special_weapon && ui::special_weapon_icon(shell.special_weapon->button, faction) == expected,
+               "WSW-28: each faction selects its authored HUD alternate, independently of enum order");
+    }
+    ui::HudShellButton partial;
+    partial.normal = "weapon-build-icon.tga";
+    partial.alternates = {"custom-ion.tga", "custom-hyper.tga"};
+    expect(ui::special_weapon_icon(partial, ui::HudFaction::rebel) == "custom-ion.tga"
+        && ui::special_weapon_icon(partial, ui::HudFaction::empire) == "custom-hyper.tga"
+        && ui::special_weapon_icon(partial, ui::HudFaction::underworld).empty(),
+        "WSW-28: custom alternates retain their identity; missing slots do not use the build icon");
+    partial.alternates.clear();
+    expect(ui::special_weapon_icon(partial, ui::HudFaction::rebel).empty(),
+           "WSW-28: absent HUD alternates stay absent");
+    retreat_button();
     shell_parts();
+    organize_shell_alternates();
+    allegiance_emblem_indices();
     shell_layout();
     planet_names();
     reinforcement_panes();
     corpus();
+    organize_corpus();
 }

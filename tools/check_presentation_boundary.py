@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UI-07: presentation may consume snapshots/commands, never a live tactical session.
+"""UI-07 / ADR-019: presentation consumes snapshots/commands, never simulation owners.
 
 The command sink interface must expose command values, not TacticalSession. Its
 implementation belongs outside presentation; no presentation-side exemption is needed.
@@ -17,7 +17,7 @@ SUFFIXES = {".cpp", ".cc", ".cxx", ".hpp", ".h", ".inc", ".gd"}
 COMMENTS = re.compile(r'//[^\n]*|/\*.*?\*/', re.DOTALL)
 INCLUDES = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
 COMPUTED_INCLUDE = re.compile(r'^\s*#\s*include\s+[^<"\s]', re.MULTILINE)
-SESSION = re.compile(r'\bTacticalSession\b')
+SESSION = re.compile(r'\b(TacticalSession|GalacticSession|GameSession)\b')
 
 
 def violations(root: Path, entries: list[Path]) -> list[str]:
@@ -33,8 +33,8 @@ def violations(root: Path, entries: list[Path]) -> list[str]:
         label = path.relative_to(root).as_posix()
         if COMPUTED_INCLUDE.search(text):
             found.append(" -> ".join((*chain, label)) + ": UI-07 computed include cannot be audited")
-        if SESSION.search(text):
-            found.append(" -> ".join((*chain, label)) + ": UI-07 live TacticalSession access")
+        if match := SESSION.search(text):
+            found.append(" -> ".join((*chain, label)) + f": UI-07 live {match.group(1)} access")
         for match in INCLUDES.finditer(text):
             name = match.group(1)
             for candidate in (path.parent / name, root / "include" / name, root / "src" / name):

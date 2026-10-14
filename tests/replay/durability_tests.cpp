@@ -402,11 +402,10 @@ void check_consequences(const Run& result, const tactical::DurabilityTable& tabl
     expect(corellian != nullptr && corellian->hull == units(1125) && corellian->hardpoints[0].enabled,
            "the rejected corvette hit changed nothing");
 
-    // Tick 3 took the Acclamator hull to a third: its live hardpoints are pulled down (HS-03).
+    // WFO-23: tick 3 hull damage follows that frame's pre-fire service; drag is due next frame.
     acclamator = durability_of(*published[4], 2);
-    expect(acclamator != nullptr && acclamator->hull == units(1000) && acclamator->hardpoints[0].health < units(210)
-               && acclamator->hardpoints[0].health > units(100),
-           "the hull at a third pulls the hardpoints down");
+    expect(acclamator != nullptr && acclamator->hull == units(1000) && acclamator->hardpoints[0].health == units(210),
+           "the later hull command leaves hardpoint drag for the next pre-fire service");
 
     // Tick 4 killed it; tick 5's orders for it and on it are rejected.
     expect(durability_of(*published[5], 2) == nullptr && published[5]->instances().size() == 4,

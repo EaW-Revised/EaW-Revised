@@ -76,13 +76,14 @@ void SpacePopulation::write_report(std::ostream& output) const {
     if (!options_.placed_ships.empty()) output << ", \"placed_ships\": " << options_.placed_ships.size();
     if (!live_decisions_.empty() && std::any_of(options_.placed_ships.begin(), options_.placed_ships.end(),
             [](const Options::PlacedShip& ship) { return ship.live_entity != 0; })) {
-        // #81, #391: death clones and breakoff props are live ships too, counted apart from
+        // Auxiliary models are live ships too, counted apart from
         // the session's units.
         std::size_t drawn = 0;
         std::size_t clones_drawn = 0;
         std::size_t breakoffs_drawn = 0;
         std::size_t launch_slots_drawn = 0;
         std::size_t projectile_slots_drawn = 0;
+        std::size_t beacon_models_drawn = 0;
         for (std::size_t ship = 0; ship < live_decisions_.size(); ++ship) {
             if (!live_decisions_[ship]) continue;
             const Options::PlacedShip& placed = options_.placed_ships[ship];
@@ -90,6 +91,7 @@ void SpacePopulation::write_report(std::ostream& output) const {
                : placed.breakoff  ? breakoffs_drawn
                : placed.launch_slot ? launch_slots_drawn
                : placed.projectile_slot ? projectile_slots_drawn
+               : placed.beacon_model ? beacon_models_drawn
                                     : drawn);
         }
         output << ", \"live_units\": {\"drawn\": " << drawn << ", \"not_drawn\": " << strings(live_undrawn_)
@@ -99,8 +101,33 @@ void SpacePopulation::write_report(std::ostream& output) const {
                << ", \"launch_slots_not_drawn\": " << strings(launch_slots_undrawn_)
                << ", \"projectile_slots_drawn\": " << projectile_slots_drawn
                << ", \"projectile_slots_not_drawn\": " << strings(projectile_slots_undrawn_)
+               << ", \"beacon_models_drawn\": " << beacon_models_drawn
                << ", \"ships_retired\": " << std::count(live_retired_.begin(), live_retired_.end(), true)
                << ", \"released_assets\": " << live_released_assets_;
+        output << ", \"suppressed_records\": [";
+        for (std::size_t index = 0; index < skipped_session_records_.size(); ++index)
+            output << (index == 0 ? "" : ", ") << skipped_session_records_[index];
+        output << "], \"surface_assets_by_unit\": [";
+        bool first_unit = true;
+        for (std::size_t ship = 0; ship < live_decisions_.size(); ++ship) {
+            if (!live_decisions_[ship]) continue;
+            const auto& placed = options_.placed_ships[ship];
+            if (!placed.team_colour || placed.death_clone || placed.breakoff || placed.launch_slot
+                || placed.projectile_slot || placed.beacon_model) continue;
+            output << (first_unit ? "" : ", ") << "{\"entity\": " << placed.live_entity
+                   << ", \"type\": " << json(placed.object_id) << ", \"rgb\": ["
+                   << static_cast<unsigned>((*placed.team_colour)[0]) << ", "
+                   << static_cast<unsigned>((*placed.team_colour)[1]) << ", "
+                   << static_cast<unsigned>((*placed.team_colour)[2]) << "], \"assets\": [";
+            bool first_hull_asset = true;
+            for (const auto asset : hull_surface_assets_[ship]) {
+                output << (first_hull_asset ? "" : ", ") << asset;
+                first_hull_asset = false;
+            }
+            output << "]}";
+            first_unit = false;
+        }
+        output << ']';
         if (!live_clip_status_.empty()) {
             output << ", \"clips\": {";
             bool first = true;
@@ -118,6 +145,14 @@ void SpacePopulation::write_report(std::ostream& output) const {
             first_shell = false;
         }
         output << "}, \"max_shown\": " << shield_shells_shown_ << "}";
+        // WST-12: each STEALTH type's cloak sub-object and the most cloaks one frame drew.
+        output << ", \"stealth_shells\": {\"types\": {";
+        bool first_cloak = true;
+        for (const auto& [object, status] : stealth_shells_) {
+            output << (first_cloak ? "" : ", ") << json(object) << ": " << json(status);
+            first_cloak = false;
+        }
+        output << "}, \"max_shown\": " << stealth_shells_shown_ << "}";
         output << "}";
     }
     if (options_.debug_ship) {
@@ -153,8 +188,13 @@ void SpacePopulation::write_report(std::ostream& output) const {
            << ", \"not_drawable\": " << roles[scene::SpaceRole::not_drawable] << "}"
            << ", \"surfaces_uploaded\": " << surfaces_uploaded_ << ", \"instances\": " << instance_count_
            << ", \"hardpoints_attached\": " << attachments_drawn_
+           << ", \"blast_mesh_submissions\": {\"buildup\": "
+           << (blast_meshes_shown_.contains("buildup") ? blast_meshes_shown_.at("buildup") : 0)
+           << ", \"charged\": "
+           << (blast_meshes_shown_.contains("charged") ? blast_meshes_shown_.at("charged") : 0) << "}"
            << ", \"skinned_instances\": " << skinned_instances_
             << ",\n    \"team_colour\": {\"colour_variants\": " << team_colour_variants_
+            << ", \"meaning\": \"per-instance colour assignments\""
             << ", \"source\": \"TED owner to catalog faction <Color>\", \"drawn_by_status\": {";
     bool first_status = true;
     for (const auto& [status, count] : team_colour_status_) {

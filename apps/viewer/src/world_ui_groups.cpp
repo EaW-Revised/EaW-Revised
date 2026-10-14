@@ -24,6 +24,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <set>
 #include <utility>
 
 #include "world_ui_internal.hpp"
@@ -175,7 +176,7 @@ void WorldUiView::place_circles(const Frame& frame) {
 void WorldUiView::update_grid(const Frame& frame) {
     // WU-25 (#457): the sim flies the dogfights over its combat cells (space-fighters FD-01 to
     // FD-03) and publishes the cell each squadron records; the joined ones hold their icons, in
-    // ascending squadron ID (the sim's service order). The grid starts at the world origin.
+    // ascending squadron ID (the sim's service order). The grid starts at the map box's low corner (WDF-05).
     const auto snapshot = frame.live->battle_frame().latest;
     std::vector<ui::CombatGrid::Record> records;
     if (snapshot != nullptr) {
@@ -212,11 +213,11 @@ void WorldUiView::draw_identity(const Frame& frame, const RID canvas_item, const
     const float x = screen[0], y = screen[1];
     const auto aligned_frame = ui::squadron_icon_rect(screen, side, identity_pixel_align_);
     const auto aligned_inner = ui::squadron_icon_rect(screen, 50.0F * 0.6F * ui_scale, identity_pixel_align_);
-    identity_geometry_.push_back({entity, screen, aligned_frame, aligned_inner});
+    // WU-21: the gripper frame tinted by the owner's lobby colour (else its faction's `Color`, #3076),
+    // or the yellow select frame while selected or under the pointer; the entity's icon inside it.
+    const ui::Rgb tint = frame.live->owner_ui_colour(owner).value_or(ui::Rgb{255, 255, 255});
+    identity_geometry_.push_back({entity, screen, aligned_frame, aligned_inner, tint, owner});
     const Rect2 frame_rect(aligned_frame.x, aligned_frame.y, aligned_frame.width, aligned_frame.height);
-    // WU-21: the gripper frame tinted by the owner's colour, or the yellow select frame while
-    // selected or under the pointer; the entity's icon inside it.
-    const ui::Rgb tint = frame.live->player_colour(owner).value_or(ui::Rgb{255, 255, 255});
     const std::string frame_name = selected || hovered ? "i_button_unit_frame_gripper_select.tga"
                                                        : "i_button_unit_frame_gripper.tga";
     if (atlas_.is_valid()) {
@@ -309,7 +310,8 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
             // WSU-36 project policy: retain this slot and the initial anchor
             // height until the cell empties; a leave/rejoin never repacks it.
             const auto place = icon_grid_.position(*cell, squadron).value();
-            const auto point = ui::combat_cell_point(*cell, {0.0F, 0.0F});
+            const auto box = frame.live->map_box();
+            const auto point = ui::combat_cell_point(*cell, {to_float(box.min_x), to_float(box.min_y)});
             if (const auto base = frame.project({point[0], point[1], place.height})) {
                 const auto slot = place.offset;
                 // WSU-36: truncate the cell projection before laying out the reference-pixel slots.
@@ -385,27 +387,17 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
                 ++gripper.grid_sample_count;
             }
         }
-        // WU-22: the squadron's health over its craft's (lost craft count as empty).
-        float health = 0.0F;
-        float max_health = 0.0F;
+        // WSU-32 (WU-22): the mean display health of the craft still standing; a lost craft leaves
+        // the mean.
+        std::vector<float> craft_health;
+        craft_health.reserve(members.size());
+        const sim::tactical::DurabilityTable* table = frame.live->durability();
         for (const sim::EntityId member : members) {
             const auto* craft = instance_of(snapshot.get(), member);
-            const auto profile_type = frame.live->unit_frame(member);
-            if (craft != nullptr && craft->durability) {
-                health += to_float(craft->durability->hull);
-                max_health += to_float(craft->durability->max_hull);
-            } else if (const sim::tactical::DurabilityTable* table = frame.live->durability()) {
-                // A lost craft: its type is the squadron's member type in roster order.
-                static_cast<void>(profile_type);
-                for (const ui::BattleUnit* unit : seen) {
-                    const auto* alive = instance_of(snapshot.get(), unit->part);
-                    if (alive == nullptr) continue;
-                    if (const auto* profile = table->find(alive->type_id)) max_health += to_float(profile->max_hull);
-                    break;
-                }
-            }
+            if (craft == nullptr || !craft->durability) continue;
+            craft_health.push_back(ui::display_health(*craft->durability, table != nullptr ? table->find(craft->type_id) : nullptr));
         }
-        const float fraction = ui::squadron_health(health, max_health);
+        const float fraction = ui::squadron_health(craft_health);
         const float x = (*screen)[0];
         const float y = (*screen)[1];
         const sim::tactical::PlayerId owner = container != nullptr ? container->owner : local;
@@ -463,12 +455,48 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
         (*screen)[1] += ui::squadron_icon_screen_offset(frame.viewport[1]);
         if ((*screen)[0] < -64.0F || (*screen)[0] > frame.viewport[0] + 64.0F
             || (*screen)[1] < -64.0F || (*screen)[1] > frame.viewport[1] + 64.0F) continue;
+        const sim::tactical::DurabilityTable* table = frame.live->durability();
         const float health = instance->durability
-            ? ui::squadron_health(to_float(instance->durability->hull), to_float(instance->durability->max_hull)) : 1.0F;
+            ? ui::display_health(*instance->durability, table != nullptr ? table->find(instance->type_id) : nullptr) : 1.0F;
         draw_abilities(frame, canvas_item, unit.entity, type->second, frame.live->is_ally_of_local(instance->owner),
                        *screen, true, 0.0F, ui_scale);
         draw_identity(frame, canvas_item, unit.entity, type->second, instance->owner, unit.hostile,
                       *screen, health, ui_scale);
+    }
+    // WGT-21 / WHE-45/47: the rider has no independent model or order target.
+    // Display the first admitted head at its carrier; multiple-head layout
+    // remains separate. Health, visibility and selection belong to the carrier.
+    std::set<sim::EntityId> carried_heads;
+    for (const ui::BattleUnit& unit : *frame.units) {
+        if (!carried_heads.insert(unit.entity).second) continue;
+        const auto* instance = instance_of(snapshot.get(), unit.entity);
+        if (instance == nullptr || instance->contained.empty()) continue;
+        const auto head = [&](auto&& self, const auto& objects) -> const tactical::CarriedObject* {
+            for (const auto& rider : objects) {
+                const auto type = types_.find(rider.type_id);
+                if (type != types_.end() && type->second.hero_head) return &rider;
+                if (const auto* nested = self(self, rider.members)) return nested;
+            }
+            return nullptr;
+        };
+        const auto* rider = head(head, instance->contained);
+        if (rider == nullptr) continue;
+        auto screen = frame.project(unit.position);
+        if (!screen) continue;
+        (*screen)[1] += ui::squadron_icon_screen_offset(frame.viewport[1]);
+        if ((*screen)[0] < -64.0F || (*screen)[0] > frame.viewport[0] + 64.0F
+            || (*screen)[1] < -64.0F || (*screen)[1] > frame.viewport[1] + 64.0F) continue;
+        const auto* table = frame.live->durability();
+        const float health = instance->durability ? ui::display_health(*instance->durability,
+            table != nullptr ? table->find(instance->type_id) : nullptr) : 1.0F;
+        draw_identity(frame, canvas_item, unit.entity, types_.at(rider->type_id), instance->owner,
+            unit.hostile, *screen, health, ui_scale);
+        // Portrait identity is display-only; type selection still uses the carrier.
+        icons_.back().type = unit.type;
+        if (const auto carrier = types_.find(unit.type); carrier != types_.end())
+            icons_.back().selectable = carrier->second.selectable;
+        icon_rows_.back() += ":rider=" + std::to_string(rider->entity_id)
+            + ":type=" + types_.at(rider->type_id).name;
     }
     max_grid_icons_ = std::max(max_grid_icons_, grid_icons_);
     for (const std::string& row : flag_rows_) flags_seen_.insert(row.substr(0, row.find(':')));

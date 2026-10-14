@@ -16,11 +16,13 @@ namespace eawr::presentation::godot_backend {
 class ParticleWorkers final : public particles::StepExecutor {
 public:
     // The default size, the main thread included (docs/performance/battle-bench.md, "The viewer's
-    // particles"): a quarter of the hardware threads, at least 1 (the main thread alone) and at
-    // most 4. The simulation's pool already takes all but two of them
+    // particles"; the rule is particles::default_particle_worker_count): a quarter of the hardware
+    // threads below eight of them, half of them (at most 4) from eight up, at least 1 (the main
+    // thread alone). The simulation's pool already takes all but two of them
     // (platform::LiveSession::game_worker_count), so every particle worker shares a core with a
-    // simulation worker; a small pool keeps a frame that overlaps a tick from taking more than a
-    // few of the tick's cores.
+    // simulation worker; hosts under eight threads keep their earlier participant count, and the
+    // cap keeps the overlap bounded. Measured melee-S work benefits from four participants on an
+    // eight-hardware-thread host.
     [[nodiscard]] static std::size_t default_count(std::size_t hardware_threads) noexcept;
 
     // `count` workers, the calling thread included; 1 runs every task on the calling thread.

@@ -10,6 +10,7 @@
 
 #include "ui_test_support.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -389,6 +390,25 @@ void fallback_contracts() {
     expect(no_probe.source == FaceSource::engine_default, "UI-F3: without a system probe no system face exists");
 }
 
+void command_label_cell_contracts() {
+    // EmpireAtWar-Medium at 11 px in an 18 px band: GDI cell is 10 + 2 px after rounding the win metrics.
+    const fonts::TextCell medium{static_cast<std::int32_t>(std::lround(0.937 * 11)),
+                                 static_cast<std::int32_t>(std::lround(0.201 * 11))};
+    expect(medium.ascent == 10 && medium.descent == 2, "the 11 px Medium cell is 10 + 2");
+    expect(fonts::centred_cell_baseline(100.0, 18.0, medium) == 100.0 + 3.0 + 10.0,
+           "a command label's baseline is its band top + half the free height + usWinAscent");
+    // The cell is centred: equal room above the cell top and below the cell bottom (to the rounded half).
+    const double baseline = fonts::centred_cell_baseline(0.0, 20.0, medium);
+    const double cell_top = baseline - medium.ascent;
+    const double cell_bottom = baseline + medium.descent;
+    expect(std::abs(cell_top - (20.0 - cell_bottom)) <= 0.5, "the glyph cell is vertically centred in the band");
+    expect(fonts::centred_cell_baseline(7.0, 4.0, medium) == 13.0,
+           "a band shorter than the cell centres the overflow");
+    const fonts::FontCache empty;
+    fonts::ResolvedFont engine;
+    expect(fonts::gdi_text_cell(empty, engine, 11).ascent == 0, "a face outside the cache has no GDI cell");
+}
+
 } // namespace
 
 void font_contracts() {
@@ -396,4 +416,5 @@ void font_contracts() {
     cache_contracts();
     system_face_contracts();
     fallback_contracts();
+    command_label_cell_contracts();
 }

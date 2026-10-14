@@ -15,7 +15,10 @@ a test, a tool or a provenance reference still needs it.
 
 - [architecture-decisions.md](architecture-decisions.md) — Architecture decisions.
 - [asset-formats.md](asset-formats.md) — Portable CPU asset formats.
+- [behaviour/frame-service-schedule.md](behaviour/frame-service-schedule.md) — Space command ties, combat cadence/reset gates, creation/removal boundaries, hazard/contact and capture timing, TIE pulse refusal and muzzle state, waypoint arrival/repeat timing and formation ownership, with observable cases; timing changes after M2 sign-off, captured-pad regression and HUD waypoint seams marked separately.
 - [behaviour/foc-river-group-selection.md](behaviour/foc-river-group-selection.md) — FoC river and effect-group draw selection.
+- [behaviour/galactic-frame-service-schedule.md](behaviour/galactic-frame-service-schedule.md) — Galactic frame order, service cadence and observable dependency cases.
+- [behaviour/gc-ai-frame-schedule.md](behaviour/gc-ai-frame-schedule.md) — Galactic AI service timing, context bridge, budget producers and action admission.
 - [behaviour/lua-api-declarations.md](behaviour/lua-api-declarations.md) — Lua-visible Declaration Inventory Contract.
 - [behaviour/lua-script-model.md](behaviour/lua-script-model.md) — Lua Script Host Behaviour Contract.
 - [behaviour/map-effect-admission.md](behaviour/map-effect-admission.md) — Map attached-effect admission snapshot.
@@ -44,7 +47,10 @@ a test, a tool or a provenance reference still needs it.
 - [clean-room.md](clean-room.md) — Clean-room rule for the remake.
 - [estimate.md](estimate.md) — Work estimate, measured phase effort and re-estimates.
 - [fixed-point.md](fixed-point.md) — Fixed-point arithmetic contract.
+- [galactic-architecture.md](galactic-architecture.md) — Galactic conquest architecture: the galactic simulation layer, time, tactical nesting, commands, checkpoints, data, Lua, AI, viewer, threading and tests (ADR-012 to ADR-020).
+- [galactic-replay-format.md](galactic-replay-format.md) — Galactic replay format v1 (EAWRGCR): tick-zero galaxy, seat-issued commands, opcode blocks.
 - [graphics-features.md](graphics-features.md) — Graphics features: retail options, viewer status, Forward+ extras.
+- [ideas.md](ideas.md) — Ideas board: suggesting and voting on features, and how ideas are triaged.
 - [inventories.md](inventories.md) — Offline inventory contracts.
 - [lua-runtime.md](lua-runtime.md) — Lua 5.0.2 bounded runtime.
 - [lua-numeric-profile.md](lua-numeric-profile.md) — Authoritative Lua soft-float binary64 numbers.
@@ -56,6 +62,9 @@ a test, a tool or a provenance reference still needs it.
 - [rendering.md](rendering.md) — Rendering policies and fixtures.
 - [replay-format.md](replay-format.md) — Synthetic replay format v1.
 - [research/source-inputs.md](research/source-inputs.md) — Source inputs and bounded findings.
+- [research/data-assumption-audit.md](research/data-assumption-audit.md) — Mod fidelity audit: every place the code assumes the data is stock FoC, with proposed fix groupings.
+- [research/focumentation/README.md](research/focumentation/README.md) — Focumentation community wiki cross-check against our notes, registry and Lua inventories.
+- [research/frame-service-map.md](research/frame-service-map.md) — Frame service map: a systematic research pass over frame order and cadence.
 - [shaders.md](shaders.md) — Shader translation spike.
 - [simulation.md](simulation.md) — Deterministic simulation harness.
 - [skirmish-start.md](skirmish-start.md) — M2 skirmish tick zero: start rules, census, the m2-start replay.
@@ -64,5 +73,7 @@ a test, a tool or a provenance reference still needs it.
 - [ui/mod-hud-survey.md](ui/mod-hud-survey.md) — How six mods change the FoC HUD; D2 recommendation and mod-compat fixtures.
 - [ui/ui-layer.md](ui/ui-layer.md) — UI layer: retail sources, layout rules, architecture and plan.
 - [unit-data.md](unit-data.md) — M2 unit tables: loading rules, hardpoint positions in Q24, content identity.
+- [galactic-data.md](galactic-data.md) — galactic conquest data tables: campaigns, planets, trade routes, factions, constants, issue rows.
+- [galactic-types.md](galactic-types.md) — Original-type galactic movement, population and production values.
 - [vfs.md](vfs.md) — Virtual file system contract.
 - [xml-model.md](xml-model.md) — XML object model and variant resolution.

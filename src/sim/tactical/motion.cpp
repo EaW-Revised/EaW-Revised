@@ -311,6 +311,8 @@ core::Result<void> validate_motion(const MotionTable& table) {
     if (!(table.rules.expansion_distance.raw() > 0 && table.rules.expansion_distance.raw() <= coordinate_limit_raw)) {
         return core::Result<void>::failure(invalid("the expansion distance is out of range"));
     }
+    if (table.rules.max_waypoints > (1U << 16U))
+        return core::Result<void>::failure(invalid("waypoint capacity exceeds the resource limit"));
     if (table.rules.reevaluation_frames == 0 || table.rules.reevaluation_frames > (1U << 16U)) {
         return core::Result<void>::failure(invalid("the reevaluation interval must be 1 to 65536 frames"));
     }
@@ -329,12 +331,14 @@ core::Result<void> validate_motion(const MotionTable& table) {
                 + "speed must be in [1/16, 1024], rate of turn in [1/128, 1024], "
                   "acceleration and deceleration in [2^-12, 1024]"));
         }
-        if (profile.turn_in_place_slowdown < whole(1) || profile.turn_in_place_slowdown.raw() > rate_limit_raw) {
-            return core::Result<void>::failure(invalid(context + "the turn-in-place slowdown must be in [1, 1024]"));
+        // MV-20: this is a positive duration scale, including authored factors below one.
+        if (profile.turn_in_place_slowdown.raw() <= 0) {
+            return core::Result<void>::failure(invalid(context + "the turn-in-place slowdown must be positive"));
         }
-        if (!within(profile.roll_rate, 0) || profile.bank_angle.raw() < 0 || profile.bank_angle > whole(90)) {
+        // BK-06: the authored bank angle is unrestricted, including negative values.
+        if (!within(profile.roll_rate, 0)) {
             return core::Result<void>::failure(
-                invalid(context + "the roll rate must be in [0, 1024] and the bank angle in [0, 90] degrees"));
+                invalid(context + "the roll rate must be in [0, 1024]"));
         }
     }
     for (std::size_t index = 0; index < table.footprints.size(); ++index) {
@@ -656,6 +660,14 @@ core::Result<Fixed> bank_roll(const MotionProfile& profile, const Fixed roll, co
         return core::Result<Fixed>::success(Fixed{});
     }
     Calc calc;
+    // BK-06: read the current roll in (-180, 180], preserving the stock fast path.
+    Fixed current_roll = roll;
+    if (roll <= whole(-180) || roll > whole(180)) {
+        auto raw = roll.raw() % (360 * Fixed::scale);
+        if (raw <= -180 * Fixed::scale) raw += 360 * Fixed::scale;
+        if (raw > 180 * Fixed::scale) raw -= 360 * Fixed::scale;
+        current_roll = Fixed::from_raw(raw);
+    }
     // BK-02: the share of the rate of turn this frame used sets the bank; half the rate or more
     // banks fully. A left turn (yaw growing) lowers the left side: the roll goes negative.
     const Fixed turn = clamp180(calc.sub(yaw_after, yaw_before));
@@ -667,13 +679,13 @@ core::Result<Fixed> bank_roll(const MotionProfile& profile, const Fixed roll, co
     }
     // BK-03: the roll eases in, at the roll rate times the remaining gap over the bank angle,
     // never below a tenth of the rate, and stops on the target.
-    const Fixed gap = calc.abs(calc.sub(target, roll));
+    const Fixed gap = calc.abs(calc.sub(target, current_roll));
     const Fixed step = calc.mul(profile.roll_rate, std::clamp(calc.div(gap, profile.bank_angle), min_roll_share, whole(1)));
-    Fixed result = roll;
-    if (roll < target) {
-        result = std::min(calc.add(roll, step), target);
-    } else if (target < roll) {
-        result = std::max(calc.sub(roll, step), target);
+    Fixed result = current_roll;
+    if (current_roll < target) {
+        result = std::min(calc.add(current_roll, step), target);
+    } else if (target < current_roll) {
+        result = std::max(calc.sub(current_roll, step), target);
     }
     if (!calc.ok()) {
         return core::Result<Fixed>::failure(calc.error("bank roll"));
@@ -723,7 +735,8 @@ core::Result<Fixed> yaw_degrees(const math::Quat rotation) {
     }
     const auto turns = math::atan2_turn(matrix.value().rows[1][0], matrix.value().rows[0][0]);
     if (!turns) {
-        return core::Result<Fixed>::failure(turns.error());
+        return core::Result<Fixed>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
+            turns.error().message + " (heading of a rotation with no planar part)"));
     }
     return core::Result<Fixed>::success(clamp180(Fixed::from_raw(turns.value().raw() * 360)));
 }

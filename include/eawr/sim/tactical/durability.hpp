@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -14,6 +15,9 @@
 // docs/behaviour/space-hardpoints.md). Everything here is a pure function of Q24 values:
 // no clock, thread or host input.
 namespace eawr::sim::tactical {
+
+// EN-08: negative authored durations disable engines without a recovery deadline.
+inline constexpr std::uint32_t indefinite_engine_disable_frames = UINT32_MAX;
 
 // What losing a hardpoint switches off (rules HD-10 to HD-15). `other` covers dummy art and
 // the hardpoint types the M2 roster does not use.
@@ -56,6 +60,9 @@ struct DamageRules {
     math::Fixed asteroid_damage{}; // WHZ-11/12: raw damage and probability per serviced logical frame
     math::Fixed asteroid_rate{};
     std::uint32_t asteroid_damage_type{no_type_index}; // ordinary Damage_Default armor route
+    // WCC-46, DG-20: the damage type scripted damage meets the shield armor with (Damage_Default);
+    // no_type_index (no table entry) leaves the multiplier at 1.
+    std::uint32_t default_damage_type{no_type_index};
     math::Fixed ion_storm_disable_seconds{}; // WHZ-31, Ion_Storm_Shield_Disable_Time
     friend bool operator==(const DamageRules&, const DamageRules&) = default;
 };
@@ -67,6 +74,8 @@ struct HardpointProfile {
     math::Fixed max_health{};
     math::Fixed repair_amount_per_frame{}; // Repair_Amount_Per_Frame; zero when not authored
     math::Fixed repair_cost_per_frame{};   // Repair_Cost_Per_Frame; zero when not authored
+    bool allows_special_weapon_use{}; // WSW-48: default permission changes on this hardpoint's lifecycle
+    std::string special_ability_name{}; // WHD-05: only ENABLE_SPECIAL_ABILITY points write this lock.
     friend bool operator==(const HardpointProfile&, const HardpointProfile&) = default;
 };
 
@@ -94,6 +103,8 @@ struct DurabilityProfile {
     math::Fixed energy_refresh{};
     // IS-02: the ION_STUN_EFFECT behaviour; a type without it is never ion stunned (#561).
     bool ion_stun_effect{};
+    // WCC-82: the DAMAGE_TRACKING behaviour; only such a type keeps a rate of damage taken.
+    bool damage_tracking{};
     // DG-40: scenario staging only; ordinary unit loaders leave this false.
     // Blocks ordinary hits before shields/hardpoints; privileged scripted damage bypasses it.
     bool scenario_invulnerable{};
@@ -150,6 +161,10 @@ struct DurabilityState {
     std::vector<std::vector<PlayerId>> repairing_players;
     std::optional<std::uint64_t> engines_disabled_until{}; // EN-08; independent of engine hardpoint health
     std::optional<std::uint64_t> ion_storm_contact{};
+    // WCC-82, AB-42: damage tracking (DAMAGE_TRACKING types only): the hull and shield lost since the
+    // rate window last closed, and the last window's rate per second. Hashed in the DTRK block.
+    math::Fixed window_damage{};
+    math::Fixed damage_rate{};
     friend bool operator==(const DurabilityState&, const DurabilityState&) = default;
 };
 
@@ -168,8 +183,20 @@ enum class HardpointState : std::uint8_t { intact = 0, damaged = 1, destroyed = 
 [[nodiscard]] bool hardpoint_destroyed(
     const DurabilityProfile& profile, const DurabilityState& state, std::size_t index) noexcept;
 [[nodiscard]] bool hardpoint_disabled(const DurabilityState& state, std::size_t index) noexcept;
+
+// WSH-03/H04: the surviving-points fraction used for target choice; one heal repairs
+// the lowest-fraction surviving destroyable point, otherwise hull. No shield or revival.
+[[nodiscard]] math::Fixed healing_fraction(const DurabilityProfile&, const DurabilityState&);
+[[nodiscard]] core::Result<std::uint32_t> heal_health(const DurabilityProfile&, DurabilityState&,
+    math::Fixed percent, math::Fixed amount);
 [[nodiscard]] HardpointState hardpoint_state(const DurabilityProfile& profile, const DurabilityRules& rules,
     const DurabilityState& state, std::size_t index) noexcept;
+
+// WCC-15: a tracked unit's estimated time to death in seconds: the health of its destroyable
+// hardpoints (each at least 0, destroyed ones too), or its hull when it has none, plus its shield,
+// over its rate of damage taken (WCC-82). Nothing ("never") at a zero rate or beyond Fixed's range.
+[[nodiscard]] std::optional<math::Fixed> time_to_death(
+    const DurabilityProfile& profile, const DurabilityState& state) noexcept;
 
 // Consequences (HD-10 to HD-14), at the level the simulation exposes before movement, firing
 // and squadrons exist: a weapon hardpoint may fire only while it is not destroyed; a type with

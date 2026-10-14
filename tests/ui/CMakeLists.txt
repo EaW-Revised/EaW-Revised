@@ -99,11 +99,98 @@ target_compile_features(ui_ability_buttons_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_ability_buttons_tests)
 add_test(NAME ui_ability_buttons_contracts COMMAND ui_ability_buttons_tests)
 
+# The skirmish battle loading screen's model: the content built from the data, the weather and preview
+# names, the history wrapping and the honest load progress (docs/behaviour/loading-screen.md).
+add_executable(ui_loading_screen_tests loading_screen_tests.cpp)
+target_link_libraries(ui_loading_screen_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_loading_screen_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_loading_screen_tests)
+add_test(NAME ui_loading_screen_contracts COMMAND ui_loading_screen_tests)
+
+# The front end's navigation and enable-state model: the screen stack, Back and Escape, the
+# gadget rules of the three menu dialogs and the fallback for a mod's unknown buttons.
+add_executable(ui_front_end_tests front_end_tests.cpp)
+target_link_libraries(ui_front_end_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_front_end_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_front_end_tests)
+add_test(NAME ui_front_end_contracts COMMAND ui_front_end_tests)
+
+# The galactic custom-campaign staging model (MNU-34) and the Continue rule: the listing, the faction
+# drop-down, Start's request and the options and difficulty gates.
+add_executable(ui_campaign_setup_tests campaign_setup_tests.cpp)
+target_link_libraries(ui_campaign_setup_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_campaign_setup_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_campaign_setup_tests)
+add_test(NAME ui_campaign_setup_contracts COMMAND ui_campaign_setup_tests)
+
+# Message and confirm boxes (MNU-42): the dialog variant from the button count and kind, the button slots and
+# the results of a press or Esc.
+add_executable(ui_message_box_tests message_box_tests.cpp)
+target_link_libraries(ui_message_box_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_message_box_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_message_box_tests)
+add_test(NAME ui_message_box_contracts COMMAND ui_message_box_tests)
+
+# The LAN screens' model (MNU-26 to MNU-29): the game list's filter and sort, the join checks, the chat limits,
+# the staging rows read from the dialog and the start and accept checks.
+add_executable(ui_lan_lobby_tests lan_lobby_tests.cpp)
+target_link_libraries(ui_lan_lobby_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_lan_lobby_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_lan_lobby_tests)
+add_test(NAME ui_lan_lobby_contracts COMMAND ui_lan_lobby_tests)
+
+# The Load Game screen's model (MNU-39, MNU-41): replay header summaries, list order, the Load and Delete
+# rules and a delete scoped to the replay store.
+add_executable(ui_load_game_tests load_game_tests.cpp)
+target_link_libraries(ui_load_game_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_load_game_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_load_game_tests)
+add_test(NAME ui_load_game_contracts COMMAND ui_load_game_tests)
+
+# The Load Game screen's saved-game list (MNU-39, WGS-155/156/161): the rows the viewer's save-directory
+# adapter builds from the checkpoint saves, their retail order and columns, and the store's list and delete.
+add_executable(ui_saved_games_tests saved_games_tests.cpp ../../apps/viewer/src/saved_games.cpp)
+target_link_libraries(ui_saved_games_tests PRIVATE eawr::ui_model eawr::checkpoint eawr::platform)
+target_compile_features(ui_saved_games_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_saved_games_tests)
+add_test(NAME ui_saved_games_contracts COMMAND ui_saved_games_tests)
+
+# The credits roll's model (MNU-07): the Credits_* constants, the text lines, the scroll and the end.
+add_executable(ui_credits_tests credits_tests.cpp)
+target_link_libraries(ui_credits_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_credits_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_credits_tests)
+add_test(NAME ui_credits_contracts COMMAND ui_credits_tests)
+
+# The skirmish staging screen's text and start blockers: captions are text-database keys, the screen's source
+# holds no caption literal, the land game types stay listed and disabled (docs/ui/menu-screens.md MNU-21, MNU-22).
+add_executable(ui_skirmish_setup_tests skirmish_setup_tests.cpp)
+target_link_libraries(ui_skirmish_setup_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_skirmish_setup_tests PRIVATE cxx_std_20)
+target_compile_definitions(ui_skirmish_setup_tests PRIVATE
+    EAWR_VIEWER_SOURCE_DIR="${PROJECT_SOURCE_DIR}/apps/viewer/src")
+eawr_target_project_warnings(ui_skirmish_setup_tests)
+add_test(NAME ui_skirmish_setup_contracts COMMAND ui_skirmish_setup_tests)
+
 # Tier labels (cmake/EawrTestTiers.cmake).
 add_executable(ui_cursor_tests cursor_tests.cpp)
 target_link_libraries(ui_cursor_tests PRIVATE eawr::ui_model)
 target_compile_features(ui_cursor_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_cursor_tests)
 add_test(NAME ui_cursor_contracts COMMAND ui_cursor_tests)
+
+# #2927: the player settings record (defaults, text round trip, damaged files, clamping, option table).
+add_executable(ui_settings_tests settings_tests.cpp)
+target_link_libraries(ui_settings_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_settings_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_settings_tests)
+add_test(NAME ui_settings_contracts COMMAND ui_settings_tests)
+
+# #2935: the player profile record (defaults, round trip, damaged files, non-ASCII names and paths, write-back).
+add_executable(ui_player_profile_tests player_profile_tests.cpp)
+target_link_libraries(ui_player_profile_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_player_profile_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_player_profile_tests)
+add_test(NAME ui_player_profile_contracts COMMAND ui_player_profile_tests)
 
 eawr_label_tests()

@@ -4,9 +4,12 @@ These notes record format and runtime semantics used by the implementation. A ru
 
 ## Formats and runtime
 
+- [Galactic frame service schedule](galactic-frame-service-schedule.md): galactic order, cadence, same-frame dependencies and synthetic frame cases; qualified arrival/control and tactical-return probes
+- [Galactic AI frame service schedule](gc-ai-frame-schedule.md): six-system timing, retained-galaxy perception, budget producers and action-admission qualifications for S4
 - [XML registry](xml-registry-edge-cases.md), with [retail admission](xml-registry-retail-addendum.md) and [file-service limits](xml-registry-file-service-addendum.md)
 - [PGLua chunks](pglua-chunks.md), [Lua host](lua-script-model.md), and [declaration index](lua-api-declarations.md)
 - [Tactical logical tick rate](tactical-tick-rate.md): 30 frames per second, pinned pending original-game behaviour recordings
+- [Frame service schedule](frame-service-schedule.md): command ties, modifier/countdown endpoints, creation and removal boundaries, ship/weapon scan gates, combat timer resets, and rate/recharge/fog/repair, hazard/contact and capture dependencies; TIE first/second-pulse refusal and muzzle advance; waypoint arrival/repeat timing and formation ownership (timing changes after M2 sign-off; captured-pad regression and HUD waypoint seams marked separately)
 - [Tactical time controls](tactical-time-controls.md): pause, fast forward and the game-speed steps (pause and speed controls); [battle end](battle-end.md): the win/lose message and the end 7 s after the outcome (victory display and battle-end delay)
 - [Space targeting](space-targeting.md), [space weapon fire, ship-level target choice and attack orders](space-weapon-fire.md), [space sensor visibility and query order](space-visibility.md), [hull and hardpoint damage, loss, death and repair](space-hardpoints.md), [projectiles, damage types, shields and regeneration](space-damage.md), [ship movement: move, turn in place and stop](space-movement.md), [orders: attacking out of range, attack-move and guard](space-orders.md), [unit abilities: power modes, timers and multipliers](space-abilities.md), [fixed-force victory and defeat](space-victory.md) and [fighter deaths: explode or spin away](space-fighter-deaths.md) (fighter death outcomes)
 - [FoC tactical space AI](foc-tactical-ai.md): architecture, the selected XML and Lua, and the tactical AI host function subset
@@ -14,12 +17,15 @@ These notes record format and runtime semantics used by the implementation. A ru
 - [TED environments](p1-effective-environment.md) and [terrain-water selection](terrainwater-technique-selection.md)
 - [Tactical camera input](tactical-camera-input.md) and [battle selection, orders and the tactical overview](foc-battle-selection.md) (battle camera, selection and orders)
 - [Battle UI in the world: selection circles, bars, squadron icons, hardpoint reticles](foc-battle-world-ui.md) (battle world UI and squadron selection)
+- [Skirmish battle loading screen](loading-screen.md): the load dialog's content from the game data, the bar that follows the battle's preparation and the Begin that starts it
+- [Front end shell](front-end-shell.md): the main menu, single-player and multiplayer menus built from the dialog data, the navigation between them and the setup and settings screens, the menu music and button sounds
 
 ## Subsystem walks
 
 - [Squadrons](walks/squadrons.md): the fighter and bomber squadron per frame, in FoC's evaluation order, with the gaps against the remake (walk 1)
 - [Capital-ship combat](walks/capital-combat.md): capital ships, frigates and corvettes in combat per frame (targeting, shields, hull, hardpoints, damage routing, death), in FoC's evaluation order, with the gaps against the remake (walk 2)
 - [Weapons and projectiles](walks/weapons.md): a weapon hardpoint, a unit's own weapon and their projectiles per frame, in FoC's evaluation order, with the gaps against the remake (walk 3)
+- [Fighter dogfight and time to kill](walks/dogfight.md): the fighter-versus-fighter loop end to end (acquisition, cells and chases, the targeting state that permits fire, the shot, hit and damage), measured against the S-97/S-98 recordings, with the ranked divergences behind the fighter time-to-kill gap
 - [Ship movement](walks/movement.md): a ship's locomotor, its order's formation and its turn toward a target per frame, in FoC's evaluation order, with the gaps against the remake (walk 4)
 - [Skirmish production](walks/production.md): credits and income, the build queues, the population cap, reinforcements and the station's upgrades and level-up in a space skirmish, in FoC's evaluation order, with the gaps against the remake (walk 5)
 - [Tactical AI](walks/tactical-ai.md): the computer player's tactical decisions in a space battle (goals, plans, TaskForces, the unit-level AI service, damage tracking and the flee response, difficulty), in FoC's evaluation order, with the gaps against the remake (walk 6)

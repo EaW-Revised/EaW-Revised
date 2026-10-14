@@ -1,10 +1,13 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/core/sha256.hpp"
+#include <stdexcept>
 #include "eawr/platform/live_session.hpp"
 
 #include "eawr/platform/live_scripts.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/tactical_bridge.hpp"
 #include "eawr/sim/tactical/session.hpp"
+#include "eawr/core/tick_profile.hpp"
 
 #include <algorithm>
 #include <condition_variable>
@@ -24,6 +27,42 @@ namespace {
 namespace tactical = sim::tactical;
 using Clock = std::chrono::steady_clock;
 
+// Preserve the executor's dispatch policy and partition callbacks. Only the caller
+// records each completed barrier's elapsed time; workers never write this vector.
+class MeasuredExecutor final : public sim::PartitionExecutor {
+public:
+    explicit MeasuredExecutor(const sim::PartitionExecutor& executor) : executor_(executor) {}
+    std::size_t worker_count() const noexcept override { return executor_.worker_count(); }
+    core::Result<void> execute(const std::size_t count,
+        const std::function<void(std::size_t)>& partition) const override {
+        return execute_phase({}, count, partition);
+    }
+    core::Result<void> execute_phase(const std::string_view name, const std::size_t count,
+        const std::function<void(std::size_t)>& partition) const override {
+        const auto run = [&] { return name.empty() ? executor_.execute(count, partition)
+            : executor_.execute_phase(name, count, partition); };
+        // Nested calls may originate on any worker. Keep their original inline
+        // execution and count them inside the enclosing barrier, exactly once.
+        if (std::this_thread::get_id() != owner_ || measuring_) return run();
+        struct Reset final { bool& flag; ~Reset() { flag = false; } } reset{measuring_};
+        measuring_ = true;
+        const auto started = Clock::now();
+        auto result = [&] {
+            const core::tick_profile::Pause pause;
+            return run();
+        }();
+        const double elapsed = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+        if (core::tick_profile::active) core::tick_profile::active->barriers_ms += elapsed;
+        phases.push_back({"worker." + (name.empty() ? std::string("unnamed") : std::string(name)), elapsed});
+        return result;
+    }
+    mutable std::vector<LivePhaseCost> phases;
+private:
+    const sim::PartitionExecutor& executor_;
+    const std::thread::id owner_{std::this_thread::get_id()};
+    mutable bool measuring_{};
+};
+
 } // namespace
 
 std::chrono::milliseconds LiveSession::tick_interval(const std::uint32_t target_rate) noexcept {
@@ -36,7 +75,15 @@ LiveEventLog::LiveEventLog(const Bounds bounds) noexcept : bounds_(bounds) {}
 bool LiveEventLog::presented(const tactical::Event& event) noexcept {
     return event.kind == tactical::EventKind::unit_destroyed || event.kind == tactical::EventKind::hardpoint_destroyed
         || event.kind == tactical::EventKind::spin_away_started || event.kind == tactical::EventKind::spin_away_ended
-        || event.kind == tactical::EventKind::reinforcement_unloaded || event.kind == tactical::EventKind::station_replaced;
+        || event.kind == tactical::EventKind::reinforcement_unloaded || event.kind == tactical::EventKind::station_replaced
+        // WBP-31: the sale consumer needs the sold child's identity after removal.
+        || event.kind == tactical::EventKind::pad_structure_sold
+        // Pad capture and construction cues use the XML-authored sounds in the audio consumer.
+        || event.kind == tactical::EventKind::pad_captured
+        || event.kind == tactical::EventKind::pad_construction_started
+        || event.kind == tactical::EventKind::pad_construction_completed
+        // WSW-33/34: the special weapon speech and pulse sounds are presented from these events.
+        || event.kind == tactical::EventKind::special_weapon_fired || event.kind == tactical::EventKind::special_weapon_ready;
 }
 
 bool LiveEventLog::presented(const tactical::CombatEvent& event) noexcept {
@@ -44,6 +91,8 @@ bool LiveEventLog::presented(const tactical::CombatEvent& event) noexcept {
     // ordinary shots and acquisitions stay out.
     return event.kind == tactical::CombatEventKind::projectile_hit
         || event.kind == tactical::CombatEventKind::projectile_expired
+        || event.kind == tactical::CombatEventKind::point_defence_zap
+        || event.kind == tactical::CombatEventKind::heal_pulse
         || (event.kind == tactical::CombatEventKind::weapon_fired
             && (event.outcome & (tactical::fired_ability_shot | tactical::fired_barrage_shot)) != 0U);
 }
@@ -138,9 +187,11 @@ public:
     // Exactly one of `session` and `scripted` is set: the world alone, or the world inside the
     // scripted session that runs the scripts beside it (#79).
     Impl(std::optional<tactical::TacticalSession> session,
-        std::unique_ptr<script::authoritative::ScriptedTacticalSession> scripted, const Options& options)
+        std::unique_ptr<script::authoritative::ScriptedTacticalSession> scripted, const Options& options,
+        std::function<core::Result<tactical::TacticalSession>()> rebuild_world, bool launch = true)
         : session_(std::move(session)), scripted_(std::move(scripted)), options_(options),
-          event_log_({std::max(options.event_history, std::max<std::size_t>(options.history, 2)), options.event_bytes}) {
+          event_log_({std::max(options.event_history, std::max<std::size_t>(options.history, 2)), options.event_bytes}),
+          rebuild_world_(std::move(rebuild_world)) {
         options_.history = std::max<std::size_t>(options_.history, 2);
         // #637: each tick's state hash is computed off the simulation thread.
         auto hasher = std::make_shared<ThreadStateHasher>();
@@ -163,17 +214,30 @@ public:
         interval_ = tick_interval(options_.target_rate);
         paused_ = options_.initially_paused;
         if (options_.pacing == Pacing::driven) target_ = world().completed_tick();
-        thread_ = std::thread([this] { run(); });
+        if (launch) thread_ = std::thread([this] { run(); });
     }
 
     ~Impl() { stop(); }
 
-    void submit(LiveOrder order) {
+    core::Result<void> submit(LiveOrder order) {
         {
             const std::lock_guard lock(mutex_);
+            if (const auto staging = recovery_admission_.lock(); staging && *staging) {
+                core::Diagnostic error; error.code = "EAWR-PLATFORM-0600";
+                error.message = "Order refused while recovery is catching up. Try again when play resumes.";
+                submission_notice_ = error; rejected_.push_back(error);
+                return core::Result<void>::failure(std::move(error));
+            }
+            submission_notice_.reset();
             inbox_.push_back(std::move(order));
         }
         wake_.notify_all();
+        return core::Result<void>::success();
+    }
+
+    std::optional<core::Diagnostic> submission_notice() const {
+        const std::lock_guard lock(mutex_);
+        return submission_notice_;
     }
 
     void advance_to(const std::uint64_t tick) {
@@ -304,9 +368,9 @@ public:
         return scripted_ ? scripted_->record() : session_->record();
     }
 
-    tactical::ProductionCounts production_counts(const tactical::PlayerId player, const tactical::TypeId type) const {
+    LiveSession::ProductionView production_view(const tactical::PlayerId player, const tactical::TypeId type) const {
         const std::lock_guard lock(session_mutex_);
-        return world().production_counts(player, type);
+        return {world().production_counts(player, type), world().snapshot()};
     }
 
     std::optional<bool> reinforcement_point(const tactical::PlayerId player, const tactical::TypeId type,
@@ -397,7 +461,8 @@ private:
                     return false;
                 };
                 if (options_.pacing == Pacing::driven || holding()) {
-                    wake_.wait(lock, due);
+                    if (options_.step_driver) wake_.wait_for(lock, std::chrono::milliseconds(2), due);
+                    else wake_.wait(lock, due);
                 } else {
                     const auto next = clock_start + interval_ * static_cast<std::int64_t>(
                         frame_.latest->completed_tick() + 1U - clock_tick);
@@ -417,7 +482,10 @@ private:
             }
             // Orders for a tick that already ran are refused now; the rest wait for their tick.
             submit_due(world().completed_tick(), false);
-            if (held) continue;
+            if (held) {
+                if (options_.step_driver && !step(executor, false)) return;
+                continue;
+            }
 
             bool step_now = false;
             if (options_.pacing == Pacing::driven) {
@@ -438,7 +506,13 @@ private:
             }
             if (!step_now) continue;
             submit_due(world().completed_tick(), true);
+            const auto before = world().completed_tick();
             if (!step(executor)) return;
+            if (options_.step_driver && world().completed_tick() == before) {
+                // A completeness wait must service I/O without a busy loop or sim time.
+                std::unique_lock lock(mutex_);
+                wake_.wait_for(lock, std::chrono::milliseconds(2), [&] { return stopping_; });
+            }
         }
     }
 
@@ -466,7 +540,9 @@ private:
         {
             const std::lock_guard lock(session_mutex_);
             for (const auto& command : sourced) {
-                if (scripted_) {
+                if (options_.step_driver) {
+                    driver_input_.push_back(command);
+                } else if (scripted_) {
                     // The scripted session submits it with the step; a refusal comes back then.
                     input_.push_back(command);
                     auto& sequence = sequences_[command.key.player_id];
@@ -484,7 +560,9 @@ private:
                 command.key = {*order.tick, order.issuer, sequence};
                 command.units = std::move(order.units);
                 command.payload = std::move(order.payload);
-                if (scripted_) {
+                if (options_.step_driver) {
+                    driver_input_.push_back(std::move(command));
+                } else if (scripted_) {
                     input_.push_back(std::move(command));
                     ++sequence;
                 } else if (auto submitted = session_->submit(command); !submitted) {
@@ -500,15 +578,95 @@ private:
         }
     }
 
-    bool step(const ThreadWorkerAdapter& executor) {
+    bool step(const ThreadWorkerAdapter& executor, bool advance_allowed = true) {
+        MeasuredExecutor measured(executor);
+        core::tick_profile::Recording serial;
+        const sim::PartitionExecutor& step_executor = options_.measure_phases
+            ? static_cast<const sim::PartitionExecutor&>(measured) : executor;
         std::vector<core::Diagnostic> script_refusals;
         std::shared_ptr<const LiveFog> fog;
         double step_ms = 0.0;
         double fog_ms = 0.0;
+        double session_lock_ms = 0.0;
+        bool held_tick = false;
+        const auto lock_started = options_.measure_phases ? Clock::now() : Clock::time_point{};
         core::Result<tactical::TacticalTick> tick = [&]() -> core::Result<tactical::TacticalTick> {
-            const std::lock_guard lock(session_mutex_);
+            std::unique_lock driver_lock(session_mutex_);
             const auto started = Clock::now();
-            auto stepped = scripted_ ? step_scripted(executor, script_refusals) : session_->step(executor);
+            if (options_.measure_phases)
+                session_lock_ms = std::chrono::duration<double, std::milli>(started - lock_started).count();
+            const auto local_step = [&] {
+                const auto run = [&] { return scripted_ ? step_scripted(step_executor, script_refusals) : session_->step(step_executor); };
+                if (!options_.measure_phases) return run();
+                core::tick_profile::Capture capture(serial);
+                core::tick_profile::Scope scope("serial.session");
+                return run();
+            };
+            if (options_.step_driver) {
+                const auto driver_error = [](const char* message) {
+                    core::Diagnostic error; error.code = "EAWR-PLATFORM-0600"; error.message = message; return error;
+                };
+                std::optional<tactical::TacticalTick> driver_tick;
+                LiveStepContext context{advance_allowed,
+                    [&] { return world().completed_tick(); },
+                    [&] {
+                        // The completed tick already queued these canonical bytes on the
+                        // background hasher. Resolve that same result for LAN's per-tick row.
+                        // Before advancement (including tick zero), preserve the current-state query.
+                        auto hash = driver_tick ? driver_tick->state_hash.get() : world().state_sha256();
+                        if (scripted_) {
+                            auto scripts = scripted_->script_state_hash();
+                            if (!scripts) throw std::runtime_error(core::format_diagnostic(scripts.error()));
+                            hash += scripts.value();
+                        }
+                        return core::sha256_hex({reinterpret_cast<const std::uint8_t*>(hash.data()), hash.size()});
+                    },
+                    [&] { return world().canonical_state_bytes(); },
+                    [&](std::span<const tactical::PlayerCommand> commands) -> core::Result<void> {
+                        for (const auto& command : commands) {
+                            if (scripted_) input_.push_back(command);
+                            else {
+                                auto accepted = session_->submit(command);
+                                if (!accepted) return core::Result<void>::failure(accepted.error());
+                            }
+                        }
+                        return core::Result<void>::success();
+                    }, [&] { return driver_tick ? driver_tick->snapshot : world().snapshot(); },
+                    [&]() -> core::Result<void> {
+                        if (!advance_allowed || driver_tick) return core::Result<void>::failure(driver_error("driver advanced a held tick or stepped twice"));
+                        auto stepped = local_step();
+                        if (!stepped) return core::Result<void>::failure(stepped.error());
+                        driver_tick.emplace(std::move(stepped).value());
+                        return core::Result<void>::success();
+                    }, [&] { const auto controls = world().departure_controls();
+                        return std::vector<tactical::DepartureControl>{controls.begin(), controls.end()}; },
+                    [&]() -> core::Result<std::vector<std::uint8_t>> {
+                        auto replay = scripted_ ? scripted_->record() : session_->record();
+                        const auto completed = world().completed_tick();
+                        std::erase_if(replay.commands, [completed](const auto& command) { return command.key.tick + 1 != completed; });
+                        if (replay.commands.empty()) return core::Result<std::vector<std::uint8_t>>::success({});
+                        return tactical::write_replay(replay);
+                    }, [this](std::uint32_t rate) { set_target_rate(rate); }};
+                context.rebuild = [this, &executor, &driver_lock] {
+                    driver_lock.unlock();
+                    try { auto rebuilt = recovery_context(executor); driver_lock.lock(); return rebuilt; }
+                    catch (...) { driver_lock.lock(); throw; }
+                };
+                auto commands = std::exchange(driver_input_, {});
+                active_driver_lock_ = &driver_lock;
+                struct ClearDriverLock { std::unique_lock<std::mutex>*& lock; ~ClearDriverLock() { lock = nullptr; } } clear_driver_lock{active_driver_lock_};
+                auto driven = options_.step_driver(context, commands, static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count()));
+                if (!driven) return core::Result<tactical::TacticalTick>::failure(driven.error());
+                if (driven.value() != driver_tick.has_value()) return core::Result<tactical::TacticalTick>::failure(driver_error("driver advancement result disagrees with completed step"));
+                if (!driver_tick) { held_tick = true; return core::Result<tactical::TacticalTick>::success({}); }
+                auto stepped = core::Result<tactical::TacticalTick>::success(std::move(*driver_tick));
+                if (!scripted_) hashes_.push_back(stepped.value().state_hash);
+                fog = capture_fog();
+                step_ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+                return stepped;
+            }
+            auto stepped = local_step();
             const auto stepped_at = Clock::now();
             if (stepped && !scripted_) hashes_.push_back(std::move(stepped.value().state_hash));
             if (stepped) fog = capture_fog();
@@ -517,10 +675,12 @@ private:
             fog_ms = std::chrono::duration<double, std::milli>(finished - stepped_at).count();
             return stepped;
         }();
+        if (held_tick) return true;
         if (!script_refusals.empty()) {
             const std::lock_guard lock(mutex_);
             rejected_.insert(rejected_.end(), script_refusals.begin(), script_refusals.end());
         }
+        const auto publish_started = options_.measure_phases ? Clock::now() : Clock::time_point{};
         {
             const std::lock_guard lock(mutex_);
             if (!tick) {
@@ -548,6 +708,20 @@ private:
                     cost.phases = {{"step", std::max(0.0, step_ms - ai_ms_ - lua_ms_)}, {"ai", ai_ms_}, {"lua", lua_ms_},
                         {"fog", fog_ms}};
                 }
+                if (options_.measure_phases) {
+                    // Outside total_ms: lock admission and publication happen before/after
+                    // the measured world/script step and fog capture, respectively.
+                    cost.phases.push_back({"session-lock", session_lock_ms});
+                    cost.phases.push_back({"publish-tail",
+                        std::chrono::duration<double, std::milli>(Clock::now() - publish_started).count()});
+                    double partition_ms = 0.0;
+                    for (const auto& phase : measured.phases) partition_ms += phase.ms;
+                    cost.phases.push_back({"worker-total", partition_ms});
+                    cost.phases.push_back({"serial-remainder", std::max(0.0, step_ms - partition_ms)});
+                    if (scripted_) cost.phases.push_back({"world", world_ms_});
+                    cost.phases.insert(cost.phases.end(), measured.phases.begin(), measured.phases.end());
+                    for (const auto& phase : serial.costs) cost.phases.push_back({std::string(phase.name), phase.ms});
+                }
                 costs_.push_back(std::move(cost));
                 if (costs_.size() > tick_cost_history) costs_.pop_front();
             }
@@ -556,15 +730,98 @@ private:
         return static_cast<bool>(tick);
     }
 
+    core::Result<std::shared_ptr<LiveStepContext>> recovery_context(const ThreadWorkerAdapter& executor) {
+        using Result = core::Result<std::shared_ptr<LiveStepContext>>;
+        // Guard admission throughout building, replaying and publishing staging.
+        // An abandoned/failed context expires the weak guard without touching its owner.
+        auto admission = std::make_shared<bool>(true);
+        { const std::lock_guard lock(mutex_); recovery_admission_ = admission; }
+        auto rebuilt = rebuild_world_();
+        if (!rebuilt) return Result::failure(rebuilt.error());
+        std::optional<tactical::TacticalSession> session;
+        std::unique_ptr<script::authoritative::ScriptedTacticalSession> scripted;
+        if (options_.scripts && options_.scripts->wrap) {
+            auto wrapped = options_.scripts->wrap(std::move(rebuilt).value());
+            if (!wrapped) return Result::failure(wrapped.error());
+            scripted = std::make_unique<script::authoritative::ScriptedTacticalSession>(std::move(wrapped).value());
+        } else session.emplace(std::move(rebuilt).value());
+        auto staging_options = options_;
+        // A headless world must not retain the live admission/presentation owner.
+        // Script factories remain immutable local content and are recreated above.
+        staging_options.step_driver = {}; staging_options.command_source = {};
+        auto staged = std::make_shared<Impl>(std::move(session), std::move(scripted), staging_options, rebuild_world_, false);
+        auto context = std::make_shared<LiveStepContext>();
+        context->completed_tick = [staged] { return staged->world().completed_tick(); };
+        context->state_hash = [staged] {
+            auto hash = staged->world().state_sha256();
+            if (staged->scripted_) {
+                auto scripts = staged->scripted_->script_state_hash();
+                if (!scripts) throw std::runtime_error(core::format_diagnostic(scripts.error()));
+                hash += scripts.value();
+            }
+            return core::sha256_hex({reinterpret_cast<const std::uint8_t*>(hash.data()), hash.size()});
+        };
+        context->canonical_state = [staged] { return staged->world().canonical_state_bytes(); };
+        context->snapshot = [staged] { return staged->world().snapshot(); };
+        context->departures = [staged] { const auto controls = staged->world().departure_controls();
+            return std::vector<tactical::DepartureControl>{controls.begin(), controls.end()}; };
+        context->install = [staged](std::span<const tactical::PlayerCommand> commands) -> core::Result<void> {
+            for (const auto& command : commands) {
+                if (staged->scripted_) staged->input_.push_back(command);
+                else if (auto accepted = staged->session_->submit(command); !accepted) return accepted;
+            }
+            return core::Result<void>::success();
+        };
+        // Executor is used only during this driver's synchronous catch-up. Activation
+        // replaces these closures with the next live context before another normal tick.
+        context->step = [this, staged, &executor]() -> core::Result<void> {
+            // Readers keep using the immutable held live world while replay runs.
+            // This pointer always names this pump's owner lock, never a prior context.
+            auto* owner_lock = active_driver_lock_;
+            if (!owner_lock) {
+                core::Diagnostic error; error.code = "EAWR-PLATFORM-0600"; error.message = "catch-up has no simulation owner";
+                return core::Result<void>::failure(std::move(error));
+            }
+            owner_lock->unlock();
+            struct Relock { std::unique_lock<std::mutex>* lock; ~Relock() { lock->lock(); } } relock{owner_lock};
+            std::vector<core::Diagnostic> refusals;
+            auto tick = staged->scripted_ ? staged->step_scripted(executor, refusals) : staged->session_->step(executor);
+            if (!tick) return core::Result<void>::failure(tick.error());
+            if (!staged->scripted_) staged->hashes_.push_back(tick.value().state_hash);
+            return core::Result<void>::success();
+        };
+        context->set_target_rate = [staged](std::uint32_t rate) { staged->options_.target_rate = rate; };
+        context->activate = [this, staged, admission]() -> core::Result<void> {
+            session_ = std::move(staged->session_); scripted_ = std::move(staged->scripted_);
+            hashes_ = std::move(staged->hashes_); script_report_ = std::move(staged->script_report_);
+            // Preserve a sealed next tick already installed on the staging owner.
+            input_ = std::move(staged->input_); driver_input_.clear();
+            const auto snapshot = world().snapshot();
+            auto fog = capture_fog();
+            { const std::lock_guard lock(mutex_);
+              // Pre-staging orders retain their tick and follow normal stale-order
+              // diagnostics. No order accepted before the guard is silently erased.
+              *admission = false; history_.clear(); history_.push_front(snapshot);
+              fog_history_.clear(); if (fog) fog_history_.push_front(std::move(fog));
+              frame_ = {snapshot, snapshot, Clock::now()};
+              event_log_ = LiveEventLog({options_.event_history, options_.event_bytes});
+              interval_ = tick_interval(staged->options_.target_rate); rebase_ = true;
+            }
+            return core::Result<void>::success();
+        };
+        return Result::success(std::move(context));
+    }
+
     // Under session_mutex_: one step of the scripted session with the queued input. Its world
     // hash is the tick hash; refused input and dropped script commands are refusals.
-    core::Result<tactical::TacticalTick> step_scripted(const ThreadWorkerAdapter& executor,
+    core::Result<tactical::TacticalTick> step_scripted(const sim::PartitionExecutor& executor,
         std::vector<core::Diagnostic>& refusals) {
         std::vector<tactical::PlayerCommand> input = std::move(input_);
         input_.clear();
         auto stepped = scripted_->step(executor, input);
         if (!stepped) return core::Result<tactical::TacticalTick>::failure(stepped.error());
         auto& result = stepped.value();
+        world_ms_ = static_cast<double>(result.timing.world_ns) / 1.0e6;
         hashes_.push_back(result.world.state_hash);
         ai_ms_ = static_cast<double>(result.timing.engine_ns) / 1.0e6;
         lua_ms_ = static_cast<double>(result.timing.service_ns) / 1.0e6;
@@ -591,6 +848,8 @@ private:
         return core::Result<tactical::TacticalTick>::success(std::move(result.world));
     }
 
+    std::unique_lock<std::mutex>* active_driver_lock_{};
+    std::vector<tactical::PlayerCommand> driver_input_;
     std::optional<tactical::TacticalSession> session_;
     std::unique_ptr<script::authoritative::ScriptedTacticalSession> scripted_;
     // Scripted mode: the commands for the next step, submitted by it; the scripts' report.
@@ -598,6 +857,7 @@ private:
     LiveScriptReport script_report_;
     double ai_ms_{}; // #957: the last scripted step's AI step and Lua service, for the cost phases
     double lua_ms_{};
+    double world_ms_{};
     std::set<std::string> seen_diagnostics_;
     Options options_;
     // Guards session_ and hashes_ against record() and tick_hashes() from other threads.
@@ -612,6 +872,8 @@ private:
     mutable std::condition_variable published_;
     std::condition_variable wake_;
     std::vector<LiveOrder> inbox_;
+    std::weak_ptr<bool> recovery_admission_; // Read/write only under mutex_.
+    std::optional<core::Diagnostic> submission_notice_;
     std::uint64_t target_{};
     // #459 time controls and #453's halt.
     bool paused_{};
@@ -627,6 +889,7 @@ private:
     std::deque<std::shared_ptr<const LiveFog>> fog_history_;
     // The presentation event log (Options::event_history, Options::event_bytes).
     LiveEventLog event_log_;
+    std::function<core::Result<tactical::TacticalSession>()> rebuild_world_;
     // #558: the newest ticks' cost, oldest first.
     std::deque<LiveTickCost> costs_;
     std::thread thread_;
@@ -647,7 +910,8 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
     const tactical::VictoryRules& victory,
     const std::optional<tactical::FogRules>& fog,
     const tactical::AbilityTable& abilities,
-    const tactical::EconomyRules& economy) {
+    const tactical::EconomyRules& economy,
+    const tactical::MapBox& map_box) {
     using StartResult = core::Result<std::unique_ptr<LiveSession>>;
     if (options.workers == 0 || options.workers > ThreadWorkerAdapter::max_worker_count) {
         core::Diagnostic diagnostic;
@@ -656,17 +920,29 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
         return StartResult::failure(std::move(diagnostic));
     }
     auto session = tactical::TacticalSession::create(
-        setup, sensors, durability, motion, fog, combat, victory, abilities, economy);
+        setup, sensors, durability, motion, fog, combat, victory, abilities, economy, map_box);
     if (!session) return StartResult::failure(session.error());
+    tactical::TacticalContent recovery_content;
+    recovery_content.sensors.assign(sensors.begin(), sensors.end());
+    recovery_content.durability = durability; recovery_content.motion = motion; recovery_content.combat = combat;
+    recovery_content.victory = victory; recovery_content.fog = fog; recovery_content.abilities = abilities;
+    recovery_content.economy = economy; recovery_content.map_box = map_box;
+    auto rebuild_world = [setup, rules = std::move(recovery_content)] { return tactical::TacticalSession::create(setup, rules); };
     if (options.scripts && options.scripts->wrap) {
         core::load_profile::Scope lua_scope(core::load_profile::Phase::lua);
         auto scripted = options.scripts->wrap(std::move(session).value());
         if (!scripted) return StartResult::failure(scripted.error());
         return StartResult::success(std::unique_ptr<LiveSession>(new LiveSession(std::make_unique<Impl>(std::nullopt,
-            std::make_unique<script::authoritative::ScriptedTacticalSession>(std::move(scripted).value()), options))));
+            std::make_unique<script::authoritative::ScriptedTacticalSession>(std::move(scripted).value()), options, rebuild_world))));
     }
     return StartResult::success(std::unique_ptr<LiveSession>(
-        new LiveSession(std::make_unique<Impl>(std::move(session).value(), nullptr, options))));
+        new LiveSession(std::make_unique<Impl>(std::move(session).value(), nullptr, options, rebuild_world))));
+}
+
+core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
+    const tactical::TacticalSetup& setup, const tactical::TacticalContent& content, Options options) {
+    return start(setup, content.sensors, content.durability, content.motion, content.combat, std::move(options),
+        content.victory, content.fog, content.abilities, content.economy, content.map_box);
 }
 
 core::Result<std::vector<std::string>> headless_tick_hashes(
@@ -677,10 +953,11 @@ core::Result<std::vector<std::string>> headless_tick_hashes(
     const tactical::CombatTable& combat,
     const tactical::VictoryRules& victory,
     const std::optional<tactical::FogRules>& fog, const tactical::AbilityTable& abilities,
-    const tactical::EconomyRules& economy) {
+    const tactical::EconomyRules& economy,
+    const tactical::MapBox& map_box) {
     using HashResult = core::Result<std::vector<std::string>>;
     auto session = tactical::TacticalSession::from_replay(
-        replay, sensors, durability, motion, fog, combat, victory, abilities, economy);
+        replay, sensors, durability, motion, fog, combat, victory, abilities, economy, map_box);
     if (!session) return HashResult::failure(session.error());
     const sim::InlineExecutor executor;
     std::vector<std::string> hashes;
@@ -692,10 +969,17 @@ core::Result<std::vector<std::string>> headless_tick_hashes(
     return HashResult::success(std::move(hashes));
 }
 
+core::Result<std::vector<std::string>> headless_tick_hashes(
+    const tactical::TacticalReplay& replay, const tactical::TacticalContent& content) {
+    return headless_tick_hashes(replay, content.sensors, content.durability, content.motion, content.combat,
+        content.victory, content.fog, content.abilities, content.economy, content.map_box);
+}
+
 LiveSession::LiveSession(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 LiveSession::~LiveSession() = default;
 
-void LiveSession::submit(LiveOrder order) { impl_->submit(std::move(order)); }
+core::Result<void> LiveSession::submit(LiveOrder order) { return impl_->submit(std::move(order)); }
+std::optional<core::Diagnostic> LiveSession::submission_notice() const { return impl_->submission_notice(); }
 void LiveSession::advance_to(const std::uint64_t tick) { impl_->advance_to(tick); }
 void LiveSession::set_paused(const bool paused) { impl_->set_paused(paused); }
 void LiveSession::set_target_rate(const std::uint32_t frames_per_second) { impl_->set_target_rate(frames_per_second); }
@@ -711,8 +995,8 @@ std::optional<bool> LiveSession::reinforcement_point(const tactical::PlayerId pl
     return impl_->reinforcement_point(player, type, point, facing_yaw);
 }
 
-tactical::ProductionCounts LiveSession::production_counts(const tactical::PlayerId player, const tactical::TypeId type) const {
-    return impl_->production_counts(player, type);
+LiveSession::ProductionView LiveSession::production_view(const tactical::PlayerId player, const tactical::TypeId type) const {
+    return impl_->production_view(player, type);
 }
 std::shared_ptr<const tactical::TacticalSnapshot> LiveSession::snapshot_at(const std::uint64_t tick) const {
     return impl_->snapshot_at(tick);

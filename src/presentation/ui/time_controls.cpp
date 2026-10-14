@@ -45,6 +45,13 @@ void TimeControls::end(const std::uint64_t tick) {
     record(tick, "end");
 }
 
+bool TimeControls::set_speed_step(const std::uint32_t step, const std::uint64_t next_tick) {
+    if (ended_ || step >= speed_step_rates.size() || step == speed_step_) return false;
+    speed_step_ = step;
+    record(next_tick, "speed");
+    return true;
+}
+
 std::uint32_t TimeControls::target_rate() const noexcept {
     return state_ == TimeState::fast_forward ? fast_forward_rate : speed_step_rates[speed_step_];
 }

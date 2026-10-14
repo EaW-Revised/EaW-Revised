@@ -1,7 +1,9 @@
 #pragma once
 
 #include "eawr/sim/commands.hpp"
+#include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <array>
 #include <cstddef>
@@ -24,6 +26,25 @@
 namespace eawr::presentation::ui {
 
 using Rgb = std::array<std::uint8_t, 3>;
+
+// OF-05: model vertices are already in render basis; only the destination
+// translation changes from source (x, y, z) to render (x, z, -y).
+[[nodiscard]] constexpr sim::math::Mat3x4 waypoint_flag_transform(sim::math::Vec3 destination) noexcept {
+    auto result = sim::math::identity_matrix();
+    result.rows[0][3] = destination.x;
+    result.rows[1][3] = destination.z;
+    result.rows[2][3] = sim::math::Fixed::from_raw(-destination.y.raw());
+    return result;
+}
+
+// OF-05 presentation policy: XML velocity is distance per logical frame.
+// Sample presented ticks, rather than counting redraws; hiding restarts it.
+class WaypointDashClock final {
+public:
+    [[nodiscard]] double sample(bool shown, double presented_tick, double velocity, double period) noexcept;
+private:
+    std::optional<double> start_tick_;
+};
 
 // WU-43..WU-46: the world uses the cards' state, but only an active ability shows here.
 // Squadron icons take the first active slot; a bracket can show both. No heap storage.
@@ -164,8 +185,17 @@ struct SquadronIconRect final { float x{}, y{}, width{}, height{}; };
 }
 // WU-24: the pixel offset itself, for a `screen_height` pixel viewport.
 [[nodiscard]] float squadron_icon_screen_offset(float screen_height) noexcept;
-// WU-22: the icon's health level is ceil(10 x the squadron's health).
-[[nodiscard]] float squadron_health(float health_sum, float max_health_sum) noexcept;
+// WSU-52 (HD-21): a unit's display health, which its health bar, its unit card (L-9) and its
+// squadron's icon (WSU-32) show: the hull percent; for a type that dies when all its hardpoints
+// are destroyed and has destroyable hardpoints, the lesser of that and the combined destroyable
+// hardpoint percent (the S/T of HS-02, as the targeting's "damaged" test reads it, WCC-16).
+// `profile` is the type's durability profile, or null when the session binds none (hull only).
+[[nodiscard]] float display_health(const sim::tactical::InstanceDurability& durability,
+    const sim::tactical::DurabilityProfile* profile) noexcept;
+// WSU-32 (WU-22): the squadron icon's health is the mean display health of the squadron's craft
+// still standing; a lost craft leaves the mean. No craft gives 0. The icon's level is
+// ceil(10 x this).
+[[nodiscard]] float squadron_health(std::span<const float> live_craft_health) noexcept;
 
 // --- Dogfight grid (WU-25 to WU-27) ---------------------------------------------------------------
 
@@ -180,7 +210,7 @@ struct CombatCell {
     int y{};
     friend constexpr bool operator==(const CombatCell&, const CombatCell&) noexcept = default;
 };
-// WU-25: the cell of a point, `origin` the grid's low corner.
+// WU-25, WDF-05: the cell of a point, `origin` the grid's low corner (the space map box's).
 [[nodiscard]] CombatCell combat_cell_of(std::array<float, 2> point, std::array<float, 2> origin) noexcept;
 // WU-25: the cell's point (its centre, odd rows half a cell further along x).
 [[nodiscard]] std::array<float, 2> combat_cell_point(CombatCell cell, std::array<float, 2> origin) noexcept;
@@ -267,7 +297,12 @@ private:
 
 // GameConstants.xml HardPoint_Target_Reticle_{Enemy,Friendly}_Screen_Size: the reticle's width as a
 // share of the screen width; its height is 4/3 of that share of the screen height.
-inline constexpr float hardpoint_reticle_screen_size = 0.03F;
+struct HardpointReticleSizes final {
+    float enemy{};
+    float friendly{};
+};
+// No unsourced size fallback: unavailable/invalid constants disable the reticles.
+[[nodiscard]] std::optional<HardpointReticleSizes> hardpoint_reticle_sizes(const vfs::Vfs& filesystem);
 
 // A reticle's place on the screen in pixels: its top-left corner and its size.
 struct ReticleRect {
@@ -280,7 +315,8 @@ struct ReticleRect {
 // WU-31: the reticle over a hardpoint whose screen point is `centre` (pixels) on a screen of
 // `viewport` pixels. Its size is a share of the screen alone, so it keeps its pixel size at every
 // camera distance and for every ship.
-[[nodiscard]] ReticleRect hardpoint_reticle_rect(std::array<float, 2> centre, std::array<float, 2> viewport) noexcept;
+[[nodiscard]] ReticleRect hardpoint_reticle_rect(std::array<float, 2> centre, std::array<float, 2> viewport,
+                                               float screen_size) noexcept;
 
 // WU-34: the world point a reticle is centred on: the hardpoint's attachment point `attachment`
 // (the unit frame: scaled, turned by the model's quarter turn, +X forward) placed by the unit's

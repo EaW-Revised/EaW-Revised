@@ -127,12 +127,16 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
     }
     const data::XmlNode* space = radar_map != nullptr ? last_child(*radar_map, "RadarMapSettings") : nullptr;
     if (radar_map != nullptr && space == nullptr) fallback(settings, radar_map_path, "RadarMapSettings", "is absent");
+    if (space == nullptr) {
+        for (const auto tag : {"Space_FOW_Color", "Space_Asteroid_Field_Color", "Space_Asteroid_Field_Border_Color"})
+            fallback(settings, radar_map_path, tag, "is absent");
+    }
     if (space != nullptr) {
         const auto read_colour = [&](const std::string_view tag, data::ui::Rgba8& destination) {
             if (const auto* node = last_child(*space, tag)) {
                 if (const auto parsed = colour(node->raw_text)) destination = *parsed;
                 else fallback(settings, radar_map_path, tag, "is not a colour");
-            }
+            } else fallback(settings, radar_map_path, tag, "is absent");
         };
         read_colour("Space_Asteroid_Field_Color", settings.field);
         read_colour("Space_Asteroid_Field_Border_Color", settings.field_border);
@@ -142,7 +146,7 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
         if (const data::XmlNode* node = last_child(*space, "Space_FOW_Color")) {
             if (const auto parsed = colour(node->raw_text)) settings.fog = *parsed;
             else fallback(settings, radar_map_path, "Space_FOW_Color", "is not a colour");
-        }
+        } else fallback(settings, radar_map_path, "Space_FOW_Color", "is absent");
         if (const data::XmlNode* node = last_child(*space, "Space_Is_Guide_Rectangle")) {
             if (const auto parsed = boolean(node->raw_text)) settings.guide_rectangle = *parsed;
             else fallback(settings, radar_map_path, "Space_Is_Guide_Rectangle", "is not Yes or No");
@@ -159,11 +163,15 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
             else fallback(settings, radar_map_path, "Color name=\"space\"", "is not a colour");
         }
     }
+    if (game_constants == nullptr) {
+        for (const auto tag : {"Nebula_Effect_Color", "Radar_Selected_Units_Color"})
+            fallback(settings, constants_path, tag, "is absent");
+    }
     if (game_constants != nullptr) {
         if (const auto* node = last_child(*game_constants, "Nebula_Effect_Color")) {
             if (const auto parsed = colour(node->raw_text)) settings.nebula = *parsed;
             else fallback(settings, constants_path, "Nebula_Effect_Color", "is not a colour");
-        }
+        } else fallback(settings, constants_path, "Nebula_Effect_Color", "is absent");
         if (const data::XmlNode* node = last_child(*game_constants, "Radar_Colorize_Selected_Units")) {
             if (const auto parsed = boolean(node->raw_text)) settings.colorize_selected = *parsed;
             else fallback(settings, constants_path, "Radar_Colorize_Selected_Units", "is not Yes or No");
@@ -171,7 +179,7 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
         if (const data::XmlNode* node = last_child(*game_constants, "Radar_Selected_Units_Color")) {
             if (const auto parsed = colour(node->raw_text)) settings.selected = *parsed;
             else fallback(settings, constants_path, "Radar_Selected_Units_Color", "is not a colour");
-        }
+        } else fallback(settings, constants_path, "Radar_Selected_Units_Color", "is absent");
     }
     return settings;
 }
@@ -350,6 +358,8 @@ std::vector<MinimapBlip> minimap_blips(const std::span<const MinimapUnit> units,
             || (!radar.display_enemies && !unit->capture))) continue;
         if (!type.visible_when_fogged && !radar.replay && (radar.model_hidden || radar.radar_faded)) continue;
         if (!radar.locally_visible && !radar.interdicted) continue;
+        // MM-17: model-free teams and empty-icon points have separate retail routes.
+        if (!type.icon.empty() && !unit->team && radar.model_present == false) continue;
         append(&*unit, false);
     }
     // WNO-44: separate stored-model pass; live visibility and fogged-radar flags do not apply.

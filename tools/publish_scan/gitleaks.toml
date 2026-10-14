@@ -8,3 +8,9 @@ description = "SHA-256 digests the inventory revalidation test pins (audit: gene
 condition = "AND"
 paths = ['''tests/inventory/acceptance/test_revalidation\.py''']
 regexes = ['''^[0-9a-f]{64}$''']
+
+[[allowlists]]
+description = "Fake Cloudflare TURN credentials in the provider unit test; never a real token."
+condition = "AND"
+paths = ['''tests/net/relay_cloudflare_tests\.cpp''']
+regexes = ['''tok_SECRET_9f8e7d6c5b4a39281706''']

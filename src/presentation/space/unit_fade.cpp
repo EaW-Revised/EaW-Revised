@@ -83,6 +83,13 @@ void NebulaBlend::service(const bool contact) {
     contact_ = contact;
 }
 
+void StealthBlend::service(const bool on, const double transition_seconds) {
+    const double target = on ? 1.0 : 0.0;
+    if (transition_seconds <= 0.0) { value_ = target; velocity_ = 0.0; return; }
+    ease(value_, velocity_, target, transition_seconds,
+        1.0 / static_cast<double>(sim::tactical::logical_frames_per_second));
+}
+
 void UnitFade::advance(const std::span<const sim::EntityId> visible, const std::span<const sim::EntityId> alive,
                        const double frames, const std::span<const sim::EntityId> immediate) {
     // Both spans are ascending IDs (the snapshot's own contract); grow the lifetime set with

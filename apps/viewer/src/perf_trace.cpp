@@ -2,6 +2,7 @@
 #include "startup_trace.hpp"
 
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/performance.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/scene_tree.hpp>
@@ -14,7 +15,16 @@ using namespace godot;
 
 namespace eawr::presentation::godot_backend {
 
+bool PerfTrace::fine_particle_timings_{};
+
 std::optional<std::string> PerfTrace::parse(const PackedStringArray& arguments, std::string& error) {
+    fine_particle_timings_=false;
+    particles::EffectRegistry::set_stream_bucketing_default(true);
+    for (int64_t index = 0; index < arguments.size(); ++index) {
+        if (String(arguments[index]) == String("--eawr-particle-fine-timings")) fine_particle_timings_=true;
+        if (String(arguments[index]) == String("--eawr-particle-stream-reference"))
+            particles::EffectRegistry::set_stream_bucketing_default(false);
+    }
     for (int64_t index = 0; index < arguments.size(); ++index) {
         if (String(arguments[index]) != String("--eawr-perf-trace")) continue;
         if (index + 1 >= arguments.size()) {
@@ -40,7 +50,7 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
     }
     output_ << "frame,frame_ms,process_ms,render_cpu_ms,render_gpu_ms,draw_calls,objects,primitives,tick,units,"
                "projectiles,effects,effect_particles,emitter_particles,particle_ms,ticks,tick_ms,submit_ms,pieces,sent,bookkeeping_ms,hud_ms,audio_ms,fog_ms,pose_ms,compose_ms,refresh_ms,opacity_ms,"
-               "ai_ms,ai_worst_ms,lua_ms,lua_worst_ms,particle_streams,particle_uploads,particle_replacements,particle_conversion_ms,particle_submission_ms,emitter_prepare_ms,projectile_prepare_ms,clone_prepare_ms,wall_frame_ms,viewer_main_ms,outside_viewer_ms,render_setup_cpu_ms,tick_wait_ms,live_frame_ms,session_tail_ms,clip_pose_ms,emitter_frame_ms,effects_frame_ms,debris_frame_ms,idle_frame_ms,idle_sample_ms,idle_upload_ms,particle_groups,particle_visible_groups,particle_prepared_groups,particle_stepped_groups\n";
+               "ai_ms,ai_worst_ms,lua_ms,lua_worst_ms,particle_streams,particle_uploads,particle_replacements,particle_conversion_ms,particle_submission_ms,emitter_prepare_ms,projectile_prepare_ms,clone_prepare_ms,wall_frame_ms,viewer_main_ms,outside_viewer_ms,render_setup_cpu_ms,tick_wait_ms,live_frame_ms,session_tail_ms,clip_pose_ms,emitter_frame_ms,effects_frame_ms,debris_frame_ms,idle_frame_ms,idle_sample_ms,idle_upload_ms,particle_groups,particle_visible_groups,particle_prepared_groups,particle_stepped_groups,emitter_spawn_cpu_ms,emitter_spawn_backend_ms,emitter_scalar_step_ms,emitter_scalar_build_ms,emitter_batch_step_cpu_ms,emitter_batch_build_cpu_ms,emitter_executor_ms,emitter_executor_wait_dispatch_ms,emitter_commit_ms,effects_spawn_cpu_ms,effects_spawn_backend_ms,effects_scalar_step_ms,effects_scalar_build_ms,effects_batch_step_cpu_ms,effects_batch_build_cpu_ms,effects_executor_ms,effects_executor_wait_dispatch_ms,effects_commit_ms,debris_spawn_cpu_ms,debris_spawn_backend_ms,debris_scalar_step_ms,debris_scalar_build_ms,debris_batch_step_cpu_ms,debris_batch_build_cpu_ms,debris_executor_ms,debris_executor_wait_dispatch_ms,debris_commit_ms,world_ms,worker_ms,serial_ms,sim_fog_ms,worker_phases,vsync_mode,engine_max_fps,sim_lock_ms,sim_publish_ms,particle_main_emission_ms,particle_main_update_ms,particle_main_sort_ms,particle_main_stream_ms,particle_main_packing_ms,particle_worker_emission_ms,particle_worker_update_ms,particle_worker_sort_ms,particle_worker_stream_ms,particle_worker_packing_ms\n";
     return true;
 }
 
@@ -80,7 +90,33 @@ void PerfTrace::frame(const Frame& frame) {
             << ',' << frame.effects_frame_ms << ',' << frame.debris_frame_ms
             << ',' << frame.idle_frame_ms << ',' << frame.idle_sample_ms << ',' << frame.idle_upload_ms
             << ',' << frame.particle_work.groups << ',' << frame.particle_work.visible_groups
-            << ',' << frame.particle_work.prepared_groups << ',' << frame.particle_work.stepped_groups << '\n';
+            << ',' << frame.particle_work.prepared_groups << ',' << frame.particle_work.stepped_groups;
+    for (const auto& timing : {frame.emitter_timing,frame.effects_timing,frame.debris_timing}) {
+        output_ << ',' << timing.spawn_cpu_ms
+            << ',' << timing.spawn_backend_ms
+            << ',' << timing.scalar_step_ms
+            << ',' << timing.scalar_build_ms
+            << ',' << timing.batch_step_cpu_ms
+            << ',' << timing.batch_build_cpu_ms
+            << ',' << timing.executor_ms
+            << ',' << timing.executor_wait_dispatch_ms
+            << ',' << timing.commit_ms;
+    }
+    output_ << ',' << frame.world_ms << ',' << frame.worker_ms << ',' << frame.serial_ms << ',' << frame.sim_fog_ms
+            << ",\"";
+    for (const auto& [name, elapsed] : frame.worker_phases) output_ << name << '=' << elapsed << ';';
+    output_ << "\"," << static_cast<int>(DisplayServer::get_singleton()->window_get_vsync_mode())
+            << ',' << Engine::get_singleton()->get_max_fps()
+            << ',' << frame.sim_lock_ms << ',' << frame.sim_publish_ms;
+    for (const bool caller : {true, false}) {
+        std::array<double, 5> stages{};
+        for (const auto& timing : {frame.emitter_timing, frame.effects_timing, frame.debris_timing}) {
+            const auto& measured = caller ? timing.main_stages_ms : timing.worker_stages_ms;
+            for (std::size_t phase = 0; phase < stages.size(); ++phase) stages[phase] += measured[phase];
+        }
+        for (const double elapsed : stages) output_ << ',' << elapsed;
+    }
+    output_ << '\n';
     previous_report_end_ = Clock::now();
 }
 

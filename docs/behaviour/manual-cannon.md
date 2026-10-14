@@ -16,6 +16,19 @@ bones remain outside this change.
 | MC-06 | Turret admission tests its authored yaw extent in the owner's attachment-bone coordinates. It does not require its current firing cone or pitch alignment. Service aims at the retained target, clamps limited extents and applies rotation offsets, then advances pitch once and yaw through both linear and wrapped residual steps at the authored per-frame speed. Without a target it retains its last desired angles. Child fire positions and axes follow barrel pitch and turret yaw before ordinary cone/muzzle checks. |
 | MC-07 | Positive `Projectile_Appearance_Delay_Frames` keeps the launched projectile at its muzzle without path age, motion or collision through the expiry frame. Equality reveals it; the following logical frame starts movement. Published completed ticks are one greater than the executed frame, so presentation hides through completed tick equal to expiry and reveals at expiry plus one. Explicit forced explosions retain the existing precedence. |
 | MC-08 | Manual cooldown and usable mechanical bone frames bind separately from ordinary projectile/recharge data. The bounded combat profile retains minimum range with stock default zero; the mod-only `Fire_Min_Range_Distance` tag remains gated pending its registry route. Missing required turret geometry refuses manual admission. Positive appearance delay applies independently to all loaded space hardpoint weapons, including a 30-frame Krayt damage gun; absent/zero delay preserves old identity and projectile bytes. |
+| MC-09 | Category admission intersects the supplied object's original type category mask with the gun's exclusions. It does not inspect squadron members. A category-less target produces a debug diagnostic but passes the exclusion-only mask. Thus directly supplying a category-less TIE bomber container does not fail this gate, although its Bomber craft do. Other admission gates still apply. |
+| MC-10 | World manual-cannon hover and click retain the craft hit by the pick ray, rather than its selection container. The same identity reaches target validation and the accepted firing request. Consequently a bomber craft pick is refused by the authored Bomber exclusion; valid ship picks remain usable. Ordinary squadron selection promotion is separate. |
+| MC-11 | A squadron icon supplies no special-weapon target. Hover remains invalid and a click refuses without firing or leaving targeting mode, even when a valid world object lies underneath. The icon neither supplies its container nor selects a member for the weapon. Ordinary icon selection and attack remain separate. |
+
+MC-09 and MC-10 are sourced from fresh read-only debug-build admission, category,
+input and world-pick checks, together with effective squadron/craft XML.
+They refine MC-01 and [special hover/click WSW-31](walks/weapons.md), using the
+[world-pick WSU-10/12 and selection WSU-16](walks/sensors-ui.md) boundaries.
+The verified direct-container admission is preserved; the world pick supplies the craft.
+MC-11 is sourced from read-only debug-build icon hit, input dispatch and action checks:
+the floating squadron icon remains UI input and supplies no special action; the HUD
+also reports an invalid pointer while special targeting is active. This extends the
+[icon input WSU-38](walks/sensors-ui.md) boundary for special weapons.
 
 WAD-40's selected cannon retains direct damage 6000, blast damage 1000 and radius 300
 through the ordinary projectile and blast services. Its 120-second player cooldown is

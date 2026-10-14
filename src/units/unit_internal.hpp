@@ -14,6 +14,10 @@ namespace eawr::units::detail {
 
 [[nodiscard]] std::string trim(std::string_view value);
 
+// AV-05 / WWP-21: the same scaled geometry for movement and combat, with no layer gate.
+[[nodiscard]] core::Result<sim::tactical::Footprint> space_footprint(const std::string& id,
+    const std::optional<Fixed>& scale_factor, const SpaceFootprint& data);
+
 // #71: the X and Y half extents of a model's collision bounds in the bind pose, before
 // Scale_Factor (research E71-18); +-1 without a collidable mesh. Converts the ALO's binary32
 // bounds here, in the units converter file.
@@ -27,7 +31,12 @@ namespace eawr::units::detail {
 [[nodiscard]] std::vector<std::string> tokens(std::string_view text);
 // An authored decimal. One trailing C float suffix (`1.0f`, `-3f`) is accepted.
 [[nodiscard]] std::optional<Fixed> number(std::string_view text);
+// A boolean tag's value as FoC reads it (AU-82): true for `1` or a first letter Y or T, false
+// otherwise; nullopt for an empty or TBD placeholder.
 [[nodiscard]] std::optional<bool> boolean(std::string_view text);
+// yes/true/1 or no/false/0 in any case, else nullopt: tells a boolean-shaped GameConstants value
+// from a decimal, where the loader does not know the constant's type.
+[[nodiscard]] std::optional<bool> canonical_boolean(std::string_view text);
 
 // `data/art/models/<name>` in lower case, with `.alo` added when absent.
 [[nodiscard]] std::string model_path(std::string_view name);
@@ -60,8 +69,8 @@ struct Report final {
     }
 };
 
-// A resolved object plus the raw variant layers (derived first), so list
-// tags can be read with the list rule in docs/unit-data.md.
+// A resolved object plus the raw variant layers (derived first). Single values follow ML-24;
+// list selection follows the per-tag rules in docs/unit-data.md.
 struct Object final {
     data::EffectiveObject effective;
     std::vector<const data::Definition*> layers;

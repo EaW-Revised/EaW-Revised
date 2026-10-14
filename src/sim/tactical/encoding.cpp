@@ -48,6 +48,10 @@ std::string_view to_string(const OrderKind kind) noexcept {
     case OrderKind::manual_target:
         return "manual_target";
     case OrderKind::repair_hardpoint: return "repair_hardpoint";
+    case OrderKind::retreat: return "retreat";
+    case OrderKind::campaign_credit_release: return "campaign_credit_release";
+    case OrderKind::special_fire: return "special_fire";
+    case OrderKind::beacon: return "beacon";
     case OrderKind::reveal_all:
         return "reveal_all";
     }
@@ -81,6 +85,8 @@ std::string_view to_string(const EventKind kind) noexcept {
     case EventKind::pad_structure_sold: return "pad_structure_sold";
     case EventKind::ability_cancelled: return "ability_cancelled";
     case EventKind::ability_ready: return "ability_ready";
+    case EventKind::special_weapon_fired: return "special_weapon_fired";
+    case EventKind::special_weapon_ready: return "special_weapon_ready";
     case EventKind::manual_target_timeout: return "manual_target_timeout";
     }
     return "unknown";
@@ -126,6 +132,9 @@ std::string_view to_string(const RejectReason reason) noexcept {
         return "arriving";
     case RejectReason::battle_decided:
         return "battle_decided";
+    case RejectReason::target_hidden:
+        return "target_hidden";
+    case RejectReason::beacon_unavailable: return "beacon_unavailable";
     }
     return "unknown";
 }
@@ -155,6 +164,7 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case 1:
         return 0;
     case 2:
+    case opcode_beacon:
     case opcode_hazard_move:
         return 24;
     case 3:
@@ -170,12 +180,16 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
         return 8;
     case opcode_attack_hardpoint:
     case opcode_manual_target:
+    case opcode_special_fire:
         return 16;
     case 9:  // #530 buy: type
+    case opcode_retreat: // action and reserved word
+    case opcode_retreat_cinematic:
     case opcode_repair_hardpoint: // WSL-40: slot and zero reserved word
     case opcode_reveal_all: // V-20: player ID and zero reserved word
     case opcode_pad_build: // WBP-09: UC type
     case opcode_credit_grant: // SAE-07: Q24 credits
+    case opcode_campaign_credit_release: // WGA-54: Q24 request, negative means all
     case opcode_ai_reservation_debit: // WAS-25: Q24 credits
     case opcode_prepaid_buy: // WAS-26: type
     case 10: // #530 cancel: queue, index
@@ -195,7 +209,11 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
 }
 
 std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
+    if (std::holds_alternative<RetreatPayload>(command.payload)) return opcode_retreat;
+    if (std::holds_alternative<RetreatCinematicPayload>(command.payload)) return opcode_retreat_cinematic;
+    if (std::holds_alternative<BeaconPayload>(command.payload)) return opcode_beacon;
     if (std::holds_alternative<AiReservationDebitPayload>(command.payload)) return opcode_ai_reservation_debit;
+    if (std::holds_alternative<CampaignCreditReleasePayload>(command.payload)) return opcode_campaign_credit_release;
     if (const auto* buy = std::get_if<BuyPayload>(&command.payload); buy != nullptr && buy->prepaid)
         return opcode_prepaid_buy;
     if (const auto* cancel = std::get_if<CancelPayload>(&command.payload);
@@ -212,6 +230,7 @@ std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
     if (std::holds_alternative<PadSellPayload>(command.payload)) return opcode_pad_sell;
     if (std::holds_alternative<AreaAbilityPayload>(command.payload)) return opcode_area_ability;
     if (std::holds_alternative<ManualTargetPayload>(command.payload)) return opcode_manual_target;
+    if (std::holds_alternative<SpecialFirePayload>(command.payload)) return opcode_special_fire;
     if (std::holds_alternative<CreditGrantPayload>(command.payload)) return opcode_credit_grant;
     if (std::holds_alternative<PadBuildPayload>(command.payload)) return opcode_pad_build;
     // #531: an attack on one hardpoint has its own opcode, so attacks on a unit keep opcode 3 and their bytes.
@@ -228,7 +247,9 @@ std::size_t command_body_size(const PlayerCommand& command) noexcept {
     const std::size_t target = ability != nullptr ? (ability->position ? 24U : ability->target != invalid_entity_id ? 8U : 0U) : 0U;
     return command_common_size
         + payload_prefix_size(command_opcode(command)) + target
-        + unit_list_header_size + 8U * command.units.size();
+        + unit_list_header_size + 8U * command.units.size()
+        + (std::get_if<MovePayload>(&command.payload) != nullptr
+            && std::get<MovePayload>(command.payload).append ? 8U : 0U);
 }
 
 void append_player(std::vector<std::uint8_t>& bytes, const Player& player) {
@@ -272,11 +293,25 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
     bytes.push_back(command_opcode(command));
     bytes.push_back(0);
     sim::detail::append_u16(bytes, 0);
-    if (const auto* repair = std::get_if<RepairHardpointPayload>(&command.payload)) {
+    if (const auto* beacon = std::get_if<BeaconPayload>(&command.payload)) {
+        sim::detail::append_i64(bytes, beacon->position.x.raw());
+        sim::detail::append_i64(bytes, beacon->position.y.raw());
+        sim::detail::append_i64(bytes, beacon->position.z.raw());
+    } else if (const auto* repair = std::get_if<RepairHardpointPayload>(&command.payload)) {
         sim::detail::append_u32(bytes, repair->hardpoint);
         sim::detail::append_u32(bytes, 0);
     } else if (const auto* reveal = std::get_if<RevealAllPayload>(&command.payload)) {
         sim::detail::append_u32(bytes, reveal->player);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* cinematic = std::get_if<RetreatCinematicPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, cinematic->playing ? 1U : 0U);
+        sim::detail::append_u32(bytes, cinematic->frame);
+    } else if (const auto* retreat = std::get_if<RetreatPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(retreat->action));
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* special = std::get_if<SpecialFirePayload>(&command.payload)) {
+        sim::detail::append_u64(bytes, special->target);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(special->admission));
         sim::detail::append_u32(bytes, 0);
     } else if (const auto* manual = std::get_if<ManualTargetPayload>(&command.payload)) {
         sim::detail::append_u64(bytes, manual->target);
@@ -332,6 +367,8 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         }
     } else if (const auto* buy = std::get_if<BuyPayload>(&command.payload)) {
         sim::detail::append_u64(bytes, buy->type);
+    } else if (const auto* release = std::get_if<CampaignCreditReleasePayload>(&command.payload)) {
+        sim::detail::append_i64(bytes, release->request.raw());
     } else if (const auto* grant = std::get_if<CreditGrantPayload>(&command.payload)) {
         sim::detail::append_i64(bytes, grant->amount.raw());
     } else if (const auto* debit = std::get_if<AiReservationDebitPayload>(&command.payload)) {
@@ -355,6 +392,10 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
     for (const auto unit : command.units) {
         sim::detail::append_u64(bytes, unit);
     }
+    if (const auto* move = std::get_if<MovePayload>(&command.payload); move != nullptr && move->append) {
+        sim::detail::append_u32(bytes, 1); // HCB-57 tail version
+        sim::detail::append_u32(bytes, 1); // append; no other flags in version 1
+    }
 }
 
 void append_event(std::vector<std::uint8_t>& bytes, const Event& event) {
@@ -366,6 +407,7 @@ void append_event(std::vector<std::uint8_t>& bytes, const Event& event) {
     bytes.push_back(event.hardpoint);
     sim::detail::append_u64(bytes, event.sequence);
     sim::detail::append_u64(bytes, event.unit);
+    if (event.kind == EventKind::special_weapon_fired) sim::detail::append_u32(bytes, event.special_pulse);
 }
 
 core::Result<void> validate_command_shape(
@@ -402,13 +444,16 @@ core::Result<void> validate_command_shape(
     if ((std::holds_alternative<CancelPayload>(command.payload)
             || std::holds_alternative<ReinforcePayload>(command.payload) || std::holds_alternative<CreditGrantPayload>(command.payload)
             || std::holds_alternative<AiReservationDebitPayload>(command.payload)
-            || std::holds_alternative<QuitPayload>(command.payload) || std::holds_alternative<RevealAllPayload>(command.payload))
+            || std::holds_alternative<CampaignCreditReleasePayload>(command.payload)
+            || std::holds_alternative<QuitPayload>(command.payload) || std::holds_alternative<RetreatPayload>(command.payload)
+            || std::holds_alternative<RetreatCinematicPayload>(command.payload) || std::holds_alternative<RevealAllPayload>(command.payload) || std::holds_alternative<BeaconPayload>(command.payload))
         && !command.units.empty()) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": a cancel or reinforce lists no unit", logical_path));
     }
     if (command.units.empty() && !economy_command(command.payload) && !std::holds_alternative<QuitPayload>(command.payload)
-        && !std::holds_alternative<RevealAllPayload>(command.payload)) {
+        && !std::holds_alternative<RevealAllPayload>(command.payload) && !std::holds_alternative<RetreatPayload>(command.payload)
+        && !std::holds_alternative<RetreatCinematicPayload>(command.payload) && !std::holds_alternative<BeaconPayload>(command.payload)) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": unit list is empty", logical_path));
     }
@@ -423,6 +468,12 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": reveal recipient is not a declared player", logical_path));
     }
+    if (const auto* retreat = std::get_if<RetreatPayload>(&command.payload); retreat &&
+        (retreat->action < RetreatAction::start || retreat->action > RetreatAction::auto_resolve))
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command, "unknown retreat action", logical_path));
+    if (const auto* cinematic = std::get_if<RetreatCinematicPayload>(&command.payload); cinematic && cinematic->frame != 0)
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            "retreat cinematic frame is reserved and must be zero", logical_path));
     for (std::size_t index = 0; index < command.units.size(); ++index) {
         if (command.units[index] == invalid_entity_id
             || (index != 0 && command.units[index] <= command.units[index - 1])) {
@@ -441,6 +492,12 @@ core::Result<void> validate_command_shape(
         manual != nullptr && (manual->target == invalid_entity_id || manual->hardpoint >= 255)) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": manual target requires a nonzero entity and hardpoint below 255", logical_path));
+    }
+    if (const auto* special = std::get_if<SpecialFirePayload>(&command.payload);
+        special != nullptr && (command.units.size() != 1 || special->target == invalid_entity_id
+            || static_cast<std::uint32_t>(special->admission) > static_cast<std::uint32_t>(SpecialFireAdmission::ai_taskforce))) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": special fire requires one source, a nonzero target and a known admission", logical_path));
     }
     if (const auto* reinforce = std::get_if<ReinforcePayload>(&command.payload);
         reinforce != nullptr && reinforce->facing_yaw
@@ -471,20 +528,25 @@ core::Result<void> validate_command_shape(
             return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
                 std::string(context) + ": unknown ability or ability action", logical_path));
         }
-        // AB-61: only switching ION_CANNON_SHOT on takes a target, and it always does.
+        // AB-61, WHE-26/27, WLS-01: targeted activation always carries an object.
         const bool aims = (ability->ability == AbilityKind::ion_cannon_shot
             || ability->ability == AbilityKind::concentrate_fire || ability->ability == AbilityKind::energy_weapon
-            || ability->ability == AbilityKind::tractor_beam) && ability->action == AbilityAction::activate;
+            || ability->ability == AbilityKind::tractor_beam || ability->ability == AbilityKind::leech_shields)
+            && ability->action == AbilityAction::activate;
         if (aims != (ability->target != invalid_entity_id)
             || (ability->target == invalid_entity_id && ability->target_hardpoint != 0xffffffffU)) {
             return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
                 std::string(context) + ": an ability target is required exactly when a targeted ability switches on",
                 logical_path));
         }
-        const bool positioned = ability->ability == AbilityKind::weaken_enemy && ability->action == AbilityAction::activate;
+        // WHE-61, WAB-70: WEAKEN_ENEMY and BUZZ_DROIDS switch on at a point.
+        const bool positioned = (ability->ability == AbilityKind::weaken_enemy || ability->ability == AbilityKind::buzz_droids
+            || ability->ability == AbilityKind::fow_reveal_ping
+            || ability->ability == AbilityKind::corrupt_systems)
+            && ability->action == AbilityAction::activate;
         if (positioned != ability->position.has_value())
             return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
-                std::string(context) + ": a position is required exactly for weaken activation", logical_path));
+                std::string(context) + ": a position is required exactly for area-status and buzz-droid activation", logical_path));
         if (ability->position) {
             constexpr auto limit = std::int64_t{1} << 42; // existing Q24 command coordinate bound
             for (const auto value : {ability->position->x, ability->position->y, ability->position->z})
@@ -497,6 +559,13 @@ core::Result<void> validate_command_shape(
         area != nullptr && area->ability != AbilityKind::barrage) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": area ability requires BARRAGE", logical_path));
+    }
+    if (const auto* beacon = std::get_if<BeaconPayload>(&command.payload)) {
+        constexpr auto limit = std::int64_t{1} << 42;
+        for (const auto value : {beacon->position.x, beacon->position.y, beacon->position.z})
+            if (value.raw() < -limit || value.raw() > limit)
+                return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                    std::string(context) + ": beacon position outside the command coordinate bound", logical_path));
     }
     return core::Result<void>::success();
 }

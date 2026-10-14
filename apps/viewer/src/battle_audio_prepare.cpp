@@ -110,8 +110,35 @@ const audio::SfxEvent* BattleAudio::event(const std::string_view name, const std
 }
 
 void BattleAudio::prepare(const units::UnitTables& tables, const tactical::CombatTable& combat,
-                          const std::string_view local_faction) {
+                          const std::string_view local_faction, std::set<tactical::TypeId> first_types) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::audio);
+    // Follow automatic spawners and squadron composition from the actual force.
+    // The rest of the table still binds all sounds, but no longer delays Begin.
+    bool changed = true;
+    while (changed) {
+        const auto count = first_types.size();
+        const auto add_index = [&](const std::uint32_t index) {
+            if (index < tables.units.size()) first_types.insert(skirmish::type_id(tables.units[index].id));
+        };
+        for (const auto& type : tables.units) {
+            if (!first_types.contains(skirmish::type_id(type.id))) continue;
+            for (const auto& member : type.members) add_index(member.craft_index);
+            if (type.spawner) {
+                for (const auto& entry : type.spawner->starting) if (entry.count > 0) add_index(entry.squadron_index);
+                for (const auto& list : type.spawner->campaign_starting)
+                    for (const auto& entry : list) if (entry.count > 0) add_index(entry.squadron_index);
+            }
+        }
+        changed = first_types.size() != count;
+    }
+    std::set<std::string> immediate_roots;
+    bool binding_unit = false, first_type = true;
+    const auto event = [this, &immediate_roots, &binding_unit, &first_type](
+            const std::string_view name, const std::string& where) {
+        const audio::SfxEvent* cue = this->event(name, where);
+        if (cue && (!binding_unit || (first_type && cue->is_3d))) immediate_roots.insert(cue->name);
+        return cue;
+    };
     // BA-01: the SFXEvents in SFXEventFiles order (presets first), each definition in file order.
     std::vector<const data::Definition*> definitions;
     for (const data::Definition& definition : catalog_->definitions()) {
@@ -134,6 +161,7 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         command_cues_[static_cast<std::size_t>(audio::CommandCue::move)] = event(child(root, "SFXEvent_Command_Bar_Move"), "Audio");
         command_cues_[static_cast<std::size_t>(audio::CommandCue::stop)] = event(child(root, "SFXEvent_Command_Bar_Stop"), "Audio");
         command_cues_[static_cast<std::size_t>(audio::CommandCue::negative)] = event(child(root, "SFXEvent_GUI_Negative_Feedback"), "Audio");
+        command_cues_[static_cast<std::size_t>(audio::CommandCue::waypoint)] = event(child(root, "SFXEvent_Command_Bar_Waypoint"), "Audio");
         options_.admission.negative_feedback = command_cues_[static_cast<std::size_t>(audio::CommandCue::negative)];
         for (const auto& item : root.children) {
             const int side = same(item.name, "Music_Event_Battle_End_Summary_Screen_Win") ? 0
@@ -142,9 +170,9 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
             data::tag_trace::used(item);
             summary_names[static_cast<std::size_t>(side)] = trim(item.raw_text);
         }
-        if (const auto value = number(child(root, "Audio_Space_3D_Saturation_Distance_Mod"))) space_.saturation_factor = *value;
-        if (const auto value = number(child(root, "Audio_Space_3D_Rolloff_Distance_Mod"))) space_.rolloff_factor = *value;
-        if (const auto value = number(child(root, "Audio_Space_3D_Listener_Z_Pullback_Dist"))) space_.listener_z = *value;
+        const auto spatial = audio::space_3d(fields_of(root), problems_);
+        spatial_audio_available_ = spatial.has_value();
+        if (spatial) space_ = *spatial;
         if (const auto value = number(child(root, "Music_Space_Battle_To_Ambient_Peace_Seconds"))) peace_seconds = *value;
         for (const auto& item : root.children) {
             if (!same(item.name, "Delay_Between_Space_Base_Attack_Announcement_Seconds")) continue;
@@ -156,6 +184,7 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         }
     } else {
         problems_.push_back("data/xml/audio.xml: " + core::format_diagnostic(document.error()));
+        problems_.push_back("EAWR-AUDIO-0301: audio.xml unavailable; spatial playback uses 2D");
     }
     // BA-20: the command rankings.
     if (auto document = data::load_document(*filesystem_, "data/xml/gameconstants.xml")) {
@@ -184,6 +213,21 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     std::vector<const audio::MusicEvent*> battle;
     // WBF-38: the local faction chooses the space victory/defeat HUD sound.
     if (auto faction = catalog_->resolve(local_faction, data::Category::faction)) {
+        constexpr std::array special_keys{"SFXEvent_HUD_Special_Weapon_Ready", "SFXEvent_HUD_Special_Weapon_Firing",
+            "SFXEvent_HUD_Enemy_Special_Weapon_Ready", "SFXEvent_HUD_Enemy_Special_Weapon_Firing"};
+        // WSW-33/34: derived lists replace their inherited list as a whole, including empty entries.
+        for (auto layer = faction.value().chain.rbegin(); layer != faction.value().chain.rend(); ++layer) {
+            const auto* definition = catalog_->find(*layer, data::Category::faction);
+            if (!definition) continue;
+            for (std::size_t index = 0; index < special_keys.size(); ++index) {
+                std::vector<const audio::SfxEvent*> cues;
+                for (const auto& item : definition->root.children) if (same(item.name, special_keys[index])) {
+                    data::tag_trace::used(item);
+                    cues.push_back(event(trim(item.raw_text), std::string(local_faction)));
+                }
+                if (!cues.empty()) special_speech_[index] = std::move(cues);
+            }
+        }
         // SND-40: a faction WAV request, independent of production speech streams.
         if (const auto* field = faction.value().value("SFXEvent_Space_Base_Under_Attack_Announcement")) {
             data::tag_trace::used(field->value);
@@ -230,9 +274,12 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     } else {
         problems_.push_back("faction '" + std::string(local_faction) + "' is not in the XML catalog");
     }
-    music_ = std::make_unique<audio::MusicDirector>(
-        std::move(ambient), std::move(battle),
-        static_cast<std::uint64_t>(std::llround(peace_seconds * tactical::logical_frames_per_second)));
+    // MAT-18, SND-71: the demo battle starts no tactical music; the menu's music is the front end's.
+    if (!options_.attract_silent) {
+        music_ = std::make_unique<audio::MusicDirector>(
+            std::move(ambient), std::move(battle),
+            static_cast<std::uint64_t>(std::llround(peace_seconds * tactical::logical_frames_per_second)));
+    }
 
     // SND-44: speech is a distinct registry, not a WAV event or a music playlist.
     if (auto document = data::load_document(*filesystem_, "data/xml/speechevents.xml")) {
@@ -288,7 +335,43 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
                 event(tag(object.value(), "Projectile_SFXEvent_Detonate"), projectile.id));
         }
     }
+    // WCB-01: real bomb terminals use their authored object death cue.
     for (const units::UnitType& type : tables.units) {
+        if (!type.cluster_bomb) continue;
+        const auto id = skirmish::type_id(type.cluster_bomb->bomb_type);
+        const auto cue = projectile_detonations_.find(id);
+        if (cue == projectile_detonations_.end()) continue;
+        if (terminal_detonations_[id] == nullptr) terminal_detonations_[id] = cue->second;
+        TypeSounds sounds;
+        sounds.name = type.cluster_bomb->bomb_type;
+        sounds.detonate[tactical::object_weapon] = cue->second;
+        types_.try_emplace(id, std::move(sounds));
+    }
+    std::map<std::string, std::string> ability_projectiles;
+    for (const units::UnitType& squadron : tables.units) {
+        if (squadron.kind != units::UnitKind::squadron) continue;
+        for (const units::Ability& ability : squadron.team_abilities) {
+            if (ability.type != "ION_CANNON_SHOT" || ability.projectile_override.empty()) continue;
+            for (const units::SquadronMember& member : squadron.members) {
+                if (member.craft_index < tables.units.size())
+                    ability_projectiles.emplace(tables.units[member.craft_index].id, ability.projectile_override);
+            }
+        }
+    }
+    binding_unit = true;
+    for (const units::UnitType& type : tables.units) {
+        first_type = first_types.contains(skirmish::type_id(type.id));
+        // WAB-75: the droid object's arming cue comes from the ability that creates it.
+        for (const auto* buzz : {&type.buzz_droids, &type.team_buzz_droids}) {
+            if (!*buzz || (*buzz)->object_type.empty()) continue;
+            const auto seconds = (*buzz)->activation_seconds.value_or(sim::math::Fixed{});
+            const auto frames = seconds.raw() > 0
+                ? static_cast<std::uint64_t>(seconds.raw()) * tactical::logical_frames_per_second
+                    / static_cast<std::uint64_t>(sim::math::Fixed::scale)
+                : 0U;
+            droid_arming_.try_emplace(skirmish::type_id((*buzz)->object_type),
+                DroidArming{event((*buzz)->activate_sfx, type.id), frames});
+        }
         TypeSounds sounds;
         sounds.name = type.id;
         sounds.squadron = type.kind == units::UnitKind::squadron;
@@ -326,13 +409,15 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         sounds.build_completed_speech = production_speech("Build_Speech_Completed");
         sounds.build_stopped_speech = production_speech("Build_Speech_Stopped");
         const audio::SfxEvent* unit_fire = event(tag(value, "SFXEvent_Fire"), where);
+        sounds.special_ready = event(tag(value, "SFXEvent_Special_Weapon_Ready"), where);
         sounds.death = event(tag(value, "Death_SFXEvent_Start_Die"), where);
         sounds.spin_death = event(tag(value, "Spin_Away_On_Death_SFXEvent_Start_Die"), where);
         sounds.asteroid_damage = event(tag(value, "SFXEvent_Damaged_By_Asteroid"), where);
         sounds.ambient_moving = event(tag(value, "SFXEvent_Ambient_Moving"), where);
         sounds.engine_idle = event(tag(value, "SFXEvent_Engine_Idle_Loop"), where);
         sounds.engine_moving = event(tag(value, "SFXEvent_Engine_Moving_Loop"), where);
-        sounds.fleet_move = event(tag(value, "SFXEvent_Command_Fleet_Move"), where);
+        sounds.fleet_move = event(tag(value, "SFXEvent_Fleet_Move"), where);
+        sounds.self_destruct_start = event(tag(value, "Selt_Destruct_SFXEvent_Start_Die"), where); // WSD-11
         for (auto* sound : {&sounds.engine_idle, &sounds.engine_moving}) {
             if (*sound && (!(*sound)->is_3d || (*sound)->play_count != -1)) {
                 problems_.push_back(where + ": engine event must be a spatial loop");
@@ -340,18 +425,13 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
             }
         }
         // SND-46: integer seconds, positive and ordered; defaults are five and ten seconds.
-        const auto ambient_delay = [&value](const std::string_view key, const int fallback) {
-            const auto text = tag(value, key);
-            return text.empty() ? fallback : audio::leading_integer(text).value_or(0);
-        };
-        const int minimum = ambient_delay("SFXEvent_Ambient_Moving_Min_Delay_Seconds", 5);
-        const int maximum = ambient_delay("SFXEvent_Ambient_Moving_Max_Delay_Seconds", 10);
-        if (minimum > 0 && maximum >= minimum && maximum <= std::numeric_limits<int>::max() / 30) {
-            sounds.ambient_min_delay = minimum * 30;
-            sounds.ambient_max_delay = maximum * 30;
-        } else {
-            if (sounds.ambient_moving) problems_.push_back(where + ": invalid ambient moving delay range");
-            sounds.ambient_moving = nullptr;
+        if (sounds.ambient_moving) {
+            const auto delays = audio::ambient_moving_delays(tag(value, "SFXEvent_Ambient_Moving_Min_Delay_Seconds"),
+                tag(value, "SFXEvent_Ambient_Moving_Max_Delay_Seconds"), where, problems_);
+            if (delays) {
+                sounds.ambient_min_delay = (*delays)[0];
+                sounds.ambient_max_delay = (*delays)[1];
+            } else sounds.ambient_moving = nullptr;
         }
         // WBP-20: local tactical lines use the generic build line only as fallback.
         sounds.build_started = event(tag(value, "SFXEvent_Tactical_Build_Started"), where);
@@ -361,7 +441,7 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         // WPR-31: explicit tactical cancellation uses the same tactical/generic fallback.
         sounds.build_cancelled = event(tag(value, "SFXEvent_Tactical_Build_Cancelled"), where);
         if (sounds.build_cancelled == nullptr) sounds.build_cancelled = event(tag(value, "SFXEvent_Build_Cancelled"), where);
-        sounds.sold = event(tag(value, "SFXEvent_Tactical_Sold"), where);
+        sounds.sold = event(tag(value, "SFXEvent_Sold_Tactical"), where);
         sounds.select = event(tag(value, "SFXEvent_Select"), where);
         sounds.move = event(tag(value, "SFXEvent_Move"), where);
         sounds.attack = event(tag(value, "SFXEvent_Attack"), where);
@@ -397,16 +477,48 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
                                                event(child(ability, "SFXEvent_GUI_Unit_Ability_Deactivated"), where)};
                 // BA-53/54: targeting acknowledgement and successful spawn use the source object.
                 sounds.ability_targets[kind] = event(child(ability, "SFXEvent_Target_Ability"), where);
+                if (kind == tactical::AbilityKind::leech_shields)
+                    sounds.leech_loop = event(child(ability, "SFXEvent_Special_Ability_Loop"), where);
             }
         }
-        const auto projectile_events = [&](const std::string& projectile, const std::uint32_t slot) {
+        // WCB-02: the named handler's launch cue is distinct from the button voice.
+        if (type.cluster_bomb) {
+            if (const auto* handlers = value.value("Abilities")) for (const auto& handler : handlers->value.children) {
+                if (!same(handler.name, "Cluster_Bomb_Ability")
+                    || !same(attribute(handler, "Name"), type.cluster_bomb->name)) continue;
+                for (const auto& field : handler.children)
+                    if (same(field.name, "SFXEvent_Activate")) data::tag_trace::used(field);
+                sounds.ability_targets[tactical::AbilityKind::cluster_bomb] = event(child(handler, "SFXEvent_Activate"), where);
+            }
+        }
+        for (const auto& nested : type.special_abilities) {
+            if (nested.kind == tactical::SpecialAbilityKind::blast && nested.charged_blast)
+                sounds.blast_activate = event(nested.charged_blast->activate_sfx, where);
+            sounds.heal_pulses.push_back(nested.kind == tactical::SpecialAbilityKind::force_healing
+                ? event(nested.heal_sfx, where) : nullptr);
+            if (nested.kind == tactical::SpecialAbilityKind::corrupt_systems && !nested.corrupt_activate_sfx.empty())
+                sounds.corrupt_activate = event(nested.corrupt_activate_sfx, where);
+            if (nested.kind == tactical::SpecialAbilityKind::laser_defense && !nested.defence_zap_sfx.empty())
+                sounds.point_defence_zap = event(nested.defence_zap_sfx, where);
+            if (nested.kind == tactical::SpecialAbilityKind::redirect_blaster && !nested.redirect_activate_sfx.empty()
+                && sounds.redirect_block == nullptr)
+                sounds.redirect_block = event(nested.redirect_activate_sfx, where);
+        }
+        const auto projectile_events = [&](const std::string& projectile, const std::uint32_t slot,
+                                            const tactical::ProjectileProfileKind kind = tactical::ProjectileProfileKind::ordinary) {
             auto shot = catalog_->resolve(projectile, data::Category::game_object);
             if (!shot) {
                 problems_.push_back("projectile " + projectile + ": " + core::format_diagnostic(shot.error()));
                 return;
             }
-            sounds.detonate[slot] = event(tag(shot.value(), "Projectile_SFXEvent_Detonate"), projectile);
-            sounds.detonate_armor[slot] = event(tag(shot.value(), "Projectile_SFXEvent_Detonate_Reduced_By_Armor"), projectile);
+            auto& plain = kind == tactical::ProjectileProfileKind::ability ? sounds.ability_detonate
+                : kind == tactical::ProjectileProfileKind::barrage ? sounds.barrage_detonate
+                : kind == tactical::ProjectileProfileKind::charged_blast ? sounds.charged_detonate : sounds.detonate;
+            auto& armor = kind == tactical::ProjectileProfileKind::ability ? sounds.ability_detonate_armor
+                : kind == tactical::ProjectileProfileKind::barrage ? sounds.barrage_detonate_armor
+                : kind == tactical::ProjectileProfileKind::charged_blast ? sounds.charged_detonate_armor : sounds.detonate_armor;
+            plain[slot] = event(tag(shot.value(), "Projectile_SFXEvent_Detonate"), projectile);
+            armor[slot] = event(tag(shot.value(), "Projectile_SFXEvent_Detonate_Reduced_By_Armor"), projectile);
         };
         for (std::size_t index = 0; index < type.hardpoints.size(); ++index) {
             const units::Hardpoint& hardpoint = type.hardpoints[index];
@@ -420,6 +532,8 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
                     const audio::SfxEvent* own = event(tag(point.value(), "Fire_SFXEvent"), hardpoint.id);
                     sounds.fire[slot] = own != nullptr ? own : unit_fire;
                     projectile_events(hardpoint.weapon->projectile, slot);
+                    if (!hardpoint.weapon->charged_projectile.empty())
+                        projectile_events(hardpoint.weapon->charged_projectile, slot, tactical::ProjectileProfileKind::charged_blast);
                 }
                 // BA-17: Death_Explosion_SFXEvent, else the breakoff prop's Death_SFXEvent_Start_Die.
                 death = event(tag(point.value(), "Death_Explosion_SFXEvent"), hardpoint.id);
@@ -443,6 +557,16 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
                 tactical::death_projectile_slot_flag | static_cast<std::uint32_t>(index));
         sounds.hardpoint_points.assign(type.hardpoints.size(), sim::math::Vec3{});
         if (const tactical::CombatProfile* profile = combat.find(skirmish::type_id(type.id))) {
+            for (const tactical::WeaponProfile& weapon : profile->weapons) {
+                if (weapon.ability_shot) {
+                    if (const auto override = ability_projectiles.find(type.id); override != ability_projectiles.end())
+                        projectile_events(override->second, weapon.hardpoint, tactical::ProjectileProfileKind::ability);
+                }
+                if (weapon.barrage_shot) for (const units::Ability& ability : type.abilities) {
+                    if (tactical::ability_kind(ability.type) == tactical::AbilityKind::barrage && !ability.projectile_override.empty())
+                        projectile_events(ability.projectile_override, weapon.hardpoint, tactical::ProjectileProfileKind::barrage);
+                }
+            }
             for (const tactical::TargetHardpoint& point : profile->hardpoints) {
                 if (point.hardpoint < sounds.hardpoint_points.size()) sounds.hardpoint_points[point.hardpoint] = point.position;
             }
@@ -450,14 +574,34 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         types_.emplace(skirmish::type_id(type.id), std::move(sounds));
     }
     start_rows_.reserve(256);
-    const auto preload_sighting = [this](const audio::SfxEvent* cue) {
-        if (cue) for (const auto& file : cue->samples) static_cast<void>(sample(file));
+    binding_unit = false;
+    // WST-14: the debug build's stealth service starts this event by name.
+    stealth_reveal_ = event("SFX_Stealth_Reveal", "stealth reveal");
+    static_cast<void>(event("GUI_Text_Hint_SFX", "local Begin"));
+    std::set<std::string> visited, scheduled_samples;
+    const auto warm = [&](std::set<std::string> roots) {
+        while (!roots.empty()) {
+            const std::string name = *roots.begin();
+            roots.erase(roots.begin());
+            const audio::SfxEvent* cue = registry_.find(name);
+            if (!cue || !visited.insert(audio::upper(cue->name)).second) continue;
+            for (const auto* stage : {&cue->pre_samples, &cue->samples, &cue->post_samples}) {
+                for (const auto& file : *stage) {
+                    if (!scheduled_samples.insert(file).second) continue;
+                    static_cast<void>(sample(file));
+                }
+            }
+            if (!cue->chained.empty()) roots.insert(cue->chained);
+        }
     };
-    preload_sighting(enemy_spotted_);
-    for (const auto& [id, sounds] : types_) {
-        static_cast<void>(id);
-        if (sounds.announce_sighting) preload_sighting(sounds.spotted);
+    // Warm only global and initial-force spatial cues. Other sounds retain
+    // synchronous first-use loading rather than decoding unused PCM.
+    warm(std::move(immediate_roots));
+    for (const auto& [name, cached] : samples_) {
+        static_cast<void>(cached);
+        preloaded_samples_.insert(name);
     }
+    samples_prepared_ = true;
 }
 
 const BattleAudio::SpeechEvent* BattleAudio::speech_event(const std::string_view name) {
@@ -507,33 +651,43 @@ const BattleAudio::SpeechEvent* BattleAudio::speech_event(const std::string_view
     return &speech;
 }
 
-const BattleAudio::Sample& BattleAudio::sample(const std::string& name) {
-    core::load_profile::Scope sample_scope(core::load_profile::Phase::audio);
-    auto found = samples_.find(name);
-    if (found != samples_.end()) return found->second;
-    Sample sample;
-    // BA-30: every FoC SFX sample is a 16-bit PCM WAVE under Data/Audio/SFX.
+BattleAudio::DecodedSample BattleAudio::decode_sample(const std::string& name) const {
+    DecodedSample decoded;
     const std::string path = "data/audio/sfx/" + lower(name);
     auto bytes = filesystem_->open(path);
-    if (!bytes) {
-        sample.cause = "missing: " + core::format_diagnostic(bytes.error());
-    } else {
+    if (!bytes) decoded.cause = "missing: " + core::format_diagnostic(bytes.error());
+    else {
         std::string error;
         const auto pcm = audio::parse_wav(bytes.value(), error);
-        if (!pcm) {
-            sample.cause = "undecodable: " + error;
-        } else {
-            godot::PackedByteArray data;
-            data.resize(static_cast<std::int64_t>(pcm->data.size()));
-            std::memcpy(data.ptrw(), pcm->data.data(), pcm->data.size());
-            godot::Ref<godot::AudioStreamWAV> stream;
-            stream.instantiate();
-            stream->set_format(godot::AudioStreamWAV::FORMAT_16_BITS);
-            stream->set_mix_rate(static_cast<std::int32_t>(pcm->sample_rate));
-            stream->set_stereo(pcm->channels == 2);
-            stream->set_data(data);
-            sample.stream = stream;
+        if (!pcm) decoded.cause = "undecodable: " + error;
+        else {
+            decoded.rate = pcm->sample_rate;
+            decoded.channels = pcm->channels;
+            decoded.pcm.assign(pcm->data.begin(), pcm->data.end());
         }
+    }
+    return decoded;
+}
+
+const BattleAudio::Sample& BattleAudio::sample(const std::string& name) {
+    core::load_profile::Scope sample_scope(core::load_profile::Phase::audio);
+    const auto found = samples_.find(name);
+    if (found != samples_.end()) return found->second;
+    if (samples_prepared_) ++synchronous_runtime_loads_;
+    auto decoded = decode_sample(name);
+    Sample sample;
+    sample.cause = std::move(decoded.cause);
+    if (sample.cause.empty()) {
+        godot::PackedByteArray data;
+        data.resize(static_cast<std::int64_t>(decoded.pcm.size()));
+        std::memcpy(data.ptrw(), decoded.pcm.data(), decoded.pcm.size());
+        godot::Ref<godot::AudioStreamWAV> stream;
+        stream.instantiate();
+        stream->set_format(godot::AudioStreamWAV::FORMAT_16_BITS);
+        stream->set_mix_rate(static_cast<std::int32_t>(decoded.rate));
+        stream->set_stereo(decoded.channels == 2);
+        stream->set_data(data);
+        sample.stream = stream;
     }
     if (!sample.stream.is_valid()) missing_samples_[name] = sample.cause;
     return samples_.emplace(name, std::move(sample)).first->second;

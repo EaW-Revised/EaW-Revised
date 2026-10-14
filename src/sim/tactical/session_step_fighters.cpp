@@ -49,6 +49,11 @@ core::Result<void> session_detail::Tick::fighters() {
     auto& instances = systems_.value().instances.value();
     auto& survivors = surviving_.value().survivors.value();
     const auto& squadron_table = impl_->motion.squadrons;
+    const auto& movement_steps = movement_->craft_steps.value();
+    // The live movement vector has entered later staging by this phase. The
+    // immutable start journal retains the same ascending slots as craft_steps.
+    const auto& movement_starts = gather_->starts.value();
+    const auto& combat_world = targets_->world.value().value();
     // WNO-29/WCC-70: visit the ordinary-death journal once, in destruction order.
     // Replacements and generic removal never enter this journal.
     if (impl_->durability.damage) for (const auto& dead : killed) {
@@ -156,7 +161,29 @@ core::Result<void> session_detail::Tick::fighters() {
                 [](const LiveUnit& unit, const EntityId value) { return unit.state.entity_id < value; });
             return found != survivors.end() && found->state.entity_id == id ? &*found : nullptr;
         };
+        // Capture only stable selector handles: commands can create a new destination after
+        // movement. Its first path must use the same cohort choice as subsequent flight.
+        using AttackCohortKey = std::tuple<std::optional<CommandKey>, EntityId, EntityId>;
+        std::map<AttackCohortKey, const LiveUnit*> cohort_leaders;
+        std::vector<const LiveUnit*> attack_leaders(squadron_inputs.size());
+        for (std::size_t index = 0; index < squadron_inputs.size(); ++index) {
+            const auto id = squadron_inputs[index]->container;
+            const auto mind = minds.find(id);
+            const auto* container = find(id);
+            if (mind == minds.end() || !mind->second.formation || container == nullptr) continue;
+            const auto target = mind->second.formation->attack_target;
+            if (target == invalid_entity_id) continue;
+            const LiveUnit* leader = nullptr;
+            for (const auto member : squadron_inputs[index]->members) {
+                if ((leader = find(member)) != nullptr) break;
+            }
+            if (leader == nullptr) continue;
+            const auto coordinator = container->waypoints ? container->waypoints->coordinator : std::nullopt;
+            const AttackCohortKey key{coordinator, coordinator ? invalid_entity_id : id, target};
+            attack_leaders[index] = cohort_leaders.try_emplace(key, leader).first->second;
+        }
         std::vector<SquadronOutcome> outcomes(squadron_inputs.size());
+        std::vector<std::uint8_t> completed_bases(squadron_inputs.size());
         std::vector<std::pair<std::size_t, PlayerId>> final_killers(squadron_inputs.size());
         const auto grouped = executor.execute_phase("squadrons", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, squadron_inputs.size());
@@ -197,10 +224,214 @@ core::Result<void> session_detail::Tick::fighters() {
                     !solo && mind != minds.end() && mind->second.idle_cell) {
                     outcome.centre = mind->second.anchor;
                 }
+                outcome.rotation = container->state.rotation;
                 outcome.transform = container->placement_cache->matrix;
+                // WSQ-53, FM-14 (#741): the container takes its leader's whole facing every
+                // frame (the first live craft of the roster, WSQ-51).
+                if (!solo) {
+                    const auto* leader = find(outcome.members.front());
+                    outcome.rotation = leader->state.rotation;
+                    if (leader->placement_cache && leader->placement_cache->rotation == outcome.rotation) {
+                        outcome.transform = leader->placement_cache->matrix;
+                    } else if (outcome.rotation != container->state.rotation) {
+                        auto turned = math::to_matrix(outcome.rotation, outcome.centre);
+                        if (!turned) {
+                            outcome.error = detail::diagnostic(diagnostic_codes::worker_failure,
+                                "tick " + std::to_string(tick) + " squadron " + std::to_string(squadron_inputs[index]->container)
+                                    + ": " + turned.error().message);
+                            continue;
+                        }
+                        outcome.transform = turned.value();
+                    }
+                }
                 outcome.transform.rows[0][3] = outcome.centre.x;
                 outcome.transform.rows[1][3] = outcome.centre.y;
                 outcome.transform.rows[2][3] = outcome.centre.z;
+                const auto mind = minds.find(squadron_inputs[index]->container);
+                if (mind != minds.end() && mind->second.formation) {
+                    const auto& state = mind->second;
+                    const auto target_id = state.formation->attack_target;
+                    const auto* target = find(target_id);
+                    const auto* leader = find(outcome.members.front());
+                    const auto* craft = squadron_table.find_craft(leader->state.type_id);
+                    const auto finish_base = [&] {
+                        // WMV-11/18: done records history only for the sole base,
+                        // after ordinary flight; an override cannot complete it.
+                        if ((state.formation->complete && state.formation->has_reached_done)
+                            || state.formation->attack_override || state.mode == SquadronMode::move
+                            || outcome.attack_approach.value_or(state.approach)) return;
+                        // WMV-18 seam: FM-24's arrived escort hold stands in for
+                        // its base path. A distant escort is not done at birth.
+                        if (state.mode == SquadronMode::escort && !state.idle_cell) return;
+                        const auto& path = outcome.attack_path ? outcome.attack_path : state.attack_path;
+                        if (path) {
+                            for (const auto& route : path->stack) {
+                                for (const auto member : outcome.members) {
+                                    const auto tracker = route.trackers.find(member);
+                                    if (tracker != route.trackers.end() && (route.nodes.size() < 2
+                                        || tracker->second.segment < route.nodes.size() - 1)) return;
+                                }
+                            }
+                        }
+                        if (state.mode == SquadronMode::idle
+                            && state.formation->base_target == invalid_entity_id && !state.idle_cell) {
+                            // A lost escort still has an unfinished hold. Losing
+                            // its carrier does not make the current position arrived.
+                            const auto reach = math::Fixed::from_raw(idle_cell_size * math::Fixed::scale);
+                            if (!within_range(leader->state.position, state.anchor, reach, RangeMetric::planar)) return;
+                            completed_bases[index] = 2; // ordered FM-24 cell claim before completion
+                        } else completed_bases[index] = 1;
+                    };
+                    if (state.attack_path && !state.attack_path->stack.empty()) {
+                        const auto& route = state.attack_path->stack.back();
+                        const auto leader_id = outcome.members.front();
+                        const auto tracker = route.trackers.find(leader_id);
+                        std::vector<EntityId> admitted;
+                        bool new_start = false;
+                        for (const auto member : outcome.members) {
+                            const auto moved = std::lower_bound(movement_starts.begin(), movement_starts.end(), member,
+                                [](const auto& start, const EntityId id) { return start.first < id; });
+                            if (moved == movement_starts.end() || moved->first != member
+                                || !movement_steps[static_cast<std::size_t>(moved - movement_starts.begin())]) continue;
+                            admitted.push_back(member);
+                            const auto own = route.trackers.find(member);
+                            new_start = new_start || (own != route.trackers.end() && !own->second.started);
+                        }
+                        const auto segment = std::find(admitted.begin(), admitted.end(), leader_id) != admitted.end()
+                            ? squadron_attack_segment(*state.attack_path, leader_id, leader->state.position)
+                            : (tracker != route.trackers.end() ? tracker->second.segment : 0);
+                        if (tracker != route.trackers.end() && (new_start || tracker->second.segment != segment)) {
+                            outcome.attack_path = state.attack_path;
+                            advance_squadron_attack_path(*outcome.attack_path, leader_id, leader->state.position, admitted);
+                            auto& installed = outcome.attack_path->stack.back();
+                            if (std::find(admitted.begin(), admitted.end(), leader_id) != admitted.end())
+                                installed.trackers.at(state.container).started = true;
+                        }
+                        if (route.nodes.size() < 2 || segment >= route.nodes.size() - 1)
+                            outcome.attack_approach = false;
+                    }
+                    if (target != nullptr && craft != nullptr && (state.attack_path || state.approach)) {
+                        const auto& retained = outcome.attack_path ? outcome.attack_path : state.attack_path;
+                        if (retained && retained->target == target_id && frame < retained->next_refresh_frame
+                            && !squadron_attack_initialization_due(*retained, frame)) {
+                            finish_base();
+                            continue;
+                        }
+                        // FSC-72/73: copied post-object observations and staged path work.
+                        // No worker writes the shared squadron state or re-runs a flight.
+                        SquadronAttackPath path = outcome.attack_path ? *outcome.attack_path
+                            : state.attack_path.value_or(SquadronAttackPath{});
+                        if (!state.attack_path) {
+                            // FC-44: constructor clock, independent of target scans.
+                            CombatRandom draw(impl_->setup.seed, frame, state.container, 0xfffe000fU);
+                            const auto fps = logical_frames_per_second;
+                            path.next_refresh_frame = frame + fps + draw.uniform(1, fps);
+                        }
+                        if (path.target != target_id) {
+                            path.target = target_id;
+                            path.initialization_pending = true;
+                        }
+                        // CombatWorld retains copied geometry/visibility, but its
+                        // health pointers belonged to the earlier movement stage.
+                        // Rebind them to immutable survivors before this later service.
+                        std::optional<detail::CombatUnit> target_geometry;
+                        if (const auto* prior = combat_world.find(target_id)) {
+                            target_geometry = *prior;
+                            target_geometry->position = target->state.position;
+                            auto transform = unit_transform(*target);
+                            if (!transform) { outcome.error = transform.error(); continue; }
+                            target_geometry->transform = transform.value();
+                            target_geometry->durability_profile = impl_->health_profile(*target);
+                            target_geometry->durability = target->durability ? &*target->durability : nullptr;
+                            target_geometry->combat = target->combat ? &*target->combat : nullptr;
+                        }
+                        const auto* target_view = target_geometry ? &*target_geometry : nullptr;
+                        const auto* leader_view = combat_world.find(leader->state.entity_id);
+                        auto attack_point = target->state.position;
+                        // OR-24 initializes a never-chosen destination on the order tick.
+                        // A destroyed retained index reads as the centre until replacement.
+                        auto* attachment = target_view != nullptr
+                            ? detail::standing_hardpoint(*target_view, state.formation->attack_hardpoint) : nullptr;
+                        if (target_view != nullptr && state.formation->attack_hardpoint == attack_hull) {
+                            const auto* selector = attack_leaders[index] != nullptr ? attack_leaders[index] : leader;
+                            attachment = detail::best_hardpoint(&impl_->combat, impl_->combat.find(selector->state.type_id),
+                                *target_view, selector->state.position);
+                            if (attachment != nullptr) outcome.attack_hardpoint = attachment->hardpoint;
+                        }
+                        if (attachment != nullptr) {
+                            auto point = math::transform_point(target_view->transform, attachment->position);
+                            if (!point) { outcome.error = point.error(); continue; }
+                            attack_point = point.value();
+                        }
+                        auto reach = core::Result<math::Fixed>::success(impl_->approach_range(*leader, false, target_view));
+                        if (target_view != nullptr) {
+                            const auto* profile = impl_->combat.find(leader->state.type_id);
+                            reach = detail::target_attack_distance(&impl_->motion, *target_view, leader->state.position,
+                                profile != nullptr ? profile->max_attack_distance.value_or(math::Fixed{}) : math::Fixed{},
+                                detail::has_aim_hardpoint(*target_view));
+                        }
+                        if (!reach) { outcome.error = reach.error(); continue; }
+                        SquadronAttackRefresh observation;
+                        observation.target_position = attack_point;
+                        observation.effective_reach = reach.value();
+                        // WMV-18: an idle lost-base identity is provenance only;
+                        // it is not a live escort input to attack-path refresh.
+                        observation.escorted_destination = state.mode == SquadronMode::escort
+                            ? state.escorted : invalid_entity_id;
+                        observation.in_attack_reach = within_range(leader->state.position, attack_point,
+                            reach.value(), RangeMetric::planar);
+                        const auto flight = crafts.find(leader->state.entity_id);
+                        observation.pursuing = flight != crafts.end() && flight->second.chase_until > frame;
+                        observation.completed_or_stopping = outcome.attack_approach == false
+                            || (flight != crafts.end() && flight->second.velocity == math::Vec3{});
+                        if (const auto theirs = minds.find(target_id); theirs != minds.end())
+                            observation.shared_cell = state.cell && theirs->second.cell && *state.cell == *theirs->second.cell;
+                        if (target_view != nullptr && leader_view != nullptr && target_view->team != leader_view->team)
+                            observation.visible = !target_view->in_limbo && !target_view->stealth_invisible
+                                && (target_view->visible_to & (std::uint64_t{1} << leader_view->player_index)) != 0;
+                        observation.repath_permitted = !leader->abilities
+                            || !ability_movement_disabled(*impl_->abilities.find(leader->state.type_id), *leader->abilities);
+                        observation.protected_destination = path.collision_identity != 0
+                            && path.collision_identity != state.container;
+                        // Full moving-escort copying/guard threshold, per-member mapping
+                        // and exceptional attack-positioning producers remain UFS-34/36.
+                        const bool refresh = refresh_squadron_attack_path(path, frame, observation);
+                        const bool initialize = squadron_attack_initialization_due(path, frame);
+                        const bool search_permitted = observation.visible && observation.repath_permitted
+                            && !observation.shared_cell && !observation.protected_destination
+                            && (!observation.in_attack_reach || observation.pursuing);
+                        if ((!initialize && (!refresh || path.initialization_pending)) || !search_permitted) {
+                            if (!state.attack_path || path != *state.attack_path) outcome.attack_path = std::move(path);
+                            finish_base();
+                            continue;
+                        }
+                        // FS-19/40: search reads the currently published container
+                        // pose, not the new member bounds/facing staged for commit.
+                        auto yaw = yaw_degrees(container->state.rotation);
+                        if (!yaw) { outcome.error = yaw.error(); continue; }
+                        auto speed = flight != crafts.end() ? math::length(flight->second.velocity)
+                            : core::Result<math::Fixed>::success(math::Fixed{});
+                        if (!speed) { outcome.error = speed.error(); continue; }
+                        auto route = plan_squadron_attack_route(*craft, impl_->motion.rules, state.container,
+                            outcome.members, frame, container->state.position, yaw.value(), speed.value(), attack_point,
+                            math::Vec3{container->placement_cache->matrix.rows[0][0], container->placement_cache->matrix.rows[1][0],
+                                container->placement_cache->matrix.rows[2][0]});
+                        if (!route) { outcome.error = route.error(); continue; }
+                        if (route.value().nodes.size() < 2) {
+                            // FC-68: an exhausted/empty attempt retains the accepted
+                            // destination and failure history, never marks it arrived.
+                            if (initialize) path.failure_frame = frame;
+                        } else if (install_squadron_attack_path(path, std::move(route).value(), frame)
+                            == SquadronPathAdmission::active) {
+                            path.cached_position = attack_point;
+                            path.escorted_destination = observation.escorted_destination;
+                            path.initialization_pending = false;
+                            outcome.attack_approach = true;
+                        }
+                        outcome.attack_path = std::move(path);
+                    }
+                    finish_base();
+                }
             }
         });
         if (!grouped) {
@@ -223,14 +454,54 @@ core::Result<void> session_detail::Tick::fighters() {
                 track_victory_change(&find(container)->state, nullptr, true);
                 if (loss_ids_.insert(container).second) {
                     const auto& state = find(container)->state;
+                    loss_killers_.emplace(container, std::pair{pending_losses_.size() + 1U, final_killers[index].second});
                     pending_losses_.push_back({state.owner, state.type_id, final_killers[index].second, 1, tick});
+                    if (impl_->setup.attract_pool) {
+                        // MAT-15: the emptied container is the team's Destroy; its company type returns.
+                        const auto mind = minds.find(container);
+                        note_pool_return(state, mind != minds.end() ? mind->second.garrison_unit
+                                                                    : find(container)->garrison_unit, false);
+                    }
                 }
                 emptied.push_back(container);
                 continue;
             }
+            if (completed_bases[index] == 2) {
+                auto& state = minds.at(container);
+                // FM-24 is ordered: a successful claim changes the next team's
+                // available cells. FM-26 publishes the newly claimed hold point.
+                claim_idle(container, state, state.anchor);
+                if (state.idle_cell) {
+                    outcome.centre = state.anchor;
+                    outcome.transform.rows[0][3] = outcome.centre.x;
+                    outcome.transform.rows[1][3] = outcome.centre.y;
+                    outcome.transform.rows[2][3] = outcome.centre.z;
+                }
+            }
             const auto slot = static_cast<std::size_t>(find(container) - survivors.data());
+            // WWP-51: aggregate publication can be this target's first displacement.
+            if (!survivors[slot].position_history && survivors[slot].state.position != outcome.centre
+                && impl_->combat.find_target_type(survivors[slot].state.type_id) != nullptr) {
+                survivors[slot].position_history = PositionHistory{survivors[slot].state.position,
+                    survivors[slot].state.position};
+            }
             survivors[slot].state.position = outcome.centre;
+            survivors[slot].state.rotation = outcome.rotation;
             instances[slot].fixed_transform = outcome.transform;
+            // FD-67/FSC-73: installation follows ordinary turns; it cannot move
+            // or fire a member again. The next movement reads this ordered commit.
+            if (outcome.attack_path) minds.at(container).attack_path = std::move(outcome.attack_path);
+            if (outcome.attack_approach) minds.at(container).approach = *outcome.attack_approach;
+            if (outcome.attack_hardpoint && minds.at(container).formation)
+                minds.at(container).formation->attack_hardpoint = *outcome.attack_hardpoint;
+            if (completed_bases[index] != 0) {
+                auto& state = minds.at(container);
+                if (completed_bases[index] == 1 || state.idle_cell) {
+                    state.formation->complete = true;
+                    state.formation->has_reached_done = true;
+                    if (state.mode == SquadronMode::idle) state.escorted = invalid_entity_id;
+                }
+            }
             kept.push_back(Squadron{container, std::move(outcome.members)});
         }
         // Containers without craft leave the session. They have no hull, so no event is
@@ -273,7 +544,7 @@ core::Result<void> session_detail::Tick::fighters() {
         const auto hangar = spawners.find(state.spawner);
         const auto* spawner = survivor(state.spawner);
         if (hangar != spawners.end() && spawner != nullptr) {
-            squadron_lost(*squadron_table.find_spawner(spawner->state.type_id), spawners.at(hangar->first), state.entry, frame);
+            squadron_lost(*squadron_table.find_spawner(spawner->state.type_id, spawner->state.owner), spawners.at(hangar->first), state.entry, frame);
         }
         iterator = minds.erase(iterator);
     }
@@ -353,7 +624,7 @@ core::Result<void> session_detail::Tick::hangars() {
             const auto range = partition_range(partition, hangars.size());
             for (auto index = range.begin; index < range.end; ++index) {
                 const auto& unit = *survivor(hangars[index].first);
-                const auto& profile = *squadron_table.find_spawner(unit.state.type_id);
+                const auto& profile = *squadron_table.find_spawner(unit.state.type_id, unit.state.owner);
                 std::vector<bool> intact;
                 const auto* hull = impl_->health_profile(unit);
                 for (const auto& bay : profile.bays) {
@@ -379,7 +650,7 @@ core::Result<void> session_detail::Tick::hangars() {
             spawners.assign(hangars[index].first, std::move(hangars[index].second));
             if (!decisions[index] && !free_bays[index]) continue;
             const auto spawner = *survivor(hangars[index].first); // copied: launches grow `survivors`
-            const auto& profile = *squadron_table.find_spawner(spawner.state.type_id);
+            const auto& profile = *squadron_table.find_spawner(spawner.state.type_id, spawner.state.owner);
             const auto first_added = survivors.size();
             auto pending = garrisons.end();
             if (!decisions[index]) {
@@ -402,7 +673,7 @@ core::Result<void> session_detail::Tick::hangars() {
                 track_victory_change(nullptr, &survivors[added].state, false);
                 if (pending != garrisons.end()) {
                     const auto& born = survivors[added].state;
-                    if (const auto* born_profile = squadron_table.find_spawner(born.type_id);
+                    if (const auto* born_profile = squadron_table.find_spawner(born.type_id, born.owner);
                         born_profile != nullptr && (!born_profile->entries.empty() || born_profile->starbase))
                         spawners.emplace(born.entity_id, initial_spawner(impl_->setup.seed, frame + 1, born.entity_id));
                     if (impl_->economy.stream(born.type_id) != nullptr) earners.emplace_back(born.entity_id, born.owner);

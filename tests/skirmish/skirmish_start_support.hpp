@@ -56,6 +56,11 @@ eawr::units::UnitType unit_type(std::string id, const UnitKind kind, std::string
     const std::optional<std::int64_t> power);
 void synthetic_roster_gate();
 void synthetic_start();
+void synthetic_placed_start();
+eawr::units::UnitTables synthetic_tables();
+skirmish::Fixture synthetic_fixture();
+skirmish::StartInputs synthetic_inputs(const eawr::units::UnitTables& tables);
+void synthetic_special_sources();
 void synthetic_placement();
 void synthetic_failures();
 void replay_round_trip();

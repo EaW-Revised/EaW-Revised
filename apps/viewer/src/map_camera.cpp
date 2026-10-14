@@ -267,6 +267,40 @@ core::Result<MapCameraConfig> skirmish_camera_config(
     return Result::success(std::move(config));
 }
 
+core::Result<MapCameraConfig> campaign_camera_config(
+    const assets::Map& map, const sim::tactical::TacticalSetup& setup, const sim::tactical::PlayerId local_player) {
+    using Result = core::Result<MapCameraConfig>;
+    if (!setup.skirmish || !map.declared_extents || !std::isfinite(map.declared_extents->first)
+        || !std::isfinite(map.declared_extents->second)
+        || map.declared_extents->first <= 0 || map.declared_extents->second <= 0) {
+        return Result::failure(invalid("campaign camera needs the prepared map identity and positive declared extents"));
+    }
+    double x = 0, y = 0;
+    std::size_t count = 0;
+    for (const auto& unit : setup.units) {
+        if (unit.owner != local_player) continue;
+        x += static_cast<double>(unit.position.x.raw()) / sim::math::Fixed::scale;
+        y += static_cast<double>(unit.position.y.raw()) / sim::math::Fixed::scale;
+        ++count;
+    }
+    if (count == 0) return Result::failure(invalid("campaign camera has no local prepared actors"));
+    MapCameraConfig config;
+    config.mode = presentation::camera::Mode::space;
+    config.map_path = setup.skirmish->map;
+    config.map_sha256 = setup.skirmish->map_sha256;
+    config.bindings_path = "space-live-camera-bindings.json";
+    const float half_x = map.declared_extents->first * 0.5F;
+    const float half_y = map.declared_extents->second * 0.5F;
+    config.bounds = {-half_x, half_x, -half_y, half_y, config.map_path, "campaign-declared-extents", "project-authored"};
+    config.target_x = std::clamp(static_cast<float>(x / static_cast<double>(count)), -half_x, half_x);
+    config.target_y = std::clamp(static_cast<float>(y / static_cast<double>(count)), -half_y, half_y);
+    config.overrides_source_id = "space-camera-owner-deviations";
+    config.overrides_authority = "project-authored";
+    config.constant_overrides = {{"Distance_Min", "100"}, {"Tactical_Min_Scroll_Speed", "823.529412"}, {"Pitch_Min", "-60"}};
+    config.overview_clicks = 5;
+    return Result::success(std::move(config));
+}
+
 core::Result<presentation::camera::LoadedConstants> resolve_map_constants(
     const MapCameraConfig& config, presentation::camera::LoadedConstants xml,
     const std::string_view config_name, const std::string_view config_sha256) {

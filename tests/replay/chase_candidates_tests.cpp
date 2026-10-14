@@ -208,10 +208,37 @@ bool boundaries() {
     }
     return endpoints && actual == expected;
 }
+// FSC-26 (FD-25): claims follow the object service rank, last-created craft first. Two own
+// craft with one eligible recipient: the later craft takes it. Two mutually followable craft
+// with expired timers: the later one chases and the earlier is taken, so it does not chase.
+bool claim_order() {
+    tactical::CraftProfile profile;
+    profile.attack_distance = units(500);
+    std::vector<tactical::CraftView> views{
+        {11, {}, {}, &profile}, {12, {}, {}, &profile}, {21, {}, {}, &profile}, {22, {}, {}, &profile}};
+    const std::vector<std::size_t> scanners{0, 1};
+    const std::vector<std::vector<EntityId>> one_recipient{{21}, {21}};
+    tactical::claim_chases(views, scanners, one_recipient, 40);
+    const bool later_wins = views[0].state.chase == 0 && views[0].state.chase_until == 0
+        && views[1].state.chase == 21 && views[1].state.chase_until == 40 + tactical::chase_frames
+        && views[2].state.chase == 0 && views[2].state.chase_until == 40 + tactical::chase_frames;
+    for (auto& view : views) view.state = {};
+    views[3].state.chase = 11;
+    views[3].state.chase_until = 90; // still running: neither chases nor is taken
+    const std::vector<std::size_t> mutual_scanners{0, 2};
+    const std::vector<std::vector<EntityId>> mutual{{22, 21}, {11}};
+    tactical::claim_chases(views, mutual_scanners, mutual, 40);
+    const bool mutual_later = views[2].state.chase == 11 && views[0].state.chase == 0
+        && views[0].state.chase_until == 40 + tactical::chase_frames && views[3].state.chase == 11
+        && views[3].state.chase_until == 90;
+    if (!later_wins || !mutual_later) std::cout << "FSC-26: chase claims did not follow the service rank\n";
+    return later_wins && mutual_later;
+}
 } // namespace
 
 int main() {
     if (!boundaries()) return 1;
+    if (!claim_order()) return 1;
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
         for (const std::uint64_t seed : {893U, 457U, 974U}) {
             if (!differential(workers, seed)) return 1;

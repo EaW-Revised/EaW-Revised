@@ -1,5 +1,14 @@
 # Space skirmish setup
 
+- **SSOWN-01:** `Is_Playable` separates lobby factions from appended map-owner
+  factions. Append only nonplayable factions that request
+  `Create_Player_In_Multiplayer_Games`. Delete map objects assigned to playable
+  factions; assign nonplayable objects to their faction's player, retaining a
+  nondiscardable decoration without such a player only through the Neutral
+  fallback. Evidence: existing [map-object ownership note](../skirmish-start.md),
+  debug-build OW-E1 to OW-E8 and effective faction XML; WSS-47. The remake's
+  separate teams for appended players remain the documented project deviation.
+
 The applied match switches (WSS-27 to WSS-30) accompany non-default tactical replays in a
 tagged header policy record. Playback rebuilds purchase content with the recorded flags
 and rejects a different bound policy before ticking. The legacy all-enabled policy retains
@@ -14,7 +23,8 @@ Existing starts continue to apply SK-01 to SK-24 and SC-01/SC-02.
 - **R-SETUP-01:** The space lobby offers a map list with a preview and player
   rows carrying faction, team and controller. WSS-08 bounds local rows by the
   lesser of authored capacity and eight; the host stays in row one and other
-  rows offer AI or Open. Open rows have no faction/team/colour record (WSS-14/15).
+  rows offer AI or Open. Open rows have no faction/team/colour record (WSS-14/15),
+  and their faction and team captions are blank in the retail lobby capture.
   Map changes remove excess records, relocate surviving out-of-range rows and
   clamp excessive teams to the last authored start (WSS-08/09). Teams are
   displayed from one while stored from zero. Start requires at least two
@@ -78,8 +88,17 @@ Existing starts continue to apply SK-01 to SK-24 and SC-01/SC-02.
   from the shared human/AI purchase menus and authoritative build admission
   (WSS-29/30). Free starting units off omits the faction default roster for
   human and AI players, while explicit fixture fleets remain separate (WSS-28).
-  Credits, tech, timer, random events, autoresolve and victory fields are retained
-  in the copy; their additional controls/consumers remain with G6/G7. The
+  Credits, tech, timer, random events and autoresolve fields are retained
+  in the copy; their consumers remain with G6. The credits slider bounds are the
+  data's `Min_Skirmish_Credits` and `Max_Skirmish_Credits`; the slider shows the
+  copy's authored credits clamped into those bounds without rounding to an edit bucket,
+  including in-range off-grid mod values, and stays disabled, with its reason as a tooltip, until the
+  start applies the selected credits (WSS-25). The win-condition list offers the
+  two space conditions (WSS-31) and the chosen one is the start's victory
+  condition (`FixtureOptions::victory_condition`); text naming neither leaves the
+  data's default. The debug build fills the list in order: all enemy units, then
+  enemy starbase, skipping inappropriate entries (WSS-31). The default's caption is the
+  database's "Destroy Enemy Space Station", as the retail capture shows. The
   established space-station construction path remains qualified by SS-U3.
   AI
   difficulty is likewise omitted pending purchasing-capable skirmish AI setup (legacy EAWR-603); the debug build's local lobby
@@ -89,11 +108,48 @@ Existing starts continue to apply SK-01 to SK-24 and SC-01/SC-02.
   starting station. Installed-data contracts validate its start and session
   content on all 24 stock space maps.
 
-The panel, preview, map-list, first two row positions
-and Start button follow the measured primary retail capture at 1280 by 720
-(roughly two-pixel measurement tolerance). Player and faction columns are
-narrower to fit separate colour and control selectors. Unsupported game-type controls
-and rows beyond authored capacity are omitted. Text metrics and the animated background
-remain adaptations; this is not a pixel-identical reproduction. The native
-fallback capture is 1920 by 1061, not a verified 1080p layout. Official/custom
-filtering follows WSS-07; saved profiles and multiplayer are deferred.
+- **R-SETUP-06:** The staging screen and its advanced options are built from the
+  installed dialog resource (the skirmish staging dialog and the skirmish advanced
+  options dialog), placed under the retail layout rules at 1280 by 720: the
+  catalogue's rectangles stand for the screen's own hand placement, which the retail
+  capture's frame, preview, rows and buttons already match; the game-type list is the
+  one known difference (its rows need more room than the gap above the map list gives, so
+  it scrolls). Every caption of the setup and its advanced dialog is a text-database
+  key, from the resource or from one table the screen owns: the game types (land, space
+  and land control), the Open and AI row names, the team word, the three start-check
+  messages and the LAN panel's buttons. A key the database lacks shows as written, and a
+  mod's text replaces any of them. Still English (no retail key): the land reason shown as
+  a tooltip, the map's unavailable reason, the LAN status and summary text and the peer's
+  default name. The game-type list shows land and
+  land control disabled, with the database's "Unavailable" and the project's reason as
+  the tooltip; space is selected. All eight rows stay on screen: rows beyond the map's
+  capacity are blank and disabled, as in the retail capture. The name column is the row's
+  controller (the local player's name in row one, Open or AI below), as in the retail
+  dialog. The colour column shows its swatch only. Faction names come from each
+  faction's `Text_ID`, in the order of the faction registries. A refused Start shows
+  the retail message for too few players, too few teams or teammates of different
+  factions; any other refusal keeps its own diagnostic. Every combo keeps the width its
+  resource rectangle gives it (its text clips; it never grows to its longest item), so
+  the faction, colour and team columns keep the retail split and gaps. The colour box
+  shows its colour as a bar centred in its text area. A combo's drop-down list is the
+  list skin as the retail capture shows it: the small frame's rim around the skin's
+  translucent backing, the entries in the list font and left aligned, no mark beside
+  the chosen one. The popup contents scale with their owning combo. The advanced
+  dialog hides the prebuilt-base check in space (WSS-27); its credits slider and
+  win-condition list are described under R-SETUP-05. The staging's Cancel button ends
+  the screen: it quits the stand-alone screen, and a shell that owns it takes the
+  request instead, and the shell's Back and Escape are that same Cancel. The screen opens
+  with the player profile's choices (PRF-03): the remembered space map, the local
+  faction, colour and team and the game type, each ignored when the data no longer has
+  it, and the profile's name for the local player; Start writes them back to the whole
+  record (credits, timer, game name and the land choices stay as loaded), Cancel does not.
+  Test, capture, report and LAN smoke runs leave the user's profile alone unless
+  `--eawr-setup-profile <file>` names one. Unverified: which of the two start-check
+  messages shows first when several apply.
+
+The preview, map list and row geometry follow the dialog resource through the dialog
+builder and match the measured primary retail capture at 1280 by 720. The LAN panel
+below the frame is this project's own and keeps its hand placement. Text metrics and
+the animated background remain adaptations; this is not a pixel-identical
+reproduction. The native fallback capture is 1920 by 1061, not a verified 1080p
+layout. Official/custom filtering follows WSS-07; multiplayer is deferred.

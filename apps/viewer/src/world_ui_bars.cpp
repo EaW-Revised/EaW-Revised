@@ -137,7 +137,10 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
         rules.squadron_member = craft;
         const float max_hull = to_float(durability.max_hull);
         rules.has_health = max_hull > 0.0F;
-        rules.health = rules.has_health ? to_float(durability.hull) / max_hull : 0.0F;
+        // WSU-52: the display health (the lesser of hull and hardpoints for a type dying with them).
+        const sim::tactical::DurabilityTable* table = frame.live->durability();
+        rules.health = rules.has_health
+            ? ui::display_health(durability, table != nullptr ? table->find(instance->type_id) : nullptr) : 0.0F;
         rules.shielded = type->second.shielded && durability.max_shields && to_float(*durability.max_shields) > 0.0F;
         rules.hide_health_bar = type->second.hide_health_bar;
         const ui::BarVisibility shown = ui::bar_visibility(rules);
@@ -175,11 +178,12 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
             row += "h" + std::to_string(level);
             y += height * ui::health_bar_spacing;
         }
-        // WBP-37: reuse world-bar geometry; exact stock capture artwork remains U-BP-7.
+        // WBP-37: reuse world-bar geometry; exact stock capture artwork remains U-BP-7. #3150: retail's health
+        // bars are white-tinted texture bars (no owner colour); the capture tint is the model colour (WBP-52).
         if (capturing) {
             const bool neutralizing = instance->owner != frame.live->economy().pads.neutral;
             const double progress = static_cast<double>(pad->state.progress.raw()) / sim::math::Fixed::scale;
-            const auto tint = frame.live->player_colour(neutralizing ? instance->owner : pad->state.target)
+            const auto tint = frame.live->model_colour_of_type(neutralizing ? instance->owner : pad->state.target, instance->type_id)
                 .value_or(ui::Rgb{255, 255, 255});
             bar(canvas_item, (*screen)[0], y, width, height,
                 static_cast<float>(ui::capture_fill(progress, neutralizing)), tint);
@@ -187,7 +191,7 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
         } else if (construction) {
             const double progress = ui::pad_time_progress(frame.live->presented_tick(), construction->start_frame,
                                                          construction->finish_frame);
-            const auto tint = frame.live->player_colour(construction->builder).value_or(ui::Rgb{255, 255, 255});
+            const auto tint = frame.live->model_colour_of_type(construction->builder, instance->type_id).value_or(ui::Rgb{255, 255, 255});
             bar(canvas_item, (*screen)[0], y, width, height, static_cast<float>(progress), tint);
             row += "b" + std::to_string(progress);
         }
@@ -206,9 +210,11 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
 void WorldUiView::draw_reticles(const Frame& frame, const RID canvas_item) {
     reticles_drawn_ = 0;
     tracked_reticles_ = 0;
+    const auto previous_reticles = std::move(reticle_rects_);
     reticle_rects_.clear();
     tooltip_hit_.reset();
     tooltip_rect_ = {};
+    if (!reticle_sizes_) return;
     // The unit whose reticles show: the one under the pointer (WU-30), and the unit of a reticle that
     // is still flashing from an order (WU-42), which shows only that reticle.
     struct Shown final {
@@ -269,7 +275,12 @@ void WorldUiView::draw_reticles(const Frame& frame, const RID canvas_item) {
             const auto screen = frame.project(world);
             if (!screen) continue;
             // WU-31: a fixed share of the screen, whatever the camera distance.
-            const ui::ReticleRect base = ui::hardpoint_reticle_rect(*screen, frame.viewport);
+            const bool appearing = std::none_of(previous_reticles.begin(), previous_reticles.end(), [&](const Reticle& old) {
+                return old.entity == unit.entity && old.hardpoint == index;
+            });
+            // WU-31: friendly share at appearance, enemy share on every subsequent service.
+            const float share = appearing && !unit.hostile ? reticle_sizes_->friendly : reticle_sizes_->enemy;
+            const ui::ReticleRect base = ui::hardpoint_reticle_rect(*screen, frame.viewport, share);
             // WU-42: a flashing reticle starts at half size and toggles every third render service.
             const float scale = flashing && (flash_->services / 3U) % 2U == 0U ? 0.5F : 1.0F;
             placed.push_back({index,

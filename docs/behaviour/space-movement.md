@@ -128,7 +128,10 @@ destinations inside occupied space.
   way, to face the target's XY direction: |yaw change| / rate of turn × slowdown frames, the
   yaw changing linearly with time. It does not move the unit and ends any path: a moving ship
   stops where MV-02 leaves it. The corvette turns 90 degrees in 120 frames (0.75 degrees per
-  frame); an Acclamator in 450.
+  frame); an Acclamator in 450. Positive authored slowdown factors are duration scales,
+  including values below one: a factor of 0.5 shortens the turn. The loader imposes no
+  one-to-1024 cap on this scale; checked fixed arithmetic still reports a duration that
+  cannot fit its storage. Zero and negative factors remain unsupported.
 - **MV-21** (recording S-11) A turn in place ends exactly on its target yaw.
 - **MV-22** (research E70-11; recording S-13) A stop drops the plan: the unit halts where
   MV-02 leaves it, without braking. S-13's corvette moves its full 3.72 units at tick 121 and
@@ -192,6 +195,19 @@ the game keeps as simulation state and draws from; nothing else in the movement 
   the facing's first angle: the ship's orientation is its heading yaw, then the roll about its
   own forward axis (Rz(yaw) Rx(roll), right-handed), then the model's fixed quarter turn. The
   model, its hardpoints and everything attached to it follow the rolled orientation.
+
+  Model collision and collection bounds also follow this placement (ABF-02 in
+  [space abilities](space-abilities.md)). Locomotion's level-heading placement scratch is
+  a derived planning cache, not a hull collision frame; its forward axis and the beam
+  range's planar facing axis remain roll-invariant (ABF-03).
+- **BK-06** (debug build, bank-angle value read, ship bank update and roll wrap)
+  `Bank_Turn_Angle` is used as authored, including 360 and negative values; it is
+  neither clamped to 0..90 nor wrapped on loading. The ship uses that value both
+  for its target bank (BK-02) and its easing divisor (BK-03). A negative value reverses
+  the target bank and makes the easing share reach its minimum of 0.1. Before each
+  banking step the current roll is read in (-180, 180], with -180 reading as +180;
+  a sustained full-rate turn with a bank of 360 therefore keeps spinning. The loader
+  preserves every representable angle.
 
 The remake keeps the roll as simulation state (project, from E351-07: FoC keeps it in the
 synchronized facing it sets every frame, not in a display-only value). Each unit with a
@@ -473,7 +489,8 @@ avoids other ships and static objects. Ships in other layers are invisible to it
   coarser steps (+0.5 to the rotation and forward coefficients) and 1.7 times the expansions;
   then an estimate weighted by 1 / 0.66 below a distance cutoff (the retail weight is the
   previous try's cost coefficient); then only static and moving obstacles; then half speed.
-  When every try fails the unit stays (AV-U5).
+  When every try fails the unit stays and retains its destination for FC-68's strict
+  two-second initialization retry (see FD-64/FSC-70 in the frame-service schedule).
 - **AV-15** (research E71-11, E71-16; recording S-14) Orders are planned one ship at a time, in
   command order, and each planned ship submits its prediction before the next ship plans. S-14
   shows the order: the right corvette, ordered after the left one in the same tick, plans
@@ -564,8 +581,11 @@ Against the retail recordings (FoC debug build, fixed-force recorder, fog reveal
   bounds, which the session does not have; it is not modelled. For the same reason the
   destination search (AV-19) does not drop points outside the map (FoC's
   map-bounds test, E266-03), so a clipped point near a map edge can lie off the map.
-- **AV-U5** (unverified) When every try fails, or a move is shorter than 40 units, the remake
-  leaves the unit at rest; FoC finishes the formation and the locomotor's reaction was not read.
+- **AV-U5** Exhausted centre-path attempts retain the current point and stamp failure history
+  (FC-68, debug build EFSW-06/07); they do not complete the formation. The shared planner
+  distinguishes this outcome from the shorter-than-40-unit prelude, holds the unit at rest,
+  and retries at failure frame + 61 at 30 Hz. Immediate/degenerate/disabled outcomes and
+  complete indirect history/reset producers remain qualified by UFS-33.
 - **AV-U6** (unverified) Whether a path's end re-submits the ship's prediction (moving the
   layer's window anchor) was not read; the remake does not.
 - **AV-U7** The collision bounds come from the ALO meshes' stored boxes; whether FoC

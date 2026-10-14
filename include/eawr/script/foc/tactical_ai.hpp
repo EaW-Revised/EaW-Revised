@@ -16,10 +16,13 @@
 #include "eawr/core/result.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/authoritative/tactical_bridge.hpp"
+#include "eawr/script/authoritative/tactical_scoring.hpp"
 #include "eawr/script/numeric/lua_number.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include <cstdint>
+#include <functional>
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
@@ -28,12 +31,17 @@
 #include <vector>
 
 namespace eawr::script::foc {
+// FC-76: synchronized scoring seconds use single-precision integer conversion
+// and division, then widen exactly for Lua. Distinct from the mode clock.
+[[nodiscard]] numeric::LuaNumber scoring_seconds(std::uint64_t frame) noexcept;
 
 // Host handle kinds (Handle::kind) of the FoC wrappers.
 inline constexpr std::uint32_t handle_game_object = 1; // id: entity ID
 inline constexpr std::uint32_t handle_player = 2;      // id: player ID
 inline constexpr std::uint32_t handle_type = 3;        // id: type ID (object type CRC)
 inline constexpr std::uint32_t handle_type_list = 4;   // id: WeightedTypeList, setup only
+inline constexpr std::uint32_t handle_position = 9;    // id: binary32 bits of planar x (high word) and y (low word)
+inline constexpr std::uint64_t first_object_instance = std::uint64_t{1} << 36;
 
 // Script commands the bindings issue (ScriptCommand::verb), translated to tactical orders.
 inline constexpr std::string_view verb_move = "foc.move";     // issuer, unit, x, y, z
@@ -48,6 +56,8 @@ inline constexpr std::string_view verb_reservation_debit = "foc.reservation_debi
 inline constexpr std::string_view verb_reinforce = "foc.reinforce";
 inline constexpr std::string_view verb_ability = "foc.ability"; // issuer, unit, AbilityKind, AbilityAction (#76)
 inline constexpr std::string_view verb_reveal_all = "foc.reveal_all"; // issuer, player (V-20)
+inline constexpr std::string_view verb_special_fire = "foc.special_fire"; // issuer, source, target, admission (WSW-40/41)
+inline constexpr std::string_view verb_campaign_retreat = "foc.campaign_retreat"; // issuer, owning campaign translates
 
 // Event producer of the engine side (EventKey::producer).
 inline constexpr std::uint32_t producer_foc_engine = authoritative::first_simulation_producer;
@@ -65,24 +75,45 @@ struct AiWeapon {
 struct AiType {
     sim::tactical::TypeId type_id{};
     std::string name;                 // XML name, upper case (Get_Name)
+    bool decoration{};
+    std::string lua_script; // SOS-01: resolved object attachment; independent of type metadata
+    // L-32: scaled collidable model bounds, for the wrapper's box query.
+    std::optional<std::array<sim::math::Vec3, 2>> proximity_bounds;
     std::uint64_t category_bits{};    // CategoryMask in GameObjectCategoryType bits
     std::uint64_t property_bits{};    // Property_Flags in GameObjectPropertiesType bits
     std::vector<std::string> abilities; // upper-case ability types
     std::uint32_t projectile_types{}; // Projectile_Types entries the tables keep
+    // WTA-34: the projectile types the unit fires, for Get_All_Projectile_Types: each hardpoint's
+    // Fire_Projectile_Type in HardPoints order (0: none), then the object weapon's.
+    std::vector<sim::tactical::TypeId> hardpoint_projectiles;
+    sim::tactical::TypeId object_projectile{};
+    // AI-32/WLD-10: the type's Lua_Script is ObjectScript_PointDefense, which the engine stands in for.
+    bool point_defence_script{};
+    bool corrupt_systems_script{};    // WHE-67: ObjectScript_IG2000 proximity/area activation
     bool locomotor{};                 // BEHAVIOR_LOCO: it has a motion profile or is a squadron
     bool star_base{};                 // BEHAVIOR_DUMMY_STAR_BASE
+    bool space_special_weapon{};     // WSW-47: existing planetary source, available for attachment
     // Goal system and perception inputs (#449).
     bool space_evaluator{};           // Has_Space_Evaluator: a space goal target (GS-10)
     std::uint32_t tech_level{};       // Tech_Level
     std::uint32_t base_level{};       // SAE-02: Base_Level
     numeric::LuaNumber combat_power{};        // AI_Combat_Power (0 when absent)
     numeric::LuaNumber max_attack_distance{}; // Targeting_Max_Attack_Distance
+    numeric::LuaNumber min_attack_distance{}; // WTA-36: Targeting_Min_Attack_Distance (0 when absent)
+    // WTA-36: Is_Hero. The type's first company unit, else its first squadron unit, else the type
+    // itself, is a named hero or a special weapon in space.
+    bool hero{};
     numeric::LuaNumber max_speed{};           // Max_Speed
     numeric::LuaNumber soft_radius{};         // Custom_Soft_Footprint_Radius (0 when absent)
     numeric::LuaNumber reveal_range{};        // Space_FOW_Reveal_Range (0 when absent)
+    // WTA-28: the half extents of the type's bounds in the plane (project choice: the collision
+    // bounds times Scale_Factor, the placement box of PL-02; 0 without one).
+    numeric::LuaNumber bounds_half_x{};
+    numeric::LuaNumber bounds_half_y{};
     std::vector<AiWeapon> weapons;            // weapon hardpoints, HardPoints order
     std::map<std::uint32_t, numeric::LuaNumber> weapon_damage; // weapon slot -> projectile Damage (DT-02)
     bool squadron{};                          // a squadron company type
+    bool targeting{};                         // EX-31: effective TARGETING behavior
     bool craft{};                             // a squadron member type
     std::uint32_t squadron_units{};           // its Squadron_Units count
     sim::tactical::TypeId squadron_unit{};    // its first craft type
@@ -91,10 +122,17 @@ struct AiType {
     bool initial_state_visible_under_fow{};  // WNO-13: authored object-goal fog exception
     bool last_state_visible_under_fow{};
     std::optional<sim::math::Fixed> tactical_cost; // WAS-26: generic cost, distinct from selected effective price
+    bool unit_ai{}; // PG-03: authored UNIT_AI behavior admits this type to combat perception
+    std::vector<std::uint32_t> previous_base_levels{}; // SAE-02: authored predecessor levels, nearest first
 };
 
+// What the defensive abilities read of a projectile type (WTA-34): its category.
+inline constexpr std::uint32_t ai_projectile_missile = 1U;
+inline constexpr std::uint32_t ai_projectile_rocket = 2U;
+inline constexpr std::uint32_t ai_projectile_mptl_rocket = 4U;
 struct AiContent {
     std::vector<AiType> types;
+    std::map<sim::tactical::TypeId, std::uint32_t> projectile_categories; // projectile object type -> ai_projectile_* bits
     std::map<std::string, std::uint64_t, std::less<>> categories; // upper-case name -> bit
     std::map<std::string, std::uint64_t, std::less<>> properties; // upper-case name -> bit
 };
@@ -121,6 +159,7 @@ struct AiPerception {
     bool campaign_game{true}; // Game.IsCampaignGame (SK-41)
     bool defender{false};     // Variable_Self.IsDefender (SK-43)
     int base_level{1};        // Variable_Self.BaseLevel (SK-44)
+    std::optional<sim::tactical::PlayerId> campaign_defender;
 };
 
 // What the goal system did (#449): a line per plan event (the eye check's per-plan timeline and
@@ -149,6 +188,8 @@ struct AiTickCost {
     std::uint32_t freestore_runs{};  // freestore script instances that ran (all players)
     std::uint32_t reinforcement_candidates{};
     std::uint64_t reinforcement_search_ns{}; // wall-clock diagnostics only; never hashed
+    std::uint32_t object_instances{}; // SOS-42: active attachments, separate from AI plans
+    std::uint32_t object_pumps{};     // SOS-42: strictly due object services
 };
 
 // #957 (owner decision on #896): how the AI's scheduled plan, goal and freestore work is spread
@@ -185,6 +226,7 @@ struct AiSetup {
     AiPerception perception;
     std::uint64_t seed{};
     AiSchedule schedule;
+    bool allow_special_weapons{true}; // WSW-47: frozen match admission for source proposals
     // The freestore script (AIPlayerType SpaceFreeStore, SK-40).
     std::string freestore_module = "Data/Scripts/FreeStore/BusyTacticalFreeStore.lua";
     // The goal system (#449): the map extent, and the AI XML by logical path (required_xml()).
@@ -193,6 +235,15 @@ struct AiSetup {
     std::map<std::string, std::string, std::less<>> xml;
     // Where the goal system writes its journal; none when null.
     std::shared_ptr<AiJournal> journal;
+    // WGT-33: the return/retreat owner supplies eligibility from this completed
+    // snapshot and constructs the ordinary admitted retreat order. Both required.
+    std::function<bool(const sim::tactical::TacticalSnapshot&, sim::tactical::PlayerId)> campaign_can_retreat;
+    std::function<core::Result<authoritative::TacticalOrder>(sim::tactical::PlayerId)> campaign_retreat_order;
+    // WGA-80/81: the campaign owner rebuilds this retained-parent query before
+    // child initialization/load resume; it reads without servicing the parent.
+    std::function<std::optional<numeric::LuaNumber>(std::string_view, sim::tactical::PlayerId)> evaluate_in_galactic_context;
+    // FD-71: owned authoritative scoring, distinct from the derived results view.
+    std::shared_ptr<authoritative::TacticalScoring> scoring;
 };
 
 // The AI XML files the goal system reads (#449), as logical paths.
@@ -211,6 +262,15 @@ struct AiSetup {
 // `modules` holds at least required_modules(), keyed by logical path.
 [[nodiscard]] core::Result<authoritative::ScriptedTacticalSession> create_session(
     sim::tactical::TacticalSession world, const AiSetup& setup, const std::map<std::string, std::string>& modules);
+
+// Prepare the same AI for a campaign-owned child. The scheduler and callback share
+// one host; use the callback after creating/restoring that child's script session.
+struct PreparedAiSession {
+    authoritative::ScriptScheduler scripts;
+    std::function<core::Result<void>(authoritative::ScriptedTacticalSession&)> bind;
+};
+[[nodiscard]] core::Result<PreparedAiSession> prepare_session(
+    const AiSetup& setup, const std::map<std::string, std::string>& modules);
 
 // The plan scripts AI-30 and SAE-03 select for the M2 fixture, and the plan library chain above the
 // freestore's (pgevents, PGTaskForce), as logical paths.

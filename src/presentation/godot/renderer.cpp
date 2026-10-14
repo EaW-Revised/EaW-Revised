@@ -1,6 +1,7 @@
 #include "eawr/presentation/godot/renderer.hpp"
 
 #include "renderer_internal.hpp"
+#include "texture_budget.hpp"
 #include "particle_culling.hpp"
 
 namespace eawr::presentation::godot_backend {
@@ -46,8 +47,8 @@ GodotShaderCache::Stats GodotShaderCache::stats() const noexcept {
     return {impl_->entries.size(), impl_->source_bytes};
 }
 
-GodotRenderer::Impl::Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders)
-    : owner_(owner), shader_cache_(std::move(shaders)) {
+GodotRenderer::Impl::Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders, const bool attach_scene)
+    : attach_scene_(attach_scene), owner_(owner), shader_cache_(std::move(shaders)) {
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (!rendering || owner_.get_world_3d().is_null() || owner_.get_viewport() == nullptr) {
         fail(diagnostic_codes::backend_unavailable,
@@ -63,6 +64,7 @@ GodotRenderer::Impl::Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shade
     fixed_camera = fixed_camera.looking_at(Vector3(), Vector3(0.0F, 1.0F, 0.0F));
     rendering->camera_set_transform(camera_, fixed_camera);
     view_transform_ = fixed_camera;
+    if (!attach_scene_) return;
     rendering->viewport_attach_camera(viewport_, camera_);
     environment_ = rendering->environment_create();
     rendering->environment_set_background(environment_, RenderingServer::ENV_BG_COLOR);
@@ -87,7 +89,7 @@ GodotRenderer::Impl::Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shade
 }
 
 GodotRenderer::Impl::~Impl() {
-    particle_culling::clear_camera(scenario_);
+    if (attach_scene_) particle_culling::clear_camera(scenario_);
     // Fog bindings go first, while every material RID is still valid.
     disable_fog();
     RenderingServer* rendering = RenderingServer::get_singleton();
@@ -104,6 +106,15 @@ GodotRenderer::Impl::~Impl() {
     for (const auto& [name, texture] : shared_textures_) {
         static_cast<void>(name);
         if (texture.is_valid()) rendering->free_rid(texture);
+    }
+    for (const detail::GpuItem& item : shared_gpu_items_) detail::gpu_memory_ledger().remove(item);
+    // Every resource released its pool references above; nothing is left
+    // unless a reference was lost, and then the texture still goes.
+    const std::uint64_t frame = drawn_frame();
+    for (const auto& [key, pooled] : texture_pool_) {
+        static_cast<void>(key);
+        if (pooled.rid.is_valid()) rendering->free_rid(pooled.rid);
+        detail::texture_budget().remove(pooled.item.bytes, frame);
     }
     if (camera_.is_valid()) rendering->free_rid(camera_);
     if (environment_.is_valid()) rendering->free_rid(environment_);
@@ -180,6 +191,7 @@ void GodotRenderer::Impl::set_lighting(const GodotRenderer::LightingState& light
         static_cast<void>(asset);
         if (consumer.shader.is_valid()) apply_lighting_params(*rendering, consumer.material);
     }
+    if (!attach_scene_) return;
     if (!sun_light_.is_valid()) {
         sun_light_ = rendering->directional_light_create();
         sun_instance_ = rendering->instance_create2(sun_light_, scenario_);
@@ -265,7 +277,7 @@ void GodotRenderer::Impl::set_camera(const FixedCamera& camera) {
         Vector3(camera.target[0], camera.target[1], camera.target[2]),
         Vector3(camera.up[0], camera.up[1], camera.up[2]));
     rendering->camera_set_transform(camera_, camera_transform);
-    particle_culling::set_camera(scenario_, camera);
+    if (attach_scene_) particle_culling::set_camera(scenario_, camera);
     view_transform_ = camera_transform;
     for (auto& [entity, instance] : instances_) {
         const auto resource = resources_.find(instance.asset_id);
@@ -346,8 +358,8 @@ void GodotRenderer::Impl::set_camera(const FixedCamera& camera) {
     return core::Result<void>::failure(std::move(diagnostic));
 }
 
-GodotRenderer::GodotRenderer(Node3D& host, std::shared_ptr<GodotShaderCache> shaders)
-    : impl_(std::make_unique<Impl>(host, std::move(shaders))) {}
+GodotRenderer::GodotRenderer(Node3D& host, std::shared_ptr<GodotShaderCache> shaders, const bool attach_scene)
+    : impl_(std::make_unique<Impl>(host, std::move(shaders), attach_scene)) {}
 GodotRenderer::~GodotRenderer() = default;
 GodotRenderer::GodotRenderer(GodotRenderer&&) noexcept = default;
 GodotRenderer& GodotRenderer::operator=(GodotRenderer&&) noexcept = default;
@@ -380,6 +392,41 @@ core::Result<void> GodotRenderer::register_shared_texture_array(
 }
 
 std::size_t GodotRenderer::shared_texture_count() const noexcept { return impl_->shared_texture_count(); }
+
+void GodotRenderer::set_texture_sharing(const bool enabled) noexcept { detail::texture_sharing() = enabled; }
+
+void GodotRenderer::set_device_memory_override(const std::uint64_t bytes) { detail::texture_budget().set_override(bytes); }
+
+void GodotRenderer::disable_texture_budget() { detail::texture_budget().disable(); }
+
+void GodotRenderer::set_texture_mip_drop(const std::uint32_t levels) { detail::texture_budget().set_minimum_drop(levels); }
+
+GodotRenderer::GpuMemory GodotRenderer::gpu_memory() {
+    const detail::GpuTotals totals = detail::gpu_memory_ledger().totals();
+    const auto category = [&](const detail::GpuCategory which) {
+        const detail::GpuCategoryTotals& item = totals[static_cast<std::size_t>(which)];
+        return GpuMemoryCategory{item.live, item.live_bytes, item.unique, item.unique_bytes,
+            item.compressed_bytes, item.uncompressed_bytes, item.uploads, item.reuses};
+    };
+    GpuMemory memory{category(detail::GpuCategory::texture), category(detail::GpuCategory::texture_array),
+        category(detail::GpuCategory::mesh)};
+    const detail::TextureBudget::State budget = detail::texture_budget().state();
+    const auto residency = detail::ResourceResidency::facts();
+    memory.deferred = residency.deferred;
+    memory.admissions = residency.admissions;
+    memory.evictions = residency.evictions;
+    memory.dormant = residency.dormant;
+    memory.admission_failures = residency.admission_failures;
+    memory.budget = {budget.device_bytes, budget.source, budget.texture_budget, budget.other_bytes, budget.resident_bytes,
+        budget.drop, budget.minimum_drop, budget.downsized, budget.over_budget, budget.rebuild_failures,
+        budget.constrained};
+    if (RenderingServer* rendering = RenderingServer::get_singleton()) {
+        memory.device_textures = rendering->get_rendering_info(RenderingServer::RENDERING_INFO_TEXTURE_MEM_USED);
+        memory.device_buffers = rendering->get_rendering_info(RenderingServer::RENDERING_INFO_BUFFER_MEM_USED);
+        memory.device_total = rendering->get_rendering_info(RenderingServer::RENDERING_INFO_VIDEO_MEM_USED);
+    }
+    return memory;
+}
 
 core::Result<void> GodotRenderer::retain(const sim::AssetId asset_id) {
     return impl_->retain(asset_id);
@@ -434,6 +481,11 @@ void GodotRenderer::set_light_scale(const sim::EntityId entity_id, const std::ar
     impl_->set_light_scale(entity_id, rgb);
 }
 
+core::Result<void> GodotRenderer::set_material_vector3(const sim::AssetId asset_id, const std::string_view binding,
+                                                       const std::array<float, 3>& value) {
+    return impl_->set_material_vector3(asset_id, binding, value);
+}
+
 core::Result<void> GodotRenderer::set_material_priority(const sim::AssetId asset_id, const std::int32_t priority) {
     return impl_->set_material_priority(asset_id, priority);
 }
@@ -452,6 +504,14 @@ GodotRenderer::LifecycleCounts GodotRenderer::lifecycle_counts() const noexcept 
 
 std::vector<GodotRenderer::InstanceEvidence> GodotRenderer::instance_evidence() const {
     return impl_->instance_evidence();
+}
+
+std::optional<std::array<float, 12>> GodotRenderer::bone_evidence(const sim::EntityId entity, const std::int32_t bone) const {
+    return impl_->bone_evidence(entity, bone);
+}
+
+void GodotRenderer::set_instance_visible(const sim::EntityId entity, const bool visible) {
+    impl_->set_instance_visible(entity, visible);
 }
 
 void GodotRenderer::set_camera(const FixedCamera& camera) { impl_->set_camera(camera); }

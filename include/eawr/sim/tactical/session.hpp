@@ -4,7 +4,9 @@
 #include "eawr/core/result.hpp"
 #include "eawr/sim/state_hash.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
+#include "eawr/sim/tactical/admission.hpp"
 #include "eawr/sim/tactical/combat.hpp"
+#include "eawr/sim/tactical/content.hpp"
 #include "eawr/sim/tactical/damage.hpp"
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/economy.hpp"
@@ -74,6 +76,9 @@ struct TacticalTick {
     std::vector<AsteroidImpact> asteroid_impacts; // ordered service diagnostics, never hashed
     std::uint64_t asteroid_queries{};
     std::uint64_t asteroid_candidates{};
+    // GC return hand-off: ordered stable IDs with final-blow owners, opt-in shared allocator
+    // sessions only. Tick output, never new tactical state or replay/snapshot bytes.
+    std::vector<std::pair<EntityId, PlayerId>> deaths;
 };
 
 // Deterministic home of one tactical session. Commands are queued by submit() in
@@ -85,7 +90,12 @@ struct TacticalTick {
 // on its craft (#271), decides the battle's outcome (#77), and publishes per-player sensor
 // visibility.
 class TacticalSession final {
+    friend struct checkpoint_detail::Access;
 public:
+    // Child-state v1: content is supplied by the factory; only mutable battle state is saved.
+    [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_checkpoint_state() const;
+    // Apply to a freshly constructed inactive session, never directly to a running battle.
+    [[nodiscard]] core::Result<void> load_checkpoint_state(std::span<const std::uint8_t> bytes);
     TacticalSession(TacticalSession&&) noexcept;
     TacticalSession& operator=(TacticalSession&&) noexcept;
     ~TacticalSession();
@@ -105,25 +115,35 @@ public:
     // (validate_abilities, #76); a unit whose type has no ability profile has no abilities.
     // `economy` is its skirmish's economy (validate_economy, #530): credits, income, the build
     // queues and hyperspace arrival; without it the session has no economy and every buy, cancel
-    // or reinforce is rejected.
+    // or reinforce is rejected. `map_box` is the space map's box, whose low corner both fighter
+    // grids start from (WDF-05); the default lays them from the world origin.
     [[nodiscard]] static core::Result<TacticalSession> create(const TacticalSetup& setup,
         std::span<const SensorProfile> sensors = {}, const DurabilityTable& durability = DurabilityTable{},
         const MotionTable& motion = MotionTable{}, const std::optional<FogRules>& fog = std::nullopt,
         const CombatTable& combat = CombatTable{}, const VictoryRules& victory = VictoryRules{},
         const AbilityTable& abilities = AbilityTable{},
-        const EconomyRules& economy = EconomyRules{});
+        const EconomyRules& economy = EconomyRules{}, const MapBox& map_box = MapBox{});
     // Creates the setup session and submits every recorded command.
     [[nodiscard]] static core::Result<TacticalSession> from_replay(const TacticalReplay& replay,
         std::span<const SensorProfile> sensors = {}, const DurabilityTable& durability = DurabilityTable{},
         const MotionTable& motion = MotionTable{}, const std::optional<FogRules>& fog = std::nullopt,
         const CombatTable& combat = CombatTable{}, const VictoryRules& victory = VictoryRules{},
         const AbilityTable& abilities = AbilityTable{},
-        const EconomyRules& economy = EconomyRules{});
+        const EconomyRules& economy = EconomyRules{}, const MapBox& map_box = MapBox{});
+    // The same two with the content as one value.
+    [[nodiscard]] static core::Result<TacticalSession> create(const TacticalSetup& setup,
+        const TacticalContent& content);
+    [[nodiscard]] static core::Result<TacticalSession> from_replay(const TacticalReplay& replay,
+        const TacticalContent& content);
 
     // Rejects, without changing the session, an unknown or non-commandable issuer, a
     // malformed payload, a command for a tick that has already executed, and a command
     // whose (tick, sequence) does not follow the issuer's previous submission.
     [[nodiscard]] core::Result<void> submit(const PlayerCommand& command);
+    // CP-1/CP-2: trusted binding from agreed setup, never from the incoming payload.
+    // A sealed seat router derives faction_sequence in canonical seat order (ADR-020).
+    [[nodiscard]] core::Result<AdmittedSeatCommand> submit_human(const SeatBinding& binding,
+        const SeatCommand& command, std::uint64_t faction_sequence);
     // Fails without changing the session at completed tick max_ticks, so record() always
     // stays within the replay tick limit.
     [[nodiscard]] core::Result<TacticalTick> step(const PartitionExecutor& executor);
@@ -141,11 +161,19 @@ public:
         std::uint64_t banked_matrix_builds{}; // BK-05 uses a distinct quaternion
         std::uint64_t pad_death_membership_work{}; // WBP-27: queries/comparisons, never hashed
         std::uint64_t concentrate_queries{}, concentrate_candidates{}, concentrate_batches{};
+        std::uint64_t corrupt_queries{}, corrupt_candidates{}, corrupt_recipients{};
     };
     [[nodiscard]] TickWork tick_work() const noexcept;
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] EntityId next_entity_id() const noexcept;
     [[nodiscard]] std::uint64_t rng_state() const noexcept;
+    // Campaign-only policy. Entry content supplies authored times and actor qualifications.
+    [[nodiscard]] core::Result<void> configure_retreat(RetreatConfig config);
+    [[nodiscard]] std::vector<RetreatView> retreat_views() const;
+    [[nodiscard]] const RetreatState& retreat_state() const noexcept;
+    [[nodiscard]] bool midbattle_solve_requested() const noexcept;
+    [[nodiscard]] std::span<const DepartureControl> departure_controls() const noexcept;
+    [[nodiscard]] std::span<const PlayerId> basic_ai_players() const noexcept;
     [[nodiscard]] std::span<const Player> players() const noexcept;
     [[nodiscard]] std::span<const SensorProfile> sensors() const noexcept;
     [[nodiscard]] const DurabilityTable& durability() const noexcept;
@@ -154,6 +182,7 @@ public:
     [[nodiscard]] const CombatTable& combat() const noexcept;
     [[nodiscard]] const VictoryRules& victory() const noexcept;
     [[nodiscard]] const EconomyRules& economy() const noexcept;
+    [[nodiscard]] const MapBox& map_box() const noexcept;
     // #530: each economy player's credits, queues and pool, ascending player ID; empty without
     // economy rules.
     [[nodiscard]] std::span<const PlayerEconomy> ledgers() const noexcept;
@@ -228,6 +257,9 @@ public:
     // A squadron's orders (#457: its combat cell), by team container, or nothing.
     [[nodiscard]] std::optional<SquadronState> squadron_state(EntityId container) const;
     [[nodiscard]] std::size_t pending_command_count() const noexcept;
+    // Accepted commands awaiting execution, in canonical key order. Checkpoint capture uses
+    // this copy to verify that the owner's command log contains the exact pending queue.
+    [[nodiscard]] std::vector<PlayerCommand> pending_commands() const;
     [[nodiscard]] std::vector<std::uint8_t> canonical_state_bytes() const;
     [[nodiscard]] std::string state_sha256() const;
     [[nodiscard]] std::shared_ptr<const TacticalSnapshot> snapshot() const noexcept;

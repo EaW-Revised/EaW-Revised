@@ -49,8 +49,8 @@ constexpr float pane_row_height = 46.0F;
 constexpr double pane_top_offset = 100.0;
 // PU-71: debug build's default component pulse, used by the pool notification.
 constexpr double pulse_seconds = 0.5;
-// PU-70: Selected_Alpha fades the pressed overlay for 0.2 seconds.
-constexpr double press_seconds = 0.2;
+// PU-70: Selected_Alpha is a blend flag, not a duration. No XML fade-duration tag exists.
+constexpr double press_seconds = presentation::ui::command_bar_press_fade_seconds;
 
 [[nodiscard]] Rect2 rect2(const model::PixelRect& rect) {
     return Rect2(static_cast<float>(rect.x), static_cast<float>(rect.y), static_cast<float>(rect.width),
@@ -100,6 +100,13 @@ EawrProductionPanel::~EawrProductionPanel() {
 
 void EawrProductionPanel::setup(Setup setup) {
     setup_ = std::move(setup);
+    tactical_population_.font = setup_.population_font;
+    tactical_population_.cell = setup_.population_cell;
+    tactical_tech_.font = setup_.tech_font;
+    tactical_tech_.cell = setup_.tech_cell;
+    if (setup_.reinforcement_counter) reinforcement_timer_.load(*setup_.reinforcement_counter, setup_.texture);
+    if (setup_.garrison_respawn_counter) garrison_timer_.load(*setup_.garrison_respawn_counter, setup_.texture);
+    if (setup_.population && setup_.texture) tactical_population_.icon = setup_.texture(setup_.population->icon);
     close_art_ = {};
     if (setup_.pane && setup_.pane->close && setup_.texture) {
         const auto& look = *setup_.pane->close;
@@ -351,6 +358,11 @@ void EawrProductionPanel::update_text() {
                   look.right_justified ? HORIZONTAL_ALIGNMENT_RIGHT : HORIZONTAL_ALIGNMENT_LEFT, look.text.colour,
                   look.text.point_size, look.text.outline);
     }
+    if (setup_.population) tactical_population_.update(*this, *setup_.population,
+        String::utf8(view_.tactical_population.c_str()), setup_.placement(), setup_.space());
+    tech_text_ = view_.tactical_tech ? model::tactical_tech_text(setup_.tech_label, *view_.tactical_tech) : std::string{};
+    if (setup_.tactical_tech) tactical_tech_.update(*this, *setup_.tactical_tech,
+        String::utf8(tech_text_.c_str()), setup_.placement(), setup_.space());
     // PU-66: the pool slots' "x<n>" and the population, on the open pane only.
     if (setup_.pane) {
         const model::HudReinforcePane& pane = *setup_.pane;
@@ -430,62 +442,18 @@ void EawrProductionPanel::prepare_art() {
             if (additive) rendering->canvas_item_set_material(art.item, additive_material_->get_rid());
         }
     }
-    // PU-64: immutable fan topology. The vertex shader moves the unfinished rim vertices
-    // onto the current endpoint; the remaining triangles have zero area. No packed buffers
-    // are mutated after submission (which would copy Godot's shared storage on redraw).
-    PackedVector3Array vertices;
-    PackedVector2Array uvs;
-    PackedInt32Array indices;
-    vertices.resize(10);
-    uvs.resize(10);
-    indices.resize(24);
-    vertices.set(0, Vector3(0.5F, 0.5F, 0));
-    uvs.set(0, Vector2(-1, 0));
-    static const std::array<Vector2, 9> rim{
-        Vector2(0.5F, 0), Vector2(1, 0), Vector2(1, 0.5F), Vector2(1, 1), Vector2(0.5F, 1),
-        Vector2(0, 1), Vector2(0, 0.5F), Vector2(0, 0), Vector2(0.5F, 0)};
-    for (int index = 0; index < 9; ++index) {
-        vertices.set(index + 1, Vector3(rim[static_cast<std::size_t>(index)].x, rim[static_cast<std::size_t>(index)].y, 0));
-        uvs.set(index + 1, Vector2(static_cast<float>(index), 0));
-        if (index < 8) {
-            indices.set(index * 3, 0);
-            indices.set(index * 3 + 1, index + 1);
-            indices.set(index * 3 + 2, index + 2);
-        }
-    }
-    Array arrays;
-    arrays.resize(Mesh::ARRAY_MAX);
-    arrays[Mesh::ARRAY_VERTEX] = vertices;
-    arrays[Mesh::ARRAY_TEX_UV] = uvs;
-    arrays[Mesh::ARRAY_INDEX] = indices;
-    dial_mesh_.instantiate();
-    dial_mesh_->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-    Ref<Shader> shader;
-    shader.instantiate();
-    shader->set_code(R"(shader_type canvas_item;
-render_mode blend_add;
-uniform float completion = 0.0;
-void vertex() {
-    vec2 rim[9] = vec2[9](vec2(0.5,0.0),vec2(1.0,0.0),vec2(1.0,0.5),vec2(1.0,1.0),
-        vec2(0.5,1.0),vec2(0.0,1.0),vec2(0.0,0.5),vec2(0.0,0.0),vec2(0.5,0.0));
-    float step = min(UV.x, clamp(completion, 0.0, 1.0) * 8.0);
-    int segment = int(floor(max(step, 0.0)));
-    UV = UV.x < 0.0 ? vec2(0.5) : mix(rim[segment], rim[min(segment+1,8)], fract(step));
-    VERTEX = UV;
-}
-)");
+    dial_renderer_.prepare<PackedVector3Array, PackedVector2Array, PackedInt32Array>();
     dial_art_.resize(setup_.queue.size());
     for (std::size_t index = 0; index < dial_art_.size(); ++index) {
         auto& art = dial_art_[index];
         if (setup_.queue[index].build.empty() || !setup_.texture) continue;
         art.texture = setup_.texture(setup_.queue[index].build);
         if (art.texture.is_null()) continue;
-        art.material.instantiate();
-        art.material->set_shader(shader);
+        art.material = dial_renderer_.material();
         art.item = rendering->canvas_item_create();
         rendering->canvas_item_set_parent(art.item, additive_item_);
         rendering->canvas_item_set_material(art.item, art.material->get_rid());
-        rendering->canvas_item_add_mesh(art.item, dial_mesh_->get_rid(), Transform2D(), Color(1,1,1,1), art.texture->get_rid());
+        dial_renderer_.submit(*rendering, art.item, art.texture);
         rendering->canvas_item_set_visible(art.item, false);
     }
 }
@@ -527,14 +495,30 @@ void EawrProductionPanel::show_button(const std::size_t layer, const bool visibl
 
 void EawrProductionPanel::draw_dial(const std::size_t component, const double completion) {
     auto& art = dial_art_[component];
-    if (!art.item.is_valid() || completion <= 0.0) return;
-    art.material->set_shader_parameter(completion_parameter_, completion);
+    if (!art.item.is_valid() || completion >= 1.0) return;
+    BuildQueueDialRenderer::set_percent(art.material,
+        static_cast<int>(std::clamp(completion, 0.0, 1.0) * 100.0));
     RenderingServer::get_singleton()->canvas_item_set_visible(art.item, true);
     ++dials_drawn_;
 }
 
 void EawrProductionPanel::_draw() {
     if (!setup_.placement || !setup_.texture) return;
+    tactical_population_.draw_icon(*this);
+    // HCB-62: this row is placed from the viewport's top-left, independently
+    // of the lower-left tactical shell and its selected-unit card slots.
+    const auto timer_space = setup_.space();
+    const float timer_scale = static_cast<float>(timer_space.scale);
+    Vector2 timer_centre(30.0F * timer_scale, 60.0F * timer_scale);
+    if (setup_.garrison_respawn_counter) {
+        garrison_timer_.draw(*this, *setup_.garrison_respawn_counter, timer_centre,
+            timer_space.scale, view_.garrison_progress);
+        garrison_timer_created_ = garrison_timer_created_ || view_.garrison_progress.has_value();
+        if (garrison_timer_created_ && garrison_timer_.icon.is_valid()) timer_centre.x +=
+            (static_cast<float>(garrison_timer_.icon->get_width()) * setup_.garrison_respawn_counter->button.scale + 5.0F) * timer_scale;
+    }
+    if (setup_.reinforcement_counter) reinforcement_timer_.draw(*this, *setup_.reinforcement_counter,
+        timer_centre, timer_space.scale, view_.reinforcement_progress);
     close_art_rect_.reset();
     RenderingServer::get_singleton()->canvas_item_clear(additive_item_);
     reinforce_drawn_ = flash_drawn_ = false;
@@ -572,8 +556,9 @@ void EawrProductionPanel::_draw() {
             if (texture.is_null()) continue;
             const Vector2 size = texture->get_size();
             const Rect2 quad = screen(model::button_quad(look.button, size.x, size.y));
-            draw_texture_rect(texture, quad, false, colour(setup_.queue_tint));
-            // PU-64: only a front entry has percentage text and a growing clock dial.
+            // Presentation policy for incomplete mods: keep the icon visible without a tint.
+            draw_texture_rect(texture, quad, false, setup_.queue_tint ? colour(*setup_.queue_tint) : Color(1, 1, 1, 1));
+            // PU-64: only a front entry has percentage text and the remaining-sector veil.
             if (queued.percent && !look.build.empty()) draw_dial(queued.component, queued.progress);
         }
     }
@@ -685,7 +670,17 @@ std::string EawrProductionPanel::report_json() const {
            << ", \"warmed_art_frames\": " << warmed_art_frames_ << ", \"art_allocations\": " << art_allocations_
            << ", \"art_buffer_work\": " << art_buffer_work_
            << ", \"credits\": " << (view_.credits ? json(*view_.credits) : std::string("null"))
-           << ", \"population\": " << json(view_.population) << ", \"queue\": [";
+           << ", \"population\": " << json(view_.population)
+           << ", \"tactical_population\": " << json(view_.tactical_population)
+           << ", \"tactical_population_rect\": " << rect_json(tactical_population_.text_rect)
+           << ", \"tactical_population_icon_rect\": " << rect_json(tactical_population_.icon_rect)
+           << ", \"tactical_tech\": " << json(tech_text_)
+           << ", \"tactical_tech_rect\": " << rect_json(tactical_tech_.text_rect)
+           << ", \"garrison_timer_progress\": " << (view_.garrison_progress ? std::to_string(*view_.garrison_progress) : "null")
+           << ", \"garrison_timer_rect\": " << rect_json(garrison_timer_.icon_rect)
+           << ", \"reinforcement_timer_progress\": " << (view_.reinforcement_progress ? std::to_string(*view_.reinforcement_progress) : "null")
+           << ", \"reinforcement_timer_rect\": " << rect_json(reinforcement_timer_.icon_rect)
+           << ", \"queue\": [";
     for (std::size_t index = 0; index < view_.queue.size(); ++index) {
         const QueueView& queued = view_.queue[index];
         std::string icon;

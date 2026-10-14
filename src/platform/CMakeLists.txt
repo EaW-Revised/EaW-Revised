@@ -2,14 +2,14 @@ include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
 
 find_package(Threads REQUIRED)
 
-add_library(eawr_platform STATIC ${EAWR_PLATFORM_SOURCES} ${EAWR_PLATFORM_ROOT_ONLY_SOURCES})
+add_library(eawr_platform STATIC ${EAWR_PLATFORM_SOURCES} ${EAWR_PLATFORM_ROOT_ONLY_SOURCES} ${EAWR_PLATFORM_GALACTIC_SOURCES})
 add_library(eawr::platform ALIAS eawr_platform)
 target_include_directories(
     eawr_platform
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
-target_link_libraries(eawr_platform PUBLIC eawr::core eawr::sim eawr::script_authoritative PRIVATE Threads::Threads)
+target_link_libraries(eawr_platform PUBLIC eawr::core eawr::sim eawr::script_authoritative PRIVATE Threads::Threads eawr::campaign eawr::checkpoint)
 target_compile_features(eawr_platform PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_platform)
 

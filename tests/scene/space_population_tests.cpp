@@ -653,15 +653,34 @@ void projectile_effect_contracts() {
     auto prop = effect;
     prop.object_id = "Prop";
     scene.placements.push_back(prop);
-    const auto decisions = eawr::scene::classify_space_placements(scene,
-        [](const std::string_view id) -> std::optional<eawr::scene::SpaceObjectTags> {
-            return eawr::scene::SpaceObjectTags{id == "Prop" ? "SpaceProp" : "Projectile", false, false, false};
-        });
+    auto unit = effect;
+    unit.object_id = "Swarm";
+    scene.placements.push_back(unit);
+    auto ordinary = unit;
+    ordinary.object_id = "OrdinaryUnit";
+    scene.placements.push_back(ordinary);
+    for (const auto& malformed : {missing, invalid, broken}) {
+        auto negative = malformed;
+        negative.object_id = "Swarm";
+        scene.placements.push_back(negative);
+    }
+    auto propless = unit;
+    propless.effects.clear();
+    scene.placements.push_back(propless);
+    const auto tags = [](const std::string_view id) -> std::optional<eawr::scene::SpaceObjectTags> {
+        return eawr::scene::SpaceObjectTags{id == "Prop" ? "SpaceProp" : id == "Round" ? "Projectile" : "SpaceUnit", false, false, false};
+    };
+    const auto decisions = eawr::scene::classify_space_placements(scene, tags);
     expect(decisions[0].role == SpaceRole::drawn && decisions[0].drawn_surfaces.empty(),
         "MD-06: projectile proxies enter the live emitter path without mesh surfaces");
     for (std::size_t index = 1; index < decisions.size(); ++index) {
         expect(decisions[index].role == SpaceRole::not_drawable,
-            "MD-06: missing effects, invalid transforms, decode failures and other object types stay rejected");
+            "map placements and ordinary SpaceUnit owners retain mesh requirements");
+        eawr::scene::Scene only;
+        only.placements.push_back(scene.placements[index]);
+        const auto ability = eawr::scene::classify_space_placements(only, tags, true).front();
+        expect(ability.role == (index == 5 || index == 6 ? SpaceRole::drawn : SpaceRole::not_drawable),
+            "ability proxy owners still reject missing effects, invalid transforms and decode failures");
     }
 }
 

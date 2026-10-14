@@ -5,6 +5,8 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -83,7 +85,11 @@ void test_validation() {
     expect(!tactical::validate_motion(still), "a zero speed is rejected");
     auto fast = foc_table();
     fast.profiles[0].turn_in_place_slowdown = decimal("0.5");
-    expect(!tactical::validate_motion(fast), "a slowdown below 1 is rejected");
+    expect(static_cast<bool>(tactical::validate_motion(fast)), "MV-20: a positive slowdown below 1 is supported");
+    fast.profiles[0].turn_in_place_slowdown = Fixed{};
+    expect(!tactical::validate_motion(fast), "MV-20: a zero duration scale is rejected");
+    fast.profiles[0].turn_in_place_slowdown = units(-1);
+    expect(!tactical::validate_motion(fast), "MV-20: a negative duration scale is rejected");
     auto flat = foc_table();
     flat.rules.arc_degrees = Fixed{};
     expect(!tactical::validate_motion(flat), "a zero arc angle is rejected");
@@ -94,8 +100,11 @@ void test_validation() {
     backwards.profiles[0].roll_rate = decimal("-0.1");
     expect(!tactical::validate_motion(backwards), "a negative roll rate is rejected");
     auto steep = foc_table();
-    steep.profiles[0].bank_angle = units(91);
-    expect(!tactical::validate_motion(steep), "a bank above 90 degrees is rejected");
+    for (const auto angle : {91, 360, -40}) {
+        steep.profiles[0].bank_angle = units(angle);
+        expect(static_cast<bool>(tactical::validate_motion(steep)), "BK-06: authored bank angles outside 0..90 load");
+        expect(steep.profiles[0].bank_angle == units(angle), "BK-06: validation preserves the authored bank angle");
+    }
     auto level = foc_table();
     level.profiles[0].roll_rate = Fixed{};
     level.profiles[0].bank_angle = Fixed{};
@@ -182,6 +191,26 @@ void test_rules() {
 }
 
 // MV-01/20/30: the three authored super capitals, including the smallest turn rate.
+void test_turn_duration_scales() {
+    for (const auto factor : {decimal("0.5"), units(2048)}) {
+        auto table = foc_table();
+        table.profiles.front().turn_in_place_slowdown = factor;
+        expect(static_cast<bool>(tactical::validate_motion(table)), "MV-20: positive authored factors have no invented range cap");
+        const auto& profile = table.profiles.front();
+        const auto face = tactical::plan_face(profile, 0, at(0, 0, 0), Fixed{}, at(0, 100, 0));
+        expect(face && face.value().kind == tactical::MotionKind::turn, "MV-20: authored duration scale plans a face order");
+        if (!face) continue;
+        const auto duration = math::multiply(math::divide(units(90), profile.rate_of_turn).value(), factor).value();
+        expect(face.value().nodes.back().frame == duration, "MV-20: face duration preserves the authored scale exactly");
+        const auto first = tactical::sample_motion(face.value(), 1, Vec3{}, Fixed{});
+        const auto expected = math::divide(profile.rate_of_turn, factor).value();
+        expect(first && !first.value().finished && near(first.value().yaw, expected, 180),
+            "MV-20: a subunit or large scale samples the corresponding turn rate");
+        const auto final = tactical::sample_motion(face.value(), static_cast<std::uint64_t>(duration.trunc_to_integer()), Vec3{}, Fixed{});
+        expect(final && final.value().finished && final.value().yaw == units(90), "MV-20: scaled face ends on its requested heading");
+    }
+}
+
 void test_super_capital_math() {
     for (const auto& [name, speed, turn, bank] : {
             std::tuple{"Eclipse_Super_Star_Destroyer", "0.3", "0.01", 2},
@@ -255,6 +284,35 @@ void test_bank_rules() {
     expect(bank(corvette(), "-14.99", "0", "1.5") == units(-15), "BK-03: the roll stops on the bank angle");
     // A frame without a turn eases back: target 0, step 0.24 x 10 / 15 = 0.16.
     expect(near(bank(corvette(), "-10", "30", "30"), decimal("-9.84"), 4), "BK-03: without a turn the roll eases back");
+    auto modded = corvette();
+    modded.bank_angle = units(360);
+    expect(near(bank(modded, "-300", "0", "1.5"), decimal("59.76"), 8),
+        "BK-06: the current roll wraps before using the authored target and easing divisor");
+    expect(bank(modded, "-180", "0", "1.5") == bank(modded, "180", "0", "1.5"),
+        "BK-06: minus 180 is read as plus 180");
+    Fixed spinning_roll{};
+    bool crossed = false;
+    for (int frame = 0; frame < 1600; ++frame) {
+        const auto next = tactical::bank_roll(modded, spinning_roll, Fixed{}, decimal("1.5"));
+        expect(static_cast<bool>(next), "BK-06: a sustained bank-360 turn advances");
+        if (!next) break;
+        crossed = crossed || (spinning_roll < units(-170) && next.value() > units(170));
+        spinning_roll = next.value();
+        if (frame == 1199) {
+            expect(near(spinning_roll, decimal("141.5249"), 100000),
+                "BK-06: the turn keeps spinning after crossing minus 180");
+        }
+    }
+    expect(crossed && near(spinning_roll, decimal("45.5249"), 100000),
+        "BK-06: a sustained turn wraps and keeps rolling instead of settling at minus 360");
+    modded.bank_angle = units(180);
+    expect(near(bank(modded, "-180", "0", "1.5"), decimal("179.76"), 8),
+        "BK-06: a bank of 180 resumes from plus 180 on the frame after reaching minus 180");
+    modded.bank_angle = units(-40);
+    expect(near(bank(modded, "0", "0", "1.5"), decimal("0.024"), 4),
+        "BK-06: a negative bank reverses the target and uses the minimum easing share");
+    expect(near(bank(modded, "0", "0", "-1.5"), decimal("-0.024"), 4),
+        "BK-06: a negative bank preserves the mirrored right-turn target");
     auto flat = corvette();
     flat.bank_angle = Fixed{};
     expect(bank(flat, "0", "0", "1.5") == Fixed{}, "BK-01: a zero bank angle never rolls");
@@ -346,10 +404,11 @@ struct Run {
     std::vector<std::string> hashes; // tick,sha256 rows 1..N
     std::vector<std::vector<tactical::UnitState>> units;
     std::vector<std::string> events;
+    std::string final_without_waypoint_identity; // Synthetic ordinary-move fixture re-review only.
 };
 
 [[nodiscard]] std::optional<Run> run(tactical::TacticalSession session, const std::uint64_t ticks,
-    const std::size_t workers, const bool scramble) {
+    const std::size_t workers, const bool scramble, const bool review_waypoint_identity = false) {
     if (scramble) session.scramble_storage_for_testing();
     const eawr::platform::ThreadWorkerAdapter executor(workers);
     Run result;
@@ -376,6 +435,16 @@ struct Run {
                 + std::string(tactical::to_string(event.kind)) + "," + std::string(tactical::to_string(event.order)));
         }
         if (scramble) session.scramble_storage_for_testing();
+    }
+    if (review_waypoint_identity) {
+        // These two ordinary-move fixtures have no other optional tail after WYPT.
+        // Retained empty coordinator routes must be their only canonical change.
+        auto bytes = session.canonical_state_bytes();
+        constexpr std::array<std::uint8_t, 4> tag{'W', 'Y', 'P', 'T'};
+        const auto tail = std::find_end(bytes.begin(), bytes.end(), tag.begin(), tag.end());
+        expect(tail != bytes.end(), "WYPT v2: ordinary-move fixture retains coordinator identity");
+        if (tail != bytes.end()) bytes.erase(tail, bytes.end());
+        result.final_without_waypoint_identity = eawr::sim::sha256_hex(bytes);
     }
     return result;
 }
@@ -421,7 +490,7 @@ struct Run {
             auto session = tactical::TacticalSession::from_replay(replay, {}, {}, foc_table());
             expect(static_cast<bool>(session), name + " replays");
             if (!session) return std::nullopt;
-            auto result = run(std::move(session).value(), replay.final_tick_count, workers, scramble);
+            auto result = run(std::move(session).value(), replay.final_tick_count, workers, scramble, true);
             expect(result.has_value(), name + ": every step succeeds");
             if (!result) return std::nullopt;
             if (!first) {
@@ -529,6 +598,8 @@ void test_bank_session() {
 void test_fixtures(const std::filesystem::path& fixtures, const bool regenerate) {
     const auto moved = check_fixture(fixtures, "tactical-motion", single_move(), regenerate);
     if (moved) {
+        expect(moved->final_without_waypoint_identity == "3e2691dd8cd34ec717b956702dd5197227623fd3330775169e12884f8d3907b1",
+            "WYPT v2: the ordinary-move fixture differs only by retained waypoint identity bytes");
         const auto& frames = moved->units;
         const auto corvette_at = [&](const std::size_t tick) { return *unit_of(frames[tick], 1); };
         const auto frigate_at = [&](const std::size_t tick) { return *unit_of(frames[tick], 2); };
@@ -545,6 +616,8 @@ void test_fixtures(const std::filesystem::path& fixtures, const bool regenerate)
     }
     const auto blocked = check_fixture(fixtures, "tactical-motion-blocked", blocked_path(), regenerate);
     if (blocked) {
+        expect(blocked->final_without_waypoint_identity == "f17028092649a965bb4c423fef673f4af45a6d1ea565e252e71780c2b9174425",
+            "WYPT v2: the blocked-move fixture differs only by retained waypoint identity bytes");
         bool still = true;
         for (const auto& frame : blocked->units) {
             for (const auto& unit : frame) {
@@ -582,6 +655,269 @@ void test_fixtures(const std::filesystem::path& fixtures, const bool regenerate)
     }
 }
 
+void test_waypoints() {
+    auto table = foc_table();
+    table.rules.max_waypoints = 6;
+    tactical::TacticalReplay replay;
+    replay.setup = setup({{1, corvette_type, 1, at(0, 0, 0), yaw(0), {}}});
+    replay.final_tick_count = 600;
+    replay.commands = {
+        command(0, 1, 0, 1, tactical::MovePayload{at(300, 0, 0), true, true}),
+        command(0, 1, 1, 1, tactical::MovePayload{at(600, 0, 0), false, true}),
+        command(0, 1, 2, 1, tactical::MovePayload{at(600, 0, 0), false, true}),
+        command(0, 1, 3, 1, tactical::MovePayload{at(900, 0, 0), false, true}),
+    };
+    const auto encoded = tactical::write_replay(replay);
+    const auto decoded = encoded ? tactical::parse_replay(encoded.value(), "waypoint-contract")
+                                : eawr::core::Result<tactical::TacticalReplay>::failure(encoded.error());
+    expect(decoded && decoded.value().commands == replay.commands, "HCB-60: append tails round-trip including duplicate input");
+    if (encoded) {
+        auto unsupported = encoded.value();
+        unsupported[unsupported.size() - 4] = 2;
+        expect(!tactical::parse_replay(unsupported, "unsupported-waypoint-flags"),
+            "HCB-60: unsupported append flags are rejected instead of silently reinterpreted");
+    }
+    std::optional<Run> first;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto session = tactical::TacticalSession::from_replay(replay, {}, {}, table);
+        expect(static_cast<bool>(session), "HCB-58: queued movement session starts");
+        if (!session) continue;
+        const auto result = run(std::move(session).value(), replay.final_tick_count, workers, true);
+        expect(result && near(result->units.back()[0].position.x, units(900), 16 * one), "HCB-58: queued legs finish at the last distinct destination");
+        if (!result) continue;
+        if (first) expect(result->hashes == first->hashes && result->events == first->events,
+            "HCB-59: waypoint state and events are identical across partition counts and storage order");
+        else first = result;
+    }
+    {
+        auto reused = replay;
+        // The second ship's authored turning arc finishes after tick 400 (near tick 475).
+        reused.final_tick_count = 600;
+        reused.setup.units.push_back({2, corvette_type, 1, at(0, 100, 0), yaw(0), {}});
+        reused.commands = {command(0, 1, 1, 1, tactical::MovePayload{at(300, 0, 0)}),
+            command(1, 1, 2, 1, tactical::MovePayload{at(600, 0, 0), false, true})};
+        reused.commands.front().units = {1, 2};
+        std::optional<Run> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto created = tactical::TacticalSession::from_replay(reused, {}, {}, table);
+            if (!created) { expect(false, "HCB-59: reuse session starts"); continue; }
+            auto session = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(session.step(executor) && session.step(executor), "HCB-59: subset queue admitted");
+            const auto snapshot = session.snapshot();
+            expect(snapshot->instances().size() == 2 && snapshot->instances()[0].waypoint_points.size() == 1
+                && snapshot->instances()[1].waypoint_points == snapshot->instances()[0].waypoint_points,
+                "HCB-59/OF-05: unselected coordinator member retains and publishes the same queued point");
+            const auto bytes = session.canonical_state_bytes();
+            session.scramble_storage_for_testing();
+            expect(session.canonical_state_bytes() == bytes, "HCB-59: coordinator identity survives storage rebuilding");
+            const auto result = run(std::move(session), reused.final_tick_count - 2, workers, true);
+            expect(result && near(result->units.back()[0].position.x, units(600), 16 * one)
+                && near(result->units.back()[1].position.x, units(600), 16 * one)
+                && result->units.back()[0].position == result->units[result->units.size() - 2][0].position
+                && result->units.back()[1].position == result->units[result->units.size() - 2][1].position,
+                "HCB-59: selected and unselected members complete and stop at the added destination");
+            if (result && reference) expect(result->hashes == reference->hashes && result->events == reference->events,
+                "HCB-59: coordinator reuse is equal on 1/2/4/8 workers");
+            else reference = result;
+        }
+    }
+    for (const tactical::CommandPayload replacement : std::vector<tactical::CommandPayload>{
+            tactical::MovePayload{at(-300, 0, 0)}, tactical::StopPayload{}, tactical::AttackPayload{2},
+            tactical::AttackMovePayload{at(-300, 0, 0)}, tactical::GuardPayload{at(-300, 0, 0)}}) {
+        auto cancelled = replay;
+        cancelled.setup.units.push_back({2, station_type, 2, at(1000, 0, 0), yaw(0), {}});
+        cancelled.commands.push_back(command(0, 1, 4, 1, replacement));
+        auto session = tactical::TacticalSession::from_replay(cancelled, {}, {}, table);
+        const eawr::platform::ThreadWorkerAdapter executor(2);
+        expect(session && session.value().step(executor), "HCB-58: replacement order executes");
+        if (!session) continue;
+        expect(session.value().snapshot()->instances().front().waypoint_points.empty(),
+            "HCB-58: replacement orders remove every retained queued point");
+    }
+    {
+        auto separated = replay;
+        separated.setup.units.push_back({2, acclamator_type, 1, at(0, 10, 0), yaw(0), {}});
+        separated.commands.resize(2);
+        for (auto& queued : separated.commands) queued.units = {1, 2};
+        auto mixed = table;
+        mixed.profiles[1].max_speed = decimal("0.5");
+        auto session = tactical::TacticalSession::from_replay(separated, {}, {}, mixed);
+        const auto result = session ? run(std::move(session).value(), 250, 4, true) : std::nullopt;
+        expect(result && result->units.back()[0].order.destination == at(600, 0, 0)
+            && result->units.back()[1].order.destination == at(300, 0, 0),
+            "HCB-59: a fast formation advances while the slow formation is still on its first point");
+    }
+    {
+        auto rebuilt = tactical::TacticalSession::from_replay(replay, {}, {}, table);
+        const eawr::platform::ThreadWorkerAdapter executor(2);
+        expect(rebuilt && rebuilt.value().step(executor), "HCB-60: queue exists before storage rebuild");
+        if (rebuilt) {
+            const auto bytes = rebuilt.value().canonical_state_bytes();
+            constexpr std::array<std::uint8_t, 4> tag{'W', 'Y', 'P', 'T'};
+            expect(std::search(bytes.begin(), bytes.end(), tag.begin(), tag.end()) != bytes.end(),
+                "HCB-60: rebuild test witnesses a nonempty WYPT block");
+            rebuilt.value().scramble_storage_for_testing();
+            expect(rebuilt.value().canonical_state_bytes() == bytes,
+                "HCB-60: a nonempty queue is byte-identical across storage rebuild");
+        }
+    }
+    for (const bool killed : {false, true}) {
+        auto removed = replay;
+        removed.commands.resize(2);
+        if (killed) removed.commands.push_back(command(1, 1, 2, 1,
+            tactical::DamagePayload{units(100), tactical::hull_target}));
+        tactical::DurabilityTable durability;
+        durability.profiles = {{corvette_type, units(10), std::nullopt, false, {}}};
+        auto created = tactical::TacticalSession::from_replay(removed, {}, durability, table);
+        expect(static_cast<bool>(created), "HCB-59: queued removal session starts");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        const eawr::platform::ThreadWorkerAdapter executor(2);
+        expect(static_cast<bool>(session.step(executor)), "HCB-59: retained queue is admitted before removal");
+        constexpr std::array<std::uint8_t, 4> tag{'W', 'Y', 'P', 'T'};
+        const auto queued = session.canonical_state_bytes();
+        expect(std::search(queued.begin(), queued.end(), tag.begin(), tag.end()) != queued.end(),
+            "HCB-59: removed unit initially has a retained queue");
+        if (!killed) expect(static_cast<bool>(session.stage_remove(1)), "HCB-59: queued unit can be removed");
+        for (unsigned tick = 1; tick < 250; ++tick) {
+            const auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "HCB-59: removal does not leave an invalid resumed order");
+            if (!stepped) break;
+            for (const auto& event : stepped.value().snapshot->events()) {
+                expect(event.order != tactical::OrderKind::move,
+                    "HCB-59: a dead or removed unit emits no resumed-leg order event");
+            }
+        }
+        const auto bytes = session.canonical_state_bytes();
+        expect(session.units().empty() && std::search(bytes.begin(), bytes.end(), tag.begin(), tag.end()) == bytes.end(),
+            "HCB-59: death and removal drop the route without advancing it");
+    }
+    {
+        // FD-60/63: a real team mind consumes completion after member locomotion/targeting.
+        constexpr tactical::TypeId craft_type = 2001, team_type = 2002;
+        auto teams = table;
+        tactical::CraftProfile craft;
+        craft.type_id = craft_type;
+        craft.max_speed = decimal("5.4");
+        craft.min_speed = decimal("1.8");
+        craft.rate_of_turn = units(6);
+        craft.lift = units(6);
+        craft.thrust = decimal("0.2");
+        craft.roll_rate = units(6);
+        craft.bank_angle = units(70);
+        craft.strafe_distance = units(200);
+        teams.squadrons.craft = {craft};
+        teams.squadrons.squadrons = {{team_type, {craft_type, craft_type},
+            {at(0, 0, 0), at(-10, 10, 0)}, units(1000), units(200), units(300), units(20)}};
+        auto team_replay = replay;
+        team_replay.setup = setup({{10, team_type, 1, at(0, 0, 0), yaw(0), {}},
+            {11, craft_type, 1, at(0, 0, 0), yaw(0), {}},
+            {12, craft_type, 1, at(-10, 10, 0), yaw(0), {}}});
+        team_replay.setup.squadrons = {{10, {11, 12}}};
+        team_replay.commands = {command(0, 1, 0, 10, tactical::MovePayload{at(300, 0, 0), false, true}),
+            command(0, 1, 1, 11, tactical::MovePayload{at(900, 0, 0), false, true})};
+        auto ordinary_replay = team_replay;
+        ordinary_replay.commands = {command(0, 1, 0, 10, tactical::MovePayload{at(900, 0, 0)})};
+        auto ordinary = tactical::TacticalSession::from_replay(ordinary_replay, {}, {}, teams);
+        expect(static_cast<bool>(ordinary), "FD-60/63: ordinary final-point control starts");
+        const eawr::platform::ThreadWorkerAdapter control_executor(1);
+        if (ordinary) for (unsigned tick = 0; tick < 600; ++tick) {
+            expect(static_cast<bool>(ordinary.value().step(control_executor)), "FD-60/63: ordinary final-point control steps");
+        }
+        const auto final_point = ordinary ? ordinary.value().squadron_state(10) : std::nullopt;
+        expect(final_point && final_point->mode == tactical::SquadronMode::idle,
+            "FD-60/63: ordinary final-point control completes");
+        for (const auto append_target : {11U, 10U}) {
+            std::vector<std::string> baseline;
+            team_replay.commands[1].units = {append_target};
+            for (const auto workers : {1U, 2U, 4U, 8U}) {
+                auto created = tactical::TacticalSession::from_replay(team_replay, {}, {}, teams);
+                expect(static_cast<bool>(created), "FD-60/63: queued squadron session starts");
+                if (!created) continue;
+                auto session = std::move(created).value();
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                bool moving_first = false, moving_next = false;
+                std::vector<std::string> hashes;
+                for (unsigned tick = 0; tick < 600; ++tick) {
+                    const auto stepped = session.step(executor);
+                    expect(static_cast<bool>(stepped), "FD-60/63: queued squadron tick succeeds");
+                    if (!stepped) break;
+                    hashes.push_back(stepped.value().state_sha256);
+                    const auto mind = session.squadron_state(10);
+                    expect(mind.has_value(), "FD-60/63: team completion uses the squadron mind");
+                    if (mind) {
+                        moving_first |= mind->mode == tactical::SquadronMode::move && mind->anchor == at(300, 0, 0);
+                        moving_next |= mind->mode == tactical::SquadronMode::move && mind->anchor == at(900, 0, 0);
+                    }
+                    session.scramble_storage_for_testing();
+                }
+                expect(moving_first && moving_next, "HCB-59/FD-60/63: craft- and team-addressed appends advance the existing team");
+                const auto mind = session.squadron_state(10);
+                // FM idle holding can adjust the anchor after arrival; compare the ordinary final-point control.
+                expect(mind && final_point && mind->mode == tactical::SquadronMode::idle && mind->anchor == final_point->anchor,
+                    "FD-60/63: squadron completes its queued final leg");
+                const auto instances = session.snapshot()->instances();
+                const auto instance = std::find_if(instances.begin(), instances.end(), [](const auto& view) { return view.entity_id == 10; });
+                expect(instance != instances.end() && instance->waypoint_points.empty(),
+                    "FD-60/63: completed squadron queue has no display points");
+                if (baseline.empty()) baseline = hashes;
+                else expect(hashes == baseline, "FD-60/63: team queue advancement is equal on 1/2/4/8 workers");
+            }
+        }
+    }
+    {
+        auto departed = replay;
+        departed.commands.resize(2);
+        departed.commands.push_back({{1, 1, 2}, {}, tactical::QuitPayload{}});
+        auto created = tactical::TacticalSession::from_replay(departed, {}, {}, table);
+        expect(static_cast<bool>(created), "HCB-59: retained-leg departure session starts");
+        if (created) {
+            auto session = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(2);
+            for (unsigned tick = 0; tick < 600; ++tick) {
+                const auto stepped = session.step(executor);
+                expect(static_cast<bool>(stepped), "HCB-59: retained-leg departure session steps");
+                if (!stepped) break;
+                if (tick != 0) for (const auto& event : stepped.value().snapshot->events()) {
+                    expect(event.order != tactical::OrderKind::move,
+                        "HCB-59: resumed legs emit neither accepted nor rejected player-command events");
+                }
+            }
+        }
+    }
+    table.rules.max_waypoints = 2;
+    auto bounded = tactical::TacticalSession::from_replay(replay, {}, {}, table);
+    const auto capacity = bounded ? run(std::move(bounded).value(), 600, 1, false) : std::nullopt;
+    expect(capacity && near(capacity->units.back()[0].position.x, units(600), 16 * one),
+        "HCB-58: capacity two ignores later destinations without replacing the active leg");
+    table.rules.max_waypoints = 6;
+    replay.commands = {
+        command(0, 1, 0, 1, tactical::MovePayload{at(300, 0, 0), false, true}),
+        command(0, 1, 1, 1, tactical::MovePayload{at(600, 0, 0), false, true}),
+        command(0, 1, 2, 1, tactical::MovePayload{at(379, 0, 0), false, true}),
+    };
+    auto looping = tactical::TacticalSession::from_replay(replay, {}, {}, table);
+    const auto loop = looping ? run(std::move(looping).value(), 600, 4, true) : std::nullopt;
+    expect(loop && loop->units[550][0].position != loop->units[600][0].position,
+        "HCB-58: a point within the strict loop radius keeps the marked segment moving");
+    replay.commands.push_back(command(300, 1, 3, 1, tactical::StopPayload{}));
+    auto stopped = tactical::TacticalSession::from_replay(replay, {}, {}, table);
+    const auto stop = stopped ? run(std::move(stopped).value(), 600, 2, true) : std::nullopt;
+    expect(stop && stop->units[400][0].position == stop->units[600][0].position,
+        "HCB-58: stop cancels a repeating route");
+    replay.commands = {
+        command(0, 1, 0, 1, tactical::MovePayload{at(300, 0, 0), false, true}),
+        command(0, 1, 1, 1, tactical::MovePayload{at(600, 0, 0), false, true}),
+        command(0, 1, 2, 1, tactical::MovePayload{at(380, 0, 0), false, true}),
+    };
+    auto boundary = tactical::TacticalSession::from_replay(replay, {}, {}, table);
+    const auto edge = boundary ? run(std::move(boundary).value(), 900, 1, false) : std::nullopt;
+    expect(edge && near(edge->units.back()[0].position.x, units(380), 16 * one)
+        && edge->units[850][0].position == edge->units[900][0].position,
+        "HCB-58: exactly 80 planar units appends an ordinary terminal point");
+}
+
 } // namespace
 
 int main(const int argc, char** argv) {
@@ -590,8 +926,10 @@ int main(const int argc, char** argv) {
         std::cerr << "usage: tactical_motion_tests <fixture directory> [--regenerate]\n";
         return 2;
     }
+    test_waypoints();
     test_validation();
     test_rules();
+    test_turn_duration_scales();
     test_super_capital_math();
     test_bank_rules();
     test_bank_session();

@@ -24,13 +24,27 @@ private:
     core::Result<void> open_staging();
     core::Result<void> commit_moves();
     core::Result<void> nebulas();
+    core::Result<void> prepare_targets();
+    core::Result<void> hull_service();
     core::Result<void> targets();
     core::Result<void> ion_team();
     core::Result<void> orders();
     core::Result<void> projectile_inputs();
+    core::Result<void> launch_shots();
     core::Result<void> abilities_tracking();
     core::Result<void> impacts();
+    core::Result<void> late_impacts();
+    core::Result<void> retaliation();
+    void notify_retaliation(const LiveUnit& unit, EntityId attacker, math::Fixed amount);
+    std::vector<std::pair<EntityId, EntityId>> retaliation_notifications_; // tick scratch, delivery order
+    core::Result<void> service_buzz_droids(UnitStage& staged, std::vector<Event>& events,
+        std::vector<UnitState>& killed, const DamageRules* damage_rules);
+    core::Result<void> service_self_destruct(UnitStage& staged, std::vector<Event>& events,
+        std::vector<UnitState>& killed, std::vector<Projectile>& projectiles, std::uint64_t& next_projectile);
     core::Result<void> commands();
+    core::Result<void> service_retreat_flight(UnitStage&, std::vector<Event>&, std::vector<UnitState>&);
+    core::Result<void> retreat_service();
+    core::Result<void> special_weapons();
     core::Result<void> systems();
     core::Result<void> commit_survivors();
     core::Result<void> pad_lifecycle();
@@ -44,6 +58,8 @@ private:
     core::Result<TacticalTick> finish();
     void mark(std::string_view section, bool begin) const;
     void register_jammer(EntityId source, bool active);
+    void spawn_instant_ability(LiveUnit& source, AbilityKind kind, const SpawnedAbilityProfile& spawn,
+        const math::Vec3& position);
     const LiveUnit* survivor(const EntityId id);
     static math::Vec3 roster_offset(const SquadronFrame& frame, const EntityId craft);
     static LiveUnit* live_unit(std::vector<LiveUnit>& units, const EntityId id);
@@ -51,17 +67,26 @@ private:
     const CraftView* craft_view(const EntityId id);
     void claim_idle(const EntityId container, SquadronState& state, const math::Vec3& desired);
     void hand_target(const EntityId container, const EntityId previous, const EntityId target,
-        const std::uint32_t hardpoint = no_hardpoint, const bool direct = false);
+        const std::uint32_t hardpoint = no_hardpoint, const bool direct = false, const bool divert = true);
+    void divert_target(EntityId container, EntityId target, bool direct = false);
     void end_combat(const EntityId container, SquadronState& state, const CraftView* leader);
     [[nodiscard]] Event destruction_event(const std::uint64_t tick, const EventKind kind, const UnitState& unit,
         const std::uint32_t hardpoint = 0, const PlayerId killer = 0);
+    void sync_radar_creations(const UnitStage& staged, EntityId first, EntityId next);
     void track_victory_change(const UnitState* before, const UnitState* after, bool evaluate);
+    void pay_bounty(TypeId victim, PlayerId owner, PlayerId killer);
+    // MAT-15: a destroyed object's type goes back to its owner's pool in an attract session. Called
+    // once per destruction, in destruction order; `garrison` and `team_member` are the object's
+    // marks (a garrison unit and a team member return nothing).
+    void note_pool_return(const UnitState& unit, bool garrison, bool team_member);
+    void set_special_hardpoint_gate(PlayerId owner, bool enabled);
+    void publish_special_hardpoints(const LiveUnit& unit);
     [[nodiscard]] bool damage_blocked() const { return pending_outcome_.has_value(); }
     [[nodiscard]] static Order order_for(const CommandPayload& payload, const std::uint64_t tick);
     [[nodiscard]] static std::optional<math::Vec3> point_move(const CommandPayload& payload);
     [[nodiscard]] static EntityId approach_target_of(const CommandPayload& payload);
     [[nodiscard]] static std::int64_t midpoint(const std::int64_t low, const std::int64_t high) noexcept;
-    [[nodiscard]] std::span<const EntityId> redirect_recipients(EntityId target) const;
+    [[nodiscard]] std::vector<EntityId> redirect_recipients(EntityId target) const;
     [[nodiscard]] const LiveUnit* redirect_unit(EntityId target) const;
     template <typename Apply>
     core::Result<bool> redirect_damage(const EntityId target, const Hit& incoming, Apply&& apply) {
@@ -91,9 +116,18 @@ private:
     // Transactional victory state, updated by sparse ordered lifecycle hooks (VT-02).
     std::vector<StarbaseEntry> pending_starbases_;
     std::optional<BattleOutcome> pending_outcome_;
+    RetreatState pending_retreat_;
+    std::optional<PlayerId> pending_midbattle_solve_;
+    std::uint64_t pending_rng_{};
     std::optional<Event> pending_victory_event_;
     std::optional<core::Diagnostic> victory_error_;
+    std::optional<core::Diagnostic> bounty_error_;
     std::vector<BattleLoss> pending_losses_;
+    struct PoolReturn final {
+        PlayerId owner{};
+        TypeId type{};
+    };
+    std::vector<PoolReturn> pool_returns_; // MAT-15: ordered, applied by economy() before production
     std::vector<BattleProduction> pending_productions_;
     std::vector<BattleEconomyCue> pending_economy_cues_;
     std::map<EntityId, std::pair<std::size_t, PlayerId>> loss_killers_;
@@ -101,8 +135,23 @@ private:
     std::set<EntityId> victory_removed_;
     std::array<std::uint64_t, max_players> victory_counts_{};
     std::vector<PlayerQuit> pending_quits_; // notification order; processed after this frame
+    std::vector<BeaconState> beacons_; // transactional, bounded by max_players.
     std::vector<PlayerId> pending_reveals_; // V-20: applied to the transactional fog copy
     std::map<PlayerId, ManualPlayerClock> manual_clocks_; // transactional tick copy
+    std::map<EntityId, SpecialWeaponState> special_weapons_;
+    std::set<PlayerId> special_disabled_by_hardpoint_;
+    NamedAbilityLocks named_ability_locks_;
+    std::optional<Impl::RadarRoster> radar_roster_; // copied only on a radar lifecycle change
+    bool radar_dirty_{};
+    void set_named_hardpoint_gate(const UnitState&, std::string_view name, bool enabled);
+    std::set<EntityId> special_initial_; // initial launches accepted this tick, in source order
+    struct SpecialShot {
+        detail::CombatUnit source, target;
+        std::optional<DurabilityState> target_health;
+        std::optional<DurabilityProfile> target_health_profile;
+        std::uint32_t pulse{};
+    };
+    std::vector<SpecialShot> special_shots_;
     std::vector<EntityId> projectile_defence_order_; // ordered activation notifications, committed only on success
     std::vector<EntityId> created_static_defences_; // creation notifications within this frame
     std::vector<Event> manual_feedback_;
@@ -163,6 +212,7 @@ private:
     std::optional<Targets> targets_;
     struct Orders {
         std::optional<std::vector<std::pair<EntityId, Impl::ApproachPlan>>> approaches;
+        std::vector<EntityId> waypoint_ready;
     };
     std::optional<Orders> orders_;
     struct Flights {
@@ -181,6 +231,8 @@ private:
     std::optional<Flights> flights_;
     struct Tracked {
         std::optional<std::vector<EntityId>> replans;
+        std::optional<std::vector<EntityId>> self_destructs; // WSD-04: ascending, countdown run out
+        std::optional<std::vector<EntityId>> lure_ends; // WLU-07: ascending, LURE expired this tick
         std::optional<std::uint64_t> frame;
         std::optional<std::array<bool, 4>> rebuilt;
         std::optional<std::optional<Tracking>> tracking;
@@ -236,12 +288,16 @@ private:
     };
     std::optional<Bonuses> bonuses_;
     struct Finalized {
+        std::optional<std::array<math::Fixed, max_players>> fog_multipliers;
+        std::optional<std::vector<SnapshotPlayer>> players;
         std::optional<std::optional<FogCells>> fog;
         std::optional<std::vector<SpinningCraft>> spinning;
         std::optional<std::array<std::uint64_t, 4>> anchors;
         std::optional<std::vector<StarbaseEntry>> starbases;
         std::optional<std::optional<BattleOutcome>> outcome;
         std::optional<std::vector<PlayerQuit>> quits;
+        std::optional<std::vector<PlayerId>> basic_ai;
+        std::optional<std::vector<DepartureControl>> departure_controls;
         std::optional<std::vector<BattleLoss>> losses;
         std::optional<std::vector<BattleProduction>> productions;
         std::optional<std::vector<BattleEconomyCue>> economy_cues;

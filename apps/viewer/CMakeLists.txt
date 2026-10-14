@@ -13,6 +13,8 @@ set(EAWR_GODOT_CPP_GENERATED_INCLUDE "${EAWR_GODOT_CPP_ROOT}/gen/include" CACHE 
 set(GODOTCPP_API_VERSION "4.7" CACHE STRING "Godot API version" FORCE)
 set(GODOTCPP_TARGET "template_release" CACHE STRING "Godot target" FORCE)
 set(GODOTCPP_USE_HOT_RELOAD OFF CACHE BOOL "Viewer does not use hot reload" FORCE)
+# Keep dependency headers outside the viewer's strict warning policy.
+set(GODOTCPP_SYSTEM_HEADERS ON CACHE BOOL "Expose godot-cpp headers as SYSTEM" FORCE)
 if(NOT WIN32)
     # A source-built binding links libstdc++ dynamically, like the accepted prebuilt
     # binding. With godot-cpp's static default a Clang 18 build crashed (SIGSEGV)
@@ -25,6 +27,17 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# All objects in the viewer link use the accepted binding's static CRT. Set the
+# cache before source-built godot-cpp creates targets or sets its own default;
+# relay TLS targets inherit this and GNS forwards it to its external builds.
+if(MSVC)
+    # Dependencies such as Mbed TLS have an older policy baseline: keep runtime
+    # selection enabled when their cmake_minimum_required resets policies.
+    set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+        CACHE STRING "Viewer MSVC runtime (matches the accepted godot-cpp binding)" FORCE)
+endif()
 
 if(NOT EXISTS "${EAWR_GODOT_CPP_ROOT}/CMakeLists.txt")
     message(FATAL_ERROR
@@ -45,7 +58,6 @@ if(EAWR_GODOT_CPP_LIBRARY)
         target_compile_options(godot-cpp INTERFACE /utf-8 /Zc:__cplusplus)
         target_compile_definitions(godot-cpp INTERFACE
             WINDOWS_ENABLED TYPED_METHOD_BIND NOMINMAX GDEXTENSION _HAS_EXCEPTIONS=0 THREADS_ENABLED)
-        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     else()
         target_compile_definitions(godot-cpp INTERFACE
             GDEXTENSION LINUX_ENABLED UNIX_ENABLED THREADS_ENABLED)
@@ -60,6 +72,12 @@ if(EAWR_GODOT_CPP_LIBRARY)
     endif()
 else()
     add_subdirectory("${EAWR_GODOT_CPP_ROOT}" "${CMAKE_BINARY_DIR}/godot-cpp" EXCLUDE_FROM_ALL)
+    if(MSVC)
+        get_target_property(_eawr_godot_runtime godot-cpp MSVC_RUNTIME_LIBRARY)
+        if(NOT _eawr_godot_runtime STREQUAL CMAKE_MSVC_RUNTIME_LIBRARY)
+            message(FATAL_ERROR "godot-cpp and the viewer must use the same MSVC runtime")
+        endif()
+    endif()
 endif()
 
 # The map mode resolves a TED skydome field against the XML catalog, so the
@@ -89,8 +107,10 @@ add_custom_command(
 # private include paths, as in the root build (src/script/CMakeLists.txt).
 include("${EAWR_ROOT}/src/core/sources.cmake")
 include("${EAWR_ROOT}/src/sim/sources.cmake")
+include("${EAWR_ROOT}/src/sim/galactic/sources.cmake")
 include("${EAWR_ROOT}/src/vfs/sources.cmake")
 include("${EAWR_ROOT}/src/data/sources.cmake")
+include("${EAWR_ROOT}/src/data/galactic/sources.cmake")
 include("${EAWR_ROOT}/src/assets/sources.cmake")
 include("${EAWR_ROOT}/src/data/ui/sources.cmake")
 include("${EAWR_ROOT}/src/presentation/sources.cmake")
@@ -99,13 +119,21 @@ include("${EAWR_ROOT}/src/scene/sources.cmake")
 include("${EAWR_ROOT}/src/units/sources.cmake")
 include("${EAWR_ROOT}/src/skirmish/sources.cmake")
 include("${EAWR_ROOT}/src/platform/sources.cmake")
+include("${EAWR_ROOT}/src/platform/galactic/sources.cmake")
+include("${EAWR_ROOT}/src/sim/galactic/sources.cmake")
+include("${EAWR_ROOT}/src/campaign/sources.cmake")
+include("${EAWR_ROOT}/src/checkpoint/sources.cmake")
+include("${EAWR_ROOT}/src/net/sources.cmake")
+include("${EAWR_ROOT}/cmake/EawrGns.cmake")
 include("${EAWR_ROOT}/src/script/sources.cmake")
+include("${EAWR_ROOT}/apps/viewer/src/galactic/sources.cmake")
 
 add_library(eawr_viewer_script STATIC
     ${EAWR_SCRIPT_NUMERIC_SOURCES}
     ${EAWR_SFLUA_HOOKS_SOURCES}
     ${EAWR_SFLUA_SOURCES}
     ${EAWR_SCRIPT_AUTHORITATIVE_SOURCES}
+    ${EAWR_SCRIPT_GALACTIC_SOURCES}
     ${EAWR_SCRIPT_FOC_SOURCES}
 )
 target_include_directories(eawr_viewer_script PUBLIC "${EAWR_ROOT}/include")
@@ -123,8 +151,10 @@ endif()
 add_library(eawr_viewer_core STATIC
     ${EAWR_CORE_SOURCES}
     ${EAWR_SIM_SOURCES}
+    ${EAWR_SIM_GALACTIC_SOURCES}
     ${EAWR_VFS_SOURCES}
     ${EAWR_DATA_SOURCES}
+    ${EAWR_GALACTIC_DATA_SOURCES}
     ${EAWR_ASSETS_SOURCES}
     ${EAWR_UI_DATA_SOURCES}
     ${EAWR_PRESENTATION_SOURCES}
@@ -133,6 +163,11 @@ add_library(eawr_viewer_core STATIC
     ${EAWR_UNITS_SOURCES}
     ${EAWR_SKIRMISH_SOURCES}
     ${EAWR_PLATFORM_SOURCES}
+    ${EAWR_PLATFORM_GALACTIC_SOURCES}
+    ${EAWR_SIM_GALACTIC_SOURCES}
+    ${EAWR_CAMPAIGN_SOURCES}
+    ${EAWR_CHECKPOINT_SOURCES}
+    ${EAWR_NET_SOURCES}
     ${EAWR_PLATFORM_LIVE_AI_SOURCES}
     "${EAWR_ROOT}/third_party/pugixml/src/pugixml.cpp"
     "${EAWR_VIEWER_XML_SCHEMA_INC}"
@@ -147,7 +182,9 @@ target_include_directories(eawr_viewer_core PUBLIC
 target_include_directories(eawr_viewer_core PRIVATE "${CMAKE_BINARY_DIR}/generated" "${EAWR_ROOT}/src/sim" "${EAWR_ROOT}/src/data")
 # The script library and the core use each other (the AI host reads the simulation; the live
 # session hosts the scripts); CMake repeats the two static libraries on the link line.
-target_link_libraries(eawr_viewer_core PUBLIC eawr_viewer_script)
+target_link_libraries(eawr_viewer_core PUBLIC eawr_viewer_script ${EAWR_NET_PLATFORM_LIBRARIES})
+target_link_libraries(eawr_viewer_core PUBLIC eawr::gns_dependency)
+target_link_libraries(eawr_viewer_core PUBLIC eawr::relay)
 target_link_libraries(eawr_viewer_script PUBLIC eawr_viewer_core)
 
 add_library(eawr_viewer SHARED
@@ -210,12 +247,14 @@ add_library(eawr_viewer SHARED
     src/space_populate_animation.cpp
     src/space_populate_report.cpp
     src/space_populate_assets.cpp
+    src/audio_buses.cpp
     src/battle_audio.cpp
     src/battle_audio_prepare.cpp
     src/battle_audio_events.cpp
     src/battle_audio_report.cpp
     src/battle_input.cpp
     src/battle_input_cards.cpp
+    src/battle_input_special.cpp
     src/battle_input_commands.cpp
     src/battle_input_pick.cpp
     src/battle_input_production.cpp
@@ -259,8 +298,30 @@ add_library(eawr_viewer SHARED
     src/input_routing_mode.cpp
     src/ui_gallery_mode.cpp
     src/ui_gallery_controls.cpp
+    src/ui_gallery_box.cpp
+    src/ui_gallery_load_game.cpp
+    src/saved_games.cpp
+    src/ui_gallery_credits.cpp
     src/ui_gallery_report.cpp
     src/skirmish_setup_mode.cpp
+    src/campaign_setup_screen.cpp
+    src/front_end_mode.cpp
+    ${EAWR_VIEWER_GALACTIC_SOURCES}
+    src/skirmish_prepare.cpp
+    src/lan_match.cpp
+    src/online_match.cpp
+    src/lan_match_fake.cpp
+    src/lan_broadcast_source.cpp
+    src/lan_lobby_mode.cpp
+    src/lan_lobby_screen.cpp
+    src/loading_screen.cpp
+    src/loading_planet.cpp
+    src/attract_runner.cpp
+    src/attract_camera.cpp
+    src/options_mode.cpp
+    src/options_screen.cpp
+    src/settings_store.cpp
+    src/profile_store.cpp
     "${EAWR_ROOT}/src/presentation/godot/renderer.cpp"
     "${EAWR_ROOT}/src/presentation/godot/renderer_fog.cpp"
     "${EAWR_ROOT}/src/presentation/godot/renderer_instances.cpp"
@@ -290,6 +351,9 @@ add_library(eawr_viewer SHARED
     "${EAWR_ROOT}/src/presentation/godot/ui/minimap_view.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/ability_buttons_view.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/dialog_builder.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/credits_view.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/load_game_view.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/message_box_view.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/movie_player.cpp"
 )
 target_include_directories(eawr_viewer PRIVATE
@@ -298,6 +362,8 @@ target_include_directories(eawr_viewer PRIVATE
     "${EAWR_ROOT}/src/presentation/godot"
 )
 target_link_libraries(eawr_viewer PRIVATE godot-cpp eawr_viewer_core Threads::Threads)
+# FES-06: only the viewer's Debug configuration exposes debug menu entries.
+target_compile_definitions(eawr_viewer PRIVATE $<$<CONFIG:Debug>:EAWR_VIEWER_DEBUG_BUILD=1>)
 get_target_property(GODOTCPP_SUFFIX godot-cpp GODOTCPP_SUFFIX)
 set(PROJECT_BIN "${CMAKE_CURRENT_LIST_DIR}/project/bin")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/project/common")
@@ -317,7 +383,11 @@ set_target_properties(eawr_viewer PROPERTIES
 
 if(MSVC)
     target_compile_options(eawr_viewer_core PRIVATE /W4 /permissive- /EHsc)
-    target_compile_options(eawr_viewer PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(eawr_viewer PRIVATE /W4 /WX /permissive- /EHsc)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        # godot-cpp __forceinline templates may not be inlined by MSVC.
+        target_compile_options(eawr_viewer PRIVATE /wd4714)
+    endif()
 else()
     target_compile_options(eawr_viewer_core PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(eawr_viewer PRIVATE -Wall -Wextra -Wpedantic)

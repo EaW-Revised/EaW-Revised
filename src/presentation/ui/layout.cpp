@@ -86,6 +86,15 @@ PixelRect shell_to_screen(const data::ui::ReferenceRect& rect, const ShellPlacem
     };
 }
 
+TextAnchor text_anchor(const data::ui::ReferenceRect& bone_origin, const ReferencePoint text_offset,
+                       const ShellPlacement& shell, const ReferencePoint shell_offset) noexcept {
+    const auto moved = data::ui::ReferenceRect{bone_origin.x + static_cast<float>(text_offset.x),
+        bone_origin.y + static_cast<float>(text_offset.y), 0.0F, 0.0F};
+    const PixelRect at = shell_to_screen(moved, shell, shell_offset);
+    const PixelRect base = shell_to_screen(bone_origin, shell, shell_offset);
+    return TextAnchor{at.x, at.y - base.y};
+}
+
 PixelRect scale_rc(const RcRect& rect, const ReferenceSpace& space) noexcept {
     const RcScale scale = rc_scale(space);
     return PixelRect{rect.x * scale.x, rect.y * scale.y, rect.width * scale.x, rect.height * scale.y};

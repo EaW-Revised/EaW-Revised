@@ -128,7 +128,7 @@ jobs:
           set -euo pipefail
           cmake --preset "$PRESET"
           cmake --build --preset "$PRESET"
-          ctest --preset "$PRESET"
+          ctest --preset "$PRESET" -LE "game-data|installed-required"
           python tools/verify_warnings_as_errors.py --root . --preset "$PRESET" --config Release
 
       - name: Configure, build and test (macOS, experimental)
@@ -139,7 +139,7 @@ jobs:
           cmake -S . -B out/build/macos -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
             -DEAWR_WARNINGS_AS_ERRORS=ON -DEAWR_ENABLE_SIM_BOUNDARY_CHECK=ON
           cmake --build out/build/macos
-          ctest --test-dir out/build/macos --output-on-failure
+          ctest --test-dir out/build/macos --output-on-failure -LE "game-data|installed-required"
 
   viewer:
     name: viewer-${{ matrix.platform }}

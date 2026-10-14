@@ -136,7 +136,7 @@ void vegetation_contracts() {
     check(value_of<std::array<float, 4>>(uniforms, "eawr_diffuse") == std::array<float, 4>{0.5F, 0.75F, 1.0F, 0.5F}
             && value_of<std::array<float, 3>>(uniforms, "eawr_diffuse1") == std::array<float, 3>{0.25F, 0.25F, 0.25F}
             && value_of<float>(uniforms, "eawr_bend_scale") == 0.25F
-            && uniform(uniforms, "eawr_time") == nullptr && uniform(uniforms, "eawr_wave_rate") == nullptr,
+            && uniform(uniforms, "eawr_effect_time") == nullptr && uniform(uniforms, "eawr_wave_rate") == nullptr,
         "Grass binds Diffuse with its opacity, Diffuse1.rgb and BendScale; the clock is the renderer's");
     check(legacy::reads_wind(cover), "Grass reads the scene wind");
     cover.bindings[3].value = std::string("x.tga");

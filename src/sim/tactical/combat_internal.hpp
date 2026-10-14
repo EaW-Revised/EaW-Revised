@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
+#include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/motion.hpp"
@@ -18,6 +19,9 @@
 #include <vector>
 
 namespace eawr::sim::tactical::detail {
+
+[[nodiscard]] std::optional<math::Vec3> lead_history(math::Vec3 now, math::Vec3 previous,
+    math::Vec3 older, math::Vec3 aim, math::Vec3 muzzle, math::Fixed speed);
 
 // WPJ-17: activation owners publish copied sources in registration order. Radius
 // precedence is independent of whether the shield ability itself is active.
@@ -56,10 +60,12 @@ struct CombatUnit {
     EntityId id{};
     TypeId type_id{};
     PlayerId owner{};
+    bool ai_owned{}; // R-01: the owner is an AI player (the economy's lobby table)
     TeamId team{};
     std::size_t player_index{};   // the owner's index in the ascending player table
     math::Vec3 position{};
     math::Vec3 previous_position{}; // before this frame's movement (W-10)
+    std::optional<math::Vec3> before_previous_position{}; // WWP-51: absent history keeps linear lead
     math::Mat3x4 transform{};     // rotation and position
     std::uint64_t visible_to{};   // bit k: players[k] sees it (the last published snapshot)
     const CombatProfile* profile{};
@@ -72,6 +78,11 @@ struct CombatUnit {
     std::optional<math::Vec3> facing_destination{};
     // AB-21: the weapon delay multiplier of its active abilities (1 without).
     math::Fixed weapon_delay{math::Fixed::from_raw(math::Fixed::scale)};
+    // WAB-80: its FULL_SALVO is on, so each hardpoint also applies its own full-salvo delay multiplier.
+    bool full_salvo{};
+    std::optional<ChargedBlastState> charged_blast{};
+    math::Fixed blast_damage_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
+    std::optional<math::Fixed> corrupt_inaccuracy{};
     // IS-06: its fire rate, 1 minus an ion stun's shot rate reduction (1 without a stun).
     math::Fixed fire_rate{math::Fixed::from_raw(math::Fixed::scale)};
     math::Fixed scatter_radius{math::Fixed::from_raw(math::Fixed::scale)}; // WAD-10, current source mode
@@ -88,8 +99,14 @@ struct CombatUnit {
     std::optional<math::Fixed> fixed_inaccuracy{};
     math::Fixed object_fire_rate{math::Fixed::from_raw(math::Fixed::scale)};
     bool target_prepared{};       // WSQ-42/43: member targeting has already run before team sharing
-    std::optional<math::Vec3> squadron_centre{}; // WWP-49: copied team position for object-weapon aim
     bool sensor_jammed{}; // WPJ-10: supplied by the recipient-stamping owner
+    bool stealth_on{};        // WST-10: its own cloak is on: no target scans (R-05)
+    bool stealth_invisible{}; // WST-09: hidden from enemies that cannot target stealth units
+    bool weapons_enabled{true}; // WTA-29: whole-unit weapon mode, independent of recharge
+    const TargetFootprint* footprint{}; // WWP-21: loaded type geometry, even without a movement layer
+    // WWP-21: only a specialized formation-team locomotor supplies ideal
+    // geometry. Ordinary space team movement leaves this absent (A-07).
+    std::optional<TargetFootprint> formation_footprint{};
 };
 
 // The immutable inputs of one tick's targeting phase.
@@ -115,6 +132,10 @@ struct CombatWorld {
     // team container stands for its live craft nearest `from` (spatial, the first in team order on
     // a tie); nothing when none is left. Any other target is itself.
     [[nodiscard]] const CombatUnit* resolve_target(const CombatUnit* target, const math::Vec3& from) const;
+    // WWP-19: for a weapon hardpoint, a squadron's team container stands for one of its live craft
+    // picked by one keyed draw from `random` (team order, every attempt); nothing when none is
+    // left. Any other target is itself and takes no draw.
+    [[nodiscard]] const CombatUnit* random_member(const CombatUnit* target, CombatRandom& random) const;
     // The team container of a squadron craft; invalid_entity_id for any other unit (#561).
     [[nodiscard]] EntityId container_of(EntityId unit) const noexcept;
     // One player's units whose boxes touch the box of `half` about `centre`, in collection order
@@ -153,11 +174,15 @@ struct CombatStep {
     std::vector<math::Vec3> aim_offsets;
     std::vector<ManualFire> manual_fired;
     std::vector<ManualFeedback> manual_feedback;
+    std::optional<ChargedBlastState> charged_blast{}; // FD-54: mutable budget returned for ordered commit
 };
 
 // One unit's ship-level target choice and weapon service at world.frame (docs/behaviour/
 // space-weapon-fire.md). Reads only `world`; the result goes to the unit's own slot.
 [[nodiscard]] core::Result<CombatStep> step_combat(const CombatWorld& world, const CombatUnit& unit);
+// WSW-22: one dedicated pulse reuses shared aim and construction, without ordinary gun service.
+[[nodiscard]] core::Result<CombatStep> step_planetary_fire(const CombatWorld& world,
+    const CombatUnit& unit, const CombatUnit& target);
 // Target-only preparation: no fire or pulse/recharge updates; the caller commits team sharing.
 struct FormationAttackContext {
     bool present{};
@@ -165,18 +190,39 @@ struct FormationAttackContext {
     bool unbounded{};
     const CombatUnit* leader{};
 };
+[[nodiscard]] core::Result<bool> formation_can_attack(const CombatWorld& world, const CombatUnit& target,
+    math::Fixed divert, math::Vec3 anchor, const FormationAttackContext& formation);
+// WDF-02/14: finish a member's service after the formation's diversion decision.
+[[nodiscard]] core::Result<CombatState> finish_squadron_target(const CombatWorld& world, const CombatUnit& unit,
+    CombatState state, const FormationAttackContext& formation, EntityId formation_target, bool same_cell);
 [[nodiscard]] CombatState target_combat(const CombatWorld& world, const CombatUnit& unit, math::Fixed divert,
     EntityId formation_target, math::Vec3 diversion_anchor, const FormationAttackContext* formation = nullptr);
+// WTA-29: notification already normalizes the attacker and admits UNIT_AI. No scan, draw,
+// turn, shot or movement destination; formed teams supply WMV-17's diversion context.
+[[nodiscard]] core::Result<CombatState> retaliate_combat(const CombatWorld& world, const CombatUnit& unit,
+    const CombatUnit& attacker, math::Fixed divert = {}, math::Vec3 anchor = {},
+    const FormationAttackContext* formation = nullptr);
 
 // WAD-39: command admission reads one immutable target and the current weapon state.
 [[nodiscard]] core::Result<bool> manual_target_admissible(const CombatWorld& world, const CombatUnit& unit,
     const CombatUnit& target, std::uint32_t hardpoint);
 
-// A-04's aim point on `target` seen from `from`: its live targetable hardpoint nearest `from`
-// (the first in HardPoints order on a tie), else its position. The approach checks of #452 use it
-// (docs/behaviour/space-orders.md OR-04).
+// WWP-16: the standing targetable hardpoint of `target` nearest `reference` (the first in
+// HardPoints order on a tie), else null.
+[[nodiscard]] const TargetHardpoint* nearest_hardpoint(const CombatUnit& target, const math::Vec3& reference);
+
+// WCC-18: the best hardpoint of `target` for an attacker of type `attacker` at `from`, else null.
+// With a priority set: the standing destroyable hardpoints (targetable or not) not excluded by the
+// set, lowest rank first, then strictly nearer, then first in HardPoints order. Without a set (or
+// without an attacker profile): the nearest standing targetable hardpoint. Distances are 3D from
+// `from` raised by the attacker's Ranged_Target_Z_Adjust to the hardpoint's point.
+[[nodiscard]] const TargetHardpoint* best_hardpoint(
+    const CombatTable* table, const CombatProfile* attacker, const CombatUnit& target, const math::Vec3& from);
+
+// A-04's aim point on `target` seen from `from`: its best hardpoint for `attacker` (WCC-18),
+// else its position. The approach checks of #452 use it (docs/behaviour/space-orders.md OR-04).
 // With `hardpoint` (an attack order's, #531 OR-25) that hardpoint's position while it stands.
-[[nodiscard]] math::Vec3 ordered_aim_point(
+[[nodiscard]] math::Vec3 ordered_aim_point(const CombatTable* table, const CombatProfile* attacker,
     const CombatUnit& target, const math::Vec3& from, std::uint32_t ordered_index = no_hardpoint);
 
 // The hardpoint of `target` with HardPoints index `index` while it is targetable and not
@@ -186,6 +232,16 @@ struct FormationAttackContext {
 // AT-10 / OR-03: range includes the target's loaded dimensions. Hardpoint aim uses
 // the soft radius; centre aim uses the hard extent along the incoming bearing.
 [[nodiscard]] math::Fixed target_soft_radius(const MotionTable* motion, const CombatUnit& target) noexcept;
+// WWP-21: the soft radius of a unit of `type_id` outside a formation, from the same tables the
+// combat world reads (squadron craft and team containers included).
+[[nodiscard]] math::Fixed type_soft_radius(const CombatTable& table, const MotionTable* motion, TypeId type_id) noexcept;
+[[nodiscard]] core::Result<TargetFootprint> formation_target_footprint(const CombatWorld& world,
+    std::span<const EntityId> members, const SquadronProfile& profile);
+// The same ideal team box from the members' types in roster order (nothing for a missing member).
+[[nodiscard]] core::Result<TargetFootprint> formation_target_footprint(const CombatTable& table, const MotionTable* motion,
+    std::span<const std::optional<TypeId>> member_types, const SquadronProfile& profile);
+[[nodiscard]] core::Result<math::Fixed> projectile_target_radius(const CombatWorld& world,
+    const CombatUnit& shooter, const CombatUnit* target);
 [[nodiscard]] core::Result<math::Fixed> target_attack_distance(const MotionTable* motion, const CombatUnit& target,
     math::Vec3 from, math::Fixed distance, bool hardpoint_aim);
 [[nodiscard]] bool has_aim_hardpoint(const CombatUnit& target) noexcept;
@@ -238,6 +294,19 @@ struct ProjectileRedirect {
 };
 [[nodiscard]] core::Result<Projectile> redirect_projectile(Projectile& original,
     const ShotProfile& projectile_type, const ProjectileRedirect& request);
+
+// WRB-06..WRB-10: one Redirect_Blaster handler reacting to a shot that reached `defender`. `blocked`: the
+// handler cancelled the hit (the caller delivers no direct damage); `created`: the fresh projectile the
+// defender's owner now flies, from `new_id`, even when movement prevents cancellation.
+// The caller retains both streams across the enabled-handler sequence.
+struct RedirectReaction {
+    bool blocked{};
+    std::optional<Projectile> created{};
+};
+[[nodiscard]] core::Result<RedirectReaction> redirect_blaster_reaction(const Projectile& original,
+    const ShotProfile& shot, const SpecialAbilityProfile& handler, const CombatUnit& defender,
+    const CombatUnit& attacker, std::uint64_t new_id, CombatRandom& random,
+    CombatRandom& direction_random, bool defender_moving);
 
 // Canonical combat record of a unit (docs/replay-format.md): attack target, flags, next scan
 // frame, then per weapon its opportunity target, last scan frame, countdown and pulses left.

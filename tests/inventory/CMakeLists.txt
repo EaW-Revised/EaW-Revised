@@ -36,6 +36,18 @@ add_test(
 )
 set_tests_properties(tag_applied_check_smoke PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 
+add_test(NAME gc_tag_applied_check_contract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_gc_tag_applied_check.py"
+        --binary "$<TARGET_FILE:foc_tag_perturb>"
+        --work "${CMAKE_CURRENT_BINARY_DIR}/gc-tag-applied-check")
+set_tests_properties(gc_tag_applied_check_contract PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 240)
+
+add_test(NAME gc_tag_applied_check_stock
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/run_gc_tag_applied_check.py"
+        --binary "$<TARGET_FILE:foc_tag_perturb>" --stock
+        --work "${CMAKE_CURRENT_BINARY_DIR}/gc-tag-applied-stock")
+set_tests_properties(gc_tag_applied_check_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 720)
+
 # Tier labels (cmake/EawrTestTiers.cmake).
 add_test(
     NAME unit_census_game_data

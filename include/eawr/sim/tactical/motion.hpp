@@ -36,11 +36,12 @@ struct MotionRules {
     math::Fixed arc_degrees{};        // 360 / MaxRotationsSpace: the turn of one arc step
     math::Fixed expansion_distance{}; // XYExpansionDistanceSpace: the planner's cell scale
     // #452 (docs/behaviour/space-orders.md OR-06, OR-14): MovementReevaluationFrameCount, the
-    // frames between approach checks, and Space_Guard_Range. They default to FoC's
-    // gameconstants.xml values, 10 frames and 750 units; the unit tables read them at the next
-    // FoC identity re-pin (OR-U6).
+    // frames between approach checks, and Space_Guard_Range. The unit tables read both from
+    // gameconstants.xml (units::motion_table); these defaults are FoC's stock values, kept for
+    // tables built by hand.
     std::uint32_t reevaluation_frames{10};
     math::Fixed guard_range{math::Fixed::from_raw(750 * math::Fixed::scale)};
+    std::uint32_t max_waypoints{}; // HCB-58: MaxWaypointsPerPath; unset synthetic tables cannot queue.
     friend constexpr bool operator==(const MotionRules&, const MotionRules&) noexcept = default;
 };
 

@@ -94,11 +94,17 @@ using Vec3 = std::array<double, 3>;
 
 // audio.xml's space factors and the engine's fixed maximum distance (BA-10, BA-11).
 struct Space3D final {
-    double saturation_factor{1.5};  // Audio_Space_3D_Saturation_Distance_Mod
-    double rolloff_factor{2.0};     // Audio_Space_3D_Rolloff_Distance_Mod
-    double listener_z{60.0};        // Audio_Space_3D_Listener_Z_Pullback_Dist
+    double saturation_factor{};  // Audio_Space_3D_Saturation_Distance_Mod
+    double rolloff_factor{};     // Audio_Space_3D_Rolloff_Distance_Mod
+    double listener_z{};        // Audio_Space_3D_Listener_Z_Pullback_Dist
     double max_distance{15000.0};
 };
+// BA-10: authored settings have no sourced missing-tag defaults. Invalid data
+// reports EAWR-AUDIO-0301; the viewer keeps playback in its 2D path.
+[[nodiscard]] std::optional<Space3D> space_3d(std::span<const Field> fields, std::vector<std::string>& problems);
+// SND-46: absent tags use the sourced 5/10-second defaults silently; invalid ranges diagnose.
+[[nodiscard]] std::optional<std::array<int, 2>> ambient_moving_delays(std::string_view minimum,
+    std::string_view maximum, std::string_view context, std::vector<std::string>& problems);
 
 // FoC's volume sliders (master, music, speech, SFX) start at 0.75, and a channel plays at its
 // slider times the master's (BA-45).
@@ -333,6 +339,7 @@ struct MusicEvent final {
     double fade_in_seconds{};
     double fade_out_previous_seconds{};
     bool loop{};
+    bool internal_loop{}; // WGP-26: stream loops even while the music service is starved.
 };
 [[nodiscard]] MusicEvent parse_music_event(std::string_view name, std::span<const Field> fields);
 

@@ -18,4 +18,20 @@ struct SquadronScan {
 [[nodiscard]] SquadronScan squadron_target(const CombatWorld& world, const SquadronState& state,
     const SquadronProfile& squadron, const CombatUnit& leader, math::Vec3 anchor);
 
+struct SquadronTargetCommit {
+    bool shared{};
+    bool notified{};
+    bool admitted{};
+    bool lost{}; // WSQ-44: the held team target was dropped; the caller ends the combat
+};
+// FS-42/FD-69: one rank-ordered commit of a previously staged member scan.
+// Roster writes preserve clocks; the returned member state is its weapon input. A member
+// whose team does not scan this frame (FO-01 move, FT-06 launch delay) shares and notifies
+// nothing: only its targeting tail runs on the target it holds.
+[[nodiscard]] core::Result<SquadronTargetCommit> commit_squadron_target(
+    const CombatWorld& world, const CombatUnit& unit, CombatState scanned,
+    CombatState& member, std::span<CombatState* const> roster, SquadronState& team,
+    math::Vec3 team_position, math::Fixed divert, math::Vec3 anchor,
+    const FormationAttackContext& formation, bool same_cell, bool scanning = true);
+
 } // namespace eawr::sim::tactical::detail

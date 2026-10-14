@@ -50,6 +50,7 @@ namespace session_detail {
 void apply_squadron_order(SquadronState& state, const CommandPayload& payload, const math::Vec3& position,
     const SquadronTable& table) {
     if (std::holds_alternative<FacePayload>(payload)) return; // FO-03: preserve the current path.
+    state.attack_path.reset(); // ordinary replacement orders discard accepted attack geometry
     math::Fixed layer_z{};
     if (const auto* squadron = table.find_squadron(state.squadron_type); squadron != nullptr && !squadron->members.empty()) {
         if (const auto* craft = table.find_craft(squadron->members.front())) layer_z = craft->layer_z;
@@ -118,7 +119,11 @@ void apply_squadron_order(SquadronState& state, const CommandPayload& payload, c
     // position destination completes at once; moving destinations retain their own completion.
     const bool reached_done = state.formation && state.formation->has_reached_done;
     state.formation = SquadronFormationState{state.anchor, state.escorted, false, reached_done, false};
-    if (const auto* attack = std::get_if<AttackPayload>(&payload)) state.formation->base_target = attack->target;
+    if (const auto* attack = std::get_if<AttackPayload>(&payload)) {
+        state.formation->base_target = attack->target;
+        state.formation->attack_target = attack->target;
+        state.formation->attack_hardpoint = attack->hardpoint;
+    }
     if (std::holds_alternative<StopPayload>(payload)) {
         state.formation->complete = true;
         state.formation->has_reached_done = true;
@@ -158,19 +163,24 @@ void TacticalSession::Impl::bind_squadrons(const std::vector<LiveUnit>& live) {
             state.container = squadron.container;
             state.squadron_type = container->state.type_id;
             state.roster = squadron.members;
-            state.anchor = container->state.position;
+            // FM-20: the idle hold is the leader's own desired point, which a placed craft starts
+            // on; the container's point stays the formation base (its divert anchor).
+            const auto* leader = squadron.members.empty() ? nullptr : unit_at(squadron.members.front());
+            state.anchor = leader != nullptr ? leader->state.position : container->state.position;
             state.formation = SquadronFormationState{container->state.position, invalid_entity_id, true, true, false};
             minds.emplace(squadron.container, std::move(state));
             for (const auto member : squadron.members) {
                 const auto* craft = unit_at(member);
                 if (craft == nullptr || table.find_craft(craft->state.type_id) == nullptr) continue;
                 CraftState flight;
-                flight.yaw = yaw_degrees(craft->state.rotation).value();
+                const auto yaw = yaw_degrees(craft->state.rotation);
+                // A rotation without a planar heading starts with the default heading.
+                flight.yaw = yaw ? yaw.value() : math::Fixed{};
                 crafts.emplace(member, flight);
             }
         }
         for (const auto& unit : live) {
-            const auto* profile = table.find_spawner(unit.state.type_id);
+            const auto* profile = table.find_spawner(unit.state.type_id, unit.state.owner);
             if (profile != nullptr && (!profile->entries.empty() || (!setup.free_garrisons.empty() && profile->starbase))) {
                 spawners.emplace(unit.state.entity_id, initial_spawner(setup.seed, 1, unit.state.entity_id));
             }
@@ -203,6 +213,7 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
             const auto placed = math::to_matrix(state.rotation, state.position);
             if (!placed) return Void::failure(placed.error());
             auto unit = new_unit(state, frame);
+            unit.garrison_unit = true; // WU-37: the hangar marks every object it creates.
             instances.push_back(instance_for(unit, placed.value(), frame));
             survivors.push_back(std::move(unit));
             next = state.entity_id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : state.entity_id + 1;
@@ -230,6 +241,7 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
                 squadron_list.push_back({id, {id}});
                 SquadronState order;
                 order.container = id;
+                order.garrison_unit = true;
                 order.squadron_type = company_type;
                 order.roster = {id};
                 order.anchor = at;
@@ -277,6 +289,7 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
         squadron_list.push_back(Squadron{container, members});
         SquadronState order;
         order.container = container;
+        order.garrison_unit = true;
         order.squadron_type = squadron->type_id;
         order.spawner = free_type != 0 ? invalid_entity_id : spawner.state.entity_id;
         order.entry = decision.entry;

@@ -77,7 +77,14 @@ As built (HUD shell, `presentation/ui/hud_shell.hpp`, viewer `--eawr-hud tactica
   mesh's additive `i_scan_lines` over the faceplate's opaque black minimap well; that is the
   empty minimap frame. Textures are files under `Data/Art/Textures`. Button icons come from the
   command bar's `Mega_Texture_Name` atlas (`MT_CommandBar`), then from files.
-- Planet name: the map's root field `0x09` (`assets::Map::context_name`, "Coruscant" in
+- UI-11 planet name (`Text_Planet_tactical`): a GC battle uses the conflict planet's
+  object identity, independent of the selected tactical map. Its effective `Text_ID`
+  supplies the localized caption. The owner playtest identifies this caption in retail
+  GC space battles; the authored command-bar component and debug-build component table
+  identify the text slot. Retail land and space modes use the same tactical shell
+  (debug-build mode switch and both tactical initialization paths); there is no separate
+  land planet-name component. The viewer's current campaign handoff is space-only.
+  Skirmish keeps its map-context behavior: the map's root field `0x09` (`assets::Map::context_name`, "Coruscant" in
   `_mp_space_coruscant`) names a `Planet` object. That object's `Text_ID`
   (`TEXT_OBJECT_STAR_SYSTEM_CORUSCANT`) is resolved in the text DB. Root field `0x08` holds the
   map's own name key (`TEXT_MAP_NAME_MP_SPACE_08`, "Coruscant Siege"), which the HUD does not

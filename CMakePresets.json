@@ -7,6 +7,22 @@
   },
   "configurePresets": [
     {
+      "name": "windows-msvc-ninja-relay",
+      "displayName": "Optional TLS relay / windows-msvc-ninja-relay",
+      "inherits": "windows-msvc-ninja-gns",
+      "cacheVariables": {
+        "EAWR_ENABLE_RELAY": "ON"
+      }
+    },
+    {
+      "name": "linux-x64-gcc-relay",
+      "displayName": "Optional TLS relay / linux-x64-gcc-relay",
+      "inherits": "linux-x64-gcc-gns",
+      "cacheVariables": {
+        "EAWR_ENABLE_RELAY": "ON"
+      }
+    },
+    {
       "name": "base",
       "hidden": true,
       "binaryDir": "${sourceDir}/out/build/${presetName}",
@@ -113,6 +129,29 @@
       }
     },
     {
+      "name": "gns-enabled",
+      "hidden": true,
+      "cacheVariables": {
+        "EAWR_ENABLE_GNS": "ON",
+        "EAWR_GNS_PROVIDER": "FETCH"
+      }
+    },
+    {
+      "name": "windows-msvc-ninja-gns",
+      "displayName": "Optional GNS / Windows x64 MSVC",
+      "inherits": ["gns-enabled", "windows-msvc-ninja"]
+    },
+    {
+      "name": "linux-x64-gcc-gns",
+      "displayName": "Optional GNS / Linux x64 GCC",
+      "inherits": ["gns-enabled", "linux-x64-gcc"]
+    },
+    {
+      "name": "linux-x64-clang-gns",
+      "displayName": "Optional GNS / Linux x64 Clang",
+      "inherits": ["gns-enabled", "linux-x64-clang"]
+    },
+    {
       "name": "linux-arm64-gcc",
       "displayName": "Linux ARM64 / GCC 14 (native runner)",
       "inherits": "ninja-release",
@@ -128,6 +167,85 @@
     }
   ],
   "buildPresets": [
+    {
+      "name": "windows-msvc-ninja-relay",
+      "configurePreset": "windows-msvc-ninja-relay",
+      "targets": [
+        "net_transport_tests",
+        "net_lockstep_tests",
+        "net_tcp_transport_tests",
+        "net_lan_directory_tests",
+        "net_desync_monitor_tests",
+        "net_desync_session_tests",
+        "net_setup_tests",
+        "net_setup_tcp_tests",
+        "net_viewer_lan_tests",
+        "net_tcp_lockstep_tests",
+        "net_gns_dependency_smoke",
+        "net_gns_link_stats_tests",
+        "net_gns_frame_codec_tests",
+        "net_gns_introduced_tests",
+        "net_gns_signalling_tests",
+        "net_gns_transport_tests",
+        "net_mesh_tests",
+        "net_port_mapping_tests",
+        "net_reconnect_tests",
+        "net_relay_server_tests", "net_relay_cloudflare_tests", "net_relay_disabled_tests", "net_online_lobby_source_tests",
+        "net_viewer_online_tests", "net_lan_credentials_tests", "net_lobby_session_tests",
+        "net_gns_setup_tests",
+        "net_gns_lockstep_tests",
+        "net_gns_desync_tests",
+        "eawr_relay_server"
+      ],
+      "jobs": 4
+    },
+    {
+      "name": "linux-x64-gcc-relay",
+      "configurePreset": "linux-x64-gcc-relay",
+      "targets": [
+        "net_transport_tests",
+        "net_lockstep_tests",
+        "net_tcp_transport_tests",
+        "net_lan_directory_tests",
+        "net_desync_monitor_tests",
+        "net_desync_session_tests",
+        "net_setup_tests",
+        "net_setup_tcp_tests",
+        "net_viewer_lan_tests",
+        "net_tcp_lockstep_tests",
+        "net_gns_dependency_smoke",
+        "net_gns_link_stats_tests",
+        "net_gns_frame_codec_tests",
+        "net_gns_introduced_tests",
+        "net_gns_signalling_tests",
+        "net_gns_transport_tests",
+        "net_mesh_tests",
+        "net_port_mapping_tests",
+        "net_reconnect_tests",
+        "net_relay_server_tests", "net_relay_cloudflare_tests", "net_relay_disabled_tests", "net_online_lobby_source_tests",
+        "net_viewer_online_tests", "net_lan_credentials_tests", "net_lobby_session_tests",
+        "net_gns_setup_tests",
+        "net_gns_lockstep_tests",
+        "net_gns_desync_tests",
+        "eawr_relay_server"
+      ],
+      "jobs": 4
+    },
+    {
+      "name": "linux-x64-clang-gns",
+      "configurePreset": "linux-x64-clang-gns",
+      "jobs": 4
+    },
+    {
+      "name": "windows-msvc-ninja-gns",
+      "configurePreset": "windows-msvc-ninja-gns",
+      "jobs": 4
+    },
+    {
+      "name": "linux-x64-gcc-gns",
+      "configurePreset": "linux-x64-gcc-gns",
+      "jobs": 4
+    },
     {
       "name": "windows-msvc",
       "configurePreset": "windows-msvc",
@@ -164,6 +282,51 @@
     }
   ],
   "testPresets": [
+    {
+      "name": "windows-msvc-ninja-relay",
+      "configurePreset": "windows-msvc-ninja-relay",
+      "filter": {
+        "include": {
+          "name": "^net_"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "linux-x64-gcc-relay",
+      "configurePreset": "linux-x64-gcc-relay",
+      "filter": {
+        "include": {
+          "name": "^net_"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "linux-x64-clang-gns",
+      "configurePreset": "linux-x64-clang-gns",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows-msvc-ninja-gns",
+      "configurePreset": "windows-msvc-ninja-gns",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-x64-gcc-gns",
+      "configurePreset": "linux-x64-gcc-gns",
+      "output": { "outputOnFailure": true }
+    },
     {
       "name": "windows-msvc",
       "configurePreset": "windows-msvc",
@@ -217,6 +380,7 @@
         "outputOnFailure": true
       },
       "execution": {
+        "jobs": 4,
         "noTestsAction": "error",
         "stopOnFailure": false
       }
@@ -228,6 +392,7 @@
         "outputOnFailure": true
       },
       "execution": {
+        "jobs": 4,
         "noTestsAction": "error",
         "stopOnFailure": false
       }
@@ -239,6 +404,7 @@
         "outputOnFailure": true
       },
       "execution": {
+        "jobs": 4,
         "noTestsAction": "error",
         "stopOnFailure": false
       }

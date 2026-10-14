@@ -34,6 +34,8 @@ from typing import Any, Iterable
 
 # The object types foc_tag_perturb can change, and the classes whose objects are not units.
 TYPES = ("station", "ship", "squadron", "craft", "hardpoint", "projectile", "faction", "constants")
+GALACTIC_TYPES = {"campaign": "campaign", "planet": "planet", "traderoute": "route",
+                  "faction": "gc-faction", "gameconstants": "constants"}
 UNIT_TYPES = ("station", "ship", "squadron", "craft")
 CLASS_TYPES = {"gameconstants": ("constants",), "faction": ("faction",), "hardpoint": ("hardpoint",),
                "projectile": ("projectile",)}
@@ -122,7 +124,8 @@ def candidate_types(element: str) -> tuple[str, ...]:
     return CLASS_TYPES.get(fold(element), UNIT_TYPES)
 
 
-def expand(rows: Iterable[dict[str, Any]], hints: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def expand(rows: Iterable[dict[str, Any]], hints: dict[str, dict[str, Any]] | None = None,
+           scene: str = "m2") -> list[dict[str, Any]]:
     """One check per (applied or partial row, class, type). A row that names its types expects
     each to change the battle and each missing type not to; a row that names none is tried on
     every type its class can have (a type without such objects in the scene drops out of the
@@ -146,12 +149,19 @@ def expand(rows: Iterable[dict[str, Any]], hints: dict[str, dict[str, Any]] | No
         wanted += [(t, "no change", True) for t in row["missing_types"] if t not in row["types"]]
         if not wanted:
             wanted = [(t, "changes", False) for t in candidate_types(row["class"])]
+        if scene == "galactic":
+            # GC targets currently describe services rather than object kinds. Keep that
+            # provenance, but perturb each XML class once; prose missing_types are seams.
+            key["registry_types"] = row["types"]
+            key["missing_types"] = row["missing_types"]
+            key["scene"] = scene
+            wanted = [(GALACTIC_TYPES.get(fold(row["class"]), "gc-unit"), "changes", True)]
         for kind, expect, explicit in wanted:
             check = dict(key, type=kind, expect=expect, explicit=explicit, change=row["change"],
                          id=f"c{len(checks) + 1:04d}")
             if preset:
                 check["preset"] = preset
-            elif kind not in TYPES:
+            elif scene != "galactic" and kind not in TYPES:
                 check["preset"] = f"type {kind}: the check cannot change it headless"
             checks.append(check)
     return checks
@@ -186,7 +196,8 @@ def outcome(check: dict[str, Any], result: dict[str, Any] | None) -> dict[str, A
     """The check's verdict against its expectation. `finding` is set for a registry claim the
     battle contradicts."""
     if "preset" in check:
-        return {"verdict": "not checkable", "reason": check["preset"], "finding": None, "in_scene": True}
+        return {"verdict": "not reachable" if check.get("scene") == "galactic" else "not checkable",
+                "reason": check["preset"], "finding": None, "in_scene": True}
     if result is None:
         return {"verdict": "not run", "reason": "no result (the run stopped early)", "finding": None, "in_scene": True}
     verdict, reason = result["verdict"], result["reason"]
@@ -225,12 +236,12 @@ def build_report(checks: list[dict[str, Any]], baseline: dict[str, Any], results
         if not done["in_scene"] and not check["explicit"]:
             continue  # a type the class does not have in the M2 scene
         entry = {k: check.get(k) for k in ("id", "class", "tag", "type", "status", "area", "ticket", "expect",
-                                           "explicit", "change", "code")}
+                                           "explicit", "change", "code", "registry_types", "missing_types")}
         entry.update(done)
         entry["evidence"] = evidence(done, result)
         if result:
             for field in ("objects", "without_tag", "tables_changed", "first_tick", "kinds", "ticks_run",
-                          "workers_check", "seconds"):
+                          "workers_check", "seconds", "campaigns", "hash_changed", "facts_changed"):
                 entry[field] = result.get(field)
         rows.append(entry)
         label = done["verdict"]
@@ -279,7 +290,7 @@ def render_report(report: dict[str, Any]) -> str:
     meta, baseline = report["meta"], report["baseline"]
     lines = ["# Tag perturbation check", ""]
     lines.append(f"Commit `{meta.get('commit', '')}`, {meta.get('date', '')}; registry `{meta.get('registry', '')}`.")
-    lines.append(f"The M2 battle (the AI on both sides, seed {baseline.get('seed', '?')}), {baseline.get('ticks', '?')} "
+    lines.append(f"The {baseline.get('scene', 'M2 battle')} (seed {baseline.get('seed', '?')}), {baseline.get('ticks', '?')} "
                  f"ticks at 1 worker; baseline deterministic at {baseline.get('check_workers', '?')} workers: "
                  f"{'yes' if baseline.get('deterministic') else 'NO'}.")
     lines += ["", "| verdict | checks |", "|---|---|"]
@@ -367,7 +378,19 @@ def git_commit() -> str:
 
 def write_plan(args: argparse.Namespace) -> list[dict[str, Any]]:
     registry = json.loads(Path(args.registry).read_text(encoding="utf-8"))
-    checks = expand(registry_rows(registry), load_hints(args.hints))
+    if args.scene is None:
+        args.scene = "galactic" if isinstance(registry, dict) and str(registry.get("note", "")).startswith("Perturbation scene: galactic.") else "m2"
+    if args.scene == "galactic" and Path(args.registry).name == "statuses-galactic.json":
+        # Shared classes (factions, units, abilities, constants and UI) remain
+        # in the root shard. Include their GC targets without changing statuses.
+        root = Path(args.registry).with_name("statuses.json")
+        if root.is_file():
+            shared = json.loads(root.read_text(encoding="utf-8"))
+            registry["rows"] += [row for row in registry_rows(shared) if any(
+                "/galactic/" in str(target.get("code", "")) or str(target.get("code", "")).startswith("src/campaign/")
+                or any(str(rule).startswith(("WG", "GFD", "GFS")) for rule in target.get("rules", []))
+                for target in row.get("applied", []) if isinstance(target, dict))]
+    checks = expand(registry_rows(registry), load_hints(args.hints), args.scene)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "plan.json").write_text(json.dumps(
         {"registry": str(args.registry), "checks": checks}, indent=2) + "\n", encoding="utf-8")
@@ -392,6 +415,8 @@ def run_command(args: argparse.Namespace) -> int:
                "--game-root", game_root, "--ticks", str(args.ticks), "--jobs", str(args.jobs),
                "--seed", str(args.seed), "--check-workers", str(args.check_workers),
                "--check-every", str(args.check_every)]
+    if args.scene == "galactic":
+        command += ["--galactic", args.campaign, "--max-seconds", str(args.max_seconds)]
     if args.nice and os.name == "posix":
         command = ["nice", "-n", "19", *command]
     started = datetime.datetime.now(datetime.timezone.utc)
@@ -411,6 +436,8 @@ def report_from(out: Path, checks: list[dict[str, Any]], meta: dict[str, Any]) -
     report = build_report(checks, baseline, results, meta)
     (out / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     (out / "report.md").write_text(render_report(report), encoding="utf-8", newline="\n")
+    if baseline.get("scene") == "galactic":
+        (out / "findings.md").write_text(render_report(report).split("## Every check")[0], encoding="utf-8")
     drafts = out / "issue-drafts"
     drafts.mkdir(exist_ok=True)
     for stale in drafts.glob("*.md"):
@@ -499,12 +526,16 @@ def main(argv: Iterable[str] | None = None) -> int:
     plan.add_argument("--registry", type=Path, required=True)
     plan.add_argument("--out", type=Path, required=True)
     plan.add_argument("--hints", type=Path, default=DEFAULT_HINTS)
+    plan.add_argument("--scene", choices=("m2", "galactic"))
     plan.set_defaults(handler=plan_command)
     run = commands.add_parser("run")
     run.add_argument("--registry", type=Path, required=True)
     run.add_argument("--binary", type=Path, required=True)
     run.add_argument("--out", type=Path, required=True)
     run.add_argument("--hints", type=Path, default=DEFAULT_HINTS)
+    run.add_argument("--scene", choices=("m2", "galactic"))
+    run.add_argument("--campaign", default="*", help="GC campaign name, or * for all stock campaigns")
+    run.add_argument("--max-seconds", type=int, default=600, help="GC total runtime budget")
     run.add_argument("--game-root", default="")
     run.add_argument("--ticks", type=int, default=3600)
     run.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 1))

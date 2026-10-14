@@ -1,9 +1,10 @@
 #include "eawr/assets/map.hpp"
 #include "eawr/units/unit_tables.hpp"
+#include "unit_internal.hpp"
 
 #include <algorithm>
 #include <array>
-#include <cctype>
+#include "eawr/core/ascii.hpp"
 #include <map>
 #include <string>
 #include <utility>
@@ -25,7 +26,7 @@ namespace tactical = sim::tactical;
 [[nodiscard]] bool same_name(const std::string_view left, const std::string_view right) noexcept {
     return left.size() == right.size()
         && std::equal(left.begin(), left.end(), right.begin(), [](const unsigned char a, const unsigned char b) {
-               return std::tolower(a) == std::tolower(b);
+               return core::ascii_lower(a) == core::ascii_lower(b);
            });
 }
 
@@ -71,7 +72,8 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
     // The projectile a weapon fires (#74, DG-21 to DG-25): its damage (a hardpoint's own positive
     // damage before the projectile's), speed and flags; the weapon's own Damage_Type before the
     // projectile's; a hardpoint's range limits its travel.
-    const auto shot_profile = [&](const Weapon& weapon, const bool hardpoint) -> core::Result<std::optional<tactical::ShotProfile>> {
+    const auto shot_profile = [&](const Weapon& weapon, const bool hardpoint,
+        const std::optional<Fixed> unit_reach = std::nullopt) -> core::Result<std::optional<tactical::ShotProfile>> {
         using ShotResult = core::Result<std::optional<tactical::ShotProfile>>;
         if (weapon.projectile_index == no_index || weapon.projectile_index >= tables.projectiles.size()) {
             return ShotResult::success(std::nullopt);
@@ -84,21 +86,29 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         shot.damage_delay = projectile.damage_delay;
         shot.damage_type = types.damage(!weapon.damage_type.empty() ? weapon.damage_type : projectile.damage_type);
         shot.speed = *projectile.max_speed;
+        // WWP-48: the unit's own weapon travels its type's Targeting_Max_Attack_Distance; the
+        // projectile's own flight distance only stands in when the type authors none.
         shot.max_travel = hardpoint && weapon.range && weapon.range->raw() > 0
             ? *weapon.range
+            : !hardpoint && unit_reach && unit_reach->raw() > 0 ? *unit_reach
             : projectile.max_flight_distance.value_or(Fixed{});
         shot.shield_damage = projectile.does_shield_damage;
         shot.hitpoint_damage = projectile.does_hitpoint_damage;
         shot.energy_damage = projectile.does_energy_damage; // EN-07
         if (projectile.disables_engines_when_power_drained) {
-            // EN-08: reject unsupported negative (indefinite) durations instead of inventing a timeout.
-            const auto seconds = projectile.disable_engines_duration;
-            if (!seconds || seconds->raw() < 0 || seconds->raw() > 3600 * Fixed::scale) {
-                return ShotResult::failure(failure("projectile '" + projectile.id + "' has an invalid engine-disable duration (EN-08)"));
+            // EN-08: absent is zero; any negative duration has no recovery deadline.
+            const auto seconds = projectile.disable_engines_duration.value_or(Fixed{});
+            if (seconds.raw() < 0) {
+                shot.disable_engines_frames = tactical::indefinite_engine_disable_frames;
+            } else {
+                auto frames = whole(seconds, tactical::logical_frames_per_second,
+                    projectile.id + " Projectile_Disable_Engines_Duration");
+                if (!frames) return ShotResult::failure(frames.error());
+                if (frames.value() == tactical::indefinite_engine_disable_frames) {
+                    return ShotResult::failure(failure(projectile.id + " engine-disable duration exceeds finite frame storage (EN-08)"));
+                }
+                shot.disable_engines_frames = frames.value();
             }
-            auto frames = whole(*seconds, 30, projectile.id + " Projectile_Disable_Engines_Duration");
-            if (!frames) return ShotResult::failure(frames.error());
-            shot.disable_engines_frames = frames.value();
         }
         // IS-01: a stun on detonation. IS-08: a stun with a radius is not modelled (no M2
         // projectile authors one); the loader refuses it rather than stun only the unit hit.
@@ -121,6 +131,11 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         if (!hardpoint) shot.energy_per_shot = projectile.energy_per_shot.value_or(Fixed{});
         // MS-01: a MISSILE-category projectile homes, turning at its Max_Rate_Of_Turn.
         shot.homing = same_name(projectile.category, "MISSILE");
+        // WRB-06: Apply_Effect refuses missiles, grenades, rockets, light-saber shots, bombs and cluster bombs.
+        shot.redirect_blockable = !(same_name(projectile.category, "MISSILE") || same_name(projectile.category, "GRENADE")
+            || same_name(projectile.category, "ROCKET") || same_name(projectile.category, "MPTL_ROCKET")
+            || same_name(projectile.category, "LIGHT_SABER") || same_name(projectile.category, "BOMB")
+            || same_name(projectile.category, "CLUSTER_BOMB"));
         shot.turn_rate = projectile.max_rate_of_turn.value_or(Fixed{}); // WPJ-09/17: direct deflection turns too
         const bool rocket = same_name(projectile.category, "ROCKET");
         if (rocket || projectile.max_lifetime || projectile.explode_at_target_radius.value_or(false)) {
@@ -162,12 +177,38 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         }
     }
 
+    // space-targeting R-01: Hardpoint_Recharge_Cutoff_For_Opportunity_Fire. A mod without the tag
+    // forces nothing.
+    std::optional<Fixed> opportunity_cutoff;
+    for (const auto& constant : tables.constants.scalars) {
+        if (constant.tag == "Hardpoint_Recharge_Cutoff_For_Opportunity_Fire") opportunity_cutoff = constant.value;
+    }
+
     tactical::CombatTable table;
     table.pad_neutral_factions = tables.pad_neutral_factions;
+    for (const auto& constant : tables.constants.scalars) {
+        if (constant.tag == "Melee_Cutoff_Range") table.melee_cutoff = constant.value.value_or(Fixed{});
+        // A-05: a boolean loads as 0/1; a mod without the tag keeps FoC's shipped false.
+        if (constant.tag == "Auto_Rotate_For_Space_Targeting") {
+            table.auto_rotate_for_targeting = constant.value.has_value() && constant.value->raw() != 0;
+        }
+    }
     std::map<std::uint32_t, std::uint32_t> set_index; // unit tables' set index -> combat table's
     for (std::size_t unit_index = 0; unit_index < tables.units.size(); ++unit_index) {
         const auto& unit = tables.units[unit_index];
-        if (unit.kind == UnitKind::squadron) continue; // squadrons act through their craft (#75)
+        const auto footprint = detail::space_footprint(unit.id, unit.scale_factor, unit.footprint);
+        if (!footprint) return Result::failure(footprint.error());
+        table.footprints.push_back({footprint.value().type_id, footprint.value().radius,
+            footprint.value().x_extent, footprint.value().y_extent});
+        if (unit.unit_ai) table.unit_ai_types.push_back(assets::object_type_crc(unit.id));
+        if (unit.kind == UnitKind::squadron) {
+            tactical::CombatProfile company;
+            company.type_id = assets::object_type_crc(unit.id);
+            company.category_bits = unit.category_bits;
+            company.special_weapon = unit.special_weapon;
+            table.retaliation_team_types.push_back(std::move(company));
+            continue; // squadrons act through their craft (#75)
+        }
         const auto override_projectile = ion_override.find(unit_index);
         std::optional<std::uint32_t> barrage_projectile;
         for (const auto& ability : unit.abilities) {
@@ -194,10 +235,14 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         profile.star_base = unit.star_base;
         profile.capture_point = unit.capture_point;
         profile.category_bits = unit.category_bits;
+        profile.attack_category_restrictions = unit.attack_category_restrictions;
         profile.hero = unit.named_hero || unit.generic_hero;
         profile.redirect_damage_to_teammates = unit.redirect_damage_to_teammates;
         profile.passive_missile_shield_radius = unit.passive_missile_shield_radius.value_or(Fixed{});
         profile.ranged_target_z_adjust = unit.ranged_target_z_adjust.value_or(Fixed{});
+        // WST-07/08: the type-level reveal range, whether or not the type has REVEAL.
+        profile.target_stealth = unit.target_stealth_units;
+        if (unit.target_stealth_units) profile.stealth_detection_range = unit.space_fow_reveal_range.value_or(Fixed{});
         for (const auto index : unit.death_projectile_indices) {
             Weapon payload;
             payload.projectile_index = index;
@@ -207,6 +252,7 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
             profile.death_projectiles.push_back(*shot.value());
         }
         profile.max_attack_distance = unit.targeting_max_attack_distance;
+        profile.stickiness = unit.targeting_stickiness_seconds.value_or(Fixed{}); // WCC-15
         profile.min_attack_distance = unit.targeting_min_attack_distance.value_or(Fixed{});
         if (unit.targeting_priority_set_index != no_index) {
             const auto [entry, inserted] =
@@ -232,9 +278,13 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
             entry.max_recharge_hundredths = std::max(minimum.value(), maximum.value());
             entry.pulse_count = std::max<std::uint32_t>(1, weapon.pulse_count.value_or(1));
             entry.pulse_delay_frames = delay.value();
+            if (weapon.full_salvo_delay_multiplier) entry.full_salvo_delay = *weapon.full_salvo_delay_multiplier;
             entry.category_restrictions = restrictions.value();
             entry.opportunity_when_idle = weapon.opportunity_fire_when_idle;
             entry.opportunity_when_targeting = weapon.opportunity_fire_when_targeting;
+            // R-01: the cutoff compares the authored seconds, before the hundredths truncation.
+            entry.ai_opportunity_forced = hardpoint != tactical::object_weapon && opportunity_cutoff
+                && weapon.max_recharge_seconds.value_or(Fixed{}) <= *opportunity_cutoff;
             return WeaponResult::success(entry);
         };
         // Compute_AI_Combat_Power (A-06, research AT-09): a weapon hardpoint's share of the type's
@@ -259,7 +309,8 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
             if (hardpoint.attachment.position) {
                 auto position = place(*hardpoint.attachment.position);
                 if (!position) return Result::failure(position.error());
-                profile.hardpoints.push_back({index, position.value(), hardpoint.targetable});
+                profile.hardpoints.push_back(
+                    {index, position.value(), hardpoint.targetable, static_cast<std::uint8_t>(hardpoint.type)});
             }
             if (!is_weapon(hardpoint.type) || !hardpoint.weapon) continue;
             const auto& weapon = *hardpoint.weapon;
@@ -332,6 +383,13 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
             auto shot = shot_profile(weapon, true);
             if (!shot) return Result::failure(shot.error());
             entry.value().shot = std::move(shot).value();
+            if (weapon.charged_projectile_index != no_index) {
+                auto swapped = weapon;
+                swapped.projectile_index = weapon.charged_projectile_index;
+                auto charged_shot = shot_profile(swapped, true);
+                if (!charged_shot) return Result::failure(charged_shot.error());
+                entry.value().charged_shot = std::move(charged_shot).value();
+            }
             if (barrage_projectile) {
                 auto swapped = weapon;
                 swapped.projectile_index = *barrage_projectile;
@@ -381,21 +439,81 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         if (unit.weapon) {
             auto entry = weapon_profile(*unit.weapon, tactical::object_weapon, unit.id + " object weapon");
             if (!entry) return Result::failure(entry.error());
+            entry.value().object_turret_required = unit.object_turret.has_value();
+            if (unit.object_turret && unit.object_turret->turret.position && unit.object_turret->turret.axes) {
+                const auto& authored = *unit.object_turret;
+                tactical::ManualTurretProfile turret;
+                auto pivot = place(*authored.turret.position);
+                if (!pivot) return Result::failure(pivot.error());
+                turret.pivot = turret.coordinate_pivot = pivot.value();
+                turret.rest = authored.rest;
+                entry.value().object_turret_rest_delay = authored.rest_delay.value_or(tactical::default_object_turret_rest_delay);
+                turret.speed = authored.speed.value_or(Fixed{});
+                turret.yaw_extent = authored.yaw_extent.value_or(Fixed{});
+                turret.pitch_extent = authored.pitch_extent.value_or(Fixed{});
+                turret.xy_only = authored.xy_only;
+                bool usable = true;
+                const auto turn_axes = [&usable](const std::array<Vec3, 3>& source) {
+                    std::array<Vec3, 3> result;
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        const auto& v = source[axis];
+                        const auto normalized = sim::math::normalize(Vec3{Fixed::from_raw(-v.y.raw()), v.x, v.z});
+                        if (!normalized) { usable = false; break; }
+                        result[axis] = normalized.value();
+                    }
+                    return result;
+                };
+                turret.axes = turn_axes(*authored.turret.axes);
+                turret.barrel = authored.barrel.position.has_value() && authored.barrel.axes.has_value();
+                if (turret.barrel) {
+                    auto barrel = place(*authored.barrel.position);
+                    if (!barrel) return Result::failure(barrel.error());
+                    turret.barrel_pivot = barrel.value();
+                    turret.barrel_axes = turn_axes(*authored.barrel.axes);
+                }
+                if (!usable) return Result::failure(failure(unit.id + ": ordinary turret has unusable bone axes (UA-05)"));
+                entry.value().object_turret = turret;
+            }
             entry.value().range = unit.targeting_max_attack_distance.value_or(Fixed{});
             // W-09: the turret extents, both authored, else no cone.
             if (unit.weapon->cone_width_degrees && unit.weapon->cone_height_degrees) {
                 entry.value().cone_width = *unit.weapon->cone_width_degrees;
                 entry.value().cone_height = *unit.weapon->cone_height_degrees;
             }
-            auto shot = shot_profile(*unit.weapon, false);
+            auto shot = shot_profile(*unit.weapon, false, unit.targeting_max_attack_distance);
             if (!shot) return Result::failure(shot.error());
             entry.value().shot = std::move(shot).value();
+            if (unit.planetary_weapon) {
+                tactical::PlanetaryWeaponProfile special;
+                special.index = unit.planetary_weapon->index;
+                special.target_action = unit.planetary_weapon->target_action;
+                special.valid_targets = unit.planetary_weapon->valid_targets;
+                const auto nearest_frames = [&](const std::optional<Fixed> seconds) -> core::Result<std::uint32_t> {
+                    const auto value = seconds.value_or(Fixed{});
+                    if (value.raw() < 0 || value.raw() > 3600 * Fixed::scale)
+                        return core::Result<std::uint32_t>::failure(failure(unit.id + " special timing out of range"));
+                    return core::Result<std::uint32_t>::success(static_cast<std::uint32_t>(
+                        (value.raw() * 30 + Fixed::scale / 2) / Fixed::scale));
+                };
+                auto recharge = nearest_frames(unit.weapon->min_recharge_seconds);
+                auto pulse = nearest_frames(unit.weapon->pulse_delay_seconds);
+                if (!recharge || !pulse) return Result::failure(!recharge ? recharge.error() : pulse.error());
+                special.recharge_frames = recharge.value();
+                special.pulse_delay_frames = pulse.value();
+                profile.planetary_weapon = special;
+            }
             if (barrage_projectile) {
                 auto swapped = *unit.weapon;
                 swapped.projectile_index = *barrage_projectile;
-                auto barrage_shot = shot_profile(swapped, false);
+                auto barrage_shot = shot_profile(swapped, false, unit.targeting_max_attack_distance);
                 if (!barrage_shot) return Result::failure(barrage_shot.error());
                 entry.value().barrage_shot = std::move(barrage_shot).value();
+            }
+            for (const auto& bone : unit.muzzle_bones) {
+                if (!bone.position) continue;
+                auto placed = place(*bone.position);
+                if (!placed) return Result::failure(placed.error());
+                entry.value().muzzles.push_back(placed.value());
             }
             profile.weapons.push_back(entry.value());
         }
@@ -482,17 +600,26 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         }
     }
     // Each used set, resolved against every type of the table (R-09 set side, attack_priority).
+    std::sort(table.unit_ai_types.begin(), table.unit_ai_types.end());
+    std::sort(table.retaliation_team_types.begin(), table.retaliation_team_types.end(),
+        [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
     table.priority_sets.resize(set_index.size());
     for (const auto& [source, target] : set_index) {
         auto& set = table.priority_sets[target];
         set.unlisted = unlisted_priority;
         for (const auto& unit : tables.units) {
-            if (unit.kind == UnitKind::squadron) continue;
             set.rows.push_back({assets::object_type_crc(unit.id), attack_priority(tables.priority_sets[source], unit)});
         }
         std::sort(set.rows.begin(), set.rows.end(),
             [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
+        // WCC-18: each hardpoint type's rank (Hard_Point_Priorities, Hard_Point_Exclusions).
+        for (auto type = static_cast<std::uint8_t>(HardpointType::unknown);
+             type <= static_cast<std::uint8_t>(HardpointType::weapon_special); ++type) {
+            set.hardpoint_ranks.push_back(hard_point_priority(tables.priority_sets[source], static_cast<HardpointType>(type)));
+        }
     }
+    std::sort(table.footprints.begin(), table.footprints.end(),
+        [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
     auto valid = tactical::validate_combat(table);
     if (!valid) return Result::failure(failure(valid.error().message));
     return Result::success(std::move(table));

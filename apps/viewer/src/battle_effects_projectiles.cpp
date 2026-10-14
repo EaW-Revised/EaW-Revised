@@ -130,6 +130,7 @@ void BattleEffects::plan_projectile_models(std::vector<SpacePopulation::Options:
         for (const auto& [slot, look] : looks.weapons) all.push_back(&look);
         for (const auto& [slot, look] : looks.ability_weapons) all.push_back(&look);
         for (const auto& [slot, look] : looks.barrage_weapons) all.push_back(&look);
+        for (const auto& [slot, look] : looks.charged_weapons) all.push_back(&look);
         for (const ProjectileLook* entry : all) {
             const ProjectileLook& look = *entry;
             if (look.render != Render::model || model_pools_.contains(look.projectile)) continue;
@@ -156,6 +157,17 @@ void BattleEffects::note_types(const tactical::TacticalSnapshot& previous, const
 }
 
 const BattleEffects::ProjectileLook* BattleEffects::look_of(const tactical::Projectile& projectile) const {
+    if (projectile.profile_key) {
+        const auto& key = *projectile.profile_key;
+        const auto type = types_.find(key.type);
+        if (type == types_.end()) return nullptr;
+        const auto& looks = key.kind == tactical::ProjectileProfileKind::ability ? type->second.ability_weapons
+            : key.kind == tactical::ProjectileProfileKind::barrage ? type->second.barrage_weapons
+            : key.kind == tactical::ProjectileProfileKind::charged_blast && type->second.charged_weapons.contains(key.weapon)
+                ? type->second.charged_weapons : type->second.weapons;
+        const auto look = looks.find(key.weapon);
+        return look == looks.end() ? nullptr : &look->second;
+    }
     if (const auto spawn = spawned_projectile_types_.find(projectile.id); spawn != spawned_projectile_types_.end()) {
         const auto type = types_.find(spawn->second);
         if (type == types_.end()) return nullptr;
@@ -204,8 +216,10 @@ void BattleEffects::observe_projectiles(const tactical::TacticalSnapshot& previo
         const auto fog_tick = snapshot.completed_tick();
         const bool limbo = projectile.muzzle_delay_until != 0 && fog_tick <= projectile.muzzle_delay_until;
         state.hide.advance(tick, limbo, state.look && state.look->immediate_fog, [&] {
+            if (state.look && !state.look->visible_to_enemy)
+                return projectile_observer_ && projectile_observer_(projectile.owner, projectile.position, fog_tick, false);
             return !state.look || !state.look->hide_when_fogged
-                || (projectile_observer_ && projectile_observer_(projectile.owner, projectile.position, fog_tick));
+                || (projectile_observer_ && projectile_observer_(projectile.owner, projectile.position, fog_tick, true));
         });
     };
     // Retain terminal owner/look even when the latest snapshot removed the shot.
@@ -222,7 +236,8 @@ bool BattleEffects::projectile_terminal_admitted(const tactical::CombatEvent& ev
     // WPJ-40: decoration creation requires both model admission and the
     // projectile object's current local fog query, independent of endpoints.
     return state->second.hide.drawn() && projectile_observer_
-        && projectile_observer_(state->second.owner, event.aim, event.tick);
+        && projectile_observer_(state->second.owner, event.aim, event.tick,
+            !state->second.look || state->second.look->visible_to_enemy);
 }
 
 float BattleEffects::projectile_model_opacity(const std::size_t ship) const {
@@ -270,7 +285,7 @@ void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& pre
             const auto spawns = latest.ability_spawns();
             const auto entry = std::lower_bound(spawns.begin(), spawns.end(), projectile.id,
                 [](const auto& spawn, const std::uint64_t id) { return spawn.id < id; });
-            if (entry != spawns.end() && entry->id == projectile.id) {
+            if (entry != spawns.end() && entry->id == projectile.id && entry->kind != tactical::AbilityKind::cluster_bomb) {
                 const auto& spawn = *entry;
                 pose = space::ProjectilePose{{to_float(spawn.position.x), to_float(spawn.position.y), to_float(spawn.position.z)}, 0, 0};
                 if (auto frame = sim::math::to_matrix(spawn.rotation, spawn.position)) {
@@ -283,6 +298,7 @@ void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& pre
                 live.push_back(std::move(*placed));
                 modelled_now_.push_back(projectile.id);
                 if (ability_projectiles_.contains(projectile.id) || barrage_projectiles_.contains(projectile.id)) ++ability_shots_drawn_[name];
+                if (projectile.reflected) ++reflected_shots_drawn_[name];
                 auto& last = model_last_posed_tick_[projectile.id];
                 last = std::max(last, latest.completed_tick());
             }
@@ -322,7 +338,7 @@ std::optional<SpacePopulation::LivePose> BattleEffects::projectile_model_pose_at
     const auto spawns = after->ability_spawns();
     const auto entry = std::lower_bound(spawns.begin(), spawns.end(), latest->id,
         [](const auto& spawn, const std::uint64_t id) { return spawn.id < id; });
-    if (entry != spawns.end() && entry->id == latest->id) {
+    if (entry != spawns.end() && entry->id == latest->id && entry->kind != tactical::AbilityKind::cluster_bomb) {
         const auto& spawn = *entry;
         pose = space::ProjectilePose{{to_float(spawn.position.x), to_float(spawn.position.y), to_float(spawn.position.z)}, 0, 0};
         if (auto frame = sim::math::to_matrix(spawn.rotation, spawn.position)) {
@@ -367,6 +383,78 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
                                      const double alpha, const UnitLookup& units, const FixedCamera& camera) {
     FrameTimer timer(measure_preparation_ ? &projectile_prepare_ms_ : nullptr, true);
     const View view = view_of(camera);
+    // WSH-08 lightning-look seam: authored repair bolts, bounded additive ribbons.
+    // Geometry is an inferred presentation adapter until the lightning effect walk settles it.
+    for (auto& [name, look] : healing_lightning_) {
+        static_cast<void>(name); look.batch.stream.clear();
+    }
+    const auto random = [](std::uint64_t key) {
+        key ^= key >> 30; key *= 0xbf58476d1ce4e5b9ULL; key ^= key >> 27; key *= 0x94d049bb133111ebULL;
+        return static_cast<float>((key ^ (key >> 31)) & 65535U) / 65535.0F;
+    };
+    std::erase_if(healing_bolts_, [&](const auto& bolt) {
+        const auto look = healing_lightning_.find(bolt.effect);
+        return look == healing_lightning_.end() || !units(bolt.source) || !units(bolt.target)
+            || healing_presented_tick_ - bolt.birth > (look->second.bolts * look->second.interval_max + look->second.fade_max) * 30.0;
+    });
+    for (const auto& bolt : healing_bolts_) {
+        auto& look = healing_lightning_.at(bolt.effect);
+        const auto source = units(bolt.source), target = units(bolt.target);
+        if (!source || !target) continue;
+        V a = vec(source->position), b = vec(target->position);
+        if (contact_bones_) {
+            if (const auto bone = contact_bones_(bolt.source, bolt.source_bone)) a = bone->frame.origin;
+            if (const auto bone = contact_bones_(bolt.target, bolt.target_bone)) b = bone->frame.origin;
+        }
+        const auto direction = normalized(sub(b, a)); if (!direction) continue;
+        const auto axes = screen_axes(view, scale(add(a, b), 0.5F), *direction);
+        double born = bolt.birth;
+        for (std::uint32_t n = 0; n < look.bolts; ++n) {
+            const auto key = bolt.source ^ (bolt.target << 16) ^ static_cast<std::uint64_t>(bolt.birth) ^ (n * 65537ULL);
+            if (n > 0) born += (look.interval_min + random(key) * (look.interval_max - look.interval_min)) * 30.0;
+            const double duration = (look.fade_min + random(key + 1) * (look.fade_max - look.fade_min)) * 30.0;
+            const double age = healing_presented_tick_ - born;
+            if (duration <= 0 || age < 0 || age >= duration) continue;
+            if (look.batch.resource == 0) {
+                particles::EmitterRenderPlan plan;
+                plan.family = particles::RenderFamily::billboard; plan.blend_selector = 1;
+                plan.program = "Engine/PrimAdditive.fx"; plan.technique = "t1"; plan.blend = particles::Blend::additive;
+                plan.phase = particles::DrawPhase::transparent; plan.depth_test = true; plan.depth_write = false;
+                plan.drawable = true; plan.texture = look.texture;
+                look.batch.resource = backend_->create_emitter(plan);
+                if (look.batch.resource == 0) { failure_ = "repair lightning: " + backend_->failure_cause(); return false; }
+            }
+            const float fade = static_cast<float>(age / duration);
+            const particles::Color colour{look.start.x + (look.end.x - look.start.x) * fade,
+                look.start.y + (look.end.y - look.start.y) * fade, look.start.z + (look.end.z - look.start.z) * fade,
+                look.start.w + (look.end.w - look.start.w) * fade};
+            const float width = look.width_min + random(key + 2) * (look.width_max - look.width_min);
+            const auto point = [&](const std::uint32_t part) {
+                V result = add(a, scale(sub(b, a), static_cast<float>(part) / static_cast<float>(look.detail)));
+                if (part != 0 && part != look.detail) {
+                    result.x += (random(key + part * 3) * 2.0F - 1.0F) * look.displacement[0];
+                    result.y += (random(key + part * 3 + 1) * 2.0F - 1.0F) * look.displacement[1];
+                    result.z += (random(key + part * 3 + 2) * 2.0F - 1.0F) * look.displacement[2];
+                }
+                return result;
+            };
+            auto& stream = look.batch.stream;
+            const V side = scale(axes.side, width * 0.5F);
+            for (std::uint32_t part = 0; part < look.detail; ++part) {
+                const auto p = point(part), q = point(part + 1);
+                const auto base = static_cast<std::uint32_t>(stream.vertices.size());
+                push(stream, add(p, side), colour, 0, 1); push(stream, sub(p, side), colour, 1, 1);
+                push(stream, add(q, side), colour, 0, 0); push(stream, sub(q, side), colour, 1, 0);
+                for (const auto index : {0U, 1U, 2U, 1U, 3U, 2U}) stream.indices.push_back(base + index);
+                ++stream.quads;
+            }
+            ++healing_bolt_samples_;
+        }
+    }
+    for (auto& [name, look] : healing_lightning_) {
+        static_cast<void>(name);
+        if (look.batch.resource != 0) backend_->update_emitter(look.batch.resource, look.batch.stream);
+    }
     kites_.stream.clear();
     beams_.stream.clear();
     const auto earlier = previous.projectiles();
@@ -491,6 +579,7 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         }
         ++stream.quads;
         ++projectiles_drawn_;
+        if (projectile.reflected) ++reflected_shots_drawn_[look->projectile];
         if (ability_projectiles_.contains(projectile.id) || barrage_projectiles_.contains(projectile.id)) ++ability_shots_drawn_[look->projectile];
     }
     projectile_shooters_ = std::move(shooters);
@@ -525,9 +614,14 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
     }
     std::set<sim::EntityId> active_energy;
     std::set<sim::EntityId> active_tractors;
+    std::set<sim::EntityId> active_leeches;
     for (auto& look : hero_beams_) {
         look.batch.stream.clear();
         look.sparks.stream.clear();
+    }
+    for (auto& [type, look] : leech_beams_) {
+        static_cast<void>(type);
+        look.batch.stream.clear(); look.sparks.stream.clear();
     }
     // WHE-26/27: tracked endpoints follow the live poses; releasing the slot removes the beam.
     for (const auto& instance : latest.instances()) {
@@ -536,18 +630,28 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         const auto type = types_.find(instance.type_id);
         if (type == types_.end()) continue;
         for (const auto& status : instance.abilities) {
-            if (!status.active || (status.kind != tactical::AbilityKind::energy_weapon && status.kind != tactical::AbilityKind::tractor_beam)) continue;
+            if (!status.active || (status.kind != tactical::AbilityKind::energy_weapon && status.kind != tactical::AbilityKind::tractor_beam
+                && status.kind != tactical::AbilityKind::leech_shields)) continue;
             const auto target = units(status.target);
             if (!target) continue;
-            const auto beam = status.kind == tactical::AbilityKind::energy_weapon ? 0U : 1U;
-            const auto origin = space::live_model_point(type->second.beam_origins[beam], source->position,
-                source->yaw_degrees, source->roll_degrees, 1.0);
+            const auto beam = status.kind == tactical::AbilityKind::energy_weapon ? 0U
+                : status.kind == tactical::AbilityKind::leech_shields ? 2U : 1U;
+            auto origin = space::live_model_point(type->second.beam_origins[beam], source->position,
+                source->yaw_degrees, source->roll_degrees, 1.0, source->pitch_degrees);
+            bool origin_from_pose = false;
+            if (contact_bones_ && type->second.beam_bones[beam]) {
+                if (const auto bone = contact_bones_(instance.entity_id, *type->second.beam_bones[beam])) {
+                    origin = {bone->frame.origin.x, bone->frame.origin.y, bone->frame.origin.z};
+                    origin_from_pose = true;
+                }
+            }
             auto endpoint = target->position;
             if (const auto target_type = types_.find(target->type); target_type != types_.end()
                 && status.target_hardpoint < target_type->second.hardpoint_points.size()) {
                 const auto point = vec(target_type->second.hardpoint_points[status.target_hardpoint]);
-                endpoint = space::live_model_point({point.x, point.y, point.z}, target->position,
-                    target->yaw_degrees, target->roll_degrees, 1.0);
+                // hardpoint_points are unit-frame points, already turned by the loader for the sim's aim.
+                endpoint = space::live_unit_point({point.x, point.y, point.z}, target->position,
+                    target->yaw_degrees, target->roll_degrees, target->pitch_degrees);
             }
             if (beam == 0 && !type->second.energy_owner_particle.empty()) {
                 active_energy.insert(instance.entity_id);
@@ -566,7 +670,27 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
                     if (!registry_->set_frame(active->second, frame)) return false;
                 }
             }
-            auto& look = hero_beams_[beam];
+            if (beam == 2) {
+                active_leeches.insert(instance.entity_id);
+                auto active = leech_effects_.find(instance.entity_id);
+                if (active == leech_effects_.end() && !type->second.leech_effect.empty()) {
+                    const auto before = effects_.size();
+                    const particles::Basis3 basis{};
+                    if (!spawn(type->second.leech_effect, endpoint, basis, "shield_leech", latest.completed_tick())) return false;
+                    if (effects_.size() > before) {
+                        effects_.back().lifetime = std::numeric_limits<std::uint32_t>::max();
+                        active = leech_effects_.emplace(instance.entity_id, effects_.back().handle).first;
+                    }
+                }
+                if (active != leech_effects_.end()) {
+                    particles::EmitterFrame frame; frame.origin = vec(endpoint);
+                    if (!registry_->set_frame(active->second, frame)) return false;
+                }
+            }
+            auto& look = beam == 2 ? leech_beams_.at(instance.type_id) : hero_beams_[beam];
+            look.last_source = *source;
+            look.last_bind_origin = type->second.beam_origins[beam];
+            look.last_origin_from_pose = origin_from_pose;
             if (look.texture.empty() || look.width <= 0) continue;
             if (look.batch.resource == 0) {
                 particles::EmitterRenderPlan plan;
@@ -592,9 +716,9 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
             std::copy_n(stream.vertices.begin() + base, look.last_quad.size(), look.last_quad.begin());
             for (const auto index : {0U, 1U, 2U, 1U, 3U, 2U}) stream.indices.push_back(base + index);
             ++stream.quads;
-            ++(beam == 0 ? energy_beams_drawn_ : tractor_beams_drawn_);
-            if (beam == 1) {
-                active_tractors.insert(instance.entity_id);
+            ++(beam == 0 ? energy_beams_drawn_ : beam == 2 ? leech_beams_drawn_ : tractor_beams_drawn_);
+            if (beam != 0) {
+                if (beam == 1) active_tractors.insert(instance.entity_id);
                 auto [birth, inserted] = look.births.try_emplace(instance.entity_id,
                     std::pair{status.target, latest.completed_tick()});
                 if (birth->second.first != status.target) {
@@ -644,12 +768,75 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
             }
         }
     }
+    // WLD-12: a point-defence zap draws its beam from the Crusader's bone nearest the shot to the shot's
+    // position at the zap, for the handler's Laser_Beam_Frames logical frames.
+    for (auto& entry : defence_batches_) entry.second.stream.clear();
+    std::erase_if(defence_zaps_, [&](const DefenceZap& zap) {
+        const auto type = types_.find(zap.type);
+        const std::uint64_t frames = type == types_.end() ? 0U : type->second.defence.frames;
+        return latest.completed_tick() >= zap.tick + frames;
+    });
+    for (const DefenceZap& zap : defence_zaps_) {
+        const auto source = units(zap.shooter);
+        const auto type = types_.find(zap.type);
+        if (!source || type == types_.end()) continue;
+        const auto& look = type->second.defence;
+        if (look.texture.empty() || look.width <= 0.0F || look.bones.empty()) continue;
+        const V b{static_cast<float>(zap.aim[0]), static_cast<float>(zap.aim[1]), static_cast<float>(zap.aim[2])};
+        // WLD-12: Get_Best_Laser_Bone, the authored bone nearest the shot.
+        std::optional<V> origin;
+        float nearest = 0.0F;
+        for (const auto& bone : look.bones) {
+            const V point = vec(space::live_model_point(bone, source->position, source->yaw_degrees, source->roll_degrees, 1.0, source->pitch_degrees));
+            const V gap = sub(b, point);
+            const float distance = dot(gap, gap);
+            if (!origin || distance < nearest) { origin = point; nearest = distance; }
+        }
+        auto& batch = defence_batches_[look.texture];
+        if (batch.resource == 0) {
+            particles::EmitterRenderPlan plan;
+            plan.family = particles::RenderFamily::billboard;
+            plan.blend_selector = 1; plan.program = "Engine/PrimAdditive.fx"; plan.technique = "t1";
+            plan.blend = particles::Blend::additive; plan.phase = particles::DrawPhase::transparent;
+            plan.depth_test = true; plan.depth_write = false; plan.drawable = true; plan.texture = look.texture;
+            batch.resource = backend_->create_emitter(plan);
+            if (batch.resource == 0) { failure_ = "laser defence beam " + look.texture + ": " + backend_->failure_cause(); return false; }
+        }
+        const V a = *origin;
+        const auto direction = normalized(sub(b, a));
+        if (!direction) continue;
+        const auto axes = screen_axes(view, scale(add(a, b), 0.5F), *direction);
+        const V side = scale(axes.side, look.width * 0.5F);
+        auto& stream = batch.stream;
+        const auto base = static_cast<std::uint32_t>(stream.vertices.size());
+        push(stream, add(a, side), look.colour, 0.0F, 1.0F);
+        push(stream, sub(a, side), look.colour, 1.0F, 1.0F);
+        push(stream, add(b, side), look.colour, 0.0F, 0.0F);
+        push(stream, sub(b, side), look.colour, 1.0F, 0.0F);
+        for (const auto index : {0U, 1U, 2U, 1U, 3U, 2U}) stream.indices.push_back(base + index);
+        ++stream.quads;
+        ++defence_beams_drawn_;
+    }
+    for (auto& entry : defence_batches_) {
+        if (entry.second.resource != 0) backend_->update_emitter(entry.second.resource, entry.second.stream);
+    }
     for (auto active = energy_owner_effects_.begin(); active != energy_owner_effects_.end();) {
         if (active_energy.contains(active->first)) { ++active; continue; }
         for (auto& effect : effects_) if (effect.handle == active->second) effect.lifetime = effect.age;
         active = energy_owner_effects_.erase(active);
     }
     std::erase_if(hero_beams_[1].births, [&](const auto& entry) { return !active_tractors.contains(entry.first); });
+    for (auto active = leech_effects_.begin(); active != leech_effects_.end();) {
+        if (active_leeches.contains(active->first)) { ++active; continue; }
+        for (auto& effect : effects_) if (effect.handle == active->second) effect.lifetime = effect.age;
+        active = leech_effects_.erase(active);
+    }
+    for (auto& [type, look] : leech_beams_) {
+        static_cast<void>(type);
+        std::erase_if(look.births, [&](const auto& entry) { return !active_leeches.contains(entry.first); });
+        if (look.batch.resource != 0) backend_->update_emitter(look.batch.resource, look.batch.stream);
+        if (look.sparks.resource != 0) backend_->update_emitter(look.sparks.resource, look.sparks.stream);
+    }
     for (auto& look : hero_beams_) {
         if (look.batch.resource != 0) backend_->update_emitter(look.batch.resource, look.batch.stream);
         if (look.sparks.resource != 0) backend_->update_emitter(look.sparks.resource, look.sparks.stream);

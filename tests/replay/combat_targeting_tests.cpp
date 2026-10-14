@@ -2,6 +2,8 @@
 #include "../../apps/sim_headless/json.hpp"
 #include "../../src/sim/tactical/combat_algorithms.hpp"
 
+#include <tuple>
+
 namespace combat_test_support {
 
 using sim_headless::Json;
@@ -451,6 +453,229 @@ void test_ship_level_choice() {
     auto far = session(setup({unit(1, gunship_type, 1, at(0, 0)), unit(2, bomber_type, 2, at(1001, 0), true)}));
     static_cast<void>(run(far, 5));
     expect(far.combat_state(1)->attack_target == 0, "ship level: nothing beyond the attack distance");
+}
+
+// WCC-16: the better-target test calls a unit damaged by its displayed health, which on a type that
+// dies with its hardpoints is the lesser of the hull fraction and the combined hardpoint fraction.
+void test_displayed_health_damaged() {
+    const auto durability = [](const bool dies_with_hardpoints) {
+        tactical::HardpointProfile hardpoint;
+        hardpoint.role = tactical::HardpointRole::weapon;
+        hardpoint.destroyable = true;
+        hardpoint.max_health = units(100);
+        tactical::DurabilityTable result;
+        result.rules.hull_vs_hardpoints = Fixed::from_decimal("0.2").value();
+        result.rules.damaged_fraction = Fixed::from_decimal("0.33").value();
+        result.profiles.push_back({fighter_type, units(1000), std::nullopt, dies_with_hardpoints, {hardpoint}});
+        result.profiles.push_back({bomber_type, units(1000), std::nullopt, false, {}});
+        return result;
+    };
+    // The fighter (priority 3.0) is examined first; the bomber (2.0) wins on priority unless the
+    // fighter counts as damaged. 80 of its hardpoint's 100 is lost: S/T = 0.2 is at most 0.33, while
+    // the hull stays at its cap 0.4, above the threshold.
+    const auto chosen = [&](const bool dies_with_hardpoints, const std::optional<std::int64_t> hull_hit,
+                            const std::optional<std::int64_t> hardpoint_hit) {
+        auto created = tactical::TacticalSession::create(
+            setup({unit(1, gunship_type, 1, at(0, 0)), unit(2, bomber_type, 2, at(420, 0), true),
+                unit(3, fighter_type, 2, at(200, 0), true)}),
+            sensors(), durability(dies_with_hardpoints), {}, std::nullopt, table());
+        expect(static_cast<bool>(created), "WCC-16: the durability session is created");
+        auto value = std::move(created).value();
+        if (hardpoint_hit) {
+            expect(static_cast<bool>(value.submit({{0, 2, 0}, {3}, tactical::DamagePayload{units(*hardpoint_hit), 0}})),
+                "WCC-16: hardpoint damage is submitted");
+        }
+        if (hull_hit) {
+            expect(static_cast<bool>(value.submit({{0, 2, 1}, {3}, tactical::DamagePayload{units(*hull_hit)}})),
+                "WCC-16: hull damage is submitted");
+        }
+        static_cast<void>(run(value, 60));
+        return value.combat_state(1)->attack_target;
+    };
+    expect(chosen(true, std::nullopt, std::nullopt) == 2, "WCC-16: undamaged, the better priority wins");
+    expect(chosen(true, std::nullopt, 80) == 3,
+        "WCC-16: a ship that lost most of its hardpoints is damaged although its hull is above the threshold");
+    expect(chosen(false, std::nullopt, 80) == 2,
+        "WCC-16: a type that does not die with its hardpoints shows its hull only");
+    expect(chosen(true, std::nullopt, 50) == 2, "WCC-16: hardpoints above the threshold are not damaged");
+    expect(chosen(true, 700, std::nullopt) == 3, "WCC-16: a low hull is still damaged");
+}
+
+// WCC-14, WCC-15: a held scanned target whose estimated time to death is within the scanner's
+// Targeting_Stickiness_Time_Threshold is kept although a scan finds a better one; at a longer time
+// the better one replaces it. The fighter (3.0) is held; the bomber (2.0) is the better find.
+void test_target_stickiness() {
+    namespace d = tactical::detail;
+    auto profiles = table();
+    profiles.profiles[4].stickiness = units(5);
+    tactical::HardpointProfile weapon_point;
+    weapon_point.role = tactical::HardpointRole::weapon;
+    weapon_point.destroyable = true;
+    weapon_point.max_health = units(400);
+    const tactical::DurabilityProfile tracked{fighter_type, units(1000), std::nullopt, false, {}};
+    auto hardpointed = tracked;
+    hardpointed.hardpoints = {weapon_point, weapon_point};
+    auto untracked = tracked;
+    auto tracked_profile = tracked;
+    tracked_profile.damage_tracking = true;
+    hardpointed.damage_tracking = true;
+    tactical::CombatState state;
+    state.attack_target = 2;
+    d::CombatUnit scanner, held, better;
+    scanner.id = 1; scanner.owner = 1; scanner.profile = &profiles.profiles[4]; scanner.combat = &state;
+    held.id = 2; held.type_id = fighter_type; held.owner = 2;
+    held.profile = &profiles.profiles[1]; held.visible_to = 1; held.position = at(200, 0);
+    better.id = 3; better.type_id = bomber_type; better.owner = 2;
+    better.profile = &profiles.profiles[2]; better.visible_to = 1; better.position = at(420, 0);
+    const auto players = setup({}).players;
+    const std::array<tactical::SnapshotPlayer, 2> relations{{{1, 1, false}, {2, 2, false}}};
+    tactical::DurabilityRules rules;
+    rules.damaged_fraction = Fixed::from_decimal("0.33").value();
+    d::CombatWorld world;
+    world.players = players; world.relationships = relations; world.table = &profiles; world.rules = &rules;
+    const std::array<tactical::SpaceBody, 3> bodies{{{1, 1, scanner.position},
+        {2, 2, held.position}, {3, 2, better.position}}};
+    world.index = tactical::SpaceIndex::build(bodies).value();
+    const auto chosen = [&](const tactical::DurabilityProfile* profile, const tactical::DurabilityState& health,
+                            const d::FormationAttackContext* formation = nullptr) {
+        auto target = held;
+        target.durability_profile = profile;
+        target.durability = &health;
+        world.units = {scanner, target, better};
+        return d::target_combat(world, world.units[0], {}, 0, {}, formation).attack_target;
+    };
+    const auto health = [](const std::int64_t hull, const std::int64_t shields, const std::int64_t rate,
+                            std::vector<Fixed> hardpoints = {}) {
+        tactical::DurabilityState result;
+        result.hull = units(hull);
+        result.shields = units(shields);
+        result.damage_rate = units(rate);
+        result.hardpoints = std::move(hardpoints);
+        return result;
+    };
+    expect(chosen(nullptr, health(500, 0, 100)) == 3, "WCC-14: without durability the better find replaces the target");
+    expect(chosen(&tracked_profile, health(500, 0, 100)) == 2, "WCC-15: 500 / 100 = 5 s is within 5 s: kept");
+    expect(chosen(&tracked_profile, health(400, 100, 100)) == 2, "WCC-15: the shield counts toward the time");
+    expect(chosen(&tracked_profile, health(600, 0, 100)) == 3, "WCC-15: 6 s is beyond 5 s: replaced");
+    expect(chosen(&tracked_profile, health(500, 0, 0)) == 3, "WCC-15: a zero rate never dies: replaced");
+    expect(chosen(&untracked, health(500, 0, 100)) == 3, "WCC-15: a target without damage tracking is never sticky");
+    // Destroyable hardpoints replace the hull: 300 + a destroyed 0 + 200 shield = 500 over 100.
+    expect(chosen(&hardpointed, health(1000, 200, 100, {units(300), Fixed{}})) == 2,
+        "WCC-15: the destroyable hardpoints' health, not the hull's, counts");
+    expect(chosen(&hardpointed, health(400, 0, 100, {units(300), units(300)})) == 3,
+        "WCC-15: 600 hardpoint health over 100 is 6 s: replaced although the hull alone would be 4 s");
+    // A type that authors no threshold has 0 (debug build): only a time of 0 is sticky.
+    profiles.profiles[4].stickiness = Fixed{};
+    expect(chosen(&tracked_profile, health(500, 0, 100)) == 3, "WCC-15: an unauthored threshold is 0");
+    expect(chosen(&hardpointed, health(800, 0, 100, {Fixed{}, Fixed{}})) == 2,
+        "WCC-15: destroyed hardpoints give 0 s, within a 0 threshold");
+    // A squadron craft's scan uses its leader's type's threshold.
+    auto leader = scanner;
+    auto leader_profile = profiles.profiles[4];
+    leader_profile.stickiness = units(5);
+    leader.profile = &leader_profile;
+    const d::FormationAttackContext formation{false, false, false, &leader};
+    expect(chosen(&tracked_profile, health(500, 0, 100), &formation) == 2,
+        "WCC-15: a squadron craft reads its leader's threshold");
+    profiles.profiles[4].stickiness = units(5);
+
+    // A squadron's team container: the sum over its tracked craft (an untracked craft adds 0).
+    const auto squadron = [&](const std::int64_t first_hull, const std::int64_t second_hull, const bool third_tracked) {
+        auto container = held;
+        container.id = 2;
+        std::vector<d::CombatUnit> craft;
+        std::vector<tactical::DurabilityState> states{health(first_hull, 0, 100), health(second_hull, 0, 100), health(50, 0, 100)};
+        for (const eawr::sim::EntityId id : {4U, 5U, 6U}) {
+            auto member = held;
+            member.id = id;
+            member.durability_profile = id == 6 && !third_tracked ? &untracked : &tracked_profile;
+            member.durability = &states[id - 4];
+            craft.push_back(member);
+        }
+        world.units = {scanner, container, better, craft[0], craft[1], craft[2]};
+        world.teams = {{2, {4, 5, 6}}};
+        const auto result = d::target_combat(world, world.units[0], {}, 0, {}).attack_target;
+        world.teams.clear();
+        return result;
+    };
+    expect(squadron(200, 300, false) == 2, "WCC-15: 2 s + 3 s over the squadron's craft is within 5 s");
+    expect(squadron(300, 300, false) == 3, "WCC-15: 3 s + 3 s is beyond 5 s");
+    expect(squadron(200, 300, true) == 3, "WCC-15: every tracked craft adds its time");
+}
+
+// WCC-82 (AB-42) and WCC-15 through a session: scripted hits feed a tracked unit's 30-frame rate
+// window, and the held fighter is kept while it will die within 5 s at that rate, though a damaged
+// bomber (the better find, WCC-16) is in range. Hashes agree for 1/2/4/8 workers.
+void test_target_stickiness_session() {
+    const auto run_case = [](const std::int64_t fighter_hull, const bool tracked, const std::size_t workers,
+                              std::vector<std::string>* hashes, const bool damage_rules = false) {
+        tactical::DurabilityTable health;
+        health.rules.hull_vs_hardpoints = Fixed::from_decimal("0.2").value();
+        health.rules.damaged_fraction = Fixed::from_decimal("0.33").value();
+        if (damage_rules) {
+            health.damage.emplace();
+            health.damage->shield_recharge_frames = 1;
+        }
+        tactical::DurabilityProfile fighter{fighter_type, units(fighter_hull), std::nullopt, false, {}};
+        fighter.damage_tracking = tracked;
+        tactical::DurabilityProfile bomber{bomber_type, units(1000), std::nullopt, false, {}};
+        bomber.damage_tracking = true;
+        health.profiles = {fighter, bomber};
+        auto profiles = table();
+        profiles.profiles[4].stickiness = units(5);
+        // Initially the healthy fighter wins. The bomber becomes the better find only after its
+        // scripted hit (WCC-16), while the fighter remains above the damaged-health threshold.
+        profiles.priority_sets[0].rows = {{fighter_type, units(2)}, {bomber_type, units(3)}, {transport_type, units(1)}};
+        auto created = tactical::TacticalSession::create(
+            setup({unit(1, gunship_type, 1, at(0, 0)), unit(2, fighter_type, 2, at(200, 0), true),
+                unit(3, bomber_type, 2, at(420, 0), true)}),
+            sensors(), health, {}, std::nullopt, profiles);
+        expect(static_cast<bool>(created), "WCC-15: the stickiness session is created");
+        if (!created) return std::vector<eawr::sim::EntityId>{};
+        auto session = std::move(created).value();
+        // 100 damage every 30 frames: the fighter's rate is 100 a second from tick 30 on. The bomber
+        // is damaged from tick 35 on: from then each scan finds it better than the fighter.
+        const std::array<std::tuple<std::uint64_t, eawr::sim::EntityId, std::int64_t>, 4> hits{{
+            {1, 2, 100}, {31, 2, 100}, {35, 3, 700}, {61, 2, 100}}};
+        for (const auto& [tick, target, amount] : hits) {
+            expect(static_cast<bool>(session.submit({{tick, 2, 0}, {target}, tactical::DamagePayload{units(amount)}})),
+                "WCC-82: a scripted hit is submitted");
+        }
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<eawr::sim::EntityId> targets;
+        for (int tick = 0; tick < 80; ++tick) {
+            auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "WCC-15: the stickiness session steps");
+            if (!stepped) break;
+            if (hashes != nullptr) hashes->push_back(stepped.value().state_sha256);
+            targets.push_back(session.combat_state(1)->attack_target);
+            if (tick == 30) {
+                const auto fighter_state = session.durability_state(2);
+                expect(fighter_state && (fighter_state->damage_rate == (tracked ? units(100) : Fixed{}))
+                        && fighter_state->window_damage == Fixed{},
+                    "WCC-82: the window's 100 becomes the rate at tick 30, for a tracked unit only");
+            }
+        }
+        return targets;
+    };
+    // 600 hull: after each hit the fighter has at most 500 left at 100 a second, within 5 s.
+    std::vector<std::string> reference;
+    const auto kept = run_case(600, true, 1, &reference);
+    expect(kept.size() == 80 && std::all_of(kept.begin() + 1, kept.end(), [](const auto id) { return id == 2; }),
+        "WCC-15: the dying fighter is kept while the damaged bomber is in range");
+    for (const std::size_t workers : {std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        std::vector<std::string> hashes;
+        static_cast<void>(run_case(600, true, workers, &hashes));
+        expect(hashes == reference, "WCC-15: stickiness hashes agree with " + std::to_string(workers) + " workers");
+    }
+    // 2000 hull: 1800 left at 100 a second is 18 s, so the first scan after tick 35 takes the bomber.
+    const auto replaced = run_case(2000, true, 1, nullptr);
+    expect(replaced.size() == 80 && replaced[34] == 2 && replaced.back() == 3,
+        "WCC-15: a fighter far from death is replaced by the damaged bomber");
+    const auto untracked = run_case(600, false, 1, nullptr);
+    expect(untracked.size() == 80 && untracked.back() == 3, "WCC-15: an untracked fighter is never sticky");
+    expect(run_case(600, true, 1, nullptr, true) == kept,
+        "WCC-82: scripted hits track the same damage with and without optional damage rules");
 }
 
 void test_ship_level_suitability() {

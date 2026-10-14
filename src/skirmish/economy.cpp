@@ -38,87 +38,24 @@ using sim::math::Fixed;
 
 } // namespace
 
-core::Result<tactical::EconomyRules> economy_rules(
-    const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables) {
-    using Result = core::Result<tactical::EconomyRules>;
-    const auto scalar = [&tables](const std::string_view tag) -> std::optional<Fixed> {
-        for (const auto& constant : tables.constants.scalars) {
-            if (constant.tag == tag) return constant.value;
-        }
-        return std::nullopt;
-    };
-    const auto credits = scalar("MP_Default_Credits");
-    const auto build_multiplier = scalar("Tactical_Build_Time_Multiplier");
-    const auto vulnerability = scalar("Space_Elevated_Vulnerability_Factor");
-    const auto vulnerable_seconds = scalar("Space_Elevated_Vulnerability_Duration");
-    const auto collision_distance = scalar("Space_Reinforcement_Collision_Check_Distance");
-    if (start.match.start_tech < 0 || start.match.max_tech < start.match.start_tech) {
-        return Result::failure(failure("invalid lobby tech levels"));
-    }
-    if (!credits || !build_multiplier || !vulnerability || !vulnerable_seconds || !collision_distance) {
-        return Result::failure(failure("needs MP_Default_Credits, Tactical_Build_Time_Multiplier and the "
-                                       "Space_Elevated_Vulnerability constants"));
-    }
-    tactical::EconomyRules rules;
-    rules.match_policy = replay_policy(start.match);
-    rules.disabled_types = roster_disabled_types();
-    for (const auto& player : start.players) {
+core::Result<tactical::PadRules> capture_rules(const tactical::TacticalSetup& setup,
+    const StartInputs& inputs, const units::UnitTables& tables) {
+    using Result = core::Result<tactical::PadRules>;
+    tactical::PadRules rules;
+    for (const auto& player : setup.players) {
         const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
-            [&](const StartFaction& entry) { return entry.neutral && detail::iequals(entry.name, player.faction); });
-        if (faction != inputs.factions.end()) rules.pads.neutral = player.player.player_id;
+            [&](const StartFaction& entry) { return entry.neutral && faction_id(entry.name) == player.faction_id; });
+        if (faction != inputs.factions.end()) rules.neutral = player.player_id;
     }
-    rules.collision_distance = *collision_distance; // WR-25
-
-    // PU-01, PU-21, PU-34: the lobby players.
-    for (const auto& player : start.players) {
-        if (!player.lobby) continue;
-        if (!player.human && !tables.ai_credit_multiplier) {
-            return Result::failure(failure("AI credits require selected difficulty data"));
-        }
-        const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
-            [&](const StartFaction& entry) { return detail::iequals(entry.name, player.faction); });
-        if (faction == inputs.factions.end() || !faction->space_unit_cap) {
-            return Result::failure(failure("faction " + player.faction + " has no Space_Tactical_Unit_Cap"));
-        }
-        const auto marker = std::find_if(start.markers.begin(), start.markers.end(), [&](const StartMarker& entry) {
-            return entry.use == MarkerUse::spawn && entry.player == player.player.player_id;
-        });
-        if (marker == start.markers.end()) {
-            return Result::failure(failure("player " + std::to_string(player.player.player_id) + " has no spawn marker"));
-        }
-        rules.players.push_back(tactical::EconomyPlayer{
-            player.player.player_id, *credits, *faction->space_unit_cap, !player.human, marker->yaw_degrees});
-        rules.players.back().start_tech = static_cast<std::uint32_t>(start.match.start_tech);
-        rules.players.back().max_tech = static_cast<std::uint32_t>(start.match.max_tech);
-        rules.players.back().credit_multiplier = tables.ai_credit_multiplier.value_or(Fixed::from_raw(Fixed::scale));
-    }
-    std::sort(rules.players.begin(), rules.players.end(),
-        [](const tactical::EconomyPlayer& left, const tactical::EconomyPlayer& right) { return left.player < right.player; });
-
     for (const auto& type : tables.units) {
-        const auto& production = type.production;
-        if (!type.company_members.empty() && !type.deployed_space_type.empty()) {
-            tactical::HeroDeployment hero{type_id(type.id), type_id(type.deployed_space_type), {}};
-            if (type.creates_carried_heroes) {
-                for (const auto& member : type.company_members) {
-                    if (member.named_hero || member.generic_hero)
-                        hero.riders.push_back({type_id(member.type), member.named_hero, member.generic_hero});
-                }
-            }
-            rules.heroes.push_back(std::move(hero));
-        }
-        if (type.tactical_sale) {
-            rules.pad_sales.push_back({type_id(type.id),
-                type.tactical_sell_percentage.value_or(Fixed::from_raw(Fixed::scale / 2))});
-        }
         // WBP-50: capture and palette queries use the projectile-collidable domain.
-        rules.pads.influence.push_back({type_id(type.id), type.influences_capture, type.construction_blocker,
+        rules.influence.push_back({type_id(type.id), type.influences_capture, type.construction_blocker,
             type.living_projectile_collision});
         if (type.tactical_respawn_seconds && type.tactical_respawn_seconds->raw() > 0) {
             if (type.tactical_respawn_seconds->raw() > 86400 * Fixed::scale) {
                 return Result::failure(failure("tactical respawn duration is out of range"));
             }
-            rules.pads.respawn.push_back({type_id(type.id), frames_of(*type.tactical_respawn_seconds)});
+            rules.respawn.push_back({type_id(type.id), frames_of(*type.tactical_respawn_seconds)});
         }
         if (type.capture_point && type.capture_radius && type.capture_seconds) {
             tactical::CaptureProfile profile;
@@ -154,7 +91,123 @@ core::Result<tactical::EconomyRules> economy_rules(
                 // before the pad's facing transforms the attachment into world space.
                 profile.attachment = {Fixed::from_raw(-y.value().raw()), x.value(), z.value()};
             }
-            rules.pads.capture.push_back(std::move(profile));
+            rules.capture.push_back(std::move(profile));
+        }
+    }
+    for (const auto& obstacle : tables.obstacles) {
+        rules.influence.push_back({type_id(obstacle.id), obstacle.influences_capture, obstacle.construction_blocker,
+            obstacle.living_projectile_collision});
+    }
+    const auto by_type = [](const auto& a, const auto& b) { return a.type < b.type; };
+    std::sort(rules.capture.begin(), rules.capture.end(), by_type);
+    std::sort(rules.influence.begin(), rules.influence.end(), by_type);
+    std::sort(rules.respawn.begin(), rules.respawn.end(), by_type);
+    return Result::success(std::move(rules));
+}
+
+core::Result<tactical::EconomyRules> economy_rules(
+    const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables, const bool campaign) {
+    using Result = core::Result<tactical::EconomyRules>;
+    const auto scalar = [&tables](const std::string_view tag) -> std::optional<Fixed> {
+        for (const auto& constant : tables.constants.scalars) {
+            if (constant.tag == tag) return constant.value;
+        }
+        return std::nullopt;
+    };
+    const auto credits = scalar("MP_Default_Credits");
+    const auto build_multiplier = scalar("Tactical_Build_Time_Multiplier");
+    const auto vulnerability = scalar("Space_Elevated_Vulnerability_Factor");
+    const auto vulnerable_seconds = scalar("Space_Elevated_Vulnerability_Duration");
+    const auto collision_distance = scalar("Space_Reinforcement_Collision_Check_Distance");
+    if (start.match.start_tech < 0 || start.match.max_tech < start.match.start_tech) {
+        return Result::failure(failure("invalid lobby tech levels"));
+    }
+    if ((!campaign && !credits) || !build_multiplier || !vulnerability || !vulnerable_seconds || !collision_distance) {
+        return Result::failure(failure("needs MP_Default_Credits, Tactical_Build_Time_Multiplier and the "
+                                       "Space_Elevated_Vulnerability constants"));
+    }
+    tactical::EconomyRules rules;
+    rules.campaign = campaign;
+    rules.match_policy = replay_policy(start.match);
+    rules.disabled_types = roster_disabled_types();
+    auto capture = capture_rules(start.setup, inputs, tables);
+    if (!capture) return Result::failure(capture.error());
+    rules.pads = std::move(capture).value();
+    // Skirmish starts also expose their resolved lobby names. Retain this exact
+    // binding for callers that construct the economy before the setup player table.
+    for (const auto& player : start.players) {
+        const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
+            [&](const StartFaction& entry) { return entry.neutral && detail::iequals(entry.name, player.faction); });
+        if (faction != inputs.factions.end()) rules.pads.neutral = player.player.player_id;
+    }
+    rules.collision_distance = *collision_distance; // WR-25
+
+    // MAT-15: a demo battle's players keep an account (the reinforcement pool) without a lobby slot,
+    // credits, income or a start marker.
+    const bool attract = start.setup.attract_pool.has_value();
+    // PU-01, PU-21, PU-34: the lobby players.
+    for (const auto& player : start.players) {
+        if (campaign) continue; // WGT-27: supplied galactic accounts, never lobby allocation
+        if (!player.lobby && !attract) continue;
+        if (!player.human && !tables.ai_credit_multiplier) {
+            return Result::failure(failure("AI credits require selected difficulty data"));
+        }
+        const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
+            [&](const StartFaction& entry) { return detail::iequals(entry.name, player.faction); });
+        // A demo player of a faction with no unit cap (neutral objects, or content that sets none) holds no
+        // pool; the battle still runs, it just does not refill that player.
+        if (attract && (faction == inputs.factions.end() || faction->neutral || !faction->space_unit_cap)) continue;
+        if (faction == inputs.factions.end() || !faction->space_unit_cap) {
+            return Result::failure(failure("faction " + player.faction + " has no Space_Tactical_Unit_Cap"));
+        }
+        if (attract) {
+            rules.players.push_back(tactical::EconomyPlayer{
+                player.player.player_id, Fixed{}, *faction->space_unit_cap, true, Fixed{}});
+            rules.players.back().start_tech = static_cast<std::uint32_t>(start.match.start_tech);
+            rules.players.back().max_tech = static_cast<std::uint32_t>(start.match.max_tech);
+            rules.players.back().credit_multiplier = tables.ai_credit_multiplier.value_or(Fixed::from_raw(Fixed::scale));
+            continue;
+        }
+        const auto marker = std::find_if(start.markers.begin(), start.markers.end(), [&](const StartMarker& entry) {
+            return entry.use == MarkerUse::spawn && entry.player == player.player.player_id;
+        });
+        if (marker == start.markers.end()) {
+            return Result::failure(failure("player " + std::to_string(player.player.player_id) + " has no spawn marker"));
+        }
+        rules.players.push_back(tactical::EconomyPlayer{
+            player.player.player_id, *credits, *faction->space_unit_cap, !player.human, marker->yaw_degrees});
+        rules.players.back().start_tech = static_cast<std::uint32_t>(start.match.start_tech);
+        rules.players.back().max_tech = static_cast<std::uint32_t>(start.match.max_tech);
+        rules.players.back().credit_multiplier = tables.ai_credit_multiplier.value_or(Fixed::from_raw(Fixed::scale));
+    }
+    std::sort(rules.players.begin(), rules.players.end(),
+        [](const tactical::EconomyPlayer& left, const tactical::EconomyPlayer& right) { return left.player < right.player; });
+    if (campaign && start.setup.campaign) rules.players = start.setup.campaign->players;
+
+    for (const auto& type : tables.units) {
+        const auto& production = type.production;
+        if (campaign) {
+            auto bounty = (tables.campaign_multiplayer ? type.bounty_mp : type.bounty_sp).value_or(Fixed::from_raw(-Fixed::scale));
+            if (bounty < Fixed{}) {
+                bounty = {};
+                for (const auto& row : tables.campaign_multiplayer ? tables.constants.bounty_mp : tables.constants.bounty_sp)
+                    if ((type.category_bits & row.category) != 0) bounty = std::max(bounty, row.value);
+            }
+            rules.bounty_values.emplace_back(type_id(type.id), bounty);
+        }
+        if (!type.company_members.empty() && !type.deployed_space_type.empty()) {
+            tactical::HeroDeployment hero{type_id(type.id), type_id(type.deployed_space_type), {}};
+            if (type.creates_carried_heroes) {
+                for (const auto& member : type.company_members) {
+                    if (member.named_hero || member.generic_hero)
+                        hero.riders.push_back({type_id(member.type), member.named_hero, member.generic_hero});
+                }
+            }
+            rules.heroes.push_back(std::move(hero));
+        }
+        if (type.tactical_sale) {
+            rules.pad_sales.push_back({type_id(type.id),
+                type.tactical_sell_percentage.value_or(Fixed::from_raw(Fixed::scale / 2))});
         }
         if (type.under_construction && !type.constructed_type.empty() && production.build_time_seconds) {
             const auto whole_seconds = production.build_time_seconds->trunc_to_integer();
@@ -168,10 +221,10 @@ core::Result<tactical::EconomyRules> economy_rules(
             if (ai_whole_seconds <= 0 || ai_whole_seconds > 86400) return Result::failure(failure("AI pad build duration is out of range"));
             const auto ai_seconds = static_cast<std::uint32_t>(ai_whole_seconds);
             rules.pads.construction.push_back({type_id(type.id), type_id(type.constructed_type),
-                production.build_cost_multiplayer.value_or(Fixed{}), seconds, ai_seconds, type.child_persists});
+                (campaign ? production.build_cost_campaign : production.build_cost_multiplayer).value_or(Fixed{}), seconds, ai_seconds, type.child_persists});
         }
         // PU-10 to PU-13, PU-20: one menu per faction group of a station's list.
-        for (const auto& group : production.buildable) {
+        for (const auto& group : campaign ? production.buildable_campaign : production.buildable) {
             tactical::StationMenu menu;
             menu.station = type_id(type.id);
             // WBP-33/34: an ordinary captured producer retains its faction queue menu.
@@ -203,7 +256,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                     // WBP-11/12/15: no queue multiplier, population or station gates.
                     if (option.disabled_reason.empty()) option.disabled_reason = roster_disabled_reason(built->constructed_type);
                     option.kind = tactical::BuildKind::structure;
-                    option.price = costs.build_cost_multiplayer.value_or(Fixed{});
+                    option.price = (campaign ? costs.build_cost_campaign : costs.build_cost_multiplayer).value_or(Fixed{});
                     const auto seconds = costs.build_time_seconds ? costs.build_time_seconds->trunc_to_integer() : 0;
                     option.build_frames = static_cast<std::uint32_t>(std::max<std::int64_t>(0, seconds)) * 30;
                     option.ai_build_frames = option.build_frames;
@@ -227,19 +280,23 @@ core::Result<tactical::EconomyRules> economy_rules(
                 }
                 option.queue = detail::iequals(costs.production_queue, "Tactical_Upgrades") ? tactical::BuildQueue::upgrades
                                                                                               : tactical::BuildQueue::units;
-                option.price = costs.build_cost_multiplayer.value_or(Fixed{});
+                option.price = (campaign ? costs.build_cost_campaign : costs.build_cost_multiplayer).value_or(Fixed{});
                 if (costs.build_time_seconds) {
                     const auto seconds = sim::math::multiply(*costs.build_time_seconds, *build_multiplier);
                     if (!seconds) return Result::failure(seconds.error());
                     option.build_frames = frames_of(seconds.value());
                     option.ai_build_frames = option.build_frames; // SK-42: Normal's Space_Build_Time_Multiplier is 1
                 }
-                option.population = costs.population_value.value_or(0);
+                option.population = units::population_in_space(costs.population_value, costs.space_override_population_value);
                 const auto* deployed = built->deployed_space_type.empty() ? nullptr : tables.find(built->deployed_space_type);
                 option.available = option.disabled_reason.empty() && option.price.raw() > 0 && option.build_frames > 0
                     && (costs.upgrade_object || built->hull.has_value() || !built->members.empty()
                         || (deployed != nullptr && (deployed->hull.has_value() || !deployed->members.empty())));
-                if (costs.upgrade_object && !costs.level_up && costs.combat_bonuses.empty() && !costs.increments_tech
+                if (costs.upgrade_object && !costs.level_up && costs.combat_bonuses.empty() && costs.ability_enables.empty()
+                    && !costs.increments_tech
+                    && costs.stealth_duration_bonuses.empty() && (!campaign || costs.bounties.empty()) // WST-03, WGCH-164
+                    && std::none_of(built->special_unlocks.begin(), built->special_unlocks.end(),
+                        [](const units::UnitType::SpecialUnlock& unlock) { return unlock.enable; })
                     && std::none_of(costs.income_bonuses.begin(), costs.income_bonuses.end(), [&](const units::IncomeBonus& bonus) {
                         return (bonus.activation_style.empty() || detail::iequals(bonus.activation_style, "Space_Automatic"))
                             && std::any_of(tables.units.begin(), tables.units.end(), [&](const units::UnitType& target) {
@@ -275,10 +332,27 @@ core::Result<tactical::EconomyRules> economy_rules(
         }
         if (production.upgrade_object) {
             tactical::UpgradeProfile upgrade;
+            if (campaign) for (const auto& authored : production.bounties) {
+                tactical::UpgradeProfile::Bounty bounty;
+                bounty.percentage = authored.percentage; bounty.category = authored.category; bounty.all_allies = authored.all_allies;
+                for (const auto& faction : authored.factions) bounty.factions.push_back(faction_id(faction));
+                std::sort(bounty.factions.begin(), bounty.factions.end());
+                bounty.factions.erase(std::unique(bounty.factions.begin(), bounty.factions.end()), bounty.factions.end());
+                upgrade.bounties.push_back(std::move(bounty));
+            }
             upgrade.type = type_id(type.id);
             upgrade.level_up = production.level_up;
             upgrade.increments_tech = production.increments_tech;
             upgrade.removes_previous = production.removes_previous.empty() ? 0 : type_id(production.removes_previous);
+            for (const auto& authored : production.stealth_duration_bonuses) {
+                // WST-03: the debug build stores the multiplier less one.
+                const auto percentage = sim::math::subtract(authored.multiplier, Fixed::from_raw(Fixed::scale));
+                if (!percentage) return Result::failure(percentage.error());
+                upgrade.stealth_duration.push_back({authored.stacking_category, percentage.value(), authored.all_allies});
+            }
+            upgrade.consume_after_special_fire = type.consume_after_special_fire;
+            for (const auto& unlock : type.special_unlocks) if (unlock.enable)
+                upgrade.special_unlocks.push_back({unlock.all_allies, unlock.reverse});
             for (const auto& authored : production.combat_bonuses) {
                 tactical::UpgradeBonus bonus;
                 bonus.stacking_category = authored.stacking_category;
@@ -293,6 +367,26 @@ core::Result<tactical::EconomyRules> economy_rules(
                 }
                 std::sort(bonus.applicable.begin(), bonus.applicable.end());
                 upgrade.bonuses.push_back(std::move(bonus));
+            }
+            for (const auto& authored : production.ability_enables) {
+                // WRB-05: exact type names and categories resolved once from the content.
+                tactical::AbilityEnableRule rule;
+                rule.ability_name = authored.ability_name;
+                for (auto& character : rule.ability_name) {
+                    if (character >= 'A' && character <= 'Z') character = static_cast<char>(character - 'A' + 'a');
+                }
+                rule.all_allies = authored.all_allies;
+                for (const auto& target : tables.units) {
+                    const bool exact = std::any_of(authored.types.begin(), authored.types.end(),
+                        [&](const std::string& name) { return detail::iequals(name, target.id); });
+                    const bool category = std::any_of(authored.categories.begin(), authored.categories.end(),
+                        [&](const std::string& name) { return std::any_of(target.category_mask.begin(), target.category_mask.end(),
+                            [&](const std::string& mask) { return detail::iequals(name, mask); }); });
+                    if (exact || category) rule.applicable.push_back(type_id(target.id));
+                }
+                std::sort(rule.applicable.begin(), rule.applicable.end());
+                rule.applicable.erase(std::unique(rule.applicable.begin(), rule.applicable.end()), rule.applicable.end());
+                upgrade.ability_enables.push_back(std::move(rule));
             }
             for (const auto& authored : production.income_bonuses) {
                 // WBP-25: stock modifier abilities omit Activation_Style; their loaded
@@ -351,9 +445,11 @@ core::Result<tactical::EconomyRules> economy_rules(
             rules.prevention.push_back(tactical::PreventionProfile{type_id(type.id), *production.reinforcement_prevention_radius});
         }
     }
-    for (const auto& obstacle : tables.obstacles) {
-        rules.pads.influence.push_back({type_id(obstacle.id), obstacle.influences_capture, obstacle.construction_blocker,
-            obstacle.living_projectile_collision});
+    if (attract) {
+        // MAT-15: the demo's accounts hold no credits and its stations pay nothing, so only the pool
+        // fills (unverified against the debug build, see the attract behaviour note's unknowns).
+        rules.income.clear();
+        for (auto& upgrade : rules.upgrades) upgrade.income_modifiers.clear();
     }
     // PL-02, LZ-01: every unit and map object type's placement box and height, for a bought unit's
     // arrival. A super capital has no box (it is placed on the point and never blocks).
@@ -377,11 +473,7 @@ core::Result<tactical::EconomyRules> economy_rules(
         [](const tactical::FootprintProfile& left, const tactical::FootprintProfile& right) { return left.type < right.type; });
     std::sort(rules.heroes.begin(), rules.heroes.end(),
         [](const auto& left, const auto& right) { return left.purchase < right.purchase; });
-    const auto by_type = [](const auto& left, const auto& right) { return left.type < right.type; };
-    std::sort(rules.pads.capture.begin(), rules.pads.capture.end(), by_type);
-    std::sort(rules.pads.construction.begin(), rules.pads.construction.end(), by_type);
-    std::sort(rules.pads.influence.begin(), rules.pads.influence.end(), by_type);
-    std::sort(rules.pads.respawn.begin(), rules.pads.respawn.end(), by_type);
+    std::sort(rules.pads.construction.begin(), rules.pads.construction.end(), [](const auto& a, const auto& b) { return a.type < b.type; });
     std::sort(rules.menus.begin(), rules.menus.end(), [](const tactical::StationMenu& left, const tactical::StationMenu& right) {
         return std::pair{left.station, left.faction} < std::pair{right.station, right.faction};
     });
@@ -393,6 +485,7 @@ core::Result<tactical::EconomyRules> economy_rules(
         [](const tactical::PreventionProfile& left, const tactical::PreventionProfile& right) { return left.type < right.type; });
     std::sort(rules.upgrades.begin(), rules.upgrades.end(),
         [](const tactical::UpgradeProfile& left, const tactical::UpgradeProfile& right) { return left.type < right.type; });
+    std::sort(rules.bounty_values.begin(), rules.bounty_values.end());
     std::sort(rules.command_bonuses.begin(), rules.command_bonuses.end(), [](const auto& left, const auto& right) {
         return std::pair{left.type, left.slot} < std::pair{right.type, right.slot};
     });

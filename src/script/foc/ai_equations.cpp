@@ -1,3 +1,4 @@
+#include "eawr/core/tick_profile.hpp"
 // Perceptual equations of the FoC tactical AI (#449, docs/behaviour/foc-tactical-ai.md
 // "Perceptual equations"). Rule IDs PE-xx cite that note.
 
@@ -8,7 +9,7 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
+#include "eawr/core/ascii.hpp"
 
 namespace eawr::script::foc::ai {
 namespace {
@@ -31,11 +32,11 @@ std::string upper(std::string_view text) {
 }
 
 bool identifier_start(char character) {
-    return std::isalpha(static_cast<unsigned char>(character)) != 0 || character == '_';
+    return core::ascii_alpha(static_cast<unsigned char>(character)) != 0 || character == '_';
 }
 
 bool identifier_part(char character) {
-    return std::isalnum(static_cast<unsigned char>(character)) != 0 || character == '_';
+    return core::ascii_alnum(static_cast<unsigned char>(character)) != 0 || character == '_';
 }
 
 // Recursive descent over the PE-01 grammar; emits postfix nodes.
@@ -58,7 +59,7 @@ private:
     }
 
     void skip() {
-        while (position_ < text_.size() && std::isspace(static_cast<unsigned char>(text_[position_])) != 0) ++position_;
+        while (position_ < text_.size() && core::ascii_space(static_cast<unsigned char>(text_[position_])) != 0) ++position_;
     }
 
     bool accept(std::string_view token) {
@@ -146,7 +147,7 @@ private:
             position_ = end + 1;
             return core::Result<void>::success();
         }
-        if (std::isdigit(static_cast<unsigned char>(next)) != 0 || next == '.') {
+        if (core::ascii_digit(static_cast<unsigned char>(next)) != 0 || next == '.') {
             const auto parsed = numeric::decimal::parse_prefix(text_.substr(position_));
             if (parsed.consumed == 0) return fail("number expected");
             Node node;
@@ -272,6 +273,40 @@ Real to_single(Real value) noexcept {
 }
 
 Real real(std::int64_t value) noexcept { return Real(value); }
+
+std::uint32_t binary32_bits(Real value) noexcept {
+    const std::uint64_t bits = to_single(value).repr;
+    const auto sign = static_cast<std::uint32_t>(bits >> 63U) << 31U;
+    const std::int32_t field = b64::exponent_of(bits);
+    const std::uint64_t fraction = b64::fraction_of(bits);
+    if (field == 0) return sign; // to_single leaves no binary64 subnormal, only zero
+    if (field == 0x7ff) {
+        auto payload = static_cast<std::uint32_t>(fraction >> 29U);
+        if (fraction != 0 && payload == 0) payload = 1U; // a NaN stays a NaN
+        return sign | (0xffU << 23U) | payload;
+    }
+    const std::int32_t exponent = field - 1023;
+    if (exponent >= -126) return sign | (static_cast<std::uint32_t>(exponent + 127) << 23U) | static_cast<std::uint32_t>(fraction >> 29U);
+    // A binary32 subnormal: the significand with its hidden bit, shifted to 2^-149 units.
+    const auto shift = static_cast<std::uint32_t>(29 + (-126 - exponent));
+    return sign | static_cast<std::uint32_t>((fraction | b64::hidden_bit) >> shift);
+}
+
+Real binary32_value(std::uint32_t bits) noexcept {
+    const std::uint64_t sign = std::uint64_t{bits >> 31U} << 63U;
+    const std::uint32_t field = (bits >> 23U) & 0xffU;
+    const std::uint32_t fraction = bits & 0x7fffffU;
+    if (field == 0xffU) return Real::from_repr(sign | (std::uint64_t{0x7ff} << 52U) | (std::uint64_t{fraction} << 29U));
+    if (field != 0) {
+        return Real::from_repr(sign | (static_cast<std::uint64_t>(field - 127 + 1023) << 52U) | (std::uint64_t{fraction} << 29U));
+    }
+    if (fraction == 0) return Real::from_repr(sign);
+    // A subnormal: fraction x 2^-149, normalised around its highest set bit.
+    std::uint32_t top = 22;
+    while ((fraction >> top) == 0) --top;
+    const std::uint64_t significand = (std::uint64_t{fraction} << (52U - top)) & (b64::hidden_bit - 1U);
+    return Real::from_repr(sign | (static_cast<std::uint64_t>(static_cast<std::int32_t>(top) - 149 + 1023) << 52U) | significand);
+}
 
 std::optional<Real> parse_real(std::string_view text) noexcept {
     const auto parsed = numeric::decimal::parse_lua_number(text);
@@ -452,7 +487,10 @@ std::optional<Real> run(const Equation& equation, LookupResolver& resolver, AiRa
                     result = left / right;
                 }
                 break;
-            case Kind::random: result = random.uniform(to_single(left), to_single(right)); break;
+            case Kind::random: {
+                core::tick_profile::Scope scope("serial.goal.local-rng");
+                result = random.uniform(to_single(left), to_single(right)); break;
+            }
             case Kind::equal: result = real(left == right ? 1 : 0); break;
             case Kind::not_equal: result = real(left == right ? 0 : 1); break;
             case Kind::less: result = real(left < right ? 1 : 0); break;

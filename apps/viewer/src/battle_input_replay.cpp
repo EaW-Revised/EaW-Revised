@@ -1,4 +1,5 @@
 #include "battle_input.hpp"
+#include "scripted_input_dispatch.hpp"
 
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/scene/scene.hpp"
@@ -55,7 +56,7 @@ namespace {
 
 } // namespace
 
-void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted) {
+void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted, LiveSessionView& live) {
     Input* engine = Input::get_singleton();
     if (engine == nullptr) return;
     const auto modifiers = [&](InputEventWithModifiers& event) {
@@ -133,11 +134,15 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted) {
         return project({static_cast<float>(point[0]), static_cast<float>(point[1]), static_cast<float>(point[2])});
     };
     const auto at = screen_of(0);
-    if (!at) {
+    if (!at || (live.options().lan_acceptance && ((*at)[0] < 0 || (*at)[0] >= viewport_[0]
+        || (*at)[1] < 0 || (*at)[1] >= viewport_[1]))) {
         note(name + ": its target is not on screen");
         return;
     }
     scripted_points_.push_back({scripted.kind, scripted.tick, *at});
+    // One emitted click owns its producer epoch across press/release decoding.
+    // This is admission state, also used without acceptance tracing enabled.
+    std::optional<ui::CommandScheduler::IntentEpochScope> input_epoch;
     const auto button = [&](const MouseButton index, const bool pressed, const std::array<float, 2>& where,
                             const bool double_click) {
         Ref<InputEventMouseButton> event;
@@ -148,7 +153,11 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted) {
         event->set_position(Vector2(where[0], where[1]));
         event->set_global_position(Vector2(where[0], where[1]));
         modifiers(**event);
-        engine->parse_input_event(event);
+        if (!input_epoch) input_epoch.emplace(live.input_epoch());
+        if (pressed || (live.options().lan_acceptance && scripted.kind == "release"))
+            live.note_lan_input(*input_epoch ? std::optional(input_epoch->epoch()) : std::nullopt);
+        dispatch_scripted_input(*engine, event, input_epoch);
+        if (!pressed) input_epoch.reset();
     };
     // #459, #453: a hand reaches a HUD button before it clicks; Godot's GUI only takes the click
     // once the pointer has moved over the window.

@@ -378,6 +378,9 @@ int main(const int argc, char** argv) {
         std::cerr << eawr::core::format_diagnostic(loaded.error()) << '\n';
         return 1;
     }
+    if (!loaded.value().health.clean()) {
+        std::cerr << "scene_scan: catalog load: " << eawr::data::describe_load_health(loaded.value().health) << '\n';
+    }
     const eawr::data::Catalog& catalog = loaded.value().catalog;
     const eawr::assets::ObjectTypeCatalog types = eawr::assets::object_type_catalog(catalog);
     eawr::scene::VfsAssetCache cache(filesystem.value());

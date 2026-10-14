@@ -163,11 +163,42 @@ void alpha_formats() {
     mask = ui::shell_alpha_mask(texture);
     expect(mask && mask.value().opaque(0.1,0.1) && !mask.value().opaque(0.3,0.1),"BC3 alpha selectors decode");
 }
+void centred_shell_hit_contracts() {
+    auto catalog = commandbar_mod_edits();
+    data::ui::CommandBarComponent component;
+    component.name = "auxiliary";
+    component.type = data::ui::ComponentType::shell;
+    component.fields = {{data::ui::Field::model_name,std::string("centred.alo"),0},
+        {data::ui::Field::model_offset_x,false,0}, {data::ui::Field::model_offset_y,true,0}};
+    catalog.add(component);
+    data::ui::ShellAnchors anchors;
+    anchors.set_model_path("data/art/models/CENTRED.ALO");
+    data::ui::ShellAnchor anchor;
+    anchor.name = "hero"; anchor.alt = data::ui::split_alt(anchor.name);
+    anchor.rect = {-100,200,40,40}; anchors.add(anchor);
+    const auto view = ui::hud_view_model(anchors,catalog,0,{});
+    const auto space = ui::reference_space({1280,720});
+    expect(view.placement(space) == ui::ShellPlacement{640,360,.9375},
+        "model-path binding retains the automatic centred shell placement");
+    expect(view.hit_test_screen({565,155},space) && !view.hit_test_screen({10,155},space),
+        "centred shell drawing and screen hit testing use the same transform");
+    component.fields.push_back({data::ui::Field::manual_offset,true,0});
+    catalog.add(component);
+    const auto manual = ui::hud_view_model(anchors,catalog,0,{},ui::ShellOrigin::centre);
+    expect(manual.placement(space) == view.placement(space),
+        "manual auxiliary identity stays centred instead of acquiring the root's lower-left offset");
+}
+
 void corpus(const std::string& name, const vfs::Vfs& filesystem) {
     auto loaded = data::ui::load_command_bar(filesystem);
     expect(loaded.has_value(),"corpus command bar loads");
     if (!loaded) return;
     const auto& catalog = loaded.value().catalog;
+    std::ofstream layout_dump;
+    if (const auto path = test::ui::environment("EAWR_COMMAND_BAR_LAYOUT_DUMP")) {
+        layout_dump.open(*path);
+        layout_dump << "shell,variant,width,height,name,before_x,before_y,before_w,before_h,after_x,after_y,after_w,after_h\n";
+    }
     std::size_t new_diagnostics = 0;
     std::size_t animations_sampled = 0;
     std::size_t inherited_clip_mismatches = 0;
@@ -198,6 +229,27 @@ void corpus(const std::string& name, const vfs::Vfs& filesystem) {
         if (!source) continue;
         auto anchors = data::ui::shell_anchors(source.value());
         new_diagnostics += anchors.diagnostics.size();
+        if (name == "FoC" && (component.name == "i_main_skirmish" || component.name == "i_main_commandbar"
+                || component.name == "i_main_reinforce")) {
+            for (const unsigned variant : {0U,1U,2U}) {
+                const auto view = ui::hud_view_model(anchors.shell,catalog,variant,lookup);
+                const double extent = view.visible_extent ? std::max(0.0F,view.visible_extent->right()) : 0.0;
+                for (const auto viewport : {ui::Viewport{1280,720},ui::Viewport{1920,1080}}) {
+                    const auto space = ui::reference_space(viewport);
+                    const auto before = ui::place_shell(space,extent);
+                    const auto after = view.placement(space);
+                    for (const auto* anchor : anchors.shell.for_variant(variant)) {
+                        const auto old_rect = ui::shell_to_screen(anchor->rect,before);
+                        const auto new_rect = ui::shell_to_screen(anchor->rect,after);
+                        expect(old_rect == new_rect,"GHUDL-04: main GC/tactical/reinforcement anchors are byte-identical");
+                        if (layout_dump) layout_dump << component.name << ',' << variant << ',' << viewport.width << ','
+                            << viewport.height << ',' << anchor->name << ',' << old_rect.x << ',' << old_rect.y << ','
+                            << old_rect.width << ',' << old_rect.height << ',' << new_rect.x << ',' << new_rect.y << ','
+                            << new_rect.width << ',' << new_rect.height << '\n';
+                    }
+                }
+            }
+        }
         std::string stem(path.substr(0,path.find_last_of('.')));
         std::transform(stem.begin(),stem.end(),stem.begin(),[](char c) {
             return c >= 'A' && c <= 'Z' ? static_cast<char>(c+('a'-'A')) : c;
@@ -268,6 +320,7 @@ void corpus(const std::string& name, const vfs::Vfs& filesystem) {
 }
 } // namespace
 void hud_contracts() {
+    centred_shell_hit_contracts();
     shell_widescreen_card();
     alpha_formats();
     if (auto filesystem = test::ui::foc_corpus("HUD")) corpus("FoC",*filesystem);

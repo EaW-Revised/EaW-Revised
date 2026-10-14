@@ -297,6 +297,26 @@ void test_battle_results() {
         "WBF-45: scrolling exposes overflow beyond the twelve visible entries");
     expect(ui::battle_time_text(1'234) == "00:00:01" && ui::battle_time_text(3'723'999) == "01:02:03",
         "WBF-44: milliseconds floor seconds and format hours, minutes and seconds");
+    for (const double scale : {0.5, 1.0, 1.5, 2.0}) {
+        const auto status = ui::battle_result_status_rect({36 * scale, 34 * scale, 838 * scale, 46 * scale}, 147 * scale);
+        for (std::size_t seat = 0; seat < 2; ++seat) {
+            for (std::size_t rows = 1; rows <= 100; ++rows) {
+                for (std::size_t scroll = 0; scroll <= ui::loss_scroll_max(rows); ++scroll) {
+                    const auto visible = std::min(rows - scroll, ui::battle_loss_visible_entries);
+                    for (std::size_t row = 0; row < visible; ++row) {
+                        const ui::PixelRect loss{(51 + 448 * static_cast<double>(seat)) * scale,
+                            (270 + 24 * static_cast<double>(row)) * scale, 359 * scale, 18 * scale};
+                        expect(status.y + status.height <= loss.y,
+                            "LAN status stays above both loss panes at every row count and scroll position");
+                    }
+                }
+            }
+        }
+        expect(status.y >= 80 * scale && status.y + status.height <= 147 * scale,
+            "LAN status stays below title/time and above loss headings at every viewport scale");
+    }
+    expect(ui::battle_result_status_rect({0, 10, 100, 20}, 15).height == 0,
+        "a dialog without free header space clips away the notice instead of covering losses");
     const tactical::TacticalSnapshot without_results(600, players, {} , {});
     expect(snapshot.canonical_bytes() == without_results.canonical_bytes(),
         "derived lifetime loss rows do not change canonical snapshot bytes");

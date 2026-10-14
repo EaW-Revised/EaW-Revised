@@ -92,6 +92,7 @@ constexpr std::array<FieldSchema, field_count> schema{{
     {"Mega_Texture_Name", FieldKind::text},
     {"Model_Name", FieldKind::text},
     {"Mouse_Over_SFX", FieldKind::text},
+    {"Right_Click_SFX", FieldKind::text},
     {"Bar_Overlay_Name", FieldKind::tokens},
     {"Bar_Texture_Name", FieldKind::tokens},
     {"Blank_Texture_Name", FieldKind::tokens},

@@ -86,7 +86,9 @@ bool UiGalleryMode::State::write_report() const {
     if (options.report_path.empty()) return false;
     std::ostringstream output;
     output << "{\n  \"mode\": \"ui_gallery\",\n  \"status\": " << json(status) << ",\n  \"failure\": " << json(failure)
-           << ",\n  \"page\": " << json(!options.hud.empty() ? "hud" : options.dialog.empty() ? "controls" : options.dialog)
+           << ",\n  \"page\": " << json(!options.hud.empty() ? "hud" : !options.message_box.empty() ? "message_box"
+                                       : !options.load_game.empty() ? "load_game"
+                                       : !options.credits.empty() ? "credits" : options.dialog.empty() ? "controls" : options.dialog)
            << ",\n  \"mod\": "
            << (options.mod_root.empty() ? "false" : "true") << ",\n  \"rules\": "
            << json(options.rules) << ",\n  \"backend\": {\"engine\": " << json(backend.engine)
@@ -109,6 +111,19 @@ bool UiGalleryMode::State::write_report() const {
                << ", \"playing\": " << (movie_player && movie_player->is_playing() ? "true" : "false") << "}";
     }
     if (hud) output << ",\n  \"hud\": " << hud->report_json();
+    if (flytext && flytext_style) {
+        const auto& shown = flytext->presented;
+        const auto& rect = flytext->readout.text_rect;
+        const auto& style = flytext_style->text;
+        output << ",\n  \"flytext\": {\"text\": " << json(shown ? std::string(shown->text) : std::string())
+               << ", \"alpha\": " << (shown ? static_cast<unsigned>(shown->alpha) : 0U)
+               << ", \"position\": [" << (shown ? shown->position.x : 0.0F) << ", "
+               << (shown ? shown->position.y : 0.0F) << "]"
+               << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]"
+               << ", \"face\": " << json(style.face) << ", \"point_size\": " << style.point_size
+               << ", \"emboss\": " << (style.emboss ? "true" : "false")
+               << ", \"outline\": " << (style.outline ? "true" : "false") << "}";
+    }
     if (atlas) {
         output << ",\n  \"atlas\": {\"mtd\": " << json(atlas->directory.source.logical_path) << ", \"entries\": "
                << atlas->directory.entries.size() << ", \"page\": " << json(atlas->page.source.logical_path)
@@ -184,6 +199,74 @@ bool UiGalleryMode::State::write_report() const {
                    << json(gadget.variation) << ", \"caption\": " << json(gadget.caption) << ", \"rect\": ["
                    << gadget.rect.x << ", " << gadget.rect.y << ", " << gadget.rect.width << ", "
                    << gadget.rect.height << "]}";
+        }
+        output << "]}";
+    }
+    if (!options.message_box.empty()) {
+        output << ",\n  \"message_box\": {\"variant\": " << json(options.message_box)
+               << ", \"dialog\": " << json(model::plan_message_box(box_request).dialog)
+               << ", \"world_presses\": " << box_probe_presses << ", \"steps\": [";
+        for (std::size_t index = 0; index < box_step_results.size(); ++index) {
+            const BoxStepResult& step = box_step_results[index];
+            output << (index ? ",\n    " : "\n    ") << "{\"name\": " << json(step.name) << ", \"passed\": "
+                   << (step.problem.empty() ? "true" : "false") << ", \"problem\": " << json(step.problem) << "}";
+        }
+        output << "]}";
+    }
+    if (!options.load_game.empty()) {
+        output << ",\n  \"load_game\": {\"mode\": " << json(options.load_game) << ", \"store\": " << json(load_store)
+               << ", \"saves\": " << json(load_saves) << ", \"launcher\": " << json(options.load_launcher)
+               << ", \"launches\": " << load_launches << ", \"loading_boxes\": " << load_loading_boxes
+               << ", \"closed\": " << (load_closed ? "true" : "false") << ", \"play\": ";
+        if (load_play) {
+            output << "{\"path\": " << json(load_play->first) << ", \"map\": " << json(load_play->second) << "}";
+        } else {
+            output << "null";
+        }
+        output << ", \"save\": ";
+        if (load_save) {
+            output << "{\"directory\": " << json(load_save->first) << ", \"name\": " << json(load_save->second) << "}";
+        } else {
+            output << "null";
+        }
+        // The saved-game rows as the screen listed them, in order (the order key, the name, the date).
+        output << ", \"rows\": [";
+        for (std::size_t index = 0; index < load_rows.size(); ++index) {
+            const LoadRow& row = load_rows[index];
+            output << (index ? ",\n    " : "\n    ") << "{\"name\": " << json(row.name) << ", \"text\": " << json(row.text)
+                   << ", \"date\": " << json(row.date) << ", \"playable\": " << (row.playable ? "true" : "false")
+                   << ", \"problem\": " << json(row.problem) << "}";
+        }
+        output << "]";
+        output << ", \"steps\": [";
+        for (std::size_t index = 0; index < box_step_results.size(); ++index) {
+            const BoxStepResult& step = box_step_results[index];
+            output << (index ? ",\n    " : "\n    ") << "{\"name\": " << json(step.name) << ", \"passed\": "
+                   << (step.problem.empty() ? "true" : "false") << ", \"problem\": " << json(step.problem) << "}";
+        }
+        output << "]}";
+    }
+    if (!options.credits.empty()) {
+        output << ",\n  \"credits\": {\"mode\": " << json(options.credits) << ", \"opened\": "
+               << (credits.opened ? "true" : "false") << ", \"closed\": " << (credits_closed ? "true" : "false")
+               << ", \"lines\": " << credits.lines << ", \"logos\": " << credits.logos
+               << ", \"moved\": " << credits.moved << ", \"elapsed\": " << credits.elapsed << ", \"movie\": ";
+        if (credits.movie) {
+            output << "{\"name\": " << json(credits.movie_name) << ", \"source\": " << json(credits.movie_source)
+                   << ", \"texture\": [" << credits.texture[0] << ", " << credits.texture[1] << "]"
+                   << ", \"distinct_frames\": " << credits_frame_hashes.size() << "}";
+        } else {
+            output << "null";
+        }
+        output << ", \"notes\": [";
+        for (std::size_t index = 0; index < credits.notes.size(); ++index) {
+            output << (index ? ", " : "") << json(credits.notes[index]);
+        }
+        output << "], \"steps\": [";
+        for (std::size_t index = 0; index < box_step_results.size(); ++index) {
+            const BoxStepResult& step = box_step_results[index];
+            output << (index ? ",\n    " : "\n    ") << "{\"name\": " << json(step.name) << ", \"passed\": "
+                   << (step.problem.empty() ? "true" : "false") << ", \"problem\": " << json(step.problem) << "}";
         }
         output << "]}";
     }

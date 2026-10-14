@@ -13,6 +13,15 @@ eawr_target_project_warnings(replay_contract_tests)
 
 set(EAWR_REPLAY_FIXTURES "${CMAKE_CURRENT_LIST_DIR}/fixtures")
 
+# Shared FT-06 / MP-E1 harness; galactic adapters include tests/support/lockstep_loopback.hpp.
+add_executable(tactical_lockstep_loopback_tests lockstep_loopback_tests.cpp)
+target_link_libraries(tactical_lockstep_loopback_tests PRIVATE eawr::sim eawr::platform eawr::script_authoritative)
+target_compile_features(tactical_lockstep_loopback_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_lockstep_loopback_tests)
+add_test(NAME tactical_lockstep_loopback COMMAND tactical_lockstep_loopback_tests
+    "${EAWR_REPLAY_FIXTURES}" "${PROJECT_SOURCE_DIR}/tests/skirmish/fixtures" "${PROJECT_SOURCE_DIR}/tests/fidelity/fixtures"
+    --artifacts "${PROJECT_BINARY_DIR}/loopback-artifacts")
+
 add_executable(tactical_contract_tests tactical_tests.cpp)
 target_link_libraries(tactical_contract_tests PRIVATE eawr::sim eawr::platform eawr::script_authoritative)
 target_compile_features(tactical_contract_tests PRIVATE cxx_std_20)
@@ -21,6 +30,7 @@ add_test(
     NAME tactical_replay_contracts
     COMMAND tactical_contract_tests "${EAWR_REPLAY_FIXTURES}"
 )
+add_test(NAME tactical_beacon_contracts COMMAND tactical_contract_tests --beacon-only)
 add_executable(tactical_space_tests space_tests.cpp)
 target_link_libraries(tactical_space_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_space_tests PRIVATE cxx_std_20)
@@ -64,7 +74,11 @@ eawr_target_project_warnings(tactical_economy_tests)
 add_test(
     NAME tactical_economy_contracts
     COMMAND tactical_economy_tests
-)
+  )
+  add_test(
+    NAME skirmish_attract_vertical_arrival_blocker
+    COMMAND tactical_economy_tests --vertical-arrival-blocker
+  )
 # #77: fixed-force victory and defeat.
 add_executable(tactical_pads_tests pads_tests.cpp)
 target_link_libraries(tactical_pads_tests PRIVATE eawr::sim eawr::platform)
@@ -119,7 +133,8 @@ add_test(
 add_executable(tactical_fighter_tests fighter_tests.cpp
     fighter_spawner_tests.cpp
     fighter_orders_tests.cpp
-    fighter_scans_tests.cpp)
+    fighter_scans_tests.cpp
+    fighter_attract_tests.cpp)
 target_link_libraries(tactical_fighter_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_fighter_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_fighter_tests)
@@ -322,5 +337,12 @@ add_test(NAME replay_independent_acceptance_contract
             --fixtures "${EAWR_REPLAY_FIXTURES}"
             --audit "${EAWR_REPLAY_FIXTURES}/original-v1.audit.json"
             --comparator "${PROJECT_SOURCE_DIR}/tools/compare_replay_hashes.py")
+
+add_test(NAME python_replay_compare_installed
+    COMMAND "${Python3_EXECUTABLE}" -m pytest -q "${CMAKE_CURRENT_SOURCE_DIR}/test_compare_installed.py"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+add_test(NAME python_replay_record_installed
+    COMMAND "${Python3_EXECUTABLE}" -m pytest -q "${CMAKE_CURRENT_SOURCE_DIR}/test_record_installed.py"
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 
 eawr_label_tests()

@@ -77,24 +77,40 @@ void LiveSessionView::begin() {
 }
 
 void LiveSessionView::press_pause() {
+    if (options_.lan) return;
     if (phase_ == Phase::ready) { begin(); return; }
     if (phase_ != Phase::running) return;
     if (session_ && time_.press_pause(session_->completed_tick())) apply_time();
 }
 
+bool LiveSessionView::request_speed(const std::uint32_t step) {
+    return options_.lan && phase_ == Phase::running && options_.lan->request_speed(step);
+}
+
 void LiveSessionView::press_fast_forward() {
+    if (options_.lan) return;
     if (phase_ != Phase::running) return;
     if (session_ && time_.press_fast_forward(session_->completed_tick())) apply_time();
 }
 
 void LiveSessionView::resume() {
+    if (options_.lan) return;
     if (phase_ == Phase::ready) { begin(); return; }
     if (phase_ != Phase::running) return;
     if (session_ && time_.resume(session_->completed_tick())) apply_time();
 }
 
 void LiveSessionView::quit() {
-    if (phase_ == Phase::results || phase_ == Phase::ready) {
+    godot::UtilityFunctions::print("EAWR live session quit requested in phase ", static_cast<int>(phase_));
+    if (options_.lan && try_abort_lan(*options_.lan, std::function<void()>([this] { if (session_) session_->stop(); }))) {
+        // MP-33: no tick can consume Quit while the other player is still reviewing.
+        // Join the driver before closing the transport it owns.
+        phase_ = Phase::returning;
+        quit_ = true;
+        return;
+    }
+    if (phase_ == Phase::results || phase_ == Phase::ready
+        || (options_.lan && options_.lan->view().phase == LanPhase::ended)) {
         phase_ = Phase::returning;
         quit_ = true;
         return;
@@ -103,7 +119,7 @@ void LiveSessionView::quit() {
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::intentional_quit;
     intent.origin = ui::CommandOrigin::hud_button;
-    if (!scheduler_->issue(intent)) return;
+    if (!command_sink()->issue(intent)) return;
     phase_ = Phase::quitting;
     // The scheduled command needs one tick even when Quit was pressed while paused.
     static_cast<void>(time_.resume(session_->completed_tick()));
@@ -124,13 +140,28 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         simulation_error_ = core::format_diagnostic(failure);
         save_failure_replay();
         SpaceLiveUpdate update;
+        update.quit = quit_;
         update.error = simulation_error_ + "\n"
             + (failure_replay_.empty() ? "No replay saved: " + failure_replay_error_ : "Replay saved: " + failure_replay_);
         return UpdateResult::success(std::move(update));
     };
     if (!session_) return fail("the live session is not running");
-    if (const auto failure = session_->failure()) return stopped(*failure);
+    if (options_.lan) {
+        const auto view = options_.lan->view();
+        if (lan_gameplay_enabled(view)) recovery_input_feedback_.clear();
+        static_cast<void>(time_.set_speed_step(view.options.tactical_speed, view.options_tick));
+    }
+    if (options_.lan && options_.lan_quit_tick) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!lan_progress_at_ || now - *lan_progress_at_ >= std::chrono::seconds(5)) {
+            lan_progress_at_ = now;
+            godot::UtilityFunctions::print("EAWR LAN frame peer=", player_, " frames=", frames_,
+                " tick=", session_->completed_tick(), " phase=", static_cast<int>(phase_),
+                " paused=", session_->paused(), " lan=", static_cast<int>(options_.lan->view().phase));
+        }
+    }
     ++frames_;
+    if (const auto failure = session_->failure()) return stopped(*failure);
     std::shared_ptr<const tactical::TacticalSnapshot> previous;
     std::shared_ptr<const tactical::TacticalSnapshot> latest;
     double alpha{};
@@ -204,9 +235,11 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     // The events of the ticks this frame reached, from the session's event log rather than the
     // snapshot history, so a stall longer than the history loses none (#370 review 3). Should
     // the log's own bound have dropped some, the gap is reported, never silently skipped.
+    std::optional<std::uint64_t> lost_through;
     battle_frame_.reached.clear();
     if (latest->completed_tick() > reached_tick_) {
         platform::LiveEvents reached = session_->events_after(reached_tick_, latest->completed_tick());
+        lost_through = reached.lost_through;
         if (reached.lost_through) {
             event_gap_rows_.push_back("{\"after\": " + std::to_string(reached_tick_) + ", \"through\": "
                                       + std::to_string(*reached.lost_through) + "}");
@@ -293,6 +326,57 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
             row.on = status.active;
         }
     }
+    // WSD-02/WSD-08: the self-destruct light follows the published countdown (frozen snapshot only).
+    if (tables_) for (const auto& record : battle_frame_.reached) for (const auto& event : record.combat_events) {
+        if (event.kind != tactical::CombatEventKind::heal_pulse) continue;
+        const auto source = space::find_instance(*latest, event.shooter);
+        if (!source) continue;
+        const auto type = std::find_if(tables_->units.begin(), tables_->units.end(), [&](const auto& unit) {
+            return skirmish::type_id(unit.id) == source->type_id;
+        });
+        if (type == tables_->units.end() || event.weapon >= type->special_abilities.size()) continue;
+        const auto& heal = type->special_abilities[event.weapon];
+        const auto colour = [](const auto& authored) {
+            return std::array<float, 3>{to_float(authored[0]), to_float(authored[1]), to_float(authored[2])};
+        };
+        const double birth = static_cast<double>(record.tick) - 1.0;
+        healing_lights_[event.shooter] = {light_effect::Kind::color_flash, colour(heal.heal_owner_colour), birth,
+            static_cast<double>(heal.heal_owner_light_frames), heal.heal_owner_light_pulses};
+        healing_lights_[event.target] = {light_effect::Kind::color_flash, colour(heal.heal_target_colour), birth,
+            static_cast<double>(heal.heal_target_light_frames), heal.heal_target_light_pulses};
+    }
+    std::erase_if(healing_lights_, [&](const auto& light) {
+        return !space::find_instance(*latest, light.first)
+            || static_cast<double>(latest->completed_tick()) >= light.second.start_frame + light.second.duration_frames;
+    });
+    {
+        const auto now = static_cast<double>(latest->completed_tick());
+        for (const tactical::TacticalInstance& instance : latest->instances()) {
+            for (const tactical::AbilityStatus& status : instance.abilities) {
+                if (status.kind != tactical::AbilityKind::self_destruct) continue;
+                const auto light = self_destruct_lights_.find(instance.entity_id);
+                if (status.active && status.total_frames > 0U) {
+                    if (light == self_destruct_lights_.end() || !light->second.active
+                        || light->second.started != status.started_tick) {
+                        const std::uint32_t elapsed = status.total_frames - std::min(status.remaining_frames, status.total_frames);
+                        self_destruct_lights_[instance.entity_id] = {
+                            light_effect::self_destruct_pulse(now, elapsed, status.total_frames), true, status.remaining_frames,
+                            status.started_tick};
+                        ++self_destruct_pulses_;
+                    } else {
+                        light->second.remaining = status.remaining_frames;
+                    }
+                } else if (light != self_destruct_lights_.end() && light->second.active) {
+                    light->second.active = false;
+                    light->second.state = light_effect::self_destruct_cancel(light->second.state, now, light->second.remaining);
+                    ++self_destruct_cancels_;
+                }
+            }
+        }
+        for (auto light = self_destruct_lights_.begin(); light != self_destruct_lights_.end();) {
+            light = space::find_instance(*latest, light->first) ? std::next(light) : self_destruct_lights_.erase(light);
+        }
+    }
     if (scoring_ && scoring_failure_.empty()) {
         if (auto observed = scoring_->observe(*latest); !observed) {
             scoring_failure_ = core::format_diagnostic(observed.error());
@@ -357,6 +441,14 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     }
     battle_frame_.previous = previous;
     battle_frame_.latest = latest;
+    if (scheduler_) {
+        scheduler_->present_snapshot(latest->completed_tick());
+        if (options_.lan && lost_through) scheduler_->present_event_gap(*lost_through);
+        if (options_.lan) for (const auto& record : battle_frame_.reached) for (const auto& event : record.events) {
+            if (event.player == player_ && (event.kind == tactical::EventKind::order_accepted || event.kind == tactical::EventKind::order_rejected))
+                scheduler_->present_result(event.sequence);
+        }
+    }
     battle_frame_.alpha = std::clamp(alpha, 0.0, 1.0);
     battle_frame_.presented_tick = presented_tick_;
     battle_frame_.fog = session_->fog_at(latest->completed_tick());
@@ -484,6 +576,8 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
             return (*fog->values[static_cast<std::size_t>(row)])[static_cast<std::size_t>(column)] != 0;
         });
     }
+    render_clock_.observe(latest->completed_tick());
+    if (options_.fixture != "attract") population.defer_unit_sample(render_clock_.sample());
     population.pose_pending_units(renderer);
     if (!nebula_blend_tick_ || *nebula_blend_tick_ < latest->completed_tick()) {
         const auto first = nebula_blend_tick_ ? *nebula_blend_tick_ + 1 : latest->completed_tick();
@@ -492,12 +586,22 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
             if (!sampled) { ++nebula_blend_missing_ticks_; continue; }
             for (const auto& instance : sampled->instances()) {
                 const auto type = presentation_types_.find(instance.type_id);
-                if (type == presentation_types_.end() || !type->second->footprint.hazard.nebula_service) continue;
-                nebula_blends_[instance.entity_id].service(instance.in_nebula);
+                if (type == presentation_types_.end()) continue;
+                if (type->second->footprint.hazard.nebula_service)
+                    nebula_blends_[instance.entity_id].service(instance.in_nebula);
+                const auto& handlers = type->second->special_abilities;
+                const auto cloak = std::find_if(handlers.begin(), handlers.end(), [](const auto& handler) {
+                    return handler.kind == tactical::SpecialAbilityKind::stealth;
+                });
+                if (cloak != handlers.end()) stealth_blends_[instance.entity_id].service(instance.stealth_on,
+                    to_float(cloak->stealth_transition));
             }
         }
         nebula_blend_tick_ = latest->completed_tick();
         std::erase_if(nebula_blends_, [&](const auto& entry) {
+            return !std::binary_search(alive_now.begin(), alive_now.end(), entry.first);
+        });
+        std::erase_if(stealth_blends_, [&](const auto& entry) {
             return !std::binary_search(alive_now.begin(), alive_now.end(), entry.first);
         });
     }
@@ -601,7 +705,8 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
                 const bool neutralizing = pose.owner != economy_.pads.neutral;
                 const double progress = static_cast<double>(pad->state.progress.raw()) / sim::math::Fixed::scale;
                 const auto owner = progress > 0 && !neutralizing ? pad->state.target : pose.owner;
-                const auto colour = player_colour(owner).value_or(std::array<std::uint8_t, 3>{255, 255, 255});
+                const auto colour = model_colour_of_type(owner, pose.instance ? pose.instance->type_id : sim::tactical::TypeId{})
+                    .value_or(std::array<std::uint8_t, 3>{255, 255, 255});
                 pad_tints_[pose.entity] = ui::capture_colorization(progress, neutralizing, colour);
             }
             if (const auto* construction = pad_construction(pose.entity)) {
@@ -620,9 +725,19 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
             // A spinning craft (#447) is dead: no DEFEND shell.
             placed.defend_active = options_.defend && !pose.spinning;
             if (pose.instance != nullptr) {
+                if (pose.instance->object_turret) {
+                    const auto& turret = *pose.instance->object_turret;
+                    placed.turret = SpacePopulation::LivePose::TurretPose{turret.yaw, turret.pitch,
+                        pose.instance->object_turret_xy_only, pose.instance->object_turret_barrel};
+                }
                 for (const tactical::AbilityStatus& ability : pose.instance->abilities) {
                     if (ability.kind == tactical::AbilityKind::defend && ability.active) placed.defend_active = true;
+                    if (ability.kind == tactical::AbilityKind::blast) {
+                        placed.blast_charging = ability.blast_charge_remaining != 0;
+                        placed.blast_charged = !placed.blast_charging && ability.blast_charged_presentation;
+                    }
                 }
+                placed.stealth_active = pose.instance->stealth_on; // WST-12
             }
             if (pose.instance != nullptr && pose.instance->durability) {
                 for (const tactical::HardpointStatus& hardpoint : pose.instance->durability->hardpoints) {
@@ -701,7 +816,9 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
             continue;
         }
         if (death) {
-            live.push_back(active->pose);
+            auto placed = active->pose;
+            placed.turret.reset(); // A death clone follows its clip, without a live tracking update.
+            live.push_back(std::move(placed));
             if (player != nullptr) clip_poses.push_back({clone.ship, death->position, death->blend_from});
         }
         ++active;
@@ -717,9 +834,17 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         projectile_models_->note_ability_shots(battle_frame_.reached, *latest,
             [this](const std::uint64_t tick) { return session_->snapshot_at(tick); });
         const BattleEffects::ProjectileObserver observer =
-            [this, latest_fog = battle_frame_.fog,
+            [this, latest, latest_fog = battle_frame_.fog,
              samples = std::make_shared<std::map<std::uint64_t, std::shared_ptr<const platform::LiveFog>>>()]
-            (const tactical::PlayerId owner, const sim::math::Vec3& position, const std::uint64_t tick) {
+            (const tactical::PlayerId owner, const sim::math::Vec3& position, const std::uint64_t tick, const bool visible_to_enemy) {
+                if (!visible_to_enemy) {
+                    const auto players = latest->players();
+                    const auto local = std::find_if(players.begin(), players.end(),
+                        [this](const auto& player) { return player.player_id == local_player(); });
+                    const auto source = std::find_if(players.begin(), players.end(),
+                        [owner](const auto& player) { return player.player_id == owner; });
+                    if (local == players.end() || source == players.end() || local->team_id != source->team_id) return false;
+                }
                 auto [sample, inserted] = samples->try_emplace(tick);
                 if (inserted) sample->second = latest_fog && latest_fog->tick == tick
                     ? latest_fog : session_->fog_at(tick);
@@ -782,6 +907,15 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     bookkeeping_timer.finish();
     population.trace_frames(trace_frames_);
     FrameTimer pose_timer(trace_frames_ ? &pose_ms_ : nullptr);
+    for (const auto& beacon : latest->visible_beacons(player_)) {
+        const auto slot = beacon_ships_.find(beacon.player);
+        if (slot == beacon_ships_.end()) continue;
+        SpacePopulation::LivePose pose;
+        pose.ship = slot->second;
+        pose.entity = placed_ships_[pose.ship].live_entity;
+        pose.position = beacon.position;
+        live.push_back(std::move(pose));
+    }
     if (!population.pose_live(live, pose_workers_)) return fail(population.failure());
     pose_timer.finish();
     FrameTimer opacity_timer(trace_frames_ ? &opacity_ms_ : nullptr);
@@ -794,8 +928,23 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         if (!ship) continue;
         const auto blend = nebula_blends_.find(pose.entity);
         const float nebula = blend == nebula_blends_.end() || blend->second.value() <= 0.01F ? 0.0F : blend->second.value();
+        // WST-12: the debug build multiplies the whole model's RGBA by the smoothed cloak tint,
+        // including the hull after switch-off. Reuse the sourced damped ease, sampled per logical frame.
+        std::array<float, 4> cloak_tint{1, 1, 1, 1};
+        if (const auto cloak_blend = stealth_blends_.find(pose.entity);
+            cloak_blend != stealth_blends_.end() && cloak_blend->second.value() > 0.01F) {
+            const auto type = presentation_types_.find(pose.type);
+            if (type != presentation_types_.end()) {
+                const auto& handlers = type->second->special_abilities;
+                const auto handler = std::find_if(handlers.begin(), handlers.end(), [](const auto& entry) {
+                    return entry.kind == tactical::SpecialAbilityKind::stealth;
+                });
+                if (handler != handlers.end()) for (std::size_t channel = 0; channel < cloak_tint.size(); ++channel)
+                    cloak_tint[channel] += cloak_blend->second.value() * (handler->stealth_colour[channel] / 255.0F - 1.0F);
+            }
+        }
         const float opacity = fade_.opacity(pose.entity).value_or(1.0F)
-            * (1.0F + nebula * (nebula_colour_.a / 255.0F - 1.0F));
+            * (1.0F + nebula * (nebula_colour_.a / 255.0F - 1.0F)) * cloak_tint[3];
         population.set_live_opacity(renderer, *ship, opacity);
         // WR-37: frame 35 starts a light fade lasting 115/(FPS*4) seconds.
         // Presentation time interpolates the logical counter; fog opacity stays independent.
@@ -806,9 +955,20 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
                 / (static_cast<double>(tactical::arrival_sweep_frames) / 4.0), 0.0, 1.0));
         }
         const auto pad = pad_tints_.find(pose.entity);
-        const std::array<float, 3> scale{light * (1.0F + nebula * (nebula_colour_.r / 255.0F - 1.0F)),
+        std::array<float, 3> scale{light * (1.0F + nebula * (nebula_colour_.r / 255.0F - 1.0F)),
             light * (1.0F + nebula * (nebula_colour_.g / 255.0F - 1.0F)),
             light * (1.0F + nebula * (nebula_colour_.b / 255.0F - 1.0F))};
+        for (std::size_t channel = 0; channel < scale.size(); ++channel) scale[channel] *= cloak_tint[channel];
+        // WSD-02/WSD-08: the effect blends the object's final light toward its colour.
+        if (const auto effect = self_destruct_lights_.find(pose.entity); effect != self_destruct_lights_.end()) {
+            if (const auto lit = light_effect::apply(effect->second.state, presented_tick_, scale)) {
+                scale = *lit;
+                ++self_destruct_light_samples_;
+                max_self_destruct_light_red_ = std::max(max_self_destruct_light_red_, scale[0]);
+            }
+        }
+        if (const auto effect = healing_lights_.find(pose.entity); effect != healing_lights_.end())
+            if (const auto lit = light_effect::apply(effect->second, presented_tick_, scale)) scale = *lit;
         visual_scales.emplace(pose.entity, scale);
         // WBP-52: capture colour belongs to each material mask, independently of lighting.
         for (const sim::EntityId piece : population.live_ship_entities(*ship)) {
@@ -820,6 +980,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     FrameTimer tail_timer(trace_frames_ ? &session_tail_ms_ : nullptr);
     FrameTimer clip_timer(trace_frames_ ? &clip_pose_ms_ : nullptr);
     if (!population.pose_live_clips(renderer, clip_poses)) return fail(population.failure());
+    if (!population.pose_live_turrets(renderer, live, clip_poses)) return fail(population.failure());
     clip_timer.finish();
     // #427: the shield shells' clock is the presentation clock (seconds).
     population.set_shield_time(renderer, static_cast<float>(presented_tick_ / tactical::logical_frames_per_second));
@@ -953,6 +1114,13 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         }
         if (next_capture_frame_ < options_.capture_frames.size()) update.hold = true;
     }
+    if (options_.lan && options_.lan_quit_tick) {
+        if (*options_.lan_quit_tick && session_->completed_tick() >= *options_.lan_quit_tick && phase_ == Phase::running) quit();
+        if (options_.lan->view().phase == LanPhase::ended) {
+            if (!lan_end_frame_) lan_end_frame_ = frames_;
+            if (frames_ >= *lan_end_frame_ + 30) quit();
+        }
+    }
     update.quit = quit_;
     return UpdateResult::success(std::move(update));
 }
@@ -974,7 +1142,7 @@ void LiveSessionView::finish() {
         // The viewer-attached run against a headless run of the same command stream.
         auto headless = platform::headless_tick_hashes(replay, content_->sensors, content_->durability, content_->motion,
                                                        content_->combat, victory_, content_->fog, content_->abilities,
-                                                       economy_);
+                                                       economy_, content_->map_box);
         shutdown_trace::mark("finish: headless replay done");
         headless_equal_ = headless && headless.value() == hashes_;
         if (!headless) finish_status_ = "headless replay failed: " + core::format_diagnostic(headless.error());

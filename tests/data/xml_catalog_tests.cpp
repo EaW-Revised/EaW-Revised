@@ -91,8 +91,125 @@ void locale_contracts() {
     expect(changed, "at least one non-C LC_CTYPE is exercised");
 }
 
+// #793 (R-10, R-13, C-06): the registry and hardpoint-include failures FoC fails on are counted apart
+// from physical-XML noise, and load_catalog_strict returns them as the error. A missing include stays
+// a warning with both neighbours loaded.
+void load_health_contracts() {
+    struct Variant {
+        std::string hardpoint_registry =
+            "<Hard_Point_Files><File>hardpoints-a.xml</File><File>hardpoints-b.xml</File></Hard_Point_Files>";
+        std::string object_registry = "<Game_Object_Files><File>objects-a.xml</File></Game_Object_Files>";
+        std::string hardpoints_a = "<HardPoints><HardPoint Name=\"HP_A\"><Damage>1</Damage></HardPoint></HardPoints>";
+        std::string hardpoints_b = "<HardPoints><HardPoint Name=\"HP_B\"><Damage>2</Damage></HardPoint></HardPoints>";
+        std::string objects_a = "<Objects><SpaceUnit Name=\"UNIT_A\"><Tactical_Health>5</Tactical_Health></SpaceUnit></Objects>";
+        bool drop_hardpoints_b = false;
+        bool drop_faction_registry = false;
+        bool stray_malformed_file = false;
+    };
+    const auto load = [](const Variant& variant, const bool strict) {
+        TempTree tree;
+        registries(tree.root);
+        write(tree.root / "XML" / "HardpointDataFiles.xml", variant.hardpoint_registry);
+        write(tree.root / "XML" / "GameObjectFiles.xml", variant.object_registry);
+        write(tree.root / "XML" / "hardpoints-a.xml", variant.hardpoints_a);
+        if (!variant.drop_hardpoints_b) write(tree.root / "XML" / "hardpoints-b.xml", variant.hardpoints_b);
+        write(tree.root / "XML" / "objects-a.xml", variant.objects_a);
+        write(tree.root / "XML" / "factions.xml", "<Factions><Faction Name=\"FACTION_A\"/></Factions>");
+        write(tree.root / "XML" / "campaigns.xml", "<Campaigns><Campaign Name=\"CAMPAIGN_A\"/></Campaigns>");
+        write(tree.root / "XML" / "sfx.xml", "<SFXEvents><SFXEvent Name=\"SFX_A\"/></SFXEvents>");
+        if (variant.drop_faction_registry) std::filesystem::remove(tree.root / "XML" / "FactionFiles.xml");
+        if (variant.stray_malformed_file) write(tree.root / "XML" / "unreferenced.xml", "<Broken><Open></Broken>");
+        const std::array mounts{eawr::vfs::MountSpec{"base", tree.root, "data", {}}};
+        auto mounted = eawr::vfs::Vfs::mount(mounts);
+        expect(static_cast<bool>(mounted), "load-health tree mounts");
+        if (!mounted) return eawr::core::Result<eawr::data::LoadResult>::failure(mounted.error());
+        return strict ? eawr::data::load_catalog_strict(mounted.value(), eawr::data::Profile::eaw)
+                      : eawr::data::load_catalog(mounted.value(), eawr::data::Profile::eaw);
+    };
+
+    {
+        Variant clean;
+        clean.stray_malformed_file = true; // an unreferenced malformed file is a diagnostic, not a health problem
+        auto loaded = load(clean, true);
+        expect(static_cast<bool>(loaded) && loaded.value().health.clean() && !loaded.value().health.failed(),
+               "a clean tree has a clean health and passes the strict load");
+        expect(loaded && has_code(loaded.value().diagnostics, eawr::data::diagnostic_codes::malformed_xml),
+               "the unreferenced malformed file stays a diagnostic");
+        expect(loaded && eawr::data::describe_load_health(loaded.value().health).empty(), "a clean load describes nothing");
+    }
+    {
+        Variant malformed;
+        malformed.hardpoints_b = "<HardPoints><HardPoint Name=\"HP_B\"></HardPoints>";
+        auto lenient = load(malformed, false);
+        expect(static_cast<bool>(lenient), "load_catalog still returns the catalog and its diagnostics");
+        if (lenient) {
+            const auto& health = lenient.value().health;
+            expect(health.failed() && health.hardpoint_include_failed == 1 && health.include_failed == 1 &&
+                       health.registry_invalid == 0 && health.include_missing == 0,
+                   "a malformed admitted hardpoint include is a counted, fatal failure (C-06)");
+            expect(health.fatal && health.fatal->code == eawr::data::diagnostic_codes::malformed_xml,
+                   "the fatal diagnostic is the include's parse error");
+            expect(lenient.value().catalog.find("HP_A", eawr::data::Category::hardpoint) != nullptr,
+                   "the neighbouring hardpoint include still loads");
+            expect(eawr::data::describe_load_health(health) == "include_failed=1 hardpoint_include_failed=1",
+                   "the health line names each non-zero count");
+        }
+        auto strict = load(malformed, true);
+        expect(!strict && strict.error().code == eawr::data::diagnostic_codes::malformed_xml &&
+                   strict.error().logical_path && strict.error().logical_path->find("hardpoints-b.xml") != std::string::npos,
+               "the strict load fails on a malformed admitted hardpoint include and names the file");
+    }
+    {
+        Variant missing;
+        missing.hardpoint_registry =
+            "<Hard_Point_Files><File>hardpoints-a.xml</File><File>absent.xml</File><File>hardpoints-b.xml</File></Hard_Point_Files>";
+        auto strict = load(missing, true);
+        expect(static_cast<bool>(strict), "a missing include is omitted with a warning, not a failure (R-10, R-13)");
+        if (strict) {
+            const auto& health = strict.value().health;
+            expect(!health.failed() && health.include_missing == 1 && health.include_failed == 0 && !health.clean(),
+                   "a missing include is counted as a warning only");
+            expect(has_code(strict.value().diagnostics, eawr::data::diagnostic_codes::registry_include_missing),
+                   "the missing include keeps its diagnostic");
+            expect(strict.value().catalog.find("HP_A", eawr::data::Category::hardpoint) != nullptr &&
+                       strict.value().catalog.find("HP_B", eawr::data::Category::hardpoint) != nullptr,
+                   "both neighbours of a missing include are present");
+            expect(eawr::data::describe_load_health(health) == "include_missing=1", "the warning line names the missing include");
+        }
+    }
+    {
+        Variant object_include;
+        object_include.objects_a = "<Objects><SpaceUnit Name=\"UNIT_A\"></Objects>";
+        auto strict = load(object_include, true);
+        expect(static_cast<bool>(strict) && strict.value().health.include_failed == 1 &&
+                   strict.value().health.hardpoint_include_failed == 0 && !strict.value().health.failed(),
+               "a malformed game-object include is counted and reported but not fatal (the issue's scope is hardpoints)");
+    }
+    {
+        Variant wrong_root;
+        wrong_root.hardpoint_registry = "<Wrong_Root><File>hardpoints-a.xml</File></Wrong_Root>";
+        auto strict = load(wrong_root, true);
+        expect(!strict && strict.error().code == eawr::data::diagnostic_codes::registry_invalid,
+               "a registry with the wrong root fails the strict load");
+        auto lenient = load(wrong_root, false);
+        expect(lenient && lenient.value().health.registry_invalid == 1 && lenient.value().health.failed(),
+               "a wrong registry root is counted");
+        Variant unparsable;
+        unparsable.hardpoint_registry = "<Hard_Point_Files><File>x</Hard_Point_Files";
+        auto broken = load(unparsable, true);
+        expect(!broken && broken.error().code == eawr::data::diagnostic_codes::registry_invalid,
+               "an unparsable registry root fails the strict load");
+        Variant gone;
+        gone.drop_faction_registry = true;
+        auto absent = load(gone, true);
+        expect(!absent && absent.error().code == eawr::data::diagnostic_codes::registry_invalid,
+               "a missing registry file fails the strict load");
+    }
+}
+
 void run_contracts() {
     locale_contracts();
+    load_health_contracts();
     TempTree tree;
     registries(tree.root);
     write(tree.root / "XML" / "objects-a.xml", R"xml(<Objects>

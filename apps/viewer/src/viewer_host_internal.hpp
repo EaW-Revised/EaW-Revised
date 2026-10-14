@@ -102,6 +102,9 @@ struct ViewerHost::Options final {
     // --eawr-render-profile retail|enhanced; empty picks default_render_profile().
     std::string render_profile;
     bool render_profile_missing{};
+    // --eawr-settings-file <path>: the player settings file (default: the user data folder's, #2927).
+    std::filesystem::path settings_file;
+    bool texture_mip_drop_explicit{};
     ViewerPath scene_path{std::string{"res://common/scene.json"}};
     ViewerPath replay_path{std::string{"res://common/original-v1.eawr-replay"}};
     std::string model_path{default_model_path};
@@ -110,11 +113,15 @@ struct ViewerHost::Options final {
     std::string animation_path;
     std::string map_path;
     bool skirmish_setup{};
+    // --eawr-front-end: the main menu and its screens, with the setup screen behind Skirmish and LAN.
+    bool front_end{};
     bool skirmish_setup_test{};
     bool skirmish_setup_returned{};
     bool startup_metrics{};
     bool cache_content{true};
     bool cache_shaders{true};
+    // --eawr-live-begin manual|auto: a setup test with `manual` shows the loading screen (#1923).
+    std::string live_begin;
     std::uint32_t load_bench_starts{1}, load_bench_completed{};
     std::string atlas_path;
     std::string icon_name;

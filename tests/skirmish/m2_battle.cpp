@@ -27,6 +27,7 @@ std::variant<std::unique_ptr<Battle>, std::string> build_battle(const Loaded& lo
     auto fog = skirmish::fog_rules(inputs.value());
     if (!fog) return failed("the M2 fog grid", fog.error());
     content.value().fog = fog.value();
+    content.value().map_box = skirmish::map_box(inputs.value());
     auto ai = skirmish::ai_setup(start.value(), inputs.value(), loaded.tables);
     // SAE-01: these fixed-force soak/schedule fixtures omit the skirmish economy.
     // The buying regression supplies real economy rules in foc_plan_tests.
@@ -52,7 +53,8 @@ std::variant<std::unique_ptr<Battle>, std::string> build_battle(const Loaded& lo
     auto battle = std::make_unique<Battle>(Battle{std::move(content).value(), std::move(ai), std::move(modules).value(), std::nullopt});
     const auto& setup = battle->content;
     auto world = tactical::TacticalSession::create(start.value().setup, setup.sensors, setup.durability, setup.motion,
-        setup.fog, setup.combat, skirmish::victory_rules(start.value(), loaded.tables), setup.abilities);
+        setup.fog, setup.combat, skirmish::victory_rules(start.value(), loaded.tables), setup.abilities,
+        tactical::EconomyRules{}, setup.map_box);
     if (!world) return failed("the world", world.error());
     auto session = foc::create_session(std::move(world).value(), battle->ai, battle->modules);
     if (!session) return failed("the AI session", session.error());

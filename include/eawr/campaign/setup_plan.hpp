@@ -1,0 +1,148 @@
+#pragma once
+
+#include "eawr/campaign/fleets.hpp"
+#include "eawr/campaign/galaxy.hpp"
+
+#include <functional>
+#include <optional>
+#include <span>
+#include <string>
+#include <vector>
+
+namespace eawr::campaign {
+
+struct CampaignPlayerBinding {
+    sim::galactic::GalacticPlayer player;
+    std::string faction;
+    bool active{true};
+};
+enum class CampaignSetupMode { single_player, multiplayer };
+struct CampaignCustomOptions {
+    // Runtime gameplay values, after any UI display conversion. WGS-13 applies only the
+    // faction's nonzero test here, not the magnitude used by the staging display.
+    std::int64_t credits{};
+    std::int64_t starting_tech{};
+    std::int64_t maximum_tech{};
+    bool allow_heroes{true};
+    friend bool operator==(const CampaignCustomOptions&, const CampaignCustomOptions&) = default;
+};
+struct CampaignSetupOptions {
+    std::optional<sim::galactic::PlayerId> local_observer; // explicit caller identity, not faction ordinal
+    std::uint64_t seed{};
+    std::optional<std::uint64_t> forced_seed;
+    std::vector<CampaignPlayerBinding> players; // strictly ascending player IDs
+    std::vector<sim::galactic::Seat> seats;
+    std::vector<FleetTypeBinding> types; // explicit original-type identities, not catalog indices
+    CampaignSetupMode mode{CampaignSetupMode::single_player}; // actual mode, not Is_Multiplayer menu metadata
+    // Explicit base-income admission/difficulty policy. Missing means no fiscal
+    // service, preserving setups until their faction/controller providers exist.
+    // WGEP-03/16: caller sources eligibility and AI Credit_Multiplier; no default.
+    std::optional<std::vector<sim::galactic::FiscalPlayer>> fiscal_players;
+    std::optional<CampaignCustomOptions> custom;
+};
+struct CampaignLocation {
+    std::string original_type;
+    sim::galactic::PlayerId initial_owner{};
+    // Nonplanet scene objects remain location requests, never conquerable planets.
+    std::optional<sim::galactic::Planet> planet;
+};
+struct StartingForceRequest {
+    sim::galactic::PlanetId planet{};
+    sim::galactic::PlayerId owner{};
+    sim::galactic::TypeId type{};
+    std::string original_type;
+    bool human{};
+    sim::math::Fixed target_allegiance; // WGS-70: set before delegated placement
+};
+struct InitialPlacement {
+    sim::galactic::PlanetId planet{};
+    sim::galactic::TypeId type{};
+};
+struct CampaignHome {
+    sim::galactic::PlayerId player{};
+    std::string original_type; // empty when the campaign has no home record
+    std::optional<sim::galactic::PlanetId> planet; // absent does not create a replacement
+};
+struct CampaignCredits { sim::galactic::PlayerId player{}; sim::math::Fixed amount; };
+struct CampaignTech {
+    sim::galactic::PlayerId player{};
+    std::int64_t requested_current{};
+    std::int64_t requested_maximum{};
+    bool unlock_initial_types{true};
+    bool notify_new_options{false};
+};
+struct CampaignHero {
+    sim::galactic::PlayerId player{};
+    sim::galactic::PlanetId home{};
+    sim::galactic::TypeId original_type_id{};
+    std::string original_type;
+};
+
+// The planner copies validated inputs. Only const views escape; providers cannot change the
+// authored traversal order, root players, identities or seed (WGS-01/03/08/09/70).
+class CampaignSetupPlan final {
+public:
+    [[nodiscard]] const sim::galactic::GalacticSetup& galaxy() const noexcept { return galaxy_; }
+    [[nodiscard]] CampaignSetupMode mode() const noexcept { return mode_; }
+    [[nodiscard]] std::span<const CampaignPlayerBinding> player_bindings() const noexcept { return player_bindings_; }
+    [[nodiscard]] std::optional<sim::galactic::PlayerId> local_observer() const noexcept { return local_observer_; }
+    [[nodiscard]] std::optional<sim::math::Fixed> observer_reveal_delay() const noexcept { return observer_reveal_delay_; }
+    [[nodiscard]] std::optional<bool> observer_auto_reveal() const noexcept { return observer_auto_reveal_; }
+    [[nodiscard]] std::span<const CampaignLocation> locations() const noexcept { return locations_; }
+    [[nodiscard]] std::span<const StartingForceRequest> forces() const noexcept { return forces_; }
+    [[nodiscard]] std::span<const InitialPlacement> initial_placements() const noexcept { return initial_placements_; }
+    [[nodiscard]] std::span<const CampaignHome> homes() const noexcept { return homes_; }
+    [[nodiscard]] std::span<const core::Diagnostic> diagnostics() const noexcept { return diagnostics_; }
+    [[nodiscard]] core::Result<sim::galactic::FleetTypeTraits> resolve_fleet_type(sim::galactic::TypeId type) const;
+    [[nodiscard]] const units::GalacticType* original_type(sim::galactic::TypeId) const noexcept;
+    [[nodiscard]] std::span<const FleetTypeBinding> type_bindings() const noexcept { return type_bindings_; }
+    [[nodiscard]] const std::optional<sim::galactic::FiscalSetup>& fiscal() const noexcept { return fiscal_; }
+    [[nodiscard]] std::span<const CampaignCredits> credits() const noexcept { return credits_; }
+    [[nodiscard]] std::span<const CampaignTech> tech() const noexcept { return tech_; }
+    [[nodiscard]] std::span<const CampaignHero> multiplayer_heroes() const noexcept { return heroes_; }
+    [[nodiscard]] std::string_view campaign_name() const noexcept { return campaign_name_; }
+    [[nodiscard]] sim::EntityId first_free_entity_id() const noexcept { return first_free_; }
+private:
+    CampaignSetupPlan() = default;
+    friend core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::GalacticData&,
+        const units::GalacticTypeTable&, std::string_view, const CampaignSetupOptions&);
+    friend core::Result<CampaignSetupPlan> plan_live_campaign_setup(const vfs::Vfs&,
+        const data::galactic::GalacticData&, const units::GalacticTypeTable&,
+        std::string_view, CampaignSetupOptions, std::string_view);
+    sim::galactic::GalacticSetup galaxy_;
+    CampaignSetupMode mode_{CampaignSetupMode::single_player};
+    std::vector<CampaignPlayerBinding> player_bindings_;
+    std::optional<sim::galactic::PlayerId> local_observer_;
+    std::optional<sim::math::Fixed> observer_reveal_delay_;
+    std::optional<bool> observer_auto_reveal_;
+    std::string campaign_name_;
+    sim::EntityId first_free_{};
+    std::vector<CampaignLocation> locations_;
+    std::vector<StartingForceRequest> forces_;
+    std::vector<InitialPlacement> initial_placements_;
+    std::vector<CampaignHome> homes_;
+    std::vector<core::Diagnostic> diagnostics_;
+    units::GalacticTypeTable bound_types_;
+    std::vector<FleetTypeBinding> type_bindings_;
+    std::optional<sim::galactic::FiscalSetup> fiscal_;
+    std::vector<CampaignCredits> credits_;
+    std::vector<CampaignTech> tech_;
+    std::vector<CampaignHero> heroes_;
+};
+[[nodiscard]] core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::GalacticData& data,
+    const units::GalacticTypeTable& types, std::string_view campaign_name, const CampaignSetupOptions& options);
+
+// WGEP-03/16/17, WGS-74: prepare the live layout's fiscal policy and authored
+// balances through campaign setup. Difficulty is an explicit XML record name.
+// Placement/control and tech side-effect providers remain WGS-U08 seams; the
+// returned layout retains neutral ownership until those services initialize it.
+[[nodiscard]] core::Result<CampaignSetupPlan> plan_live_campaign_setup(
+    const vfs::Vfs&, const data::galactic::GalacticData&, const units::GalacticTypeTable&,
+    std::string_view campaign, CampaignSetupOptions, std::string_view difficulty);
+
+// Explicit neutral-layout preview producer. No placement/control/action facts
+// are inferred; refuse a layout already containing forces or live subsystems.
+[[nodiscard]] core::Result<void> initialize_layout_observer(const data::galactic::GalacticData&,
+    const CampaignSetupPlan&, sim::galactic::PlayerId local_player, sim::galactic::GalacticSetup&);
+
+} // namespace eawr::campaign

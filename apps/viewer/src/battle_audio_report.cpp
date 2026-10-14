@@ -105,7 +105,9 @@ void BattleAudio::write_report(std::ostream& output) const {
     output << "  \"battle_audio\": {\"muted\": " << (options_.muted ? "true" : "false") << ", \"frames\": " << frames_
            << ", \"sfx_events\": " << registry_.size() << ", \"space_3d\": {\"saturation_factor\": "
            << space_.saturation_factor << ", \"rolloff_factor\": " << space_.rolloff_factor << ", \"listener_z\": "
-           << space_.listener_z << ", \"max_distance\": " << space_.max_distance << "}, \"listener\": "
+           << space_.listener_z << ", \"available\": " << (spatial_audio_available_ ? "true" : "false")
+           << ", \"spatial_starts\": " << spatial_starts_ << ", \"two_d_starts\": " << two_d_starts_
+           << ", \"max_distance\": " << space_.max_distance << "}, \"listener\": "
            << json(listener_text_) << ", \"voices_3d\": " << audio::Voices::voices_3d << ", \"max_voices\": " << max_voices_
            << ", \"stolen\": " << stolen_ << ", \"attacks\": " << attacks_
            << ", \"attached_moves\": " << attached_moves_;
@@ -133,6 +135,7 @@ void BattleAudio::write_report(std::ostream& output) const {
            << ", \"stops\": " << engine_stops_ << ", \"retired\": " << engine_retired_
            << ", \"hidden_updates\": " << engine_hidden_updates_ << ", \"fade_updates\": " << engine_fade_updates_
            << ", \"detached\": " << engine_detached_ << "}";
+    output << ", \"self_destruct_sound_stops\": " << self_destruct_sound_stops_;
     output << ", \"ambient\": {\"visits\": " << ambient_visits_
            << ", \"initialized\": " << ambient_initialized_ << ", \"retired\": " << ambient_retired_
            << ", \"timers\": " << ambient_timers_.size() << ", \"peak_timers\": " << ambient_peak_
@@ -154,7 +157,10 @@ void BattleAudio::write_report(std::ostream& output) const {
            << ", \"speech_queued\": " << speech_queued_ << ", \"speech_pending\": " << speech_queue_.size()
            << ", \"speech_completed\": " << speech_completed_ << ", \"speech_failed\": " << speech_failed_
            << ", \"speech_overflow\": " << speech_overflow_ << ", \"speech_active\": " << (speech_stream_.active() ? "true" : "false")
-           << ", \"ducked_starts\": " << ducked_starts_ << ", \"ducked_updates\": " << ducked_updates_ << "}";
+           << ", \"ducked_starts\": " << ducked_starts_ << ", \"ducked_updates\": " << ducked_updates_
+           << ", \"attract_silent\": " << (options_.attract_silent ? "true" : "false")
+           << ", \"attract_refused\": " << attract_refused_
+           << ", \"voice_starts\": " << speech_class_starts_ << "}";
     counts("requested", requested_);
     output << ", \"base_warning\": {\"delay_frames\": " << base_warning_delay_frames_
            << ", \"countdown\": " << base_warning_countdown_ << ", \"radar_active\": " << radar_warnings_.size() << ", \"rows\": [";
@@ -178,6 +184,13 @@ void BattleAudio::write_report(std::ostream& output) const {
     }
     output << "}";
     counts("played_samples", played_samples_);
+    output << ", \"samples_loaded_during_play\": " << samples_.size() - preloaded_samples_.size()
+           << ",\n    \"preloaded_samples\": [";
+    std::size_t preloaded_index = 0;
+    for (const auto& name : preloaded_samples_) output << (preloaded_index++ ? ", " : "") << json(name);
+    output << "]";
+    output << ", \"synchronous_runtime_loads\": " << synchronous_runtime_loads_;
+
     output << ", \"missing_samples\": {";
     first = true;
     for (const auto& [name, cause] : missing_samples_) {

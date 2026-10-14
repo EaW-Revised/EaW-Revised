@@ -4,6 +4,7 @@
 #include "eawr/presentation/camera/camera.hpp"
 #include "eawr/presentation/camera/constants_source.hpp"
 #include "eawr/presentation/camera/controller.hpp"
+#include "eawr/sim/tactical/types.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -42,10 +43,10 @@ struct OverviewConstants final {
 
 enum class OverviewLevel : std::uint8_t { off = 0, overview = 1, map = 2 };
 
-// FoC counts overview clicks only after the zoom out that reached Distance_Max has settled for 26
-// frames of its frame counter. The remake reads them as logic frames at 30 per second, which is
-// unverified.
-inline constexpr double overview_settle_seconds = 26.0 / 30.0;
+// V-1 (CAM-1, CAM-2, docs/behaviour/foc-battle-selection.md): the debug build uses a
+// fixed 26-frame settle count after a zoom out; this is a sourced constant, not an XML value.
+// Converting that frame counter to logical seconds remains unverified against retail.
+inline constexpr double overview_settle_seconds = 26.0 / sim::tactical::logical_frames_per_second;
 
 class TacticalOverview final {
 public:

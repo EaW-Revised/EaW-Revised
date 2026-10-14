@@ -28,7 +28,7 @@ inline constexpr std::uint32_t death_projectile_slot_flag = 0x40000000U;
 inline constexpr std::uint32_t death_projectile_selection_slot = 0xfffe0007U; // coordinator-reserved
 inline constexpr std::uint32_t projectile_damage_delay_slot = 0xfffe0008U; // coordinator-reserved
 
-// WAD-39: authored mechanical turret inputs in the unit frame, only for manual guns.
+// UA-05/WAD-39: shared authored geometry; ordinary and manual guns have separate aim rules.
 struct ManualTurretProfile {
     math::Vec3 pivot{};
     std::array<math::Vec3, 3> axes{};
@@ -42,6 +42,7 @@ struct ManualTurretProfile {
     bool barrel{};
     math::Vec3 barrel_pivot{};
     std::array<math::Vec3, 3> barrel_axes{};
+    bool xy_only{};
     friend bool operator==(const ManualTurretProfile&, const ManualTurretProfile&) = default;
 };
 
@@ -73,6 +74,9 @@ struct ShotProfile {
     // `turn_rate` degrees (its Max_Rate_Of_Turn) in yaw and in pitch each frame.
     bool homing{};
     math::Fixed turn_rate{};
+    // WRB-06: a shot a Redirect_Blaster handler may deflect: its projectile category is not MISSILE, ROCKET,
+    // MPTL_ROCKET, GRENADE, LIGHT_SABER, BOMB or CLUSTER_BOMB.
+    bool redirect_blockable{};
     // Ion weapons (#561): Projectile_Does_Energy_Damage drains the pool of the unit hit (EN-07),
     // and Projectile_Ion_Stun_On_Detonation stuns it (IS-01).
     bool energy_damage{};
@@ -88,6 +92,9 @@ struct ShotProfile {
 
 // One way a unit type fires: a weapon hardpoint (Fire_* tags) or the type's object weapon.
 // Points are model-space offsets already scaled by the type's Scale_Factor.
+// FC-61/EFSB-06: unauthored ordinary turret rest hold, in synchronized seconds.
+inline constexpr auto default_object_turret_rest_delay = math::Fixed::from_raw(2 * math::Fixed::scale);
+
 struct WeaponProfile {
     std::uint32_t hardpoint{object_weapon}; // index in the type's HardPoints list
     math::Fixed range{};                    // Fire_Range_Distance; the object weapon uses Targeting_Max_Attack_Distance
@@ -100,9 +107,16 @@ struct WeaponProfile {
     std::uint64_t category_restrictions{};  // categories it may not fire at (Fire_Category_Restrictions)
     bool opportunity_when_idle{};
     bool opportunity_when_targeting{};
+    // space-targeting R-01: a weapon hardpoint whose authored maximum recharge is at most
+    // Hardpoint_Recharge_Cutoff_For_Opportunity_Fire counts both flags as on for an AI owner.
+    bool ai_opportunity_forced{};
     math::Vec3 fire_a{};                    // Fire_Bone_A
     math::Vec3 fire_b{};                    // Fire_Bone_B; equal to fire_a when there is none
     bool has_fire_b{};
+    // WWP-47: the object weapon's muzzle bones in firing order (the authored prefix, then _00 and
+    // consecutive two-digit suffixes until the first absent bone). Empty: the shot leaves the unit's
+    // own origin. Always empty for a hardpoint weapon.
+    std::vector<math::Vec3> muzzles{};
     // Fire_Bone_A's bind-frame x, y and z axes in the unit's frame, orthonormal: a fixed
     // hardpoint's cone opens along x, its width about z and its height toward z (W-07). Without
     // them (no fire bone frame) the cone is measured in the unit's own frame.
@@ -118,10 +132,17 @@ struct WeaponProfile {
     bool special{}; // WAD-31/32: ordinary service, selected projectile required
     bool requires_manual_target{}; // WAD-39: manual consumer supplies a separate assignment
     std::optional<ShotProfile> barrage_shot{}; // WAD-38: ordinary weapon inputs, overridden projectile
+    std::optional<ShotProfile> charged_shot{}; // WAD-35: optional charged override, else ordinary shot
     math::Fixed manual_min_range{};
     std::uint32_t manual_cooldown_frames{};
     std::optional<ManualTurretProfile> manual_turret{};
     bool manual_turret_required{};
+    std::optional<ManualTurretProfile> object_turret{}; // UA-05: ordinary procedural aim, separate from manual guns
+    bool object_turret_required{};
+    math::Fixed object_turret_rest_delay{default_object_turret_rest_delay}; // FC-61: strict expiry
+    // WAB-80: Full_Salvo_Weapon_Delay_Multiplier, applied to this hardpoint's delays while the unit's
+    // FULL_SALVO is on; 1 when the hardpoint does not author it.
+    math::Fixed full_salvo_delay{math::Fixed::from_raw(math::Fixed::scale)};
     friend bool operator==(const WeaponProfile&, const WeaponProfile&) = default;
 };
 
@@ -130,6 +151,7 @@ struct TargetHardpoint {
     std::uint32_t hardpoint{}; // index in the type's HardPoints list
     math::Vec3 position{};
     bool targetable{};
+    std::uint8_t type{}; // the hardpoint type's ordinal (units::HardpointType); 0 = unknown
     friend bool operator==(const TargetHardpoint&, const TargetHardpoint&) = default;
 };
 
@@ -198,6 +220,21 @@ struct MeshCollisionWork {
 // One unit type's combat content (for M2 the #65 unit tables, units::combat_table): neither
 // replay data nor state. A type without a profile (a squadron container, #271) never targets,
 // fires or is a target.
+// WSW-01/14/19: persistent source metadata. The sole object weapon supplies
+// shared projectile/aim data; its ordinary autonomous service is never bound.
+struct PlanetaryWeaponProfile {
+    std::uint32_t index{}, target_action{}, recharge_frames{}, pulse_delay_frames{};
+    std::uint64_t valid_targets{};
+    friend bool operator==(const PlanetaryWeaponProfile&, const PlanetaryWeaponProfile&) = default;
+};
+
+struct SpecialWeaponState {
+    std::uint64_t recharge_started{}, recharge_until{}, next_pulse_frame{};
+    EntityId target{invalid_entity_id};
+    std::uint32_t pulses_left{}, instances{1};
+    friend bool operator==(const SpecialWeaponState&, const SpecialWeaponState&) = default;
+};
+
 struct CombatProfile {
     TypeId type_id{};
     std::uint64_t category_bits{};                  // CategoryMask, as a candidate
@@ -230,8 +267,14 @@ struct CombatProfile {
     math::Fixed ranged_target_z_adjust{}; // WWP-72/WPJ-17: world Z aim and defence offset
     bool valid_target{true}; // WCC-25: Is_Valid_Target defaults true
     bool special_weapon{}; // WCC-25: SPECIAL_WEAPON targets require the star-base exception
+    std::optional<PlanetaryWeaponProfile> planetary_weapon{};
     bool star_base{}; // DUMMY_STAR_BASE behavior, independent of XML class
     std::vector<ShotProfile> death_projectiles{}; // WNO-29: one choice per ordinary death
+    bool target_stealth{}; // WST-07: Target_Stealth_Units; sees and shoots stealthed enemies
+    math::Fixed stealth_detection_range{}; // WST-08: Space_FOW_Reveal_Range of a target_stealth type, else 0
+    std::uint64_t attack_category_restrictions{}; // WTA-29: unit-level category refusal
+    // WCC-15: Targeting_Stickiness_Time_Threshold in seconds; 0 when not authored (debug build).
+    math::Fixed stickiness{};
     friend bool operator==(const CombatProfile&, const CombatProfile&) = default;
 };
 
@@ -247,7 +290,20 @@ struct PriorityRow {
 struct PrioritySet {
     std::vector<PriorityRow> rows; // strictly increasing type_id
     math::Fixed unlisted{};        // the score of a type without a row
+    // WCC-18: per hardpoint type ordinal, the type's rank (units::hard_point_priority): its 1-based
+    // place in Hard_Point_Priorities, nullopt when excluded, else `unlisted`. A type past the end
+    // ranks `unlisted`.
+    std::vector<std::optional<math::Fixed>> hardpoint_ranks{};
     friend bool operator==(const PrioritySet&, const PrioritySet&) = default;
+};
+
+// WWP-21 / AV-05: type geometry, including craft and team types without a Space_Layer.
+struct TargetFootprint {
+    TypeId type_id{};
+    math::Fixed radius{};
+    math::Fixed x_extent{};
+    math::Fixed y_extent{};
+    friend constexpr bool operator==(const TargetFootprint&, const TargetFootprint&) = default;
 };
 
 // An empty table binds no combat: nothing targets or fires, as before #73.
@@ -255,7 +311,17 @@ struct CombatTable {
     std::vector<CombatProfile> profiles; // strictly increasing type_id
     std::vector<PrioritySet> priority_sets;
     std::vector<FactionId> pad_neutral_factions{}; // WHZ-51: authored neutral factions for ordinary combat
+    std::vector<TypeId> unit_ai_types{}; // WTA-29: sorted type admission, including team containers
+    // Metadata only: team companies are never inserted into the active combat profiles.
+    std::vector<CombatProfile> retaliation_team_types{}; // WTA-29: strictly increasing type_id
     [[nodiscard]] const CombatProfile* find(TypeId type_id) const noexcept;
+    // WTA-29/WCC-25: target identity survives subsequent scans without company weapons.
+    [[nodiscard]] const CombatProfile* find_target_type(TypeId type_id) const noexcept;
+    std::vector<TargetFootprint> footprints{}; // strictly increasing type_id; independent of combat eligibility
+    math::Fixed melee_cutoff{}; // WWP-27: Melee_Cutoff_Range, compared with the shooter's attack distance
+    // A-05: Auto_Rotate_For_Space_Targeting; set, a unit with hardpoints turns for a scanned target too.
+    bool auto_rotate_for_targeting{};
+    [[nodiscard]] const TargetFootprint* footprint(TypeId type_id) const noexcept;
     friend bool operator==(const CombatTable&, const CombatTable&) = default;
 };
 
@@ -311,6 +377,7 @@ inline constexpr std::uint32_t ship_slot = 0xffff0000U;          // ship-level s
 inline constexpr std::uint32_t shield_phase_slot = 0xffff0001U;  // spawn: the shield recharge phase (DG-13)
 inline constexpr std::uint32_t energy_phase_slot = 0xffff0002U;  // spawn: the energy recharge phase (EN-02)
 inline constexpr std::uint32_t station_upgrade_phase_slot = 0xfffe0009U; // WSL-31, coordinator-reserved
+inline constexpr std::uint32_t rocket_path_slot = 0xfffe0010U; // RFL-03, coordinator-reserved
 inline constexpr std::uint32_t spawn_slot_flag = 0x80000000U;    // | weapon index: initial countdown
 
 // --- Hardpoint opportunity service (space-targeting R-01 to R-15) -----------------------------
@@ -398,10 +465,20 @@ struct ManualPlayerClock {
 
 // One weapon's fire cycle and opportunity target. Hashed state.
 struct WeaponState {
+    struct TurretState {
+        EntityId target{};
+        math::Fixed yaw{}, pitch{}, desired_yaw{}, desired_pitch{};
+        bool ready{};
+        std::optional<std::uint64_t> rest_started_frame{};
+        bool returning_to_rest{};
+        friend constexpr bool operator==(const TurretState&, const TurretState&) noexcept = default;
+    };
     OpportunityState opportunity{};
     std::uint32_t countdown{};   // frames before the weapon may be serviced again
     std::uint32_t pulses_left{}; // shots left in the current burst
+    std::uint32_t next_muzzle{}; // WWP-47: index of the object weapon's next muzzle bone; zero keeps old state bytes
     std::optional<ManualWeaponState> manual{}; // absent keeps old canonical state bytes
+    std::optional<TurretState> turret{};
     friend constexpr bool operator==(const WeaponState&, const WeaponState&) noexcept = default;
 };
 
@@ -427,6 +504,10 @@ enum class CombatEventKind : std::uint8_t {
     weapon_fired = 2,    // a shot for the projectile system (#74)
     projectile_hit = 3,  // a projectile reached a unit (#74)
     projectile_expired = 4, // WAD-04/07: presentation-only terminal pose, not canonical state
+    // WLD-05/WLD-12: LASER_DEFENSE shot down projectile `target` (an ID) from `shooter`'s position
+    // `origin` to the shot's position `aim`; presentation only, not canonical state.
+    point_defence_zap = 5,
+    heal_pulse = 6, // WSH-08: weapon names the nested handler slot; presentation only.
 };
 
 // Diagnostic terminal reasons, carried only by projectile_expired events.
@@ -449,8 +530,13 @@ inline constexpr std::uint32_t hit_outcome_shield_absorbed = 1U; // the shield t
 // A weapon_fired event's outcome: the shot is the weapon's ability shot (#561, AB-66).
 inline constexpr std::uint32_t fired_ability_shot = 1U;
 inline constexpr std::uint32_t fired_barrage_shot = 2U;
+inline constexpr std::uint32_t fired_charged_shot = 4U; // coordinator-reserved, WAD-36
 inline constexpr std::uint32_t hit_outcome_armor_reduced = 2U;   // hull armor multiplier <= 0.75
 inline constexpr std::uint32_t hit_outcome_storm_shield = 4U; // coordinator-reserved, WHZ-32 flash branch
+inline constexpr std::uint32_t hit_outcome_redirected = 8U;   // WRB-08: a Redirect_Blaster handler deflected the shot
+// WRB-09/11: successive handler rolls and separate angle/pitch draws, keyed by the shot.
+inline constexpr std::uint32_t redirect_blaster_slot = 0xfffe000aU; // coordinator-reserved
+inline constexpr std::uint32_t redirect_blaster_direction_slot = 0xfffe000bU; // coordinator-reserved
 inline constexpr math::Fixed armor_reduced_limit = math::Fixed::from_raw(math::Fixed::scale * 3 / 4);
 
 struct CombatEvent {

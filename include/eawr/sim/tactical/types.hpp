@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/sim/commands.hpp"
+#include "eawr/sim/tactical/retreat_action.hpp"
 #include "eawr/sim/math/geometry.hpp"
 
 #include <cstdint>
@@ -29,6 +30,14 @@ using PlayerId = std::uint32_t;
 using TeamId = std::uint32_t;
 using FactionId = std::uint64_t;
 using TypeId = std::uint64_t;
+
+// WDF-05 (WU-27): both fighter grids are laid over the space map's box from its low corner. The
+// session carries that corner; the default is the world origin (a session built without a map).
+struct MapBox {
+    math::Fixed min_x{};
+    math::Fixed min_y{};
+    friend constexpr bool operator==(const MapBox&, const MapBox&) noexcept = default;
+};
 
 // WSS-27..30: the four applied match switches that bind replay purchase content.
 struct SkirmishMatchPolicy {
@@ -90,6 +99,10 @@ enum class OrderKind : std::uint8_t {
     manual_target = 17, // WAD-39: coordinator-reserved, replay opcode 18
     reveal_all = 18, // coordinator-reserved: V-20, replay opcode 21
     repair_hardpoint = 21, // coordinator-reserved: WSL-40, replay opcode 25
+    retreat = 23, // WR-43..47, replay opcode 28; campaign only.
+    special_fire = 22, // coordinator-reserved: WSW-15/40/41, command only.
+    campaign_credit_release = 24, // WGA-54: replay opcode 29
+    beacon = 25, // coordinator-reserved: HCB-12, replay opcode 31, no unit order.
 };
 
 // The order a unit last accepted: a move or face keeps its point in `destination`, an attack its
@@ -161,6 +174,7 @@ struct StopPayload {
 struct MovePayload {
     math::Vec3 destination{};
     bool through_hazards{}; // coordinator-reserved opcode 20 when true; ordinary move stays 2
+    bool append{}; // HCB-57: optional replay tail; an ordinary move keeps its original bytes.
     friend constexpr bool operator==(const MovePayload&, const MovePayload&) noexcept = default;
 };
 
@@ -222,6 +236,18 @@ enum class AbilityKind : std::uint8_t {
     hunt = 14, // coordinator-reserved, WAB-50/56
     missile_shield = 15, // coordinator-reserved, WPJ-17
     sensor_jamming = 16, // coordinator-reserved, WHE-32
+    buzz_droids = 17, // coordinator-reserved, WAB-70 to WAB-79
+    laser_defense = 18, // coordinator-reserved, WLD-01 to WLD-12
+    full_salvo = 19, // coordinator-reserved, WAB-80 to WAB-83
+    stealth = 20, // coordinator-reserved, WST-01..WST-15
+    self_destruct = 21, // coordinator-reserved, WSD-01 to WSD-12
+    corrupt_systems = 22, // coordinator-reserved, WHE-33/34
+    leech_shields = 23, // coordinator-reserved, WLS-01 to WLS-05
+    lure = 24, // coordinator-reserved, WLU-01 to WLU-10
+    interdict = 25, // coordinator-reserved, WIN-01/02/04
+    cluster_bomb = 26, // coordinator-reserved, WCB-01..03
+    fow_reveal_ping = 27, // coordinator-reserved, WFP-01/02/03
+    blast = 28, // coordinator-reserved, WHE-35/36, FS-34/35
 };
 
 // What an ability command asks (AB-10 to AB-13): switch the ability on or off, or set whether it
@@ -261,6 +287,15 @@ struct ManualTargetPayload {
     friend constexpr bool operator==(const ManualTargetPayload&, const ManualTargetPayload&) noexcept = default;
 };
 
+// WSW-15/40/41: preserve entry-route admission in the recorded authoritative
+// command. AI routes require an authoritative AI player; they are not a HUD bypass.
+enum class SpecialFireAdmission : std::uint8_t { player = 0, ai_object = 1, ai_taskforce = 2 };
+struct SpecialFirePayload {
+    EntityId target{};
+    SpecialFireAdmission admission{SpecialFireAdmission::player};
+    friend constexpr bool operator==(const SpecialFirePayload&, const SpecialFirePayload&) noexcept = default;
+};
+
 // Buy (#530, PU-10 to PU-15): queue `type` at the command's one listed unit, the station.
 struct BuyPayload {
     TypeId type{};
@@ -295,13 +330,34 @@ struct CreditGrantPayload {
     math::Fixed amount{};
     friend constexpr bool operator==(const CreditGrantPayload&, const CreditGrantPayload&) = default;
 };
+struct CampaignCreditReleasePayload {
+    math::Fixed request{}; // WGA-54: negative requests all remaining strategic credits, within cap headroom
+    friend constexpr bool operator==(const CampaignCreditReleasePayload&, const CampaignCreditReleasePayload&) = default;
+};
 struct AiReservationDebitPayload {
     math::Fixed amount{};
     friend constexpr bool operator==(const AiReservationDebitPayload&, const AiReservationDebitPayload&) = default;
 };
 
+struct RetreatPayload {
+    RetreatAction action{RetreatAction::start};
+    friend bool operator==(const RetreatPayload&, const RetreatPayload&) = default;
+};
+struct RetreatCinematicPayload {
+    bool playing{};
+    std::uint32_t frame{}; // reserved wire field: must be zero; the session owns cinematic time
+    friend bool operator==(const RetreatCinematicPayload&, const RetreatCinematicPayload&) = default;
+};
+
 struct QuitPayload {
     friend constexpr bool operator==(const QuitPayload&, const QuitPayload&) noexcept = default;
+};
+
+struct DepartureControl {
+    PlayerId player{}, controller{};
+    std::uint64_t tick{};
+    bool basic_ai{};
+    friend bool operator==(const DepartureControl&, const DepartureControl&) = default;
 };
 
 struct PlayerQuit {
@@ -326,17 +382,31 @@ struct RepairHardpointPayload {
     friend constexpr bool operator==(const RepairHardpointPayload&, const RepairHardpointPayload&) noexcept = default;
 };
 
+struct BeaconPayload {
+    math::Vec3 position{};
+    friend constexpr bool operator==(const BeaconPayload&, const BeaconPayload&) noexcept = default;
+};
+
+// HCB-12: bounded per-issuer state; these objects do not join unit services.
+struct BeaconState {
+    PlayerId player{};
+    TypeId type{};
+    math::Vec3 position{};
+    std::uint64_t placed_tick{}, expires_tick{}, sequence{};
+    friend constexpr bool operator==(const BeaconState&, const BeaconState&) noexcept = default;
+};
+
 using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
     AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload, PadBuildPayload,
     CreditGrantPayload, QuitPayload, PadSellPayload, AreaAbilityPayload, ManualTargetPayload, RevealAllPayload,
-    RepairHardpointPayload, AiReservationDebitPayload>;
+    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload>;
 
 // Whether a command acts on the issuer's economy (#530) rather than on units.
 [[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
     return std::holds_alternative<BuyPayload>(payload) || std::holds_alternative<CancelPayload>(payload)
         || std::holds_alternative<ReinforcePayload>(payload) || std::holds_alternative<PadBuildPayload>(payload)
         || std::holds_alternative<CreditGrantPayload>(payload) || std::holds_alternative<PadSellPayload>(payload)
-        || std::holds_alternative<AiReservationDebitPayload>(payload);
+        || std::holds_alternative<AiReservationDebitPayload>(payload) || std::holds_alternative<CampaignCreditReleasePayload>(payload);
 }
 
 // key.player_id is the issuer. Units are nonzero and strictly increasing; a buy lists exactly its
@@ -348,9 +418,20 @@ struct PlayerCommand {
     friend bool operator==(const PlayerCommand&, const PlayerCommand&) = default;
 };
 
+[[nodiscard]] inline PlayerCommand retreat_command(const CommandKey key, const RetreatAction action) {
+    return {key, {}, RetreatPayload{action}};
+}
+[[nodiscard]] inline PlayerCommand retreat_cinematic_command(const CommandKey key, const bool playing, const std::uint32_t frame) {
+    return {key, {}, RetreatCinematicPayload{playing, frame}};
+}
+
 [[nodiscard]] constexpr OrderKind order_kind(const CommandPayload& payload) noexcept {
+    if (std::holds_alternative<RetreatPayload>(payload) || std::holds_alternative<RetreatCinematicPayload>(payload)) return OrderKind::retreat;
+    if (std::holds_alternative<BeaconPayload>(payload)) return OrderKind::beacon;
+    if (std::holds_alternative<SpecialFirePayload>(payload)) return OrderKind::special_fire;
     if (std::holds_alternative<RepairHardpointPayload>(payload)) return OrderKind::repair_hardpoint;
     if (std::holds_alternative<AiReservationDebitPayload>(payload)) return OrderKind::ai_reservation_debit;
+    if (std::holds_alternative<CampaignCreditReleasePayload>(payload)) return OrderKind::campaign_credit_release;
     if (std::holds_alternative<RevealAllPayload>(payload)) return OrderKind::reveal_all;
     if (std::holds_alternative<QuitPayload>(payload)) return OrderKind::intentional_quit;
     if (std::holds_alternative<AreaAbilityPayload>(payload)) return OrderKind::area_ability;
@@ -378,6 +459,8 @@ enum class EventKind : std::uint8_t {
     manual_target_timeout = 15, // WAD-39: feedback belongs to the requesting player only
     ability_cancelled = 16, // coordinator-reserved, WHZ-23; sequence carries AbilityKind
     ability_ready = 17, // coordinator-reserved, WHZ-24; sequence carries AbilityKind
+    special_weapon_fired = 18, // WSW-22/33: every wrapper pulse; sequence carries source index.
+    special_weapon_ready = 19, // WSW-33: source recharge completed while enabled; sequence carries index.
 };
 
 enum class RejectReason : std::uint8_t {
@@ -401,6 +484,8 @@ enum class RejectReason : std::uint8_t {
     no_economy = 16,           // the session has no economy rules, or the issuer none
     arriving = 17,             // PU-39: the unit is still arriving from hyperspace
     battle_decided = 18,       // WR-19: pending victory forbids reinforcement
+    target_hidden = 19,        // WST-11: a stealth-invisible enemy, for a type that cannot target stealth (coordinator-reserved)
+    beacon_unavailable = 20, // coordinator-reserved: HCB-12, no agreed faction beacon rule.
 };
 
 // One event per listed unit of an executed command, in command order then unit order, each
@@ -411,6 +496,8 @@ enum class RejectReason : std::uint8_t {
 // spin-away and victory events carry sequence zero and no order; a destruction or spin-away event
 // carries the unit's owner, a victory the winner.
 // WNO-23: pad_captured carries the new owner in player and the previous owner in sequence.
+// WBP-18: pad_construction_completed carries the finished child in unit and the
+// replaced under-construction child in sequence, preserving its authored completion cue.
 struct Event {
     std::uint64_t tick{};
     EventKind kind{EventKind::order_accepted};
@@ -420,6 +507,7 @@ struct Event {
     OrderKind order{OrderKind::none};
     RejectReason reason{RejectReason::none};
     std::uint8_t hardpoint{}; // hardpoint_destroyed only
+    std::uint32_t special_pulse{}; // special_weapon_fired: 0 initial, 1..N continuation.
     friend constexpr bool operator==(const Event&, const Event&) noexcept = default;
 };
 

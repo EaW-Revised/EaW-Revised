@@ -49,6 +49,8 @@ public:
     bool press_fast_forward(std::uint64_t next_tick);
     // The pause banner's Resume Game button (TM-09): plays when paused.
     bool resume(std::uint64_t next_tick);
+    // MP-06: presentation observes an already agreed network speed choice.
+    bool set_speed_step(std::uint32_t step, std::uint64_t next_tick);
     // #453 BEP-02: the battle ended at `tick`; the panel stops and no tick runs any more.
     void end(std::uint64_t tick);
 

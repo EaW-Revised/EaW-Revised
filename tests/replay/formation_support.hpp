@@ -63,6 +63,7 @@ void test_group_session(const char* trace);
 void test_plan_searches_phase();
 void test_single_lanes();
 void test_search_budget();
+void test_failed_path_retry();
 void test_wait_replaced();
 void test_disabled_engine_group_session();
 void test_block_slots();

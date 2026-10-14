@@ -1,4 +1,6 @@
 #include "space_environment_internal.hpp"
+
+#include <cstring>
 #include "eawr/core/load_profile.hpp"
 #include "render_profile_viewport.hpp"
 #include "shutdown_trace.hpp"
@@ -15,7 +17,7 @@ namespace {
 
 constexpr std::string_view effect_clock_rule =
     "retail scene clock: TIME gains LogicalFPS / 1000 = 0.03 s per 30 Hz sim frame and wraps at 28800 s; here "
-    "per 30 Hz presentation tick (real time live, held after the particle frames in a capture, plus "
+    "per admitted tactical frame (FD-74); standalone scenes use real time live or held capture ticks, plus "
     "--eawr-map-idle-offset). Nebula.fx moves only through it: vertex wave and UV scroll";
 
 [[nodiscard]] TacticalLoad load_space_tactical(const vfs::Vfs& filesystem) {
@@ -45,6 +47,14 @@ constexpr std::string_view effect_clock_rule =
     result.values.yaw_degrees = constants.yaw_default;
     result.source = "Space_Mode, data/xml/tacticalcameras.xml sha256 " + tactical_sha;
     return result;
+}
+
+// The presentation side of the saved camera's stored binary32 values (skirmish::AttractCamera).
+[[nodiscard]] float float_of(const std::uint32_t bits) noexcept {
+    float value{};
+    static_assert(sizeof value == sizeof bits);
+    std::memcpy(&value, &bits, sizeof value);
+    return value;
 }
 
 } // namespace
@@ -135,6 +145,31 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
         host.set_process_input(true);
         host.set_process_unhandled_input(true);
     }
+    if (options_.saved_camera) {
+        // MAT-10: the map's saved camera, at the window's size, for the whole map.
+        const skirmish::AttractCamera& saved = *options_.saved_camera;
+        const std::array<float, 3> target{float_of(saved.look_at_bits[0]), float_of(saved.look_at_bits[2]),
+                                          -float_of(saved.look_at_bits[1])};
+        const auto eye = tactical::eye_position(target, float_of(saved.distance_bits),
+                                                float_of(saved.pitch_degrees_bits), float_of(saved.yaw_degrees_bits));
+        const auto vertical = tactical::vertical_fov_degrees(float_of(saved.fov_degrees_bits));
+        if (!eye || !vertical) return fail("the saved attract camera has no valid frame");
+        const Vector2 viewport = host.get_viewport()->get_visible_rect().size;
+        tactical::TacticalFrame frame{defaults.width, defaults.height, vertical.value(),
+            tactical_.constants->near_clip, tactical_.constants->far_clip, eye.value(), target};
+        if (viewport.x >= 1.0F && viewport.y >= 1.0F) {
+            frame.width = static_cast<std::uint32_t>(viewport.x);
+            frame.height = static_cast<std::uint32_t>(viewport.y);
+        }
+        locked_frame_ = frame;
+        camera_ = fixed_camera(frame);
+        camera_status_ = std::string(space::to_string(space::validate_camera(camera_)));
+        if (space::validate_camera(camera_) != space::CameraStatus::valid) {
+            return fail("the saved attract camera is " + camera_status_);
+        }
+        camera_source_ = "saved map camera (main-menu attract)";
+        locked_view_ = true;
+    }
     camera_ = space::environment_view_camera(camera_);
     if (!options_.capture_path.empty()) {
         // Every camera source above has the capture identity's size; the
@@ -207,6 +242,12 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
         const scene::Scene built = scene::build(input);
         for (const scene::Placement& placement : built.placements) {
             if (placement.model_path.empty()) continue;
+            // #3077: a catalog marker is never drawn in game, whatever model it names
+            // (Death_Star_Position authors a planet-shader Death Star for the editor).
+            if (!placement.object_id.empty()) {
+                const auto object = options_.catalog->resolve(placement.object_id, data::Category::game_object);
+                if (object && scene::space_object_tags(object.value()).marker) continue;
+            }
             const assets::Model* model = cache.model(placement.model_path);
             if (model == nullptr) continue;
             const space::EnvironmentFamily family = space::environment_family(*model);
@@ -353,7 +394,8 @@ bool EnvironmentView::write_report() const {
     } else {
         output << "null";
     }
-    output << "},\n    \"effect_clock\": {\"clock\": " << json(options_.real_time_clock ? "live" : "held")
+    output << "},\n    \"effect_clock\": {\"clock\": " << json(
+        populate_result_ && populate_result_->render_clock ? "admitted" : options_.real_time_clock ? "live" : "held")
         << ", \"offset\": " << options_.clock_offset << ", \"tick_at_capture\": ";
     if (effect_tick_) output << *effect_tick_; else output << "null";
     output << ", \"time_seconds\": " << (effect_tick_ ? number(space::environment_effect_time(*effect_tick_)) : "null")
@@ -430,6 +472,7 @@ bool EnvironmentView::write_report() const {
 // Defined after the evidence harness: the view submits only after its own
 // uploads made every environment surface non-casting.
 void EnvironmentView::camera_event(const viewer::camera_input::RawEvent& event) {
+    if (movie_) return;
     if (bridge_ && overview_ && event.kind == camera_input::RawKind::mouse_wheel && event.pressed) {
         // FoC: a wheel click up zooms in; clicks out at Distance_Max count toward the overview,
         // whose levels take the wheel from the tactical camera.
@@ -461,7 +504,7 @@ std::optional<tactical::TacticalFrame> EnvironmentView::effects_frame() const {
 
 void EnvironmentView::focus(const float source_x, const float source_y) {
     // Source (x, y) is render (x, -y) on the battle plane.
-    if (!bridge_ || completed_) return;
+    if (!bridge_ || completed_ || movie_) return;
     if (auto moved = bridge_->focus(source_x, -source_y); !moved) failure_ = core::format_diagnostic(moved.error());
 }
 
@@ -472,6 +515,20 @@ std::optional<presentation::camera::SourceTargetBounds> EnvironmentView::camera_
 
 void EnvironmentView::overview_key() {
     if (overview_) overview_->toggle();
+}
+
+void EnvironmentView::movie(const bool on, const std::array<float, 3>& target) {
+    if (movie_ != on) {
+        movie_seconds_ = 0.0;
+        if (bridge_ && on) {
+            // Cancel held inputs before hiding the tactical controls. Releases
+            // during movie mode must not leave a key held after Escape.
+            bridge_->set_focus(false);
+            bridge_->set_focus(true);
+        }
+    }
+    movie_ = on && bridge_ && bridge_->active();
+    movie_target_ = target;
 }
 
 std::string EnvironmentView::overview_level() const {
@@ -493,11 +550,26 @@ void EnvironmentView::camera_pointer_left() {
 }
 
 void EnvironmentView::camera_viewport(const float width, const float height) {
+    if (locked_view_ && renderer_ && !completed_ && width >= 1.0F && height >= 1.0F) {
+        camera_.width = static_cast<std::uint32_t>(width);
+        camera_.height = static_cast<std::uint32_t>(height);
+        locked_frame_.width = camera_.width;
+        locked_frame_.height = camera_.height;
+        renderer_->set_camera(camera_);
+        return;
+    }
     if (bridge_ && !completed_) {
         if (auto resized = bridge_->set_viewport(width, height); !resized) {
             failure_ = core::format_diagnostic(resized.error());
         }
     }
+}
+
+void EnvironmentView::set_attract_pose(const std::array<float, 3>& eye, const std::array<float, 3>& target) {
+    if (!locked_view_ || completed_) return;
+    locked_frame_.eye = eye;
+    locked_frame_.target = target;
+    attract_pose_pending_ = true;
 }
 
 std::optional<int> EnvironmentView::process(const double delta) {
@@ -518,13 +590,15 @@ std::optional<int> EnvironmentView::process(const double delta) {
         if (overview_ && bridge_->active()) {
             bridge_->set_overview_view_yaw(overview_->view_yaw(bridge_->controller().yaw_degrees()));
         }
-        if (auto stepped = bridge_->step(static_cast<float>(delta)); !stepped) {
-            static_cast<void>(fail(core::format_diagnostic(stepped.error())));
-            completed_ = true;
-            return 2;
+        if (!movie_) {
+            if (auto stepped = bridge_->step(static_cast<float>(delta)); !stepped) {
+                static_cast<void>(fail(core::format_diagnostic(stepped.error())));
+                completed_ = true;
+                return 2;
+            }
         }
         tactical::TacticalFrame frame = bridge_->frame();
-        if (overview_) {
+        if (overview_ && !movie_) {
             overview_->advance(delta);
             const auto& bounds = bridge_->controller().render_bounds();
             // The map overview fits the larger half extent of the camera's target bounds, the
@@ -537,6 +611,12 @@ std::optional<int> EnvironmentView::process(const double delta) {
                 return 2;
             }
             frame = shown.value();
+        }
+        if (movie_) {
+            movie_seconds_ += std::max(delta, 0.0);
+            auto shot = tactical::movie_frame(frame, movie_target_, movie_seconds_);
+            if (shot) frame = shot.value();
+            else movie_ = false;
         }
         camera_ = space::environment_view_camera(fixed_camera(frame));
         renderer_->set_camera(camera_);
@@ -554,17 +634,43 @@ std::optional<int> EnvironmentView::process(const double delta) {
         snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
         submit_since(sky_start);
     }
-    // The idle clips' 30 Hz clock follows real time in the live view. The
-    // attached effects run on it too, so their period does not scale with
-    // the display rate (#186).
-    const std::uint32_t tick = options_.real_time_clock ? live_idle_tick(clock_seconds_, delta) : frame_;
-    if (options_.effects.follow_lighting) options_.effects.follow_lighting(*renderer_);
-    if (options_.effects.tick && !options_.effects.tick(camera_, tick)) {
-        completed_ = true;
-        static_cast<void>(fail("space attached effect advance failed"));
-        return 2;
+    if (attract_pose_pending_) {
+        // The attract's camera moved: the same view at the new eye. The skies are camera-centred,
+        // so they follow the eye as a map camera's do.
+        attract_pose_pending_ = false;
+        camera_ = space::environment_view_camera(fixed_camera(locked_frame_));
+        renderer_->set_camera(camera_);
+        const assets::Vec3f eye = space::source_from_render(camera_.eye);
+        for (const auto& [index, original] : sky_instances_) {
+            const auto matrix = instance_matrix(space::camera_relative_sky_transform(original, eye_source_, eye));
+            if (!matrix) {
+                completed_ = true;
+                static_cast<void>(fail("camera-centred sky transform exceeds the renderer range"));
+                return 2;
+            }
+            instances_[index].fixed_transform = *matrix;
+        }
+        snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
     }
-    if (populate_result_ && populate_result_->tick) populate_result_->tick(*renderer_, tick);
+    const bool admitted_clock = populate_result_ && populate_result_->render_clock;
+    std::uint32_t tick = admitted_clock ? 0U
+        : options_.real_time_clock ? live_idle_tick(clock_seconds_, delta) : frame_;
+    const auto advance_attached = [&]() -> std::optional<int> {
+        if (options_.effects.follow_lighting) options_.effects.follow_lighting(*renderer_);
+        if (options_.effects.tick && !options_.effects.tick(camera_, tick)) {
+            completed_ = true;
+            static_cast<void>(fail("space attached effect advance failed"));
+            return 2;
+        }
+        return std::nullopt;
+    };
+    // Standalone scenes keep their existing tick-before-live order. A tactical
+    // population observes admission in `live` and samples its map idle clips
+    // there, before posing units that can read those clips' attachment bones.
+    if (!admitted_clock) {
+        if (const auto failed = advance_attached()) return failed;
+        if (populate_result_ && populate_result_->tick) populate_result_->tick(*renderer_, tick);
+    }
     SpaceLiveUpdate live;
     if (populate_result_ && populate_result_->live) {
         auto update = populate_result_->live(*renderer_, delta, camera_);
@@ -590,6 +696,10 @@ std::optional<int> EnvironmentView::process(const double delta) {
             snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
             submit_since(instances_start);
         }
+    }
+    if (admitted_clock) {
+        tick = populate_result_->render_clock->sample();
+        if (const auto failed = advance_attached()) return failed;
     }
     if (const auto failed = advance_effects(tick)) return failed;
     ++frame_;
@@ -660,6 +770,10 @@ void SpaceEnvironment::close() {
     if (state_->view) state_->view->close();
 }
 
+void SpaceEnvironment::set_attract_pose(const std::array<float, 3>& eye, const std::array<float, 3>& target) {
+    if (state_->view) state_->view->set_attract_pose(eye, target);
+}
+
 std::optional<presentation::camera::TacticalFrame> SpaceEnvironment::live_camera_frame() const {
     return state_->view ? state_->view->drawn_frame() : std::nullopt;
 }
@@ -699,6 +813,12 @@ std::uint64_t SpaceEnvironment::live_submit_sent() const { return state_->view ?
 void SpaceEnvironment::live_camera_overview_key() {
     if (state_->view) state_->view->overview_key();
 }
+
+void SpaceEnvironment::live_camera_movie(const bool on, const std::array<float, 3>& target) {
+    if (state_->view) state_->view->movie(on, target);
+}
+
+bool SpaceEnvironment::live_camera_movie() const { return state_->view && state_->view->movie(); }
 
 std::string SpaceEnvironment::live_camera_overview() const {
     return state_->view ? state_->view->overview_level() : std::string("unavailable");

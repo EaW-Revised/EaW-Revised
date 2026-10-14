@@ -1,5 +1,6 @@
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
+#include "skirmish_prepare.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 
 #include "shutdown_trace.hpp"
@@ -117,7 +118,9 @@ namespace {
         if (order.ability == tactical::AbilityKind::none) return std::nullopt;
         std::string action = comma == std::string::npos ? std::string("on") : rest.substr(comma + 1);
         if (const std::size_t aim = action.find(','); aim != std::string::npos) {
-            if (order.ability == tactical::AbilityKind::weaken_enemy) {
+            if (order.ability == tactical::AbilityKind::fow_reveal_ping
+                || order.ability == tactical::AbilityKind::weaken_enemy || order.ability == tactical::AbilityKind::buzz_droids
+                || order.ability == tactical::AbilityKind::corrupt_systems) {
                 std::vector<sim::math::Fixed> values;
                 std::size_t start = aim + 1;
                 for (;;) {
@@ -296,11 +299,14 @@ namespace {
         };
         const std::string_view hud = input.hud;
         const bool time = hud == "begin" || hud == "pause" || hud == "fast_forward" || hud == "resume" || hud == "quit";
-        const bool order = hud == "attack" || hud == "attack_move" || hud == "move" || hud == "stop" || hud == "guard";
+        const bool order = hud == "attack" || hud == "attack_move" || hud == "move" || hud == "stop" || hud == "guard"
+            || hud == "waypoint";
         const bool production = hud == "b_reinforcement" || hud == "r_close" ||
                                 (hud.size() == 6 && hud.substr(0, 2) == "r_" && digits(hud.substr(2))) ||
                                 (hud.size() == 8 && hud.substr(0, 6) == "tqueue" && digits(hud.substr(6)));
-        if (!time && !production && !order) return std::nullopt;
+        const bool special = hud == "special_weapon" || hud == "movie_camera" || hud == "b_camera_t"
+            || hud == "beacon" || hud == "b_special_weapon2" || hud == "retreat" || hud == "b_retreat";
+        if (!time && !production && !order && !special) return std::nullopt;
         if (input.shift || input.ctrl || input.alt) return std::nullopt;
         return input;
     }
@@ -384,6 +390,12 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
             error = "--eawr-live-session expects m2, skirmish, replay or melee";
         }
         options.fixture = text;
+    } else if (name == "--eawr-live-lan-test") {
+        if (text != "waiting" && text != "desync" && text != "result" && text != "result_join" && text != "loss"
+            && text != "barrier" && text != "peer_left" && text != "failed_peer" && text != "reconnecting" && text != "resyncing" && text != "held" && text != "catching_up" && text != "proving"
+            && text != "desync_paused" && text != "recovered" && text != "recovery_failed" && text != "rejoin_failed" && text != "recovery_barrier" && text != "recovery_disabled") {
+            error = "--eawr-live-lan-test expects waiting, desync, result, result_join, loss, barrier, peer_left, failed_peer, reconnecting or resyncing";
+        } else { options.lan = make_fake_lan_match(text); options.begin_barrier = false; }
     } else if (name == "--eawr-skirmish-map") {
         options.skirmish.map = lower_path(text);
     } else if (name == "--eawr-skirmish-victory") {
@@ -395,24 +407,16 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         if (!seed) error = "--eawr-skirmish-seed expects an unsigned whole number";
         else options.skirmish.seed = *seed;
     } else if (name == "--eawr-skirmish-players") {
-        std::vector<skirmish::LobbySlot> slots;
-        std::size_t begin = 0;
-        std::uint64_t previous{};
-        while (begin < text.size()) {
-            const auto end = text.find(',', begin);
-            const auto id = parse_u64(text.substr(begin, end == std::string::npos ? end : end - begin));
-            if (!id || *id <= previous || *id > tactical::max_players || slots.size() >= 8) break;
-            skirmish::LobbySlot slot = slots.empty() ? skirmish::m2_fixture().slots[0] : skirmish::m2_fixture().slots[1];
-            slot.slot = static_cast<std::uint32_t>(*id);
-            slots.push_back(std::move(slot));
-            previous = *id;
-            if (end == std::string::npos) { begin = text.size(); break; }
-            begin = end + 1;
-            if (begin == text.size()) { begin = text.size() + 1; break; }
+        auto ids = skirmish_player_ids(text);
+        if (!ids) error = ids.error().message;
+        else {
+            std::vector<skirmish::LobbySlot> slots;
+            for (const auto id : ids.value()) {
+                skirmish::LobbySlot slot = slots.empty() ? skirmish::m2_fixture().slots[0] : skirmish::m2_fixture().slots[1];
+                slot.slot = id; slots.push_back(std::move(slot));
+            }
+            options.skirmish.slots = std::move(slots);
         }
-        if (begin != text.size() || slots.size() < 2)
-            error = "--eawr-skirmish-players requires two to eight increasing slot IDs";
-        else options.skirmish.slots = std::move(slots);
     } else if (name == "--eawr-skirmish-slot" || name == "--eawr-skirmish-fleet") {
         const auto colon = text.find(':');
         const auto slot = parse_u64(text.substr(0, colon));
@@ -518,7 +522,7 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                     "<tick>:key:<name>, each with optional +shift, +ctrl or +alt, "
                     "<tick>:mdrag:<dx>,<dy> or <tick>:mclick:centre, each with optional +ctrl, "
                     "or <tick>:wheel:<in|out>, or <tick>:<click|rclick|hover|press|release>:hud=<pause|fast_forward|resume|quit|"
-                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|stop|guard>; "
+                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|waypoint|stop|guard|special_weapon|retreat>; "
                     "f<frame> in place of <tick> fires on that frame after the warm-up";
         } else {
             options.inputs.push_back(std::move(*input));
@@ -576,6 +580,13 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
             if (comma == std::string::npos) break;
             start = comma + 1;
         }
+    } else if (name == "--eawr-live-lan-acceptance") {
+        if (text != "on" && text != "off") error = "--eawr-live-lan-acceptance expects on or off";
+        else options.lan_acceptance = text == "on";
+    } else if (name == "--eawr-live-lan-quit-tick") {
+        const auto tick = parse_u64(text);
+        if (!tick || *tick > tactical::max_ticks) error = "--eawr-live-lan-quit-tick expects a tick count";
+        else options.lan_quit_tick = *tick;
     } else if (name == "--eawr-live-ticks") {
         const auto tick = parse_u64(text);
         if (!tick || *tick > tactical::max_ticks) error = "--eawr-live-ticks expects a tick count";
@@ -587,16 +598,19 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
     } else if (name == "--eawr-live-speed") {
         const auto step = parse_u64(text);
         if (!step || *step >= ui::speed_step_rates.size()) error = "--eawr-live-speed expects a speed step 0 to 4";
-        else options.speed_step = static_cast<std::uint32_t>(*step);
+        else {
+            options.speed_step = static_cast<std::uint32_t>(*step);
+            options.speed_step_given = true;
+        }
     } else if (name == "--eawr-live-workers") {
         const auto workers = parse_u64(text);
         if (!workers || *workers == 0 || *workers > 256) error = "--eawr-live-workers expects 1 to 256";
         else options.workers = static_cast<std::size_t>(*workers);
     } else if (name == "--eawr-live-particle-detail" || name == "--eawr-live-particle-lod") {
-        const auto value = parse_double(text);
-        if (!value || *value < 0 || *value > 1) error = std::string(name) + " expects a value from 0 to 1";
-        else if (name == "--eawr-live-particle-detail") options.particle_detail.global = static_cast<float>(*value);
-        else options.particle_detail.local = static_cast<float>(*value);
+        const auto detail = parse_double(text);
+        if (!detail || *detail < 0 || *detail > 1) error = std::string(name) + " expects a value from 0 to 1";
+        else if (name == "--eawr-live-particle-detail") options.particle_detail.global = static_cast<float>(*detail);
+        else options.particle_detail.local = static_cast<float>(*detail);
     } else if (name == "--eawr-live-particle-heat") {
         if (text != "on" && text != "off") error = "--eawr-live-particle-heat expects on or off";
         else options.particle_detail.heat = text == "on";

@@ -87,9 +87,20 @@ inline constexpr std::string_view meshshield_time_binding = "eawr_shield_time";
     return std::nullopt;
 }
 
+// WST-12: the cloak's sub-objects, by the names the debug build's stealth handler switches
+// (case ignored): BASEMESH hides and STEALTH shows while a unit is cloaked.
+inline constexpr std::string_view cloak_base_mesh_name = "basemesh";
+inline constexpr std::string_view stealth_mesh_name = "stealth";
+[[nodiscard]] inline std::optional<std::uint32_t> stealth_mesh_index(const assets::Model& model) {
+    for (std::uint32_t index = 0; index < model.meshes.size(); ++index) {
+        if (shield_name_equal(model.meshes[index].name, stealth_mesh_name)) return index;
+    }
+    return std::nullopt;
+}
+
 // A MeshShield submesh's material: its authored parameters (the three textures by name, bound
 // by the caller) and the clock at 0.
-[[nodiscard]] inline MaterialDescription meshshield_material(const assets::Submesh& submesh) {
+[[nodiscard]] inline MaterialDescription meshshield_material(const assets::Submesh& submesh, const bool cloak = false) {
     MaterialDescription material{
         .schema_version = MaterialDescription::current_schema_version,
         .route = MaterialRoute::modern_spatial,
@@ -99,6 +110,16 @@ inline constexpr std::string_view meshshield_time_binding = "eawr_shield_time";
         .pass_name = {},
         .bindings = {},
     };
+    if (cloak) {
+        // WST-12: only the cloak shader accepts the model RGBA multiplier. The DEFEND surface
+        // keeps its established adapter; shared meshes receive independent instance values.
+        const auto uniforms = material.program.find("varying vec2 eawr_tex0;");
+        material.program.insert(uniforms,
+            "instance uniform vec3 eawr_unit_light_scale = vec3(1.0);\n");
+        const std::string original = "(texel * wave_texel * eawr_diffuse).rgb";
+        material.program.replace(material.program.find(original), original.size(),
+            "(texel * wave_texel * eawr_diffuse).rgb * eawr_unit_light_scale");
+    }
     for (const assets::MaterialParameter& parameter : submesh.parameters) {
         material.bindings.push_back({parameter.name, parameter.value});
     }

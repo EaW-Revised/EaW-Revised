@@ -110,6 +110,18 @@ void test_validation() {
     auto still = motion().squadrons;
     still.craft[0].max_speed = Fixed{};
     expect(!tactical::validate_squadron_table(still), "a craft needs a maximum speed");
+    auto banked = motion().squadrons;
+    for (const auto angle : {360, -40}) {
+        banked.craft[0].bank_angle = units(angle);
+        expect(static_cast<bool>(tactical::validate_squadron_table(banked)), "FM-03: modded bank angles load");
+        expect(banked.craft[0].bank_angle == units(angle), "FM-03: the authored bank angle is preserved");
+        auto setup = tactical::TacticalSetup{};
+        setup.players = players();
+        auto table = motion();
+        table.squadrons = banked;
+        expect(static_cast<bool>(tactical::TacticalSession::create(setup, {}, {}, table)),
+            "FM-03: a session accepts a modded bank angle");
+    }
     auto defenseless = motion().squadrons;
     defenseless.craft[0].out_of_combat_defense = units(-1);
     expect(static_cast<bool>(tactical::validate_squadron_table(defenseless)), "FoC's -1 out-of-combat adjustment is valid");
@@ -210,6 +222,7 @@ void test_out_of_combat() {
     expect(defense() == units(-1), "DG-26: an idle craft is out of combat");
     frame.attacking = true;
     frame.approach = true;
+    frame.attack_lane = tactical::LaneFlight{at(1, 0), {}, profile.max_speed, true};
     frame.target_position = at(600, 0);
     frame.target_radius = units(50);
     expect(defense() == units(-1), "DG-26: the approach beyond the strafe reach (200 + 50) is out of combat");
@@ -225,7 +238,7 @@ void test_out_of_combat() {
 }
 
 // C-13, FA-07 (#469): on the approach beyond the strafe reach a follower forms up on its slot and
-// the leader climbs to its layer height along the line to the target; after it both dive
+// the leader climbs to its layer height along the installed segment; after it both dive
 // straight at the target (FA-01).
 void test_approach() {
     auto profile = motion().squadrons.craft.front();
@@ -240,6 +253,7 @@ void test_approach() {
     frame.formation_tolerance = units(20);
     frame.attacking = true;
     frame.target_position = at(2000, 0, -100);
+    frame.attack_lane = tactical::LaneFlight{at(1, 0), {}, profile.max_speed, true};
     const auto step = [&](const tactical::CraftView& self, const bool approach) {
         frame.self = &self;
         frame.approach = approach;
@@ -254,6 +268,247 @@ void test_approach() {
     profile.out_of_combat_defense = units(-1);
     expect(step(leader, true).defense == units(-1) && step(leader, false).defense == Fixed{},
         "DG-26: the approach is out of combat, the straight dive in combat");
+}
+
+void test_attack_path_boundary() {
+    auto profile = motion().squadrons.craft.front();
+    profile.out_of_combat_defense = units(-1);
+    tactical::SquadronState state;
+    state.container = 10;
+    state.approach = true;
+    state.attack_path.emplace();
+    tactical::SquadronAttackRoute route;
+    route.identity = 10;
+    route.nodes = {at(0, 0), at(100, 0), at(100, 100)};
+    route.trackers = {{10, {}}, {11, {}}, {12, {}}};
+    state.attack_path->stack.push_back(route);
+    const std::array<eawr::sim::EntityId, 1> admitted{11};
+    tactical::advance_squadron_attack_path(*state.attack_path, 11, at(101, 0), admitted);
+    for (const auto& [id, tracker] : state.attack_path->stack.back().trackers) {
+        expect(tracker.segment == 1, "FSC-74: leader half-plane crossing advances every roster tracker");
+        expect(tracker.started == (id == 11), "FSC-73: only admitted movement marks its member started");
+    }
+    tactical::CraftView leader{11, at(100, 99), {}, &profile};
+    leader.state.velocity = {profile.max_speed, {}, {}};
+    tactical::CraftFrame frame;
+    frame.self = frame.leader = &leader;
+    frame.attacking = frame.approach = true;
+    frame.target_position = at(2000, 2000);
+    const auto read = [&] {
+        const auto flight = tactical::squadron_attack_flight(*state.attack_path, 11, leader.position,
+            profile.max_speed, {}, {});
+        frame.attack_lane = flight ? flight.value() : std::nullopt;
+        return tactical::step_craft(frame);
+    };
+    const auto before = read();
+    expect(before && before.value().defense == units(-1), "FSC-74: unfinished path outside strafe reach is out of combat");
+    tactical::advance_squadron_attack_path(*state.attack_path, 11, at(100, 100), admitted);
+    const auto ended = read();
+    expect(ended && !frame.attack_lane && ended.value().defense == Fixed{},
+        "FSC-74: final half-plane equality selects direct-target flight outside strafe reach");
+    for (const bool shared : {false, true}) {
+        state.attack_path->stack = {route};
+        state.approach = true;
+        tactical::squadron_attack_combat_boundary(state, !shared, shared);
+        expect(!state.approach && state.attack_path->stack.empty(),
+            "FSC-74: strafe reach and a shared recorded cell independently clear unfinished approach stacks");
+    }
+}
+
+void test_attack_path_refresh() {
+    tactical::SquadronAttackPath original;
+    original.target = 20;
+    original.next_refresh_frame = 101;
+    tactical::SquadronAttackRoute route;
+    route.identity = 10;
+    route.nodes = {at(0, 0), at(1000, 0)};
+    route.trackers = {{10, {}}, {11, {}}, {12, {}}};
+    original.stack = {route};
+    tactical::SquadronAttackRefresh observation;
+    observation.target_position = at(101, 0);
+    observation.effective_reach = units(200);
+    auto path = original;
+    expect(!tactical::refresh_squadron_attack_path(path, 100, observation) && path == original,
+        "FSC-72: displacement does not bypass the independent formation deadline");
+    expect(tactical::refresh_squadron_attack_path(path, 101, observation) && path.next_refresh_frame == 131
+        && path.stack == original.stack, "FSC-72: equality consumes the clock before requesting later installation");
+    for (const auto displacement : {99, 100}) {
+        path = original;
+        observation.target_position = at(displacement, 0);
+        for (const std::uint64_t frame : {101U, 131U, 161U}) {
+            expect(!tactical::refresh_squadron_attack_path(path, frame, observation)
+                && path.next_refresh_frame == frame + 30 && path.stack == original.stack,
+                "FSC-72: subthreshold/equal displacement consumes visits without expiring the old path");
+        }
+    }
+    observation.target_position = at(101, 0);
+    for (int gate = 0; gate != 6; ++gate) {
+        auto gated = observation;
+        if (gate == 0) gated.shared_cell = true;
+        if (gate == 1) gated.visible = false;
+        if (gate == 2) gated.repath_permitted = false;
+        if (gate == 3) gated.protected_destination = true;
+        if (gate == 4) gated.attack_positioning = false;
+        if (gate == 5) gated.in_attack_reach = true;
+        path = original;
+        expect(!tactical::refresh_squadron_attack_path(path, 101, gated) && path.next_refresh_frame == 131
+            && path.stack == original.stack, "FSC-72: refused/shared/fog/range visits consume the clock and retain geometry");
+        if (gate == 5) {
+            path = original;
+            gated.pursuing = true;
+            expect(tactical::refresh_squadron_attack_path(path, 101, gated),
+                "FSC-72: pursuit is a separate in-range replacement gate");
+        }
+    }
+    observation.target_position = original.cached_position;
+    observation.completed_or_stopping = true;
+    path = original;
+    expect(tactical::refresh_squadron_attack_path(path, 101, observation),
+        "FSC-72: completed/stopping out-of-range attack requests replacement independently of displacement");
+    observation.completed_or_stopping = false;
+    observation.escorted_destination = 40;
+    path = original;
+    expect(tactical::refresh_squadron_attack_path(path, 101, observation),
+        "FSC-72: escort identity change is distinct from ordinary target displacement (UFS-36 copying remains open)");
+
+    path = original;
+    expect(tactical::install_squadron_attack_path(path, route, 200) == tactical::SquadronPathAdmission::active
+        && path.stack_changed_frame == 200 && !path.stack.back().trackers.at(11).started,
+        "FSC-73/FC-72: old ordinary path can be replaced by identity, activation does not start flight");
+    path = original;
+    path.collision_identity = 10;
+    expect(tactical::install_squadron_attack_path(path, route, 200) == tactical::SquadronPathAdmission::active,
+        "FSC-73/FC-72: a matching collision identity can become active");
+    path = original;
+    path.collision_identity = 10;
+    auto free_route = route;
+    free_route.identity = 0;
+    expect(tactical::install_squadron_attack_path(path, free_route, 200) == tactical::SquadronPathAdmission::inserted
+        && path.stack.size() == 2 && path.stack.back() == route && path.stack_changed_frame == original.stack_changed_frame,
+        "FSC-73/FC-72: collision-free insertion below a protected tracker is not activation or a stack-change stamp");
+    expect(tactical::install_squadron_attack_path(path, route, 201) == tactical::SquadronPathAdmission::active
+        && path.stack.size() == 3 && path.stack.front() == free_route
+        && path.stack_changed_frame == 201 && !path.stack.back().trackers.at(11).started,
+        "FSC-73/FC-72: matching identity becomes top without discarding protected/lower entries or starting flight");
+    auto incompatible = route;
+    incompatible.identity = 99;
+    const auto before = path;
+    expect(tactical::install_squadron_attack_path(path, incompatible, 201) == tactical::SquadronPathAdmission::refused
+        && path == before, "FSC-73/FC-72: incompatible nonzero identity refuses without disturbing the protected path");
+    tactical::SquadronState retained;
+    retained.formation.emplace();
+    retained.formation->attack_target = 20;
+    retained.attack_path = original;
+    retained.attack_path->initialization_pending = true;
+    retained.attack_path->failure_frame = 100;
+    tactical::SquadronAttackRoute failed;
+    expect(tactical::install_squadron_attack_path(*retained.attack_path, failed, 100)
+        == tactical::SquadronPathAdmission::refused && retained.formation->attack_target == 20,
+        "FSC-73: failed installation does not revoke an accepted target destination");
+    expect(!tactical::squadron_attack_initialization_due(*retained.attack_path, 160)
+        && tactical::squadron_attack_initialization_due(*retained.attack_path, 161),
+        "FSC-73/FC-68: failure history has strict two-second expiry, independent of the refresh deadline");
+    retained.attack_path->failure_frame.reset();
+    expect(tactical::squadron_attack_initialization_due(*retained.attack_path, 101),
+        "FSC-73: first initialization has no fabricated failure history");
+    // This squadron-only interface does not create queued non-team zero-speed
+    // assignments; that distinct FC-69 producer stays outside its closure.
+}
+
+void test_installed_attack_segment() {
+    auto profile = motion().squadrons.craft.front();
+    tactical::CraftView leader{11, at(0, 0), {}, &profile};
+    leader.state.velocity = {profile.max_speed, {}, {}};
+    tactical::CraftView follower{12, at(-10, 10), leader.state, &profile};
+    tactical::SquadronAttackPath path;
+    path.target = 20;
+    path.cached_position = at(2000, 1000);
+    path.next_refresh_frame = 20;
+    tactical::SquadronAttackRoute route;
+    route.nodes = {at(0, 0), at(1000, 0), at(2000, 1000)};
+    route.trackers = {{10, {}}, {11, {}}, {12, {}}};
+    path.stack.push_back(route);
+    tactical::CraftFrame frame;
+    frame.self = &leader;
+    frame.leader = &leader;
+    frame.attacking = true;
+    frame.approach = true;
+    frame.target_position = path.cached_position;
+    auto flight = tactical::squadron_attack_flight(path, leader.id, at(0, 0), profile.max_speed, {}, units(1));
+    expect(flight && flight.value() && flight.value()->direction == at(1, 0),
+        "FSC-71: a northeast target retains the installed east segment");
+    if (!flight || !flight.value()) return;
+    frame.attack_lane = flight.value();
+    for (int tick = 0; tick != 3; ++tick) {
+        frame.target_position.y = units(1000 + tick * 10);
+        const auto flown = tactical::step_craft(frame);
+        expect(flown && flown.value().state.yaw == Fixed{},
+            "FSC-71: slight target displacement does not replace installed leader heading");
+        if (flown) { leader.position = flown.value().position; leader.state = flown.value().state; }
+    }
+    frame.self = &follower;
+    frame.own_offset = at(-10, 10);
+    frame.formation_tolerance = units(20);
+    const auto first = tactical::step_craft(frame);
+    frame.attack_lane->direction = at(0, 1);
+    const auto second = tactical::step_craft(frame);
+    expect(first && second && first.value().position == second.value().position
+        && first.value().state == second.value().state,
+        "FSC-71: follower slot flight reads leader velocity rather than its own path heading");
+    path.stack.back().aside = units(20);
+    const auto mapped = tactical::squadron_attack_flight(path, leader.id, at(0, 0), profile.max_speed, {}, units(1));
+    frame.self = &leader;
+    frame.attack_lane = mapped ? mapped.value() : std::nullopt;
+    const auto shifted = tactical::step_craft(frame);
+    expect(shifted && shifted.value().state.yaw > Fixed{}, "FSC-71: a nonzero mapped side offset steers the leader");
+    tactical::MotionRules rules;
+    rules.arc_degrees = units(10);
+    rules.expansion_distance = units(20);
+    const std::array<eawr::sim::EntityId, 2> roster{11, 12};
+    const auto north = tactical::plan_squadron_attack_route(profile, rules, 10, roster, 0,
+        at(0, 0), units(90), profile.max_speed, at(2000, 0));
+    const auto east = tactical::plan_squadron_attack_route(profile, rules, 10, roster, 0,
+        at(0, 0), Fixed{}, profile.max_speed, at(2000, 0));
+    expect(north && east && north.value().nodes == east.value().nodes
+        && north.value().start_facing != east.value().start_facing,
+        "FSC-71: current start facing is independent of the unobstructed segment bearing");
+    const auto decimal = [](const char* value) { return Fixed::from_decimal(value).value(); };
+    const math::Vec3 captured_start{decimal("-369.418579"), decimal("-1459.639404"), decimal("9.208252")};
+    const math::Vec3 captured_end{decimal("407.160217"), decimal("-1457.412354"), decimal("1.970062")};
+    auto captured = tactical::plan_squadron_attack_route(profile, rules, 10, roster, 376,
+        captured_start, decimal("165.068619"), profile.max_speed, captured_end);
+    expect(captured && captured.value().nodes == std::vector<math::Vec3>{captured_start, captured_end}
+        && captured.value().ahead == Fixed{} && captured.value().aside == Fixed{}
+        && captured.value().node_speeds == std::vector<Fixed>{Fixed{}, Fixed{}},
+        "FSC-71/FD-65: captured unobstructed route retains two nodes and zero mapping");
+    if (!captured) return;
+    const auto& nodes = captured.value().nodes;
+    const auto bearing = std::atan2(static_cast<double>(nodes[1].y.raw() - nodes[0].y.raw()),
+        static_cast<double>(nodes[1].x.raw() - nodes[0].x.raw())) * 180.0 / std::acos(-1.0);
+    expect(std::abs(bearing - 0.164310771) < 0.000001,
+        "FSC-71: captured bearing survives squadron route production");
+    for (const auto& [id, tracker] : captured.value().trackers) {
+        static_cast<void>(id);
+        expect(tracker.turn_scale == units(1) && tracker.speed_scale == units(1) && !tracker.started,
+            "FSC-71/73: unit annotations are retained without starting a member");
+    }
+    path.stack = {captured.value()};
+    path.cached_position = captured_end;
+    path.next_refresh_frame = 416;
+    tactical::SquadronAttackRefresh observation;
+    observation.target_position = captured_end;
+    observation.effective_reach = units(500);
+    for (const auto due : {416U, 446U, 476U}) {
+        expect(!tactical::refresh_squadron_attack_path(path, due, observation)
+            && path.next_refresh_frame == due + 30 && path.stack.front() == captured.value(),
+            "FSC-72: captured due boundaries consume thirty frames and retain the same route");
+    }
+    for (const auto& point : {std::pair{math::Vec3{decimal("-390.766632"), decimal("-1410.495239"), {}}, -1.6368354559},
+             std::pair{math::Vec3{decimal("-307.285919"), decimal("-1359.540161"), {}}, -3.3273465633}}) {
+        auto lane = tactical::squadron_attack_flight(path, 11, point.first, profile.max_speed, decimal("0.1"), units(30));
+        expect(lane && lane.value() && std::abs(static_cast<double>(lane.value()->shift.raw()) / one - point.second) < 0.00001,
+            "FSC-71: container side correction is distinct from zero path mapping and live range observation");
+    }
 }
 
 // FL-06 facing: a launch along (1, 0, -1) yaws 0, pitches 45 (nose down) at full speed.
@@ -323,7 +578,9 @@ void test_launched_squadron() {
     setup.squadrons = {{10, {11}}};
     auto table = motion();
     table.squadrons.spawners[0].entries = {{squadron_a, 1, 0}};
-    auto created = tactical::TacticalSession::create(setup, sensors(), durability(), table);
+    // WDF-05: the squadron escorts a carrier near the origin, and the fixture lies below it.
+    auto created = tactical::TacticalSession::create(setup, sensors(), durability(), table, std::nullopt, tactical::CombatTable{},
+        tactical::VictoryRules{}, tactical::AbilityTable{}, tactical::EconomyRules{}, tactical::MapBox{units(-2400), units(-2400)});
     expect(static_cast<bool>(created), "#518: the session builds");
     if (!created) return;
     auto session = std::move(created).value();
@@ -341,6 +598,12 @@ void test_launched_squadron() {
     }
     expect(launched.has_value(), "#518: the squadron (craft 12, 13; container 14) launches");
     if (!launched) return;
+    expect(instance(*session.snapshot(), 14)->garrison_unit,
+        "WU-37: a hangar-launched team's birth snapshot is marked");
+    expect(instance(*session.snapshot(), 12)->garrison_unit && instance(*session.snapshot(), 13)->garrison_unit,
+        "WU-37: every hangar craft is marked at birth");
+    expect(!instance(*session.snapshot(), 10)->garrison_unit,
+        "WU-37: the starting team stays unmarked");
     const std::vector<tactical::Squadron> both{{10, {11}}, {14, {12, 13}}};
     const auto listed = session.snapshot()->squadrons();
     expect(std::vector<tactical::Squadron>(listed.begin(), listed.end()) == both,
@@ -354,6 +617,17 @@ void test_launched_squadron() {
         if (!stepped) return;
     }
     const auto snapshot = session.snapshot();
+    expect(instance(*snapshot, 14) && instance(*snapshot, 14)->garrison_unit,
+        "WU-37: hangar provenance survives later snapshots and movement");
+    expect(instance(*snapshot, 12)->garrison_unit && instance(*snapshot, 13)->garrison_unit,
+        "WU-37: craft marks survive subsequent gather, movement and snapshot rebuilds");
+    std::vector<tactical::TacticalInstance> unmarked(snapshot->instances().begin(), snapshot->instances().end());
+    auto marked = unmarked;
+    for (auto& value : unmarked) value.garrison_unit = false;
+    for (auto& value : marked) value.garrison_unit = true;
+    expect(tactical::TacticalSnapshot(0, {}, unmarked, {}).canonical_bytes()
+        == tactical::TacticalSnapshot(0, {}, marked, {}).canonical_bytes(),
+        "WU-37: garrison presentation does not affect canonical snapshot bytes");
     const auto near = [&](const eawr::sim::EntityId id) {
         const auto* found = instance(*snapshot, id);
         if (found == nullptr) return false;
@@ -365,6 +639,120 @@ void test_launched_squadron() {
     expect(near(14) && near(12) && near(13), "#518: the launched squadron and both its craft reach the move's destination");
     const auto* idle = instance(*snapshot, 11);
     expect(idle != nullptr && !near(11), "#518: the order moves only the launched squadron");
+}
+
+// WU-37: retain provenance independently of the registry and the current team roster.
+void test_garrison_provenance() {
+    constexpr tactical::TypeId wing_type = craft_type + 1;
+    for (const bool parent : {false, true}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup setup;
+            setup.seed = seed; setup.players = players();
+            setup.players.push_back({3, 1, 1, tactical::player_flag_commandable});
+            setup.departure_policy = tactical::MultiplayerDeparturePolicy{{empire, rebel, 3}};
+            setup.units = {unit(1, carrier_type, empire, at(0, 0)),
+                unit(10, craft_type, empire, at(100, 0))};
+            setup.units.front().garrison_enabled = false;
+            setup.free_garrisons = {{empire, 1, {parent ? squadron_a : craft_type}, {10}}};
+            auto table = motion();
+            auto wing = table.squadrons.craft.front(); wing.type_id = wing_type;
+            table.squadrons.craft.push_back(wing);
+            table.squadrons.squadrons.front().members = {craft_type, wing_type, wing_type};
+            table.squadrons.squadrons.front().offsets = {at(0, 0), at(-10, 10), at(10, 10)};
+            table.squadrons.spawners.front().entries.clear();
+            table.squadrons.spawners.front().starbase = true;
+            table.squadrons.spawners.front().delay_frames = 1;
+            auto health = durability();
+            auto wing_health = health.profiles[1]; wing_health.type_id = wing_type;
+            health.profiles.insert(health.profiles.begin() + 2, wing_health);
+            tactical::AbilityProfile replenish;
+            replenish.kind = tactical::AbilityKind::replenish_wingmen;
+            replenish.recharge_frames = 1; replenish.replenish_team = squadron_a;
+            tactical::UnitAbilityProfile leader;
+            leader.type_id = craft_type; leader.abilities = {replenish};
+            tactical::AbilityTable abilities; abilities.profiles = {leader};
+            auto made = tactical::TacticalSession::create(setup, {}, health, table, std::nullopt, {}, {}, abilities);
+            expect(static_cast<bool>(made), "WU-37: free-garrison wingman fixture creates");
+            if (!made) return;
+            auto world = std::move(made).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            const auto advance = [&]() {
+                if (workers != 1) world.scramble_storage_for_testing();
+                auto step = world.step(executor);
+                expect(static_cast<bool>(step), "WU-37: provenance fixture steps");
+                if (step) hashes.push_back(step.value().state_sha256);
+                return static_cast<bool>(step);
+            };
+            expect(static_cast<bool>(world.submit({{0, empire, 0}, {10}, tactical::DamagePayload{units(1000)}})),
+                "WU-37: deplete original free-garrison registry");
+            eawr::sim::EntityId container{}, source{};
+            for (unsigned frame = 0; frame < 100 && !source; ++frame) {
+                if (!advance()) return;
+                for (const auto& group : world.squadrons()) if (group.container > 10) {
+                    container = group.container; source = group.members.front();
+                }
+            }
+            expect(source != 0, "WU-37: free-garrison replacement launches");
+            if (!source) return;
+            const auto originals = world.squadrons().front().members;
+            expect(instance(*world.snapshot(), source)->garrison_unit
+                && instance(*world.snapshot(), container)->garrison_unit,
+                "WU-37: solo or parent and original craft are marked at birth");
+            if (!advance()) return;
+            expect(instance(*world.snapshot(), source)->garrison_unit,
+                "WU-37: the independent craft mark survives ECS gather and shuffled rebuild");
+            if (parent) {
+                std::vector<eawr::sim::EntityId> lost(originals.begin() + 1, originals.end());
+                expect(static_cast<bool>(world.submit({{world.completed_tick(), empire, 1}, lost,
+                    tactical::DamagePayload{units(1000)}})), "WU-37: remove original wingmen");
+                if (!advance()) return;
+            }
+            expect(static_cast<bool>(world.submit({{world.completed_tick(), empire, 2}, {source},
+                tactical::AbilityPayload{tactical::AbilityKind::replenish_wingmen, tactical::AbilityAction::activate}})),
+                "WU-37: replenish the marked leader");
+            if (!advance()) return;
+            const auto groups = world.squadrons();
+            const auto group = std::find_if(groups.begin(), groups.end(), [source](const auto& value) {
+                return std::find(value.members.begin(), value.members.end(), source) != value.members.end();
+            });
+            expect(group != groups.end() && group->members.size() == 3,
+                "WU-37: replenishment retains the leader and creates two wingmen");
+            if (group == groups.end() || group->members.size() != 3) return;
+            const auto retained_container = group->container;
+            expect((retained_container == container) == parent
+                && instance(*world.snapshot(), retained_container)->garrison_unit == parent
+                && world.squadron_state(retained_container)->garrison_unit == parent,
+                "WU-37: retain an existing marked parent; a new parent is unmarked despite its marked leader");
+            for (const auto id : group->members) expect(instance(*world.snapshot(), id)->garrison_unit == (id == source),
+                "WU-37: new wingmen are unmarked and the retained leader stays marked");
+            expect(static_cast<bool>(world.submit({{world.completed_tick(), empire, 3}, {source},
+                tactical::DamagePayload{units(1000)}})), "WU-37: remove the last registered original craft");
+            if (!advance() || !advance()) return;
+            expect(instance(*world.snapshot(), retained_container)
+                && instance(*world.snapshot(), retained_container)->garrison_unit == parent
+                && world.squadron_state(retained_container)->garrison_unit == parent,
+                "WU-37: original-craft depletion never changes the surviving parent's birth mark");
+            // Capture and departure use the same ownership boundary. The remaining craft
+            // are all unmarked, so the team's mark cannot be inferred from its members.
+            expect(static_cast<bool>(world.submit({{world.completed_tick(), empire, 4}, {}, tactical::QuitPayload{}})),
+                "WU-37: transfer the surviving team to the remaining ally");
+            if (!advance() || !advance()) return;
+            const auto* transferred = instance(*world.snapshot(), retained_container);
+            const auto transferred_mind = world.squadron_state(retained_container);
+            expect(transferred && transferred->owner == 3 && transferred->garrison_unit == parent
+                && transferred_mind && transferred_mind->garrison_unit == parent,
+                "WU-37: team ownership transfer preserves the independent container mark after commit");
+            for (const auto member : world.squadrons().front().members) {
+                const auto* craft = instance(*world.snapshot(), member);
+                expect(craft && craft->owner == 3 && !craft->garrison_unit,
+                    "WU-37: transferred replenished members stay unmarked beneath a marked team");
+            }
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "WU-37: provenance and wingman loss agree on 1/2/4/8 workers");
+        }
+    }
 }
 
 // C-05 (FT-02, FT-03): priority 1 beats a nearer priority 3; nothing beyond chase + attack reach.

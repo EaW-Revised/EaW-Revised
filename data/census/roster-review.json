@@ -1,10 +1,71 @@
 {
   "schema_version": 1,
-  "review": "RG-02, MD-01..06: primary projectile profiles in unit_combat.cpp apply laser, missile, torpedo, ion and mass-driver damage/guidance; mass drivers bypass shields and use authored hull/hardpoint armor factors. The seven stock mass-driver carrier profiles and both effect-only projectile models are covered by game-data contracts. WAD-01..30: the blast service applies authored damage/range, tiered falloff, faction immunity, direct-route exclusion and secondary hull/hardpoint delivery; WAD-04 rocket flight supplies Diamond Boron termination. Weapon special hardpoints remain excluded. RG-03: ability_table dispatches the listed kinds and rejects other modifiers. WHE-22/23/51/52: active cause/take damage modes feed ordinary damage at delivery; Falcon uses ordinary expiration/recharge and the authored invulnerability emitter. Movement profiles implement the three listed locomotors. Skirmish uses Tech_0 carrier lists; higher-tech lists and minor registry gaps do not gate ships. G7 WHE-26/27/57..60: named energy/tractor handlers service tracked ship targets, ordinary range geometry, direct per-frame damage and source/category speed removal; unknown U-09 sub-policies use conservative defaults. G8 WHE-28/29/61/62: authored spawned types, countdown detonation and source-owned timed category-0 weaken effects; conservative placement, no automatic selection or cancellation of created objects. BARR-01/WAD-38: Broadside and Marauder BARRAGE binds the enemy proxy, override projectile, 10/40-second timers, fire-rate multiplier 3, fixed scatter 320 and height offset -150; the HUD sends a world-point area command and retains ordinary cancellation. G9 WHE-30/63/64: retain leader and authored survivor order, append until authored total, recharge only on refill, and route raw ordinary and privileged damage before recipient modes. WAB-04/05/50..56: HUNT patrol core clears attacks, services idle leaders with deterministic fog/enemy/fallback destinations, commits coordinated attack-moves and cancels accepted orders; fire/camera/order-gate limits remain tracked separately.",
-  "supported_capabilities": ["mass-driver", "hero-deployment", "blast-damage"],
-  "ability_only_hardpoints": {"HP_KEDALBE_SHIELD_LEECH_00": "No Fire_Projectile_Type; its only action is the disabled LEECH_SHIELDS ability. This does not prevent ordinary weapons from firing (RG-03)."},
-  "weapon_hardpoints": ["HARD_POINT_WEAPON_LASER", "HARD_POINT_WEAPON_MISSILE", "HARD_POINT_WEAPON_TORPEDO", "HARD_POINT_WEAPON_ION_CANNON"],
-  "locomotors": ["SIMPLE_SPACE_LOCOMOTOR", "FIGHTER_LOCOMOTOR", "TEAM_LOCOMOTOR"],
-  "abilities": ["DEFEND", "TURBO", "POWER_TO_WEAPONS", "SPOILER_LOCK", "ION_CANNON_SHOT", "INVULNERABILITY", "CONCENTRATE_FIRE", "ENERGY_WEAPON", "TRACTOR_BEAM", "HARMONIC_BOMB", "WEAKEN_ENEMY", "REPLENISH_WINGMEN", "BARRAGE", "HUNT"],
-  "ability_modifiers": ["WEAPON_DELAY_MULTIPLIER", "SHIELD_REGEN_MULTIPLIER", "SHIELD_REGEN_INTERVAL_MULTIPLIER", "ENERGY_REGEN_MULTIPLIER", "ENERGY_REGEN_INTERVAL_MULTIPLIER", "SPEED_MULTIPLIER", "CAUSE_DAMAGE_MULTIPLIER", "TAKE_DAMAGE_MULTIPLIER", "FIRE_RATE_MULTIPLIER"]
+  "review": "WIN-01/02/04 and WMS-01..04: Interdictor deployments halt, lock movement from authored data, gate the gravity well and drive pgw/prs emitters; radar alerts and campaign retreat remain separate. RG-02, MD-01..06: primary projectile profiles in unit_combat.cpp apply laser, missile, torpedo, ion and mass-driver damage/guidance; mass drivers bypass shields and use authored hull/hardpoint armor factors. The seven stock mass-driver carrier profiles and both effect-only projectile models are covered by game-data contracts. WAD-01..30: the blast service applies authored damage/range, tiered falloff, faction immunity, direct-route exclusion and secondary hull/hardpoint delivery; WAD-04 rocket flight supplies Diamond Boron termination. WHE-35/36, WAD-31..37 and FS-34/35: The_Peacebringer admits ordinary SPECIAL guns and BLAST with a per-service charge countdown, a shared successful-shot budget and direct instance multiplier; selected projectile area damage remains unchanged. WAD-31/32/33: Krayt ordinary SPECIAL profiles are admitted without BLAST; WAD-39/40 and WSW-09/14/19: Underworld stations three through five admit the manual main cannon while retaining upgrade, target, turret and player-clock gates; level-four/five plasma batteries use ordinary SPECIAL service. U-08 multi-station/alignment retail evidence remains separate; broader inter-object ordering FD-56 and exceptional callback UFS-30 remain deferred. RG-03: ability_table dispatches the listed kinds and rejects other modifiers. WHE-22/23/51/52: active cause/take damage modes feed ordinary damage at delivery; Falcon uses ordinary expiration/recharge and the authored invulnerability emitter. WLU-01..10: LURE applies authored per-craft pulses and enemy-team orders, ordinary expiry/recharge and take-damage reduction; the HUD dispatches its squadron button and shows the team particle. Movement profiles implement the three listed locomotors. Skirmish uses Tech_0 carrier lists; higher-tech lists and minor registry gaps do not gate ships. G7 WHE-26/27/57..60: named energy/tractor handlers service tracked ship targets, ordinary range geometry, direct per-frame damage and source/category speed removal; unknown U-09 sub-policies use conservative defaults. G8 WHE-28/29/61/62: authored spawned types, countdown detonation and source-owned timed category-0 weaken effects; conservative placement, no automatic selection or cancellation of created objects. BARR-01/WAD-38: Broadside and Marauder BARRAGE binds the enemy proxy, override projectile, 10/40-second timers, fire-rate multiplier 3, fixed scatter 320 and height offset -150; the HUD sends a world-point area command and retains ordinary cancellation. G9 WHE-30/63/64: retain leader and authored survivor order, append until authored total, recharge only on refill, and route raw ordinary and privileged damage before recipient modes. WAB-04/05/50..56: HUNT patrol core clears attacks, services idle leaders with deterministic fog/enemy/fallback destinations, commits coordinated attack-moves and cancels accepted orders; fire/camera/order-gate limits remain tracked separately. WCB-01..03 and WFP-01..03: self-targeted real ring projectiles and unlimited owner fog ping activation are admitted; the stock ping ends on its first flight service. MC30 script autofire cadence and WFP-U1 fog regrowth appearance remain separate gaps.",
+  "supported_capabilities": [
+    "mass-driver",
+    "hero-deployment",
+    "blast-damage"
+  ],
+  "ability_only_hardpoints": {
+    "HP_KEDALBE_SHIELD_LEECH_00": "No Fire_Projectile_Type; its action is the named LEECH_SHIELDS handler (WLS-01..05). This does not prevent ordinary weapons from firing (RG-03)."
+  },
+  "weapon_hardpoints": [
+    "HARD_POINT_WEAPON_LASER",
+    "HARD_POINT_WEAPON_MISSILE",
+    "HARD_POINT_WEAPON_TORPEDO",
+    "HARD_POINT_WEAPON_ION_CANNON"
+  ],
+  "locomotors": [
+    "SIMPLE_SPACE_LOCOMOTOR",
+    "FIGHTER_LOCOMOTOR",
+    "TEAM_LOCOMOTOR"
+  ],
+  "abilities": [
+    "BLAST",
+    "LURE",
+    "INTERDICT",
+    "DEFEND",
+    "TURBO",
+    "POWER_TO_WEAPONS",
+    "SPOILER_LOCK",
+    "ION_CANNON_SHOT",
+    "INVULNERABILITY",
+    "CONCENTRATE_FIRE",
+    "ENERGY_WEAPON",
+    "TRACTOR_BEAM",
+    "HARMONIC_BOMB",
+    "WEAKEN_ENEMY",
+    "REPLENISH_WINGMEN",
+    "BARRAGE",
+    "HUNT",
+    "BUZZ_DROIDS",
+    "LASER_DEFENSE",
+    "MISSILE_SHIELD",
+    "SENSOR_JAMMING",
+    "FULL_SALVO",
+    "SELF_DESTRUCT",
+    "STEALTH",
+    "CORRUPT_SYSTEMS",
+    "LEECH_SHIELDS",
+    "CLUSTER_BOMB",
+    "FOW_REVEAL_PING"
+  ],
+  "ability_modifiers": [
+    "WEAPON_DELAY_MULTIPLIER",
+    "SHIELD_REGEN_MULTIPLIER",
+    "SHIELD_REGEN_INTERVAL_MULTIPLIER",
+    "ENERGY_REGEN_MULTIPLIER",
+    "ENERGY_REGEN_INTERVAL_MULTIPLIER",
+    "SPEED_MULTIPLIER",
+    "CAUSE_DAMAGE_MULTIPLIER",
+    "TAKE_DAMAGE_MULTIPLIER",
+    "FIRE_RATE_MULTIPLIER"
+  ],
+  "special_weapon_units": [
+    "The_Peacebringer",
+    "Krayt_Class_Destroyer",
+    "Skirmish_Underworld_Star_Base_3",
+    "Skirmish_Underworld_Star_Base_4",
+    "Skirmish_Underworld_Star_Base_5"
+  ]
 }

@@ -399,4 +399,26 @@ core::Result<void> BoundedTacticalController::lock_capture(const TacticalFrame& 
     return core::Result<void>::success();
 }
 
+core::Result<TacticalFrame> movie_frame(const TacticalFrame& tactical,
+    const std::array<float, 3>& subject, const double elapsed_seconds) {
+    if (!finite_frame(tactical) || !std::isfinite(elapsed_seconds) || elapsed_seconds < 0.0
+        || !std::all_of(subject.begin(), subject.end(), [](const float v) { return std::isfinite(v); })) {
+        return core::Result<TacticalFrame>::failure(failure(
+            diagnostic_codes::invalid_controller_request, "movie camera needs a valid frame, subject and elapsed time"));
+    }
+    // HCB-11d: this gentle orbit is project policy, not retail shot selection.
+    const double x = static_cast<double>(tactical.eye[0]) - tactical.target[0];
+    const double z = static_cast<double>(tactical.eye[2]) - tactical.target[2];
+    const double radius = std::max(std::hypot(x, z) * 0.5, static_cast<double>(tactical.near_plane) * 4.0);
+    const double yaw = std::atan2(x, z) + std::remainder(elapsed_seconds * 0.1, 2.0 * std::numbers::pi);
+    TacticalFrame result = tactical;
+    result.target = subject;
+    result.up = {0.0F, 1.0F, 0.0F};
+    result.eye = {static_cast<float>(subject[0] + radius * std::sin(yaw)),
+        static_cast<float>(subject[1] + radius * 0.2), static_cast<float>(subject[2] + radius * std::cos(yaw))};
+    if (!finite_frame(result)) return core::Result<TacticalFrame>::failure(failure(
+        diagnostic_codes::invalid_controller_request, "movie camera position exceeds the presentation range"));
+    return core::Result<TacticalFrame>::success(result);
+}
+
 } // namespace eawr::presentation::camera

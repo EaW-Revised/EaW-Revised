@@ -27,9 +27,36 @@
 | BE-02 | The message is `TEXT_WIN_TACTICAL` ("WE ARE VICTORIOUS!") when the local player is the winner or the winner's ally, and `TEXT_LOSE_TACTICAL` ("WE HAVE BEEN DEFEATED!") when it is the winner's enemy (VT-10). A player that is neither sees none. | research BX-01, BX-04; data (text) |
 | BE-03 | The message is one line of text in `Win_Lose_Message_Font` (EmpireAtWar-Bold) at `Win_Lose_Message_Font_Size` 24, in `Win_Message_Color` (223, 243, 255, 255) or `Lose_Message_Color` (255, 244, 223, 255) (`GameConstants.xml`). It is centred horizontally (its left edge at half the screen width less half its width) and placed at 0.4 of the screen height from the top. A new message replaces the old one; it stays up until the battle ends. | research BX-04; data |
 | BE-04 | The countdown is `end_tick` minus the deciding frame, 210 logical frames (VT-11). It counts logical frames, so a pause holds it and the game speed changes how long it lasts on the wall clock ([time controls](tactical-time-controls.md) TM-07). The battle goes on while it runs. | research BX-05 |
-| BE-05 | When the countdown reaches zero in a skirmish, the tactical mode pauses and the full-screen battle end dialog (`IDD_BATTLE_END_DIALOG`) opens: the result, the units of each side and the battle's figures, with its own summary-screen win or lose music. In a campaign battle the game returns to the galaxy instead. The rig's retail stills (fog off, Coruscant, battle-end staging probe) show the dialog titled `TEXT_WIN_BATTLE` ("You have won the battle!") or `TEXT_LOST_BATTLE` ("You have lost the battle!") with `TEXT_BATTLE_TIME`, `TEXT_YOUR_LOSSES` and `TEXT_ENEMY_LOSSES` panes listing the lost units, and one Exit button. | research BX-06, BX-07, BX-08; rig capture |
+| BE-05 | When the countdown reaches zero in a skirmish, the tactical mode pauses and the full-screen battle end dialog (`IDD_BATTLE_END_DIALOG`) opens: the result, the units of each side and the battle's figures, with its own summary-screen win or lose music. In a campaign battle the game returns to the galaxy instead. The rig's retail stills (fog off, Coruscant, battle-end staging probe) show the dialog titled `TEXT_WIN_BATTLE` ("You have won the battle!") or `TEXT_LOST_BATTLE` ("You have lost the battle!") with `TEXT_BATTLE_TIME`, `TEXT_YOUR_LOSSES` and `TEXT_ENEMY_LOSSES` panes listing the lost units, and one Exit button. Exit (Continue) and Escape close the dialog and free the battle (one page; there is no statistics page after it): a skirmish returns to the skirmish setup screen (staging dialog) on a newly built main-menu backdrop, a LAN or online battle to its lobby, a campaign battle to the galaxy. Enter and Space mapping through the dialog default button is untraced. The summary music starts when the dialog opens; the music playing before it is queued and resumes when the summary music ends, and it is dropped when the dialog closes. | research BX-06, BX-07, BX-08; rig capture; FoC debug build |
 
 ### Project choices
+
+**BE-06 (research, MNU-45):** Save Replay is visible on the battle-end dialog only for
+multiplayer games when replay permission is enabled. It opens the MNU-41 save dialog.
+The recordings list, name edit, Save and Cancel controls use the installed dialog resource;
+overwriting an existing name asks through the standard Yes/No message box.
+
+**BEP-05 (project):** LAN has no replay-permission setting yet, so LAN games assume that
+permission is enabled. Single-player skirmishes keep Save Replay hidden. Saving joins the
+already halted session, obtains its existing recording and serializes it unchanged (UI-C2).
+Serialization runs only on Save, with the resulting immutable bytes reused if an overwrite
+confirmation is opened; opening or cancelling the dialog does no serialization. The LAN path
+also requires the latest simulation outcome to have reached its end tick before admitting Save.
+The user store is `user://replays`, with the same `--eawr-replay-store` override as Load Game.
+Names must be plain filesystem names, without the replay suffix; empty names, separators,
+control characters, Windows forbidden characters, device names and trailing dots/spaces
+are refused. The replay suffix is appended by the store, so an entered suffix is refused too.
+The complete filename is limited to 255 UTF-16 units (and on POSIX, 255 UTF-8 bytes), including
+the suffix: a portable project ceiling based on the common Windows component limit, not a
+retail edit-box limit. Windows device names include the superscript forms; the project also
+reserves COM0 and LPT0. Sources: [Windows filename rules](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)
+and [component limits](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation).
+Malformed UTF-8 is refused before native path conversion. Invalid names disable Save and
+explain why in its tooltip; Enter obeys the disabled button. User names and system errors
+are literal UTF-8 lines in the overwrite/error message box, so they never become text keys.
+A completed write
+atomically installs the recording, and errors leave the dialog open with a message.
+The existing recordings list and playback path consume the saved file.
 
 | Rule | Choice |
 |---|---|

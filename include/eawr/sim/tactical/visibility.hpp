@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <array>
 #include <utility>
 #include <vector>
 
@@ -33,7 +34,8 @@ struct SensorProfile {
 };
 
 // Fails with EAWR-SIM-0305 unless type IDs strictly increase and every range is >= 0.
-[[nodiscard]] core::Result<void> validate_sensors(std::span<const SensorProfile> sensors);
+[[nodiscard]] core::Result<void> validate_sensors(std::span<const SensorProfile> sensors,
+    std::span<const std::pair<PlayerId, math::Fixed>> player_multipliers = {});
 
 // Immutable sensor state of one tick. visible_to is const and safe to call concurrently.
 class SensorField final {
@@ -46,13 +48,14 @@ public:
         std::span<const Player> players,
         std::span<const UnitState> units,
         std::span<const SensorProfile> sensors,
-        std::span<const EntityId> disabled = {}); // WR-35/39: ascending IDs whose reveal service is disabled
+        std::span<const EntityId> disabled = {},
+        std::span<const std::pair<PlayerId, math::Fixed>> player_multipliers = {}); // WR-35/39: ascending IDs whose reveal service is disabled
 
     // Bit k is set when players[k] sees a unit of `owner` at `position`: players[k] is on
     // the owner's team, or a unit of players[k]'s team whose type has a sensor profile lies
     // within its reveal range, measured in the source XY plane, inclusive.
     [[nodiscard]] std::uint64_t visible_to(PlayerId owner, const math::Vec3& position) const;
-    [[nodiscard]] std::optional<math::Fixed> reveal_range(TypeId type_id) const noexcept;
+    [[nodiscard]] std::optional<math::Fixed> reveal_range(TypeId type_id, PlayerId owner = 0) const noexcept;
     [[nodiscard]] const SensorProfile* profile(TypeId type_id) const noexcept;
 
 private:
@@ -60,6 +63,8 @@ private:
 
     std::vector<std::pair<PlayerId, std::uint64_t>> team_masks_; // ascending player ID
     std::vector<SensorProfile> sensors_;
+    std::array<std::pair<PlayerId, math::Fixed>, max_players> player_multipliers_{};
+    std::size_t player_multiplier_count_{};
     SpaceIndex observers_;
     std::vector<math::Fixed> observer_ranges_; // aligned with observers_.bodies()
     math::Fixed max_range_{};

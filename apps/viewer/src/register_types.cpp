@@ -1,9 +1,21 @@
+#include "lan_lobby_screen.hpp"
+#include "lan_match.hpp"
+#include "loading_screen.hpp"
+#include "options_screen.hpp"
 #include "startup_trace.hpp"
+#include "gpu_memory_trace.hpp"
 #include "viewer_host.hpp"
+#include "galactic/radar_hud.hpp"
+#include "galactic/fleet_drag.hpp"
+#include "galactic/ground_hud.hpp"
 
+#include "ui/credits_view.hpp"
 #include "ui/input_routing.hpp"
 #include "ui/kit.hpp"
+#include "ui/load_game_view.hpp"
+#include "ui/message_box_view.hpp"
 #include "ui/tactical_hud.hpp"
+#include "ui/build_queue_dial.hpp"
 
 #include <gdextension_interface.h>
 #include <godot_cpp/core/class_db.hpp>
@@ -21,13 +33,28 @@ namespace {
 void initialize_eawr_viewer(const ModuleInitializationLevel level) {
     if (level == MODULE_INITIALIZATION_LEVEL_SCENE) {
         GDREGISTER_CLASS(eawr::presentation::godot_backend::ViewerHost);
+        GDREGISTER_CLASS(eawr::presentation::godot_backend::EawrLoadingScreen);
+        GDREGISTER_CLASS(eawr::presentation::godot_backend::EawrGalacticRadar);
+        GDREGISTER_CLASS(eawr::presentation::godot_backend::EawrFleetDrag);
+        GDREGISTER_CLASS(eawr::presentation::godot_backend::EawrGroundInput);
+        GDREGISTER_CLASS(eawr::presentation::godot_backend::EawrOptionsScreen);
         eawr::presentation::godot_backend::register_ui_kit_classes();
         eawr::presentation::godot_backend::register_ui_input_classes();
+        eawr::presentation::godot_backend::register_message_box_classes();
+        eawr::presentation::godot_backend::register_lan_lobby_classes();
+        eawr::presentation::godot_backend::register_load_game_classes();
+        eawr::presentation::godot_backend::register_credits_classes();
         eawr::presentation::godot_backend::register_tactical_hud_classes();
+        GDREGISTER_CLASS(eawr::presentation::godot_backend::EawrBuildQueueDial);
     }
 }
 
-void uninitialize_eawr_viewer(const ModuleInitializationLevel) {}
+void uninitialize_eawr_viewer(const ModuleInitializationLevel level) {
+    if (level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+        eawr::presentation::godot_backend::gpu_memory_trace.shutdown_journal();
+        eawr::presentation::godot_backend::shutdown_lan_drains();
+    }
+}
 
 } // namespace
 

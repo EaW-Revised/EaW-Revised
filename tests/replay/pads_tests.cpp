@@ -191,11 +191,10 @@ void test_transfer_boundary() {
                     expect(value.units()[2].owner == (claim ? 1U : 4U)
                         && value.durability_state(3)->hull == q(claim ? 75 : 50),
                         "WNO-42 50/100 to 75/150 and reverse at capture completion");
-                    // On loss WHE-19 clamps to 75/100, then HS-04 removes
-                    // (75 - 50) * 75/100 because the restored hull is 50/100.
-                    const auto hardpoint = claim ? q(75) : Fixed::from_raw(225 * one / 4);
-                    expect(value.durability_state(3)->hardpoints[0] == hardpoint,
-                        "WNO-42 hardpoint notifications precede ordinary hull constraint");
+                    // WHE-19 clamps immediately; WFO-23's next pre-fire service
+                    // then applies HS-04 using the restored hull fraction.
+                    expect(value.durability_state(3)->hardpoints[0] == q(75),
+                        "WNO-42 transfer notifications precede the next pre-fire hull constraint");
                     expect(std::count_if(frame_events.begin(), frame_events.end(), [](const auto& event) {
                         return event.kind == t::EventKind::pad_captured;
                     }) == 1, "WNO-23 one transfer event on completion");
@@ -208,6 +207,11 @@ void test_transfer_boundary() {
                     expect(seen != result.value().snapshot->instances().end()
                         && ((seen->visible_to & 1U) != 0) == claim, "WNO-23 reveal uses the new owner on completion");
                 }
+                if (tick == 33) {
+                    const auto hardpoint = claim ? q(75) : Fixed::from_raw(225 * one / 4);
+                    expect(value.durability_state(3)->hardpoints[0] == hardpoint,
+                        "WFO-23/WNO-42 next pre-fire hull service applies the restored-owner constraint");
+                }
                 if (tick >= 32) expect(value.durability_state(3)->hull == q(claim ? 75 : 50),
                     "WNO-42 later services do not restore or apply owner bonuses twice");
             }
@@ -217,6 +221,7 @@ void test_transfer_boundary() {
 
 void test_transfer_state() {
     t::session_detail::LiveUnit converted;
+    converted.garrison_unit = true;
     converted.state = {3, 20, 1, at(0), m::identity_quat(), {t::OrderKind::attack, 0, {}, 2}};
     converted.combat.emplace();
     converted.combat->attack_target = 2; converted.combat->attack_hardpoint = 0; converted.combat->direct = true;
@@ -249,6 +254,8 @@ void test_transfer_state() {
         && converted.combat->weapons[0].opportunity.last_scan_frame == 17
         && converted.combat->weapons[0].manual->yaw == q(30),
         "WNO-42 transfer retains weapon service clocks");
+    expect(converted.garrison_unit,
+        "WU-37: conversion retains a craft's birth mark independently of owner and target cleanup");
     auto start = setup();
     start.units.front().position = at(2000);
     start.units[1].type_id = 50; start.units[1].position = at(200);
@@ -638,6 +645,11 @@ void test_construction() {
     steps(value, 12, executor);
     expect(value.construction().at(4).finish_frame == deadline, "WBP-16 damage does not move deadline");
     steps(value, 31, executor);
+    const auto completion_events = value.snapshot()->events();
+    expect(std::count_if(completion_events.begin(), completion_events.end(), [](const auto& event) {
+        return event.kind == t::EventKind::pad_construction_completed
+            && event.player == 3 && event.unit == 5 && event.sequence == 4;
+    }) == 1, "WBP-18 completion preserves the replaced UC id for its authored audio cue");
     expect(!value.durability_state(4) && value.pads().at(3).constructed == 5 && value.construction().empty(),
         "WBP-18/19 replace UC and clear link");
     expect(value.durability_state(5)->hull < q(600) && value.durability_state(5)->hull > q(499),

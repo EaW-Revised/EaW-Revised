@@ -45,4 +45,7 @@ void draw_strip(CanvasItem& item, const Ref<Texture2D>& texture, const Rect2& re
 [[nodiscard]] Ref<Texture2D> state_icon(const Control& control, const String& slot, const KitState state);
 [[nodiscard]] float piece_scale(const Control& control);
 [[nodiscard]] Border small_border(const Control& control);
+// Keeps `item`'s text oversampled for the scale it is drawn at (CanvasItem oversampling_with_scale)
+// when it is shown after its scaled root changed size while it was hidden.
+void track_oversampling(CanvasItem& item);
 } // namespace eawr::presentation::godot_backend::kit_detail

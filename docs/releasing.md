@@ -4,17 +4,20 @@ Releases are built on the public repository's GitHub-hosted runners by
 `.github/workflows/release.yml`. Nothing is published automatically: the workflow opens a
 **draft** release, and a maintainer reviews and publishes it.
 
-## Current candidate: v0.1.5
+## Current candidate: v0.2.0
 
-The current candidate is v0.1.5. The v0.2.0 milestone is reserved for finished
-skirmish mode. Keep this candidate local until the owner approves the public sync.
+The last published release is v0.1.6 (2026-10-07). The next candidate is v0.2.0: playable
+space skirmish, LAN multiplayer and partially working Galactic Conquest. The galactic AI
+does not play in live campaigns yet. Keep a candidate local until the owner approves the
+public sync.
 
 ## Cutting a release
 
 1. Prepare the public snapshot through a sync pull request. Wait for its CI to pass
    before merging it into public `main`; the private source commit must match the
    tested preview. Draft tester-facing release notes describing new features,
-   known issues and how to report feedback.
+   known issues and how to report feedback: bugs as issues, new ideas on the
+   [Ideas board](ideas.md).
 2. Package the candidate locally and extract the viewer archive into a fresh,
    writable folder. Run `play-demo.cmd` or `sh ./play-demo.sh` with the pinned
    Godot and an installed expansion. Verify map and faction selection, starting
@@ -30,8 +33,8 @@ skirmish mode. Keep this candidate local until the owner approves the public syn
 5. Tag the commit with a version and push the tag:
 
    ```text
-   git tag -s v0.1.5 -m "EaW Revised v0.1.5"
-   git push origin v0.1.5
+   git tag -s v0.2.0 -m "EaW Revised v0.2.0"
+   git push origin v0.2.0
    ```
 
 6. The Release workflow runs the publish scan, builds and tests the core, builds the viewer

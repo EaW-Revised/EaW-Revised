@@ -464,8 +464,9 @@ DistortionScale 25, SFreq 0.002, TFreq 0.05 (a 20 s wave) and UVScrollRate
 `LogicalFPS / 1000` = 0.03 s for every 30 Hz sim frame that step advanced, so
 the clock stands still while the game is paused. A step adds at most 1 s, and
 the clock wraps at 28,800 s. The viewer uses the idle clips' 30 Hz tick as the
-sim frame (`space::environment_effect_time`): real time in the live view,
-held after the particle frames in a fixed capture, plus `--eawr-map-idle-offset`.
+sim frame (`space::environment_effect_time`): admitted tactical frames in a live
+battle (FD-74), real time in other live scenes, and held after the particle
+frames in a fixed capture, plus `--eawr-map-idle-offset`.
 The environment view sets `eawr_effect_time` on each Planet and Nebula surface
 whenever that tick changes.
 
@@ -555,10 +556,16 @@ size keys hide it from 0.18 to 0.66 of its life, so each light shows yellow, the
 off, then orange to red, once per second.
 
 V1 emitter mini 0x33 (skip time) is applied as a pre-roll: on its first advance an
-instance simulates each emitter for its own skip seconds in 1/30 s steps, then
-rebases time to zero. Mini 0x32 (freeze time) stops an emitter once its local time
-reaches it: particles keep their state and nothing ages, moves or spawns. The MIT
-reference decodes both and applies neither; the reading comes from the corpus
+instance simulates each emitter for its own skip seconds in fixed 0.1 s steps (not
+the 1/30 s presentation sample; PS-07), repeating while the accumulated emitter
+time is at or below the skip time, so it can run one step past it, then rebases time
+to zero. Mini 0x32 (freeze time) stops an emitter permanently when an update would
+carry its local time strictly past it (equality still advances; PS-08): the whole
+update is skipped, particles keep their state and nothing ages, moves or spawns. The
+first-update freeze check comes before the pre-roll. The MIT
+reference decodes both and applies neither; the rules come from the debug build
+(PS-07, PS-08; checked again against the Focumentation page "Particle Editor",
+which only says the emitter freezes after its freeze time) and the corpus
 (engine trails skip 1 s, asteroid fields skip and freeze at 10 s). Heat renderers
 with selector 1 or 2 draw through the PrimHeat distortion adapter, weighted by the
 texture mask; selector 11 draws alpha-blended with its normal map lit by the
@@ -630,7 +637,14 @@ they replace the MIT alo-viewer's V1 conversion where the two differ.
   nothing. The alo-viewer conversion (v / 2, keys / 2 / (1 + v / 2)) made every
   particle with a size spread smaller: the Coruscant asteroid pebbles
   (`p_asteroid_field00`, v = 0.92) drew at 0.37-1.0 of the key instead of
-  0.08-1.92: 0.69 of the mean width and 0.39 of the mean area.
+  0.08-1.92: 0.69 of the mean width and 0.39 of the mean area. Checked again
+  against the Focumentation page "Particle Editor", whose "minimum scale" says
+  each particle is sized between that percentage and 100 %: mini 0x12 is the
+  only size-spread field the debug build's loader reads, and the birth draw is
+  uniform in [-v, +v] with the key multiplied by 1 + u (stock v lies in 0 to
+  1), so the spread is symmetric and its mean is the key. The wiki matches the
+  lower end 1 - v only (the label may well show 1 - v); which editor control
+  writes the field was not read from the community tool.
 - The per-effect size scale (dynamic size setting) defaults to 1; the texture
   cell index is the integer part of the UV track's value at the particle's
   relative age, on a square grid of sqrt(mini 0x10) cells, row-major (death debris and station-death captures:

@@ -72,6 +72,7 @@ int main() {
     std::filesystem::remove_all(scratch);
     run_contracts();
     tag_trace_contracts();
+    retail_value_contracts();
     if (failures == 0) std::cout << "data contracts passed\n";
     else std::cerr << failures << " data contract test(s) failed\n";
     return failures == 0 ? 0 : 1;

@@ -109,6 +109,10 @@ class CombatRandom;
 [[nodiscard]] bool shield_depleted(const DamageRules& rules, const DurabilityState& state, std::uint64_t frame) noexcept;
 [[nodiscard]] bool in_ion_storm(const DamageRules& rules, const DurabilityState& state, std::uint64_t frame) noexcept;
 
+// WLS-02: direct shield-only damage, without armor, damage modes, energy drain or hull overflow.
+void drain_shields(const DurabilityProfile& profile, const DamageRules& rules, DurabilityState& state,
+    math::Fixed amount, std::uint64_t frame) noexcept;
+
 // One shield recharge (DG-13 to DG-16, EN-04); the session calls it on the unit's recharge
 // frames. A unit with an energy pool pays for what the shield gains, or gains nothing.
 // `multiplier` is an active ability's shield regen multiplier (AB-22); a negative one drains.
@@ -187,6 +191,15 @@ struct FlightState {
     friend bool operator==(const FlightState&, const FlightState&) = default;
 };
 
+// WRB-10: a key into the immutable combat table, independent of damage ownership.
+enum class ProjectileProfileKind : std::uint32_t { ordinary, ability, barrage, death, charged_blast = 4 };
+struct ProjectileProfileKey {
+    TypeId type{};
+    std::uint32_t weapon{};
+    ProjectileProfileKind kind{};
+    friend bool operator==(const ProjectileProfileKey&, const ProjectileProfileKey&) = default;
+};
+
 // A projectile in flight (hashed state when the table binds damage rules).
 struct Projectile {
     std::uint64_t id{};                   // creation order, from 1
@@ -227,6 +240,8 @@ struct Projectile {
     std::optional<FlightState> flight{};
     std::uint64_t muzzle_delay_until{}; // positive only: PROJ bit11, appended expiry frame
     math::Fixed damage_delay{};
+    std::optional<ProjectileProfileKey> profile_key{}; // captured at launch, survives every deflection
+    bool reflected{}; // detached from the original shooter; overrides also encode their profile key
     friend bool operator==(const Projectile&, const Projectile&) = default;
 };
 

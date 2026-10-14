@@ -7,8 +7,10 @@
 #include "eawr/core/result.hpp"
 #include "eawr/presentation/lighting/scene_bloom.hpp"
 #include "eawr/presentation/renderer.hpp"
+#include "eawr/presentation/render_clock.hpp"
 #include "eawr/presentation/space/environment_scene.hpp"
 #include "eawr/sim/snapshot.hpp"
+#include "eawr/skirmish/attract.hpp"
 #include "eawr/vfs/vfs.hpp"
 
 #include <godot_cpp/classes/node3d.hpp>
@@ -74,6 +76,9 @@ struct SpacePopulateResult final {
     std::function<core::Result<SpaceLiveUpdate>(GodotRenderer&, double, const FixedCamera&)> live;
     std::function<void(GodotRenderer&)> release;
     std::function<void(std::ostream&)> write_report;
+    // Null retains the standalone/menu clock. A live tactical population owns
+    // this source and observes its admitted frames during `live`, before effects.
+    const RenderClock* render_clock{};
 };
 using SpacePopulateHook = std::function<core::Result<SpacePopulateResult>(const SpacePopulateContext& context)>;
 
@@ -139,6 +144,9 @@ public:
         // its default camera. The evidence harness requires it unless an
         // unlocked map camera draws from its authored pose.
         std::string camera;
+        // MAT-10: the main-menu attract's view. The map's saved camera, drawn at the window's size
+        // under the Space_Mode clip planes; the view never moves it and takes no camera input.
+        std::optional<skirmish::AttractCamera> saved_camera;
         // --eawr-space-control: none, drop-submission, broken-shader,
         // occluder, occluder-full, reload-cycle (live create/destroy),
         // sky-shadow or sky-shadow-cast (lit receiver; the latter is the
@@ -195,6 +203,8 @@ public:
                              const assets::ObjectTypeCatalog& catalog, bool catalog_loaded,
                              const std::string& catalog_failure);
     [[nodiscard]] std::optional<int> process(double delta);
+    // Why ready() returned false; empty otherwise.
+    [[nodiscard]] std::string failure() const;
     // The player closed the window (a live view): releases the scene and writes the report now,
     // since the engine quits without another frame. Inert for a run that has finished.
     void close();
@@ -204,6 +214,10 @@ public:
     void camera_focus(bool focused);
     void camera_pointer_left();
     void camera_viewport(float width, float height);
+    // The attract's locked view (Options::saved_camera) keeps its field of view, window size and
+    // clip planes and takes this eye and look-at (render basis) from the next frame on. Inert for
+    // any other view.
+    void set_attract_pose(const std::array<float, 3>& eye, const std::array<float, 3>& target);
 
     // #82, the live battle input: the camera frame the view drew last (render
     // basis; nothing before the first frame or without the populated view),
@@ -225,6 +239,8 @@ public:
     // The pieces whose transform that submit sent to the engine (#888: only the moved ones).
     [[nodiscard]] std::uint64_t live_submit_sent() const;
     void live_camera_overview_key();
+    void live_camera_movie(bool on, const std::array<float, 3>& render_target);
+    [[nodiscard]] bool live_camera_movie() const;
     [[nodiscard]] std::string live_camera_overview() const;
 
 private:

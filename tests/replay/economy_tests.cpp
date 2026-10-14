@@ -365,6 +365,44 @@ void test_reserved_reinforcement() {
     }
 }
 
+void test_campaign_reserve_publication() {
+    std::vector<std::string> baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto start = setup();
+        start.first_free_entity_id = 601; // shared allocator follows every initial reserve
+        start.campaign.emplace();
+        start.campaign->reserves = {{500, ship_type, human, true, squadron_type, {}},
+            {501, ship_type, human, false, ship_type, {}}, {600, ship_type, ai, false, 0, {}}};
+        auto content = rules(); content.campaign = true;
+        for (auto& player : content.players) player.credit_cap = units(6000);
+        start.campaign->players = content.players;
+        content.campaign_population = {{ship_type, 2}, {squadron_type, 1}};
+        auto created = tactical::TacticalSession::create(start, sensors, {}, motion(), std::nullopt, {}, {}, {}, content);
+        expect(static_cast<bool>(created), "WGM-48: campaign publication fixture is valid");
+        if (!created) return;
+        auto world = std::move(created).value();
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> trace;
+        for (unsigned step = 0; step < 3; ++step) {
+            const auto snapshot = world.snapshot();
+            const auto rows = snapshot->economy();
+            const auto local = std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.player == human; });
+            const auto enemy = std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.player == ai; });
+            expect(local != rows.end() && local->reserves == std::vector<tactical::ReserveView>{
+                {500, ship_type, 1, true}, {501, ship_type, 2, false}},
+                "WGT-19/28/WR-09: equal current types retain independent original populations and restrictions");
+            expect(enemy != rows.end() && enemy->reserves == std::vector<tactical::ReserveView>{{600, ship_type, 2, false}},
+                "reserve rows stay partitioned by published economy owner");
+            auto advanced = world.step(executor);
+            expect(static_cast<bool>(advanced), "reserve publication advances through ordinary tactical step");
+            if (!advanced) return;
+            trace.push_back(advanced.value().state_hash.get());
+        }
+        if (baseline.empty()) baseline = trace;
+        expect(trace == baseline, "reserve publication retains 1/2/4/8 tactical hash equality");
+    }
+}
+
 // validate_economy and the command shapes.
 void test_validation() {
     const auto players = setup().players;
@@ -389,7 +427,11 @@ void test_validation() {
 
 using namespace economy_test_support;
 
-int main() {
+int main(const int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--vertical-arrival-blocker") {
+        test_vertical_arrival_blocker();
+        return failures == 0 ? 0 : 1;
+    }
     expect(tactical::reinforcement_prevention_blocks(at(0, 0), units(5), at(2, 3, 1000)),
         "WR-22: prevention is planar and rejects the circle interior");
     expect(!tactical::reinforcement_prevention_blocks(at(0, 0), units(5), at(3, 4)),
@@ -414,14 +456,17 @@ int main() {
     test_reinforced_carrier();
     test_arrival_hits();
     test_arrival_services();
+    test_arrival_widens_drop_area();
     test_pending_victory_reinforcement();
     test_arrival_lane_sweep();
     test_arrival_tracking_frames();
     test_reinforce_refusals();
     test_arrival_placement();
+    test_vertical_arrival_blocker();
     test_determinism();
     test_validation();
     test_reserved_reinforcement();
+    test_campaign_reserve_publication();
     test_rotated_reinforcement();
     if (failures != 0) {
         std::cerr << failures << " economy check(s) failed\n";

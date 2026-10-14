@@ -61,6 +61,7 @@ import struct
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import camera_fixture
 from scene_fixture import _chunk, _cstring, _mini, _vertex  # noqa: E402
 
 MAP_LOGICAL_PATH = "data/art/maps/eawr_space_synthetic.ted"
@@ -419,6 +420,13 @@ def write_fixture_root(root: pathlib.Path, variant: str = "baseline") -> pathlib
         colours = SWAPPED_B if variant == "swap" else QUADRANTS["eawr_space_b.dds"]
         (data / "Art" / "Textures" / "eawr_space_b.dds").write_bytes(dds_bgra_bytes(colours))
     xml = data / "XML"
+    # The environment view validates its tactical camera before drawing the sky.
+    # Reuse invented camera inputs, with only the Space_Mode definition mounted.
+    fields = "".join(f"    <{tag}>{value}</{tag}>\n" for tag, value in camera_fixture.SPACE.items())
+    (xml / "TacticalCameras.xml").write_text(
+        '<TacticalCameras>\n  <TacticalCamera Name="Space_Mode">\n'
+        + fields + "  </TacticalCamera>\n</TacticalCameras>\n", encoding="utf-8")
+    (xml / "GameConstants.xml").write_text(camera_fixture.game_constants_xml(), encoding="utf-8")
     (xml / "GameObjectFiles.xml").write_text(
         "<Game_Object_Files><File>eawr_space_objects.xml</File></Game_Object_Files>\n", encoding="utf-8")
     (xml / "HardpointDataFiles.xml").write_text("<Hard_Point_Files></Hard_Point_Files>\n", encoding="utf-8")

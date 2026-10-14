@@ -57,6 +57,9 @@ here.
   `EAWR-SCRIPT-0201`. The `string`, `table` and `coroutine` tables and every binding
   object's member table are read-only. Binding objects are userdata whose metatable is
   hidden (`getmetatable` returns `"EAWR binding"`). Script-defined globals stay writable.
+  Proposed (L-17, not yet implemented; it changes the policy identity): FoC scripts can see an
+  engine-created global table `LuaWrapperMetaTable` (the stock pool reset names it), so the
+  sandbox installs it as an empty read-only table, and `LuaThreadTable` stays absent.
 - Writing the key `__mode` or `__gc` into any table faults with `EAWR-SCRIPT-0202`, so no
   script can make a weak table or a finalizer. lauxlib's own size table for
   `table.getn`/`setn` is internal and exempt; no script can reach it.
@@ -191,7 +194,8 @@ queues skew exactly as in FoC.
 param)` returns the next slot number (never reused); the slot's function is the global's
 value at creation, and the parameter reaches only the first resume. A pump visits slots in
 ascending order and re-reads the slot count, so a thread created during a pump runs in the
-same pump. After each resume the pump reads the topmost value the thread left (L-23 as
+same pump (debug build; Focumentation: Lua Commands says "next frame", which holds only for a
+thread created outside a pump, L-27). After each resume the pump reads the topmost value the thread left (L-23 as
 corrected from the FoC debug build in the Lua, AI and camera behaviour audit): `true` keeps the slot, anything else or an
 error ends it. Retail does not tell a yield from a return, so a thread that returns `true`
 keeps its slot and starts its function again, without its parameter, on the next pump; a
@@ -200,7 +204,10 @@ multi-value yield is decided by its last value. This is one policy point,
 false gives the P0 rule (a normal return ends the slot). `_ScriptExit()` ends the pump after the current thread
 and removes the instance after the tick, keeping its output. `GetThreadID()` is -1 outside
 threads; `ThreadValue(name)`, `ThreadValue.Set(name, value)` and `ThreadValue.Reset()` keep
-string-keyed values per thread and do nothing outside threads, as FoC's `ThreadValue`.
+string-keyed values per thread, as FoC's `ThreadValue`. Reading and setting do nothing outside
+threads; `Reset` takes no key, ignores any argument, clears every thread's values and also
+works outside threads (debug build, L-28; Focumentation: Lua Commands describes a one-key reset,
+which FoC does not do).
 
 **One service.** For tick T: serially route due events to their instances in key order;
 then service every instance (the inbox in order, then the thread pump); then serially commit
@@ -343,16 +350,83 @@ scenario is heavier in table work than in arithmetic; the soft-float share of Lu
 `lua_numeric_bench`, about half for arithmetic-heavy code. The tactical AI host measures the real FoC
 AI load.
 
+## Transactional immediate effects
+
+A host can opt a bounded native script set into `set_immediate_effect_host`.
+The default scheduler, including tactical scripts, keeps its partitioned
+instance phase. The opt-in set runs on the owner thread in ascending instance
+ID order because campaign credits, funding notifications and created object
+identities share one native state. This is an ordered script action phase,
+not an additional world entity service. The host supplies an explicit maximum
+instance count; each instance retains its instruction and memory budgets.
+The galactic manager exposes this through `Capabilities::immediate_effects`
+and `immediate_instance_limit`; both must be supplied together. It binds the
+runtime provider before its services attach or resume Lua instances.
+
+`ImmediateEffectHost::capture` supplies an isolated shadow, including every
+mutable notification consumer. `BindingContext::apply_immediate` clones that
+shadow before an action and installs the result only on success. A failed
+action cannot leave partial writes, including when Lua catches its error.
+`query_immediate` reads the current shadow, so a read immediately after a
+successful action sees its result. Handler and coroutine-resume marks retain
+the preceding shadow. Ordinary Lua failure restores that mark; a quota fault
+discards the instance's entire service. Later instances see only successful
+earlier instances in canonical order.
+
+One atomic host publication follows successful native service, before the
+scheduler publishes staged commands. A host publication failure leaves native
+state unchanged and aborts the scheduler. Successful root chunks publish their
+effects at creation; a failed chunk publishes nothing. Shadows are ephemeral:
+save/load retains the runtime host, while the campaign owner saves and hashes
+the published native state. Providers must clone only private mutable state,
+share immutable inputs, and keep queries read-only; callbacks may never write
+through to the live campaign. Providers should count their copied and applied
+work deterministically and bound native action requests independently of the
+Lua instruction budget.
+
+The GC `NativeActions` adapter uses a sparse campaign shadow: cash copies the
+written account and initialized funding ledger; magic copies the staging
+planet's presence/production rows and orbital inputs. Completed campaign
+inputs and prepared placements remain shared across rollback marks. Selection
+of orbital inputs runs partitioned, and publication applies new entities in
+request order with one snapshot refresh. It does not clone an ECS registry for
+each Lua action. Native request work counters are independent of worker count.
+
+Galactic `Give_Money` and the following `Get_Credits` use that shadow, including
+negative deltas, the selected positive multiplier and the account cap (WGA-100).
+Magic `Produce_Force`/`Build_All` also expose the created unit list, count and
+object validity/type/owner/position before returning. Their staged command
+adopts those identities into the existing task owner; later execution finishes
+the production block, without creating a second force. This preserves the
+request/completion distinction in GFS-A13 and GFD-A08 of
+[the GC AI schedule](behaviour/gc-ai-frame-schedule.md).
+
+The installed `galactic_ai_execution_stock` case uses real Normal campaign
+accounts and stock placement with a harness-owned magic plan and Lua observer:
+its `Give_Money(6000)` returns before the next `Get_Credits` reads 6000 from a
+zero balance. It also covers failed-handler cash/placement/frontier discard,
+same-call created handles, repeated production and later block completion on
+1/2/4/8 workers. Natural plan activation and the separate scheduled-spawn-list
+owner remain composition dependencies.
+
 ## Open items
 
 - The game build's live session does not run scripts yet; hosting `ScriptedTacticalSession`
   on its simulation thread, world events as script events, and the story-driven HUD outputs
   (`FLASH_GUI`, `FORCE_CLICK_GUI` as immutable presentation messages whose clicks enter the
   command path once) come with the tactical AI host's bindings and the Lua HUD presentation bridge.
-- FoC's per-object service gate (`ServiceRate`, `LastService`, a first offset drawn from the
+- FoC's per-object service gate (`ServiceRate`, `LastService`, L-29; a first offset drawn from the
   sync random stream) and `GameRandom` belong to the tactical AI host with the object script bindings.
 - The memory quota is per instance; a session-wide total (many instances each near their
   quota) is not bounded.
 - Mod gap (LuaJIT evaluation scan): Fall of the Republic's EaWX cross-plot serialiser round-trips values
   through `string.dump` and `loadstring`, which this sandbox forbids; that mod's feature fails
   here until a safe equivalent exists (unverified whether its tactical scripts reach it).
+
+## Managed native handle ownership
+
+WGA-471/472 provide an opt-in census for galactic markup handles. At an eligible successful completed scheduler invocation, surviving Lua roots and queued host values retain ownership across all instances. Private userdata interning, identity anchors and the weak size cache are excluded as roots. A visited-object walk includes table keys/values, closure upvalues, registry callbacks and coroutine stacks; dead cached containers cannot keep their native contributions alive. Instances with no cached userdata of the managed kind skip the graph walk.
+
+Native inventory and releases use private operations on the existing immediate-effect shadow. Release commits in stable native-ID order with the same atomic publication as ordinary script writes. Any rolled-back script call or quota fault suppresses collection for that invocation. VM destruction never calls the native host. An explicit host root supplier retains aliases in bridge command queues. Ordinary host observation copies do not own a native handle unless explicitly registered.
+
+The galactic policy visits completed invocations 64, 128, and so on. The fixed interval reduces recurring graph-walk work; the already-saved completed-invocation counter preserves its phase across load. An orphan remains until the next eligible clean invocation. The interval participates in session identity and never adapts to wall time or allocator state. Graph object/edge/physical-entry counters and elapsed time are diagnostic outputs only. The default and tactical profiles do no census and preserve their encoding.

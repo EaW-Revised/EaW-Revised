@@ -14,6 +14,7 @@
 // Retail space fog cells (#274; docs/behaviour/space-visibility.md V-11 to V-17): the logical
 // fog that targeting reads when a session is bound to a map's fog grid.
 namespace eawr::sim::tactical {
+namespace checkpoint_detail { struct Access; }
 
 // A map's space fog grid and its regrow constants: content the setup's content identity names,
 // like the sensor table, and neither replay data nor state. Column c covers world X from
@@ -73,6 +74,7 @@ struct FogFlash {
 // last marked circle. Copies share immutable row buffers; advance stages only rows that
 // change, then commits them after every partition succeeds.
 class FogCells final {
+    friend struct checkpoint_detail::Access;
 public:
     FogCells() = default;
     // players in strictly increasing ID order (validated by the session setup).
@@ -81,11 +83,14 @@ public:
     // One tick, in retail order: services the grids whose phase is `tick` (when `service`),
     // then releases the circles of revealers that are gone and re-marks every revealer that
     // has no circle yet, has changed owner, or has moved at least one cell width since its last mark, then applies
-    // the tick's flashes (V-19). revealers are in strictly increasing ID. Per-row work is
+    // the tick's flashes (V-19). WGT-50 force_players refreshes stationary revealers
+    // owned by those players after a range modifier event; player IDs are sorted and unique.
+    // revealers are in strictly increasing ID. Per-row work is
     // partitioned; the result does not depend on the executor.
     [[nodiscard]] core::Result<void> advance(std::uint64_t tick, bool service,
         std::span<const FogRevealer> revealers, const PartitionExecutor& executor,
-        std::span<const FogFlash> flashes = {});
+        std::span<const FogFlash> flashes = {},
+        std::span<const PlayerId> force_players = {});
 
     // V-20: holds the entire grid for this player across ordinary refresh. Transactional,
     // with row assignments partitioned; retained snapshots keep their previous rows.

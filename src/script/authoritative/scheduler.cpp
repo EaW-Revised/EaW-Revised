@@ -2,10 +2,12 @@
 
 #include "eawr/core/sha256.hpp"
 #include "eawr/sim/world.hpp"
+#include "../../sim/tactical/diagnostic_timer.hpp"
 
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -213,14 +215,16 @@ void pump_threads(Instance& instance) {
     }
 }
 
-void service_instance(Instance& instance, ::std::uint64_t tick, bool host_paced) {
+void service_instance(Instance& instance, ::std::uint64_t tick, bool host_paced, ::std::uint64_t time_tick) {
+    if (!instance.inbox.empty() || !host_paced) instance.sync_graph_dirty = true;
+    instance.rolled_back = false;
     InstanceScope scope(instance);
     instance.sandbox->set_budget(instance.shared->config.quotas.instructions_per_service);
     if (instance.tick != tick) {
         instance.tick = tick;
         instance.random = RandomStream(instance.shared->config.seed, tick, instance.id);
     }
-    instance.time_tick = tick - 1;
+    instance.time_tick = time_tick;
     for (const ScriptEvent& event : instance.inbox) {
         if (event.key.producer == producer_script_timer) --instance.pending_timers;
         switch (event.kind) {
@@ -338,10 +342,11 @@ int abort_session(lua_State* state) {
 
 Mark Instance::mark() const noexcept {
     return Mark{staging.commands.size(), staging.posts.size(), staging.timers.size(), random.draws(),
-                command_sequence,        post_sequence,        timer_sequence};
+                command_sequence,        post_sequence,        timer_sequence, immediate, immediate_changed};
 }
 
 void Instance::rollback(const Mark& mark) {
+    rolled_back = true;
     pending_timers -= static_cast<::std::uint32_t>(staging.timers.size() - mark.timers);
     staging.commands.resize(mark.commands);
     staging.posts.resize(mark.posts);
@@ -350,6 +355,8 @@ void Instance::rollback(const Mark& mark) {
     command_sequence = mark.command_sequence;
     post_sequence = mark.post_sequence;
     timer_sequence = mark.timer_sequence;
+    immediate = mark.immediate;
+    immediate_changed = mark.immediate_changed;
 }
 
 } // namespace detail
@@ -418,9 +425,19 @@ ScriptScheduler& ScriptScheduler::operator=(ScriptScheduler&&) noexcept = defaul
 ScriptScheduler::~ScriptScheduler() = default;
 
 core::Result<ScriptScheduler> ScriptScheduler::create(SessionConfig config, ModuleManifest manifest) {
+    if (config.galactic_clock && config.query_clock) {
+        return core::Result<ScriptScheduler>::failure(detail::make_error(codes::invalid_request,
+            "galactic and query clock profiles are mutually exclusive"));
+    }
     if (!valid_tick_duration(config.tick_duration)) {
         return core::Result<ScriptScheduler>::failure(
             detail::make_error(codes::invalid_request, "tick duration terms must be in 1..2048"));
+    }
+    // ADR-013: GC mode time uses the logical 30-frame second.
+    if ((config.galactic_clock || config.query_clock) && config.tick_duration.numerator * 30U != config.tick_duration.denominator) {
+        return core::Result<ScriptScheduler>::failure(detail::make_error(codes::invalid_request,
+            config.query_clock ? "the query clock profile requires one frame per 1/30 second"
+                : "the GC clock profile requires one frame per 1/30 second"));
     }
     if (config.quotas.identities == 0 || config.quotas.identities > (::std::uint64_t{1} << 30) ||
         config.quotas.instructions_per_service <= 0 || config.quotas.memory_bytes == 0) {
@@ -430,6 +447,7 @@ core::Result<ScriptScheduler> ScriptScheduler::create(SessionConfig config, Modu
     impl->shared = ::std::make_unique<detail::Shared>();
     impl->shared->config = ::std::move(config);
     impl->shared->manifest = ::std::move(manifest);
+    impl->shared->manifest_digest = impl->shared->manifest.digest();
     return core::Result<ScriptScheduler>::success(ScriptScheduler(::std::move(impl)));
 }
 
@@ -454,7 +472,8 @@ core::Result<void> ScriptScheduler::register_binding(::std::string_view name, Bi
             return core::Result<void>::failure(detail::make_error(codes::invalid_request, "duplicate binding: " + entry.name));
         }
     }
-    if (detail::is_infrastructure_name(name)) {
+    if (detail::is_infrastructure_name(name) &&
+        !(impl_->shared->config.galactic_clock && detail::can_extend_infrastructure(name))) {
         return core::Result<void>::failure(
             detail::make_error(codes::invalid_request, "name belongs to an infrastructure binding: " + ::std::string(name)));
     }
@@ -487,12 +506,36 @@ core::Result<void> ScriptScheduler::register_method(
     return core::Result<void>::success();
 }
 
+core::Result<void> ScriptScheduler::set_immediate_effect_host(
+    ::std::shared_ptr<ImmediateEffectHost> host, const ::std::size_t max_instances) {
+    if (auto usable = impl_->check_usable(); !usable) return usable;
+    if (!host || max_instances == 0 || impl_->instances.size() > max_instances)
+        return core::Result<void>::failure(detail::make_error(codes::invalid_request, "immediate effects need a host and sufficient instance bound"));
+    impl_->immediate_host = ::std::move(host);
+    impl_->immediate_instance_limit = max_instances;
+    return core::Result<void>::success();
+}
+
+core::Result<void> ScriptScheduler::register_managed_handles(ManagedHandlePolicy policy) {
+    if (auto usable = impl_->check_usable(); !usable) return usable;
+    if (!impl_->instances.empty() || impl_->managed_handles || !policy.kind || !policy.interval
+        || policy.inventory_query.empty() || policy.release_action.empty())
+        return core::Result<void>::failure(detail::make_error(codes::invalid_request, "managed handles need one pre-instance policy"));
+    impl_->managed_handles = ::std::move(policy);
+    return core::Result<void>::success();
+}
+
+void ScriptScheduler::set_managed_handle_roots(::std::function<ValueList()> roots) { impl_->managed_roots = ::std::move(roots); }
+ManagedHandleWork ScriptScheduler::managed_handle_work() const noexcept { return impl_->managed_work; }
+
 core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::std::string_view root_module) {
     using namespace ::eawr::script::sflua;
     if (auto usable = impl_->check_usable(); !usable) return usable;
     if (id == 0 || impl_->instances.contains(id)) {
         return core::Result<void>::failure(detail::make_error(codes::invalid_request, "instance IDs are unique and nonzero"));
     }
+    if (impl_->immediate_host && impl_->instances.size() >= impl_->immediate_instance_limit)
+        return core::Result<void>::failure(detail::make_error(codes::invalid_request, "ordered native instance bound exceeded"));
     const ::std::string* bytes = impl_->shared->manifest.find(root_module);
     if (bytes == nullptr) {
         return core::Result<void>::failure(
@@ -512,9 +555,16 @@ core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::
     lua_atpanic(state, detail::abort_session);
     const ::std::uint64_t tick = impl_->completed_tick + 1;
     instance->tick = tick;
-    instance->time_tick = impl_->completed_tick;
+    instance->time_tick = (impl_->shared->config.galactic_clock || impl_->shared->config.query_clock)
+        ? impl_->galactic_frame : impl_->completed_tick;
     instance->random = RandomStream(impl_->shared->config.seed, tick, id);
     try {
+        if (impl_->immediate_host) {
+            auto shadow = impl_->immediate_host->capture();
+            if (!shadow) return core::Result<void>::failure(shadow.error());
+            if (!shadow.value()) throw ::std::runtime_error("immediate effect capture is null");
+            instance->immediate = ::std::move(shadow).value();
+        }
         detail::InstanceScope scope(*instance);
         detail::install_bindings(*instance);
         instance->sandbox->seal();
@@ -535,12 +585,75 @@ core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::
             return core::Result<void>::failure(
                 detail::make_error(detail::fault_code(instance->sandbox->fault()), "instance chunk faulted: memory quota exhausted"));
         }
+        if (instance->immediate_changed) {
+            auto publication = instance->immediate->clone();
+            if (!publication) throw ::std::runtime_error("immediate effect clone is null");
+            if (auto published = impl_->immediate_host->publish(::std::move(publication)); !published)
+                return core::Result<void>::failure(published.error());
+        }
+        instance->immediate.reset();
+        instance->immediate_changed = false;
     } catch (const ::std::exception& error) {
         impl_->aborted = true;
         return core::Result<void>::failure(detail::make_error(codes::session_abort, error.what()));
     }
     impl_->instances.emplace(id, ::std::move(instance));
     return core::Result<void>::success();
+}
+
+core::Result<::std::vector<ScriptDiagnostic>> ScriptScheduler::reconcile_objects(::std::vector<ObjectScript> objects) {
+    using Result = core::Result<::std::vector<ScriptDiagnostic>>;
+    if (auto usable = impl_->check_usable(); !usable) return Result::failure(usable.error());
+    ::std::sort(objects.begin(), objects.end(), [](const auto& a, const auto& b) { return a.instance < b.instance; });
+    ::std::set<::std::pair<::std::uint32_t, ::std::uint64_t>> identities;
+    ::std::uint64_t previous = 0;
+    for (const auto& object : objects) {
+        if (object.instance == 0 || object.instance == previous || object.object.id == 0 ||
+            object.object.id >= (::std::uint64_t{1} << 37) || object.generation == 0 || object.module.empty() ||
+            !ModuleManifest::normalise(object.module) ||
+            !identities.emplace(object.object.kind, object.object.id).second ||
+            (impl_->instances.contains(object.instance) && !impl_->objects.contains(object.instance))) {
+            return Result::failure(detail::make_error(codes::invalid_request, "invalid object-script identities"));
+        }
+        previous = object.instance;
+    }
+    // Lifecycle changes are structural barrier work. Lua definitions and pumps
+    // remain in the partitioned service, never in this ordered commit.
+    for (auto iterator = impl_->objects.begin(); iterator != impl_->objects.end();) {
+        const auto desired = ::std::lower_bound(objects.begin(), objects.end(), iterator->first,
+            [](const auto& object, ::std::uint64_t id) { return object.instance < id; });
+        if (desired != objects.end() && *desired == iterator->second) { ++iterator; continue; }
+        if (impl_->instances.contains(iterator->first)) {
+            if (auto removed = remove_instance(iterator->first); !removed) return Result::failure(removed.error());
+        }
+        iterator = impl_->objects.erase(iterator);
+    }
+    ::std::vector<ScriptDiagnostic> diagnostics;
+    for (const auto& object : objects) {
+        if (impl_->objects.contains(object.instance)) continue;
+        impl_->objects.emplace(object.instance, object);
+        if (auto created = create_instance(object.instance, object.module); !created) {
+            diagnostics.push_back({created.error().code, object.module + ": " + created.error().message,
+                impl_->completed_tick + 1, object.instance, -1});
+            continue;
+        }
+        for (::std::uint64_t step = 0; step < 3; ++step) {
+            ScriptEvent event;
+            event.key = {impl_->completed_tick + 1, first_simulation_producer, object.instance, step};
+            event.target = object.instance;
+            event.kind = step == 0 ? ScriptEvent::Kind::call : step == 1 ? ScriptEvent::Kind::start_thread : ScriptEvent::Kind::assign;
+            event.name = step == 0 ? "Base_Definitions" : step == 1 ? "main" : "Object";
+            if (step == 2) event.parameter = Value{object.object};
+            if (auto submitted = submit_event(::std::move(event)); !submitted) return Result::failure(submitted.error());
+        }
+    }
+    return Result::success(::std::move(diagnostics));
+}
+
+::std::vector<ObjectScript> ScriptScheduler::object_scripts() const {
+    ::std::vector<ObjectScript> objects;
+    for (const auto& [id, object] : impl_->objects) { static_cast<void>(id); objects.push_back(object); }
+    return objects;
 }
 
 namespace {
@@ -577,14 +690,47 @@ core::Result<void> ScriptScheduler::submit_event(ScriptEvent event) {
 
 core::Result<ServiceReport> ScriptScheduler::service(
     const sim::PartitionExecutor& executor, const ServiceOptions& options) {
+    ::std::optional<sim::tactical::DiagnosticTimer> service_timer;
+    if (impl_->managed_handles) service_timer.emplace();
+    if (impl_->managed_handles && !impl_->immediate_host)
+        return core::Result<ServiceReport>::failure(detail::make_error(codes::invalid_request, "managed handles require atomic native effects"));
     if (auto usable = impl_->check_usable(); !usable) return core::Result<ServiceReport>::failure(usable.error());
+    if (impl_->immediate_host && impl_->instances.size() > impl_->immediate_instance_limit)
+        return core::Result<ServiceReport>::failure(detail::make_error(codes::invalid_request, "ordered native instance bound exceeded"));
     const ::std::uint64_t tick = impl_->completed_tick + 1;
+    const auto& config = impl_->shared->config;
+    if (config.query_clock && (!options.time_tick || *options.time_tick >= max_script_tick
+        || *options.time_tick < impl_->galactic_frame)) {
+        return core::Result<ServiceReport>::failure(detail::make_error(codes::invalid_request,
+            "query clock service requires a valid nondecreasing upstream time tick"));
+    }
+    if (options.time_tick && !config.query_clock) {
+        if (auto supplied = set_galactic_frame(*options.time_tick); !supplied)
+            return core::Result<ServiceReport>::failure(supplied.error());
+    }
+    const auto time_tick = config.query_clock ? *options.time_tick
+        : config.galactic_clock ? impl_->galactic_frame : tick - 1;
 
-    // Serial: route due events and timers to their instances in key order.
-    while (!impl_->pending.empty() && impl_->pending.begin()->first.tick <= tick) {
-        auto node = impl_->pending.extract(impl_->pending.begin());
-        const auto found = impl_->instances.find(node.mapped().target);
-        if (found != impl_->instances.end()) found->second->inbox.push_back(::std::move(node.mapped()));
+    // Query timers use upstream frame deadlines; ordinary event keys retain
+    // their invocation domain. Deliver elapsed timers before this invocation's
+    // host events, with each domain retaining canonical key order.
+    if (config.query_clock) {
+        for (const bool timers : {true, false}) {
+            for (auto iterator = impl_->pending.begin(); iterator != impl_->pending.end();) {
+                const auto& key = iterator->first;
+                if ((key.producer == producer_script_timer) != timers || key.tick > (timers ? time_tick : tick)) { ++iterator; continue; }
+                auto node = impl_->pending.extract(iterator++);
+                const auto found = impl_->instances.find(node.mapped().target);
+                if (found != impl_->instances.end()) found->second->inbox.push_back(::std::move(node.mapped()));
+            }
+        }
+    } else {
+        // The normal and GC event ordering and tick domain are unchanged.
+        while (!impl_->pending.empty() && impl_->pending.begin()->first.tick <= tick) {
+            auto node = impl_->pending.extract(impl_->pending.begin());
+            const auto found = impl_->instances.find(node.mapped().target);
+            if (found != impl_->instances.end()) found->second->inbox.push_back(::std::move(node.mapped()));
+        }
     }
     ::std::vector<detail::Instance*> ordered;
     ordered.reserve(impl_->instances.size());
@@ -592,24 +738,138 @@ core::Result<ServiceReport> ScriptScheduler::service(
     // Serial: the host's pacing choice is read before the partitioned phase.
     ::std::vector<char> paced(ordered.size());
     for (::std::size_t index = 0; index < ordered.size(); ++index) {
-        paced[index] = options.host_paced && options.host_paced(ordered[index]->id) ? 1 : 0;
+        paced[index] = impl_->objects.contains(ordered[index]->id) ||
+            (options.host_paced && options.host_paced(ordered[index]->id)) ? 1 : 0;
     }
     ::std::vector<::std::int64_t> used(ordered.size());
+    ManagedHandleWork managed_work;
+    ::std::vector<Handle> release_order;
 
     // Partitioned: each instance reads its own state and writes its own staging.
     ::std::vector<::std::string> failures(sim::tick_partition_count);
-    const auto run = executor.execute_phase(script_phase_name, sim::tick_partition_count, [&](const ::std::size_t partition) {
+    auto partition_service = [&](const ::std::size_t partition) {
         const sim::PartitionRange range = sim::partition_range(partition, ordered.size());
         try {
             for (::std::size_t index = range.begin; index < range.end; ++index) {
-                detail::service_instance(*ordered[index], tick, paced[index] != 0);
+                detail::service_instance(*ordered[index], tick, paced[index] != 0, time_tick);
+                if (impl_->objects.contains(ordered[index]->id) && ::std::any_of(
+                        ordered[index]->staging.diagnostics.begin(), ordered[index]->staging.diagnostics.end(),
+                        [](const auto& diagnostic) { return diagnostic.code != codes::unsupported_api
+                            && diagnostic.code != codes::script_warning; })) {
+                    ordered[index]->outcome = InstanceOutcome::faulted;
+                }
                 used[index] = impl_->shared->config.quotas.instructions_per_service - ordered[index]->sandbox->budget();
                 detail::settle_memory(*ordered[index]);
             }
         } catch (const ::std::exception& error) {
             failures[partition] = error.what();
         }
-    });
+    };
+    core::Result<void> run = core::Result<void>::success();
+    if (impl_->immediate_host) {
+        // Native identity allocation and notifications share one campaign
+        // shadow. Only this explicitly bounded script set runs in order; no
+        // world entity loop is added and default/tactical service is unchanged.
+        try {
+            auto captured = impl_->immediate_host->capture();
+            if (!captured) throw ::std::runtime_error(captured.error().message);
+            ::std::shared_ptr<ImmediateEffectState> shadow = ::std::move(captured).value();
+            if (!shadow) throw ::std::runtime_error("immediate effect capture is null");
+            bool changed = false;
+            for (::std::size_t index = 0; index < ordered.size(); ++index) {
+                auto& instance = *ordered[index];
+                instance.immediate = shadow;
+                instance.immediate_changed = false;
+                detail::service_instance(instance, tick, paced[index] != 0, time_tick);
+                used[index] = impl_->shared->config.quotas.instructions_per_service - instance.sandbox->budget();
+                detail::settle_memory(instance);
+                if (instance.outcome != InstanceOutcome::faulted) {
+                    shadow = instance.immediate;
+                    changed = changed || instance.immediate_changed;
+                }
+                instance.immediate.reset();
+                instance.immediate_changed = false;
+            }
+            // WGA-471/472: census the prospective completed state, then release
+            // within this same shadow. No callback runs during VM destruction.
+            const bool clean = impl_->managed_handles && ::std::all_of(ordered.begin(), ordered.end(), [](const auto* instance) {
+                return instance->outcome != InstanceOutcome::faulted && !instance->rolled_back;
+            });
+            if (impl_->managed_handles && clean && tick % impl_->managed_handles->interval == 0) {
+                const sim::tactical::DiagnosticTimer census_timer;
+                const auto& policy = *impl_->managed_handles;
+                auto inventory = shadow->query(policy.inventory_query, {});
+                if (!inventory) throw ::std::runtime_error(inventory.error().message);
+                if (!inventory.value().empty()) {
+                    const auto surviving = [&](const detail::Instance& instance) {
+                        return instance.outcome == InstanceOutcome::running && (!impl_->objects.contains(instance.id)
+                            || ::std::any_of(instance.slots.begin(), instance.slots.end(), [](const auto& slot) { return slot.live; }));
+                    };
+                    ::std::vector<detail::sf::HandleCensus> census(ordered.size());
+                    auto walked = executor.execute_phase("script-handle-census", sim::tick_partition_count,
+                        [&](::std::size_t partition) {
+                            const auto range = sim::partition_range(partition, ordered.size());
+                            for (::std::size_t index = range.begin; index < range.end; ++index)
+                                if (surviving(*ordered[index])) census[index] = ordered[index]->sandbox->handle_census(policy.kind);
+                        });
+                    if (!walked) throw ::std::runtime_error(walked.error().message);
+                    ::std::set<::std::uint64_t> live;
+                    for (const auto& row : census) {
+                        managed_work.objects += row.objects; managed_work.edges += row.edges; managed_work.entries += row.entries;
+                        if (row.objects) ++managed_work.censuses;
+                        for (const auto& handle : row.handles) live.insert(handle.id);
+                    }
+                    const auto visit = [&](const auto& self, const Value& value) -> void {
+                        ++managed_work.host_values;
+                        if (const auto* handle = ::std::get_if<Handle>(&value.data)) {
+                            if (handle->kind == policy.kind) live.insert(handle->id);
+                        } else if (const auto* list = ::std::get_if<ValueList>(&value.data)) {
+                            for (const auto& item : *list) self(self, item);
+                        }
+                    };
+                    const auto values = [&](const ValueList& list) { for (const auto& value : list) visit(visit, value); };
+                    const auto event_values = [&](const ScriptEvent& event) {
+                        const auto found = impl_->instances.find(event.target);
+                        if (found == impl_->instances.end() || !surviving(*found->second)) return;
+                        values(event.arguments); if (event.parameter) visit(visit, *event.parameter);
+                    };
+                    for (const auto& [key, event] : impl_->pending) { static_cast<void>(key); event_values(event); }
+                    for (const auto* instance : ordered) {
+                        for (const auto& command : instance->staging.commands) values(command.arguments);
+                        for (const auto& event : instance->staging.posts) event_values(event);
+                        for (const auto& event : instance->staging.timers) event_values(event);
+                    }
+                    if (impl_->managed_roots) values(impl_->managed_roots());
+                    ::std::set<::std::uint64_t> ids;
+                    for (const auto& value : inventory.value()) {
+                        const auto* handle = ::std::get_if<Handle>(&value.data);
+                        if (!handle || handle->kind != policy.kind || !handle->id)
+                            throw ::std::runtime_error("invalid managed handle inventory");
+                        ids.insert(handle->id);
+                    }
+                    for (const auto id : ids) if (!live.contains(id)) {
+                        auto released = shadow->apply(policy.release_action, {Value{Handle{policy.kind, id}}});
+                        if (!released) throw ::std::runtime_error(released.error().message);
+                        ++managed_work.released; changed = true;
+                        release_order.push_back({policy.kind, id});
+                    }
+                }
+                managed_work.nanoseconds = census_timer.elapsed_nanoseconds();
+            }
+            if (changed) {
+                auto publication = shadow->clone();
+                if (!publication) throw ::std::runtime_error("immediate effect clone is null");
+                auto published = impl_->immediate_host->publish(::std::move(publication));
+                if (!published) throw ::std::runtime_error(published.error().message);
+            }
+        } catch (const ::std::exception& error) {
+            impl_->aborted = true;
+            for (auto* instance : ordered) { instance->immediate.reset(); instance->immediate_changed = false; }
+            return core::Result<ServiceReport>::failure(detail::make_error(codes::session_abort, error.what()));
+        }
+    } else {
+        run = executor.execute_phase(script_phase_name, sim::tick_partition_count, partition_service);
+    }
     for (const ::std::string& failure : failures) {
         if (!failure.empty()) {
             impl_->aborted = true;
@@ -623,6 +883,8 @@ core::Result<ServiceReport> ScriptScheduler::service(
 
     // Serial commit in ascending instance ID.
     ServiceReport report;
+    report.managed_handles = managed_work;
+    report.managed_releases = ::std::move(release_order);
     report.tick = tick;
     for (::std::size_t index = 0; index < ordered.size(); ++index) {
         report.loads.push_back(InstanceLoad{ordered[index]->id, ::std::max<::std::int64_t>(used[index], 0)});
@@ -638,7 +900,9 @@ core::Result<ServiceReport> ScriptScheduler::service(
         staging = detail::Staging{};
     }
     for (detail::Instance* instance : ordered) {
-        if (instance->outcome == InstanceOutcome::running) continue;
+        const bool object_finished = impl_->objects.contains(instance->id) &&
+            ::std::none_of(instance->slots.begin(), instance->slots.end(), [](const auto& slot) { return slot.live; });
+        if (instance->outcome == InstanceOutcome::running && !object_finished) continue;
         report.removed_instances.push_back(instance->id);
         impl_->instances.erase(instance->id);
     }
@@ -647,6 +911,9 @@ core::Result<ServiceReport> ScriptScheduler::service(
         iterator = impl_->instances.contains(iterator->second.target) ? ::std::next(iterator) : impl_->pending.erase(iterator);
     }
     impl_->completed_tick = tick;
+    if (config.query_clock) impl_->galactic_frame = time_tick;
+    if (service_timer) report.managed_handles.service_nanoseconds = service_timer->elapsed_nanoseconds();
+    impl_->managed_work = report.managed_handles;
     return core::Result<ServiceReport>::success(::std::move(report));
 }
 
@@ -691,6 +958,19 @@ core::Result<::std::optional<Value>> ScriptScheduler::read_global(
 
 ::std::uint64_t ScriptScheduler::completed_tick() const noexcept { return impl_->completed_tick; }
 
+bool ScriptScheduler::uses_galactic_clock() const noexcept { return impl_->shared->config.galactic_clock; }
+TickDuration ScriptScheduler::tick_duration() const noexcept { return impl_->shared->config.tick_duration; }
+::std::uint64_t ScriptScheduler::galactic_frame() const noexcept { return impl_->galactic_frame; }
+core::Result<void> ScriptScheduler::set_galactic_frame(const ::std::uint64_t frame) {
+    if (auto usable = impl_->check_usable(); !usable) return usable;
+    if (!uses_galactic_clock() || frame >= max_script_tick || frame > impl_->completed_tick + 1) {
+        return core::Result<void>::failure(detail::make_error(codes::invalid_request,
+            "a mode frame requires the GC clock profile and cannot exceed the next service tick"));
+    }
+    impl_->galactic_frame = frame;
+    return core::Result<void>::success();
+}
+
 ::std::vector<::std::uint64_t> ScriptScheduler::instances() const {
     ::std::vector<::std::uint64_t> ids;
     for (const auto& [id, instance] : impl_->instances) ids.push_back(id);
@@ -724,7 +1004,20 @@ core::Result<void> ScriptScheduler::remove_instance(const ::std::uint64_t instan
     using namespace ::eawr::script::sflua;
     ::std::string out(sandbox_policy_identity);
     out.append(rng_identity);
+    if (impl_->managed_handles) {
+        const auto& policy = *impl_->managed_handles;
+        out.append("managed-handles-wga-471"); detail::append_u64(out, policy.kind); detail::append_u64(out, policy.interval);
+        detail::append_bytes(out, policy.inventory_query.data(), policy.inventory_query.size());
+        detail::append_bytes(out, policy.release_action.data(), policy.release_action.size());
+    }
     detail::append_u64(out, impl_->completed_tick);
+    if (uses_galactic_clock()) {
+        out.append(galactic_save_format_identity);
+        detail::append_u64(out, impl_->galactic_frame);
+    } else if (impl_->shared->config.query_clock) {
+        out.append(query_save_format_identity);
+        detail::append_u64(out, impl_->galactic_frame);
+    }
     for (const auto& [key, event] : impl_->pending) {
         detail::append_u64(out, key.tick);
         detail::append_u64(out, key.producer);

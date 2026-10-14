@@ -10,6 +10,59 @@
 #include <string>
 
 namespace eawr::sim::tactical {
+
+math::Fixed healing_fraction(const DurabilityProfile& profile, const DurabilityState& state) {
+    auto current = state.hull;
+    auto maximum = profile.max_hull;
+    if (profile.destroyed_with_hardpoints && std::any_of(profile.hardpoints.begin(), profile.hardpoints.end(),
+        [](const auto& point) { return point.destroyable; })) {
+        current = {}; maximum = {};
+        for (std::size_t i = 0; i < profile.hardpoints.size(); ++i) {
+            if (!profile.hardpoints[i].destroyable || state.hardpoints[i].raw() <= 0) continue;
+            current = math::Fixed::from_raw(current.raw() + state.hardpoints[i].raw());
+            maximum = math::Fixed::from_raw(maximum.raw() + profile.hardpoints[i].max_health.raw());
+        }
+    }
+    return maximum.raw() > 0 ? math::divide(current, maximum).value() : math::Fixed{};
+}
+
+std::optional<math::Fixed> time_to_death(const DurabilityProfile& profile, const DurabilityState& state) noexcept {
+    if (state.damage_rate.raw() <= 0) return std::nullopt;
+    std::int64_t health = 0;
+    bool hardpoints = false;
+    for (std::size_t index = 0; index < profile.hardpoints.size() && index < state.hardpoints.size(); ++index) {
+        if (!profile.hardpoints[index].destroyable) continue;
+        hardpoints = true;
+        health += std::max<std::int64_t>(0, state.hardpoints[index].raw());
+    }
+    if (!hardpoints) health = state.hull.raw();
+    health += state.shields.raw();
+    math::Fixed result;
+    if (!math::try_divide(math::Fixed::from_raw(health), state.damage_rate, result)) return std::nullopt;
+    return result;
+}
+
+core::Result<std::uint32_t> heal_health(const DurabilityProfile& profile, DurabilityState& state,
+    const math::Fixed percent, const math::Fixed amount) {
+    std::uint32_t picked = hull_target;
+    math::Fixed lowest = math::Fixed::from_raw(math::Fixed::scale);
+    for (std::size_t i = 0; i < profile.hardpoints.size(); ++i) {
+        const auto& point = profile.hardpoints[i];
+        if (!point.destroyable || state.hardpoints[i].raw() <= 0) continue;
+        const auto fraction = math::divide(state.hardpoints[i], point.max_health).value();
+        if (fraction < lowest) { lowest = fraction; picked = static_cast<std::uint32_t>(i); }
+    }
+    auto& health = picked == hull_target ? state.hull : state.hardpoints[picked];
+    const auto maximum = picked == hull_target ? profile.max_hull : profile.hardpoints[picked].max_health;
+    const auto increment = math::multiply(maximum, percent);
+    if (!increment) return core::Result<std::uint32_t>::failure(increment.error());
+    const auto flat = math::add(increment.value(), amount);
+    if (!flat) return core::Result<std::uint32_t>::failure(flat.error());
+    // Clamp before adding so a very large authored increment cannot overflow health.
+    health = math::Fixed::from_raw(health.raw() + std::min(std::max<std::int64_t>(flat.value().raw(), 0),
+        std::max<std::int64_t>(maximum.raw() - health.raw(), 0)));
+    return core::Result<std::uint32_t>::success(picked);
+}
 namespace {
 
 namespace wide = math::detail;
@@ -211,6 +264,10 @@ bool engines_online(const DurabilityProfile& profile, const DurabilityState& sta
 }
 
 void disable_engines(DurabilityState& state, const std::uint32_t frames, const std::uint64_t frame) noexcept {
+    if (frames == indefinite_engine_disable_frames) {
+        state.engines_disabled_until = std::numeric_limits<std::uint64_t>::max();
+        return;
+    }
     // EN-08: reapplication extends to the later end, rather than stacking durations.
     const auto until = frame > std::numeric_limits<std::uint64_t>::max() - frames
         ? std::numeric_limits<std::uint64_t>::max() : frame + frames;
@@ -218,7 +275,8 @@ void disable_engines(DurabilityState& state, const std::uint32_t frames, const s
 }
 
 bool service_disabled_engines(DurabilityState& state, const std::uint64_t frame) noexcept {
-    if (!state.engines_disabled_until || frame < *state.engines_disabled_until) return false;
+    if (!state.engines_disabled_until || *state.engines_disabled_until == std::numeric_limits<std::uint64_t>::max()
+        || frame < *state.engines_disabled_until) return false;
     state.engines_disabled_until.reset();
     return true;
 }

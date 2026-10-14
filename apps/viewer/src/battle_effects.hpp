@@ -89,7 +89,7 @@ public:
     [[nodiscard]] std::vector<TerminalSound> take_terminal_sounds() {
         return std::exchange(terminal_sounds_, {});
     }
-    using ProjectileObserver = std::function<bool(sim::tactical::PlayerId, const sim::math::Vec3&, std::uint64_t)>;
+    using ProjectileObserver = std::function<bool(sim::tactical::PlayerId, const sim::math::Vec3&, std::uint64_t, bool)>;
     void observe_projectiles(const sim::tactical::TacticalSnapshot& previous,
                              const sim::tactical::TacticalSnapshot& latest, double presented_tick,
                              ProjectileObserver observer);
@@ -143,6 +143,8 @@ public:
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
+    void measure_particles(bool on) noexcept { registry_->begin_measurement(on); }
+    [[nodiscard]] const particles::RegistryTimings& particle_timings() const noexcept { return registry_->timings(); }
     [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
         return registry_->set_detail(detail);
     }
@@ -177,6 +179,7 @@ private:
         double step_length{};          // the shot's Max_Speed: its frame step (0: unknown)
         bool hide_when_fogged{};
         bool immediate_fog{};
+        bool visible_to_enemy{true}; // WFP-01: Model_Visible_To_Enemy
     };
     struct ProjectileVisibility final {
         space::ProjectileHide hide;
@@ -186,15 +189,32 @@ private:
     std::map<std::uint64_t, ProjectileVisibility> projectile_visibility_;
     ProjectileObserver projectile_observer_;
     struct TypeLooks final {
-        std::array<space::Vec3d, 2> beam_origins{};
+        std::vector<sim::tactical::SpecialAbilityProfile> healing;
+        std::map<std::string, std::uint32_t> named_bones;
+        std::array<space::Vec3d, 3> beam_origins{};
+        std::array<std::optional<std::uint32_t>, 3> beam_bones{};
+        std::string leech_effect;
+        // WLD-12: LASER_DEFENSE's beam: texture, width, colour, how many logical frames it stays, and the
+        // model-space bind points of its Bone_Names (the beam starts at the one nearest the shot).
+        struct DefenceLook final {
+            std::string texture;
+            float width{};
+            particles::Color colour{1.0F, 1.0F, 1.0F, 1.0F};
+            std::uint32_t frames{5};
+            std::vector<space::Vec3d> bones;
+        } defence;
         std::string energy_owner_particle;
         std::string replenish_particle;
+        std::string corrupt_target_particle, corrupt_owner_particle;
+        std::string lure_particle; // WLU-09: the LURE craft's Particle_Effect
+        std::string blast_charging_particle, blast_charged_particle;
         std::map<std::uint32_t, ProjectileLook> weapons; // by weapon slot key (HardPoints index or object_weapon)
         // #862 (space-abilities AB-66): the weapon's ability shot, the squadron's
         // ION_CANNON_SHOT override projectile, by weapon slot key.
         std::map<std::uint32_t, ProjectileLook> ability_weapons;
         // WAD-38: BARRAGE retains its own override beside ordinary and ion shots.
         std::map<std::uint32_t, ProjectileLook> barrage_weapons;
+        std::map<std::uint32_t, ProjectileLook> charged_weapons;
         std::string death_explosion;                     // Death_Explosions
         std::string spin_explosion;                      // Spin_Away_On_Death_Explosion (#447)
         std::vector<std::string> hardpoint_explosions;   // Death_Explosion_Particles, HardPoints order
@@ -240,6 +260,10 @@ private:
         std::optional<Contact> contact;
         std::uint32_t drain_from{};
         particles::EmitterFrame frame;
+        sim::EntityId corrupt_target{};
+        sim::EntityId lure_team{}; // WLU-09: the luring team it follows
+        sim::EntityId blast_owner{};
+        bool blast_charged{};
     };
     // One spawned effect: the tick of its event, reason:particle, its age when a frame first
     // drew it (none: gone before one did).
@@ -247,6 +271,7 @@ private:
         std::uint64_t tick{};
         std::string key;
         std::optional<std::uint32_t> first_age;
+        std::optional<particles::EmitterFrame> frame;
     };
     struct Batch final {
         std::uint64_t resource{};
@@ -261,12 +286,18 @@ private:
         particles::Color colour{1.0F, 1.0F, 1.0F, 1.0F};
         std::map<sim::EntityId, std::pair<sim::EntityId, std::uint64_t>> births;
         std::array<particles::ParticleVertex, 4> last_quad{};
+        UnitFrame last_source{};
+        space::Vec3d last_bind_origin{};
+        bool last_origin_from_pose{};
         std::uint64_t active_at_release{};
         std::uint64_t sparks_drawn{};
         std::uint64_t moving_samples{};
         float last_spark_fraction{};
     };
     std::array<HeroBeamLook, 2> hero_beams_;
+    std::map<sim::tactical::TypeId, HeroBeamLook> leech_beams_;
+    std::map<sim::EntityId, particles::EffectHandle> leech_effects_;
+    std::uint64_t leech_beams_drawn_{};
     std::array<std::string, 4> move_particles_; // move, double click, attack move, guard
     float move_scale_{1.0F};
     std::map<sim::EntityId, particles::EffectHandle> energy_owner_effects_;
@@ -274,6 +305,34 @@ private:
     std::map<sim::tactical::TypeId, std::string> weaken_particles_;
     std::map<std::pair<std::uint64_t, sim::EntityId>, particles::EffectHandle> weaken_effects_;
     std::uint64_t energy_beams_drawn_{}, tractor_beams_drawn_{};
+    // WLD-12: point-defence zaps still inside their beam frames, and one additive batch per beam texture.
+    struct DefenceZap final {
+        sim::EntityId shooter{};
+        sim::tactical::TypeId type{};
+        std::uint64_t tick{};
+        std::array<double, 3> aim{};
+    };
+    std::vector<DefenceZap> defence_zaps_;
+    std::map<std::string, Batch> defence_batches_;
+    std::uint64_t defence_beams_drawn_{};
+    struct HealBolt {
+        sim::EntityId source{}, target{};
+        std::string effect;
+        double birth{};
+        std::uint32_t source_bone{}, target_bone{};
+    };
+    struct HealLightning {
+        Batch batch;
+        std::string texture;
+        float width_min{}, width_max{}, fade_min{}, fade_max{}, interval_min{}, interval_max{};
+        std::array<float, 3> displacement{};
+        particles::Color start{}, end{};
+        std::uint32_t detail{}, bolts{};
+    };
+    std::map<std::string, HealLightning> healing_lightning_;
+    std::vector<HealBolt> healing_bolts_;
+    std::uint64_t healing_pulses_{}, healing_particles_{}, healing_bolt_samples_{};
+    double healing_presented_tick_{};
 
     [[nodiscard]] const ParticleType* particle_type(const std::string& name);
     [[nodiscard]] const assets::Texture* resolve_texture(std::string_view name);
@@ -332,6 +391,9 @@ private:
     std::vector<ContactSample> contact_samples_;
     // The last frame of every unit seen, for the explosions of units that left the session.
     std::map<sim::EntityId, UnitFrame> last_seen_;
+    // WSD-11: the tick each unit the local player saw die was destroyed. A self-destructing unit has left the
+    // world when its blast detonates, so its blast shows when the unit was seen at its death.
+    std::map<sim::EntityId, std::uint64_t> seen_deaths_;
     // WNO-29: visible death payloads survive pruning of their destroyed source pose.
     // The type of every unit the session has held (shooters of hits and projectiles may have died).
     std::map<sim::EntityId, sim::tactical::TypeId> entity_types_;
@@ -346,6 +408,7 @@ private:
     // Ability shots fired (weapon_fired events) and drawn (kite or beam frames), by projectile type.
     std::map<std::string, std::uint64_t> ability_shots_fired_;
     std::map<std::string, std::uint64_t> ability_shots_drawn_;
+    std::map<std::string, std::uint64_t> reflected_shots_drawn_;
     // #456 BP-62: one slot pool per model projectile type, its placed ships, and which pool and
     // slot each of those ships is; the projectiles drawn as models this frame.
     struct ModelPool final {
@@ -388,6 +451,7 @@ private:
     bool collect_axis_diagnostics_{};
     std::uint64_t max_beams_{};
     std::map<std::string, std::uint64_t> not_drawn_;     // projectile type -> frames it was in flight undrawn
+    std::map<std::string, std::uint64_t> terminal_culls_; // WPJ-40 admission reason -> terminal events
     std::map<std::string, std::uint64_t> spawned_;       // reason:particle -> count
     std::map<std::string, std::uint64_t> spawn_failed_;  // reason:particle -> count
     std::map<std::string, std::uint64_t> expired_;       // reason:particle -> skipped, lifetime over

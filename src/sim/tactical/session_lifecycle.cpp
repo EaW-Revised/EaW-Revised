@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/core/sha256.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include "eawr/sim/tactical/formation.hpp"
@@ -50,14 +51,36 @@ namespace session_detail {
 
 TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const SensorProfile> sensor_table, const DurabilityTable& table,
     const MotionTable& motion_table, const std::optional<FogRules>& fog_rules, const CombatTable& combat_table,
-    const VictoryRules& victory_rules, const AbilityTable& ability_table, const EconomyRules& economy_rules)
+    const VictoryRules& victory_rules, const AbilityTable& ability_table, const EconomyRules& economy_rules,
+    const MapBox& box)
     : setup(source), sensors(sensor_table.begin(), sensor_table.end()), durability(table), motion(motion_table),
-      combat(combat_table), victory(victory_rules), abilities(ability_table), economy(economy_rules),
+      combat(combat_table), victory(victory_rules), abilities(ability_table), economy(economy_rules), map_box(box),
       squadrons(source.squadrons), rng_state(source.seed) {
+        if (source.campaign) {
+            TacticalReplay recording; recording.setup = source;
+            const auto encoded = write_replay(recording);
+            if (!encoded) initialization_error = encoded.error();
+            else campaign_binding = core::sha256(encoded.value());
+        }
+        for (const auto& profile : combat.profiles) for (const auto& weapon : profile.weapons)
+            if (weapon.requires_manual_target) manual_admission_profiles.emplace(
+                std::pair{profile.type_id, weapon.hardpoint}, std::make_shared<const WeaponProfile>(weapon));
         // WPR-55: content-indexed counters and bonus profiles; storage is reused by every phase.
         std::vector<TypeId> types;
         // SAE-02: perceptions also count starting structures and completed pad children.
-        for (const auto& unit : source.units) types.push_back(unit.type_id);
+        for (const auto& unit : source.units) {
+            types.push_back(unit.type_id);
+            if (unit.purchase_type != 0) types.push_back(unit.purchase_type);
+        }
+        if (source.campaign) for (const auto& reserve : source.campaign->reserves) {
+            types.push_back(reserve.type);
+            if (reserve.purchase_type != 0) types.push_back(reserve.purchase_type);
+            const auto* hero = economy.hero(reserve.type);
+            const auto deployed = hero ? hero->deployed : reserve.type;
+            types.push_back(deployed);
+            if (const auto* squadron = motion.squadrons.find_squadron(deployed))
+                types.insert(types.end(), squadron->members.begin(), squadron->members.end());
+        }
         for (const auto& child : economy.pads.construction) {
             types.push_back(child.type);
             types.push_back(child.constructed);
@@ -79,6 +102,7 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
             bonus_categories.push_back(source_profile.bonus.stacking_category);
         }
         for (const auto& profile : abilities.profiles) for (const auto& special : profile.special) {
+            if (special.kind == SpecialAbilityKind::leech_shields) bonus_categories.push_back(0);
             if (special.kind == SpecialAbilityKind::concentrate_fire || special.kind == SpecialAbilityKind::tractor_beam)
                 bonus_categories.push_back(special.concentrate_stacking_category);
         }
@@ -97,11 +121,28 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
         committed_bonus_profiles.resize(ownership_keys.size());
         bonus_parts.resize(tick_partition_count * bonus_categories.size());
         income_category_parts = initial_income_categories(economy, tick_partition_count);
+        std::vector<const CampaignReserve*> ordered_reserves;
+        if (source.campaign) {
+            if (source.campaign->reserve_order.empty()) {
+                for (const auto& reserve : source.campaign->reserves) ordered_reserves.push_back(&reserve);
+            } else for (const auto id : source.campaign->reserve_order) {
+                const auto reserve = std::lower_bound(source.campaign->reserves.begin(), source.campaign->reserves.end(), id,
+                    [](const auto& row, EntityId key) { return row.id < key; });
+                ordered_reserves.push_back(&*reserve); // validate_setup proved a complete permutation
+            }
+        }
         for (const auto& player : economy.players) {
             PlayerEconomy ledger;
             ledger.player = player.player;
             ledger.credits = player.credits;
             ledger.tech_level = player.start_tech;
+            if (source.campaign) {
+                for (const auto* reserve : ordered_reserves) if (reserve->owner == player.player) {
+                    ledger.pool.push_back(reserve->type);
+                    ledger.pool_tokens.push_back(reserve->id);
+                    ledger.next_pool_token = std::max(ledger.next_pool_token, reserve->id + 1);
+                }
+            }
             ledgers.push_back(std::move(ledger));
         }
         for (const auto& player : source.players) {
@@ -124,10 +165,41 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
             next_id = source.units.back().entity_id + 1;
         }
         std::vector<LiveUnit> live;
+        if (source.first_free_entity_id) next_id = *source.first_free_entity_id;
+        if (source.campaign) for (const auto id : source.campaign->population_registered) {
+            const auto unit = std::find_if(source.units.begin(), source.units.end(), [id](const auto& row) { return row.entity_id == id; });
+            const auto population = population_of(unit->purchase_type != 0 ? unit->purchase_type : unit->type_id);
+            const auto squadron = std::find_if(source.squadrons.begin(), source.squadrons.end(), [id](const auto& row) { return row.container == id; });
+            if (squadron == source.squadrons.end()) shares.emplace(id, PopulationShare{unit->owner, population_share(population, 1)});
+            else for (const auto craft : squadron->members)
+                shares.emplace(craft, PopulationShare{unit->owner, population_share(population, static_cast<std::uint32_t>(squadron->members.size()))});
+        }
+        if (source.campaign) for (const auto& upgrade : source.campaign->upgrades) {
+            auto account = std::find_if(ledgers.begin(), ledgers.end(), [&](const auto& row) { return row.player == upgrade.owner; });
+            if (next_id == invalid_entity_id || next_id == std::numeric_limits<EntityId>::max()) {
+                initialization_error = detail::diagnostic(diagnostic_codes::resource_limit, "campaign upgrade allocator exhausted");
+                break;
+            }
+            account->completed.push_back(CompletedBuild{upgrade.type, upgrade.holder, next_id++});
+            ++account->lifetime[upgrade.type];
+        }
         live.reserve(source.units.size());
         for (const auto& unit : source.units) {
+            if (const auto* profile = combat.find(unit.type_id); profile && profile->planetary_weapon)
+                special_weapons.emplace(unit.entity_id, SpecialWeaponState{});
             live.push_back(new_unit(unit, 0));
+            auto slots = radar_slots(unit.type_id);
+            if (!slots.empty()) radar_roster.emplace(unit.entity_id, std::move(slots));
+            if (const auto* health = durability.find(unit.type_id))
+                if (const auto* handlers = abilities.find(unit.type_id))
+                    for (const auto& point : health->hardpoints)
+                        if (!point.special_ability_name.empty())
+                            static_cast<void>(set_named_ability_lock(named_ability_locks, unit.owner,
+                                *handlers, point.special_ability_name, false));
         }
+        auto radar = publish_named_abilities(live, named_ability_locks, radar_roster, InlineExecutor{});
+        if (!radar) initialization_error = radar.error();
+        else snapshot_players = std::move(radar).value();
         rebuild(live, false);
         // Partial-table sessions retain setup bindings; only bound hangars can consume them.
         const bool creation_tables = !motion.squadrons.spawners.empty();
@@ -142,6 +214,23 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
             free_garrisons.push_back({binding, binding.registered, std::nullopt, {}});
         }
         bind_squadrons(live);
+        if (source.campaign && !source.campaign->upgrades.empty() && !bonus_categories.empty()) {
+            std::map<EntityId, TypeId> containers;
+            for (const auto& u : source.campaign->upgrades) {
+                const auto holder = std::find_if(live.begin(), live.end(), [&](const auto& row) { return row.state.entity_id == u.holder; });
+                containers.emplace(u.holder, holder->state.type_id);
+            }
+            auto profiles = build_bonus_profiles(ledgers, containers, InlineExecutor{});
+            if (!profiles) initialization_error = profiles.error();
+            else {
+                for (auto& unit : live) {
+                    const auto applied = apply_bonuses(unit, bonuses_for(unit));
+                    if (!applied) { initialization_error = applied.error(); break; }
+                }
+                committed_bonus_profiles = bonus_profiles;
+                rebuild(live, false);
+            }
+        }
         if (!economy.command_bonuses.empty()) {
             auto ledger = update_command_ledger(live, 0, InlineExecutor{});
             if (!ledger) initialization_error = ledger.error();
@@ -158,9 +247,10 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
             core::load_profile::Scope fog_scope(core::load_profile::Phase::fog);
             // Tick zero marks every revealer's circle; there is no service before the first
             // step. The inline executor runs the same partitions a step does.
-            const auto field = SensorField::build(source.players, source.units, sensors).value();
+            const auto field = SensorField::build(source.players, source.units, sensors, {}, command_ledger.reveal_multipliers).value();
             fog.emplace(*fog_rules, source.players);
             static_cast<void>(fog->advance(0, false, revealers(field, source.units), InlineExecutor{}));
+            if (source.campaign) last_fog_multipliers=fog_multipliers(command_ledger);
         }
         publish_staged(live, {}, {});
     }
@@ -196,12 +286,22 @@ std::optional<DurabilityState> TacticalSession::Impl::entering_durability(
 LiveUnit TacticalSession::Impl::new_unit(const UnitState& unit, const std::uint64_t frame) const {
         const auto* profile = durability.find(unit.type_id);
         const auto* fighting = combat.find(unit.type_id);
-        return LiveUnit{unit, entering_durability(profile, unit.entity_id, frame),
+        auto live = LiveUnit{unit, entering_durability(profile, unit.entity_id, frame),
             motion.find(unit.type_id) != nullptr ? std::optional(MotionState{}) : std::nullopt, math::Fixed{},
             math::Fixed{},
-            fighting != nullptr ? std::optional(initial_combat(*fighting, setup.seed, frame, unit.entity_id))
+            fighting != nullptr && !fighting->planetary_weapon ? std::optional(initial_combat(*fighting, setup.seed, frame, unit.entity_id))
                                 : std::nullopt,
             std::nullopt, entering_abilities(unit.type_id, unit.owner)};
+        if (live.abilities) {
+            const auto& handlers = abilities.find(unit.type_id)->special;
+            for (std::size_t i = 0; i < handlers.size(); ++i) {
+                if (handlers[i].kind != SpecialAbilityKind::force_healing) continue;
+                // WSH-06: immediate first eligible poll with a keyed 0..1-frame creation phase.
+                CombatRandom random(setup.seed, frame, unit.entity_id, healing_initial_poll_slot);
+                live.abilities->special.slots[i].next_service_frame = frame + random.uniform(0, 1);
+            }
+        }
+        return live;
     }
 
 const DurabilityProfile* TacticalSession::Impl::health_profile(const LiveUnit& unit) const noexcept {
@@ -216,8 +316,11 @@ TacticalSession::~TacticalSession() = default;
 core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup,
     const std::span<const SensorProfile> sensors, const DurabilityTable& durability, const MotionTable& motion,
     const std::optional<FogRules>& fog, const CombatTable& combat, const VictoryRules& victory,
-    const AbilityTable& abilities, const EconomyRules& economy) {
+    const AbilityTable& abilities, const EconomyRules& economy, const MapBox& map_box) {
     auto valid = validate_setup(setup);
+    if (valid && (setup.campaign.has_value() != economy.campaign
+        || (setup.campaign && setup.campaign->players != economy.players)))
+        valid = core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "campaign setup and economy binding differ"));
     if (valid) {
         valid = validate_sensors(sensors);
     }
@@ -247,7 +350,7 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
     if (!valid) {
         return core::Result<TacticalSession>::failure(valid.error());
     }
-    auto impl = std::make_unique<Impl>(setup, sensors, durability, motion, fog, combat, victory, abilities, economy);
+    auto impl = std::make_unique<Impl>(setup, sensors, durability, motion, fog, combat, victory, abilities, economy, map_box);
     if (impl->initialization_error) return core::Result<TacticalSession>::failure(*impl->initialization_error);
     return core::Result<TacticalSession>::success(TacticalSession(std::move(impl)));
 }
@@ -255,8 +358,11 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
 core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay& replay,
     const std::span<const SensorProfile> sensors, const DurabilityTable& durability, const MotionTable& motion,
     const std::optional<FogRules>& fog, const CombatTable& combat, const VictoryRules& victory,
-    const AbilityTable& abilities, const EconomyRules& economy) {
+    const AbilityTable& abilities, const EconomyRules& economy, const MapBox& map_box) {
     auto valid = validate_replay(replay);
+    if (valid && (replay.setup.campaign.has_value() != economy.campaign
+        || (replay.setup.campaign && replay.setup.campaign->players != economy.players)))
+        valid = core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "campaign replay and economy binding differ"));
     if (valid && replay.setup.match_policy.value_or(SkirmishMatchPolicy{}) != economy.match_policy) {
         return core::Result<TacticalSession>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
             "replay match policy does not match the bound skirmish economy policy"));
@@ -292,7 +398,7 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
     }
     auto session = TacticalSession(
         std::make_unique<Impl>(replay.setup, sensors, durability, motion, fog, combat, victory, abilities,
-            economy));
+            economy, map_box));
     if (session.impl_->initialization_error) return core::Result<TacticalSession>::failure(*session.impl_->initialization_error);
     for (const auto& command : replay.commands) {
         const auto submitted = session.submit(command);
@@ -301,6 +407,28 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
         }
     }
     return core::Result<TacticalSession>::success(std::move(session));
+}
+
+core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup, const TacticalContent& content) {
+    auto resolved = setup;
+    if (auto valid = validate_setup(resolved); !valid) return core::Result<TacticalSession>::failure(valid.error());
+    if (content.retreat) resolve_cinematic_seats(resolved, content.economy.players);
+    auto result = create(resolved, content.sensors, content.durability, content.motion, content.fog, content.combat,
+        content.victory, content.abilities, content.economy, content.map_box);
+    if (result && content.retreat) {
+        auto configured = result.value().configure_retreat(*content.retreat);
+        if (!configured) return core::Result<TacticalSession>::failure(configured.error());
+    }
+    return result;
+}
+
+core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay& replay,
+    const TacticalContent& content) {
+    auto result = create(replay.setup, content);
+    if (!result) return result;
+    for (const auto& command : replay.commands)
+        if (auto submitted = result.value().submit(command); !submitted) return core::Result<TacticalSession>::failure(submitted.error());
+    return result;
 }
 
 
@@ -335,9 +463,24 @@ core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
         const auto applied = impl_->apply_bonuses(live.back(), impl_->bonuses_for(live.back(), true));
         if (!applied) return core::Result<EntityId>::failure(applied.error());
     }
+    auto locks = impl_->named_ability_locks;
+    if (const auto* health = impl_->durability.find(state.type_id))
+        if (const auto* handlers = impl_->abilities.find(state.type_id))
+            for (const auto& point : health->hardpoints)
+                if (!point.special_ability_name.empty())
+                    static_cast<void>(set_named_ability_lock(locks, state.owner, *handlers, point.special_ability_name, false));
+    auto roster = impl_->radar_roster;
+    auto slots = impl_->radar_slots(state.type_id);
+    if (!slots.empty()) roster.emplace(state.entity_id, std::move(slots));
+    if (roster != impl_->radar_roster || locks != impl_->named_ability_locks) {
+        auto radar = impl_->publish_named_abilities(live, locks, roster, InlineExecutor{});
+        if (!radar) return core::Result<EntityId>::failure(radar.error());
+        impl_->snapshot_players = std::move(radar).value();
+    }
+    impl_->named_ability_locks = std::move(locks);
     impl_->rebuild(live, false);
-    if (command_ledger) impl_->command_ledger = std::move(*command_ledger);
-    if (impl_->motion.squadrons.find_spawner(state.type_id) != nullptr) {
+    if (command_ledger) { impl_->command_ledger = std::move(*command_ledger); impl_->fog_modifiers_dirty=impl_->setup.campaign.has_value(); }
+    if (impl_->motion.squadrons.find_spawner(state.type_id, state.owner) != nullptr) {
         impl_->spawners.emplace(state.entity_id,
             initial_spawner(impl_->setup.seed, impl_->completed_tick + 1, state.entity_id));
     }
@@ -396,9 +539,15 @@ core::Result<void> TacticalSession::stage_remove(const EntityId unit) {
             if (!applied) return applied;
         }
     }
+    auto roster = impl_->radar_roster;
+    if (roster.erase(unit) != 0) {
+        auto radar = impl_->publish_named_abilities(live, impl_->named_ability_locks, roster, InlineExecutor{});
+        if (!radar) return core::Result<void>::failure(radar.error());
+        impl_->snapshot_players = std::move(radar).value();
+    }
     impl_->rebuild(live, false);
     impl_->ledgers = std::move(ledgers);
-    if (command_ledger) impl_->command_ledger = std::move(*command_ledger);
+    if (command_ledger) { impl_->command_ledger = std::move(*command_ledger); impl_->fog_modifiers_dirty=impl_->setup.campaign.has_value(); }
     if (sources_changed && !impl_->bonus_categories.empty()) impl_->committed_bonus_profiles.swap(impl_->bonus_profiles);
     impl_->spawners.erase(unit);
     impl_->pads.erase(unit);

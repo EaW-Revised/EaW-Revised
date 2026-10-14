@@ -9,6 +9,8 @@
 # Each directory that registers tests ends with eawr_label_tests(); eawr_check_test_tiers() at the
 # end of the root list file fails the configure when one does not.
 
+include("${CMAKE_CURRENT_LIST_DIR}/EawrGameDataTests.cmake")
+
 set(EAWR_SLOW_TESTS
 
     python_presentation_godot_qualify_package_runtime
@@ -21,6 +23,7 @@ set(EAWR_SLOW_TESTS
     foc_burn_battle
     foc_ai_economy
     foc_plan_battle
+    foc_plan_long_tail
     foc_schedule_957
     foc_soak_615
     foc_soak_664
@@ -42,21 +45,27 @@ set(EAWR_SLOW_TESTS
     vfs_supplemental
 )
 set(EAWR_GPU_TESTS
+
     python_presentation_space_environment_effect_graphical
     python_presentation_renderer_atlas_overlay
     python_presentation_renderer_batchmesh_alpha
     python_presentation_renderer_batchmesh_alpha_fog
-    python_presentation_renderer_battle_input
+
+
     python_presentation_renderer_battle_load
     python_presentation_renderer_camera_contract
     python_presentation_renderer_camera_input
     python_presentation_renderer_capture_size
+
     python_presentation_renderer_effect_mode
     python_presentation_renderer_effect_mode_capture
     python_presentation_renderer_font_mode
     python_presentation_renderer_hull_preview
+
+    python_presentation_renderer_hud_flytext
+    python_presentation_renderer_hud_readouts
     python_presentation_renderer_input_routing
-    python_presentation_renderer_live_session
+
     python_presentation_renderer_map_attached_effects
     python_presentation_renderer_map_camera
     python_presentation_renderer_map_fog
@@ -67,15 +76,17 @@ set(EAWR_GPU_TESTS
     python_presentation_renderer_particle_texture_origin
     python_presentation_renderer_render_profile
     python_presentation_renderer_runtime_renderer
+
     python_presentation_renderer_space_camera
     python_presentation_renderer_space_fog
     python_presentation_renderer_space_map_mode
     python_presentation_renderer_space_meshadditive_sky
     python_presentation_renderer_space_meshgloss_sky
+
     python_presentation_renderer_tactical_hud
     python_presentation_renderer_ui_gallery
     python_presentation_renderer_ui_movies
-    battle_cursor_runtime
+
     fog_godot_runtime
     fog_renderer_godot_runtime
     hull_asset_shadow_probe_contracts
@@ -124,6 +135,7 @@ endfunction()
 
 # Root list file, after every add_subdirectory: every directory with tests labelled them.
 function(eawr_check_test_tiers)
+    eawr_check_game_data_tests("${CMAKE_SOURCE_DIR}")
     set(unlabelled "")
     set(all_tests "")
     _eawr_collect_test_directories("${CMAKE_SOURCE_DIR}" unlabelled all_tests)

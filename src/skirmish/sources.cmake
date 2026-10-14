@@ -3,6 +3,7 @@
 
 set(EAWR_SKIRMISH_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/ai.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/attract.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/census.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/content.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/economy.cpp"

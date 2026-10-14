@@ -62,18 +62,23 @@ bool has_row(const std::vector<eawr::units::Unresolved>& rows, const std::string
              const std::string_view field, const std::string_view value = {});
 void object_weapon_defaults();
 void squadron_container_health();
+void retail_value_rules();
 void living_collision_admission();
 void ship_suitability_content();
 void height_adjusted_aim();
+void object_weapon_muzzles();
 void presentation_admission();
 void print_rows(const std::string_view label, const std::vector<eawr::units::Unresolved>& rows);
 void mass_driver_type();
 void synthetic_tables();
+void space_population();
+void object_script_inheritance();
 void priority_rules();
 void content_identity();
 void bind_frame_errors();
 void hunt_tables();
-void foc_fleet();
+void foc_fleet(bool formation_only = false);
+void foc_formation_deceleration(eawr::units::LoadInput input);
 
 struct TempTree final {
     std::filesystem::path root = std::filesystem::temp_directory_path() /

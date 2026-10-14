@@ -1,10 +1,21 @@
 #include "eawr/presentation/ui/world_ui.hpp"
+#include "eawr/data/xml.hpp"
+#include "eawr/data/tag_trace.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <charconv>
 #include <limits>
 
 namespace eawr::presentation::ui {
+
+double WaypointDashClock::sample(const bool shown, const double presented_tick,
+                                const double velocity, const double period) noexcept {
+    if (!shown) { start_tick_.reset(); return 0.0; }
+    if (!start_tick_ || presented_tick < *start_tick_) start_tick_ = presented_tick;
+    if (period <= 0.0) return 0.0;
+    return std::fmod((presented_tick - *start_tick_) * velocity, period);
+}
 
 std::array<std::uint32_t, 2> world_ability_overlays(const WorldOverlayUnit& unit, const AbilityState& state) {
     std::array<std::uint32_t, 2> result{};
@@ -167,9 +178,28 @@ SquadronIconRect squadron_icon_rect(const std::array<float, 2> centre, const flo
     return {std::floor(left), std::ceil(top), side, side};
 }
 
-float squadron_health(const float health_sum, const float max_health_sum) noexcept {
-    if (!(max_health_sum > 0.0F) || !std::isfinite(health_sum)) return 0.0F;
-    return std::clamp(health_sum / max_health_sum, 0.0F, 1.0F);
+float display_health(const sim::tactical::InstanceDurability& durability,
+    const sim::tactical::DurabilityProfile* const profile) noexcept {
+    const auto max_hull = durability.max_hull.raw();
+    if (max_hull <= 0) return 0.0F;
+    double health = std::clamp(static_cast<double>(durability.hull.raw()) / static_cast<double>(max_hull), 0.0, 1.0);
+    if (profile == nullptr || !profile->destroyed_with_hardpoints) return static_cast<float>(health);
+    std::int64_t maximum = 0;
+    std::int64_t current = 0;
+    for (std::size_t index = 0; index < profile->hardpoints.size() && index < durability.hardpoints.size(); ++index) {
+        if (!profile->hardpoints[index].destroyable) continue;
+        maximum += profile->hardpoints[index].max_health.raw();
+        current += std::max<std::int64_t>(durability.hardpoints[index].health.raw(), 0);
+    }
+    if (maximum > 0) health = std::min(health, std::clamp(static_cast<double>(current) / static_cast<double>(maximum), 0.0, 1.0));
+    return static_cast<float>(health);
+}
+
+float squadron_health(const std::span<const float> live_craft_health) noexcept {
+    if (live_craft_health.empty()) return 0.0F;
+    double sum = 0.0;
+    for (const float health : live_craft_health) sum += std::isfinite(health) ? std::clamp(health, 0.0F, 1.0F) : 0.0F;
+    return static_cast<float>(sum / static_cast<double>(live_craft_health.size()));
 }
 
 float squadron_icon_screen_offset(const float screen_height) noexcept {
@@ -178,10 +208,12 @@ float squadron_icon_screen_offset(const float screen_height) noexcept {
 
 CombatCell combat_cell_of(const std::array<float, 2> point, const std::array<float, 2> origin) noexcept {
     CombatCell cell;
-    cell.y = static_cast<int>(std::floor((point[1] - origin[1]) / combat_cell_size));
+    // WDF-05: truncated row and column from the box's low corner; an odd row's x is clamped to it.
+    cell.y = static_cast<int>(std::trunc((point[1] - origin[1]) / combat_cell_size));
     float x = point[0];
     if ((cell.y & 1) != 0) x -= combat_cell_size * 0.5F;
-    cell.x = static_cast<int>(std::floor((x - origin[0]) / combat_cell_size));
+    x = std::max(x, origin[0]);
+    cell.x = static_cast<int>(std::trunc((x - origin[0]) / combat_cell_size));
     return cell;
 }
 
@@ -389,10 +421,39 @@ std::string_view hardpoint_reticle_texture(const std::string_view hardpoint_type
     return {};
 }
 
-ReticleRect hardpoint_reticle_rect(const std::array<float, 2> centre, const std::array<float, 2> viewport) noexcept {
-    // WU-31: 0.03 of the screen wide, 4/3 of that share of the screen high, centred.
-    const float width = hardpoint_reticle_screen_size * viewport[0];
-    const float height = hardpoint_reticle_screen_size * 4.0F / 3.0F * viewport[1];
+std::optional<HardpointReticleSizes> hardpoint_reticle_sizes(const vfs::Vfs& filesystem) {
+    const auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
+    if (!document) return std::nullopt;
+    HardpointReticleSizes result;
+    for (const auto& [name, destination] : std::array{
+        std::pair{"HardPoint_Target_Reticle_Enemy_Screen_Size", &result.enemy},
+        std::pair{"HardPoint_Target_Reticle_Friendly_Screen_Size", &result.friendly}}) {
+        const data::XmlNode* found{};
+        for (const auto& node : document.value().root.children) {
+            const std::string_view tag(name);
+            if (node.name.size() == tag.size() && std::equal(node.name.begin(), node.name.end(), tag.begin(),
+                [](char a, char b) { return (a >= 'A' && a <= 'Z' ? a + 'a' - 'A' : a)
+                    == (b >= 'A' && b <= 'Z' ? b + 'a' - 'A' : b); })) found = &node;
+        }
+        if (!found) return std::nullopt;
+        data::tag_trace::used(*found);
+        const auto first = found->raw_text.find_first_not_of(" \t\r\n");
+        const auto last = found->raw_text.find_last_not_of(" \t\r\n");
+        if (first == std::string::npos) return std::nullopt;
+        const auto raw = std::string_view(found->raw_text).substr(first, last - first + 1);
+        float value{};
+        const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+        if (error != std::errc{} || end != raw.data() + raw.size() || !std::isfinite(value) || value < 0) return std::nullopt;
+        *destination = value;
+    }
+    return result;
+}
+
+ReticleRect hardpoint_reticle_rect(const std::array<float, 2> centre, const std::array<float, 2> viewport,
+                                  const float screen_size) noexcept {
+    // WU-31: authored screen share, 4/3 height, centred.
+    const float width = screen_size * viewport[0];
+    const float height = screen_size * 4.0F / 3.0F * viewport[1];
     return {centre[0] - width * 0.5F, centre[1] - height * 0.5F, width, height};
 }
 

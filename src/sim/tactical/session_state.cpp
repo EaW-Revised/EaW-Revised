@@ -37,8 +37,129 @@
 #include <vector>
 
 #include "session_encoding.hpp"
+#include "checkpoint_fields_internal.hpp"
 
 namespace eawr::sim::tactical {
+
+core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state() const {
+    try {
+        checkpoint_detail::Writer out;
+        out(std::uint32_t{9U}); // Includes retained squadron destination hardpoints.
+        auto live = impl_->sorted_live();
+        checkpoint_detail::Access::state(out, std::as_const(*impl_));
+        out(live);
+        out(checkpoint_detail::Access::visibility(*impl_));
+        out(static_cast<std::uint64_t>(impl_->searches.size()));
+        for (const auto& [id, search] : impl_->searches) {
+            out(id, search.search.checkpoint(), search.frame, search.target, search.max_speed, search.inputs, search.plan);
+        }
+        out(encode_retreat_state(impl_->retreat_state), impl_->midbattle_solve);
+        return core::Result<std::vector<std::uint8_t>>::success(std::move(out.bytes));
+    } catch (const checkpoint_detail::Invalid& error) {
+        return core::Result<std::vector<std::uint8_t>>::failure(detail::diagnostic(diagnostic_codes::resource_limit, error.what()));
+    }
+}
+
+core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const std::uint8_t> bytes) {
+    try {
+        checkpoint_detail::Reader in(bytes);
+        std::uint32_t version{};
+        in(version);
+        if (version != (9U)) throw checkpoint_detail::Invalid("unsupported child state domain");
+        const auto cursors = impl_->last_submitted;
+        checkpoint_detail::Access::state(in, *impl_);
+        if (impl_->last_submitted != cursors) throw checkpoint_detail::Invalid("command cursors disagree with sealed log");
+        if (impl_->committed_bonus_profiles.size() != impl_->ownership_keys.size())
+            throw checkpoint_detail::Invalid("bonus profile census disagrees with content");
+        for (const auto& source : impl_->command_ledger.sources)
+            if (source.profile >= impl_->economy.command_bonuses.size()) throw checkpoint_detail::Invalid("invalid command bonus profile");
+        for (const auto& [id, sources] : impl_->command_ledger.recipients) {
+            static_cast<void>(id);
+            for (const auto source : sources) if (source >= impl_->command_ledger.sources.size())
+                throw checkpoint_detail::Invalid("invalid command bonus recipient");
+        }
+        std::vector<LiveUnit> live;
+        in(live);
+        checkpoint_detail::Access::PublishedVisibility visibility;
+        in(visibility);
+        if (impl_->completed_tick > max_ticks || live.size() > max_units) throw checkpoint_detail::Invalid("state exceeds tactical limits");
+        EntityId previous = 0;
+        for (auto& unit : live) {
+            if (unit.state.entity_id <= previous || (impl_->next_id != 0 && unit.state.entity_id >= impl_->next_id)
+                || !std::binary_search(impl_->setup.players.begin(), impl_->setup.players.end(), unit.state.owner,
+                    [](const auto& a, const auto& b) {
+                        if constexpr (std::is_same_v<std::decay_t<decltype(a)>, Player>) return a.player_id < b;
+                        else return a < b.player_id;
+                    })) throw checkpoint_detail::Invalid("invalid live unit identity or owner");
+            previous = unit.state.entity_id;
+            if (!math::to_matrix(unit.state.rotation, unit.state.position)) throw checkpoint_detail::Invalid("invalid live unit transform");
+            if (unit.durability) {
+                const auto* profile = impl_->health_profile(unit);
+                if (!profile || unit.durability->hardpoints.size() != profile->hardpoints.size())
+                    throw checkpoint_detail::Invalid("durability binding disagrees with content");
+            }
+            if (unit.abilities) {
+                const auto* profile = impl_->abilities.find(unit.state.type_id);
+                if (!profile || unit.abilities->slots.size() != profile->abilities.size()
+                    || unit.abilities->special.slots.size() != profile->special.size())
+                    throw checkpoint_detail::Invalid("ability binding disagrees with content");
+            }
+            if (unit.combat) {
+                const auto* profile = impl_->combat.find(unit.state.type_id);
+                if (!profile || unit.combat->weapons.size() != profile->weapons.size())
+                    throw checkpoint_detail::Invalid("combat binding disagrees with content");
+            }
+        }
+        if (impl_->setup.campaign) {
+            auto derived = impl_->update_command_ledger(live, impl_->next_id, InlineExecutor{});
+            if (!derived || derived.value().battlefield_defence != impl_->command_ledger.battlefield_defence
+                || derived.value().reveal_multipliers != impl_->command_ledger.reveal_multipliers)
+                throw checkpoint_detail::Invalid("campaign player modifier ledger disagrees with its live sources");
+            for(std::size_t i=0;i<impl_->last_fog_multipliers.size();++i) if(impl_->last_fog_multipliers[i]<math::Fixed{}
+                || (i>=impl_->setup.players.size() && impl_->last_fog_multipliers[i]!=math::Fixed{})) throw checkpoint_detail::Invalid("invalid last-fog multiplier cache");
+            impl_->fog_modifiers_dirty=impl_->fog_multipliers(impl_->command_ledger)!=impl_->last_fog_multipliers;
+        }
+        const auto search_count = in.count();
+        impl_->searches.clear();
+        EntityId previous_search = 0;
+        for (std::uint64_t i = 0; i < search_count; ++i) {
+            EntityId id{};
+            SlicedPathSearch::Checkpoint saved;
+            std::uint64_t frame{};
+            math::Vec3 target{};
+            std::optional<math::Fixed> max_speed;
+            Impl::PathInputs inputs;
+            std::optional<MotionState> plan;
+            in(id, saved, frame, target, max_speed, inputs, plan);
+            if (id <= previous_search || saved.entity != id) throw checkpoint_detail::Invalid("invalid sliced search identity");
+            previous_search = id;
+            auto search = SlicedPathSearch::from_checkpoint(impl_->motion, saved);
+            if (!search) throw checkpoint_detail::Invalid(search.error().message);
+            impl_->searches.emplace(id, Impl::SlicedSearch{std::move(search).value(), frame, target, max_speed, inputs, plan});
+        }
+        std::vector<std::uint8_t> retreat_bytes;
+        in(retreat_bytes, impl_->midbattle_solve);
+        auto retreat_saved = decode_retreat_state(retreat_bytes);
+        if (!retreat_saved || (!impl_->retreat && retreat_saved.value().phase != RetreatPhase::idle)
+            || (impl_->midbattle_solve && (!impl_->retreat || !impl_->teams.contains(*impl_->midbattle_solve))))
+            throw checkpoint_detail::Invalid("invalid campaign retreat state");
+        impl_->retreat_state = std::move(retreat_saved).value();
+        for (auto& unit : live) impl_->refresh_damage_modes(unit);
+        if (in.remaining() != 0) throw checkpoint_detail::Invalid("trailing child-state bytes");
+        // The factory submitted the sealed log. Move its past commands into the immutable record.
+        impl_->executed.clear();
+        for (auto it = impl_->pending.begin(); it != impl_->pending.end() && it->first.tick < impl_->completed_tick;) {
+            impl_->executed.push_back(it->second);
+            it = impl_->pending.erase(it);
+        }
+        impl_->rebuild(live, false);
+        impl_->publish_staged(live, {}, {});
+        checkpoint_detail::Access::restore_visibility(*impl_, visibility);
+        return core::Result<void>::success();
+    } catch (const checkpoint_detail::Invalid& error) {
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, error.what()));
+    }
+}
 
 namespace session_detail {
 
@@ -83,14 +204,17 @@ void TacticalSession::Impl::publish_staged(const std::vector<LiveUnit>& live, st
         for (const auto& unit : live) {
             states.push_back(unit.state);
         }
-        const auto field = SensorField::build(setup.players, states, sensors).value();
+        const auto field = SensorField::build(setup.players, states, sensors, {}, command_ledger.reveal_multipliers).value();
         std::vector<TacticalInstance> instances;
         instances.reserve(live.size());
+        waypoint_queues_present = false;
         for (const auto& unit : live) {
-            auto instance = instance_for(unit, math::to_matrix(unit.state.rotation, unit.state.position).value(), completed_tick);
+            // WWP-73: staged publication preserves the drawn frame without mutating live caches.
+            const auto rotation = banked_rotation(unit.state.rotation, unit.roll).value();
+            auto instance = instance_for(unit, math::to_matrix(rotation, unit.state.position).value(), completed_tick);
             instance.visible_to = visible_to(field, fog ? &*fog : nullptr, unit.state.owner, unit.state.position,
                 unit.state.type_id, unit.state.rotation);
-            instance.reveal_range = field.reveal_range(unit.state.type_id);
+            instance.reveal_range = field.reveal_range(unit.state.type_id, unit.state.owner);
             if (const auto craft = crafts.find(unit.state.entity_id); craft != crafts.end()) {
                 instance.craft_velocity_per_frame = craft->second.velocity;
             }
@@ -101,13 +225,24 @@ void TacticalSession::Impl::publish_staged(const std::vector<LiveUnit>& live, st
                 instance.has_movement_path = flight.mode == SquadronMode::move || flight.approach
                     || (flight.mode == SquadronMode::escort && !flight.idle_cell);
             }
+            if (unit.waypoints) waypoint_queues_present |= !unit.waypoints->points.empty();
             instances.push_back(std::move(instance));
         }
         current_snapshot = std::make_shared<const TacticalSnapshot>(completed_tick, snapshot_players,
             std::move(instances), std::move(events), std::move(combat_events), projectiles, outcome,
             std::vector<SpinningCraft>{}, std::vector<SquadronTarget>{}, squadrons, economy_views(ledgers, shares), pad_views(), quits,
-            losses, productions, manual_clock_views(), economy_cues, ability_spawns);
+            losses, productions, manual_clock_views(), economy_cues, ability_spawns, retreat_views(), garrison_timer_views(), beacons);
     }
+
+std::vector<GarrisonTimerView> TacticalSession::Impl::garrison_timer_views() const {
+    // WSL-29: bounded player publication copies already committed timers;
+    // this changes no service phase, timer admission or canonical state.
+    std::vector<GarrisonTimerView> views;
+    views.reserve(free_garrisons.size());
+    for (const auto& state : free_garrisons)
+        views.push_back({state.setup.player, state.setup.delay_frames, state.due_frame});
+    return views;
+}
 
 std::vector<PadView> TacticalSession::Impl::pad_views() const {
         std::vector<PadView> views;
@@ -121,14 +256,17 @@ std::vector<PadView> TacticalSession::Impl::pad_views() const {
     }
 
 std::vector<FogRevealer> TacticalSession::Impl::revealers(const SensorField& field, const std::span<const UnitState> units,
-    const std::span<const EntityId> disabled) {
+    const std::span<const HeldReveal> held) {
         std::vector<FogRevealer> result;
         for (const auto& unit : units) {
-            if (const auto range = field.reveal_range(unit.type_id);
-                range && !std::binary_search(disabled.begin(), disabled.end(), unit.entity_id)) {
-                result.push_back(FogRevealer{unit.entity_id, unit.owner, unit.position, *range,
-                    field.profile(unit.type_id)->dense_multiplier});
-            }
+            const auto range = field.reveal_range(unit.type_id, unit.owner);
+            if (!range) continue;
+            math::Vec3 position = unit.position;
+            const auto at = std::lower_bound(held.begin(), held.end(), unit.entity_id,
+                [](const HeldReveal& entry, const EntityId id) { return entry.id < id; });
+            if (at != held.end() && at->id == unit.entity_id) position = at->position;
+            result.push_back(FogRevealer{unit.entity_id, unit.owner, position, *range,
+                field.profile(unit.type_id)->dense_multiplier});
         }
         return result;
     }
@@ -169,28 +307,79 @@ std::uint64_t TacticalSession::Impl::visible_to(const SensorField& field, const 
         return mask;
     }
 
-TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const math::Mat3x4& transform, const std::uint64_t now) const {
+TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const math::Mat3x4& transform,
+    const std::uint64_t now, const std::map<EntityId, SpecialWeaponState>* staged_special) const {
         TacticalInstance instance{unit.state.entity_id, unit.state.type_id, unit.state.owner,
             teams.at(unit.state.owner), transform, 0, {}, {}, {}};
+        instance.contained = unit.state.contained;
         if (unit.durability) {
             instance.durability = durability_status(*health_profile(unit), durability, *unit.durability);
         }
+        if (unit.waypoints) {
+            instance.waypoint_points.reserve(unit.waypoints->points.size());
+            for (const auto& point : unit.waypoints->points)
+                instance.waypoint_points.push_back({point.move.destination, point.repeat});
+        }
         instance.abilities = ability_statuses(unit, now);
+        // WU-37: birth marks survive ownership changes and loss of original members.
+        // Replenishment does not propagate a mark from craft to team or team to craft.
+        instance.garrison_unit = unit.garrison_unit;
+        if (const auto team = minds.find(unit.state.entity_id); team != minds.end())
+            instance.garrison_unit = team->second.garrison_unit;
+        detail::CombatUnit targeting;
+        targeting.type_id = unit.state.type_id;
+        targeting.profile = combat.find(unit.state.type_id);
+        targeting.footprint = combat.footprint(unit.state.type_id);
+        instance.category_bits = targeting.profile ? targeting.profile->category_bits : 0;
+        instance.target_stealth = targeting.profile && targeting.profile->target_stealth;
+        instance.soft_radius = detail::target_soft_radius(&motion, targeting);
+        const auto& special_states = staged_special ? *staged_special : special_weapons;
+        if (const auto found = special_states.find(unit.state.entity_id); found != special_states.end()) {
+            const auto* profile = combat.find(unit.state.type_id);
+            if (profile && profile->planetary_weapon) {
+                const auto& special = *profile->planetary_weapon;
+                const auto& state = found->second;
+                auto readiness = math::Fixed::from_raw(math::Fixed::scale);
+                if (now < state.recharge_until && state.recharge_until > state.recharge_started) {
+                    const auto elapsed = now > state.recharge_started ? now - state.recharge_started : 0;
+                    readiness = math::Fixed::from_raw(static_cast<std::int64_t>(
+                        elapsed * math::Fixed::scale / (state.recharge_until - state.recharge_started)));
+                }
+                instance.planetary_weapon = TacticalInstance::PlanetaryWeaponView{
+                    special.index, special.target_action, special.valid_targets, state, readiness};
+            }
+        }
         instance.has_movement_path = unit.motion && unit.motion->kind == MotionKind::path;
         if (unit.motion && motion.find(unit.state.type_id)) instance.locomotor_speed_per_frame = unit.speed;
         instance.in_tractor_beam = unit.in_tractor_beam;
+        if (unit.abilities) {
+            instance.stealth_on = unit.abilities->stealth_on;
+            instance.stealth_invisible = stealth_invisible(*unit.abilities, now, abilities.find(unit.state.type_id));
+        }
         instance.in_asteroid_field = unit.asteroid_contact.has_value();
         instance.in_nebula = unit.nebula && unit.nebula->present;
+        instance.corrupt = unit.corrupt;
         instance.in_ion_storm = durability.damage && unit.durability && in_ion_storm(*durability.damage, *unit.durability, now);
         if (instance.in_ion_storm && instance.durability) instance.durability->shields_online = false;
         if (unit.combat) {
             const auto* profile = combat.find(unit.state.type_id);
             for (std::size_t index = 0; index < unit.combat->weapons.size(); ++index) {
                 const auto& weapon = unit.combat->weapons[index];
+                if (weapon.turret) {
+                    instance.object_turret = weapon.turret;
+                    if (profile && profile->weapons[index].object_turret) {
+                        const auto& turret = *profile->weapons[index].object_turret;
+                        instance.object_turret_xy_only = turret.xy_only;
+                        instance.object_turret_barrel = turret.barrel;
+                    }
+                }
                 if (!weapon.manual || profile == nullptr) continue;
                 const auto& manual = *weapon.manual;
                 instance.manual_weapons.push_back({profile->weapons[index].hardpoint, manual.target,
-                    manual.requesting_player, manual.assigned_frame, manual.yaw, manual.pitch});
+                    manual.requesting_player, manual.assigned_frame, manual.yaw, manual.pitch,
+                    weapon.countdown, weapon.pulses_left, !unit.durability || weapon_enabled(
+                        *health_profile(unit), *unit.durability, profile->weapons[index].hardpoint),
+                    manual_admission_profiles.at({unit.state.type_id, profile->weapons[index].hardpoint})});
             }
         }
         if (ion_stunned(unit.ion_stun, now)) {
@@ -214,6 +403,12 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
         sim::detail::append_u64(bytes, completed_tick);
         sim::detail::append_u64(bytes, next_id);
         sim::detail::append_u64(bytes, rng_state);
+        if (retreat) {
+            bytes.insert(bytes.end(), {'R', 'T', 'R', 'T'});
+            const auto encoded = encode_retreat_state(retreat_state);
+            sim::detail::append_u64(bytes, encoded.size()); bytes.insert(bytes.end(), encoded.begin(), encoded.end());
+            sim::detail::append_u32(bytes, midbattle_solve.value_or(0));
+        }
         bytes.insert(bytes.end(), setup.content_identity.begin(), setup.content_identity.end());
         sim::detail::append_u64(bytes, setup.players.size());
         for (const auto& player : setup.players) {
@@ -274,6 +469,40 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
             }
         }
         std::uint64_t manual_weapons = 0;
+        if (!named_ability_locks.empty()) {
+            bytes.insert(bytes.end(), {'N', 'L', 'C', 'K'});
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u32(bytes, 0);
+            sim::detail::append_u64(bytes, named_ability_locks.size());
+            for (const auto& [key, locked] : named_ability_locks) {
+                const auto& [owner, type, name] = key;
+                sim::detail::append_u32(bytes, owner);
+                sim::detail::append_u64(bytes, type);
+                sim::detail::append_u64(bytes, name.size());
+                bytes.insert(bytes.end(), name.begin(), name.end());
+                sim::detail::append_u32(bytes, locked ? 1U : 0U);
+            }
+        }
+        // WSW-14/19: coordinator-reserved optional block; ordinary sessions retain their bytes.
+        if (!special_weapons.empty() || !special_disabled_by_hardpoint.empty()) {
+            bytes.insert(bytes.end(), {'S', 'W', 'P', 'N'});
+            sim::detail::append_u32(bytes, special_disabled_by_hardpoint.empty() ? 1U : 2U);
+            sim::detail::append_u32(bytes, 0);
+            sim::detail::append_u64(bytes, special_weapons.size());
+            for (const auto& [id, state] : special_weapons) {
+                sim::detail::append_u64(bytes, id);
+                sim::detail::append_u64(bytes, state.recharge_started);
+                sim::detail::append_u64(bytes, state.recharge_until);
+                sim::detail::append_u64(bytes, state.next_pulse_frame);
+                sim::detail::append_u64(bytes, state.target);
+                sim::detail::append_u32(bytes, state.pulses_left);
+                sim::detail::append_u32(bytes, state.instances);
+            }
+            if (!special_disabled_by_hardpoint.empty()) {
+                sim::detail::append_u64(bytes, special_disabled_by_hardpoint.size());
+                for (const auto player : special_disabled_by_hardpoint) sim::detail::append_u32(bytes, player);
+            }
+        }
         if (!free_garrisons.empty()) {
             bytes.insert(bytes.end(), {'G', 'A', 'R', 'R'});
             sim::detail::append_u32(bytes, 1);
@@ -322,6 +551,31 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 sim::detail::append_u64(bytes, clock.last_fired_frame);
             }
         }
+        std::uint64_t turret_count = 0;
+        for (const auto& unit : units) {
+            if (!unit.combat) continue;
+            for (const auto& weapon : unit.combat->weapons) turret_count += weapon.turret ? 1 : 0;
+        }
+        if (turret_count != 0) {
+            bytes.insert(bytes.end(), {'O', 'T', 'U', 'R'});
+            sim::detail::append_u64(bytes, turret_count);
+            for (const auto& unit : units) {
+                if (!unit.combat) continue;
+                for (std::uint32_t index = 0; index < unit.combat->weapons.size(); ++index) {
+                    const auto& turret = unit.combat->weapons[index].turret;
+                    if (!turret) continue;
+                    sim::detail::append_u64(bytes, unit.state.entity_id);
+                    sim::detail::append_u32(bytes, index);
+                    sim::detail::append_u64(bytes, turret->target);
+                    for (const auto angle : {turret->yaw, turret->pitch, turret->desired_yaw, turret->desired_pitch})
+                        append_fixed(bytes, angle);
+                    bytes.push_back(turret->ready ? 1 : 0);
+                    bytes.push_back(turret->rest_started_frame ? 1 : 0);
+                    sim::detail::append_u64(bytes, turret->rest_started_frame.value_or(0));
+                    bytes.push_back(turret->returning_to_rest ? 1 : 0);
+                }
+            }
+        }
         // Squadron membership (#271) and fog cells (#274) follow as tagged blocks, only when
         // present, so a session without them hashes exactly as before.
         if (!squadrons.empty()) {
@@ -338,6 +592,11 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
         if (fog) {
             bytes.insert(bytes.end(), fog_tag.begin(), fog_tag.end());
             fog->append_state(bytes);
+            if (setup.campaign) {
+                bytes.insert(bytes.end(),{'G','C','F','W'});
+                sim::detail::append_u64(bytes,setup.players.size());
+                for(std::size_t i=0;i<setup.players.size();++i) sim::detail::append_i64(bytes,last_fog_multipliers[i].raw());
+            }
         }
         if (motion.avoidance) {
             bytes.insert(bytes.end(), tracking_tag.begin(), tracking_tag.end());
@@ -370,34 +629,43 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 detail::append_projectile(bytes, projectile);
             }
         }
-        // Waiting group members (#344), then ships waiting for a sliced search (PC-08), each
+        // Waiting group members (#344), sliced searches (PC-08), and failed searches (FC-68), each
         if (!pending_blast_damage.empty()) {
-            constexpr std::array<std::uint8_t, 4> blast_tag{'B', 'L', 'S', 'T'};
+            constexpr std::array<std::uint8_t, 4> blast_tag{'D', 'D', 'M', 'G'};
             bytes.insert(bytes.end(), blast_tag.begin(), blast_tag.end());
-            sim::detail::append_u32(bytes, 3);
+            sim::detail::append_u32(bytes, 1);
             sim::detail::append_u32(bytes, 0);
             sim::detail::append_u64(bytes, pending_blast_damage.size());
-            for (const auto& queued : pending_blast_damage) {
+            std::vector<std::size_t> order(pending_blast_damage.size());
+            for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
+            std::stable_sort(order.begin(), order.end(), [&](const auto left, const auto right) {
+                return pending_blast_damage[left].due < pending_blast_damage[right].due;
+            });
+            for (const auto index : order) {
+                const auto& queued = pending_blast_damage[index];
                 sim::detail::append_u64(bytes, queued.due);
-                sim::detail::append_u64(bytes, queued.recipient.id);
-                append_fixed(bytes, queued.recipient.amount);
-                append_fixed(bytes, queued.recipient.delay);
-                sim::detail::append_u32(bytes, queued.recipient.hardpoint);
+                sim::detail::append_u64(bytes, queued.recipient);
+                append_fixed(bytes, queued.amount);
                 sim::detail::append_u32(bytes, queued.owner);
                 sim::detail::append_u32(bytes, queued.damage_type);
                 sim::detail::append_u32(bytes, queued.internal_damage_misc ? 1U : 0U);
+                sim::detail::append_u32(bytes, static_cast<std::uint32_t>(queued.contacted_mesh.size()));
+                bytes.insert(bytes.end(), queued.contacted_mesh.begin(), queued.contacted_mesh.end());
             }
         }
         // Waiting group members (#344), then ships waiting for a sliced search (PC-08), each
         // ascending ID, only while any wait.
-        for (const bool sliced : {false, true}) {
+        for (const unsigned group : {0U, 1U, 2U}) {
             std::vector<std::pair<EntityId, const FormationWait*>> waits;
             for (const auto& unit : units) {
-                if (unit.formation && unit.formation->sliced == sliced) waits.emplace_back(unit.state.entity_id, &*unit.formation);
+                if (!unit.formation) continue;
+                const auto wait_group = unit.formation->failure_frame ? 2U : (unit.formation->sliced ? 1U : 0U);
+                if (wait_group == group) waits.emplace_back(unit.state.entity_id, &*unit.formation);
             }
             if (waits.empty()) continue;
-            const auto& tag = sliced ? sliced_tag : formation_tag;
+            const auto& tag = group == 2U ? path_retry_tag : (group == 1U ? sliced_tag : formation_tag);
             bytes.insert(bytes.end(), tag.begin(), tag.end());
+            if (group == 2U) sim::detail::append_u32(bytes, path_retry_block_version);
             sim::detail::append_u64(bytes, waits.size());
             for (const auto& [id, wait] : waits) {
                 sim::detail::append_u64(bytes, id);
@@ -410,6 +678,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 sim::detail::append_u32(bytes, wait->order.player_id);
                 sim::detail::append_u64(bytes, wait->order.sequence);
                 sim::detail::append_u32(bytes, wait->rank);
+                if (group == 2U) sim::detail::append_u64(bytes, *wait->failure_frame);
             }
         }
         // Approach mappings (#452), ascending ID, only while any unit has one.
@@ -425,6 +694,37 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 sim::detail::append_u64(bytes, approach->prediction_frame);
             }
         }
+        // WMV-13 (#719): last observed order targets, ascending ID, only while any unit keeps one.
+        std::vector<std::pair<EntityId, const Sighting*>> sightings;
+        for (const auto& unit : units) {
+            if (unit.sighting) sightings.emplace_back(unit.state.entity_id, &*unit.sighting);
+        }
+        if (!sightings.empty()) {
+            bytes.insert(bytes.end(), sighting_tag.begin(), sighting_tag.end());
+            sim::detail::append_u64(bytes, sightings.size());
+            for (const auto& [id, sighting] : sightings) {
+                sim::detail::append_u64(bytes, id);
+                sim::detail::append_u64(bytes, sighting->target);
+                append_fixed(bytes, sighting->point.x);
+                append_fixed(bytes, sighting->point.y);
+                append_fixed(bytes, sighting->point.z);
+            }
+        }
+        // WU-37, GRSN v1: independent object and team birth marks, in stable ID order.
+        const auto marked_units = std::count_if(units.begin(), units.end(),
+            [](const auto& unit) { return unit.garrison_unit; });
+        const auto marked_teams = std::count_if(minds.begin(), minds.end(),
+            [](const auto& entry) { return entry.second.garrison_unit; });
+        if (marked_units != 0 || marked_teams != 0) {
+            bytes.insert(bytes.end(), garrison_tag.begin(), garrison_tag.end());
+            sim::detail::append_u32(bytes, garrison_block_version);
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(marked_units));
+            for (const auto& unit : units) if (unit.garrison_unit)
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(marked_teams));
+            for (const auto& [id, mind] : minds) if (mind.garrison_unit)
+                sim::detail::append_u64(bytes, id);
+        }
         // Squadron flight, orders and hangars (#75), each only when present.
         if (!crafts.empty()) {
             bytes.insert(bytes.end(), craft_tag.begin(), craft_tag.end());
@@ -439,6 +739,47 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
             for (const auto& [container, state] : minds) {
                 static_cast<void>(container);
                 append_squadron_state(bytes, state);
+            }
+        }
+        // SQAP v2 retains route facing/mapping and member annotations.
+        const auto attack_paths = std::count_if(minds.begin(), minds.end(),
+            [](const auto& entry) { return entry.second.attack_path.has_value(); });
+        if (attack_paths != 0) {
+            bytes.insert(bytes.end(), squadron_attack_path_tag.begin(), squadron_attack_path_tag.end());
+            sim::detail::append_u32(bytes, 2);
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(attack_paths));
+            for (const auto& [id, state] : minds) {
+                if (!state.attack_path) continue;
+                const auto& path = *state.attack_path;
+                sim::detail::append_u64(bytes, id);
+                sim::detail::append_u64(bytes, path.target);
+                append_vec3(bytes, path.cached_position);
+                sim::detail::append_u64(bytes, path.next_refresh_frame);
+                sim::detail::append_u64(bytes, path.collision_identity);
+                sim::detail::append_u64(bytes, path.stack_changed_frame);
+                sim::detail::append_u64(bytes, path.escorted_destination);
+                sim::detail::append_u32(bytes, path.initialization_pending ? 1U : 0U);
+                sim::detail::append_u32(bytes, path.failure_frame ? 1U : 0U);
+                if (path.failure_frame) sim::detail::append_u64(bytes, *path.failure_frame);
+                sim::detail::append_u64(bytes, path.stack.size());
+                for (const auto& route : path.stack) {
+                    sim::detail::append_u64(bytes, route.identity);
+                    append_fixed(bytes, route.aside);
+                    append_vec3(bytes, route.start_facing);
+                    append_fixed(bytes, route.ahead);
+                    sim::detail::append_u64(bytes, route.nodes.size());
+                    for (const auto& node : route.nodes) append_vec3(bytes, node);
+                    sim::detail::append_u64(bytes, route.node_speeds.size());
+                    for (const auto speed : route.node_speeds) append_fixed(bytes, speed);
+                    sim::detail::append_u64(bytes, route.trackers.size());
+                    for (const auto& [member, tracker] : route.trackers) {
+                        sim::detail::append_u64(bytes, member);
+                        sim::detail::append_u32(bytes, tracker.segment);
+                        sim::detail::append_u32(bytes, tracker.started ? 1U : 0U);
+                        append_fixed(bytes, tracker.turn_scale);
+                        append_fixed(bytes, tracker.speed_scale);
+                    }
+                }
             }
         }
         if (!spawners.empty()) {
@@ -654,6 +995,67 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 append_abilities(bytes, *unit.abilities);
             }
         }
+        // Cloaks (#1887, WST-03), ascending ID, only while one is on: the last detection frame.
+        const auto cloaked = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
+            return unit.abilities && unit.abilities->stealth_on;
+        });
+        if (cloaked != 0) {
+            bytes.insert(bytes.end(), stealth_tag.begin(), stealth_tag.end());
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(cloaked));
+            for (const auto& unit : units) {
+                if (!unit.abilities || !unit.abilities->stealth_on) continue;
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                sim::detail::append_u64(bytes, unit.abilities->stealth_detected);
+            }
+        }
+        // Cloaks with their own end (#1906, WST-03), ascending ID, only while one is on.
+        const auto lengthened = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
+            return unit.abilities && unit.abilities->stealth_on && unit.abilities->stealth_end != 0;
+        });
+        if (lengthened != 0) {
+            bytes.insert(bytes.end(), stealth_end_tag.begin(), stealth_end_tag.end());
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(lengthened));
+            for (const auto& unit : units) {
+                if (!unit.abilities || !unit.abilities->stealth_on || unit.abilities->stealth_end == 0) continue;
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                sim::detail::append_u64(bytes, unit.abilities->stealth_end);
+            }
+        }
+        // Krayt object scripts (WSD-09), ascending ID, once a live unit's script has run.
+        const auto scripted = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
+            return unit.abilities && unit.abilities->self_destruct_script;
+        });
+        if (scripted != 0) {
+            bytes.insert(bytes.end(), self_destruct_script_tag.begin(), self_destruct_script_tag.end());
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(scripted));
+            for (const auto& unit : units) {
+                if (!unit.abilities || !unit.abilities->self_destruct_script) continue;
+                const auto& script = *unit.abilities->self_destruct_script;
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                sim::detail::append_i64(bytes, script.last_service);
+                sim::detail::append_u32(bytes, script.nearby);
+                sim::detail::append_i64(bytes, script.threat.raw());
+                sim::detail::append_u32(bytes, script.armed ? 1U : 0U);
+            }
+        }
+        // FC-57/58: only initialized MC30 scripts add this optional state block.
+        const auto mc30_scripts = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
+            return unit.abilities && unit.abilities->mc30_script;
+        });
+        if (mc30_scripts != 0) {
+            bytes.insert(bytes.end(), mc30_script_tag.begin(), mc30_script_tag.end());
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(mc30_scripts));
+            for (const auto& unit : units) {
+                if (!unit.abilities || !unit.abilities->mc30_script) continue;
+                const auto& script = *unit.abilities->mc30_script;
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                sim::detail::append_i64(bytes, script.last_service);
+                sim::detail::append_u32(bytes, script.nearby);
+                sim::detail::append_i64(bytes, script.threat.raw());
+                sim::detail::append_u32(bytes, script.human ? 1U : 0U);
+                sim::detail::append_u32(bytes, script.armed ? 1U : 0U);
+            }
+        }
         // Ion stuns (#561), ascending ID, only while a live unit has one.
         std::uint64_t stunned = 0;
         for (const auto& unit : units) stunned += unit.ion_stun ? 1 : 0;
@@ -722,6 +1124,20 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 if (!unit.durability || !unit.durability->ion_storm_contact) continue;
                 sim::detail::append_u64(bytes, unit.state.entity_id);
                 sim::detail::append_u64(bytes, *unit.durability->ion_storm_contact);
+            }
+        }
+        // Damage tracking (WCC-82), ascending ID, only while a live unit's window or rate is not zero.
+        const auto tracking = [](const LiveUnit& unit) {
+            return unit.durability && (unit.durability->window_damage.raw() != 0 || unit.durability->damage_rate.raw() != 0);
+        };
+        if (const auto tracked = std::count_if(units.begin(), units.end(), tracking); tracked != 0) {
+            bytes.insert(bytes.end(), damage_tracking_tag.begin(), damage_tracking_tag.end());
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(tracked));
+            for (const auto& unit : units) {
+                if (!tracking(unit)) continue;
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                sim::detail::append_i64(bytes, unit.durability->window_damage.raw());
+                sim::detail::append_i64(bytes, unit.durability->damage_rate.raw());
             }
         }
         if (!command_ledger.sources.empty()) {
@@ -827,11 +1243,49 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 }
             }
         }
+        const auto buzz_requests = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
+            return unit.abilities && unit.abilities->pending_buzz_position;
+        });
+        if (buzz_requests != 0) {
+            constexpr std::array<std::uint8_t, 4> tag{'B', 'Z', 'Q', 'R'}; // coordinator-reserved
+            bytes.insert(bytes.end(), tag.begin(), tag.end());
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(buzz_requests));
+            for (const auto& unit : units) if (unit.abilities && unit.abilities->pending_buzz_position) {
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                append_vec3(bytes, *unit.abilities->pending_buzz_position);
+            }
+        }
+        if (!buzz_droids.empty()) {
+            constexpr std::array<std::uint8_t, 4> tag{'B', 'U', 'Z', 'Z'}; // coordinator-reserved
+            bytes.insert(bytes.end(), tag.begin(), tag.end());
+            sim::detail::append_u64(bytes, buzz_droids.size());
+            for (const auto& droid : buzz_droids) {
+                sim::detail::append_u64(bytes, droid.droid);
+                sim::detail::append_u64(bytes, droid.source_type);
+                append_vec3(bytes, droid.start);
+                sim::detail::append_u64(bytes, droid.active_from);
+            }
+        }
         if (!spins.empty()) {
             bytes.insert(bytes.end(), spin_tag.begin(), spin_tag.end());
             sim::detail::append_u64(bytes, spins.size());
             for (const auto& spin : spins) {
                 append_spin(bytes, spin);
+            }
+        }
+        if (setup.departure_policy) {
+            constexpr std::array<std::uint8_t, 4> tag{'M', 'P', 'D', 'P'}; // coordinator-reserved
+            bytes.insert(bytes.end(), tag.begin(), tag.end());
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(setup.departure_policy->humans.size()));
+            for (const auto id : setup.departure_policy->humans) sim::detail::append_u32(bytes, id);
+            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(departure_controls.size()));
+            for (const auto& control : departure_controls) {
+                sim::detail::append_u32(bytes, control.player);
+                sim::detail::append_u32(bytes, control.controller);
+                sim::detail::append_u64(bytes, control.tick);
+                sim::detail::append_u32(bytes, control.basic_ai ? 1U : 0U);
             }
         }
         if (!quits.empty()) {
@@ -884,6 +1338,125 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                     sim::detail::append_u64(bytes, queue.size());
                     for (const auto& entry : queue) sim::detail::append_u64(bytes, entry.entry_id);
                 }
+            }
+        }
+        if (!setup.cinematic_seats.empty()) {
+            constexpr std::array<std::uint8_t, 4> tag{'C', 'I', 'N', 'S'};
+            bytes.insert(bytes.end(), tag.begin(), tag.end());
+            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(setup.cinematic_seats.size()));
+            for (const auto& seat : setup.cinematic_seats) {
+                sim::detail::append_u32(bytes, seat.player);
+                sim::detail::append_u32(bytes, seat.cinematics_enabled ? 1U : 0U);
+            }
+        }
+        if (setup.campaign) {
+            bytes.insert(bytes.end(), {'B','O','U','N','T','Y',1});
+            for (const auto& ledger : ledgers) sim::detail::append_i64(bytes, ledger.collected_bounty.raw());
+            constexpr std::array<std::uint8_t, 4> tag{'C', 'A', 'M', 'C'};
+            bytes.insert(bytes.end(), tag.begin(), tag.end());
+            sim::detail::append_u32(bytes, 1);
+            bytes.insert(bytes.end(), campaign_binding.begin(), campaign_binding.end());
+            sim::detail::append_u64(bytes, ledgers.size());
+            for (const auto& ledger : ledgers) {
+                sim::detail::append_u32(bytes, ledger.player);
+                sim::detail::append_i64(bytes, ledger.campaign_extra_releases.raw());
+            }
+        }
+        const auto corrupt_count = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) { return unit.corrupt.has_value(); });
+        std::uint64_t corrupt_casts = 0;
+        for (const auto& unit : units) if (unit.abilities)
+            for (const auto& slot : unit.abilities->slots) corrupt_casts += slot.position ? 1U : 0U;
+        if (corrupt_count != 0 || corrupt_casts != 0) {
+            bytes.insert(bytes.end(), corrupt_tag.begin(), corrupt_tag.end());
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(corrupt_count));
+            for (const auto& unit : units) if (unit.corrupt) {
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                sim::detail::append_u64(bytes, unit.corrupt->source_type);
+                sim::detail::append_u64(bytes, unit.corrupt->started_tick);
+                sim::detail::append_u64(bytes, unit.corrupt->expires_tick);
+                append_fixed(bytes, unit.corrupt->drain_per_frame);
+                append_fixed(bytes, unit.corrupt->inaccuracy);
+            }
+            sim::detail::append_u64(bytes, corrupt_casts);
+            for (const auto& unit : units) if (unit.abilities)
+                for (std::size_t slot = 0; slot < unit.abilities->slots.size(); ++slot) if (unit.abilities->slots[slot].position) {
+                    sim::detail::append_u64(bytes, unit.state.entity_id);
+                    sim::detail::append_u32(bytes, static_cast<std::uint32_t>(slot));
+                    append_vec3(bytes, *unit.abilities->slots[slot].position);
+                }
+        }
+        const auto blast_count = std::count_if(units.begin(), units.end(), [](const auto& unit) {
+            return unit.abilities && unit.abilities->charged_blast;
+        });
+        if (blast_count != 0) {
+            bytes.insert(bytes.end(), charged_blast_tag.begin(), charged_blast_tag.end());
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(blast_count));
+            for (const auto& unit : units) if (unit.abilities && unit.abilities->charged_blast) {
+                const auto& blast = *unit.abilities->charged_blast;
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                sim::detail::append_u32(bytes, blast.charge_remaining);
+                sim::detail::append_u32(bytes, blast.shots_remaining);
+                sim::detail::append_u32(bytes, blast.charged_presentation ? 1U : 0U);
+            }
+        }
+        const auto waypoint_count = std::count_if(units.begin(), units.end(), [](const auto& unit) {
+            return unit.waypoints.has_value();
+        });
+        if (waypoint_count != 0) {
+            constexpr std::array<std::uint8_t, 4> waypoint_tag{'W', 'Y', 'P', 'T'};
+            bytes.insert(bytes.end(), waypoint_tag.begin(), waypoint_tag.end());
+            sim::detail::append_u32(bytes, 2);
+            sim::detail::append_u32(bytes, motion.rules.max_waypoints);
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(waypoint_count));
+            for (const auto& unit : units) {
+                if (!unit.waypoints) continue;
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                sim::detail::append_u32(bytes, unit.waypoints->coordinator ? 1U : 0U);
+                if (unit.waypoints->coordinator) {
+                    const auto& key = *unit.waypoints->coordinator;
+                    sim::detail::append_u32(bytes, key.player_id);
+                    sim::detail::append_u64(bytes, key.tick);
+                    sim::detail::append_u64(bytes, key.sequence);
+                }
+                sim::detail::append_u32(bytes, unit.waypoints->active ? 1U : 0U);
+                sim::detail::append_u32(bytes, static_cast<std::uint32_t>(unit.waypoints->points.size()));
+                for (const auto& point : unit.waypoints->points) {
+                    append_vec3(bytes, point.move.destination);
+                    sim::detail::append_u32(bytes, (point.move.through_hazards ? 1U : 0U) | (point.repeat ? 2U : 0U));
+                    sim::detail::append_u32(bytes, point.key.player_id);
+                    sim::detail::append_u64(bytes, point.key.tick);
+                    sim::detail::append_u64(bytes, point.key.sequence);
+                }
+            }
+        }
+        if (!beacons.empty()) {
+            constexpr std::array<std::uint8_t, 4> beacon_tag{'B', 'E', 'C', 'N'};
+            bytes.insert(bytes.end(), beacon_tag.begin(), beacon_tag.end());
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(beacons.size()));
+            for (const auto& beacon : beacons) {
+                sim::detail::append_u32(bytes, beacon.player);
+                sim::detail::append_u32(bytes, 0);
+                sim::detail::append_u64(bytes, beacon.type);
+                append_vec3(bytes, beacon.position);
+                sim::detail::append_u64(bytes, beacon.placed_tick);
+                sim::detail::append_u64(bytes, beacon.expires_tick);
+                sim::detail::append_u64(bytes, beacon.sequence);
+            }
+        }
+        const auto history_count = std::count_if(units.begin(), units.end(),
+            [](const LiveUnit& unit) { return unit.position_history.has_value(); });
+        if (history_count != 0) {
+            bytes.insert(bytes.end(), {'P', 'H', 'S', 'T'});
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u32(bytes, 0);
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(history_count));
+            for (const auto& unit : units) if (unit.position_history) {
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                append_vec3(bytes, unit.position_history->previous);
+                append_vec3(bytes, unit.position_history->before_previous);
             }
         }
         return bytes;

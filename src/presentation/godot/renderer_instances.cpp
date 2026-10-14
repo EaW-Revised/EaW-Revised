@@ -225,6 +225,32 @@ core::Result<void> GodotRenderer::Impl::set_material_scalar(const sim::AssetId a
     return core::Result<void>::success();
 }
 
+core::Result<void> GodotRenderer::Impl::set_material_vector3(const sim::AssetId asset_id, const std::string_view binding,
+                                                            const std::array<float, 3>& value) {
+    const auto resource = resources_.find(asset_id);
+    if (resource == resources_.end()) return failure(diagnostic_codes::missing_asset,
+        "cannot set a material value on missing renderer asset " + std::to_string(asset_id));
+    auto& bindings = resource->second.description.bindings;
+    const auto bound = std::find_if(bindings.begin(), bindings.end(),
+        [&](const MaterialBinding& item) { return item.name == binding; });
+    if (bound == bindings.end() || !std::holds_alternative<assets::Vec3f>(bound->value)
+        || !std::all_of(value.begin(), value.end(), [](const float component) { return std::isfinite(component); })) {
+        return failure(diagnostic_codes::invalid_material, "material value " + std::string(binding)
+            + " is not a finite value for a vector3 binding of renderer asset " + std::to_string(asset_id));
+    }
+    RenderingServer* rendering = RenderingServer::get_singleton();
+    if (!rendering) return failure(diagnostic_codes::backend_unavailable, "RenderingServer is unavailable");
+    bound->value = assets::Vec3f{value[0], value[1], value[2]};
+    const StringName name(bound->name.c_str());
+    const Vector3 vector(value[0], value[1], value[2]);
+    rendering->material_set_param(resource->second.material, name, vector);
+    const auto consumer = fog_consumers_.find(asset_id);
+    if (consumer != fog_consumers_.end() && consumer->second.material.is_valid()
+        && consumer->second.material != resource->second.material)
+        rendering->material_set_param(consumer->second.material, name, vector);
+    return core::Result<void>::success();
+}
+
 [[nodiscard]] std::vector<GodotRenderer::SkinBindingEvidence> GodotRenderer::Impl::skin_bindings() const {
     std::vector<GodotRenderer::SkinBindingEvidence> result;
     for (const auto& [entity_id, instance] : instances_) {
@@ -277,6 +303,30 @@ core::Result<void> GodotRenderer::Impl::set_material_scalar(const sim::AssetId a
     return result;
 }
 
+std::optional<std::array<float, 12>> GodotRenderer::Impl::bone_evidence(
+    const sim::EntityId entity, const std::int32_t bone) const {
+    RenderingServer* rendering = RenderingServer::get_singleton();
+    const auto instance = instances_.find(entity);
+    if (!rendering || instance == instances_.end() || !instance->second.skeleton.is_valid()
+        || bone < 0 || bone >= rendering->skeleton_get_bone_count(instance->second.skeleton)) return std::nullopt;
+    const auto transform = rendering->skeleton_bone_get_transform(instance->second.skeleton, bone);
+    const auto x = transform.basis.get_column(0);
+    const auto y = transform.basis.get_column(1);
+    const auto z = transform.basis.get_column(2);
+    return std::array<float, 12>{static_cast<float>(x.x), static_cast<float>(x.y), static_cast<float>(x.z),
+        static_cast<float>(y.x), static_cast<float>(y.y), static_cast<float>(y.z),
+        static_cast<float>(z.x), static_cast<float>(z.y), static_cast<float>(z.z),
+        static_cast<float>(transform.origin.x), static_cast<float>(transform.origin.y), static_cast<float>(transform.origin.z)};
+}
+
+void GodotRenderer::Impl::set_instance_visible(const sim::EntityId entity, const bool visible) {
+    RenderingServer* rendering = RenderingServer::get_singleton();
+    const auto instance = instances_.find(entity);
+    if (!rendering || instance == instances_.end() || instance->second.visible == visible) return;
+    rendering->instance_set_visible(instance->second.rid, visible);
+    instance->second.visible = visible;
+}
+
 void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snapshot) {
     if (!snapshot) {
         submission_evidence_.clear();
@@ -289,12 +339,16 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
         order_.invalidate();
         return;
     }
+    // GM-04: once frames are drawn the device's counter is live; a battle that loaded over
+    // budget steps its textures down here (measured every few frames, see the budget).
+    enforce_texture_budget(*rendering);
     // #888: only what changed reaches Godot. The pass order is kept while the
     // snapshot's (entity, asset) sequence and the uploads are unchanged, and a
     // piece is sent only when its fixed transform differs from the one it last
     // sent; the fixed-to-float bridge (adapt_snapshot's conversion) runs for
     // those pieces only.
     const std::span<const sim::RenderInstance> instances = snapshot->instances();
+    if (residency_.active()) reconcile_residency(*rendering, instances);
     ++work_.submits;
     work_.pieces += instances.size();
     // This is the project-owned submission dependency. It combines with
@@ -312,7 +366,9 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
         for (std::size_t index = 0; index < pieces.size(); ++index) {
             if (!pieces[index].uploaded) continue;
             const sim::RenderInstance& source = instances[pieces[index].source];
-            order_resources_[index] = &resources_.at(source.asset_id);
+            auto& resource = resources_.at(source.asset_id);
+            if (!resource.mesh.is_valid()) continue;
+            order_resources_[index] = &resource;
             submission_evidence_.push_back({source.entity_id, source.asset_id, pieces[index].pass});
         }
     }
