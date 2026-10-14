@@ -321,6 +321,32 @@ void GalacticAudio::build(const audio::GalacticBuildCue cue, const std::string_v
         problems_.push_back("speech queue full: " + feedback.speech);
 }
 
+namespace {
+godot::Ref<godot::AudioStream> wave_stream(const audio::WavPcm& pcm) {
+    godot::PackedByteArray data;
+    data.resize(static_cast<std::int64_t>(pcm.data.size()));
+    std::memcpy(data.ptrw(), pcm.data.data(), pcm.data.size());
+    godot::Ref<godot::AudioStreamWAV> wav;
+    wav.instantiate(); wav->set_format(godot::AudioStreamWAV::FORMAT_16_BITS);
+    wav->set_mix_rate(static_cast<std::int32_t>(pcm.sample_rate));
+    wav->set_stereo(pcm.channels == 2); wav->set_data(data);
+    return wav;
+}
+
+godot::Ref<godot::AudioStream> decoded_stream(const std::span<const std::byte> bytes) {
+    std::string error;
+    return audio::decode_stream(bytes, error, wave_stream,
+        [](const std::span<const std::byte> input) -> godot::Ref<godot::AudioStream> {
+            godot::PackedByteArray data;
+            data.resize(static_cast<std::int64_t>(input.size()));
+            std::memcpy(data.ptrw(), input.data(), input.size());
+            godot::Ref<godot::AudioStreamMP3> mp3;
+            mp3.instantiate(); mp3->set_data(data); mp3->set_loop(false);
+            return mp3->get_length() > 0 ? godot::Ref<godot::AudioStream>(mp3) : godot::Ref<godot::AudioStream>{};
+        });
+}
+} // namespace
+
 void GalacticAudio::update_speech(const bool paused) {
     speech_player_->set_stream_paused(paused);
     if (paused) return;
@@ -338,33 +364,16 @@ void GalacticAudio::update_speech(const bool paused) {
     const auto& speech = *front->event;
     if (!speech_stream_.admit(3) || speech.files.empty()) { speech_queue_.pop(); return; }
     const auto& file = speech.files[static_cast<std::size_t>(random_.between(0, static_cast<int>(speech.files.size()) - 1))];
-    std::string path = "data/audio/speech/english/";
-    for (const unsigned char character : file) path += character == '\\' ? '/' : static_cast<char>(std::tolower(character));
+    const std::string path = audio::speech_sample_path("english", file);
+    const auto key = audio::galactic_stream_key(audio::GalacticStreamKind::speech, path);
     godot::Ref<godot::AudioStream> loaded;
-    if (const auto cached = streams_.find(path); cached != streams_.end()) loaded = cached->second;
+    if (const auto cached = streams_.find(key); cached != streams_.end()) loaded = cached->second;
     else {
         if (const auto bytes = filesystem_.open(path)) {
-            godot::PackedByteArray data;
-            if (path.ends_with(".wav")) {
-                std::string error;
-                if (const auto pcm = audio::parse_wav(bytes.value(), error)) {
-                    data.resize(static_cast<std::int64_t>(pcm->data.size()));
-                    std::memcpy(data.ptrw(), pcm->data.data(), pcm->data.size());
-                    godot::Ref<godot::AudioStreamWAV> wav;
-                    wav.instantiate(); wav->set_format(godot::AudioStreamWAV::FORMAT_16_BITS);
-                    wav->set_mix_rate(static_cast<std::int32_t>(pcm->sample_rate));
-                    wav->set_stereo(pcm->channels == 2); wav->set_data(data); loaded = wav;
-                }
-            } else {
-                data.resize(static_cast<std::int64_t>(bytes.value().size()));
-                std::memcpy(data.ptrw(), bytes.value().data(), bytes.value().size());
-                godot::Ref<godot::AudioStreamMP3> mp3;
-                mp3.instantiate(); mp3->set_data(data); mp3->set_loop(false);
-                if (mp3->get_length() > 0) loaded = mp3;
-            }
+            loaded = decoded_stream(bytes.value());
         }
         if (loaded.is_null() && problems_.size() < 256) problems_.push_back("missing or undecodable speech: " + path);
-        streams_.emplace(path, loaded);
+        streams_.emplace(key, loaded);
     }
     if (loaded.is_null()) { speech_queue_.pop(); return; }
     speech_player_->stop(); speech_player_->set_stream(loaded);
@@ -375,32 +384,22 @@ void GalacticAudio::update_speech(const bool paused) {
 }
 
 godot::Ref<godot::AudioStream> GalacticAudio::stream(const std::string_view file, const bool music_file) {
-    std::string path = music_file ? "data/audio/music/" : "data/audio/sfx/";
-    for (const unsigned char character : file) path += character == '\\' ? '/' : static_cast<char>(std::tolower(character));
-    if (const auto found = streams_.find(path); found != streams_.end()) return found->second;
+    // Music adds its fixed directory; an SFX name goes to the file service as written (#1708).
+    std::string path = music_file ? audio::music_sample_path(file) : std::string{};
+    if (!music_file) for (const unsigned char character : file) path += character == '\\' ? '/' : static_cast<char>(std::tolower(character));
+    const auto key = audio::galactic_stream_key(
+        music_file ? audio::GalacticStreamKind::music : audio::GalacticStreamKind::sfx, path);
+    if (const auto found = streams_.find(key); found != streams_.end()) return found->second;
     godot::Ref<godot::AudioStream> result;
-    if (const auto bytes = filesystem_.open(path)) {
-        godot::PackedByteArray data;
-        if (music_file) {
-            data.resize(static_cast<std::int64_t>(bytes.value().size()));
-            std::memcpy(data.ptrw(), bytes.value().data(), bytes.value().size());
-            godot::Ref<godot::AudioStreamMP3> mp3;
-            mp3.instantiate(); mp3->set_data(data); mp3->set_loop(false);
-            if (mp3->get_length() > 0) result = mp3;
-        } else {
+    if (const auto bytes = music_file ? filesystem_.open(path) : audio::open_sfx_sample(filesystem_, path)) {
+        if (music_file) result = decoded_stream(bytes.value());
+        else {
             std::string error;
-            if (const auto pcm = audio::parse_wav(bytes.value(), error)) {
-                data.resize(static_cast<std::int64_t>(pcm->data.size()));
-                std::memcpy(data.ptrw(), pcm->data.data(), pcm->data.size());
-                godot::Ref<godot::AudioStreamWAV> wav;
-                wav.instantiate(); wav->set_format(godot::AudioStreamWAV::FORMAT_16_BITS);
-                wav->set_mix_rate(static_cast<std::int32_t>(pcm->sample_rate));
-                wav->set_stereo(pcm->channels == 2); wav->set_data(data); result = wav;
-            }
+            if (const auto pcm = audio::parse_wav(bytes.value(), error)) result = wave_stream(*pcm);
         }
     }
     if (result.is_null() && problems_.size() < 256) problems_.push_back("missing or undecodable audio: " + path);
-    streams_.emplace(path, result);
+    streams_.emplace(key, result);
     return result;
 }
 

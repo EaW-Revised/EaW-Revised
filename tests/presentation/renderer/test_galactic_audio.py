@@ -324,6 +324,30 @@ func _process(_delta):
             self.assertEqual(sounds.get("GUI_Dial_Switch_SFX", 0), 1, sounds)
             self.assertEqual(sounds.get("GUI_Highlight_Mouse_Over", 0), 1, sounds)
 
+    def test_music_decodes_content_under_reversed_extensions(self):
+        from tools.inventory.corpus import Corpus
+        from tests.presentation.renderer.audio_stream_fixture import reversed_extensions
+        with tempfile.TemporaryDirectory(prefix="galactic-audio-content-") as temporary:
+            directory = pathlib.Path(temporary)
+            mod = directory / "mod"
+            xml = mod / "Data/XML"
+            xml.mkdir(parents=True)
+            (xml.parent / "MegaFiles.xml").write_text(
+                "<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+            files = reversed_extensions(self, Corpus(os.environ["EAWR_EAW_GAME_ROOT"]), xml.parent)
+            for name in files:
+                with self.subTest(file=name):
+                    (xml / "MusicEvents.xml").write_text(
+                        '<MusicEvents><MusicEvent Name="Galactic_Map_Rebel_Music_Event">'
+                        f'<Files>{name}</Files></MusicEvent></MusicEvents>', encoding="utf-8")
+                    result, _ = run_viewer(self, directory, name,
+                        "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                        "--eawr-mod-root", str(mod), "--eawr-galactic-seat", "1")
+                    audio = result["galactic_audio"]
+                    self.assertTrue(any(name in row for row in audio["music"]), audio)
+                    self.assertFalse(any("undecodable" in row or "could not load" in row
+                                         for row in audio["problems"]), audio)
+
     def test_missing_music_file_reports_its_named_cue(self):
         with tempfile.TemporaryDirectory(prefix="galactic-audio-missing-") as temporary:
             directory = pathlib.Path(temporary)

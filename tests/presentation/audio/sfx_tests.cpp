@@ -5,6 +5,7 @@
 #include "eawr/presentation/audio/command_cues.hpp"
 #include "eawr/presentation/space/unit_fade.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -390,16 +391,230 @@ void stolen_event_completion() {
     }
 }
 
+// A WAVE file from a raw fmt body and data payload; `fact` adds a fact chunk with that frame count.
+std::vector<std::byte> riff(const std::vector<std::uint8_t>& fmt, const std::vector<std::uint8_t>& data,
+                            const std::optional<std::uint32_t> fact = std::nullopt) {
+    std::vector<std::byte> bytes;
+    const auto put = [&bytes](const char* text) {
+        for (int i = 0; i < 4; ++i) bytes.push_back(static_cast<std::byte>(text[i]));
+    };
+    const auto u32 = [&bytes](const std::uint32_t value) {
+        for (int i = 0; i < 4; ++i) bytes.push_back(static_cast<std::byte>((value >> (8 * i)) & 0xffU));
+    };
+    const auto raw = [&bytes](const std::vector<std::uint8_t>& values) {
+        for (const auto value : values) bytes.push_back(static_cast<std::byte>(value));
+    };
+    put("RIFF");
+    u32(0);  // not read by the decoder
+    put("WAVE");
+    put("fmt ");
+    u32(static_cast<std::uint32_t>(fmt.size()));
+    raw(fmt);
+    if (fact) {
+        put("fact");
+        u32(4);
+        u32(*fact);
+    }
+    put("data");
+    u32(static_cast<std::uint32_t>(data.size()));
+    raw(data);
+    if ((data.size() & 1U) != 0U) bytes.push_back(std::byte{0});
+    return bytes;
+}
+
+std::vector<std::uint8_t> fmt_body(const std::uint16_t format, const std::uint16_t channels, const std::uint16_t block_align,
+                                   const std::uint16_t bits, const std::vector<std::uint8_t>& extra = {}) {
+    std::vector<std::uint8_t> body;
+    const auto u16 = [&body](const std::uint16_t value) {
+        body.push_back(static_cast<std::uint8_t>(value & 0xffU));
+        body.push_back(static_cast<std::uint8_t>(value >> 8U));
+    };
+    const auto u32 = [&u16](const std::uint32_t value) {
+        u16(static_cast<std::uint16_t>(value & 0xffffU));
+        u16(static_cast<std::uint16_t>(value >> 16U));
+    };
+    u16(format);
+    u16(channels);
+    u32(22050);
+    u32(22050U * block_align);
+    u16(block_align);
+    u16(bits);
+    body.insert(body.end(), extra.begin(), extra.end());
+    return body;
+}
+
+std::vector<std::int16_t> frames_of(const audio::WavPcm& pcm) {
+    std::vector<std::int16_t> values;
+    for (std::size_t at = 0; at + 1 < pcm.data.size(); at += 2) {
+        values.push_back(static_cast<std::int16_t>(std::to_integer<std::uint16_t>(pcm.data[at])
+                                                   | (std::to_integer<std::uint16_t>(pcm.data[at + 1]) << 8U)));
+    }
+    return values;
+}
+
 void wave_files() {
     std::string error;
     const auto mono = wav(1, 16, 1, 100);
     const auto parsed = audio::parse_wav(mono, error);
     expect(parsed && parsed->sample_rate == 22050 && parsed->channels == 1 && parsed->data.size() == 200,
            "16-bit mono PCM: " + error);
-    const auto adpcm = wav(0x11, 4, 1, 10);
-    expect(!audio::parse_wav(adpcm, error) && error.find("16-bit PCM") != std::string::npos, "ADPCM refused");
+    // 16-bit PCM stays a view of the file, not a copy.
+    expect(parsed && parsed->converted.empty() && parsed->data.data() >= mono.data()
+           && parsed->data.data() < mono.data() + mono.size(), "16-bit PCM is borrowed from the file");
     std::vector<std::byte> truncated(mono.begin(), mono.begin() + 30);
     expect(!audio::parse_wav(truncated, error), "truncated refused");
+    expect(!audio::parse_wav(std::vector<std::byte>(8, std::byte{0}), error) && error.find("RIFF") != std::string::npos,
+           "not RIFF refused");
+
+    // 8-bit PCM is unsigned: 0x80 is silence, 0x00 the most negative and 0xFF the most positive step.
+    const auto eight = riff(fmt_body(1, 1, 1, 8), {0x80, 0x00, 0xFF, 0x81, 0x7F});
+    const auto widened = audio::parse_wav(eight, error);
+    expect(widened && widened->channels == 1 && widened->sample_rate == 22050, "8-bit PCM parses: " + error);
+    if (widened) {
+        const auto values = frames_of(*widened);
+        expect(values == std::vector<std::int16_t>({0, -32768, 32512, 256, -256}), "8-bit PCM is centred and widened to 16 bits");
+    }
+    // A stereo 8-bit file with an odd trailing byte keeps whole frames only.
+    const auto eight_stereo = riff(fmt_body(1, 2, 2, 8), {0x80, 0x90, 0x70, 0x80, 0x80});
+    const auto stereo = audio::parse_wav(eight_stereo, error);
+    expect(stereo && frames_of(*stereo) == std::vector<std::int16_t>({0, 4096, -4096, 0}), "8-bit stereo keeps whole frames");
+
+    // WAVE_FORMAT_EXTENSIBLE carries the real format in its sub-format; PCM and ADPCM both work.
+    std::vector<std::uint8_t> extensible_extra{22, 0, 16, 0, 4, 0, 0, 0, 1, 0};  // cbSize, valid bits, mask, sub-format tag 1
+    extensible_extra.resize(24, 0);  // rest of the sub-format GUID
+    const auto extensible = riff(fmt_body(0xFFFE, 1, 2, 16, extensible_extra), {0x01, 0x00, 0xFF, 0x7F});
+    const auto wide = audio::parse_wav(extensible, error);
+    expect(wide && frames_of(*wide) == std::vector<std::int16_t>({1, 32767}), "WAVE_FORMAT_EXTENSIBLE PCM: " + error);
+    auto short_extensible = fmt_body(0xFFFE, 1, 2, 16);  // 16 bytes: no sub-format
+    expect(!audio::parse_wav(riff(short_extensible, {0, 0}), error) && error.find("EXTENSIBLE") != std::string::npos,
+           "EXTENSIBLE without a sub-format is refused");
+
+    // Formats this decoder does not read are refused with the format and bit depth named.
+    expect(!audio::parse_wav(riff(fmt_body(1, 1, 3, 24), {0, 0, 0}), error) && error.find("24 bits") != std::string::npos,
+           "24-bit PCM refused");
+    expect(!audio::parse_wav(riff(fmt_body(3, 1, 4, 32), {0, 0, 0, 0}), error) && error.find("format 3") != std::string::npos,
+           "float refused");
+    expect(!audio::parse_wav(riff(fmt_body(1, 3, 6, 16), {0, 0, 0, 0, 0, 0}), error) && error.find("channel") != std::string::npos,
+           "three channels refused");
+
+    // IMA ADPCM, mono: a 4-byte header (first sample 1000, step index 10), then four code bytes.
+    const std::vector<std::uint8_t> ima_extra{2, 0, 9, 0};  // cbSize, 9 samples per block
+    const std::vector<std::uint8_t> mono_block{0xE8, 0x03, 10, 0, 0x21, 0x43, 0x65, 0x87};
+    const auto ima_mono = audio::parse_wav(riff(fmt_body(0x11, 1, 8, 4, ima_extra), mono_block), error);
+    expect(ima_mono && ima_mono->channels == 1, "IMA ADPCM mono parses: " + error);
+    if (ima_mono) {
+        expect(frames_of(*ima_mono) == std::vector<std::int16_t>({1000, 1006, 1016, 1030, 1045, 1068, 1108, 1191, 1179}),
+               "IMA ADPCM mono decodes low nibble first");
+    }
+    // Stereo: each channel has its own header, then 4 code bytes per channel in channel order.
+    const std::vector<std::uint8_t> stereo_block{0xE8, 0x03, 10, 0, 0x30, 0xF8, 40, 0,
+                                                 0x21, 0x43, 0x65, 0x87, 0x9A, 0xBC, 0xDE, 0xF0};
+    const auto ima_stereo = audio::parse_wav(riff(fmt_body(0x11, 2, 16, 4, ima_extra), stereo_block), error);
+    expect(ima_stereo && ima_stereo->channels == 2, "IMA ADPCM stereo parses: " + error);
+    if (ima_stereo) {
+        const auto values = frames_of(*ima_stereo);
+        const std::array<std::int16_t, 9> left{1000, 1006, 1016, 1030, 1045, 1068, 1108, 1191, 1179};
+        const std::array<std::int16_t, 9> right{-2000, -2210, -2324, -2637, -2931, -3429, -4177, -4078, -5435};
+        bool match = values.size() == 18;
+        for (std::size_t frame = 0; match && frame < 9; ++frame) {
+            match = values[frame * 2] == left[frame] && values[frame * 2 + 1] == right[frame];
+        }
+        expect(match, "IMA ADPCM stereo interleaves the two channels' groups");
+    }
+    // The predictor saturates instead of wrapping.
+    const std::vector<std::uint8_t> clamp_block{0x00, 0x7D, 88, 0, 0x77, 0x77, 0x77, 0x77};
+    const auto clamped = audio::parse_wav(riff(fmt_body(0x11, 1, 8, 4, ima_extra), clamp_block), error);
+    expect(clamped && frames_of(*clamped) == std::vector<std::int16_t>({32000, 32767, 32767, 32767, 32767, 32767, 32767, 32767, 32767}),
+           "IMA ADPCM saturates at 16 bits");
+    // Two blocks decode independently; `fact` trims the padding of the last one.
+    std::vector<std::uint8_t> two_blocks = mono_block;
+    two_blocks.insert(two_blocks.end(), {0x10, 0x00, 0, 0, 0x00, 0x00, 0x00, 0x00});
+    const auto trimmed = audio::parse_wav(riff(fmt_body(0x11, 1, 8, 4, ima_extra), two_blocks, 12), error);
+    expect(trimmed && frames_of(*trimmed).size() == 12 && frames_of(*trimmed)[9] == 16, "IMA ADPCM blocks restart and `fact` trims");
+    // A damaged step index or block size is refused, not decoded.
+    expect(!audio::parse_wav(riff(fmt_body(0x11, 1, 8, 4, ima_extra), {0, 0, 90, 0, 0, 0, 0, 0}), error)
+           && error.find("step index") != std::string::npos, "IMA ADPCM step index out of range refused");
+    expect(!audio::parse_wav(riff(fmt_body(0x11, 1, 3, 4, ima_extra), {0, 0, 0, 0}), error)
+           && error.find("block size") != std::string::npos, "IMA ADPCM block size refused");
+    // Moving the result keeps the converted frames readable.
+    auto moved = audio::parse_wav(riff(fmt_body(0x11, 1, 8, 4, ima_extra), mono_block), error);
+    std::optional<audio::WavPcm> later = std::move(moved);
+    expect(later && frames_of(*later).size() == 9 && frames_of(*later)[8] == 1179, "a moved ADPCM result still views its frames");
+}
+
+void sample_paths() {
+    using Paths = std::vector<std::string>;
+    // A bare name: the SFX archives (mounted under data/audio/sfx), then the name as an archive entry.
+    expect(audio::sfx_sample_candidates("Blaster_Fire_1.WAV") == Paths({"data/audio/sfx/blaster_fire_1.wav", "blaster_fire_1.wav"}),
+           "a bare sample name");
+    expect(audio::sfx_sample_candidates("  Spaced.wav ") == Paths({"data/audio/sfx/spaced.wav", "spaced.wav"}), "a padded name");
+    // Data-rooted names are looked up as given, with no second prefix (ML-04's four spellings, any case).
+    const Paths rooted{"data/audio/voiceovers/rebel/lead_01.wav"};
+    expect(audio::sfx_sample_candidates("Data\\Audio\\Voiceovers\\Rebel\\Lead_01.wav") == rooted, "Data\\ rooted");
+    expect(audio::sfx_sample_candidates("DATA/Audio/Voiceovers/Rebel/Lead_01.wav") == rooted, "DATA/ rooted");
+    expect(audio::sfx_sample_candidates(".\\Data\\Audio\\Voiceovers\\Rebel\\Lead_01.wav") == rooted, ".\\Data\\ rooted");
+    expect(audio::sfx_sample_candidates("./data/audio/voiceovers/rebel/lead_01.wav") == rooted, "./data/ rooted");
+    // A sub-path that is not Data-rooted is not redirected: it is a bare archive-style name.
+    expect(audio::sfx_sample_candidates("Weapons\\Laser.wav") == Paths({"data/audio/sfx/weapons/laser.wav", "weapons/laser.wav"}),
+           "a sub-path without Data");
+    expect(audio::sfx_sample_candidates("database.wav") == Paths({"data/audio/sfx/database.wav", "database.wav"}),
+           "a name that only starts with the letters data");
+    expect(audio::sfx_sample_candidates(" ").empty(), "an empty name has no candidates");
+    // Music and speech add their fixed directory, whatever the name looks like.
+    expect(audio::music_sample_path("GC_Empire_1.MP3") == "data/audio/music/gc_empire_1.mp3", "music path");
+    expect(audio::speech_sample_path("English", "UWEC_TYB0100_ENG.MP3") == "data/audio/speech/english/uwec_tyb0100_eng.mp3",
+           "speech path");
+}
+
+void stream_selection_cache_and_diagnostics() {
+    // File spelling is deliberately absent from the shared decoder interface.
+    // Both consumers use this seam for speech and music.
+    const auto wave_bytes = wav(1, 16, 1, 4);
+    const std::vector<std::byte> mp3_bytes{std::byte{0xff}, std::byte{0xfb}, std::byte{0x90}, std::byte{0x64}};
+    std::string error;
+    int waves = 0, mp3s = 0;
+    const auto decode = [&](const auto& bytes) {
+        return audio::decode_stream(bytes, error,
+            [&](const audio::WavPcm& pcm) { ++waves; return pcm.sample_rate == 22050 && pcm.data.size() == 8; },
+            [&](std::span<const std::byte> data) { ++mp3s; return data.size() == 4 && data[0] == std::byte{0xff}; });
+    };
+    expect(decode(wave_bytes), "WAVE bytes named line.mp3 decode as PCM");
+    expect(waves == 1 && mp3s == 0 && error.empty(), "WAVE never reaches MP3 backend");
+    expect(decode(mp3_bytes), "MP3 bytes named line.wav reach MP3 backend");
+    expect(waves == 1 && mp3s == 1, "MP3 never reaches WAVE parser");
+    const std::vector<std::byte> truncated{std::byte{'R'}, std::byte{'I'}, std::byte{'F'}, std::byte{'F'}};
+    expect(!decode(truncated) && !error.empty() && mp3s == 1, "malformed RIFF does not fall through to MP3");
+    const auto path = audio::speech_sample_path("english", "line.mp3");
+    const auto sfx_key = audio::galactic_stream_key(audio::GalacticStreamKind::sfx, path);
+    const auto speech_key = audio::galactic_stream_key(audio::GalacticStreamKind::speech, path);
+    const auto music_key = audio::galactic_stream_key(audio::GalacticStreamKind::music, path);
+    expect(sfx_key != speech_key && sfx_key != music_key, "production key isolates SFX from both stream decoders");
+    expect(speech_key == path && music_key == path, "speech and music retain resolved-path keys");
+    std::map<std::string, bool> streams;
+    streams.emplace(sfx_key, false); // failed WAVE-only SFX request
+    expect(streams.find(speech_key) == streams.end(), "failed SFX does not satisfy a speech cache lookup");
+    streams.emplace(speech_key, true);
+    expect(streams.at(speech_key) && !streams.at(sfx_key) && streams.size() == 2,
+           "speech after failed SFX retains its successfully decoded stream");
+
+    const std::map<std::string, bool> samples{{"ok-a", true}, {"ok-b", true}, {"absent", false}, {"bad", false}};
+    const std::map<std::string, std::string> sample_failures{
+        {"absent", "missing: EAWR-VFS-0002 [error] absent.wav: not found"}, {"bad", "undecodable: format 3"},
+        {"speech", "missing: speech EAWR-VFS-0002 [error] speech-a.wav: not found"}, {"music", "missing: music EAWR-VFS-0003"},
+        {"speech2", "missing: speech EAWR-VFS-0002 [error] speech-b.wav: not found"}, {"music2", "undecodable: MP3"},
+        {"bad2", "undecodable: format 3"}};
+    const auto counts = audio::sample_diagnostics(samples, sample_failures, [](bool valid) { return valid; });
+    expect(counts.sfx_requested == 4 && counts.sfx_resolved == 2, "SFX totals exclude speech/music failures");
+    expect(counts.files_missing_total == 4 && counts.files_undecodable_total == 3, "all file failure totals");
+    expect(counts.files_missing == std::map<std::string, std::size_t>{{"EAWR-VFS-0002", 1},
+        {"speech EAWR-VFS-0002", 2}, {"music EAWR-VFS-0003", 1}}, "every missing cause has its own total");
+    expect(counts.files_undecodable == std::map<std::string, std::size_t>{{"format 3", 2}, {"MP3", 1}},
+           "every undecodable cause has its own total");
+    const auto empty = audio::sample_diagnostics(std::map<std::string, bool>{},
+        std::map<std::string, std::string>{}, [](bool valid) { return valid; });
+    expect(empty.sfx_requested == 0 && empty.sfx_resolved == 0 && empty.files_missing_total == 0
+        && empty.files_undecodable_total == 0 && empty.files_missing.empty() && empty.files_undecodable.empty(),
+        "empty maps have no phantom totals");
 }
 
 void falloff_and_listener() {
@@ -942,6 +1157,8 @@ int main() {
     event_lifecycle();
     stolen_event_completion();
     wave_files();
+    sample_paths();
+    stream_selection_cache_and_diagnostics();
     falloff_and_listener();
     voice_rules();
     two_dimensional_pool();

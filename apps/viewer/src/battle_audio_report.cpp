@@ -191,6 +191,28 @@ void BattleAudio::write_report(std::ostream& output) const {
     output << "]";
     output << ", \"synchronous_runtime_loads\": " << synchronous_runtime_loads_;
 
+    // #1708: totals per cause, so a mod run shows at a glance how many sounds never played.
+    {
+        const auto totals = audio::sample_diagnostics(samples_, missing_samples_,
+            [](const Sample& sample) { return sample.stream.is_valid(); });
+        output << ", \"sample_diagnostics\": {\"sfx_requested\": " << totals.sfx_requested
+               << ", \"sfx_resolved\": " << totals.sfx_resolved
+               << ", \"files_missing_total\": " << totals.files_missing_total
+               << ", \"files_undecodable_total\": " << totals.files_undecodable_total
+               << ", \"files_missing\": {";
+        bool first_cause = true;
+        for (const auto& [cause, count] : totals.files_missing) {
+            output << (first_cause ? "" : ", ") << json(cause) << ": " << count;
+            first_cause = false;
+        }
+        output << "}, \"files_undecodable\": {";
+        first_cause = true;
+        for (const auto& [cause, count] : totals.files_undecodable) {
+            output << (first_cause ? "" : ", ") << json(cause) << ": " << count;
+            first_cause = false;
+        }
+        output << "}}";
+    }
     output << ", \"missing_samples\": {";
     first = true;
     for (const auto& [name, cause] : missing_samples_) {

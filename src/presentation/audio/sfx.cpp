@@ -1,9 +1,11 @@
 #include "eawr/presentation/audio/sfx.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 
@@ -179,6 +181,90 @@ const SfxEvent* SfxRegistry::find(const std::string_view name) const {
     return found == events_.end() ? nullptr : &found->second;
 }
 
+namespace {
+
+constexpr std::array<std::int16_t, 89> ima_steps{
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107,
+    118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963,
+    1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894,
+    6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794,
+    32767};
+constexpr std::array<int, 8> ima_index_moves{-1, -1, -1, -1, 2, 4, 6, 8};
+
+void put_s16(std::vector<std::byte>& out, const int value) {
+    const auto unsigned_value = static_cast<std::uint16_t>(static_cast<std::int16_t>(value));
+    out.push_back(static_cast<std::byte>(unsigned_value & 0xffU));
+    out.push_back(static_cast<std::byte>(unsigned_value >> 8U));
+}
+
+struct ImaState final {
+    int predictor{};
+    int index{};
+};
+
+[[nodiscard]] int ima_sample(ImaState& state, const unsigned nibble) {
+    const int step = ima_steps[static_cast<std::size_t>(state.index)];
+    int delta = step >> 3;
+    if ((nibble & 1U) != 0U) delta += step >> 2;
+    if ((nibble & 2U) != 0U) delta += step >> 1;
+    if ((nibble & 4U) != 0U) delta += step;
+    state.predictor = std::clamp(state.predictor + ((nibble & 8U) != 0U ? -delta : delta), -32768, 32767);
+    state.index = std::clamp(state.index + ima_index_moves[nibble & 7U], 0, 88);
+    return state.predictor;
+}
+
+// The IMA ADPCM block layout of a WAVE file: per block a 4-byte header per channel (the first
+// sample as 16 bits, the step index, one reserved byte), then groups of 4 data bytes per channel in
+// channel order, each byte two 4-bit codes, low nibble first, so a group is 8 samples of a channel.
+[[nodiscard]] bool decode_ima_adpcm(const std::span<const std::byte> data, const std::uint16_t channels,
+                                    const std::size_t block_align, const std::size_t samples_per_block,
+                                    std::vector<std::byte>& out, std::string& error) {
+    const std::size_t header = 4U * channels;
+    if (block_align <= header || block_align % header != 0U) {
+        error = "IMA ADPCM block size " + std::to_string(block_align) + " does not fit " + std::to_string(channels) + " channel(s)";
+        return false;
+    }
+    for (std::size_t block = 0; block < data.size(); block += block_align) {
+        const std::size_t length = std::min(block_align, data.size() - block);
+        if (length < header) break;
+        const auto byte_at = [&](const std::size_t at) { return std::to_integer<unsigned>(data[block + at]); };
+        std::array<ImaState, 2> state{};
+        const std::size_t groups = (length - header) / header;
+        std::size_t frames = groups * 8U + 1U;
+        if (samples_per_block != 0U) frames = std::min(frames, samples_per_block);
+        std::vector<std::int16_t> pcm(frames * channels);
+        for (std::uint16_t channel = 0; channel < channels; ++channel) {
+            const std::size_t at = 4U * channel;
+            const int predictor = static_cast<std::int16_t>(byte_at(at) | (byte_at(at + 1U) << 8U));
+            const int index = static_cast<int>(byte_at(at + 2U));
+            if (index > 88) {
+                error = "IMA ADPCM step index " + std::to_string(index) + " out of range";
+                return false;
+            }
+            state[channel] = ImaState{predictor, index};
+            pcm[channel] = static_cast<std::int16_t>(predictor);
+        }
+        for (std::size_t group = 0; group < groups; ++group) {
+            for (std::uint16_t channel = 0; channel < channels; ++channel) {
+                const std::size_t at = header + group * header + 4U * channel;
+                for (std::size_t offset = 0; offset < 4U; ++offset) {
+                    const unsigned packed = byte_at(at + offset);
+                    for (std::size_t half = 0; half < 2U; ++half) {
+                        const std::size_t frame = 1U + group * 8U + offset * 2U + half;
+                        if (frame >= frames) continue;
+                        pcm[frame * channels + channel] = static_cast<std::int16_t>(
+                            ima_sample(state[channel], half == 0U ? packed & 0xfU : packed >> 4U));
+                    }
+                }
+            }
+        }
+        for (const std::int16_t value : pcm) put_s16(out, value);
+    }
+    return true;
+}
+
+} // namespace
+
 std::optional<WavPcm> parse_wav(const std::span<const std::byte> bytes, std::string& error) {
     const auto u32 = [&](const std::size_t at) {
         std::uint32_t value{};
@@ -198,6 +284,9 @@ std::optional<WavPcm> parse_wav(const std::span<const std::byte> bytes, std::str
     }
     std::optional<WavPcm> result;
     bool format_seen = false;
+    std::uint16_t format = 0, bits = 0;
+    std::size_t block_align = 0, samples_per_block = 0;
+    std::optional<std::uint32_t> fact_frames;
     std::size_t at = 12;
     while (at + 8 <= bytes.size()) {
         const std::uint32_t size = u32(at + 4);
@@ -211,31 +300,127 @@ std::optional<WavPcm> parse_wav(const std::span<const std::byte> bytes, std::str
                 error = "fmt chunk too short";
                 return std::nullopt;
             }
-            const std::uint16_t format = u16(body);
-            const std::uint16_t bits = u16(body + 14);
-            if (format != 1 || bits != 16) {
-                error = "format " + std::to_string(format) + " with " + std::to_string(bits) + " bits (16-bit PCM expected)";
+            format = u16(body);
+            bits = u16(body + 14);
+            block_align = u16(body + 12);
+            // WAVE_FORMAT_EXTENSIBLE names the real format in the first two bytes of its sub-format.
+            if (format == 0xFFFEU) {
+                if (size < 40) {
+                    error = "WAVE_FORMAT_EXTENSIBLE fmt chunk too short";
+                    return std::nullopt;
+                }
+                format = u16(body + 24);
+            }
+            if (format == 0x0011U && size >= 20) samples_per_block = u16(body + 18);
+            const bool pcm = format == 1U && (bits == 8U || bits == 16U);
+            const bool ima = format == 0x0011U && bits == 4U;
+            if (!pcm && !ima) {
+                error = "format " + std::to_string(format) + " with " + std::to_string(bits)
+                    + " bits (8/16-bit PCM or 4-bit IMA ADPCM expected)";
                 return std::nullopt;
             }
-            result = WavPcm{u32(body + 4), u16(body + 2), {}};
+            result.emplace(u32(body + 4), u16(body + 2));
             format_seen = true;
             if (result->channels == 0 || result->channels > 2 || result->sample_rate == 0) {
                 error = "unsupported channel count or rate";
                 return std::nullopt;
             }
+        } else if (tag(at, "fact") && size >= 4) {
+            fact_frames = u32(body);
         } else if (tag(at, "data")) {
             if (!format_seen) {
                 error = "data before fmt";
                 return std::nullopt;
             }
-            const std::size_t frame = 2U * result->channels;
-            result->data = bytes.subspan(body, size - size % frame);
+            const auto payload = bytes.subspan(body, size);
+            if (format == 1U && bits == 16U) {
+                const std::size_t frame = 2U * result->channels;
+                result->data = payload.first(size - size % frame);
+            } else if (format == 1U) {
+                // 8-bit PCM is unsigned; centre it on zero and widen to 16 bits.
+                result->converted.reserve(payload.size() * 2U);
+                for (const std::byte sample : payload) put_s16(result->converted, (std::to_integer<int>(sample) - 128) * 256);
+                result->converted.resize(result->converted.size() - result->converted.size() % (2U * result->channels));
+                result->data = result->converted;
+            } else {
+                if (!decode_ima_adpcm(payload, result->channels, block_align, samples_per_block, result->converted, error)) {
+                    return std::nullopt;
+                }
+                // A `fact` chunk names the real frame count; the last block is padded to its size.
+                const std::size_t frame = 2U * result->channels;
+                if (fact_frames && static_cast<std::size_t>(*fact_frames) * frame < result->converted.size()) {
+                    result->converted.resize(static_cast<std::size_t>(*fact_frames) * frame);
+                }
+                result->data = result->converted;
+            }
             return result;
         }
         at = body + size + (size & 1U);
     }
     error = format_seen ? "no data chunk" : "no fmt chunk";
     return std::nullopt;
+}
+
+std::vector<std::string> sfx_sample_candidates(const std::string_view name) {
+    std::string path(trim(name));
+    std::replace(path.begin(), path.end(), '\\', '/');
+    std::transform(path.begin(), path.end(), path.begin(), [](const char c) {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    });
+    if (path.starts_with("./")) path.erase(0, 2);
+    if (path.empty()) return {};
+    if (path.starts_with("data/")) return {std::move(path)};
+    return {"data/audio/sfx/" + path, path};
+}
+
+core::Result<std::vector<std::byte>> open_sfx_sample(const vfs::Vfs& filesystem, const std::string_view name) {
+    auto candidates = sfx_sample_candidates(name);
+    if (candidates.empty()) {
+        core::Diagnostic diagnostic;
+        diagnostic.code = std::string(vfs::diagnostic_codes::invalid_path);
+        diagnostic.message = "empty sample name";
+        return core::Result<std::vector<std::byte>>::failure(std::move(diagnostic));
+    }
+    // Mount prefixes are a VFS convenience, not part of the archive's name.
+    // ML-04/05/10: bare names skip loose SFX-directory files; rooted reads may
+    // search archives, but only an entry bearing that whole path qualifies.
+    const bool rooted = candidates.front().starts_with("data/") && candidates.size() == 1;
+    const auto requested = vfs::canonicalize(rooted ? candidates.front() : candidates.back());
+    if (!requested) return core::Result<std::vector<std::byte>>::failure(requested.error());
+    // A conventional SFX archive may itself contain a full-path entry. Its
+    // logical index has the mount prefix too; still compare the original name.
+    if (rooted) candidates.push_back("data/audio/sfx/" + requested.value());
+    for (const auto& path : candidates) {
+        const auto records = filesystem.candidates(path);
+        if (!records) continue;
+        for (const auto& record : records.value()) {
+            if (record.origin == vfs::AssetOrigin::loose) {
+                if (record.canonical_path != requested.value()) continue;
+            }
+            auto bytes = filesystem.open(record, requested.value());
+            if (bytes) return bytes;
+            if (bytes.error().code != vfs::diagnostic_codes::not_found) return bytes;
+        }
+    }
+    core::Diagnostic diagnostic;
+    diagnostic.code = std::string(vfs::diagnostic_codes::not_found);
+    diagnostic.logical_path = requested.value();
+    diagnostic.message = "sample is not present under its authored file or archive name";
+    return core::Result<std::vector<std::byte>>::failure(std::move(diagnostic));
+}
+
+std::string music_sample_path(const std::string_view file) {
+    std::string path = "data/audio/music/";
+    for (const char c : trim(file)) path.push_back(c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    return path;
+}
+
+std::string speech_sample_path(const std::string_view language_directory, const std::string_view file) {
+    std::string path = "data/audio/speech/";
+    for (const char c : trim(language_directory)) path.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    path.push_back('/');
+    for (const char c : trim(file)) path.push_back(c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    return path;
 }
 
 std::optional<Space3D> space_3d(const std::span<const Field> fields, std::vector<std::string>& problems) {

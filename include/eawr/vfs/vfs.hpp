@@ -110,6 +110,12 @@ public:
     [[nodiscard]] static core::Result<Vfs> mount(std::span<const MountSpec> ordered_layers);
 
     [[nodiscard]] core::Result<std::vector<std::byte>> open(std::string_view logical_path) const;
+    // Read one exact candidate returned by this mounted VFS. This lets callers
+    // qualify archive entry names independently of their logical mount prefix.
+    // When archive_name is supplied, an archive candidate must bear that exact
+    // canonical raw entry name, excluding its logical mount prefix.
+    [[nodiscard]] core::Result<std::vector<std::byte>> open(const AssetRecord& candidate,
+                                                          std::string_view archive_name = {}) const;
     [[nodiscard]] core::Result<AssetRecord> stat(std::string_view logical_path) const;
     [[nodiscard]] core::Result<std::vector<AssetRecord>> enumerate(
         std::string_view prefix = {},

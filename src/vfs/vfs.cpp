@@ -12,6 +12,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -512,6 +513,9 @@ struct Vfs::Impl {
     };
     std::vector<StoredAsset> assets;
     std::unordered_map<std::string, std::vector<std::size_t>> by_path;
+    // Used only by exact-candidate audio reads, never by open(logical_path).
+    mutable std::mutex archive_names_mutex;
+    mutable std::map<std::filesystem::path, std::map<std::pair<std::uint64_t, std::uint64_t>, std::set<std::string>>> archive_names;
 };
 
 Vfs::Vfs() = default;
@@ -687,6 +691,55 @@ core::Result<std::vector<std::byte>> Vfs::open(const std::string_view logical_pa
             diagnostic_codes::native_io, "short read from asset source", canonical.value(), asset.record.source_id));
     }
     return core::Result<std::vector<std::byte>>::success(std::move(bytes));
+}
+
+core::Result<std::vector<std::byte>> Vfs::open(const AssetRecord& candidate, const std::string_view archive_name) const {
+    if (!impl_) return core::Result<std::vector<std::byte>>::failure(error(
+        diagnostic_codes::mount_invalid, "VFS is not mounted", candidate.canonical_path));
+    const auto found = impl_->by_path.find(candidate.canonical_path);
+    if (found == impl_->by_path.end()) return core::Result<std::vector<std::byte>>::failure(error(
+        diagnostic_codes::not_found, "candidate is not present in the mounted view", candidate.canonical_path));
+    for (const auto index : found->second) {
+        const auto& asset = impl_->assets[index];
+        if (asset.record != candidate) continue;
+        const auto& canonical_path = candidate.canonical_path;
+        if (candidate.origin == AssetOrigin::archive && !archive_name.empty()) {
+            std::lock_guard lock(impl_->archive_names_mutex);
+            auto names = impl_->archive_names.find(asset.native_path);
+            if (names == impl_->archive_names.end()) {
+                // The public record's original_path includes the mount prefix.
+                // Re-read metadata without that prefix once per archive; retain
+                // names by byte range so no asset bytes or whole file are cached.
+                const auto raw = parse_meg(asset.native_path, candidate.source_id, "");
+                if (!raw) return core::Result<std::vector<std::byte>>::failure(raw.error());
+                std::map<std::pair<std::uint64_t, std::uint64_t>, std::set<std::string>> entries;
+                for (const auto& entry : raw.value().entries)
+                    entries[std::pair{entry.offset, entry.size}].insert(entry.canonical_path);
+                names = impl_->archive_names.emplace(asset.native_path, std::move(entries)).first;
+            }
+            const auto name = names->second.find(std::pair{asset.offset, candidate.size});
+            if (name == names->second.end() || !name->second.contains(std::string(archive_name))) continue;
+        }
+        if (asset.record.size > max_asset_bytes ||
+            asset.record.size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            return core::Result<std::vector<std::byte>>::failure(error(
+                diagnostic_codes::archive_limit, "asset exceeds the bounded read limit", canonical_path, asset.record.source_id));
+        }
+        std::ifstream input(asset.native_path, std::ios::binary);
+        if (!input) return core::Result<std::vector<std::byte>>::failure(native_io_error(
+            asset.native_path, "cannot read asset source", canonical_path, asset.record.source_id));
+        input.seekg(static_cast<std::streamoff>(asset.offset), std::ios::beg);
+        if (!input) return core::Result<std::vector<std::byte>>::failure(error(
+            diagnostic_codes::native_io, "cannot seek asset source", canonical_path, asset.record.source_id));
+        std::vector<std::byte> bytes(static_cast<std::size_t>(asset.record.size));
+        if (!read_exact(input, bytes.data(), bytes.size())) {
+            return core::Result<std::vector<std::byte>>::failure(error(
+                diagnostic_codes::native_io, "short read from asset source", canonical_path, asset.record.source_id));
+        }
+        return core::Result<std::vector<std::byte>>::success(std::move(bytes));
+    }
+    return core::Result<std::vector<std::byte>>::failure(error(
+        diagnostic_codes::not_found, "candidate is not present in the mounted view", candidate.canonical_path));
 }
 
 core::Result<std::vector<AssetRecord>> Vfs::enumerate_raw(

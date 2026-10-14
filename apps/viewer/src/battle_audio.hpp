@@ -212,6 +212,9 @@ private:
     [[nodiscard]] const audio::SfxEvent* event(std::string_view name, const std::string& where);
     [[nodiscard]] const Sample& sample(const std::string& name);
     [[nodiscard]] godot::Ref<godot::AudioStream> music_stream(const std::string& file);
+    // A speech or music file through the VFS, WAVE or MP3 by content; a failure is counted in missing_samples_.
+    [[nodiscard]] godot::Ref<godot::AudioStream> open_stream(const std::string& path, const std::string& key,
+                                                             std::string_view kind);
     // Admits an event; the identifier is independent of later sample allocation (SND-18).
     std::optional<audio::EventQueue::Handle> play(const audio::SfxEvent* sfx, std::optional<audio::Vec3> position, bool hidden, const std::string& reason,
               sim::EntityId loop_child = sim::invalid_entity_id, sim::EntityId attached = sim::invalid_entity_id,

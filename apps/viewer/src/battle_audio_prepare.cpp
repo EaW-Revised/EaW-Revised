@@ -24,6 +24,8 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <span>
+#include <string_view>
 #include <utility>
 
 #include "battle_audio_internal.hpp"
@@ -604,6 +606,56 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     samples_prepared_ = true;
 }
 
+namespace {
+
+[[nodiscard]] godot::Ref<godot::AudioStreamWAV> wav_stream(const audio::WavPcm& pcm) {
+    godot::PackedByteArray data;
+    data.resize(static_cast<std::int64_t>(pcm.data.size()));
+    std::memcpy(data.ptrw(), pcm.data.data(), pcm.data.size());
+    godot::Ref<godot::AudioStreamWAV> stream;
+    stream.instantiate();
+    stream->set_format(godot::AudioStreamWAV::FORMAT_16_BITS);
+    stream->set_mix_rate(static_cast<std::int32_t>(pcm.sample_rate));
+    stream->set_stereo(pcm.channels == 2);
+    stream->set_data(data);
+    return stream;
+}
+
+[[nodiscard]] godot::Ref<godot::AudioStreamMP3> mp3_stream(const std::span<const std::byte> bytes) {
+    godot::PackedByteArray data;
+    data.resize(static_cast<std::int64_t>(bytes.size()));
+    std::memcpy(data.ptrw(), bytes.data(), bytes.size());
+    godot::Ref<godot::AudioStreamMP3> stream;
+    stream.instantiate();
+    stream->set_data(data);
+    stream->set_loop(false);
+    return stream;
+}
+
+} // namespace
+
+// Speech and music streams: the original adds a fixed directory to the event's file name and
+// lets its decoder tell WAVE from MP3 by content (#1708), so a WAVE named `.mp3` plays too.
+godot::Ref<godot::AudioStream> BattleAudio::open_stream(const std::string& path, const std::string& key,
+                                                        const std::string_view kind) {
+    godot::Ref<godot::AudioStream> result;
+    auto bytes = filesystem_->open(path);
+    if (!bytes) {
+        missing_samples_[key] = "missing: " + std::string(kind) + " " + core::format_diagnostic(bytes.error());
+        return result;
+    }
+    std::string error;
+    result = audio::decode_stream(bytes.value(), error,
+        [](const audio::WavPcm& pcm) -> godot::Ref<godot::AudioStream> { return wav_stream(pcm); },
+        [](const std::span<const std::byte> data) -> godot::Ref<godot::AudioStream> {
+            auto stream = mp3_stream(data);
+            return stream->get_length() > 0.0 ? godot::Ref<godot::AudioStream>(stream) : godot::Ref<godot::AudioStream>{};
+        });
+    if (result.is_null()) missing_samples_[key] = "undecodable: "
+        + (error.empty() ? "Godot's MP3 decoder read no audio" : error);
+    return result;
+}
+
 const BattleAudio::SpeechEvent* BattleAudio::speech_event(const std::string_view name) {
     if (name.empty()) return nullptr;
     const auto found = speech_events_.find(lower(name));
@@ -617,55 +669,28 @@ const BattleAudio::SpeechEvent* BattleAudio::speech_event(const std::string_view
     // is English; SND-62 requires an explicit language route before adding others.
     speech.streams.reserve(speech.files.size());
     for (const auto& file : speech.files) {
-        godot::Ref<godot::AudioStream> result;
-        if (auto bytes = filesystem_->open("data/audio/speech/english/" + lower(file))) {
-            godot::PackedByteArray data;
-            if (lower(file).ends_with(".wav")) {
-                std::string error;
-                if (const auto pcm = audio::parse_wav(bytes.value(), error)) {
-                    data.resize(static_cast<std::int64_t>(pcm->data.size()));
-                    std::memcpy(data.ptrw(), pcm->data.data(), pcm->data.size());
-                    godot::Ref<godot::AudioStreamWAV> stream;
-                    stream.instantiate();
-                    stream->set_format(godot::AudioStreamWAV::FORMAT_16_BITS);
-                    stream->set_mix_rate(static_cast<std::int32_t>(pcm->sample_rate));
-                    stream->set_stereo(pcm->channels == 2);
-                    stream->set_data(data);
-                    result = stream;
-                } else missing_samples_[file] = "undecodable speech WAV: " + error;
-            } else {
-                data.resize(static_cast<std::int64_t>(bytes.value().size()));
-                std::memcpy(data.ptrw(), bytes.value().data(), bytes.value().size());
-                godot::Ref<godot::AudioStreamMP3> stream;
-                stream.instantiate();
-                stream->set_data(data);
-                stream->set_loop(false);
-                if (stream->get_length() > 0.0) result = stream;
-                else missing_samples_[file] = "undecodable speech MP3";
-            }
-        } else {
-            missing_samples_[file] = "speech: " + core::format_diagnostic(bytes.error());
-        }
-        speech.streams.push_back(result);
+        speech.streams.push_back(open_stream(audio::speech_sample_path("english", file), file, "speech"));
     }
     return &speech;
 }
 
 BattleAudio::DecodedSample BattleAudio::decode_sample(const std::string& name) const {
     DecodedSample decoded;
-    const std::string path = "data/audio/sfx/" + lower(name);
-    auto bytes = filesystem_->open(path);
-    if (!bytes) decoded.cause = "missing: " + core::format_diagnostic(bytes.error());
-    else {
-        std::string error;
-        const auto pcm = audio::parse_wav(bytes.value(), error);
-        if (!pcm) decoded.cause = "undecodable: " + error;
-        else {
-            decoded.rate = pcm->sample_rate;
-            decoded.channels = pcm->channels;
-            decoded.pcm.assign(pcm->data.begin(), pcm->data.end());
-        }
+    // The original opens the name as written (#1708); see audio::sfx_sample_candidates.
+    const auto bytes = audio::open_sfx_sample(*filesystem_, name);
+    if (!bytes) {
+        decoded.cause = "missing: " + core::format_diagnostic(bytes.error());
+        return decoded;
     }
+    std::string error;
+    const auto pcm = audio::parse_wav(bytes.value(), error);
+    if (!pcm) {
+        decoded.cause = "undecodable: " + error;
+        return decoded;
+    }
+    decoded.rate = pcm->sample_rate;
+    decoded.channels = pcm->channels;
+    decoded.pcm.assign(pcm->data.begin(), pcm->data.end());
     return decoded;
 }
 
@@ -678,16 +703,10 @@ const BattleAudio::Sample& BattleAudio::sample(const std::string& name) {
     Sample sample;
     sample.cause = std::move(decoded.cause);
     if (sample.cause.empty()) {
-        godot::PackedByteArray data;
-        data.resize(static_cast<std::int64_t>(decoded.pcm.size()));
-        std::memcpy(data.ptrw(), decoded.pcm.data(), decoded.pcm.size());
-        godot::Ref<godot::AudioStreamWAV> stream;
-        stream.instantiate();
-        stream->set_format(godot::AudioStreamWAV::FORMAT_16_BITS);
-        stream->set_mix_rate(static_cast<std::int32_t>(decoded.rate));
-        stream->set_stereo(decoded.channels == 2);
-        stream->set_data(data);
-        sample.stream = stream;
+        audio::WavPcm pcm(decoded.rate, decoded.channels);
+        pcm.converted = std::move(decoded.pcm);
+        pcm.data = pcm.converted;
+        sample.stream = wav_stream(pcm);
     }
     if (!sample.stream.is_valid()) missing_samples_[name] = sample.cause;
     return samples_.emplace(name, std::move(sample)).first->second;
@@ -697,21 +716,7 @@ godot::Ref<godot::AudioStream> BattleAudio::music_stream(const std::string& file
     core::load_profile::Scope music_scope(core::load_profile::Phase::audio);
     const auto found = music_streams_.find(file);
     if (found != music_streams_.end()) return found->second;
-    godot::Ref<godot::AudioStream> result;
-    const std::string path = "data/audio/music/" + lower(file);
-    if (auto bytes = filesystem_->open(path)) {
-        godot::PackedByteArray data;
-        data.resize(static_cast<std::int64_t>(bytes.value().size()));
-        std::memcpy(data.ptrw(), bytes.value().data(), bytes.value().size());
-        godot::Ref<godot::AudioStreamMP3> stream;
-        stream.instantiate();
-        stream->set_data(data);
-        stream->set_loop(false);
-        if (stream->get_length() > 0.0) result = stream;
-        else missing_samples_[file] = "undecodable: Godot's MP3 decoder read no audio";
-    } else {
-        missing_samples_[file] = "missing: " + core::format_diagnostic(bytes.error());
-    }
+    auto result = open_stream(audio::music_sample_path(file), file, "music");
     music_streams_.emplace(file, result);
     return result;
 }

@@ -171,7 +171,7 @@ public:
         if (!have_music_ || music_.files.empty()) return;
         if (!music_player_->get_stream().is_valid()) {
             const std::string file = lower(music_.files.front());
-            if (auto bytes = filesystem_->open("data/audio/music/" + file)) {
+            if (auto bytes = filesystem_->open(audio::music_sample_path(file))) {
                 PackedByteArray data;
                 data.resize(static_cast<std::int64_t>(bytes.value().size()));
                 std::memcpy(data.ptrw(), bytes.value().data(), bytes.value().size());
@@ -220,7 +220,7 @@ private:
         const auto found = samples_.find(name);
         if (found != samples_.end()) return found->second;
         Ref<AudioStreamWAV> stream;
-        if (auto bytes = filesystem_->open("data/audio/sfx/" + lower(name))) {
+        if (auto bytes = audio::open_sfx_sample(*filesystem_, name)) {
             std::string error;
             if (const auto pcm = audio::parse_wav(bytes.value(), error)) {
                 PackedByteArray data;

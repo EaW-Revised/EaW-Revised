@@ -158,6 +158,10 @@ if(EAWR_ENABLE_RELAY)
         "${CMAKE_CURRENT_SOURCE_DIR}/relay_server_processes.py" "$<TARGET_FILE:eawr_relay_server>"
         "${PROJECT_BINARY_DIR}/relay-process-artifacts")
     set_tests_properties(net_relay_server_process PROPERTIES TIMEOUT 60)
+    # Stages only the relay Dockerfile's build-stage COPY inputs and runs its cmake steps there (Linux; skips elsewhere).
+    add_test(NAME net_relay_dockerfile_stage COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/relay_dockerfile_stage.py" "${PROJECT_SOURCE_DIR}")
+    set_tests_properties(net_relay_dockerfile_stage PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()
 add_executable(net_lan_credentials_tests lan_credentials_tests.cpp)
 target_link_libraries(net_lan_credentials_tests PRIVATE eawr::net eawr::platform)

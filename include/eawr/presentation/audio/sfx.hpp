@@ -1,5 +1,8 @@
 #pragma once
 
+#include "eawr/core/result.hpp"
+#include "eawr/vfs/vfs.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -79,14 +82,104 @@ private:
 
 // --- Samples ------------------------------------------------------------------------------------
 
-// A RIFF WAVE file's 16-bit PCM payload (every FoC SFX sample; BA-30).
+// A RIFF WAVE file as little-endian 16-bit frames. The decoder behind the original game's audio
+// layer chooses by file content, not by extension (#1708), so a mod's sample may be 16-bit PCM,
+// 8-bit PCM or IMA ADPCM; every one is handed on as 16-bit frames.
 struct WavPcm final {
     std::uint32_t sample_rate{};
     std::uint16_t channels{};
-    std::span<const std::byte> data;  // little-endian 16-bit frames, borrowed from the file bytes
+    // Borrowed from the file bytes for 16-bit PCM, else it views `converted`.
+    std::span<const std::byte> data;
+    std::vector<std::byte> converted;  // the frames of an 8-bit or ADPCM file
+
+    WavPcm() = default;
+    WavPcm(const std::uint32_t rate, const std::uint16_t channel_count) noexcept
+        : sample_rate(rate), channels(channel_count) {}
+    // Moving a vector keeps its buffer, so `data` stays valid; a copy would not.
+    WavPcm(WavPcm&&) noexcept = default;
+    WavPcm& operator=(WavPcm&&) noexcept = default;
+    WavPcm(const WavPcm&) = delete;
+    WavPcm& operator=(const WavPcm&) = delete;
 };
-// Parses `bytes`; nullopt with `error` set when it is not 16-bit PCM WAVE.
+// Parses `bytes`; nullopt with `error` set when the file is not a WAVE this decoder reads: 8-bit
+// or 16-bit PCM (also inside WAVE_FORMAT_EXTENSIBLE) or 4-bit IMA ADPCM, mono or stereo.
 [[nodiscard]] std::optional<WavPcm> parse_wav(std::span<const std::byte> bytes, std::string& error);
+
+// --- Sample names -------------------------------------------------------------------------------
+
+// The original opens the authored SFX name (BA-30, ML-04/05/10). Data-rooted
+// names may find loose files or full-path archive entries; bare names do not
+// search loose Data/Audio/SFX files. Candidates are logical VFS index paths:
+// rooted path alone, otherwise the conventional SFX archive prefix then the
+// authored name. open_sfx_sample qualifies each candidate's original name and
+// origin so an archive mount prefix never changes the requested name.
+[[nodiscard]] std::vector<std::string> sfx_sample_candidates(std::string_view name);
+[[nodiscard]] eawr::core::Result<std::vector<std::byte>> open_sfx_sample(const eawr::vfs::Vfs& filesystem, std::string_view name);
+// Music and speech streams are different: the original adds a fixed directory to the event's
+// file name (`Data\Audio\Music\` and `Data\Audio\Speech\<language>\`) without looking at the
+// name. `language_directory` is the language's folder name (`English`).
+[[nodiscard]] std::string music_sample_path(std::string_view file);
+[[nodiscard]] std::string speech_sample_path(std::string_view language_directory, std::string_view file);
+
+// Shared by battle and galactic streams. A malformed RIFF stays a WAVE failure;
+// it is never retried as MP3. The backend owns MP3 decoding and stream validity.
+template<class WaveDecoder, class Mp3Decoder>
+[[nodiscard]] auto decode_stream(std::span<const std::byte> bytes, std::string& error,
+                                 WaveDecoder wave, Mp3Decoder mp3) -> decltype(mp3(bytes)) {
+    if (bytes.size() >= 4 && bytes[0] == std::byte{'R'} && bytes[1] == std::byte{'I'}
+        && bytes[2] == std::byte{'F'} && bytes[3] == std::byte{'F'}) {
+        if (const auto pcm = parse_wav(bytes, error)) return wave(*pcm);
+        return {};
+    }
+    return mp3(bytes);
+}
+
+// SFX failures must not poison a speech/music stream for the same authored path.
+enum class GalacticStreamKind { speech, music, sfx };
+[[nodiscard]] inline std::string galactic_stream_key(GalacticStreamKind kind, std::string_view path) {
+    return kind == GalacticStreamKind::sfx ? "sfx:" + std::string(path) : std::string(path);
+}
+
+struct SampleDiagnostics final {
+    std::size_t sfx_requested{}, sfx_resolved{}, files_missing_total{}, files_undecodable_total{};
+    std::map<std::string, std::size_t> files_missing, files_undecodable;
+};
+
+// Samples contains SFX only; failures may also contain speech and music.
+template<class Samples, class Failures, class Resolved>
+[[nodiscard]] SampleDiagnostics sample_diagnostics(const Samples& samples, const Failures& failures, Resolved resolved) {
+    SampleDiagnostics result;
+    result.sfx_requested = samples.size();
+    for (const auto& [name, sample] : samples) {
+        static_cast<void>(name);
+        if (resolved(sample)) ++result.sfx_resolved;
+    }
+    for (const auto& [name, cause] : failures) {
+        static_cast<void>(name);
+        constexpr std::string_view prefix = "undecodable:";
+        if (cause.starts_with(prefix)) {
+            auto detail = std::string_view(cause).substr(prefix.size());
+            if (detail.starts_with(' ')) detail.remove_prefix(1);
+            ++result.files_undecodable[std::string(detail)];
+            ++result.files_undecodable_total;
+        } else {
+            auto detail = std::string_view(cause);
+            if (detail.starts_with("missing:")) {
+                detail.remove_prefix(std::string_view("missing:").size());
+                if (detail.starts_with(' ')) detail.remove_prefix(1);
+            }
+            // Keep the stream category and VFS code, not the per-file path,
+            // source or message. Different files with the same cause aggregate.
+            if (const auto code = detail.find("EAWR-"); code != std::string_view::npos) {
+                const auto end = detail.find(' ', code);
+                detail = detail.substr(0, end);
+            }
+            ++result.files_missing[std::string(detail)];
+            ++result.files_missing_total;
+        }
+    }
+    return result;
+}
 
 // --- 3D -----------------------------------------------------------------------------------------
 

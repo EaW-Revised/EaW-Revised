@@ -5,6 +5,7 @@ WORKDIR /source
 COPY include/eawr/core include/eawr/core
 COPY include/eawr/net include/eawr/net
 COPY include/eawr/platform/relay_credentials.hpp include/eawr/platform/relay_credentials.hpp
+COPY include/eawr/presentation/ui/lan_lobby.hpp include/eawr/presentation/ui/lan_lobby.hpp
 COPY src/platform/relay_credentials.cpp src/platform/relay_credentials.cpp
 COPY src/net src/net
 COPY cmake cmake
