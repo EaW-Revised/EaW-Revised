@@ -42,7 +42,8 @@ struct RelayServerOptions {
     std::function<void(const core::Diagnostic&)> diagnostics;
     std::size_t max_connections{128};
     std::size_t max_sessions{64};
-    std::size_t connections_per_ip{8};
+    // 18 = 2 x max_match_seats: nine room members behind one NAT, each with a directory and a room connection.
+    std::size_t connections_per_ip{18};
     std::size_t unpaired_sessions_per_ip{2};
     std::size_t accepts_per_minute{30};
     std::size_t operations_per_minute{120};
@@ -60,6 +61,13 @@ struct RelayServerOptions {
     // service also warns both peers then (the effective window is at most half of session_lifetime).
     std::chrono::milliseconds max_session_lifetime{86400000};
     std::chrono::milliseconds renewal_window{600000};
+    // N-peer rooms (slice N3). Room members have budgets of their own, apart from the legacy per-session and
+    // per-prefix ones (players share a NAT): a member, a whole room (capacity x member) and a prefix
+    // (connections_per_ip x member). Provisional until the introduced-path test measures the signal volume.
+    std::size_t room_operations_per_member_per_minute{480};
+    std::size_t room_bytes_per_member_per_minute{2 * 1024 * 1024};
+    std::chrono::milliseconds room_reservation_timeout{30000}; // an admitted guest must attach within this
+    std::chrono::milliseconds room_hold_timeout{300000};       // a started match holds a lost seat this long
 };
 
 // One owner thread calls poll. Uses the existing native socket layer and TLS;
@@ -79,6 +87,7 @@ public:
     std::uint16_t port() const;
     std::size_t connections() const;
     std::size_t sessions() const;
+    std::size_t rooms() const;
     // Operator moderation, called on the same owner thread as poll().
     bool remove_chat_member(const std::string& room, std::uint32_t seat);
 private:

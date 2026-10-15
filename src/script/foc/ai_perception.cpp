@@ -16,6 +16,7 @@ namespace {
 Real single(Real value) { return to_single(value); }
 Real fixed(math::Fixed value) { return numeric::from_fixed(value); }
 std::atomic<ThreatGrid::QueryObserver> threat_observer{};
+std::atomic<Engine::InputObserver> input_observer{};
 
 template <typename T> T clamp_to(T value, T low, T high) { return value < low ? low : (high < value ? high : value); }
 
@@ -507,8 +508,63 @@ Real normalised(Real value, Real normaliser) {
 
 } // namespace
 
+void Engine::observe_inputs(const InputObserver observer) noexcept {
+    input_observer.store(observer, std::memory_order_relaxed);
+}
+
+void Engine::report_inputs() const noexcept {
+    if (core::tick_profile::active) {
+        if (const auto observer = input_observer.load(std::memory_order_relaxed))
+            observer(host_->view ? host_->view->tick : 0, input_counts_);
+    }
+}
+
+Engine::PadInput Engine::pad_input(const sim::EntityId object, const tactical::PadState& state, const bool prepare_open) const {
+    PadInput row;
+    row.object = object;
+    const auto& world = *host_->ai_world;
+    const auto& view = *host_->view;
+    row.unit = view.find(object);
+    row.children = {view.find(state.constructed), view.find(state.under_construction)};
+    if (!row.unit) return row;
+    const auto* profile = world.economy().pads.point(row.unit->type);
+    for (const auto& player : world.players()) {
+        const bool allied = host_->allied(player.player_id, row.unit->owner) && !host_->neutral(row.unit->owner);
+        const bool can_build = allied && profile && profile->build_pad && view.tick >= state.cooldown_until;
+        std::optional<bool> open;
+        if (!can_build) open = false;
+        else if (prepare_open && pad_open_pending_.contains(player.player_id))
+            open = world.construction_allowed(player.player_id, object);
+        row.buyers.push_back({player.player_id, world.economy().menu(row.unit->type, player.faction_id), allied, can_build, open});
+    }
+    return row;
+}
+
+void Engine::prepare_pad_inputs(const sim::PartitionExecutor* executor) {
+    pad_inputs_.reset();
+    pad_open_pending_ = std::move(pad_open_requested_);
+    pad_open_requested_.clear();
+    if (!host_->world || !host_->view) return;
+    const auto& pads = host_->ai_world->pads();
+    const std::vector<std::pair<sim::EntityId, tactical::PadState>> inputs(pads.begin(), pads.end());
+    std::vector<PadInput> rows(inputs.size());
+    const auto prepare = [&](const std::size_t index) { rows[index] = pad_input(inputs[index].first, inputs[index].second, true); };
+    constexpr std::size_t parallel_pad_rows = 256;
+    if (executor && inputs.size() * host_->ai_world->players().size() >= parallel_pad_rows)
+        prepare_rows(*executor, "ai-pad-perception", inputs.size(), prepare);
+    else for (std::size_t index = 0; index < inputs.size(); ++index) prepare(index);
+    input_counts_.pad_rows += rows.size();
+    ++input_counts_.pad_prepasses;
+    if (player_inputs_active_) ++input_counts_.late_prepasses;
+    pad_inputs_ = std::move(rows);
+}
+
 std::optional<Real> Engine::pad_count(const tactical::PlayerId player,
     const std::vector<std::string>& names, const bool open) const {
+    if (player_inputs_active_) {
+        ++input_counts_.pad_queries;
+        if (open) pad_open_requested_.insert(player);
+    }
     std::vector<tactical::TypeId> types;
     for (const auto& name : names) {
         const auto found = host_->types_by_name.find(name);
@@ -531,57 +587,53 @@ std::optional<Real> Engine::pad_count(const tactical::PlayerId player,
     const auto owner = std::find_if(players.begin(), players.end(),
         [player](const auto& entry) { return entry.player_id == player; });
     if (owner == players.end()) return Real{};
-    // WAS-10/11: copy query inputs, prepare disjoint pad rows, then reduce integers in order.
-    // Earlier goal reservations in this barrier are included; ownership/build-limit counts
-    // remain separate. This never introduces a serial entity census.
-    const std::vector<std::pair<sim::EntityId, tactical::PadState>> pads(world.pads().begin(), world.pads().end());
-    std::vector<std::int64_t> counts(pads.size());
-    const sim::InlineExecutor inline_executor;
-    prepare_rows(perception_executor_ != nullptr ? *perception_executor_ : inline_executor,
-        "ai-pad-perception", pads.size(), [&](const std::size_t index) {
-        const auto& [object, state] = pads[index];
-        const auto* pad = view.find(object);
-        if (pad == nullptr || !host_->allied(player, pad->owner) || host_->neutral(pad->owner)) return;
-        const auto reserved = pad_reservations_.find(object);
+    // Immutable pad facts are prepared before players run. Reservations remain
+    // live ordered reads: an earlier goal in this barrier can close this pad.
+    const auto count_row = [&](const PadInput& row) {
+        const auto* pad = row.unit;
+        if (!pad) return std::int64_t{};
+        const auto buyer = std::find_if(row.buyers.begin(), row.buyers.end(),
+            [player](const auto& entry) { return entry.player == player; });
+        if (buyer == row.buyers.end() || !buyer->allied) return std::int64_t{};
+        const auto reserved = pad_reservations_.find(row.object);
         const bool pending_or_live = reserved != pad_reservations_.end()
             && (!reserved->second.consumed || view.tick <= reserved->second.issued
-                || view.find(state.under_construction) != nullptr || view.find(state.constructed) != nullptr);
+                || row.children[1] != nullptr || row.children[0] != nullptr);
         const auto reservation = pending_or_live && host_->allied(player, reserved->second.player)
             ? reserved->second.type : tactical::TypeId{};
+        std::int64_t count = 0;
         if (open) {
-            const auto* profile = world.economy().pads.point(pad->type);
-            if (reservation != 0 || profile == nullptr || !profile->build_pad
-                || view.tick < state.cooldown_until
-                || !world.construction_allowed(player, object)) return;
-            const auto* menu = world.economy().menu(pad->type, owner->faction_id);
+            if (reservation != 0 || !buyer->can_build) return count;
+            // Only preceding-tick actual open queries request a broad-phase memo.
+            // Cold dynamic players use the same const inline query, never a phase.
+            const bool allowed = buyer->open ? *buyer->open : world.construction_allowed(player, row.object);
+            if (!allowed) return count;
             if (types.empty() || std::any_of(types.begin(), types.end(), [&](const auto type) {
-                return type == pad->type || (menu != nullptr && menu->find(type) != nullptr);
-            })) counts[index] = 1; // WAS-11: multiple matching filters still count once
+                return type == pad->type || (buyer->menu && buyer->menu->find(type));
+            })) count = 1;
         } else {
             if (names.empty()) {
-                // WAS-10: no filter counts each registered reservation or live child.
-                if (reservation != 0) counts[index] = 1;
-                else for (const auto id : {state.constructed, state.under_construction}) {
-                    if (view.find(id) != nullptr) ++counts[index];
-                }
-                return;
+                if (reservation != 0) count = 1;
+                else for (const auto* child : row.children) if (child) ++count;
+                return count;
             }
             for (const auto type : types) {
                 if (reservation != 0) {
                     const auto* child = world.economy().pads.child(reservation);
-                    if (reservation == type || (child != nullptr && child->constructed == type)) ++counts[index];
-                } else {
-                    // WAS-10: without a stored reservation, inspect the actual children.
-                    for (const auto id : {state.constructed, state.under_construction}) {
-                        const auto* child = view.find(id);
-                        if (child != nullptr && child->type == type) ++counts[index];
-                    }
-                }
+                    if (reservation == type || (child && child->constructed == type)) ++count;
+                } else for (const auto* child : row.children) if (child && child->type == type) ++count;
             }
         }
-    });
+        return count;
+    };
     std::int64_t total = 0;
-    for (const auto count : counts) total += count;
+    if (pad_inputs_) {
+        for (const auto& row : *pad_inputs_) total += count_row(row);
+    } else {
+        // Cache-free const path outside the engine barrier (including Lua).
+        // Queries never start a worker phase.
+        for (const auto& [object, state] : world.pads()) total += count_row(pad_input(object, state));
+    }
     return real(total);
 }
 

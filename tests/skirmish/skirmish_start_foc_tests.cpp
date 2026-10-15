@@ -286,7 +286,8 @@ void foc_ffa_visibility(const skirmish::SkirmishStart& start, const skirmish::St
 }
 
 void foc_ffa_ai(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs,
-    const eawr::units::UnitTables& tables, const eawr::vfs::Vfs& files) {
+    const eawr::units::UnitTables& tables, const eawr::vfs::Vfs& files,
+    const std::optional<tactical::PlayerId> overflow = std::nullopt) {
     const std::array<tactical::PlayerId, 1> humans{1};
     auto content = skirmish::session_content(tables, humans);
     auto economy = skirmish::economy_rules(start, inputs, tables);
@@ -322,7 +323,8 @@ void foc_ffa_ai(const skirmish::SkirmishStart& start, const skirmish::StartInput
             for (const auto& event : step.value().world.snapshot->events())
                 if (event.kind == tactical::EventKind::order_accepted) ++accepted[event.player];
         }
-        for (const auto& player : ai.players) if (player.ai)
+        // WSS-54: an overflow AI has no starting fleet to order. Other AIs must remain active.
+        for (const auto& player : ai.players) if (player.ai && overflow != player.player)
             expect(accepted[player.player] > 0, "every FFA AI issues accepted orders: player " + std::to_string(player.player));
         const auto replay = tactical::write_replay(session.value().record());
         expect(static_cast<bool>(replay), "FFA AI replay writes");
@@ -1104,6 +1106,42 @@ void foc_start(const std::filesystem::path& fixtures) {
                         }
                         std::cout << "FoC 2v2: shared stations, four ledgers, 1/2/4/8 workers and replay PASS\n";
                     }
+                }
+            }
+            if (name.ends_with("_coruscant.ted")) {
+                skirmish::SetupSelection uneven;
+                uneven.map = map.path;
+                uneven.slots = {{1, "Rebel", 0, true, {}}, {2, "Rebel", 0, false, {}},
+                    {3, "Empire", 1, false, {}}, {4, "Empire", 1, false, {}},
+                    {5, "Empire", 1, false, {}}, {6, "Empire", 1, false, {}}};
+                const auto accepted = skirmish::setup_options(uneven, maps.value());
+                expect(static_cast<bool>(accepted), "WSS-54: installed Coruscant lobby accepts owner 2v4 roster");
+                auto uneven_fixture = selected.value();
+                uneven_fixture.slots = uneven.slots;
+                const auto uneven_start = skirmish::build_start(uneven_fixture, chosen_inputs.value());
+                expect(static_cast<bool>(uneven_start), "WSS-54: installed Coruscant 2v4 builds");
+                if (uneven_start) {
+                    // WSW-01/SS-OV05: standalone sources are per playable player, independent of spawn markers.
+                    expect(std::none_of(uneven_start.value().units.begin(), uneven_start.value().units.end(),
+                        [](const auto& unit) { return unit.state.owner == 6 && unit.role != skirmish::UnitRole::special_weapon; })
+                        && std::none_of(uneven_start.value().markers.begin(), uneven_start.value().markers.end(),
+                            [](const auto& marker) { return marker.player == 6; }),
+                        "WSS-54: fourth Empire teammate has no starting fleet or reused marker");
+                    const auto economy = skirmish::economy_rules(uneven_start.value(), chosen_inputs.value(), tables.value());
+                    expect(economy && economy.value().players.size() == 6, "WSS-54: installed 2v4 binds six accounts");
+                    const auto content = skirmish::session_content(tables.value(), skirmish::human_slots(uneven_fixture));
+                    expect(static_cast<bool>(content), "WSS-54: installed 2v4 binds full session content");
+                    if (economy && content) {
+                        const auto* account = economy.value().player(6);
+                        expect(account && account->credits == whole(6000) && account->reinforcement_yaw == Fixed{},
+                            "WSS-54: overflow keeps retail starting cash and project default yaw");
+                        const auto uneven_session = tactical::TacticalSession::create(uneven_start.value().setup,
+                            content.value().sensors, content.value().durability, content.value().motion,
+                            std::nullopt, content.value().combat, {}, content.value().abilities, economy.value());
+                        expect(uneven_session && uneven_session.value().ledgers().size() == 6, "WSS-54: installed 2v4 session activates");
+                    }
+                    // 900 admitted frames with all five AI controllers and full content, equal on 1/2/4/8 workers.
+                    foc_ffa_ai(uneven_start.value(), chosen_inputs.value(), tables.value(), filesystem.value(), 6);
                 }
             }
             if (polus) {

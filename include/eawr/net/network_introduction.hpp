@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/net/gns_room.hpp"
 #include "eawr/net/gns_signalling.hpp"
 #include "eawr/net/online_lobby.hpp"
 
@@ -22,6 +23,8 @@ struct NetworkIntroductionOptions {
     std::chrono::milliseconds renewal_retry{5000};
     std::size_t queue_bytes{256 * 1024};
     std::size_t queue_frames{64};
+    // Only public/direct publications may have a guessable invitation alias.
+    bool public_alias{true};
 };
 
 // One persistent TLS connection. Operational calls block their caller for the
@@ -37,6 +40,7 @@ public:
     std::string principal() const;
     core::Result<OnlineRoomPage> list(std::string after = {}, std::uint32_t limit = 50) override;
     core::Result<OnlineRoomPublication> publish(OnlineRoomMetadata, std::string password = {}) override;
+    core::Result<OnlineRoomPublication> publish_bridge(OnlineRoomMetadata, std::string password, std::string invitation, std::string ownership = {}) override;
     core::Result<void> heartbeat(const OnlineRoomPublication&, const OnlineRoomMetadata&) override;
     core::Result<void> remove(const OnlineRoomPublication&) override;
     core::Result<OnlineRoomAdmission> join(std::string room, std::string password, std::string name) override;
@@ -61,5 +65,63 @@ public:
     static core::Result<void> health(NetworkIntroductionOptions options);
 private:
     NetworkIntroductionOptions options_;
+};
+
+// One member of an N-peer room over the TLS service (slice N3 of docs/net-online-npeer.md): a connection of its own,
+// separate from the directory connection. The factories block for the bounded admission exchange (including the
+// per-member TURN credential), so call them from a background I/O worker. After that, send/poll/roster only touch
+// copied, bounded queues and are safe on GNS callbacks; one worker thread owns all TLS I/O. Host-only operations
+// (release, kick, lock) are refused locally from any other slot. The service sets every signal's source slot and
+// identity: nothing a member sends can name another source. Never log the member capability.
+//
+// Behaviour relative to the in-process fixture (InProcessGnsRoom), for N4's contract tests:
+//  * Lock is not gated on completeness; the session (N4) refuses Start while a seat is missing.
+//  * A signal to a seat that is not attached is accepted and dropped by the service (counted), never an error and
+//    never a disconnect; the fixture returns an error to the caller.
+//  * A kick whose denylist entry does not fit (64 identities/principals) removes the member without denying it and the
+//    acknowledgement carries EAWR-NET-1777 (last_refusal); the fixture closes the room.
+//  * A guest keeps its NetworkOnlineLobby (directory connection) alive until attach() returns: the seat reservation ends
+//    with the directory admission.
+//  * Kick denies the identity and the directory principal. A client that changes both (a fresh principal and another
+//    identity string) is a new player; the denial is a courtesy against accidents, not an identity guarantee.
+//  * Destroying the last reference joins the worker, which may wait out a pending connect or DNS lookup: do not drop it on
+//    a GNS callback thread.
+class NetworkGnsRoom final : public GnsRoomEndpoint {
+public:
+    static bool available();
+    // Host: opens the signalling scope of an already published directory room (principal from NetworkOnlineLobby).
+    static core::Result<std::shared_ptr<NetworkGnsRoom>> open(NetworkIntroductionOptions, const OnlineRoomPublication& room,
+        std::string principal, std::string identity, bool public_alias = true);
+    // Guest holding a directory admission (slot and member capability from OnlineRoomAdmission).
+    static core::Result<std::shared_ptr<NetworkGnsRoom>> attach(NetworkIntroductionOptions, const OnlineRoomAdmission& admission, std::string identity);
+    // Guest with a public four-character alias: reserves the lowest free seat and attaches in one step.
+    static core::Result<std::shared_ptr<NetworkGnsRoom>> attach_alias(NetworkIntroductionOptions, std::string alias, std::string identity);
+    // After Start: binds a new connection to a held seat for repair and returns fresh TURN credentials.
+    static core::Result<std::shared_ptr<NetworkGnsRoom>> reattach(NetworkIntroductionOptions, std::string room, std::string capability, std::string identity);
+    ~NetworkGnsRoom() override;
+    std::string alias() const;       // host only, empty when the room has none
+    std::string capability() const;  // secret: the key for reattach
+    // Signals that arrived while the receive queue was full are dropped and counted (ICE retries); the member stays.
+    std::uint64_t dropped_signals() const;
+    // Code ("EAWR-NET-1775") of the host's last operation the service acknowledged as not (fully) applied: a repeated
+    // lock, a release after Start (1775), a kick whose denial did not fit the bounded denylist (1777). Empty if none.
+    std::string last_refusal() const;
+    PeerIndex local_slot() const override;
+    GnsRoomRoster roster() const override;
+    core::Result<void> send(PeerIndex slot, std::span<const std::uint8_t> blob) override;
+    core::Result<std::optional<GnsRoomSignal>> poll() override;
+    std::optional<GnsTurnCredentials> turn_credentials() const override;
+    GnsRoomLease lease() const override;
+    core::Result<void> status() const override;
+    core::Result<void> leave() override;
+    core::Result<void> release(PeerIndex slot) override;
+    core::Result<void> kick(PeerIndex slot) override;
+    core::Result<void> lock() override;
+private:
+    struct Impl;
+    explicit NetworkGnsRoom(std::unique_ptr<Impl> impl);
+    static core::Result<std::shared_ptr<NetworkGnsRoom>> connect(NetworkIntroductionOptions, std::vector<std::uint8_t> request,
+        std::string identity, std::optional<std::uint32_t> expected_slot);
+    std::unique_ptr<Impl> impl_;
 };
 } // namespace eawr::net

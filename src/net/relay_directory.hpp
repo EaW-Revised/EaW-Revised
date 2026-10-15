@@ -4,8 +4,10 @@
 #include <deque>
 #include <map>
 #include <optional>
+#include <functional>
 
 namespace eawr::net::relay {
+class RoomService;
 struct PasswordHashInput { std::string password, salt; };
 struct PasswordHashOutput { std::string salt; core::Result<std::string> value; };
 // One server owner orders admission and commits the seat before replying. Tests
@@ -15,8 +17,23 @@ public:
     using Time = RelayServer::Clock::time_point;
     explicit Directory(std::size_t max_rooms, std::size_t max_connections)
         : max_rooms_(max_rooms), max_principals_(max_connections * 4) {}
+    struct BridgeHooks {
+        std::function<bool(const std::string&, const std::string&, bool, bool)> valid;
+        std::function<void(const std::string&)> bind;
+        std::function<bool(const std::string&)> admit;
+        std::function<void(const std::string&)> revoke;
+    };
+    void set_bridge_hooks(BridgeHooks hooks) { bridge_ = std::move(hooks); }
+    // N-peer room scope (slice N3): the room service shares the admission commit and the room's lobby state.
+    void set_room_scope(RoomService* scope) { scope_ = scope; }
+    struct ScopeInfo { std::uint32_t capacity{}; bool passworded{}, bridged{}; };
+    // Host-only: the room must belong to this principal and ownership capability and not be closed or started.
+    std::optional<ScopeInfo> scope_info(const std::string& room, const std::string& credential, const std::string& principal);
+    void scope_state(const std::string& room, bool locked, bool closed);
     Bytes request(std::uint64_t client, const std::string& prefix, const Bytes&, Time, PrefixBudgets&,
         std::optional<PasswordHashInput>* pending = nullptr, const PasswordHashOutput* completed = nullptr);
+    void invalidate_bridge(const std::string& invitation);
+    void close_bridge(const std::string& invitation);
     void disconnect(std::uint64_t client, Time);
     void expire(Time);
     bool operator_remove(const std::string& room, std::uint32_t seat);
@@ -33,6 +50,8 @@ private:
     struct Room {
         OnlineRoomRow row;
         std::string ownership, principal, prefix, salt, password_hash;
+        std::string bridge_invitation, bridge_ownership;
+        bool bridge_bound{}, bridge_consumed{}, scope_locked{}, scope_closed{};
         Time expires{};
         Budget passwords;
         std::uint32_t sequence{}, next_seat{2};
@@ -40,6 +59,8 @@ private:
         std::deque<OnlineChatLine> chat;
     };
     std::size_t max_rooms_, max_principals_;
+    BridgeHooks bridge_;
+    RoomService* scope_{};
     Budget hashes_;
     PrefixBudgets* budgets_{};
     std::map<std::string, Room> rooms_;

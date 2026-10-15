@@ -6,11 +6,6 @@
 
 namespace eawr::script::foc::ai {
 namespace {
-std::string chain(const std::vector<std::string>& tokens, std::size_t start) {
-    std::string out;
-    for (auto index = start; index < tokens.size(); ++index) { if (!out.empty()) out += '.'; out += tokens[index]; }
-    return out;
-}
 std::optional<Real> parameter_number(const std::vector<Binding>& bindings, std::string_view name) {
     for (const auto& b : bindings) if (b.parameter == name) if (const auto* value = std::get_if<Real>(&b.value)) return *value;
     return {};
@@ -87,6 +82,7 @@ struct GalacticWorld::Evaluator final : LookupResolver {
 std::optional<Real> GalacticWorld::evaluate_with_timeline(const Engine& engine, std::string_view name,
     tactical::PlayerId owner, const Target* target, int value) const {
     gc_profile::Scope profile_scope(gc_profile::Phase::perception);
+    const auto reads = sequential_reads();
     if (value < 0 || value > 5 || !snapshot_ || !player(owner) || !refresh_economy_runtime()) return {};
     const auto* equation = engine.data().equations.find(name); if (!equation) return {};
     PlayerAi selected; selected.player = owner;
@@ -100,6 +96,7 @@ std::optional<Real> GalacticWorld::evaluate_with_timeline(const Engine& engine, 
 std::optional<Real> GalacticWorld::perception(const Engine& engine, const Equation& equation,
     const Context& context, AiRandom& random) const {
     gc_profile::Scope profile_scope(gc_profile::Phase::perception);
+    const auto reads = sequential_reads();
     if (!snapshot_ || !player(context.player) || !refresh_economy_runtime()) return {};
     Evaluator evaluator(*this, engine, context); return run(equation, evaluator, random);
 }
@@ -107,15 +104,17 @@ std::optional<Real> GalacticWorld::perception(const Engine& engine, const Equati
 std::optional<Real> GalacticWorld::perception_read_only(const Engine& engine, const Equation& equation,
     const Context& context, AiRandom& random) const {
     gc_profile::Scope profile_scope(gc_profile::Phase::perception);
+    const auto reads = sequential_reads();
     if (!snapshot_ || !player(context.player) || !refresh_economy_runtime()) return {};
     Evaluator evaluator(*this, engine, context, 0, ReadMode::read_only); return run(equation, evaluator, random);
 }
 
 std::optional<Real> GalacticWorld::reconstruction_enemy_space(const DerivedExecutionRestore&, const Context& context) const {
+    const auto reads = sequential_reads();
     if (!snapshot_ || !player(context.player) || !context.target || !planet(context.target->object)) return {};
     const GalacticCacheKey key{context.player, context.enemy, context.human, context.target->object,
         {"VARIABLE_TARGET", "ENEMYFORCE", "SPACETOTALUNNORMALIZED"}, {}};
-    std::scoped_lock lock(cache_mutex_);
+    const auto lock = query_lock();
     // B-U05: a derived load is not an admitted force-cache refresh. Preserve
     // archived observations, including expired/frame-zero rows. A missing row
     // uses the qualified raw getter without publishing cache or visibility.
@@ -124,6 +123,7 @@ std::optional<Real> GalacticWorld::reconstruction_enemy_space(const DerivedExecu
 
 std::optional<Real> GalacticWorld::target_enemy_force(const Context& context,
     galactic::ProductionDomain channel, std::uint64_t category_mask) const {
+    const auto reads = sequential_reads();
     if (!snapshot_ || !player(context.player) || !context.target) return {};
     const auto* at = planet(context.target->object);
     if (!at) return {};
@@ -131,7 +131,7 @@ std::optional<Real> GalacticWorld::target_enemy_force(const Context& context,
         {"VARIABLE_TARGET", "ENEMYFORCE", channel == galactic::ProductionDomain::ground
             ? "GROUNDTOTALUNNORMALIZED" : "SPACETOTALUNNORMALIZED"}, {}};
     if (category_mask) key.bindings.push_back({"PARAMETER_CATEGORY", Real(category_mask)});
-    std::scoped_lock lock(cache_mutex_);
+    const auto lock = query_lock();
     const auto cached = read(key, ReadMode::ordinary);
     if (!cached || allied(context.player, at->planet.owner)) return cached;
     // The original contrast reader adds these actual defensive facts after
@@ -172,6 +172,7 @@ std::optional<Real> GalacticWorld::target_enemy_force(const Context& context,
 
 std::optional<Real> GalacticWorld::reconstruction_perception(const DerivedExecutionRestore&,
     const Engine& engine, const Equation& equation, const Context& context, AiRandom& random) const {
+    const auto reads = sequential_reads();
     if (!snapshot_ || !player(context.player)) return {};
     Evaluator evaluator(*this, engine, context, 0, ReadMode::archived); return run(equation, evaluator, random);
 }
@@ -187,14 +188,111 @@ std::uint32_t galactic_visibility_mask(std::span<const std::string> tokens) {
         return galactic::bit(galactic::Intelligence::ground_count);
     return 0;
 }
-GalacticCachedValue* GalacticWorld::cached_value(const GalacticCacheKey& key) const {
-    if (cache_index_.size() != state_.cache.size()) {
-        cache_index_.clear();
-        for (std::size_t index = 0; index < state_.cache.size(); ++index)
-            cache_index_.emplace(state_.cache[index].key, index);
+namespace {
+std::uint64_t mix(std::uint64_t value) {
+    value ^= value >> 30U; value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27U; value *= 0x94d049bb133111ebULL;
+    return value ^ (value >> 31U);
+}
+std::uint64_t key_hash(const GalacticInternedKey& key) {
+    auto value = mix(key.player);
+    value = mix(value ^ (key.enemy ? static_cast<std::uint64_t>(*key.enemy) + 1 : 0));
+    value = mix(value ^ (key.human ? static_cast<std::uint64_t>(*key.human) + 1 : 0));
+    return mix(mix(mix(value ^ key.planet) ^ key.token) ^ key.binding.identity);
+}
+bool bindings_equal(const std::vector<Binding>& a, const std::vector<Binding>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (a[i].parameter != b[i].parameter || a[i].value.index() != b[i].value.index()) return false;
+        if (const auto* number = std::get_if<Real>(&a[i].value)) {
+            const auto other = std::get<Real>(b[i].value);
+            if (number->repr != other.repr && *number != other) return false;
+        } else if (std::get<std::string>(a[i].value) != std::get<std::string>(b[i].value)) return false;
     }
-    const auto found = cache_index_.find(key);
-    return found == cache_index_.end() ? nullptr : &state_.cache[found->second];
+    return true;
+}
+std::uint64_t binding_hash(const std::vector<Binding>& bindings) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    const auto text = [&](std::string_view value) {
+        hash = mix(hash ^ value.size());
+        for (const auto c : value) { hash ^= static_cast<unsigned char>(c); hash *= 1099511628211ULL; }
+    };
+    for (const auto& binding : bindings) {
+        text(binding.parameter); hash = mix(hash ^ binding.value.index());
+        if (const auto* number = std::get_if<Real>(&binding.value)) hash = mix(hash ^ (*number == Real{} ? 0 : number->repr));
+        else text(std::get<std::string>(binding.value));
+    }
+    return hash;
+}
+}
+thread_local const GalacticWorld* GalacticWorld::active_world_{};
+std::uint64_t GalacticWorld::intern_token(const std::vector<std::string>& tokens,
+    std::shared_ptr<const PerceptionToken> compiled) const {
+    if (compiled && compiled->tokens == tokens) {
+        if (!tokens_.contains(compiled->id)) {
+            tokens_.emplace(compiled->id, compiled); token_ids_.emplace(tokens, compiled->id);
+        }
+        return compiled->id;
+    }
+    if (const auto found = token_ids_.find(tokens); found != token_ids_.end()) return found->second;
+    compiled = compile_perception_token(tokens);
+    tokens_.emplace(compiled->id, compiled); token_ids_.emplace(tokens, compiled->id);
+    return compiled->id;
+}
+std::optional<GalacticBindingId> GalacticWorld::find_bindings(const std::vector<Binding>& bindings) const {
+    if (bindings.empty()) return GalacticBindingId{};
+    const auto bucket = binding_ids_.find(binding_hash(bindings));
+    if (bucket == binding_ids_.end()) return {};
+    for (const auto id : bucket->second)
+        if (bindings_equal(bindings_[static_cast<std::size_t>(id)], bindings)) return GalacticBindingId{id, id};
+    return {};
+}
+GalacticBindingId GalacticWorld::intern_bindings(const std::vector<Binding>& bindings, bool memo) const {
+    if (bindings.empty()) return {};
+    auto& values = memo ? memo_bindings_ : bindings_;
+    auto& ids = memo ? memo_binding_ids_ : binding_ids_;
+    auto& bucket = ids[binding_hash(bindings)];
+    std::optional<std::uint64_t> identity;
+    for (const auto id : bucket) if (bindings_equal(values[static_cast<std::size_t>(id)], bindings)) {
+        if (!identity) identity = id;
+        bool exact = true;
+        for (std::size_t i = 0; i < bindings.size(); ++i)
+            if (const auto* number = std::get_if<Real>(&bindings[i].value);
+                number && number->repr != std::get<Real>(values[static_cast<std::size_t>(id)][i].value).repr) exact = false;
+        if (exact) return {*identity, id};
+    }
+    const auto id = static_cast<std::uint64_t>(values.size());
+    values.push_back(bindings); bucket.push_back(id); return {identity.value_or(id), id};
+}
+GalacticInternedKey GalacticWorld::intern_key(const GalacticCacheKey& key) const {
+    return {key.player, key.enemy, key.human, key.planet, intern_token(key.tokens), intern_bindings(key.bindings)};
+}
+GalacticCacheKey GalacticWorld::expand_key(const GalacticInternedKey& key) const {
+    return {key.player, key.enemy, key.human, key.planet, tokens_.at(key.token)->tokens,
+        bindings_[static_cast<std::size_t>(key.binding.spelling)]};
+}
+GalacticQueryKey GalacticWorld::query_key(const GalacticInternedKey& key) const {
+    return {key.player, key.enemy, key.human, key.planet, tokens_.at(key.token)->tokens,
+        bindings_[static_cast<std::size_t>(key.binding.spelling)], key.token};
+}
+void GalacticWorld::index_cache() const {
+    std::size_t capacity = 16;
+    while (capacity < cache_.size() * 2) capacity *= 2;
+    cache_index_.assign(capacity, 0);
+    for (std::size_t i = 0; i < cache_.size(); ++i) {
+        auto slot = static_cast<std::size_t>(key_hash(cache_[i].key)) & (capacity - 1);
+        while (cache_index_[slot]) slot = (slot + 1) & (capacity - 1);
+        cache_index_[slot] = i + 1;
+    }
+}
+GalacticInternedValue* GalacticWorld::cached_value(const GalacticInternedKey& key) const {
+    if (cache_index_.empty()) index_cache();
+    auto slot = static_cast<std::size_t>(key_hash(key)) & (cache_index_.size() - 1);
+    while (const auto position = cache_index_[slot]) {
+        if (cache_[position - 1].key == key) return &cache_[position - 1];
+        slot = (slot + 1) & (cache_index_.size() - 1);
+    }
+    return nullptr;
 }
 GalacticVisibility* GalacticWorld::visibility(tactical::PlayerId owner, galactic::PlanetId id, std::uint32_t mask, bool publish) const {
     if (visibility_index_.size() != state_.visibility.size()) {
@@ -216,26 +314,36 @@ GalacticVisibility* GalacticWorld::visibility(tactical::PlayerId owner, galactic
 std::optional<Real> GalacticWorld::lookup(const Context& context, const Lookup& lookup,
     const std::vector<Binding>& bindings, ReadMode mode) const {
     if (lookup.tokens.size() < 2) return {};
-    GalacticCacheKey key{context.player, context.enemy, context.human,
-        context.target ? context.target->object : 0, lookup.tokens, bindings};
-    std::scoped_lock lock(cache_mutex_);
+    const auto token = intern_token(lookup.tokens, lookup.compiled);
+    const GalacticQueryKey key{context.player, context.enemy, context.human,
+        context.target ? context.target->object : 0, tokens_.at(token)->tokens, bindings, token};
     return read(key, mode);
 }
 
 std::optional<Real> GalacticWorld::read(const GalacticCacheKey& key, ReadMode mode) const {
-    if (key.tokens.size() == 2 && key.tokens[1] == "MARKUP") return uncached(key, mode); // WGA-461: retained literal, no remembered cache.
+    const auto token = intern_token(key.tokens);
+    return read(GalacticQueryKey{key.player, key.enemy, key.human, key.planet, tokens_.at(token)->tokens, key.bindings, token}, mode);
+}
+std::optional<Real> GalacticWorld::read(const GalacticQueryKey& key, ReadMode mode) const {
+    const auto& compiled = *tokens_.at(key.token);
+    const auto& token = compiled.chain;
+    const auto uncached_value = [&] { return uncached(key, mode); };
+    const auto remembered = [&]() -> GalacticInternedValue* {
+        const auto binding = find_bindings(key.bindings);
+        return binding ? cached_value({key.player, key.enemy, key.human, key.planet, key.token, *binding}) : nullptr;
+    };
+    if (compiled.tokens.size() == 2 && token == "MARKUP") return uncached_value(); // WGA-461: retained literal, no remembered cache.
     if (mode == ReadMode::archived) {
-        if (const auto* cached = cached_value(key)) return cached->value;
-        return uncached(key, mode);
+        if (const auto* cached = remembered()) return cached->value;
+        return uncached_value();
     }
-    const auto configured = setup_.cache_intervals.find(chain(key.tokens, 1));
+    const auto configured = setup_.cache_intervals.find(token);
     const auto* at = key.planet ? planet(key.planet) : nullptr;
-    if (!at || key.tokens.front() != "VARIABLE_TARGET" || configured == setup_.cache_intervals.end()) return uncached(key, mode);
-    const auto mask = snapshot_->observer() ? galactic_visibility_mask(key.tokens) : 0;
+    if (!at || compiled.root != PerceptionToken::Root::target || configured == setup_.cache_intervals.end()) return uncached_value();
+    const auto mask = snapshot_->observer() ? galactic_visibility_mask(compiled.tokens) : 0;
     auto* observed = visibility(key.player, key.planet, mask, mode == ReadMode::ordinary);
     GalacticVisibility unseen{key.player, key.planet, false, 0, mask};
     if (!observed) observed = &unseen;
-    const auto token = chain(key.tokens, 1);
     const bool fogged = token != "ISCONNECTEDTO" && token != "CONNECTSISOLATEDPLANETSBYFORCE"
         && token != "CONNECTSLARGESTISLANDS" && token.find(".NEARBY") == std::string::npos;
     const bool visible = !setup_.uses_fog || !fogged || observed->visible;
@@ -245,33 +353,39 @@ std::optional<Real> GalacticWorld::read(const GalacticCacheKey& key, ReadMode mo
         const auto expiry = real(static_cast<std::int64_t>(frame)) + interval * real(setup_.logical_fps);
         if (!economy_queries_expiry_ || expiry < *economy_queries_expiry_) economy_queries_expiry_ = expiry;
     };
-    if (const auto* cached = cached_value(key); !refreshing_visibility_ && cached && cached->frame != 0) {
+    if (const auto* cached = remembered(); !refreshing_visibility_ && cached && cached->frame != 0) {
         // WGA-65: equality at expiry passes; hidden reads use indefinite lookup.
         if (!visible || interval == real(-1) || (interval != Real{} &&
             !(real(static_cast<std::int64_t>(cached->frame)) + interval * real(setup_.logical_fps)
                 < real(static_cast<std::int64_t>(synchronized_frame_))))) { retain_expiry(cached->frame); return cached->value; }
     }
-    const auto value = uncached(key, mode); if (!value) return {};
+    const auto value = uncached_value(); if (!value) return {};
     if (mode != ReadMode::ordinary) return value;
     retain_expiry(synchronized_frame_);
-    auto* found = cached_value(key);
-    const GalacticCachedValue cached{key, *value, interval, synchronized_frame_};
+    const GalacticInternedKey retained{key.player, key.enemy, key.human, key.planet, key.token, intern_bindings(key.bindings)};
+    auto* found = cached_value(retained);
+    const GalacticInternedValue cached{retained, *value, interval, synchronized_frame_};
     if (token == "TARGETPLAYERID" && (!found || found->value != *value)) economy_queries_.clear();
     if ((token == "TARGETPLAYERID" || token == "ENEMYFORCE.HASSPACEFORCE"
         || token == "ENEMYFORCE.SPACETOTALUNNORMALIZED" || token == "ENEMYFORCE.GROUNDTOTALUNNORMALIZED")
         && (!found || found->value != *value)) ++movement_input_revision_;
     mark_state_changed();
     if (!found) {
-        state_.cache.push_back(cached);
-        cache_index_.emplace(key, state_.cache.size() - 1);
+        cache_.push_back(cached);
+        if (cache_.size() * 2 > cache_index_.size()) index_cache();
+        else {
+            auto slot = static_cast<std::size_t>(key_hash(retained)) & (cache_index_.size() - 1);
+            while (cache_index_[slot]) slot = (slot + 1) & (cache_index_.size() - 1);
+            cache_index_[slot] = cache_.size();
+        }
     } else *found = cached;
     if (visible && fogged) visibility(key.player, key.planet, mask)->last_observed = synchronized_frame_;
     return value;
 }
 
-std::optional<Real> GalacticWorld::uncached(const GalacticCacheKey& key, ReadMode mode) const {
+std::optional<Real> GalacticWorld::uncached(const GalacticQueryKey& key, ReadMode mode) const {
     if (key.tokens.size() < 2 || !snapshot_) return {};
-    const auto token = chain(key.tokens, 1);
+    const auto& token = tokens_.at(key.token)->chain;
     const auto& root = key.tokens.front();
     if ((key.tokens.size() >= 3 && (key.tokens[1] == "FRIENDLYFORCE" || key.tokens[1] == "ENEMYFORCE")
         && !token.ends_with("TIMELASTSEEN") && !token.ends_with("TIMELASTSEENUNNORMALIZED"))
@@ -311,7 +425,7 @@ std::optional<Real> GalacticWorld::uncached(const GalacticCacheKey& key, ReadMod
                 if (snapshot_->observer()) for (const auto& facts : snapshot_->observer()->planets)
                     if (facts.planet == row.planet.id) { owner = facts.allegiance; break; }
                 if (allied(*id, owner)) continue;
-                auto nested = key; nested.planet = row.planet.id;
+                auto nested = copy_key(key); nested.planet = row.planet.id;
                 nested.tokens = {"VARIABLE_TARGET", "ENEMYFORCE",
                     token == "AVERAGEAGEOFSPACEINTELLIGENCE" ? "SPACETOTAL" : "GROUNDTOTAL", "TIMELASTSEEN"};
                 nested.bindings.clear();
@@ -402,8 +516,21 @@ std::optional<Real> GalacticWorld::uncached(const GalacticCacheKey& key, ReadMod
     return {}; // U-01: no fabricated value for an unqualified token.
 }
 
+void GalacticWorld::finish_perception_queries() const {
+    const auto lock = query_lock();
+    // This is a reclamation threshold, not a limit on authored bindings. The
+    // native record set defines the retained storage; spare growth amortizes GC.
+    if (bindings_.size() <= cache_.size() * 2 + 256) return;
+    auto previous = std::move(bindings_);
+    bindings_.clear(); bindings_.emplace_back(); binding_ids_.clear();
+    for (auto& row : cache_) row.key.binding = intern_bindings(previous[static_cast<std::size_t>(row.key.binding.spelling)]);
+    cache_index_.clear();
+}
+
 GalacticPerceptionState GalacticWorld::state() const {
-    std::scoped_lock lock(cache_mutex_); auto out = state_;
+    const auto lock = query_lock(); auto out = state_;
+    out.cache.reserve(cache_.size());
+    for (const auto& row : cache_) out.cache.push_back({expand_key(row.key), row.value, row.interval, row.frame});
     // Parallel reads may insert in any order; native state publishes canonical keys.
     std::sort(out.cache.begin(), out.cache.end(), [](const auto& a, const auto& b) { return key_less(a.key, b.key); });
     std::sort(out.visibility.begin(), out.visibility.end(), [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.mask) < std::tie(b.player, b.planet, b.mask); });
@@ -412,15 +539,16 @@ GalacticPerceptionState GalacticWorld::state() const {
     return out;
 }
 Real GalacticWorld::force_cache_deadline(tactical::PlayerId owner, std::uint32_t logical_fps, bool fog) const {
-    std::scoped_lock lock(cache_mutex_);
+    const auto lock = query_lock();
     auto through = Real(std::numeric_limits<std::int64_t>::max());
-    for (const auto& cached : state_.cache) {
-        if (cached.key.player != owner || cached.key.tokens.size() != 3
-            || cached.key.tokens[1] != "ENEMYFORCE"
-            || (cached.key.tokens[2] != "HASSPACEFORCE" && cached.key.tokens[2] != "SPACETOTALUNNORMALIZED"
-                && cached.key.tokens[2] != "GROUNDTOTALUNNORMALIZED")) continue;
+    for (const auto& cached : cache_) {
+        const auto& tokens = tokens_.at(cached.key.token)->tokens;
+        if (cached.key.player != owner || tokens.size() != 3
+            || tokens[1] != "ENEMYFORCE"
+            || (tokens[2] != "HASSPACEFORCE" && tokens[2] != "SPACETOTALUNNORMALIZED"
+                && tokens[2] != "GROUNDTOTALUNNORMALIZED")) continue;
         if (fog) {
-            const auto* seen = visibility(owner, cached.key.planet, galactic_visibility_mask(cached.key.tokens), false);
+            const auto* seen = visibility(owner, cached.key.planet, galactic_visibility_mask(tokens), false);
             if (!seen) {
                 // state() orders visibility by mask. Its first legacy fallback
                 // is the smallest mask, regardless of native insertion order.
@@ -444,7 +572,7 @@ core::Result<void> GalacticWorld::restore(GalacticPerceptionState state) {
     std::set<std::tuple<tactical::PlayerId, std::string, std::string>> hint_keys;
     for (std::size_t i = 0; i < state.cache.size(); ++i) {
         const auto& row = state.cache[i];
-        const auto interval = setup_.cache_intervals.find(chain(row.key.tokens, 1));
+        const auto interval = setup_.cache_intervals.find(compile_perception_token(row.key.tokens)->chain);
         if (!player(row.key.player) || !planet(row.key.planet) || (row.key.enemy && !player(*row.key.enemy))
             || (row.key.human && !player(*row.key.human)) || row.interval < real(-1)
             || row.frame > synchronized_frame_ || row.key.tokens.size() < 2 || row.key.tokens.front() != "VARIABLE_TARGET"
@@ -486,12 +614,17 @@ core::Result<void> GalacticWorld::restore(GalacticPerceptionState state) {
         if (!hint_keys.emplace(row.player, row.planet, row.name).second)
             return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "duplicate galactic hint identity"));
     }
-    std::scoped_lock lock(cache_mutex_); mark_state_changed(); ++movement_input_revision_;
-    state_ = std::move(state); cache_index_.clear(); visibility_index_.clear(); economy_queries_.clear(); economy_queries_expiry_.reset(); return core::Result<void>::success();
+    const auto lock = query_lock(); mark_state_changed(); ++movement_input_revision_;
+    cache_.clear(); cache_.reserve(state.cache.size());
+    bindings_.clear(); bindings_.emplace_back(); binding_ids_.clear();
+    memo_bindings_.clear(); memo_bindings_.emplace_back(); memo_binding_ids_.clear();
+    for (const auto& row : state.cache) cache_.push_back({intern_key(row.key), row.value, row.interval, row.frame});
+    state.cache.clear(); state_ = std::move(state);
+    cache_index_.clear(); visibility_index_.clear(); economy_queries_.clear(); economy_queries_expiry_.reset(); return core::Result<void>::success();
 }
 bool GalacticWorld::insert_hint(GalacticHint hint) {
     hint.planet = upper_case(hint.planet); hint.name = upper_case(hint.name);
-    std::scoped_lock lock(cache_mutex_);
+    const auto lock = query_lock();
     for (const auto& row : state_.hints) if (row.player == hint.player && row.planet == hint.planet && row.name == hint.name) return false;
     mark_state_changed();
     state_.hints.push_back(std::move(hint)); return true;
@@ -500,31 +633,31 @@ void GalacticWorld::set_story_flag(tactical::PlayerId owner, galactic::PlanetId 
     // The shared equation parser canonicalizes text parameters. Retail trigger
     // case identity remains a qualification seam; all component paths agree.
     name = upper_case(name);
-    std::scoped_lock lock(cache_mutex_);
+    const auto lock = query_lock();
     for (const auto& row : state_.flags) if (row.player == owner && row.planet == id && row.name == name) return;
     mark_state_changed();
     state_.flags.push_back({owner, id, std::move(name)});
 }
 bool GalacticWorld::check_story_flag(tactical::PlayerId owner, galactic::PlanetId id, std::string_view name, bool clear) {
     const auto canonical = upper_case(name);
-    std::scoped_lock lock(cache_mutex_);
+    const auto lock = query_lock();
     const auto found = std::find_if(state_.flags.begin(), state_.flags.end(), [&](const auto& flag) { return flag.player == owner && flag.planet == id && flag.name == canonical; });
     if (found == state_.flags.end()) return false;
     if (clear) { mark_state_changed(); state_.flags.erase(found); }
     return true;
 }
 void GalacticWorld::visibility_changed(tactical::PlayerId owner, galactic::PlanetId id, bool visible, std::uint32_t mask) {
-    std::scoped_lock lock(cache_mutex_);
+    const auto lock = query_lock();
     economy_queries_.clear(); economy_queries_expiry_.reset();
     ++movement_input_revision_;
     mark_state_changed();
     auto* observed = visibility(owner, id, mask);
     if (visible || observed->visible) {
         refreshing_visibility_ = true;
-        std::vector<GalacticCacheKey> keys;
-        for (const auto& cached : state_.cache) if (cached.key.player == owner && cached.key.planet == id
-            && (mask == 0 || galactic_visibility_mask(cached.key.tokens) == mask)) keys.push_back(cached.key);
-        for (const auto& key : keys) if (const auto value = uncached(key)) {
+        std::vector<GalacticInternedKey> keys;
+        for (const auto& cached : cache_) if (cached.key.player == owner && cached.key.planet == id
+            && (mask == 0 || galactic_visibility_mask(tokens_.at(cached.key.token)->tokens) == mask)) keys.push_back(cached.key);
+        for (const auto& key : keys) if (const auto value = uncached(query_key(key))) {
             if (auto* cached = cached_value(key)) { cached->value = *value; cached->frame = synchronized_frame_; }
         }
         visibility(owner, id, mask)->last_observed = synchronized_frame_;

@@ -482,6 +482,36 @@ void renewal_contracts(const std::string& fake_certificate, const std::string& f
     until([&] { return fake.count("/revoke") == 3; }, "Pairing and both renewed credentials are revoked at session end");
 }
 
+// N-peer rooms (slice N3): one provider call per member, revoked as each seat ends; the member attaches without
+// relay candidates when the provider has no credential for it.
+void room_contracts(const std::string& fake_certificate, const std::string& fake_key, const std::string& certificate, const std::string& key) {
+    FakeCloudflare fake(fake_certificate, fake_key);
+    for (int i = 1; i <= 3; ++i)
+        fake.push({201, ice_servers(good_urls, "room-user-0" + std::to_string(i), "room-cred-0" + std::to_string(i) + "=")});
+    Fixture f(fake, fake_certificate, certificate, key);
+    OnlineRoomMetadata metadata;
+    metadata.name = "Cloud room"; metadata.host_name = "Host"; metadata.build = "build"; metadata.protocol = "protocol"; metadata.capacity = 4;
+    NetworkOnlineLobby host_lobby(f.client), guest_one_lobby(f.client), guest_two_lobby(f.client), guest_three_lobby(f.client);
+    const auto publication = require(host_lobby.publish(metadata, ""));
+    auto host = require(NetworkGnsRoom::open(f.client, publication, host_lobby.principal(), "host-peer", false));
+    auto one = require(NetworkGnsRoom::attach(f.client, require(guest_one_lobby.join(publication.room, "", "Guest1")), "guest-one"));
+    auto two = require(NetworkGnsRoom::attach(f.client, require(guest_two_lobby.join(publication.room, "", "Guest2")), "guest-two"));
+    expect(host->turn_credentials() && host->turn_credentials()->username == "room-user-01" && one->turn_credentials()->username == "room-user-02"
+        && two->turn_credentials()->username == "room-user-03", "Each member has its own provider credential");
+    expect(host->turn_credentials()->uri == "turn:203.0.113.7:3478,turn:203.0.113.7:443" && host->turn_credentials()->lifetime > 86400s,
+        "The credential covers the room's hard maximum plus the margin");
+    expect(fake.count("/generate-ice-servers") == 3, "One provider call per member");
+    require(one->leave());
+    until([&] { return fake.count("/revoke") == 1; }, "A leaving member's credential is revoked");
+    // The provider has nothing left for the next member: it attaches without relay candidates and the room warns.
+    auto three = require(NetworkGnsRoom::attach(f.client, require(guest_three_lobby.join(publication.room, "", "Guest3")), "guest-three"));
+    expect(!three->turn_credentials(), "A member the provider cannot serve attaches without relay candidates");
+    expect(f.diagnostics.has("EAWR-NET-1557"), "The provider failure is reported");
+    host.reset();
+    until([&] { return fake.count("/revoke") == 3; }, "Room end revokes every remaining member credential");
+    until([&] { return !two->status() && !three->status(); }, "Members learn that the room ended");
+    no_secret(f.diagnostics.all(), "Room diagnostics carry no secrets");
+}
 void startup_contracts(const std::string& certificate, const std::string& key) {
     const auto code = [&](RelayServerOptions options) -> std::string {
         options.port = 0; options.listen_address = "127.0.0.1"; options.certificate_file = certificate; options.key_file = key;
@@ -521,6 +551,7 @@ int main(int argc, char** argv) {
         provider_contracts(path("cf.pem"), path("cf.key"), path("other.pem"), path("other.key"));
         pairing_contracts(path("cf.pem"), path("cf.key"), path("relay.pem"), path("relay.key"));
         renewal_contracts(path("cf.pem"), path("cf.key"), path("relay.pem"), path("relay.key"));
+        room_contracts(path("cf.pem"), path("cf.key"), path("relay.pem"), path("relay.key"));
         startup_contracts(path("relay.pem"), path("relay.key"));
         std::filesystem::remove_all(directory);
         std::cout << "Cloudflare TURN provider contracts passed\n";

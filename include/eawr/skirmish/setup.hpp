@@ -9,7 +9,7 @@ namespace eawr::skirmish {
 struct SetupTeam final {
     std::uint32_t team{};
     std::vector<std::string> factions;
-    // WSS-54: each teammate needs its own valid authored spawn marker.
+    // WSS-54: authored count for the project LAN AI-add preference, never a lobby limit.
     std::optional<std::uint32_t> spawn_capacity{};
 };
 

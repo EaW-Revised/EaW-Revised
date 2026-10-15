@@ -24,6 +24,11 @@ struct TickDuration {
 
 inline constexpr std::uint64_t max_script_tick = std::uint64_t{1} << 40;
 
+// Random-key domain of an object turn (#3702): the turn draws from the stream keyed
+// `tick | turn_random_domain`, disjoint from the barrier service's key `tick` because
+// every script tick is below max_script_tick.
+inline constexpr std::uint64_t turn_random_domain = std::uint64_t{1} << 62;
+
 [[nodiscard]] bool valid_tick_duration(TickDuration duration) noexcept;
 
 // GetCurrentTime: tick x duration, rounded once to binary64 (nearest, ties to

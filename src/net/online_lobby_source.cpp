@@ -8,11 +8,48 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <functional>
 
 namespace eawr::net {
 namespace {
 using namespace presentation::ui;
 using Clock = std::chrono::steady_clock;
+// A retired source keeps its service alive until the bounded I/O call finishes.
+// Joining is confined to this drain owner, never a frame or scene destructor.
+class SourceDrains {
+    struct State {
+        std::mutex mutex;
+        std::condition_variable condition;
+        std::deque<std::function<void()>> work;
+        bool stopping{};
+    };
+public:
+    SourceDrains() : state_(std::make_shared<State>()), worker_([state = state_] {
+        for (;;) {
+            std::function<void()> work;
+            { std::unique_lock lock(state->mutex);
+              state->condition.wait(lock, [&] { return state->stopping || !state->work.empty(); });
+              if (state->stopping) return;
+              work = std::move(state->work.front()); state->work.pop_front(); }
+            work();
+        }
+    }) {}
+    ~SourceDrains() {
+        { std::lock_guard lock(state_->mutex); state_->stopping = true; }
+        state_->condition.notify_all();
+        // The drain owns its state and retired sources. Process exit never waits
+        // for a queued service call, and the detached worker never touches this.
+        worker_.detach();
+    }
+    void retire(std::function<void()> work) {
+        std::lock_guard lock(state_->mutex); state_->work.push_back(std::move(work)); state_->condition.notify_all();
+    }
+private:
+    std::shared_ptr<State> state_;
+    std::thread worker_;
+};
+SourceDrains& source_drains() { static SourceDrains drains; return drains; }
+
 LobbyGame game_row(const OnlineRoomRow& row, const OnlineRoomMetadata* tags = nullptr) {
     LobbyGame game;
     game.name = row.metadata.name; game.map = row.metadata.map; game.game_type = row.metadata.mode;
@@ -31,6 +68,8 @@ struct OnlineLobbyGameSource::Impl {
     std::condition_variable condition;
     LobbyPresence presence;
     std::string password;
+    std::string bridge_invitation, bridge_owner;
+    bool require_bridge{};
     bool presence_changed{}, changed{};
     struct Join { LobbyAttemptId attempt; std::string room, password, name; std::uint64_t generation{}; };
     std::optional<Join> pending_join;
@@ -47,7 +86,7 @@ struct OnlineLobbyGameSource::Impl {
     OnlineHostingState hosting{OnlineHostingState::idle};
     std::string active_name;
     std::jthread worker;
-    Impl(std::unique_ptr<OnlineLobbyService> s, OnlineRoomMetadata t) : service(std::move(s)), tags(std::move(t)) {}
+    Impl(std::unique_ptr<OnlineLobbyService> s, OnlineRoomMetadata t, bool bridge) : service(std::move(s)), tags(std::move(t)), require_bridge(bridge) {}
 
     void error(const core::Diagnostic& value) {
         std::lock_guard lock(mutex); failure = value;
@@ -61,6 +100,7 @@ struct OnlineLobbyGameSource::Impl {
         OnlineRoomMetadata hosted;
         bool admitted{}, wants_host{}, passworded{};
         std::string host_password;
+        std::string invitation, invitation_owner;
         std::uint32_t chat_sequence{};
         auto next_list = Clock::now(), next_heartbeat = next_list, next_chat = next_list, next_publish = next_list;
         auto last_list = Clock::time_point{};
@@ -113,7 +153,7 @@ struct OnlineLobbyGameSource::Impl {
                     return stop.stop_requested() || presence_changed || pending_join || leave_requested || refresh_requested || !sends.empty();
                 });
                 if (stop.stop_requested()) break;
-                if (presence_changed) { announced = presence; presence_changed = false; configured_password = password; }
+                if (presence_changed) { announced = presence; presence_changed = false; configured_password = password; invitation = bridge_invitation; invitation_owner = bridge_owner; }
                 if (pending_join) { join = std::move(pending_join); pending_join.reset(); }
                 leaving = leave_requested; leave_requested = false;
                 refreshing = refresh_requested; refresh_requested = false;
@@ -123,19 +163,20 @@ struct OnlineLobbyGameSource::Impl {
                 if (publication) { auto result = service->remove(*publication); if (!result) error(result.error()); else success(); publication.reset(); }
                 else if (admitted) { auto result = service->leave(); if (!result) error(result.error()); else success(); }
                 wants_host = false; clear_admission(); state(OnlineHostingState::idle);
+                invitation.clear(); invitation_owner.clear();
             }
             if (announced && announced->place == LobbyPlace::hosting) {
                 wants_host = true; passworded = announced->passworded; host_password = std::move(configured_password);
                 hosted = tags; hosted.name = relay::clean_text(announced->game, 24); hosted.host_name = relay::clean_text(announced->name, 20);
                 hosted.mode = announced->game_type; hosted.map = announced->map;
                 hosted.capacity = announced->max_players; hosted.starting = announced->locked;
-                if (publication) heartbeat(); else next_publish = Clock::now();
+                if (publication) heartbeat(); else { next_publish = Clock::now(); state(OnlineHostingState::publishing); }
             }
-            if (wants_host && !publication && Clock::now() >= next_publish) {
+            if (wants_host && !publication && (!require_bridge || !invitation.empty()) && Clock::now() >= next_publish) {
                 state(OnlineHostingState::publishing);
                 auto result = passworded && host_password.empty()
                     ? core::Result<OnlineRoomPublication>::failure(relay::error(1540, "A private room needs a password"))
-                    : service->publish(hosted, passworded ? host_password : std::string{});
+                    : service->publish_bridge(hosted, passworded ? host_password : std::string{}, invitation, invitation_owner);
                 if (!result) {
                     error(result.error()); state(OnlineHostingState::retrying); next_publish = Clock::now() + std::chrono::seconds(5);
                 } else {
@@ -156,7 +197,7 @@ struct OnlineLobbyGameSource::Impl {
                         if (result) {
                             completion.admission = std::move(result).value(); admitted = true; chat_sequence = 0;
                             const auto row = std::find_if(games.begin(), games.end(), [&](const auto& game) { return game.address == join->room; });
-                            active_name = row == games.end() ? join->room : row->name;
+                            active_name = row == games.end() ? "Online game" : row->name;
                         } else { completion.refusal = result.error(); current_attempt.reset(); }
                         if (results.size() == 64) results.erase(results.begin());
                         results.push_back(std::move(completion));
@@ -211,12 +252,21 @@ struct OnlineLobbyGameSource::Impl {
     }
 
 };
-OnlineLobbyGameSource::OnlineLobbyGameSource(std::unique_ptr<OnlineLobbyService> service, OnlineRoomMetadata tags)
-    : impl_(std::make_unique<Impl>(std::move(service), std::move(tags))) {
+OnlineLobbyGameSource::OnlineLobbyGameSource(std::unique_ptr<OnlineLobbyService> service, OnlineRoomMetadata tags, bool require_bridge)
+    : impl_(std::make_unique<Impl>(std::move(service), std::move(tags), require_bridge)) {
     if (!impl_->service) throw std::invalid_argument("Online lobby source needs a service");
-    impl_->worker = std::jthread([this](std::stop_token stop) { impl_->run(stop); });
+    impl_->worker = std::jthread([state = impl_.get()](std::stop_token stop) { state->run(stop); });
 }
-OnlineLobbyGameSource::~OnlineLobbyGameSource() { impl_->worker.request_stop(); impl_->condition.notify_all(); impl_->worker.join(); }
+OnlineLobbyGameSource::~OnlineLobbyGameSource() {
+    impl_->worker.request_stop(); impl_->condition.notify_all();
+    auto retired = std::shared_ptr<Impl>(std::move(impl_));
+    source_drains().retire([retired] { if (retired->worker.joinable()) retired->worker.join(); });
+}
+void OnlineLobbyGameSource::set_bridge_invitation(std::string invitation, std::string ownership) {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->bridge_invitation == invitation && impl_->bridge_owner == ownership) return;
+    impl_->bridge_invitation = std::move(invitation); impl_->bridge_owner = std::move(ownership); impl_->presence_changed = true; impl_->condition.notify_all();
+}
 bool OnlineLobbyGameSource::set_host_password(std::string password) {
     std::lock_guard lock(impl_->mutex);
     const bool locked = impl_->hosting == OnlineHostingState::hosted || impl_->hosting == OnlineHostingState::publishing;

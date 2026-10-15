@@ -297,7 +297,7 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
                 if (!production.feasible) stage(gg::SelectionStage::production, gg::rejected_estimate(), true);
                 else {
                     factories[i] = facts.structure ? target(goal.target)->object : production.producers.back();
-                    const auto mean = required(gg::estimate_single_type(input->producers, player.player, proposals[i], facts.channel, executor(perception_executor_)));
+                    const auto mean = required(gg::estimate_single_type(input->producers, player.player, proposals[i], facts.channel, executor(nullptr)));
                     excess.push_back(facts.structure ? facts.build_seconds : to_single(mean - facts.build_seconds)); production_rows.push_back(i);
                 }
             }
@@ -374,7 +374,9 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
         const auto preferences = gg::production_preferences(excess);
         for (std::size_t i = 0; i < preferences.size(); ++i)
             candidates[production_rows[i]].stages[static_cast<std::size_t>(gg::SelectionStage::production)].weight = preferences[i];
-        const auto scores = required(gg::score_candidates(candidates, static_cast<std::uint32_t>(potential.units.size()), executor(perception_executor_)));
+        // These short folds belong to the ordered decision pass. Bulk producer
+        // estimates above remain independent worker jobs over copied inputs.
+        const auto scores = required(gg::score_candidates(candidates, static_cast<std::uint32_t>(potential.units.size()), executor(nullptr)));
         for (std::size_t i = 0; i < erased.size(); ++i) erased[i] = erased[i] || scores.candidates[i].removed;
         if (!scores.best) break;
         const auto chosen = *scores.best; const auto type = proposals[chosen]; const auto& facts = input->types.at(type);

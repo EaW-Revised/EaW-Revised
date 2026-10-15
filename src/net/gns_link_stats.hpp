@@ -1,10 +1,23 @@
 #pragma once
 
+#include "eawr/net/gns_transport.hpp"
 #include "eawr/net/transport.hpp"
 
+#include <cctype>
 #include <limits>
+#include <string>
+#include <string_view>
 
 namespace eawr::net {
+// GNS d534c19a, CConnectionTransportP2PICE::TransportPopulateConnectionInfo:
+// TURN sets Relayed and clears the remote IP; direct ICE publishes that IP.
+// SDR POPs, missing addresses and conflicting flags remain unknown. No status-text
+// tokens are used: that revision's detailed printer omits the ICE transport kind.
+inline GnsRoute classify_gns_route(bool connected, bool relayed, bool remote_ip, bool sdr_pop) {
+    if (!connected || sdr_pop) return GnsRoute::unknown;
+    if (relayed) return remote_ip ? GnsRoute::unknown : GnsRoute::relayed;
+    return remote_ip ? GnsRoute::direct : GnsRoute::unknown;
+}
 // Local cadence observations of the SDK's integer-millisecond estimate. These
 // are not native probe counts, and getters never advance the sampler.
 class GnsLinkStatsSampler {

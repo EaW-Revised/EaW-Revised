@@ -1,4 +1,5 @@
 #include "skirmish_setup_mode.hpp"
+#include "lan_lobby_screen.hpp"
 #include "battle_content.hpp"
 #include "lan_match.hpp"
 #include "eawr/scene/scene.hpp"
@@ -88,6 +89,10 @@ void navigate_popup(EawrUiCombo* combo, int target) {
 struct SkirmishSetupMode::State final {
     explicit State(Options value) : options(std::move(value)),
         shaders(options.cache_shaders ? std::make_shared<GodotShaderCache>() : nullptr) {}
+    ~State() { if (online_id && UtilityFunctions::is_instance_id_valid(online_id) && online_screen->get_parent() == nullptr) memdelete(online_screen); }
+    EawrLanLobby* online_screen{};
+    int64_t online_id{};
+    bool online_mode{};
     Options options;
     Node3D* host{};
     CanvasLayer* layer{};
@@ -1274,6 +1279,11 @@ bool SkirmishSetupMode::ready(Node3D& host) {
 void SkirmishSetupMode::process() {
     auto& state = *state_;
     if (!state.visible) return;
+    if (state.online_mode) {
+        if (auto selected = state.online_screen->take_start()) { state.lan = state.online_screen->lan_match(); state.pending = std::move(selected); }
+        else if (!state.online_screen->shown()) state.cancel_requested = true;
+        return;
+    }
     const auto size = state.host->get_viewport()->get_visible_rect().size;
     const float scale = std::min(size.x / 1280.0F, size.y / 720.0F);
     state.root->set_position(((size - Vector2(1280, 720) * scale) * 0.5F).round());
@@ -1527,10 +1537,11 @@ std::shared_ptr<GodotShaderCache> SkirmishSetupMode::shaders() const { return st
 std::shared_ptr<LanMatch> SkirmishSetupMode::lan_match() const { return state_->lan; }
 BaseButton* SkirmishSetupMode::start_button() const { return state_->start; }
 BaseButton* SkirmishSetupMode::lan_host_button() const { return state_->lan_host; }
-void SkirmishSetupMode::hide() { state_->visible = false; state_->layer->hide(); }
+void SkirmishSetupMode::hide() { state_->visible = false; state_->layer->hide(); if (state_->online_mode && state_->online_screen) state_->online_screen->dismiss(); }
 void SkirmishSetupMode::route_cancel() { state_->cancel_routed = true; }
 bool SkirmishSetupMode::take_cancel() { return std::exchange(state_->cancel_requested, false); }
 void SkirmishSetupMode::show(std::string message) {
+    if (state_->online_mode && state_->online_screen) { state_->escape_was_down = true; state_->visible = true; state_->online_screen->show(*state_->host); return; }
     if (state_->lan_smoke) {
         UtilityFunctions::print("EAWR LAN smoke returned: ", text(message));
         state_->host->get_tree()->quit(message.starts_with("Battle finished") ? 0 : 2);
@@ -1567,8 +1578,30 @@ SkirmishSetupMode::UiResources SkirmishSetupMode::ui_resources() const {
     return resources;
 }
 
+
+void SkirmishSetupMode::enter_online(model::NetworkSettings settings) {
+    auto& state = *state_;
+    if (state.online_screen && UtilityFunctions::is_instance_id_valid(state.online_id)) {
+        state.online_screen->dismiss(); memdelete(state.online_screen);
+    }
+    state.online_screen = memnew(EawrLanLobby); state.online_id = state.online_screen->get_instance_id();
+    EawrLanLobby::Options options; options.content = state.content;
+    options.game_root = state.options.game_root; options.mod_root = state.options.mod_root; options.profile = state.options.profile;
+    options.online_settings = std::move(settings);
+    options.player_name = model::effective_network_name(state.player_profile, state.platform_name);
+    options.player_colour = static_cast<std::uint32_t>(std::max(0, state.player_profile.lobby_colour));
+    if (!state.online_screen->build(std::move(options))) {
+        state.notice = "The online lobby could not be opened."; memdelete(state.online_screen); state.online_screen = nullptr; state.online_id = 0;
+        state.cancel_requested = true; return;
+    }
+    state.layer->hide(); state.online_mode = true; state.visible = true; state.cancel_requested = false;
+    state.online_screen->show(*state.host, model::LobbySourceKind::online);
+}
+EawrLanLobby* SkirmishSetupMode::online_lobby() const { return state_->online_mode ? state_->online_screen : nullptr; }
+
 void SkirmishSetupMode::enter(const bool lan) {
     auto& state = *state_;
+    state.online_mode = false;
     state.visible = true;
     state.layer->show();
     state.connection->select(lan ? 1 : 0);
@@ -1580,6 +1613,8 @@ void SkirmishSetupMode::enter(const bool lan) {
 
 void SkirmishSetupMode::leave() {
     auto& state = *state_;
+    if (state.online_mode && state.online_screen) { state.online_screen->dismiss(); state.online_screen->lan_match()->cancel(); }
+    state.online_mode = false;
     if (state.lan) { state.lan->cancel(); state.lan.reset(); }
     state.visible = false;
     state.layer->hide();

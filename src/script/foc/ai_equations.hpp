@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -62,10 +63,22 @@ struct Binding {
     ParameterValue value;
 };
 
+// Process-local identities never enter decisions or native archives. The full
+// authored spelling remains available to the canonical perception encoder.
+struct PerceptionToken {
+    enum class Root : std::uint8_t { other, game, self, enemy, human, target };
+    std::uint64_t id{};
+    Root root{Root::other};
+    std::vector<std::string> tokens;
+    std::string chain;
+};
+[[nodiscard]] std::shared_ptr<const PerceptionToken> compile_perception_token(const std::vector<std::string>&);
+
 // One token chain of an equation, e.g. Variable_Target.Location.EnemyForce, in upper case.
 struct Lookup {
     std::vector<std::string> tokens;
     std::vector<std::string> parameters; // bound in order; values come from the program
+    std::shared_ptr<const PerceptionToken> compiled{};
 };
 
 struct Node {

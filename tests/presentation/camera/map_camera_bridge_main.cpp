@@ -201,7 +201,28 @@ int main() {
         config = eawr::viewer::skirmish_camera_config(map, start, 2);
         expect(config && config.value().target_x == 1600 && config.value().target_y == -2400
                && config.value().target_height == 0, "auto camera centres the local placed fleet on the battle plane");
-        expect(!eawr::viewer::skirmish_camera_config(map, start, 3), "auto camera refuses a missing local spawn");
+        eawr::skirmish::StartPlayer guest;
+        guest.player.player_id = 3; guest.player.team_id = 1; guest.start_side = "Team_01";
+        guest.lobby = guest.human = true;
+        start.players.push_back(guest);
+        start.markers.push_back({43, "team_01_spawn_point_marker", 0, eawr::skirmish::MarkerUse::spawn_unused,
+            {whole(3000), whole(-1000), {}}, {}});
+        start.markers.push_back({44, "Team_00_Spawn_Point_Marker", 1, eawr::skirmish::MarkerUse::spawn,
+            {whole(-4000), whole(3000), {}}, {}});
+        config = eawr::viewer::skirmish_camera_config(map, start, 3);
+        expect(config && config.value().target_x == 2000 && config.value().target_y == -1500,
+            "project camera for a LAN overflow seat uses its team's complete spawn centroid");
+        start.markers.erase(start.markers.begin(), start.markers.begin() + 2);
+        start.markers.push_back({45, "Team_01_Space_Station", 2, eawr::skirmish::MarkerUse::station,
+            {whole(4200), whole(3200), {}}, {}});
+        config = eawr::viewer::skirmish_camera_config(map, start, 3);
+        expect(config && config.value().target_x == 4200 && config.value().target_y == 3200,
+            "project overflow camera uses the team station when there are no team spawns");
+        start.markers.pop_back();
+        config = eawr::viewer::skirmish_camera_config(map, start, 3);
+        expect(config && config.value().target_x == 0 && config.value().target_y == 0,
+            "project overflow camera uses the extents centre when the team has no markers");
+        expect(!eawr::viewer::skirmish_camera_config(map, start, 4), "auto camera refuses an unknown local player");
         map.declared_extents.reset();
         expect(!eawr::viewer::skirmish_camera_config(map, start, 2), "auto camera refuses missing extents");
     }

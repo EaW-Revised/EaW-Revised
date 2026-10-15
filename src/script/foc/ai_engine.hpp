@@ -211,7 +211,7 @@ struct TeamDef {
     std::int32_t max_count{};
     std::int32_t percentage{};
     bool percentage_based{};
-    std::vector<tactical::TypeId> types; // possible types, ascending type ID
+    std::vector<tactical::TypeId> types; // possible types: named list = authored order, deduped; category list = type-table order
 };
 
 struct TaskForceDef {
@@ -663,15 +663,39 @@ public:
         std::uint64_t candidates{};
     };
     [[nodiscard]] ProducerWork producer_work() const noexcept { return producer_work_; }
+    struct InputCounts {
+        std::uint64_t view_rows{}, producer_entities{}, producer_prepasses{}, pad_rows{}, pad_prepasses{}, pad_queries{}, late_prepasses{};
+    };
+    using InputObserver = void (*)(std::uint64_t, const InputCounts&) noexcept;
+    static void observe_inputs(InputObserver) noexcept;
+    [[nodiscard]] InputCounts input_counts() const noexcept { return input_counts_; }
 
 private:
     friend struct EngineContractAccess;
     friend class TacticalWorld;
     friend class GoalStateContributor;
     friend struct GoalStateCodec;
-    void prepare_producers() const;
+    void report_inputs() const noexcept;
+    void prepare_producers(const sim::PartitionExecutor* executor = nullptr) const;
     // Perception.
     void prepare_station_levels(const sim::PartitionExecutor*);
+    struct PadInput {
+        sim::EntityId object{};
+        const ViewUnit* unit{};
+        std::array<const ViewUnit*, 2> children{};
+        struct Buyer {
+            tactical::PlayerId player{};
+            const tactical::StationMenu* menu{};
+            bool allied{}, can_build{};
+            std::optional<bool> open;
+        };
+        std::vector<Buyer> buyers;
+    };
+    [[nodiscard]] PadInput pad_input(sim::EntityId, const tactical::PadState&, bool prepare_open = false) const;
+    void prepare_pad_inputs(const sim::PartitionExecutor*);
+    std::optional<std::vector<PadInput>> pad_inputs_;
+    std::set<tactical::PlayerId> pad_open_pending_;
+    mutable std::set<tactical::PlayerId> pad_open_requested_;
     [[nodiscard]] Real station_base_level(tactical::PlayerId) const;
     struct StationLevel { tactical::PlayerId owner{}; Real level{}; };
     // Derived only for the current ordered service barrier; never persisted.
@@ -767,6 +791,8 @@ private:
     mutable bool producers_prepared_{};
     mutable std::map<std::pair<tactical::PlayerId, tactical::TypeId>, std::vector<sim::EntityId>> producers_;
     mutable ProducerWork producer_work_{};
+    mutable InputCounts input_counts_{};
+    bool player_inputs_active_{};
     const sim::PartitionExecutor* perception_executor_{};
     GalacticSelectionProvider galactic_selection_;
     std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> galactic_stage_catalog_;

@@ -111,6 +111,15 @@ public:
     [[nodiscard]] const std::optional<DesyncReport>& recovered_report() const noexcept { return recovered_report_; }
     [[nodiscard]] bool waiting() const noexcept { return waiting_; }
     [[nodiscard]] bool setup_agreed() const noexcept { return setup_agreed_; }
+    [[nodiscard]] std::optional<std::uint64_t> peer_confirmed_tick() const noexcept {
+        if (!previous_ || frozen_ || failed_ || previous_->summaries.empty()
+            || previous_->summaries.size() + 1 != active_peers_.size()) return {};
+        for (const auto& [peer, summary] : previous_->summaries) {
+            static_cast<void>(peer);
+            if (summary.hash != previous_->local.hash) return {};
+        }
+        return previous_->local.last;
+    }
     [[nodiscard]] bool agreed_end() const noexcept { return ended_ && !waiting_ && !frozen_ && !failed_; }
     [[nodiscard]] const std::optional<DesyncReport>& report() const noexcept { return report_; }
     [[nodiscard]] std::size_t retained_bytes() const noexcept { return retained_bytes_; }

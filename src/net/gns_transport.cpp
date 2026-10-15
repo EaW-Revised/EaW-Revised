@@ -26,6 +26,10 @@ core::Diagnostic error(unsigned number, std::string message) {
     result.code = "EAWR-NET-" + std::to_string(number); result.message = std::move(message);
     return result;
 }
+std::atomic<int>& observed_route_cell() {
+    static std::atomic<int> cell{static_cast<int>(GnsRoute::unknown)};
+    return cell;
+}
 #if EAWR_HAS_GNS
 static_assert(gns_identity_max_bytes < SteamNetworkingIdentity::k_cchMaxGenericString);
 void u32(Bytes& bytes, std::uint32_t value) {
@@ -150,6 +154,7 @@ struct GnsTransport::Impl {
     bool refusing{};
     unsigned refusal_reason{};
     Clock::time_point refusal_deadline{};
+    std::optional<Clock::time_point> service_closed_deadline;
     std::optional<std::size_t> closing_pending;
     std::deque<Outbound> outbound;
     std::size_t outbound_bytes{};
@@ -201,6 +206,7 @@ struct GnsTransport::Impl {
     }
     void stop(unsigned reason = 0, std::string message = {}) {
         stats.reset();
+        observed_route_cell().store(static_cast<int>(GnsRoute::unknown));
         if (reason != 0 && !failure) failure = error(reason, std::move(message));
         if (reason != 0 && hosting && !accepted && !ended && !refusing
             && stream != k_HSteamNetConnection_Invalid) {
@@ -344,7 +350,11 @@ struct GnsTransport::Impl {
             if (!next) {
                 signalling_state->unavailable.store(true);
                 if (refusing) return; // keep the original reason and fixed deadline
-                if (!signalling_state->admitted.load()) { cancelled = true; stop(1517, "GNS introduction service failed"); }
+                // A peer's typed refusal can already be queued on the ICE path
+                // when its service session closes. Give callbacks/receive one
+                // fixed, nonblocking drain window before the generic closure.
+                if (!signalling_state->admitted.load() && !service_closed_deadline)
+                    service_closed_deadline = Clock::now() + std::chrono::milliseconds(250);
                 return;
             }
             if (!next.value()) return;
@@ -357,12 +367,18 @@ struct GnsTransport::Impl {
             }
         }
     }
+    void settle_service_closure() {
+        if (service_closed_deadline && Clock::now() >= *service_closed_deadline
+            && !signalling_state->admitted.load() && !refusing) {
+            cancelled = true; stop(1517, "GNS introduction service failed");
+        }
+    }
     void pump() {
         if (state == LinkState::closed && stream == k_HSteamNetConnection_Invalid
             && listener == k_HSteamListenSocket_Invalid) return;
         pump_signals();
         sockets().RunCallbacks();
-        if (stream == k_HSteamNetConnection_Invalid) return;
+        if (stream == k_HSteamNetConnection_Invalid) { settle_service_closure(); return; }
         if (ready && !hello_sent && !refusing) hello();
         // Drain queued messages before acting on a closed callback, which would
         // otherwise discard the ordered tail at CloseConnection.
@@ -384,6 +400,8 @@ struct GnsTransport::Impl {
             const auto reason = end_error ? end_error : (peer_close ? 0U : 1506U);
             stop(reason, "GNS peer disconnected"); return;
         }
+        settle_service_closure();
+        if (stream == k_HSteamNetConnection_Invalid) return;
         const auto now = Clock::now();
         if (!accepted && now - started >= options.handshake_timeout) { stop(1507, "GNS handshake timed out"); return; }
         if (accepted && !closing && now - last_receive >= options.timeout) { stop(1507, "GNS application peer timed out"); return; }
@@ -392,6 +410,12 @@ struct GnsTransport::Impl {
             const auto valid_ping = sockets().GetConnectionRealTimeStatus(stream, &status, 0, nullptr) == k_EResultOK
                 && status.m_eState == k_ESteamNetworkingConnectionState_Connected;
             stats.observe(now, valid_ping ? std::optional<int>(status.m_nPing) : std::nullopt);
+            SteamNetConnectionInfo_t info{};
+            const bool info_ok = sockets().GetConnectionInfo(stream, &info);
+            const bool connected = info_ok && info.m_eState == k_ESteamNetworkingConnectionState_Connected;
+            observed_route_cell().store(static_cast<int>(classify_gns_route(connected,
+                (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_Relayed) != 0,
+                !info.m_addrRemote.IsIPv6AllZeros(), info.m_idPOPRelay != 0 || info.m_idPOPRemote != 0)));
         }
         if (accepted && !closing && outbound.empty() && now - last_write >= options.keepalive)
             control({static_cast<std::uint8_t>(TcpMessage::keepalive)});
@@ -429,6 +453,7 @@ struct GnsTransport::Impl {
 #endif
 };
 
+GnsRoute GnsTransport::observed_route() { return static_cast<GnsRoute>(observed_route_cell().load()); }
 bool GnsTransport::available() { return EAWR_HAS_GNS != 0; }
 GnsTransport::GnsTransport(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 GnsTransport::~GnsTransport() = default;
@@ -575,6 +600,7 @@ void GnsTransport::close() {
     impl_->control({static_cast<std::uint8_t>(TcpMessage::close)});
     impl_->closing = true; impl_->state = LinkState::closed; impl_->started = Clock::now();
     impl_->stats.reset();
+    observed_route_cell().store(static_cast<int>(GnsRoute::unknown));
 #endif
 }
 bool GnsTransport::closed() const {

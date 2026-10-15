@@ -597,7 +597,7 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
     view->units.resize(objects.size());
     std::vector<GalacticVisibility> visibility_state;
     if (!snapshot->observer()) {
-        std::scoped_lock lock(cache_mutex_);
+        const auto lock = query_lock();
         visibility_state = state_.visibility;
     }
     const auto object_phase = executor.execute_phase("galactic-ai-objects", sim::tick_partition_count,
@@ -846,7 +846,7 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
         for (const auto& [mask, value] : values) {
             bool changed;
             {
-                std::scoped_lock lock(cache_mutex_);
+                const auto lock = query_lock();
                 const auto* found = visibility(known.player, known.planet, mask, false);
                 changed = !found || found->visible != value;
             }
@@ -902,11 +902,12 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
 
 void GalacticWorld::bind_connectivity(GalacticConnectivity connectivity) {
     if (connectivity.revision != connectivity_.revision) {
-        std::scoped_lock lock(cache_mutex_);
+        const auto lock = query_lock();
         mark_state_changed();
         cache_index_.clear();
-        std::erase_if(state_.cache, [](const auto& row) {
-            return std::any_of(row.key.tokens.begin(), row.key.tokens.end(), [](const auto& token) { return token.starts_with("ISCONNECTED") || token.starts_with("CONNECTS"); });
+        std::erase_if(cache_, [&](const auto& row) {
+            const auto& tokens = tokens_.at(row.key.token)->tokens;
+            return std::any_of(tokens.begin(), tokens.end(), [](const auto& token) { return token.starts_with("ISCONNECTED") || token.starts_with("CONNECTS"); });
         });
     }
     connectivity_ = std::move(connectivity);
@@ -933,7 +934,7 @@ bool GalacticWorld::build_allowed(tactical::PlayerId owner, sim::EntityId produc
 const tactical::BuildOption* GalacticWorld::build_option(tactical::PlayerId owner, sim::EntityId producer, tactical::TypeId type) const {
     if (live_deltas_ && input_) {
         if (producer > std::numeric_limits<galactic::PlanetId>::max()) return nullptr;
-        std::scoped_lock lock(cache_mutex_);
+        const auto lock = query_lock();
         const auto key = std::tuple{owner, producer, type};
         if (const auto at = build_options_.find(key); at != build_options_.end()) return &at->second;
         const std::array types{type};

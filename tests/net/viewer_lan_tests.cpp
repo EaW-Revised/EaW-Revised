@@ -568,8 +568,47 @@ void shared_builder_matches_former_live_encoding() {
     }
 }
 
+void lan_overflow_human_keeps_its_seat() {
+    stage = "LAN human seat beyond its team's marker count";
+    eawr::units::UnitTables tables;
+    eawr::skirmish::Fixture fixture;
+    fixture.map = "data/art/maps/lan-overflow.ted"; fixture.map_sha256 = std::string(64, 'a'); fixture.seed = 84;
+    fixture.pre_built_base = fixture.free_starting_units = false;
+    fixture.slots = {{1, "Rebel", 0, true, {}}, {2, "Empire", 1, false, {}}, {3, "Empire", 1, true, {}}};
+    eawr::skirmish::SetupMap map; map.path = fixture.map;
+    map.metadata.capacity = 3; map.metadata.new_markers = true; map.metadata.start_positions.emplace(2);
+    map.teams = {{0, {"Rebel"}, 1}, {1, {"Empire"}, 1}};
+    eawr::skirmish::SetupSelection selection; selection.map = map.path; selection.slots = fixture.slots;
+    const auto options = require(viewer::validated_lan_options(selection, std::span<const eawr::skirmish::SetupMap>(&map, 1)));
+    expect(options.slots && options.slots->back().human, "overflow guest keeps human control through lobby validation");
+    eawr::skirmish::StartInputs inputs; inputs.map = fixture.map; inputs.map_sha256 = fixture.map_sha256;
+    inputs.tables = &tables; inputs.lobby_colours.resize(3);
+    for (unsigned team = 0; team < 2; ++team) {
+        eawr::skirmish::StartFaction faction; faction.name = team == 0 ? "Rebel" : "Empire"; faction.playable = true;
+        inputs.factions.push_back(std::move(faction));
+        eawr::skirmish::MapPlacement marker; marker.record = team;
+        marker.type = "Team_0" + std::to_string(team) + "_Spawn_Point_Marker";
+        marker.marker = true; marker.position = sim::math::Vec3{}; marker.orientation_degrees = sim::math::Vec3{};
+        inputs.placements.push_back(std::move(marker));
+    }
+    const auto prepared = require(viewer::prepare_skirmish(fixture, std::move(tables), std::move(inputs)));
+    expect(prepared.start.players.size() == 3 && prepared.start.players.back().human
+        && std::none_of(prepared.start.markers.begin(), prepared.start.markers.end(),
+            [](const auto& marker) { return marker.player == 3; }),
+        "LAN preparation retains an overflow guest without inventing a spawn");
+    const auto canonical = viewer::lan_recording_setup(fixture, prepared.start);
+    auto offered = offer(); offered.seed = fixture.seed;
+    offered.setup = require(net::encode_skirmish_setup(canonical));
+    offered.identity = {std::string(eawr::core::build_identity()), *canonical.match_identity};
+    offered.seats = {{0, sim::SeatId{1}, 1}, {1, sim::SeatId{2}, 3}};
+    const auto decoded = require(net::decode_setup_offer(require(net::encode_setup_offer(offered))));
+    expect(decoded.seats.back().player == 3 && canonical.departure_policy
+        && canonical.departure_policy->humans == std::vector<tactical::PlayerId>{1, 3},
+        "canonical LAN offer preserves the overflow player's command seat and departure policy");
+}
+
 void lan_ai_defaults_follow_authored_constraints() {
-    stage = "LAN AI defaults follow team factions and authored spawn limits";
+    stage = "LAN AI defaults prefer free markers without refusing overflow";
     eawr::skirmish::SetupMap map; map.path = setup().skirmish->map;
     map.metadata.capacity = 4; map.metadata.new_markers = true; map.metadata.start_positions.emplace(4);
     map.teams = {{0, {"Rebel", "Empire"}, 2}, {1, {"Rebel", "Empire"}, 2}, {2, {"Rebel", "Empire"}, 1}};
@@ -588,8 +627,17 @@ void lan_ai_defaults_follow_authored_constraints() {
     require(viewer::append_lan_ai_row(selection, map, 3, 8));
     expect(selection.slots.back().team == 2, "a full opposing side falls back to an authored side with a valid free spawn");
     map.teams.pop_back(); selection = initial;
+    map.teams[0].spawn_capacity = 2;
+    require(viewer::append_lan_ai_row(selection, map, 3, 8));
+    expect(selection.slots.back().team == 0 && selection.slots.back().faction == "Rebel",
+        "project AI-add default prefers a host-team free marker to opposing overflow");
+    map.teams[0].spawn_capacity = 1; selection = initial;
+    require(viewer::append_lan_ai_row(selection, map, 3, 8));
+    expect(selection.slots.back().team == 1 && selection.slots.back().faction == "Empire",
+        "when every side is full, AI-add accepts overflow on the opposing team");
+    require(viewer::append_lan_ai_row(selection, map, 4, 8));
     const auto before = require(viewer::encode_lan_lobby_game(require(viewer::validated_lan_options(selection, std::span<const eawr::skirmish::SetupMap>(&map, 1)))));
-    expect(!viewer::append_lan_ai_row(selection, map, 3, 8), "an AI edit is refused when no side can admit it");
+    expect(!viewer::append_lan_ai_row(selection, map, 5, 8), "an AI edit is refused beyond total map capacity");
     expect(require(viewer::encode_lan_lobby_game(require(viewer::validated_lan_options(selection, std::span<const eawr::skirmish::SetupMap>(&map, 1))))) == before,
         "a refused AI edit preserves the exact prior selection bytes");
 }
@@ -1780,7 +1828,7 @@ int main() {
         expect(invalid->view().message.find("EAWR-NET-0211") != std::string::npos &&
             invalid->view().message.find("hostname") != std::string::npos, "invalid endpoint has clear corrective error text");
         recovery_presentation_contract();
-        lan_ai_defaults_follow_authored_constraints(); lobby_refusal_and_placeholder_contracts(); shared_builder_matches_former_live_encoding(); terminal_lobby_commands_are_inert();
+        lan_ai_defaults_follow_authored_constraints(); lan_overflow_human_keeps_its_seat(); lobby_refusal_and_placeholder_contracts(); shared_builder_matches_former_live_encoding(); terminal_lobby_commands_are_inert();
         close_one_mesh_edge(); authoritative_staging(false); authoritative_staging(true);
         authoritative_staging(true, net::LobbyReason::kicked); authoritative_staging(true, net::LobbyReason::host_closed);
         missing_planned_owner_is_refused();

@@ -209,8 +209,8 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
     next.movement.benefits_from_corruption = observer->benefits_from_corruption;
     next.movement.access.resize(snapshot.planets().size());
     std::vector<std::optional<core::Diagnostic>> errors(snapshot.planets().size());
-    // The planet tokens below query perception in every partition: refresh
-    // its copied economy input once here, never from a partition (#2971).
+    // Refresh the copied economy once for this access generation. The pure
+    // partitioned phase below does not query perception or lazy engine caches.
     // Reconstruction reads archived values and refreshes nothing.
     std::optional<World::PartitionedReads> reads;
     if (!reconstruction) reads.emplace(world.partitioned_reads());
@@ -236,22 +236,29 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
             if (facts->space_level != 0) row.starbase_relation = relation(facts->space_owner);
             for (const auto& fleet : snapshot.fleets()) if (fleet.orbit == id && !fleet.motion.transit && !allied(fleet.owner))
                 row.nonallied_fleet = true;
-            if (selected->ai) {
-                const auto classified = token(world, engine, owner, id, {"VARIABLE_TARGET", "TARGETPLAYERID"}, reconstruction);
-                row.ai_classification_succeeded = classified.has_value();
-                if (classified) {
-                    const auto* player = find(content_->players, static_cast<gc::PlayerId>(*classified), [](const auto& at) { return at.player; });
-                    row.ai_relation = !player || player->neutral ? gc::PathRelation::neutral : gc::PathRelation::hostile;
-                }
-                if (!row.starbase_relation) {
-                    const auto force = token(world, engine, owner, id, {"VARIABLE_TARGET", "ENEMYFORCE", "HASSPACEFORCE"}, reconstruction);
-                    if (force) row.ai_enemy_space_force = *force != Real{};
-                }
-            }
+
         }
     });
     if (!prepared) return core::Result<const Cache*>::failure(prepared.error());
     for (const auto& error : errors) if (error) return core::Result<const Cache*>::failure(*error);
+    // Perception mutates remembered bindings and upstream lazy engine caches.
+    // Keep the bulk access preparation parallel; query tokens on the owner in
+    // canonical planet order before publishing the completed movement input.
+    const auto serial_reads = world.sequential_reads();
+    if (selected->ai) for (std::size_t index = 0; index < snapshot.planets().size(); ++index) {
+        const auto id = snapshot.planets()[index].id;
+        auto& row = next.movement.access[index];
+        const auto classified = token(world, engine, owner, id, {"VARIABLE_TARGET", "TARGETPLAYERID"}, reconstruction);
+        row.ai_classification_succeeded = classified.has_value();
+        if (classified) {
+            const auto* player = find(content_->players, static_cast<gc::PlayerId>(*classified), [](const auto& at) { return at.player; });
+            row.ai_relation = !player || player->neutral ? gc::PathRelation::neutral : gc::PathRelation::hostile;
+        }
+        if (!row.starbase_relation) {
+            const auto perceived_force = token(world, engine, owner, id, {"VARIABLE_TARGET", "ENEMYFORCE", "HASSPACEFORCE"}, reconstruction);
+            if (perceived_force) row.ai_enemy_space_force = *perceived_force != Real{};
+        }
+    }
     if (snapshot.control()) for (const auto& at : snapshot.control()->state)
         next.movement.orbital_occupants.emplace(at.planet, at.orbital_player);
     else if (snapshot.production()) for (const auto& at : snapshot.production()->planets)

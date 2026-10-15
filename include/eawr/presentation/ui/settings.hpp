@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "eawr/core/diagnostic.hpp"
 
 namespace eawr::presentation::ui {
 
@@ -107,11 +108,22 @@ struct NetworkSettings final {
     int preferred_faction{0};  // 0 random, then the playable factions in data order
     int connection_speed{0};   // 0 modem, 1 broadband
     int lobby_locale{-1};      // -1 follows the game language
+    // Project online service. Empty ships unconfigured; LAN retains its own settings.
+    std::string online_host;
+    int online_port{27020};
+    std::string online_trust{"pin"}; // pin, ca-file, or operating-system trust
+    std::string online_pin;
+    std::string online_ca_file;
+    bool online_relay_only{};
 
     [[nodiscard]] bool uses_default_port() const noexcept { return port == default_network_port; }
 
     friend bool operator==(const NetworkSettings&, const NetworkSettings&) = default;
 };
+
+// Curated diagnostics contain no entered host, certificate path or pin. An empty host
+// is valid for storage but cannot open Online. Malformed trust never falls back.
+[[nodiscard]] std::optional<core::Diagnostic> validate_online_settings(const NetworkSettings&, bool require_service = false);
 
 struct PlayerSettings final {
     AudioSettings audio;
@@ -125,7 +137,8 @@ struct PlayerSettings final {
     friend bool operator==(const PlayerSettings&, const PlayerSettings&) = default;
 };
 
-// Brings every field into its bounds (NaN-free by construction: all fields are integers).
+// Brings numeric fields into their bounds (NaN-free by construction). Online
+// service fields use validate_online_settings and fail closed instead of clamping.
 // Returns the names of the fields that were out of range.
 std::vector<std::string> clamp_settings(PlayerSettings& settings);
 

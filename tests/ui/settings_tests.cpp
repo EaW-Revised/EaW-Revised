@@ -21,6 +21,46 @@ bool has_note(const ui::SettingsLoad& load, const std::string& part) {
                        [&](const std::string& note) { return note.find(part) != std::string::npos; });
 }
 
+
+void test_online_settings() {
+    ui::NetworkSettings network;
+    expect(!ui::validate_online_settings(network), "empty project service can be saved");
+    expect(ui::validate_online_settings(network, true)->code == "EAWR-NET-1745", "Online requires a configured service");
+    network.online_host = "service.example"; network.online_pin = std::string(64, 'a');
+    expect(!ui::validate_online_settings(network, true), "explicit service pin validates");
+    ui::PlayerSettings stored; stored.network = network; stored.network.online_relay_only = true;
+    expect(ui::parse_settings(ui::serialize_settings(stored)).settings == stored, "service and relay-only choice round trip");
+    network.online_host = "https://secret.example:123";
+    auto error = ui::validate_online_settings(network, true);
+    expect(error && error->code == "EAWR-NET-1746" && error->message.find("secret") == std::string::npos, "host validation is curated and private");
+    for (const char* invalid : {"service:27020", ":::1", "-bad.example", "bad..example"}) {
+        network = stored.network; network.online_host = invalid;
+        expect(ui::validate_online_settings(network)->code == "EAWR-NET-1746", "malformed host syntax is refused before network I/O");
+    }
+    network = stored.network; network.online_host = "::1";
+    expect(!ui::validate_online_settings(network, true), "raw IPv6 service address validates");
+    network = stored.network; network.online_port = 0;
+    expect(ui::validate_online_settings(network)->code == "EAWR-NET-1747", "zero service port is refused, not clamped");
+    network = stored.network; network.online_pin = "secret-pin";
+    expect(ui::validate_online_settings(network)->code == "EAWR-NET-1749", "invalid pin cannot silently select another trust mode");
+    network = stored.network; network.online_trust = "ca-file"; network.online_ca_file = "certificates/community.pem";
+    expect(!ui::validate_online_settings(network, true), "explicit CA file is accepted");
+    network.online_ca_file.clear();
+    expect(ui::validate_online_settings(network)->code == "EAWR-NET-1750", "CA mode needs its trust file");
+    network = stored.network; network.online_trust = "system";
+    expect(!ui::validate_online_settings(network, true), "system trust accepts a DNS host");
+    for (const char* literal : {"127.0.0.1", "::1"}) {
+        network.online_host = literal;
+        expect(ui::validate_online_settings(network, true)->code == "EAWR-NET-1754", "system trust refuses IP literals with a curated setting message");
+    }
+    network.online_host = "service.example"; stored.network = network;
+    expect(ui::parse_settings(ui::serialize_settings(stored)).settings == stored, "system trust choice round trips");
+    const auto malformed = ui::parse_settings("eawr-settings 1\nnetwork.online_host=secret.example\nnetwork.online_port=bad\nnetwork.online_pin=private\n");
+    expect(has_note(malformed, "EAWR-NET-1747") && !has_note(malformed, "secret.example"), "damaged service remains invalid with a private typed note");
+    stored.network.online_host = "service.example\nnetwork.allow_upnp=0";
+    expect(ui::parse_settings(ui::serialize_settings(stored)).settings.network.allow_upnp, "service text cannot inject settings lines");
+}
+
 void test_defaults() {
     const ui::PlayerSettings defaults;
     // ST-A1: the four volume sliders start at 0.75; subtitles are on.
@@ -245,6 +285,7 @@ void test_session_values() {
 } // namespace
 
 int main() {
+    test_online_settings();
     test_defaults();
     test_round_trip();
     test_garbage();

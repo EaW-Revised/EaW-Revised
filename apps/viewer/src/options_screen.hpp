@@ -91,6 +91,7 @@ public:
     // Sets a control as the player would: a slider's value, a check's state, a list's or
     // combo's selected index. False when the control is not on the page or is disabled.
     [[nodiscard]] bool set_control(const std::string& id, double value);
+    [[nodiscard]] bool set_text_control(const std::string& id, const std::string& value);
     // Presses a button as a click would. False when it is missing or disabled.
     [[nodiscard]] bool press(const std::string& id);
 

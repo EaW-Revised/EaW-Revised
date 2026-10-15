@@ -31,6 +31,7 @@ struct LanView {
     std::uint64_t input_delay{3};
     std::string peer_name{"Opponent"}, message, bundle_path, setup_summary;
     std::optional<std::uint64_t> desync_tick;
+    std::optional<std::uint64_t> peer_confirmed_tick;
     std::optional<bool> victory;
     std::optional<net::DepartureOutcome> departure{};
     std::vector<sim::tactical::PlayerId> human_owners{1, 2};
@@ -207,6 +208,8 @@ public:
     virtual void set_discard_observer(std::function<void(std::uint64_t)>) {}
     // Applies only to the next host() call. Default off; joining never maps a port.
     virtual void set_port_mapping(bool) {}
+    // Set before online host(): password rooms must never mint a public alias.
+    virtual void set_public_invitation(bool) {}
     virtual void join(std::string endpoint) = 0;
     virtual void cancel() = 0;
     // Reserve an abort atomically against runtime admission. Release resources only
@@ -219,6 +222,10 @@ public:
     virtual std::optional<skirmish::FixtureOptions> take_start() = 0;
     virtual std::optional<skirmish::FixtureOptions> offered_setup() const = 0;
     virtual LanView view() const = 0;
+    // Setup-owner access only. The private publication capability is for the room
+    // service; it must never reach a view, chat or diagnostic record.
+    virtual std::string bridge_invitation() const { return {}; }
+    virtual std::string bridge_ownership() const { return {}; }
     virtual sim::tactical::PlayerId local_player() const = 0;
     virtual platform::LiveStepDriver driver(const sim::tactical::TacticalSetup& setup) = 0;
     // MP-06 requests wait for canonical future-tick admission. MP-33 pause is refused.

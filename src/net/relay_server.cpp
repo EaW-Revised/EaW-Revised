@@ -2,6 +2,7 @@
 #include "relay_tls.hpp"
 #include "relay_prefix_budget.hpp"
 #include "relay_directory.hpp"
+#include "relay_room.hpp"
 #include "relay_hash_worker.hpp"
 #include "relay_cloudflare.hpp"
 #include "relay_renewal.hpp"
@@ -47,7 +48,21 @@ bool valid(const RelayServerOptions& o) {
         && o.idle_timeout >= std::chrono::seconds(10) && o.idle_timeout <= std::chrono::hours(1)
         && o.session_lifetime >= std::chrono::seconds(1) && o.session_lifetime <= std::chrono::hours(24)
         && o.max_session_lifetime >= o.session_lifetime && o.max_session_lifetime <= std::chrono::hours(24 * 7)
-        && o.renewal_window.count() > 0 && o.renewal_window <= o.max_session_lifetime;
+        && o.renewal_window.count() > 0 && o.renewal_window <= o.max_session_lifetime
+        && o.room_operations_per_member_per_minute > 0 && o.room_operations_per_member_per_minute <= 100000
+        && o.room_bytes_per_member_per_minute >= max_body && o.room_bytes_per_member_per_minute <= 1024ULL * 1024 * 1024
+        && o.room_reservation_timeout >= std::chrono::seconds(1) && o.room_reservation_timeout <= std::chrono::minutes(10)
+        && o.room_hold_timeout >= std::chrono::seconds(1) && o.room_hold_timeout <= std::chrono::hours(24);
+}
+RoomOptions room_options(const RelayServerOptions& o) {
+    RoomOptions r;
+    r.session_lifetime = o.session_lifetime; r.max_session_lifetime = o.max_session_lifetime; r.renewal_window = o.renewal_window;
+    r.reservation_timeout = o.room_reservation_timeout; r.hold_timeout = o.room_hold_timeout;
+    // One provider call per member; a Cloudflare call may spend its whole timeout plus the connect margin.
+    r.credential_wait = o.cloudflare_timeout + std::chrono::seconds(2);
+    r.operations_per_member = o.room_operations_per_member_per_minute; r.bytes_per_member = o.room_bytes_per_member_per_minute;
+    r.unpaired_per_prefix = o.unpaired_sessions_per_ip; r.failed_guesses = o.failed_guesses_per_minute; r.aliases = o.room_aliases;
+    return r;
 }
 // Default credential refresh: the same HMAC (coturn REST) scheme as pairing. It completes inside submit.
 class HmacTurnRefresh final : public TurnRefresh {
@@ -95,14 +110,15 @@ struct RelayServer::Impl {
         std::string ip, identity, session;
         Clock::time_point created{}, last_read{}, closing_at{};
         bool closing{};
-        bool directory{}, hashing{};
+        bool directory{}, hashing{}, room{};
         Bytes hash_request;
     };
     struct Session {
         std::array<std::uint64_t, 2> peers{};
         Clock::time_point expires{}, paired_at{};
         Budget budget;
-        std::string alias;
+        std::string alias, publisher_ownership;
+        bool directory_bound{}, directory_admitted{}, invitation_revoked{};
         bool paired{};
         // Ticket E: the lease ends session_lifetime plus all renewals after pairing, never past the maximum.
         std::chrono::milliseconds extension{};
@@ -129,10 +145,56 @@ struct RelayServer::Impl {
     PasswordHashWorker hashes;
     std::unique_ptr<CloudflareTurnWorker> turns;
     std::deque<Clock::time_point> turn_calls;
+    std::deque<std::string> revoke_queue;
     std::shared_ptr<TurnRefresh> refresh;
+    // The room service's view of this server: queued output, typed failure, credentials and directory state.
+    struct RoomHost final : RoomSink {
+        Impl& server;
+        explicit RoomHost(Impl& s) : server(s) {}
+        bool send(std::uint64_t id, Bytes bytes) override {
+            const auto found = server.clients.find(id); return found != server.clients.end() && server.output(found->second, std::move(bytes));
+        }
+        bool try_send(std::uint64_t id, Bytes bytes) override {
+            // No fail(): a full queue of the receiver drops this blob and nothing else.
+            const auto found = server.clients.find(id);
+            return found != server.clients.end() && !found->second.closing && found->second.tls->queue(std::move(bytes));
+        }
+        void close(std::uint64_t id, Bytes frame) override {
+            const auto found = server.clients.find(id);
+            if (found == server.clients.end() || found->second.closing) return;
+            auto& c = found->second;
+            c.closing = true; c.closing_at = server.now() + std::chrono::milliseconds(250);
+            if (!c.tls->ready() || !c.tls->queue(std::move(frame))) c.closing_at = server.now();
+        }
+        void fail(std::uint64_t id, unsigned reason) override {
+            if (const auto found = server.clients.find(id); found != server.clients.end()) server.fail(found->second, reason);
+        }
+        bool request_turn(const std::string& key, std::chrono::seconds lifetime) override { return server.refresh->submit({key, lifetime}); }
+        void revoke(const std::string& username) override { server.revoke_credentials(username); }
+        std::optional<std::string> new_alias() override { return server.new_alias(); }
+        void warn(core::Diagnostic diagnostic) override { server.warn(std::move(diagnostic)); }
+        void directory_state(const std::string& room, bool locked, bool closed) override { server.directory.scope_state(room, locked, closed); }
+    } room_host{*this};
+    RoomService rooms;
     Impl(RelayServerOptions o, Now clock, socket::Open open, Context ctx, RelayServer::PasswordHash hash, std::shared_ptr<TurnRefresh> turn_refresh)
         : options(std::move(o)), now(clock), listener(open), context(std::move(ctx)), ips(options.max_connections),
-          directory(options.max_sessions, options.max_connections), hashes(hash ? hash : password_hash) {
+          directory(options.max_sessions, options.max_connections), hashes(hash ? hash : password_hash),
+          rooms(room_options(options), room_host, directory, ips) {
+        directory.set_room_scope(&rooms);
+        directory.set_bridge_hooks({
+            [this](const std::string& code, const std::string& owner, bool passworded, bool publishing) { return bridge_valid(code, owner, passworded, publishing); },
+            [this](const std::string& code) { sessions.at(code).directory_bound = true; },
+            [this](const std::string& code) {
+                const auto found = sessions.find(code);
+                if (found == sessions.end() || !found->second.directory_bound || found->second.directory_admitted || found->second.paired || found->second.invitation_revoked) return false;
+                found->second.directory_admitted = true; return true;
+            },
+            [this](const std::string& code) {
+                const auto found = sessions.find(code);
+                if (found == sessions.end() || found->second.paired || found->second.invitation_revoked) return;
+                found->second.invitation_revoked = true;
+                const auto host = clients.find(found->second.peers[0]); if (host != clients.end()) fail(host->second, 1523);
+            }});
         if (options.turn_provider == TurnProvider::cloudflare) {
             CloudflareTurnConfig config;
             config.key_id = options.cloudflare_key_id; config.api_token = options.cloudflare_api_token;
@@ -171,17 +233,31 @@ struct RelayServer::Impl {
         if (turn_calls.size() >= options.cloudflare_calls_per_minute) return false;
         turn_calls.push_back(time); return true;
     }
-    // Best effort: a refused or failed revoke leaves the credential to expire with its TTL.
+    // A revoke that finds the shared call cap spent waits in a bounded queue and goes out as calls free up; one that
+    // the provider refuses or fails leaves the credential to expire with its TTL.
     void revoke_credentials(const std::string& username) {
-        if (!turns || username.empty() || !turn_call_allowed()) return;
-        turns->submit({CloudflareTurnWorker::Kind::revoke, {}, {}, username});
+        if (!turns || username.empty()) return;
+        if (!revoke_queue.empty() || !turn_call_allowed()) {
+            if (revoke_queue.size() < 1024) revoke_queue.push_back(username);
+            return;
+        }
+        if (!turns->submit({CloudflareTurnWorker::Kind::revoke, {}, {}, username}) && revoke_queue.size() < 1024) revoke_queue.push_back(username);
+    }
+    void drain_revokes() {
+        while (turns && !revoke_queue.empty() && turn_call_allowed()) {
+            if (!turns->submit({CloudflareTurnWorker::Kind::revoke, {}, {}, revoke_queue.front()})) break;
+            revoke_queue.pop_front();
+        }
     }
     void remove(std::uint64_t id) {
         const auto found = clients.find(id);
         if (found == clients.end()) return;
         directory.disconnect(id, now());
+        rooms.disconnect(id, now());
         const auto session = sessions.find(found->second.session);
         if (session != sessions.end()) {
+            directory.invalidate_bridge(session->first);
+            if (!session->second.alias.empty()) directory.invalidate_bridge(session->second.alias);
             if (!session->second.paired) --ips.at(found->second.ip).unpaired;
             for (const auto other : session->second.peers)
                 if (other != id && clients.contains(other)) fail(clients.at(other), 1528);
@@ -245,6 +321,9 @@ struct RelayServer::Impl {
         for (auto& [code, s] : sessions)
             if (s.renewing && time >= s.renewal_deadline) refuse_refresh(s, time);
         while (auto done = refresh->take()) {
+            if (rooms.owns_turn(done->session)) {
+                rooms.turn_done(done->session, std::move(done->credentials), std::move(done->failure), time); continue;
+            }
             const auto job = refresh_jobs.find(done->session);
             if (job == refresh_jobs.end()) {
                 if (done->credentials) revoke_credentials(done->credentials->username);
@@ -296,7 +375,9 @@ struct RelayServer::Impl {
                 const auto byte = digit(random.value()[i]) * 16 + digit(random.value()[i + 1]);
                 if (byte < 252) alias += alphabet[static_cast<std::size_t>(byte) % alphabet.size()];
             }
-            if (alias.size() == 4 && std::none_of(sessions.begin(), sessions.end(), [&](const auto& entry) { return entry.second.alias == alias; })) return alias;
+            // One namespace for invitation aliases and room aliases: a typed code names exactly one thing.
+            if (alias.size() == 4 && !rooms.alias_in_use(alias)
+                && std::none_of(sessions.begin(), sessions.end(), [&](const auto& entry) { return entry.second.alias == alias; })) return alias;
         }
         return {};
     }
@@ -306,10 +387,31 @@ struct RelayServer::Impl {
     void failed_guess(const Connection& c, bool alias_form) {
         ips.failed_guess(c.ip, now(), alias_form);
     }
+    bool bridge_valid(const std::string& invitation, const std::string& owner, bool passworded, bool publishing) const {
+        if (!code_valid(invitation) || !code_valid(owner)) return false;
+        const auto found = sessions.find(invitation);
+        if (found == sessions.end() || found->second.paired || found->second.directory_admitted || found->second.invitation_revoked || now() >= found->second.expires) return false;
+        if (!secret_equal(found->second.publisher_ownership, owner) || (publishing && found->second.directory_bound)) return false;
+        const auto host = clients.find(found->second.peers[0]);
+        if (host == clients.end() || host->second.closing) return false;
+        return !passworded || found->second.alias.empty();
+    }
     void request(std::uint64_t id, Connection& c, const Bytes& bytes) {
         if (bytes.size() < 2 || bytes[0] != 2) { fail(c, 1521); return; }
         const auto kind = static_cast<Kind>(bytes[1]);
         Reader reader{std::span(bytes).subspan(2)};
+        if (room_kind(static_cast<unsigned>(kind))) {
+            // Room scope: a member connection of its own, never a directory or legacy session connection.
+            if (c.directory || !c.session.empty()) { fail(c, 1540); return; }
+            c.room = true;
+            rooms.request(id, c.ip, bytes, now()); return;
+        }
+        if (c.room) {
+            // Ticket E's renewal and the client heartbeat run unchanged on a room member connection.
+            if (kind == Kind::ping && reader.done()) return;
+            if (kind == Kind::renew && reader.done()) { rooms.renew(id, now()); return; }
+            fail(c, 1521); return;
+        }
         if (static_cast<unsigned>(kind) >= 20 && static_cast<unsigned>(kind) <= 29) {
             if (!c.session.empty() || (!c.directory && kind != Kind::directory_open)) { fail(c, 1540); return; }
             if (kind == Kind::directory_publish) {
@@ -344,18 +446,19 @@ struct RelayServer::Impl {
             if (kind == Kind::join) code = reader.string(32);
             auto identity = reader.string(gns_identity_max_bytes);
             const auto lifetime = kind == Kind::publish ? reader.u32() : 0;
-            if (!reader.done() || !identity_valid(identity)
+            const auto public_alias = kind == Kind::publish ? reader.u32() : 0;
+            if (!reader.done() || !identity_valid(identity) || public_alias > 1
                 || (kind == Kind::join && !code_valid(code) && !alias_valid(code))) { fail(c, 1521); return; }
             if (kind == Kind::publish) {
                 if (lifetime == 0 || lifetime > 86400000) { fail(c, 1521); return; }
                 if (sessions.size() >= options.max_sessions || ips.at(c.ip).unpaired >= options.unpaired_sessions_per_ip) {
                     fail(c, 1527); return;
                 }
-                auto generated = random_code();
-                if (!generated || sessions.contains(generated.value())) { fail(c, 1529); return; }
+                auto generated = random_code(), owner = random_code();
+                if (!generated || !owner || owner.value() == generated.value() || sessions.contains(generated.value())) { fail(c, 1529); return; }
                 c.session = generated.value(); c.identity = std::move(identity);
-                Session s; s.peers[0] = id; s.expires = now() + std::min(std::chrono::milliseconds(lifetime), options.max_join_lifetime); s.budget.window = now();
-                if (options.room_aliases) {
+                Session s; s.publisher_ownership = owner.value(); s.peers[0] = id; s.expires = now() + std::min(std::chrono::milliseconds(lifetime), options.max_join_lifetime); s.budget.window = now();
+                if (options.room_aliases && public_alias != 0) {
                     auto alias = new_alias();
                     if (!alias) { c.session.clear(); fail(c, 1533); return; }
                     s.alias = std::move(*alias);
@@ -365,7 +468,7 @@ struct RelayServer::Impl {
                 sessions.emplace(c.session, std::move(s));
                 ++ips.at(c.ip).unpaired;
                 auto response = message(Kind::published); string(response, c.session); string(response, c.identity); string(response, alias);
-                u32(response, static_cast<std::uint32_t>(accepted.count()));
+                u32(response, static_cast<std::uint32_t>(accepted.count())); string(response, owner.value());
                 output(c, std::move(response)); return;
             }
             const bool alias_form = alias_valid(code);
@@ -380,6 +483,7 @@ struct RelayServer::Impl {
             auto& s = found->second;
             if (now() >= s.expires && !s.paired) { failed_guess(c, alias_form); fail(c, alias_form ? 1523 : 1522); return; }
             auto& host = clients.at(s.peers[0]);
+            if (s.invitation_revoked) { failed_guess(c, alias_form); fail(c, 1523); return; }
             if (s.paired || host.closing || identity == host.identity) { failed_guess(c, alias_form); fail(c, 1524); return; }
             // The live allocation must cover all renewals; providers clamp credentials to 48 h.
             const auto credential_lifetime = std::min(std::chrono::ceil<std::chrono::seconds>(options.max_session_lifetime)
@@ -387,7 +491,7 @@ struct RelayServer::Impl {
             if (options.turn_provider == TurnProvider::cloudflare) {
                 c.session = code; c.identity = std::move(identity); s.peers[1] = id;
                 --ips.at(host.ip).unpaired;
-                s.paired = true; s.paired_at = now();
+                s.paired = true; directory.close_bridge(code); s.paired_at = now();
                 // The Paired message follows the credential call, which runs off this thread.
                 const auto ttl = credential_lifetime;
                 if (turn_call_allowed() && turns->submit({CloudflareTurnWorker::Kind::generate, code, ttl, {}})) {
@@ -403,7 +507,7 @@ struct RelayServer::Impl {
             if (!a || !b) { fail(c, 1529); return; }
             c.session = code; c.identity = std::move(identity); s.peers[1] = id;
             --ips.at(host.ip).unpaired;
-            s.paired = true; s.paired_at = now();
+            s.paired = true; directory.close_bridge(code); s.paired_at = now();
             output(host, pairing(code, host, c, a.value()));
             output(c, pairing(code, c, host, b.value())); return;
         }
@@ -414,6 +518,9 @@ struct RelayServer::Impl {
         if (++s.budget.operations > options.operations_per_minute
             || !s.budget.add_bytes(bytes.size(), options.bytes_per_minute)) { fail(c, 1525); return; }
         if (kind == Kind::revoke && reader.done() && !s.paired && s.peers[0] == id) {
+            s.invitation_revoked = true; // publisher gets its revoke acknowledgement, not a second failure
+            directory.invalidate_bridge(found->first);
+            if (!s.alias.empty()) directory.invalidate_bridge(s.alias);
             --ips.at(c.ip).unpaired; sessions.erase(found); c.session.clear();
             output(c, message(Kind::revoked)); c.closing = true;
             c.closing_at = now() + std::chrono::milliseconds(250); return;
@@ -437,6 +544,8 @@ struct RelayServer::Impl {
         ips.refresh(time);
         directory.expire(time);
         settle_renewals(time);
+        rooms.poll(time);
+        drain_revokes();
         while (auto completed = hashes.take()) {
             const auto found = clients.find(completed->job.client);
             if (found == clients.end() || found->second.closing || !found->second.hashing) continue;
@@ -496,24 +605,28 @@ struct RelayServer::Impl {
                 if (c.tls->ready() && c.tls->drained() && !c.tls->finish_writes()) dead.push_back(id);
             }
             auto& budget = ips.at(c.ip);
-            auto& traffic = c.directory ? budget.directory : static_cast<Budget&>(budget);
+            auto& traffic = c.directory ? budget.directory : c.room ? budget.room : static_cast<Budget&>(budget);
             traffic.refresh(time);
-            const auto byte_limit = c.directory ? options.directory_bytes_per_minute : options.bytes_per_minute;
+            // A prefix may carry up to connections_per_ip member connections of the per-member room limits.
+            const auto byte_limit = c.directory ? options.directory_bytes_per_minute
+                : c.room ? options.room_bytes_per_member_per_minute * options.connections_per_ip : options.bytes_per_minute;
             if (!traffic.add_bytes(c.tls->take_read_bytes(), byte_limit)) fail(c, 1525);
             if (!c.closing && !c.hashing) if (auto bytes = c.tls->receive()) {
                 c.last_read = time;
                 const bool directory_request = bytes->size() >= 2 && (*bytes)[1] >= 20 && (*bytes)[1] <= 29;
-                auto& operations = directory_request ? budget.directory : static_cast<Budget&>(budget);
+                const bool room_request = c.room || (bytes->size() >= 2 && room_kind((*bytes)[1]));
+                auto& operations = directory_request ? budget.directory : room_request ? budget.room : static_cast<Budget&>(budget);
                 operations.refresh(time);
-                const auto limit = directory_request ? options.directory_operations_per_minute : options.operations_per_minute;
+                const auto limit = directory_request ? options.directory_operations_per_minute
+                    : room_request ? options.room_operations_per_member_per_minute * options.connections_per_ip : options.operations_per_minute;
                 if (++operations.operations > limit) fail(c, 1525);
                 else request(id, c, *bytes);
             }
             const auto session = sessions.find(c.session);
             const bool paired = session != sessions.end() && session->second.paired;
-            if (!c.closing && !c.directory && !paired && c.session.empty() && time - c.created >= options.admission_timeout) fail(c, 1528);
+            if (!c.closing && !c.directory && !c.room && !paired && c.session.empty() && time - c.created >= options.admission_timeout) fail(c, 1528);
             if (!c.closing && session != sessions.end() && !paired && time >= session->second.expires) fail(c, 1522);
-            if (!c.closing && (c.directory || !c.session.empty()) && time - c.last_read >= options.idle_timeout) fail(c, 1528);
+            if (!c.closing && (c.directory || c.room || !c.session.empty()) && time - c.last_read >= options.idle_timeout) fail(c, 1528);
             if (!c.closing && paired && time >= lease_end(session->second))
                 fail(c, lease_end(session->second) >= lease_hard_end(session->second) ? lease_ended_at_maximum : lease_not_renewed);
             if (c.tls->failed() || (c.closing && time >= c.closing_at)) dead.push_back(id);
@@ -538,6 +651,7 @@ void RelayServer::poll() { impl_->poll(); }
 std::uint16_t RelayServer::port() const { return impl_->listener.port; }
 std::size_t RelayServer::connections() const { return impl_->clients.size(); }
 std::size_t RelayServer::sessions() const { return impl_->sessions.size(); }
+std::size_t RelayServer::rooms() const { return impl_->rooms.rooms(); }
 bool RelayServer::remove_chat_member(const std::string& room, std::uint32_t seat) {
     return impl_->directory.operator_remove(room, seat);
 }

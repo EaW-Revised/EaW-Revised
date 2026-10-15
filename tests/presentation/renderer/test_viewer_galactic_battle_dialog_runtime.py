@@ -113,6 +113,105 @@ func _process(delta):
         self.assertEqual(returned["battle_dialog"]["phase"], "hidden")
         self.assertEqual(returned["battle_dialog"]["choices"], 1)
 
+    def keyboard_camera(self, fixture, key="KEY_NONE", prompt_point=(0, 0), home=False, zoom=False):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-pending-camera-"))
+        report, capture, driver = (directory / name for name in ("report.json", "capture.png", "driver.gd"))
+        driver.write_text('''extends SceneTree
+var elapsed = 0.0
+var stage = 0
+var scrolling_sent = false
+func _initialize():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func key_event(code, pressed):
+    var event = InputEventKey.new()
+    event.keycode = code
+    event.physical_keycode = code
+    event.pressed = pressed
+    Input.parse_input_event(event)
+func _process(delta):
+    elapsed += min(delta, 0.1)
+    if elapsed > 0.6 and stage == 0:
+        stage = 1
+        key_event(%s, true)
+    if elapsed > 0.8 and not scrolling_sent and %s:
+        scrolling_sent = true
+        var event = InputEventMouseButton.new()
+        event.position = Vector2(16, 350)
+        event.global_position = event.position
+        event.button_index = MOUSE_BUTTON_RIGHT
+        event.pressed = true
+        Input.parse_input_event(event)
+    if elapsed > 0.9 and stage == 1:
+        stage = 2
+        var event = InputEventMouseMotion.new()
+        event.position = Vector2(%s, %s)
+        event.global_position = event.position
+        event.relative = Vector2(1, 0)
+        Input.parse_input_event(event)
+    if elapsed > 1.3 and stage == 2:
+        stage = 3
+        key_event(%s, false)
+    if elapsed > 1.6 and stage == 3:
+        stage = 4
+        if %s:
+            key_event(KEY_HOME, true)
+            key_event(KEY_HOME, false)
+        if %s:
+            for pressed in [true, false]:
+                var event = InputEventMouseButton.new()
+                event.position = Vector2(16, 350)
+                event.global_position = event.position
+                event.button_index = MOUSE_BUTTON_WHEEL_UP
+                event.pressed = pressed
+                Input.parse_input_event(event)
+    if elapsed > %s:
+        root.get_texture().get_image().save_png(%s)
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % (key, "true" if zoom else "false", *prompt_point, key, "true" if home else "false",
+       "true" if zoom else "false", 3.0 if zoom else 2.0,
+       json.dumps(str(capture).replace("\\", "/"))), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture,
+            "--eawr-game-root", support.GAME_ROOT, "--eawr-galactic-paused", "yes",
+            "--eawr-lighting", "sh", "--eawr-report", str(report)],
+            cwd=support.ROOT, capture_output=True, text=True, timeout=300)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(data["battle_dialog"]["choices"], 0)
+        self.assertEqual(data["map_input"]["selected"], 101)
+        self.assertEqual(data["battle_dialog"]["phase"], "choice" if fixture == "battle-choice" else "progress")
+        self.assertTrue(capture.is_file())
+        print("pending camera capture:", capture)
+        return data
+
+    def test_pending_prompt_keeps_keyboard_camera_live(self):
+        # WGUI-171: exercise the per-frame held state, including a blocked
+        # mouse motion over the prompt between key press and key release.
+        baseline = self.keyboard_camera("battle-choice")
+        x, y, w, h = self.control(baseline, "fight")["rect"]
+        point = (x + w / 2, y + h / 2)
+        target = baseline["camera"]["target"]
+        for key in ("KEY_D", "KEY_RIGHT"):
+            with self.subTest(key=key):
+                moved = self.keyboard_camera("battle-choice", key, point)
+                self.assertGreater(sum((a - b) ** 2 for a, b in zip(moved["camera"]["target"], target)), 1)
+        reset = self.keyboard_camera("battle-choice", "KEY_D", point, home=True)
+        for actual, expected in zip(reset["camera"]["target"], target):
+            self.assertAlmostEqual(actual, expected, places=4)
+        zoomed = self.keyboard_camera("battle-choice", "KEY_D", point, zoom=True)
+        self.assertEqual(zoomed["flights"][0]["state"], "focused",
+                         "blocked prompt motion left a mouse-scroll hold that suppresses wheel zoom")
+        self.assertEqual(zoomed["flights"][0]["planet"], 101)
+        modal = self.keyboard_camera("battle-progress", "KEY_D")
+        for actual, expected in zip(modal["camera"]["target"], target):
+            self.assertAlmostEqual(actual, expected, places=4)
+
     def test_summary_returned_salvage_bounty(self):
         summary, capture = self.capture("battle-summary-bounty")
         self.assertTrue(capture.is_file())

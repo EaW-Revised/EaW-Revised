@@ -29,7 +29,8 @@ def run_case(mode):
             return 77
         port = str(int(line.strip()))
         names = (("peer", "peer") if mode == 0 else ("peer", "delayed-ack") if mode == 1
-                 else ("retry-host", "retry-expiry") if mode == 2 else ("retry-native-host", "retry-native"))
+                 else ("retry-host", "retry-expiry") if mode == 2 else ("retry-native-host", "retry-native") if mode == 3
+                 else ("closure-refusal-host", "closure-refusal-peer"))
         peers = [start(names[role], str(role), port) for role in range(2)]
         failed = False
         for child in peers + [broker]:
@@ -49,7 +50,7 @@ def run_case(mode):
 
 
 if __name__ == "__main__":
-    for mode in (0, 1, *([2] * 10), *([3] * 5)):
+    for mode in (0, 1, *([2] * 10), *([3] * 5), 4):
         result = run_case(mode)
         if result != 0:
             raise SystemExit(result)

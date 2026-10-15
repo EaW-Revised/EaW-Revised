@@ -102,7 +102,7 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
                 std::set<std::uint32_t> seen;
                 for (auto p = inputs.value().placements.rbegin(); p != inputs.value().placements.rend(); ++p) {
                     const auto team = marker_team(p->type, "_Space_Station");
-                    if (!p->marker || !team || !seen.insert(*team).second || !spawns.contains(*team)
+                    if (!p->marker || !team || !seen.insert(*team).second
                         || !p->position || !p->orientation_degrees) continue;
                     SetupTeam side{*team, {}, spawns[*team]};
                     for (const auto& candidate : p->marker_for) {
@@ -116,7 +116,7 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
                         && side.team < entry.metadata.start_positions->size()) entry.teams.push_back(std::move(side));
                 }
                 std::sort(entry.teams.begin(), entry.teams.end(), [](const auto& a, const auto& b) { return a.team < b.team; });
-                if (entry.teams.size() < 2) entry.unavailable = "This map has fewer than two supported station and spawn teams.";
+                if (entry.teams.size() < 2) entry.unavailable = "This map has fewer than two supported station teams.";
                 if (entry.metadata.new_markers != true)
                     entry.unavailable = "Legacy map starts are not supported yet.";
                 else if (!entry.metadata.start_positions || entry.metadata.start_positions->size() < 2)
@@ -218,15 +218,13 @@ core::Result<FixtureOptions> setup_options(const SetupSelection& selection, std:
     if (!map->unavailable.empty()) return fail(map->unavailable);
     if (auto valid = validate_setup_slots(selection.slots, map->metadata); !valid) return Result::failure(valid.error());
     std::set<std::uint32_t> colours;
-    std::map<std::uint32_t, std::uint32_t> teammates;
     for (const auto& slot : selection.slots) {
         const auto colour = slot.colour_index.value_or(slot.slot - 1);
         if (colour >= multiplayer_colour_count || !colours.insert(colour).second)
             return fail("Choose distinct colours from the authored multiplayer palette.");
         const auto team = std::find_if(map->teams.begin(), map->teams.end(), [&](const auto& entry) { return entry.team == slot.team; });
         if (team == map->teams.end()) return fail("The selected team has no start on this map.");
-        if (team->spawn_capacity && ++teammates[slot.team] > *team->spawn_capacity)
-            return fail("Team " + std::to_string(slot.team + 1) + " has too few spawn markers for the selected players.");
+        // WSS-54: retail validates total capacity and teams, not per-team spawn counts.
         if (std::find(team->factions.begin(), team->factions.end(), slot.faction) == team->factions.end())
             return fail("This map has no starting station for " + slot.faction + " on the selected team.");
         if (!slot.fleet.empty()) return fail("Starting fleets are not configurable in this screen.");

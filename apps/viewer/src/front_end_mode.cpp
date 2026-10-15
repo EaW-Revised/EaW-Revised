@@ -6,6 +6,7 @@
 #include "campaign_setup_screen.hpp"
 #include "camera_input.hpp"
 #include "options_screen.hpp"
+#include "lan_lobby_screen.hpp"
 #include "saved_games.hpp"
 #include "settings_store.hpp"
 #include "ui/load_game_view.hpp"
@@ -341,7 +342,7 @@ bool is_menu(const model::FrontEndScreen screen) { return !model::dialog_name(sc
 // by a screen the shell opens on top of it (settings, load game): the demo battle and the menu music
 // stay up behind them.
 bool over_backdrop(const model::FrontEndScreen screen) {
-    return is_menu(screen) || screen == model::FrontEndScreen::options || screen == model::FrontEndScreen::load_game
+    return is_menu(screen) || screen == model::FrontEndScreen::options || screen == model::FrontEndScreen::network_options || screen == model::FrontEndScreen::load_game
         || screen == model::FrontEndScreen::campaign_setup;
 }
 
@@ -557,7 +558,7 @@ void FrontEndMode::State::sync_attract() {
         const model::FrontEndScreen screen = nav.current();
         const bool multiplayer = screen == model::FrontEndScreen::multiplayer;
         backdrop->set_color(Color(0.0F, 0.0F, 0.0F, multiplayer ? 1.0F : 0.0F));
-        setup->scene_behind(!multiplayer && screen != model::FrontEndScreen::lan_setup);
+        setup->scene_behind(!multiplayer && screen != model::FrontEndScreen::lan_setup && screen != model::FrontEndScreen::online_setup);
     }
     if (!attract->failure().empty()) attract_failure = attract->failure();
 }
@@ -804,6 +805,9 @@ void FrontEndMode::State::show_screen() {
     case model::FrontEndScreen::lan_setup:
         setup->enter(true);
         break;
+    case model::FrontEndScreen::online_setup:
+        setup->enter_online(ActiveSettings::get() ? ActiveSettings::get()->network : SettingsStore{options.settings_file}.load().settings.network);
+        break;
     case model::FrontEndScreen::single_player:
         refresh_single_player();
         break;
@@ -828,6 +832,7 @@ void FrontEndMode::State::show_screen() {
         }
         break;
     }
+    case model::FrontEndScreen::network_options:
     case model::FrontEndScreen::options: {
         if (options_screen == nullptr) {
             options_screen = memnew(EawrOptionsScreen);
@@ -838,6 +843,7 @@ void FrontEndMode::State::show_screen() {
             screen_options.game_root = options.game_root;
             screen_options.mod_root = options.mod_root;
             screen_options.context = EawrOptionsScreen::Context::main_menu;
+            screen_options.settings_file = options.settings_file;
             // A pinned capture window is not resized by a saved video setting.
             screen_options.apply_window = !options.test && options.capture_path.empty();
             if (!options_screen->build(std::move(screen_options))) {
@@ -849,7 +855,7 @@ void FrontEndMode::State::show_screen() {
                 break;
             }
         }
-        options_screen->show(*host);
+        options_screen->show(*host, screen == model::FrontEndScreen::network_options ? EawrOptionsScreen::Page::network : EawrOptionsScreen::Page::hub);
         options_open = true;
         break;
     }
@@ -1077,6 +1083,35 @@ std::optional<int> FrontEndMode::State::run_test() {
         else UtilityFunctions::printerr("EAWR front end test: no gadget ", id);
     };
     using S = model::FrontEndScreen;
+    if (options.online_routes_test) {
+        switch (frames) {
+        case 8: press_gadget(S::main_menu, "IDC_MAIN_MENU_MULTIPLAYER"); break;
+        case 16: log_menu("multiplayer", menus[2]); press_gadget(S::multiplayer, "IDC_MULTIPLAYER_INTERNET_BUTTON"); break;
+        case 24:
+            if (auto* lobby = setup->online_lobby()) {
+                UtilityFunctions::print("EAWR online service lobby source: ", text(lobby->snapshot().source));
+                capture("online_service_lobby");
+            }
+            break;
+        case 26: if (auto* lobby = setup->online_lobby()) static_cast<void>(lobby->run_action("cancel")); break;
+        case 34: press_gadget(S::multiplayer, "IDC_MAIN_OPTIONS_NETWORK"); break;
+        case 42:
+            if (live_options()) UtilityFunctions::print("EAWR online service network page: ", EawrOptionsScreen::page_name(options_screen->page()));
+            capture("online_service_network"); break;
+        case 44: if (live_options()) static_cast<void>(options_screen->press("IDC_BACK")); break;
+        case 52: press_gadget(S::multiplayer, "IDC_OK_MAIN"); break;
+        case 60: press_gadget(S::main_menu, "IDC_OPTIONS"); break;
+        case 68: if (live_options()) static_cast<void>(options_screen->press("IDC_MAIN_OPTIONS_NETWORK")); break;
+        case 76:
+            if (live_options()) UtilityFunctions::print("EAWR online service options page: ", EawrOptionsScreen::page_name(options_screen->page()));
+            break;
+        case 78: if (live_options()) static_cast<void>(options_screen->press("IDC_BACK")); break;
+        case 82: if (live_options()) static_cast<void>(options_screen->press("IDC_OK_MAIN")); break;
+        case 90: press_gadget(S::main_menu, "IDC_MAIN_MENU_EXIT2"); break;
+        default: break;
+        }
+        return std::nullopt;
+    }
     switch (frames) {
     case 8:
         log_menu("main_menu", menus[0]);
@@ -1385,6 +1420,8 @@ FrontEndMode::Options FrontEndMode::from_command_line(const std::filesystem::pat
         if ((argument == "--eawr-save-dir" || argument == "--eawr-galactic-save-dir") && i + 1 < arguments.size())
             options.save_directory = ViewerPath{utf8(arguments[i + 1])}.native();
         if (argument == "--eawr-front-end-test") options.test = true;
+        if (argument == "--eawr-front-end-test-online") { options.test = true; options.online_routes_test = true; }
+        if (argument == "--eawr-settings-file" && i + 1 < arguments.size()) options.settings_file = ViewerPath{utf8(arguments[i + 1])}.native();
         if (argument == "--eawr-front-end-test-quit-open") options.quit_with_options_open = true;
         if (argument == "--eawr-front-end-test-battle") options.battle_round_trip = true;
         if (argument == "--eawr-front-end-test-start") options.start_battle = true;
@@ -1493,14 +1530,16 @@ std::optional<int> FrontEndMode::process() {
         if (!state.campaign_started && state.nav.current() == model::FrontEndScreen::load_game)
             static_cast<void>(state.nav.back());
     }
+    if (state.options_open && state.nav.current() == model::FrontEndScreen::network_options && state.live_options()
+        && state.options_screen->page() == EawrOptionsScreen::Page::hub) static_cast<void>(state.options_screen->press("IDC_OK_MAIN"));
     if (state.options_open && (state.live_options() == nullptr || !state.options_screen->shown())) {
         // The settings screen closed itself (its hub's Back, or Esc on the hub).
         state.options_open = false;
-        if (state.nav.current() == model::FrontEndScreen::options) static_cast<void>(state.nav.back());
+        if (state.nav.current() == model::FrontEndScreen::options || state.nav.current() == model::FrontEndScreen::network_options) static_cast<void>(state.nav.back());
     }
     // Back from the setup screen (its Back button or Escape).
     const auto screen = state.nav.current();
-    if ((screen == model::FrontEndScreen::skirmish_setup || screen == model::FrontEndScreen::lan_setup)
+    if ((screen == model::FrontEndScreen::skirmish_setup || screen == model::FrontEndScreen::lan_setup || screen == model::FrontEndScreen::online_setup)
         && state.setup->visible() && state.setup->take_back()) {
         static_cast<void>(state.nav.back());
     }

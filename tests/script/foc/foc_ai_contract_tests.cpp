@@ -48,6 +48,26 @@ inline std::shared_ptr<Host> make_tactical_host() {
 }
 
 struct EngineContractAccess {
+    static void prepare_inputs(Engine& engine, const sim::PartitionExecutor& executor) {
+        engine.prepare_producers(&executor); engine.prepare_pad_inputs(&executor);
+    }
+    static void prepare_pads(Engine& engine, const sim::PartitionExecutor& executor) { engine.prepare_pad_inputs(&executor); }
+    static void request_open(Engine& engine, tactical::PlayerId player) { engine.pad_open_requested_.insert(player); }
+    static bool has_prepared_open(const Engine& engine, tactical::PlayerId player) {
+        if (!engine.pad_inputs_) return false;
+        for (const auto& row : *engine.pad_inputs_) for (const auto& buyer : row.buyers)
+            if (buyer.player == player && buyer.can_build && buyer.open.has_value()) return true;
+        return false;
+    }
+    static void reset_pads(Engine& engine) { engine.pad_inputs_.reset(); }
+    static bool has_prepared_pads(const Engine& engine) { return engine.pad_inputs_.has_value(); }
+    static const auto& producers(const Engine& engine, tactical::PlayerId player, tactical::TypeId type) {
+        return engine.producers_.at({player, type});
+    }
+    static void reserve_pad(Engine& engine, sim::EntityId pad, tactical::PlayerId player, tactical::TypeId type) {
+        engine.pad_reservations_[pad] = {player, 1, type, false, 0};
+    }
+    static void release_pad(Engine& engine, sim::EntityId pad) { engine.pad_reservations_.erase(pad); }
     static bool has_prepared_station_levels(const Engine& engine) { return engine.station_levels_.has_value(); }
     static std::optional<Real> prepared_station_level(Engine& engine, tactical::PlayerId player,
         const sim::PartitionExecutor& executor) {
@@ -2205,6 +2225,9 @@ void station_barrier_expiry() {
                 ++calls;
                 expect(player == 1 && ai::EngineContractAccess::has_prepared_station_levels(engine),
                     "station expiry: real service retains prepared levels inside the barrier");
+                expect(engine.input_counts().producer_prepasses == 1 && engine.input_counts().pad_prepasses == 1
+                    && engine.input_counts().late_prepasses == 0 && ai::EngineContractAccess::has_prepared_pads(engine),
+                    "shared inputs: producer and pad preparation precede the actual player hook");
                 expect(engine.evaluate("Level", player, nullptr) == ai::real(expected),
                     "station expiry: barrier query sees the current station level");
                 return eawr::core::Result<void>::success();
@@ -2212,6 +2235,7 @@ void station_barrier_expiry() {
             expect(engine.before_service(*world.host->ai_world, scripts.value(), sequence, &executor, hook).has_value(),
                 "station expiry: real before_service completes");
             expect(calls == 1, "station expiry: execution hook observed the prepared barrier");
+            expect(!ai::EngineContractAccess::has_prepared_pads(engine), "shared inputs: barrier pad rows expire before Lua reads");
             expect(!ai::EngineContractAccess::has_prepared_station_levels(engine),
                 "station expiry: real before_service expires prepared levels on return");
             expect(session.value().stage_remove(expected == 3 ? 10 : 20).has_value(),
@@ -2769,7 +2793,16 @@ void spending_pad_states() {
         ai::AiData data; data.equations = std::move(parsed).value();
         ai::Engine engine(host, std::move(data), {});
         ai::EngineContractAccess::perception_executor(engine, &executor);
-        const auto value = [&](const char* equation) { return engine.evaluate(equation, 2, nullptr); };
+        const auto value = [&](const char* equation) {
+            const auto journals = host->setup.journal->plans.size();
+            const auto direct = engine.evaluate(equation, 2, nullptr);
+            host->setup.journal->plans.resize(journals);
+            ai::EngineContractAccess::prepare_pads(engine, executor);
+            const auto prepared = engine.evaluate(equation, 2, nullptr);
+            ai::EngineContractAccess::reset_pads(engine);
+            expect(prepared == direct, "WAS-10/11: prepared pads preserve every live-state and typed-filter result");
+            return prepared;
+        };
         const auto foreign = [&] {
             ai::AiRandom random;
             return host->ai_world->perception(engine, *engine.data().equations.find("FOREIGNSTRUCTURES"),
@@ -4119,6 +4152,7 @@ struct QueryExecutor final : eawr::sim::PartitionExecutor {
     eawr::core::Result<void> execute_phase(std::string_view phase, std::size_t partitions,
         const std::function<void(std::size_t)>& partition) const override {
         expect(partitions == eawr::sim::tick_partition_count, "threat preparation uses the fixed 64 partitions");
+        expect(!queries_only, "shared inputs: a player query must never dispatch a worker phase");
         ++phases[std::string(phase)];
         if (fail) {
             eawr::core::Diagnostic error;
@@ -4126,12 +4160,266 @@ struct QueryExecutor final : eawr::sim::PartitionExecutor {
             error.message = "query executor refused the phase";
             return eawr::core::Result<void>::failure(std::move(error));
         }
+        if (reverse) {
+            for (auto index = partitions; index > 0; --index) partition(index - 1);
+            return eawr::core::Result<void>::success();
+        }
         return pool.execute_phase(phase, partitions, partition);
     }
     eawr::platform::ThreadWorkerAdapter pool;
     mutable std::map<std::string, std::size_t> phases;
-    bool fail{};
+    bool fail{}, reverse{}, queries_only{};
 };
+
+void shared_view_prepass() {
+    namespace t = eawr::sim::tactical;
+    t::TacticalSetup start;
+    start.players = {{1, 1, 100, 1}, {2, 2, 200, 1}};
+    for (eawr::sim::EntityId index = 0; index < 70; ++index) {
+        t::Squadron squadron;
+        squadron.container = 1000 + index;
+        start.units.push_back({squadron.container, 20, 1});
+        for (const auto offset : {1U, 101U, 201U, 301U}) {
+            const auto id = index + offset;
+            squadron.members.push_back(id);
+            start.units.push_back({id, 1, 1});
+        }
+        start.squadrons.push_back(squadron);
+    }
+    std::sort(start.units.begin(), start.units.end(), [](const auto& left, const auto& right) { return left.entity_id < right.entity_id; });
+    for (std::size_t index = 0; index < start.units.size(); ++index) {
+        start.units[index].position.x = eawr::sim::math::Fixed::from_integer(static_cast<std::int64_t>(index)).value();
+        start.units[index].garrison_enabled = index % 2 != 0;
+    }
+    auto made = t::TacticalSession::create(start);
+    expect(made.has_value(), "shared view: interleaved member identities across 70 containers create");
+    if (!made) return;
+    const auto original_units = made.value().units();
+    expect(!made.value().unit_state(999999), "shared view: lightweight reader rejects absent identities");
+    made.value().scramble_storage_for_testing();
+    for (const auto& unit : original_units)
+        expect(made.value().unit_state(unit.entity_id) == std::optional{unit},
+            "shared view: lightweight reader equals the complete UnitState census after storage scrambling");
+    const auto published = made.value().snapshot();
+    std::vector<t::TacticalInstance> inputs(published->instances().begin(), published->instances().end());
+    for (std::size_t index = 0; index < inputs.size(); ++index) inputs[index].visible_to = index % 3 + 1;
+    const t::TacticalSnapshot snapshot(published->completed_tick(),
+        std::vector<t::SnapshotPlayer>(published->players().begin(), published->players().end()), inputs, {});
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const bool reverse : {false, true}) {
+        QueryExecutor executor(workers); executor.reverse = reverse;
+        const auto view = foc::detail::build_view(made.value(), snapshot, &executor);
+        expect(executor.phases["ai-world-view"] == 2 && view->units.size() == start.units.size(),
+            "shared view: both map replacement and value preparation run on the fixed partitions");
+        for (std::size_t index = 0; index < start.units.size(); ++index) {
+            const auto& unit = view->units[index];
+            expect(unit.id == start.units[index].entity_id && unit.owner == 1 && unit.team == inputs[index].team && unit.visible_to == inputs[index].visible_to,
+                "shared view: ordered unit and snapshot joins preserve identity, teams and visibility");
+            const auto owner = std::find_if(start.squadrons.begin(), start.squadrons.end(), [&](const auto& squadron) {
+                return std::find(squadron.members.begin(), squadron.members.end(), unit.id) != squadron.members.end();
+            });
+            if (owner != start.squadrons.end()) expect(unit.craft && !unit.container && unit.squadron == owner->container,
+                "shared view: ordered member merge joins interleaved craft to the original container");
+            else {
+                const auto container = std::find_if(start.squadrons.begin(), start.squadrons.end(),
+                    [&](const auto& squadron) { return squadron.container == unit.id; });
+                expect(container != start.squadrons.end() && unit.container && !unit.craft && unit.members == container->members,
+                    "shared view: container membership keeps original member order");
+            }
+            expect(unit.health == ai::real(1) && unit.shield == Real{} && unit.formation_target == 0 && !unit.formation_moving,
+                "shared view: missing durability and formation retain the original defaults");
+            const auto& candidate = view->capture_candidates[index];
+            expect(candidate.body.entity_id == unit.id && candidate.body.owner == unit.owner && candidate.type == unit.type,
+                "shared view: capture inputs retain ascending unit identities");
+        }
+        auto sparse_inputs = inputs;
+        sparse_inputs.erase(sparse_inputs.begin());
+        const t::TacticalSnapshot sparse(published->completed_tick(),
+            std::vector<t::SnapshotPlayer>(published->players().begin(), published->players().end()), sparse_inputs, {});
+        const auto sparse_view = foc::detail::build_view(made.value(), sparse, &executor);
+        expect(sparse_view->units.size() == original_units.size() && sparse_view->units.front().id == original_units.front().entity_id
+            && sparse_view->units.front().visible_to == 0,
+            "shared view: requested snapshot omission retains the current live unit with default snapshot fields");
+        executor.fail = true;
+        bool refused = false;
+        try { static_cast<void>(foc::detail::build_view(made.value(), snapshot, &executor)); }
+        catch (const std::runtime_error&) { refused = true; }
+        expect(refused, "shared view: failed preparation cannot return a partially populated view");
+    }
+    t::TacticalSetup small; small.players = start.players; small.units = {{1, 1, 1}};
+    auto small_world = t::TacticalSession::create(small);
+    expect(small_world.has_value(), "shared view: small inline fixture creates");
+    if (small_world) {
+        QueryExecutor executor(8); executor.fail = true;
+        const auto view = foc::detail::build_view(small_world.value(), *small_world.value().snapshot(), &executor);
+        expect(view->units.size() == 1 && executor.phases.empty(), "shared view: fixed row threshold avoids the pool for a small view");
+    }
+}
+
+void shared_view_formation_join() {
+    namespace t = eawr::sim::tactical;
+    namespace m = eawr::sim::math;
+    const auto q = [](std::int64_t value) { return m::Fixed::from_integer(value).value(); };
+    const auto at = [&](std::int64_t x) { return m::Vec3{q(x), {}, {}}; };
+    t::TacticalSetup start;
+    start.players = {{1, 1, 100, t::player_flag_commandable}, {2, 2, 200, t::player_flag_commandable}};
+    start.units = {{10, 100, 1, at(0)}, {11, 101, 1, at(0)}, {12, 101, 1, at(10)},
+        {20, 100, 1, at(100)}, {21, 101, 1, at(100)}, {22, 101, 1, at(110)},
+        {30, 100, 1, at(200)}, {31, 101, 1, at(200)}, {32, 101, 1, at(210)},
+        {1000, 102, 2, at(2000)}, {1001, 102, 2, at(3000)}};
+    start.squadrons = {{10, {11, 12}}, {20, {21, 22}}, {30, {31, 32}}};
+    // Ensure the real worker path runs even with only three formation rows.
+    for (eawr::sim::EntityId id = 2000; id < 2260; ++id) start.units.push_back({id, 102, 2, at(100000)});
+    t::MotionTable motion;
+    t::CraftProfile craft;
+    craft.type_id = 101; craft.max_speed = q(5); craft.min_speed = q(1); craft.rate_of_turn = q(6);
+    craft.lift = q(6); craft.thrust = q(1); craft.roll_rate = q(6); craft.bank_angle = q(70); craft.strafe_distance = q(200);
+    motion.squadrons.craft = {craft};
+    motion.squadrons.squadrons = {{100, {101, 101}, {at(0), at(10)}, q(1000), q(200), q(300), q(20)}};
+    t::CombatProfile fighter, enemy;
+    fighter.type_id = 101; fighter.max_attack_distance = q(450); enemy.type_id = 102;
+    t::CombatTable combat; combat.profiles = {fighter, enemy};
+    t::DurabilityProfile health; health.type_id = 101; health.max_hull = q(100);
+    t::DurabilityTable durability; durability.profiles = {health};
+    auto made = t::TacticalSession::create(start, {}, durability, motion, std::nullopt, combat);
+    expect(made.has_value(), "formation join: valid moving/attacking squadron fixture creates");
+    if (!made) return;
+    auto& world = made.value();
+    expect(world.submit({{0, 1, 0}, {10}, t::MovePayload{at(5000)}}).has_value()
+        && world.submit({{0, 1, 1}, {20}, t::AttackPayload{1000}}).has_value()
+        && world.submit({{0, 1, 2}, {30}, t::AttackPayload{1001}}).has_value()
+        && world.submit({{0, 1, 3}, {11}, t::DamagePayload{q(25), t::attack_hull}}).has_value(),
+        "formation join: distinct real formation orders and non-default damage submit");
+    const eawr::sim::InlineExecutor inline_executor;
+    expect(world.step(inline_executor).has_value(), "formation join: orders commit into live squadron states");
+    const auto moving = world.squadron_state(10), first_attack = world.squadron_state(20), second_attack = world.squadron_state(30);
+    expect(moving && moving->mode == t::SquadronMode::move && moving->target == 0
+        && first_attack && first_attack->mode == t::SquadronMode::idle && first_attack->target == 1000
+        && second_attack && second_attack->mode == t::SquadronMode::idle && second_attack->target == 1001,
+        "formation join: fixture establishes distinct non-default modes and targets before testing the join");
+    // Deliberately overlap an input member after valid simulation setup. The old
+    // first-emplace contract picks the earlier container, whose movement differs.
+    auto& duplicate_owner = const_cast<t::Squadron&>(world.squadrons()[1]);
+    duplicate_owner.members.push_back(11);
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const bool reverse : {false, true}) {
+        QueryExecutor executor(workers); executor.reverse = reverse;
+        const auto view = foc::detail::build_view(world, *world.snapshot(), &executor);
+        expect(executor.phases["ai-world-view"] == 2, "formation join: both preparation phases use the worker executor");
+        const auto check = [&](const auto& ids, eawr::sim::EntityId target, bool travelling) {
+            for (const auto id : ids) {
+                const auto* row = view->find(id);
+                expect(row && row->formation_target == target && row->formation_moving == travelling,
+                    "formation join: each container and craft retains its own non-default target and movement flag");
+            }
+        };
+        check(std::array<eawr::sim::EntityId, 3>{10, 11, 12}, 0, true);
+        check(std::array<eawr::sim::EntityId, 3>{20, 21, 22}, 1000, false);
+        check(std::array<eawr::sim::EntityId, 3>{30, 31, 32}, 1001, false);
+        const auto* duplicate = view->find(11);
+        expect(duplicate && duplicate->squadron == 10 && duplicate->formation_target == 0 && duplicate->formation_moving,
+            "formation join: duplicate member keeps the first container instead of its attacking neighbour");
+        const auto* damaged = view->find(11);
+        expect(damaged && damaged->hull == q(75) && damaged->max_hull == q(100)
+            && damaged->health == ai::real(3) / ai::real(4),
+            "formation join: non-default durability row survives the independent snapshot identity join");
+    }
+    duplicate_owner.members.pop_back();
+    expect(world.stage_remove(2259).has_value(), "formation join: stage removal republishes current live identities");
+    t::UnitState spawned; spawned.type_id = 102; spawned.owner = 2; spawned.position = at(4000);
+    const auto added = world.stage_spawn(spawned);
+    expect(added.has_value(), "formation join: stage spawn republishes current live identities");
+    if (added) for (const auto workers : {1U, 2U, 4U, 8U}) {
+        QueryExecutor executor(workers); executor.reverse = true;
+        const auto view = foc::detail::build_view(world, *world.snapshot(), &executor);
+        const auto census = world.units();
+        expect(view->units.size() == census.size() && !view->find(2259) && view->find(added.value()),
+            "formation join: view immediately sees staged removal and spawn without dropping a live unit");
+        for (std::size_t index = 0; index < census.size(); ++index)
+            expect(view->units[index].id == census[index].entity_id,
+                "formation join: current publication identity domain matches the exact live census after staging");
+    }
+}
+
+void shared_input_prepasses() {
+    namespace t = eawr::sim::tactical;
+    const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const bool reverse : {false, true}) {
+        QueryExecutor executor(workers); executor.reverse = reverse;
+        t::TacticalSetup start;
+        start.players = {{1, 1, 100, 1}, {2, 1, 200, 1}, {99, 99, 300, 0}};
+        start.units = {{1, 10, 2}};
+        for (eawr::sim::EntityId id = 1000; id < 1260; ++id) start.units.push_back({id, 20, 2});
+        t::EconomyRules rules;
+        rules.players = {{1, q(1000), 20, true}, {2, q(1000), 20, true}, {99, {}, 20}};
+        rules.menus = {{10, 200, {{50, t::BuildKind::unit, t::BuildQueue::units, q(100), 30, 30, 0, true}}},
+            {20, 100, {{30, t::BuildKind::structure, t::BuildQueue::units, q(100), 30, 30, 0, true}}, 0, false},
+            {20, 200, {{30, t::BuildKind::structure, t::BuildQueue::units, q(100), 30, 30, 0, true}}, 0, false}};
+        rules.pads.neutral = 99;
+        rules.pads.capture = {{20, q(100), q(1), {100, 200}, false, true, true}};
+        rules.pads.construction = {{30, 40, q(100), 1, 1}};
+        rules.pads.influence = {{10, false}, {20, false}, {30, false}, {40, false}};
+        auto world = t::TacticalSession::create(start, {}, {}, {}, {}, {}, {}, {}, rules);
+        expect(world.has_value(), "shared inputs: large allied producer/pad fixture creates");
+        if (!world) continue;
+        auto host = ai::make_tactical_host(); host->world = &world.value(); host->snapshot = world.value().snapshot();
+        host->view = foc::detail::build_view(world.value(), *host->snapshot, &executor);
+        for (const auto& [id, name] : {std::pair{10U, "BASE"}, {20U, "PAD"}, {30U, "UC"}, {40U, "MINE"}}) {
+            foc::AiType type; type.type_id = id; type.name = name; type.star_base = id == 10;
+            host->setup.content.types.push_back(type);
+        }
+        for (const auto& type : host->setup.content.types) {
+            host->types.emplace(type.type_id, &type); host->types_by_name.emplace(type.name, &type);
+        }
+        const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+        auto parsed = ai::EquationSet::parse({{"inputs.xml", "<Root><Open>Variable_Self.OpenBuildPadCount</Open>"
+            "<Built>Variable_Self.TacticalBuiltStructureCount{Parameter_Type=\"UC\", Parameter_Type=\"UC\", Parameter_Type=\"MINE\"}</Built></Root>"}}, converters);
+        expect(parsed.has_value(), "shared inputs: pad equations parse");
+        if (!parsed) continue;
+        ai::AiData data; data.equations = std::move(parsed).value();
+        ai::Engine engine(host, std::move(data), {});
+        ai::EngineContractAccess::perception_executor(engine, &executor);
+        const auto uncached = engine.evaluate("Open", 1, nullptr);
+        expect(uncached == ai::real(260), "shared inputs: all allied pads are initially open");
+        ai::EngineContractAccess::request_open(engine, 1);
+        ai::EngineContractAccess::prepare_inputs(engine, executor);
+        expect(ai::EngineContractAccess::has_prepared_open(engine, 1) && !ai::EngineContractAccess::has_prepared_open(engine, 2),
+            "shared inputs: only preceding actual open-query demand prepares broad-phase admission");
+        expect(executor.phases["ai-producers"] == 1 && executor.phases["ai-pad-perception"] == 1,
+            "shared inputs: each large census dispatches once before queries");
+        std::vector<eawr::sim::EntityId> expected;
+        for (eawr::sim::EntityId id = 1000; id < 1260; ++id) expected.push_back(id);
+        expect(ai::EngineContractAccess::producers(engine, 1, 30) == expected
+            && ai::EngineContractAccess::producers(engine, 1, 50) == std::vector<eawr::sim::EntityId>{1},
+            "shared inputs: ordered merge preserves pad candidates and the distinct lower-ID station menu");
+        const auto phases = executor.phases;
+        executor.queries_only = true;
+        expect(engine.evaluate("Open", 1, nullptr) == uncached && engine.producer(1, 30) == 1000,
+            "shared inputs: prepared queries retain initial answers");
+        ai::EngineContractAccess::reserve_pad(engine, 1000, 2, 30);
+        expect(engine.evaluate("Open", 1, nullptr) == ai::real(259)
+            && engine.evaluate("Built", 1, nullptr) == ai::real(3) && engine.producer(1, 30) == 1001,
+            "shared inputs: later teammate reservation immediately changes open, typed aliases and producer selection");
+        ai::EngineContractAccess::release_pad(engine, 1000);
+        expect(engine.evaluate("Open", 1, nullptr) == uncached && engine.evaluate("Built", 1, nullptr) == Real{}
+            && engine.producer(1, 30) == 1000 && executor.phases == phases,
+            "shared inputs: release restores answers without any query-time worker phase");
+        executor.queries_only = false;
+        ai::EngineContractAccess::prepare_pads(engine, executor);
+        expect(!ai::EngineContractAccess::has_prepared_open(engine, 1),
+            "shared inputs: open-query demand expires after an unused service");
+        executor.queries_only = true;
+        expect(engine.evaluate("Open", 2, nullptr) == uncached,
+            "shared inputs: a cold player uses the identical inline admission path without dispatch");
+        ai::EngineContractAccess::reset_pads(engine);
+        expect(world.value().stage_remove(1000).has_value(), "shared inputs: remove pad outside the service barrier");
+        expect(engine.evaluate("Open", 1, nullptr) == ai::real(259),
+            "shared inputs: unscoped pad read sees removal instead of stale prepared facts");
+        executor.queries_only = false; executor.fail = true;
+        bool refused = false;
+        try { ai::EngineContractAccess::prepare_pads(engine, executor); } catch (const std::runtime_error&) { refused = true; }
+        expect(refused && !ai::EngineContractAccess::has_prepared_pads(engine),
+            "shared inputs: failed worker phase never publishes partial pad facts");
+    }
+}
 
 void threat_preparation() {
     World world;
@@ -4397,6 +4685,41 @@ void taskforce_definitions() {
     }
     expect(tf.minimum_size == 3 && tf.escort, "PL-11: keywords");
     expect(definition.allow_free_store && definition.allow_engaged && !definition.ignore_target, "PL-12: flag defaults");
+}
+
+// PL-20: a named type list proposes its types in the order the plan wrote them, so equal weights
+// pick the first name written (the original's enumeration lists the satellite plan's laser first).
+void named_team_authored_order() {
+    World world;
+    world.host->setup.content.types.clear();
+    // Ids deliberately descend against the authored order: an id sort would reverse it.
+    const std::vector<std::pair<eawr::sim::tactical::TypeId, const char*>> named{{9, "UC_SAT_LASER"}, {7, "UC_SAT_MISSILE"}, {5, "UC_SAT_REPAIR"}};
+    for (const auto& [id, name] : named) {
+        foc::AiType type;
+        type.type_id = id;
+        type.name = name;
+        world.host->setup.content.types.push_back(type);
+    }
+    world.host->types.clear();
+    world.host->types_by_name.clear();
+    for (const foc::AiType& entry : world.host->setup.content.types) {
+        world.host->types.emplace(entry.type_id, &entry);
+        world.host->types_by_name.emplace(entry.name, &entry);
+    }
+    auth::ValueList globals;
+    globals.push_back(auth::Value::text("Build_Structure_Space"));
+    std::vector<auth::Value> taskforce{auth::Value::text("MainForce"),
+        auth::Value::text("Uc_Sat_Laser | Uc_Sat_Missile | Uc_Sat_Repair = 0, 1")};
+    std::vector<auth::Value> list{auth::Value{taskforce}};
+    globals.push_back(auth::Value{list});
+    for (int index = 0; index < 8; ++index) globals.push_back(auth::Value{});
+    std::vector<std::string> notes;
+    auto plan = ai::build_plan(*world.host, "structure", "structure.lua", globals, notes);
+    expect(static_cast<bool>(plan), "PL-20: the named-type plan builds");
+    if (!plan) return;
+    const ai::TaskForceDef& tf = plan.value().taskforces.front();
+    expect(tf.teams.size() == 1 && tf.teams.front().types == std::vector<eawr::sim::tactical::TypeId>{9, 7, 5},
+        "PL-20: a named type list keeps the authored order, not the id order");
 }
 
 void required_category_unions() {
@@ -7602,9 +7925,13 @@ int main(int argc, char** argv) {
     selection_team_starts();
     threat_grid();
     unit_ai_grid_admission();
+    shared_view_prepass();
+    shared_view_formation_join();
+    shared_input_prepasses();
     threat_preparation();
     plan_definition_paths();
     taskforce_definitions();
+    named_team_authored_order();
     required_category_unions();
     scheduler_reads();
     optional_taskforce_startup();

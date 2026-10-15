@@ -13,6 +13,9 @@ struct OnlineMatchOptions {
     std::chrono::milliseconds invitation_lifetime{std::chrono::minutes(15)};
     bool short_invitation{};
     bool turn_only{};
+    std::uint64_t hash_exchange_every{30};
+    // Called by the setup I/O owner after pairing, before creating GNS. Never logged here.
+    std::function<void(const net::GnsTurnCredentials&)> turn_credentials_observer{};
 };
 // Factory performs no I/O. Host/join use a bounded worker, pump_setup creates GNS
 // on the setup I/O owner and then uses the shared staging/setup implementation.
@@ -25,6 +28,8 @@ struct OnlineAdmission {
     std::atomic_bool cancelled{}, finished{}, close_confirmed{};
     mutable std::mutex mutex;
     std::string code;
+    std::string bridge_owner;
+    std::string bridge_code; // full private capability; never a display field
     std::chrono::steady_clock::time_point expires{};
     std::shared_ptr<net::GnsSignallingEndpoint> paired;
     std::optional<core::Diagnostic> failure;

@@ -32,6 +32,8 @@ public:
         std::string language{"ENGLISH"};
         // --eawr-front-end-test: the GPU contract's scripted run (clicks, logs, captures, exit).
         bool test{};
+        bool online_routes_test{};
+        std::filesystem::path settings_file;
         // With `test`: quit from the settings hub without closing it (the shutdown ownership case).
         bool quit_with_options_open{};
         // With `test`: start a battle from the setup screen and, when its end dialog's Continue

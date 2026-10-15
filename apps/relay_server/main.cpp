@@ -26,11 +26,13 @@ Config defaults() {
         {"access_token", ""}, {"require_access_token", "0"}, {"room_aliases", "0"}, {"failed_guesses_per_minute", "100"}, {"turn_uri", ""}, {"turn_secret", ""},
         {"turn_provider", "coturn"}, {"cloudflare_turn_key_id", ""}, {"cloudflare_turn_api_token", ""},
         {"cloudflare_turn_calls_per_minute", "30"}, {"cloudflare_turn_timeout_ms", "4000"}, {"max_connections", "128"}, {"max_sessions", "64"},
-        {"connections_per_ip", "8"}, {"accepts_per_minute", "30"}, {"operations_per_minute", "120"},
+        {"connections_per_ip", "18"}, {"accepts_per_minute", "30"}, {"operations_per_minute", "120"},
         {"unpaired_sessions_per_ip", "2"},
         {"bytes_per_minute", "1048576"}, {"directory_operations_per_minute", "2048"}, {"directory_bytes_per_minute", "8388608"}, {"queue_bytes", "262144"}, {"queue_frames", "64"},
         {"admission_timeout_ms", "10000"}, {"max_join_lifetime_ms", "900000"}, {"idle_timeout_ms", "60000"},
-        {"session_lifetime_ms", "7200000"}, {"max_session_lifetime_ms", "86400000"}, {"renewal_window_ms", "600000"}, {"address", "127.0.0.1"}, {"certificate_name", "localhost"},
+        {"session_lifetime_ms", "7200000"}, {"max_session_lifetime_ms", "86400000"}, {"renewal_window_ms", "600000"},
+        {"room_operations_per_member_per_minute", "480"}, {"room_bytes_per_member_per_minute", "2097152"},
+        {"room_reservation_timeout_ms", "30000"}, {"room_hold_timeout_ms", "300000"}, {"address", "127.0.0.1"}, {"certificate_name", "localhost"},
         {"ca_file", ""}, {"certificate_sha256", ""}};
 }
 void put(Config& config, const std::string& key, std::string value) {
@@ -80,7 +82,11 @@ eawr::net::RelayServerOptions options(const Config& c) {
     o.admission_timeout = milliseconds(number(c, "admission_timeout_ms"));
     o.max_join_lifetime = milliseconds(number(c, "max_join_lifetime_ms")); o.idle_timeout = milliseconds(number(c, "idle_timeout_ms"));
     o.session_lifetime = milliseconds(number(c, "session_lifetime_ms"));
-    o.max_session_lifetime = milliseconds(number(c, "max_session_lifetime_ms")); o.renewal_window = milliseconds(number(c, "renewal_window_ms")); return o;
+    o.max_session_lifetime = milliseconds(number(c, "max_session_lifetime_ms")); o.renewal_window = milliseconds(number(c, "renewal_window_ms"));
+    o.room_operations_per_member_per_minute = number(c, "room_operations_per_member_per_minute");
+    o.room_bytes_per_member_per_minute = number(c, "room_bytes_per_member_per_minute");
+    o.room_reservation_timeout = milliseconds(number(c, "room_reservation_timeout_ms"));
+    o.room_hold_timeout = milliseconds(number(c, "room_hold_timeout_ms")); return o;
 }
 int diagnostic(const eawr::core::Diagnostic& d) { std::cerr << d.code << ": " << d.message << '\n'; return 1; }
 }
@@ -96,7 +102,7 @@ int main(int argc, char** argv) {
                 std::cout << "eawr_relay_server [--config file] [--key value]\n"
                     "--health: TLS health probe; --address, --port, --certificate-name (system CA), optional --ca-file, or --certificate-sha256\n"
                     "--generate-certificate: create --certificate-file and --key-file (refuses overwrite)\n"
-                    "--fingerprint: print --certificate-file DER SHA-256; --generate-token: print a random access token\n";
+                    "--fingerprint: read --certificate-file PEM and print certificate DER SHA-256; --generate-token: print a random access token\n";
                 return 0;
             }
             if (arg == "--health") { health = true; continue; }

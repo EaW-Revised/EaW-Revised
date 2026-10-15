@@ -31,6 +31,10 @@ def main():
                 assert time.monotonic() < deadline, "relay readiness timeout"
         assert line.startswith("relay ready port="), line
         port = line.strip().split("=")[1]
+        health = subprocess.run([relay, "--health", "--address", "localhost", "--port", port,
+                                 "--ca-file", str(cert), "--certificate-name", "localhost"],
+                                capture_output=True, text=True, timeout=10)
+        assert health.returncode == 0 and health.stdout.strip() == "healthy", health.stdout + health.stderr
 
         def run(role, invitation, selected_port=port):
             child = subprocess.run([bridge, role, selected_port, str(cert), str(invitation)], capture_output=True, text=True, timeout=35)
@@ -48,16 +52,16 @@ def main():
             closed_port = str(closed.getsockname()[1])
         run("retry", directory / "retry.txt", closed_port)
 
-        def pair(name, host_role, guest_role, expected=None):
+        def pair(name, host_role, guest_role, expected=None, code_length=4, selected_port=port):
             invitation = directory / (name + ".txt")
-            host = subprocess.Popen([bridge, host_role, port, str(cert), str(invitation)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            host = subprocess.Popen([bridge, host_role, selected_port, str(cert), str(invitation)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             children.append(host)
             deadline = time.monotonic() + 30
-            while not invitation.exists() or len(invitation.read_text()) != 4:
+            while not invitation.exists() or len(invitation.read_text()) != code_length:
                 assert host.poll() is None, host.communicate()
                 assert time.monotonic() < deadline, "publication timeout"
                 time.sleep(0.01)
-            guest = subprocess.Popen([bridge, guest_role, port, str(cert), str(invitation)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            guest = subprocess.Popen([bridge, guest_role, selected_port, str(cert), str(invitation)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             children.append(guest)
             while not all(pathlib.Path(str(invitation) + "." + role).exists() for role in (host_role, guest_role)):
                 for child in (host, guest):
@@ -70,14 +74,30 @@ def main():
             else:
                 assert proof == expected, proof
             pathlib.Path(str(invitation) + ".done").touch()
+            audit = pathlib.Path(str(invitation) + ".private-audit")
+            private_values = audit.read_text().splitlines() if audit.exists() else []
             for child in (host, guest):
                 out, err = child.communicate(timeout=10)
+                assert all(value not in out + err for value in private_values if value), "Private invitation, ownership or password reached bridge logs"
                 assert child.returncode == 0, out + err
 
         pair("normal", "host", "guest")
+        pair("directory-public", "host-directory-public", "guest-directory-public", code_length=32)
+        pair("directory-private", "host-directory-private", "guest-directory-private", code_length=32)
         pair("mismatch", "host-mismatch", "guest-mismatch", ("EAWR-NET-1503", "EAWR-NET-1503"))
         pair("bad-setup", "host-bad-setup", "guest-bad-setup", ("EAWR-NET-1535", "EAWR-NET-1528"))
         pair("silent", "host-silent", "guest-silent", ("silent", "EAWR-NET-1536"))
+        no_alias_server = subprocess.Popen([relay, "--certificate-file", str(cert), "--key-file", str(key), "--port", "0", "--room-aliases", "0"],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        children.append(no_alias_server)
+        no_alias_lines = queue.Queue()
+        threading.Thread(target=lambda: [no_alias_lines.put(line) for line in no_alias_server.stdout], daemon=True).start()
+        no_alias_ready = no_alias_lines.get(timeout=30)
+        assert no_alias_ready.startswith("relay ready port="), no_alias_ready
+        no_alias_port = no_alias_ready.strip().split("=")[1]
+        pair("directory-no-alias", "host-directory-no-alias", "guest-directory-no-alias", code_length=32, selected_port=no_alias_port)
+        no_alias_server.terminate()
+        no_alias_server.wait(timeout=10)
         print("TLS publication/cancel/retry -> GNS staging -> setup/tick-zero -> equal tick-10 hashes, build refusal and bounded snapshot wait passed")
         return 0
     finally:

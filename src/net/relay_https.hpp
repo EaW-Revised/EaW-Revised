@@ -12,6 +12,10 @@
 #include <vector>
 
 namespace eawr::net::relay {
+// Bounded DNS and TCP connection on a caller-owned I/O worker. IPv4 first,
+// at most two addresses; the returned socket belongs to the caller.
+socket::Handle connect_service(const std::string& host, std::uint16_t port,
+    std::chrono::steady_clock::time_point deadline, std::stop_token stop = {});
 // Plain TLS byte channel over a nonblocking native socket, used by the outbound
 // HTTPS client (and by tests as a fake HTTPS endpoint). It never owns the socket.
 // Every call is nonblocking: wants_io means retry after the socket may have moved.

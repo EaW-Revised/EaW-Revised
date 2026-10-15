@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <array>
+#include <mutex>
+#include <limits>
 #include "eawr/core/ascii.hpp"
 
 namespace eawr::script::foc::ai {
@@ -357,7 +359,41 @@ core::Result<Equation> parse_equation(std::string name, std::string_view body, c
     equation.name = std::move(name);
     Parser parser(body, equation, converters);
     if (auto parsed = parser.parse(); !parsed) return core::Result<Equation>::failure(parsed.error());
+    for (auto& lookup : equation.lookups) lookup.compiled = compile_perception_token(lookup.tokens);
     return core::Result<Equation>::success(std::move(equation));
+}
+
+std::shared_ptr<const PerceptionToken> compile_perception_token(const std::vector<std::string>& tokens) {
+    static std::mutex mutex;
+    static std::map<std::vector<std::string>, std::weak_ptr<const PerceptionToken>> compiled;
+    static std::uint64_t next{};
+    static std::uint64_t last_pruned{};
+    const std::scoped_lock lock(mutex);
+    // Expired load/reconstruction definitions are derived metadata. Bound
+    // their residue across repeated campaign loads and refused archives.
+    if (next - last_pruned >= 256) {
+        std::erase_if(compiled, [](const auto& entry) { return entry.second.expired(); });
+        last_pruned = next;
+    }
+    auto& entry = compiled[tokens];
+    if (auto value = entry.lock()) return value;
+    if (next == std::numeric_limits<std::uint64_t>::max()) std::terminate();
+    auto value = std::make_shared<PerceptionToken>();
+    value->id = ++next; value->tokens = tokens;
+    if (!tokens.empty()) {
+        const auto& root = tokens.front();
+        if (root == "GAME") value->root = PerceptionToken::Root::game;
+        else if (root == "VARIABLE_SELF") value->root = PerceptionToken::Root::self;
+        else if (root == "VARIABLE_ENEMY") value->root = PerceptionToken::Root::enemy;
+        else if (root == "VARIABLE_HUMAN") value->root = PerceptionToken::Root::human;
+        else if (root == "VARIABLE_TARGET") value->root = PerceptionToken::Root::target;
+    }
+    for (std::size_t i = 1; i < tokens.size(); ++i) {
+        if (i != 1) value->chain += '.';
+        value->chain += tokens[i];
+    }
+    entry = value;
+    return value;
 }
 
 core::Result<EquationSet> EquationSet::parse(

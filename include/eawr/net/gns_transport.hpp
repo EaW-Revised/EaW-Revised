@@ -4,6 +4,9 @@
 #include "eawr/net/gns_signalling.hpp"
 
 namespace eawr::net {
+// Path of the established GNS connection: kind of ICE route in use. `unknown` until
+// the first sample, and whenever the SDK text names neither a relay nor a direct kind.
+enum class GnsRoute { unknown, direct, relayed };
 struct GnsOptions : TcpOptions {
     // Qualification/deployment policy: require TURN instead of direct ICE.
     bool turn_only{};
@@ -17,6 +20,9 @@ struct GnsOptions : TcpOptions {
 class GnsTransport final : public MessageTransport {
 public:
     static bool available();
+    // Route of the most recent open GNS connection in this process, sampled by poll at
+    // a one-second cadence. Safe to read from any thread; carries no address.
+    static GnsRoute observed_route();
     static core::Result<std::unique_ptr<GnsTransport>> host(std::string address = "0.0.0.0",
         std::uint16_t port = TcpOptions::default_port, GnsOptions options = {});
     static core::Result<std::unique_ptr<GnsTransport>> connect(std::string address,

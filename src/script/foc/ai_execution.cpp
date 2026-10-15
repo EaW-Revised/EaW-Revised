@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <stdexcept>
 
 namespace eawr::script::foc::ai {
 
@@ -10,36 +11,63 @@ using namespace engine_internal;
 
 // EX-11: every 0.1 s each unfinished build task takes a free store object of its type, the one
 // the plan's potential plan reserved first; a type the free store no longer holds fails.
-void Engine::prepare_producers() const {
+void Engine::prepare_producers(const sim::PartitionExecutor* executor) const {
     if (producers_prepared_ || !host_->ai_world->available() || host_->view == nullptr) return;
-    producers_prepared_ = true;
-    const auto add = [&](const ViewUnit& unit) {
-        const auto owner = std::find_if(host_->ai_world->players().begin(), host_->ai_world->players().end(),
-            [&](const auto& player) { return player.player_id == unit.owner; });
-        if (owner == host_->ai_world->players().end()) return;
-        const bool pad = host_->ai_world->pads().contains(unit.id);
-        for (const auto& player : host_->ai_world->players()) {
-            const auto* menu = host_->ai_world->economy().menu(unit.type, pad ? player.faction_id : owner->faction_id);
-            if (menu == nullptr) continue;
+    const auto& world = *host_->ai_world;
+    using Key = std::pair<tactical::PlayerId, tactical::TypeId>;
+    std::vector<const ViewUnit*> inputs;
+    inputs.reserve(world.pads().size() + host_->view->units.size());
+    // Preserve the original pad-first, then ascending-view census and counters.
+    for (const auto& [id, state] : world.pads()) {
+        static_cast<void>(state);
+        inputs.push_back(host_->view->find(id));
+    }
+    for (const auto& unit : host_->view->units) {
+        const auto* info = host_->type(unit.type);
+        if (info && info->star_base && !world.pads().contains(unit.id)) inputs.push_back(&unit);
+    }
+    std::vector<std::vector<Key>> rows(inputs.size());
+    const auto prepare = [&](const std::size_t index) {
+        const auto* unit = inputs[index];
+        if (!unit) return;
+        const bool pad = world.pads().contains(unit->id);
+        const auto players = world.players();
+        const auto owner = std::find_if(players.begin(), players.end(),
+            [&](const auto& player) { return player.player_id == unit->owner; });
+        if (owner == players.end()) return;
+        for (const auto& player : players) {
+            const auto* menu = world.economy().menu(unit->type, pad ? player.faction_id : owner->faction_id);
+            if (!menu) continue;
             for (const auto& option : menu->options) {
-                if (build_option(player.player_id, option.type, unit.id) == nullptr) continue;
-                auto& candidates = producers_[{player.player_id, option.type}];
-                if (candidates.empty() || candidates.back() != unit.id) candidates.push_back(unit.id);
+                if (build_option(player.player_id, option.type, unit->id))
+                    rows[index].emplace_back(player.player_id, option.type);
             }
         }
     };
-    // Preserve pad-first and ascending entity order; live admission and reservations are
-    // rechecked by producer(), since earlier plans can reserve a pad in this same service.
-    for (const auto& [id, state] : host_->ai_world->pads()) {
-        static_cast<void>(state);
-        ++producer_work_.entities;
-        if (const auto* unit = host_->view->find(id)) add(*unit);
+    // Galactic providers can own mutable admission memos; only tactical snapshot
+    // rows use the pool. The fixed threshold never depends on measured duration.
+    constexpr std::size_t parallel_producer_rows = 256;
+    if (executor && host_->world && inputs.size() >= parallel_producer_rows) {
+        const auto prepared = executor->execute_phase("ai-producers", sim::tick_partition_count,
+            [&](const std::size_t partition) {
+                const auto range = sim::partition_range(partition, inputs.size());
+                for (auto index = range.begin; index < range.end; ++index) prepare(index);
+            });
+        if (!prepared) throw std::runtime_error("AI producer preparation failed: " + prepared.error().message);
+    } else for (std::size_t index = 0; index < inputs.size(); ++index) prepare(index);
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        for (const auto& key : rows[index]) {
+            auto& candidates = producers_[key];
+            if (candidates.empty() || candidates.back() != inputs[index]->id)
+                candidates.push_back(inputs[index]->id);
+        }
     }
-    for (const auto& unit : host_->view->units) {
-        ++producer_work_.entities;
-        const auto* info = host_->type(unit.type);
-        if (info != nullptr && info->star_base && !host_->ai_world->pads().contains(unit.id)) add(unit);
-    }
+    const auto census = world.pads().size() + host_->view->units.size();
+    producer_work_.entities += census;
+    input_counts_.producer_entities += census;
+    ++input_counts_.producer_prepasses;
+    if (player_inputs_active_) ++input_counts_.late_prepasses;
+    producers_prepared_ = true;
 }
 
 sim::EntityId Engine::producer(const tactical::PlayerId player, const tactical::TypeId type, const sim::EntityId preferred) const {

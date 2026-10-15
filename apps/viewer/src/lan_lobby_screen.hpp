@@ -21,6 +21,7 @@
 #include "lan_match.hpp"
 
 #include "eawr/net/online_lobby_source.hpp"
+#include "eawr/presentation/ui/settings.hpp"
 #include "eawr/net/tcp_transport.hpp"
 #include "eawr/presentation/ui/lan_lobby.hpp"
 #include "eawr/presentation/ui/layout.hpp"
@@ -68,6 +69,8 @@ public:
         // The online room source behind the Online half of the same screen (public and password
         // rooms, refresh, the password join and the hosting state). Null: Online stays unavailable.
         std::shared_ptr<net::OnlineRoomSource> online_rooms;
+        // Null loads the player's saved settings. Fixtures keep their supplied sources.
+        std::optional<presentation::ui::NetworkSettings> online_settings;
         // The TCP port a hosted game listens on; 0 lets the system pick one (the lobby announces it).
         std::uint16_t game_port{net::TcpOptions::default_port};
         // The profile's name and colour until the player changes them.
@@ -132,7 +135,7 @@ public:
 
     // Adds the screen to `parent`, opens the lobby and starts announcing. Emits `closed` once the
     // player leaves it; the screen is then out of the tree.
-    void show(godot::Node& parent);
+    void show(godot::Node& parent, std::optional<presentation::ui::LobbySourceKind> initial_source = std::nullopt);
     [[nodiscard]] bool shown() const noexcept { return shown_; }
     // Removes the screen without the `closed` signal: the menu that took a started match calls it.
     void dismiss();
@@ -203,6 +206,7 @@ private:
     void join_selected();
     void join_address(const std::string& address, const std::string& game);
     void select_source(presentation::ui::LobbySourceKind source);
+    bool configure_online_match();
     void cancel_join();
     void join_code(const std::string& code);
     // Online rooms: the list, the password prompt and the hosting state.
@@ -226,6 +230,8 @@ private:
     std::unique_ptr<Impl> impl_;
     Options options_;
     std::shared_ptr<LanMatch> match_;
+    std::shared_ptr<LanMatch> lan_match_;
+    std::shared_ptr<LanMatch> online_match_;
     std::vector<std::string> notes_;
     std::vector<std::string> sounds_;
     std::string failure_;

@@ -1,0 +1,6 @@
+# EAWR online test: the public service this kit talks to.
+# trust is `system-ca` (certificate from a public authority) or `pin:` plus the
+# SHA-256 of the server certificate (64 hex digits).
+address=@EAWR_ONLINE_TEST_ADDRESS@
+port=@EAWR_ONLINE_TEST_PORT@
+trust=@EAWR_ONLINE_TEST_TRUST@

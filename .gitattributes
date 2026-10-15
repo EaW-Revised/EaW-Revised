@@ -40,3 +40,5 @@ tests/galactic/fixtures/fleet-corpus/*.hashes.csv text eol=lf
 tests/galactic/fixtures/fleet-corpus/*.eawr-gcreplay binary
 tests/galactic/fixtures/production-corpus/*.hashes.csv text eol=lf
 tests/galactic/fixtures/production-corpus/*.eawr-gcreplay binary
+# Double-click launchers in the online test kit must keep CRLF line endings.
+*.cmd text eol=crlf

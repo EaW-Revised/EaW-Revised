@@ -136,7 +136,7 @@ core::Result<void> GalacticWorld::prepare_forces(std::vector<PlanetRow>& rows,
     });
 }
 
-std::optional<Real> GalacticWorld::force_token(const GalacticCacheKey& key, ReadMode mode) const {
+std::optional<Real> GalacticWorld::force_token(const GalacticQueryKey& key, ReadMode mode) const {
     const auto* at = planet(key.planet);
     const auto token = key.tokens.back();
     if (key.tokens.size() == 2 && key.tokens.front() == "VARIABLE_TARGET") {
@@ -206,7 +206,7 @@ std::optional<Real> GalacticWorld::force_token(const GalacticCacheKey& key, Read
     };
     if (key.tokens.front() == "GAME") {
         if (token != "SPACETOTALUNNORMALIZED" && token != "GROUNDTOTALUNNORMALIZED") return {};
-        Real total{}; auto nested = key; nested.tokens.front() = "VARIABLE_TARGET";
+        Real total{}; auto nested = copy_key(key); nested.tokens.front() = "VARIABLE_TARGET";
         nested.bindings.clear(); // WGA-189: rebuilt planet contexts omit incoming bindings
         for (const auto& row : planets_) { nested.planet = row.planet.id; const auto value = read(nested, mode); if (!value) return {}; total += *value; }
         return total; // WGA-189
@@ -243,7 +243,7 @@ std::optional<Real> GalacticWorld::force_token(const GalacticCacheKey& key, Read
     if (!nearby && token != "SPACETOTAL" && token != "GROUNDTOTAL" && token != "SPACETOTALNBTD" && token != "GROUNDTOTALNBTD"
         && token != "SPACETOTALNBTT" && token != "GROUNDTOTALNBTT" && token != "SPACETOTALNBPTM" && token != "GROUNDTOTALNBPTM") return {};
     const auto raw_token = space ? "SPACETOTALUNNORMALIZED" : "GROUNDTOTALUNNORMALIZED";
-    auto nested = key; nested.tokens.back() = raw_token;
+    auto nested = copy_key(key); nested.tokens.back() = raw_token;
     const auto numerator = read(nested, mode); if (!numerator) return {};
     Real denominator{};
     if (token.ends_with("NBTT")) {
@@ -267,7 +267,7 @@ std::optional<Real> GalacticWorld::force_token(const GalacticCacheKey& key, Read
     if (!setup_.maximum_fleet_distance || *setup_.maximum_fleet_distance <= Real{}) return {};
     Real total{};
     const auto attenuation = number(key.bindings, "PARAMETER_ATTENUATOR").value_or(real(1));
-    nested = key; nested.tokens.back() = raw_token;
+    nested = copy_key(key); nested.tokens.back() = raw_token;
     for (const auto& other : at->nearby) {
         nested.planet = other.planet; const auto value = read(nested, mode); if (!value) return {};
         total += (real(1) - (real(1) - attenuation) * (other.distance / *setup_.maximum_fleet_distance)) * *value;

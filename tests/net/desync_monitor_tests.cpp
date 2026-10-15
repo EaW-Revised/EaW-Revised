@@ -129,6 +129,28 @@ void check_report(const Pair& pair, std::uint64_t tick, std::uint64_t detected) 
     require(pair.left.report()->local_hash == pair.right.report()->remote_hash, "reports disagree on peer hashes");
 }
 
+void peer_confirmation(const std::filesystem::path& directory) {
+    Pair pair(directory, 16 * 1024 * 1024, 10);
+    require(!pair.left.peer_confirmed_tick(), "no confirmation before any remote summary");
+    good(pair.left.record(0, digest(0)));
+    good(pair.right.record(0, digest(0)));
+    pair.drain();
+    require(pair.left.peer_confirmed_tick() == 0, "tick-zero remote proof");
+    for (std::uint64_t tick = 1; tick <= 10; ++tick) {
+        good(pair.left.record(tick, digest(tick)));
+        good(pair.right.record(tick, digest(tick)));
+    }
+    require(pair.left.peer_confirmed_tick() == 0, "local tick 10 is not remote confirmation");
+    pair.drain();
+    require(pair.left.peer_confirmed_tick() == 10 && pair.right.peer_confirmed_tick() == 10, "both summaries confirm tick 10");
+
+    Pair dropped(directory, 16 * 1024 * 1024, 10);
+    good(dropped.left.record(0, digest(0))); good(dropped.right.record(0, digest(0))); dropped.drain();
+    for (std::uint64_t tick = 1; tick <= 10; ++tick) good(dropped.left.record(tick, digest(tick)));
+    good(dropped.left.on_departure(1, 10));
+    require(dropped.left.peer_confirmed_tick() != 10, "departure cannot count as remote tick-10 proof");
+}
+
 void synthetic(const std::filesystem::path& directory, std::uint64_t fault, std::uint64_t end,
     bool input_fault = false, std::uint64_t every = 30) {
     Pair pair(directory, 16 * 1024 * 1024, every);
@@ -628,6 +650,7 @@ int main(int argc, char** argv) {
     try {
         require(argc == 3, "usage: desync_monitor_tests fixture artifact-directory");
         const std::filesystem::path directory = argv[2];
+        peer_confirmation(directory);
         adaptive_departure_bounds();
         scripted_battle(argv[1], directory);
         scripted_battle(argv[1], directory, true);

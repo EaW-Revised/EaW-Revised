@@ -91,8 +91,8 @@ void enable_state() {
     }
     for (const char* control : {"IDC_MULTIPLAYER_INTERNET_BUTTON", "IDC_MAIN_OPTIONS_NETWORK"}) {
         const auto found = rule(FrontEndScreen::multiplayer, control);
-        expect(found.kind == GadgetKind::disabled && !found.reason.empty(),
-               std::string("FES-07: ") + control + " is disabled with its reason");
+        expect(found.kind == GadgetKind::open && found.reason.empty(),
+               std::string("Online service: ") + control + " opens its screen");
     }
     ui::FrontEndNav nav;
     const auto disabled = rule(FrontEndScreen::main_menu, "IDC_MAIN_MENU_TUTORIAL");

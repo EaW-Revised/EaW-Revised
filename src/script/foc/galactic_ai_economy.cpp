@@ -58,7 +58,7 @@ std::shared_ptr<const GalacticEconomyRuntime> fresh_economy_runtime(std::span<co
 
 core::Result<void> GalacticWorld::bind_economy_runtime(std::shared_ptr<const GalacticEconomyRuntime> input) const {
     {
-        std::scoped_lock lock(cache_mutex_);
+        const auto lock = query_lock();
         if (input == economy_runtime_) return core::Result<void>::success();
     }
     if (input) {
@@ -83,7 +83,7 @@ core::Result<void> GalacticWorld::bind_economy_runtime(std::shared_ptr<const Gal
     }
     // Runtime publications belong to their upstream saved owners, like bind's
     // completed world input; this derived copy is not a seventh native owner.
-    std::scoped_lock lock(cache_mutex_); economy_runtime_ = std::move(input);
+    const auto lock = query_lock(); economy_runtime_ = std::move(input);
     return core::Result<void>::success();
 }
 
@@ -96,11 +96,11 @@ bool GalacticWorld::refresh_economy_runtime() const {
     // build-budget publication); concurrent calls corrupted it at 8 workers
     // (#2971). Other callers take turns: battle-mode child scripts query their
     // galactic parent from their own partitions.
-    std::scoped_lock supplying(supplier_mutex_);
+    const auto reads = sequential_reads();
     auto supplied = economy_supplier_();
     if (!supplied || !supplied.value()) return false;
     {
-        std::scoped_lock lock(cache_mutex_);
+        const auto lock = query_lock();
         if (economy_runtime_ == supplied.value()) return true;
     }
     return static_cast<bool>(bind_economy_runtime(std::move(supplied).value()));
@@ -283,7 +283,7 @@ core::Result<void> GalacticWorld::prepare_economy_tokens(const sim::PartitionExe
     return core::Result<void>::success();
 }
 
-std::optional<Real> GalacticWorld::target_economy_token(const GalacticCacheKey& key, std::string_view token) const {
+std::optional<Real> GalacticWorld::target_economy_token(const GalacticQueryKey& key, std::string_view token) const {
     const auto* row = find(economy_planets_, key.planet, [](const auto& p) { return p.planet; });
     if (!row || !row->production_available) return {};
     if (token == "HASSTARBASEOFLEVEL" || token == "HASGROUNDBASEOFLEVEL") {
@@ -300,21 +300,25 @@ std::optional<Real> GalacticWorld::target_economy_token(const GalacticCacheKey& 
     return real(total);
 }
 
-std::optional<Real> GalacticWorld::player_economy_token(const GalacticCacheKey& key, tactical::PlayerId owner,
+std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& key, tactical::PlayerId owner,
     std::string_view token, ReadMode mode) const {
     // WGA-65/299: aggregate memoization must not suppress the next frame's
     // ordinary ownership observations, including zero-interval cache rows.
     // A restored owner has a cold memo and must publish the same observations.
     if (mode == ReadMode::ordinary && (economy_queries_frame_ != synchronized_frame_
         || (economy_queries_expiry_ && *economy_queries_expiry_ < real(static_cast<std::int64_t>(synchronized_frame_))))) {
+        if (economy_queries_frame_ != synchronized_frame_) {
+            memo_bindings_.clear(); memo_bindings_.emplace_back(); memo_binding_ids_.clear();
+        }
         economy_queries_.clear(); economy_queries_expiry_.reset(); economy_queries_frame_ = synchronized_frame_;
     }
     if (token == "PLANETSCONTROLLED" || token == "PLANETSCONTROLLEDUNNORMALIZED") {
-        auto canonical = key; canonical.planet = 0;
-        if (mode == ReadMode::ordinary) if (const auto cached = economy_queries_.find(canonical); cached != economy_queries_.end()) return cached->second;
+        std::optional<GalacticInternedKey> canonical;
+        if (mode == ReadMode::ordinary) { canonical = memo_key(key); canonical->planet = 0; }
+        if (mode == ReadMode::ordinary) if (const auto cached = economy_queries_.find(*canonical); cached != economy_queries_.end()) return cached->second;
         Real controlled{};
         for (const auto& row : planets_) {
-            auto ownership = key; ownership.planet = row.planet.id;
+            auto ownership = copy_key(key); ownership.planet = row.planet.id;
             ownership.tokens = {"VARIABLE_TARGET", "TARGETPLAYERID"}; ownership.bindings.clear();
             const auto target_owner = read(ownership, mode); if (!target_owner) return {};
             const auto selected = rounded(*target_owner); if (!selected) return {};
@@ -322,7 +326,7 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticCacheKey& 
         }
         const auto value = token == "PLANETSCONTROLLED" && !planets_.empty()
             ? controlled / real(static_cast<std::int64_t>(planets_.size())) : controlled;
-        if (mode == ReadMode::ordinary) economy_queries_.emplace(std::move(canonical), value);
+        if (mode == ReadMode::ordinary) economy_queries_.emplace(*canonical, value);
         return value;
     }
     const auto at = economy_players_.find(owner); if (at == economy_players_.end()) return {};
@@ -370,14 +374,15 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticCacheKey& 
     // WGA-299: foreign roots need observer-local target cache aggregation. Do
     // not expose raw foreign production by reusing the selected owner's census.
     if (owner != key.player) return {};
-    auto canonical = key; canonical.planet = 0;
-    if (mode == ReadMode::ordinary) if (const auto cached = economy_queries_.find(canonical); cached != economy_queries_.end()) return cached->second;
+    std::optional<GalacticInternedKey> canonical;
+    if (mode == ReadMode::ordinary) { canonical = memo_key(key); canonical->planet = 0; }
+    if (mode == ReadMode::ordinary) if (const auto cached = economy_queries_.find(*canonical); cached != economy_queries_.end()) return cached->second;
     const auto evaluate = [&]() -> std::optional<Real> {
         if (token == "MAINTENANCEUNNORMALIZED") return player_counts.maintenance;
         if (token == "MAINTENANCE" || token == "NETINCOMEUNNORMALIZED" || token == "GROSSINCOMEUNNORMALIZED") {
             Real gross{};
             for (const auto& row : planets_) {
-                auto ownership = key; ownership.planet = row.planet.id;
+                auto ownership = copy_key(key); ownership.planet = row.planet.id;
                 ownership.tokens = {"VARIABLE_TARGET", "TARGETPLAYERID"}; ownership.bindings.clear();
                 const auto target_owner = read(ownership, mode); if (!target_owner) return {};
                 if (*target_owner != real(owner)) continue;
@@ -429,14 +434,14 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticCacheKey& 
         const auto types = selected_types(setup_, key.bindings);
         std::int64_t owned{}, matches{}, structures{};
         for (const auto& row : economy_planets_) {
-            auto ownership = key; ownership.planet = row.planet;
+            auto ownership = copy_key(key); ownership.planet = row.planet;
             ownership.tokens = {"VARIABLE_TARGET", "TARGETPLAYERID"}; ownership.bindings.clear();
             const auto target_owner = read(ownership, mode); if (!target_owner) return {};
             if (*target_owner != real(owner)) continue;
             ++owned;
             if (!row.production_available) return {};
             if (token == "MAXEDSTARBASES" || token == "MAXEDGROUNDBASES") {
-                auto nested = key; nested.planet = row.planet; nested.bindings.clear();
+                auto nested = copy_key(key); nested.planet = row.planet; nested.bindings.clear();
                 nested.tokens = {"VARIABLE_TARGET", token == "MAXEDSTARBASES" ? "STARBASELEVEL" : "GROUNDBASELEVEL"};
                 const auto current = read(nested, mode); if (!current) return {};
                 nested.tokens.back() = token == "MAXEDSTARBASES" ? "MAXSTARBASELEVEL" : "MAXGROUNDBASELEVEL";
@@ -445,12 +450,12 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticCacheKey& 
             } else if (token == "HASSTARBASEOFLEVEL" || token == "NUMSTARBASEOFLEVEL"
                 || token == "HASGROUNDBASEOFLEVEL" || token == "NUMGROUNDBASEOFLEVEL") {
                 if (!level || *level < 1 || !requested) return {};
-                auto nested = key; nested.planet = row.planet;
+                auto nested = copy_key(key); nested.planet = row.planet;
                 nested.tokens = {"VARIABLE_TARGET", token.find("STARBASE") != std::string_view::npos ? "HASSTARBASEOFLEVEL" : "HASGROUNDBASEOFLEVEL"};
                 const auto qualifies = read(nested, mode); if (!qualifies) return {};
                 if (*qualifies != Real{}) ++matches;
             } else if (token == "HASSTRUCTURE" || token == "STRUCTURECOUNT") {
-                auto nested = key; nested.planet = row.planet;
+                auto nested = copy_key(key); nested.planet = row.planet;
                 nested.tokens = {"VARIABLE_TARGET", std::string(token)};
                 const auto value = read(nested, mode); if (!value) return {};
                 structures += static_cast<std::int64_t>(*value);
@@ -467,11 +472,11 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticCacheKey& 
         return {};
     };
     const auto value = evaluate();
-    if (mode == ReadMode::ordinary) economy_queries_.emplace(std::move(canonical), value);
+    if (mode == ReadMode::ordinary) economy_queries_.emplace(*canonical, value);
     return value;
 }
 
-std::optional<Real> GalacticWorld::budget_fraction(const GalacticCacheKey& key, tactical::PlayerId owner) const {
+std::optional<Real> GalacticWorld::budget_fraction(const GalacticQueryKey& key, tactical::PlayerId owner) const {
     if (!economy_runtime_ || !snapshot_ || economy_runtime_->completed_tick != snapshot_->completed_tick()) return {};
     const auto budget = std::find_if(economy_runtime_->budgets.begin(), economy_runtime_->budgets.end(),
         [&](const auto& row) { return row.player == owner; });

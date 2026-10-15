@@ -81,7 +81,7 @@ WGA-407/410 allow allied landed ownership through the sourced safety gate, while
 
 Economy aggregate memoization is scoped to one synchronized frame. Ordinary player aggregates still consume their observer-local ownership getters at each demand frame, including zero-interval observations (WGA-65/299). A warm live memo and a cold restored memo therefore publish identical native ownership and visibility timestamps without rebuilding unchanged physical economy inputs. This derived memo remains outside the archive and synchronization digest.
 
-Perception capture sorts references to retained records under the owning cache lock instead of copying their strings and bindings. The WGA-195 canonical key order, ordered bindings, component domain/version and archive bytes remain unchanged.
+Perception capture sorts references to compact retained records and borrows their interned token and binding spellings under the sequential query boundary. The admitted decision pass owns that boundary once, so nested perception reads take no lock. The WGA-195 canonical key order, ordered bindings, component domain/version and archive bytes remain unchanged; process-local intern identities stay outside the encoded state.
 
 Demand-time producer admission indexes immutable effective offers by original type identity. Requested types select their original registration positions, deduplicate repeated requests, and keep that order for first-allowed reads; unrequested offers are not tested. Queue durations, credits, population, blockers and reservation admission still come from the same owning snapshot (GFS-A14, WGA-329). The index and offer-check counter are derived work metadata and remain outside native archives and synchronization digests.
 

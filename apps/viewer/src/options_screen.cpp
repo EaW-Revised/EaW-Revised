@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <map>
 #include <optional>
 #include <utility>
@@ -350,8 +351,59 @@ void EawrOptionsScreen::rebuild_page() {
         notes_.push_back(failure_);
         return;
     }
-    state.dialog.emplace(build_dialog(*found, *resources.theme_model, resources.text ? &*resources.text : nullptr,
-                                      placement));
+    data::Dialog service = *found;
+    if (page_ == Page::hub && options_.context == Context::main_menu) {
+        const auto found_button = std::find_if(service.controls.begin(), service.controls.end(), [](const auto& c) { return c.id_name == "IDC_MAIN_OPTIONS_GAMEPLAY"; });
+        if (found_button != service.controls.end()) {
+            data::DialogControl network = *found_button; network.id_name = "IDC_MAIN_OPTIONS_NETWORK"; network.id.reset();
+            network.text = "TEXT_BUTTON_INTERNET_OPTIONS";
+            // Find room for the added entry without moving authored controls.
+            const auto fits = [&](const data::RcRect& rect) {
+                return std::none_of(service.controls.begin(), service.controls.end(), [&](const auto& c) {
+                    const bool button = c.statement == "PUSHBUTTON" || c.statement == "DEFPUSHBUTTON" || c.class_name == "Button";
+                    return button && !hidden_gadget(c.id_name) && std::find(c.style.begin(), c.style.end(), "BS_GROUPBOX") == c.style.end() && rect.x < c.rect.x + c.rect.width && rect.x + rect.width > c.rect.x
+                        && rect.y < c.rect.y + c.rect.height && rect.y + rect.height > c.rect.y;
+                });
+            };
+            bool placed = false;
+            for (int y = network.rect.y; !placed && y + network.rect.height <= service.rect.height; y += std::max(1, network.rect.height / 2)) {
+                for (int x = network.rect.x; !placed && x + network.rect.width <= service.rect.width; x += std::max(1, network.rect.width / 2)) {
+                    data::RcRect candidate{x, y, network.rect.width, network.rect.height};
+                    if (fits(candidate)) { network.rect = candidate; placed = true; }
+                }
+            }
+            if (placed) service.controls.push_back(std::move(network));
+        }
+    }
+    if (page_ == Page::network) {
+        // Keep every authored control in place. Extend the loaded dialog with a
+        // service column beside the retail network controls.
+        const int width = service.rect.width, height = service.rect.height;
+        service.rect.width += width * 2 / 3;
+        const auto add = [&](const char* kind, const char* id, const char* caption, int row, bool label) {
+            data::DialogControl control;
+            control.statement = kind; control.id_name = id;
+            if (caption) control.text = caption;
+            control.rect = {width + width / 24, height * (14 + row * 10) / 100 + (label ? 0 : height * 3 / 100),
+                            width * 7 / 12, height * (label ? 3 : 5) / 100};
+            control.style = {"WS_VISIBLE", "WS_TABSTOP"};
+            service.controls.push_back(std::move(control));
+        };
+        const std::array<std::pair<const char*, const char*>, 5> edits{{
+            {"IDC_ONLINE_SERVICE_HOST", "Online service host"}, {"IDC_ONLINE_SERVICE_PORT", "Service port"},
+            {"IDC_ONLINE_SERVICE_PIN", "Certificate SHA-256 pin"}, {"IDC_ONLINE_SERVICE_CA", "CA certificate file"},
+            {"IDC_ONLINE_SERVICE_TRUST", "Trust: system, pin or ca-file"}}};
+        int row = 0;
+        for (const auto& [id, caption] : edits) {
+            const std::string label = std::string(id) + "_LABEL";
+            add("LTEXT", label.c_str(), caption, row, true); add("EDITTEXT", id, nullptr, row++, false);
+        }
+        add("CONTROL", "IDC_ONLINE_RELAY_ONLY", "Require relay for online games", row++, true);
+        service.controls.back().class_name = "Button";
+        service.controls.back().style.push_back("BS_AUTOCHECKBOX");
+        add("LTEXT", "IDC_ONLINE_SERVICE_ERROR", "", row, true);
+    }
+    state.dialog.emplace(build_dialog(service, *resources.theme_model, resources.text ? &*resources.text : nullptr, placement));
     root->add_child(state.dialog->frame);
     for (BuiltGadget& gadget : state.dialog->gadgets) {
         if (gadget.control == nullptr) continue;
@@ -580,6 +632,12 @@ void EawrOptionsScreen::wire_page() {
     }
     case Page::network: {
         const model::NetworkSettings& net = draft_.network;
+        const std::array<std::pair<const char*, std::string>, 5> values{{
+            {"IDC_ONLINE_SERVICE_HOST", net.online_host}, {"IDC_ONLINE_SERVICE_PORT", std::to_string(net.online_port)},
+            {"IDC_ONLINE_SERVICE_PIN", net.online_pin}, {"IDC_ONLINE_SERVICE_CA", net.online_ca_file},
+            {"IDC_ONLINE_SERVICE_TRUST", net.online_trust}}};
+        for (const auto& [id, value] : values) if (has(id)) Object::cast_to<LineEdit>(state.controls[id])->set_text(text(value));
+        if (has("IDC_ONLINE_RELAY_ONLY")) check("IDC_ONLINE_RELAY_ONLY")->set_pressed_no_signal(net.online_relay_only);
         if (has("IDC_NETWORK_PORT_NUMBER")) {
             Object::cast_to<LineEdit>(state.controls["IDC_NETWORK_PORT_NUMBER"])
                 ->set_text(text(std::to_string(net.port)));
@@ -611,9 +669,6 @@ void EawrOptionsScreen::wire_page() {
              net.connection_speed);
         fill("IDC_INTERNET_PREFERRED_QUICKMATCH_FACTION", {key_text("TEXT_QUICKMATCH_RANDOM_FACTION")}, 0);
         // The network page's own Defaults button restores values nothing here can change.
-        if (has("IDC_SET_DEFAULT")) {
-            disable(*state.controls["IDC_SET_DEFAULT"], "IDC_SET_DEFAULT", "Online play is not built yet.");
-        }
         break;
     }
     }
@@ -764,12 +819,31 @@ void EawrOptionsScreen::sync_draft_from_controls() {
     case Page::gameplay:
         if (const auto v = value("IDC_GAME_SPEED_SLIDER")) draft_.gameplay.tactical_speed = static_cast<int>(*v + 0.5);
         break;
+    case Page::network: {
+        const auto edit = [&](const char* id) { const auto found = state.controls.find(id); return found != state.controls.end()
+            ? utf8(Object::cast_to<LineEdit>(found->second)->get_text()) : std::string{}; };
+        draft_.network.online_host = edit("IDC_ONLINE_SERVICE_HOST");
+        draft_.network.online_pin = edit("IDC_ONLINE_SERVICE_PIN");
+        draft_.network.online_ca_file = edit("IDC_ONLINE_SERVICE_CA");
+        draft_.network.online_trust = edit("IDC_ONLINE_SERVICE_TRUST");
+        const std::string port = edit("IDC_ONLINE_SERVICE_PORT");
+        int parsed{}; const auto [end, error] = std::from_chars(port.data(), port.data() + port.size(), parsed);
+        draft_.network.online_port = error == std::errc{} && end == port.data() + port.size() ? parsed : 0;
+        if (const auto v = value("IDC_ONLINE_RELAY_ONLY")) draft_.network.online_relay_only = *v > 0.5;
+        break;
+    }
     default: break;
     }
 }
 
 void EawrOptionsScreen::commit_page(const bool leave) {
     sync_draft_from_controls();
+    if (page_ == Page::network) {
+        if (const auto error = model::validate_online_settings(draft_.network)) {
+            if (auto* label = Object::cast_to<EawrUiLabel>(state_->controls["IDC_ONLINE_SERVICE_ERROR"])) label->set_text(text(error->message));
+            return;
+        }
+    }
     static_cast<void>(model::clamp_settings(draft_));
     // Only this page's section is committed: the others are the saved ones still.
     switch (page_) {
@@ -819,6 +893,11 @@ void EawrOptionsScreen::defaults_page() {
         // The honoured option only: the others are not editable here, so Defaults leaves them.
         draft_.gameplay.tactical_speed = defaults.gameplay.tactical_speed;
         break;
+    case Page::network:
+        draft_.network.online_host.clear(); draft_.network.online_port = defaults.network.online_port;
+        draft_.network.online_trust = defaults.network.online_trust; draft_.network.online_pin.clear();
+        draft_.network.online_ca_file.clear(); draft_.network.online_relay_only = false;
+        break;
     default: return;
     }
     rebuild_page();
@@ -841,7 +920,7 @@ void EawrOptionsScreen::handle_button(const std::string& id) {
         else if (id == "IDC_MAIN_OPTIONS_VIDEO" || id == "IDC_IN_GAME_OPTIONS_VIDEO") open_page(Page::video);
         else if (id == "IDC_MAIN_OPTIONS_KEYBOARD" || id == "IDC_IN_GAME_OPTIONS_KEYBOARD") open_page(Page::keyboard);
         else if (id == "IDC_MAIN_OPTIONS_GAMEPLAY" || id == "IDC_IN_GAME_OPTIONS_GAMEPLAY") open_page(Page::gameplay);
-        else if (id == "IDC_IN_GAME_OPTIONS_NETWORK") open_page(Page::network);
+        else if (id == "IDC_IN_GAME_OPTIONS_NETWORK" || id == "IDC_MAIN_OPTIONS_NETWORK") open_page(Page::network);
         break;
     case Page::audio:
         if (id == "IDC_OK") commit_page(true);
@@ -869,6 +948,7 @@ void EawrOptionsScreen::handle_button(const std::string& id) {
     case Page::network:
         if (id == "IDC_OK") commit_page(true);
         else if (id == "IDC_BACK") cancel_page();
+        else if (id == "IDC_SET_DEFAULT") defaults_page();
         break;
     }
 }
@@ -925,6 +1005,15 @@ bool EawrOptionsScreen::set_control(const std::string& id, const double value) {
     return false;
 }
 
+bool EawrOptionsScreen::set_text_control(const std::string& id, const std::string& value) {
+    if (!state_) return false;
+    const auto found = state_->controls.find(id);
+    if (found == state_->controls.end() || state_->reasons.count(id)) return false;
+    auto* edit = Object::cast_to<LineEdit>(found->second);
+    if (!edit || !edit->is_editable()) return false;
+    edit->set_text(text(value)); return true;
+}
+
 bool EawrOptionsScreen::press(const std::string& id) {
     if (!state_) return false;
     const auto found = state_->controls.find(id);
@@ -958,7 +1047,9 @@ std::vector<EawrOptionsScreen::ControlState> EawrOptionsScreen::control_states()
             entry.value = combo->get_selected();
             if (combo->get_selected() >= 0) entry.text = utf8(combo->get_item_text(combo->get_selected()));
         } else if (const auto* edit = Object::cast_to<LineEdit>(gadget.control)) {
-            entry.text = utf8(edit->get_text());
+            // Reports describe the control state, never a service address, pin or local path.
+            entry.text = gadget.id == "IDC_ONLINE_SERVICE_HOST" || gadget.id == "IDC_ONLINE_SERVICE_PIN" || gadget.id == "IDC_ONLINE_SERVICE_CA"
+                ? (edit->get_text().is_empty() ? "" : "configured") : utf8(edit->get_text());
         } else if (const auto* button = Object::cast_to<BaseButton>(gadget.control)) {
             entry.value = button->is_pressed() ? 1.0 : 0.0;
             if (button->is_disabled() && entry.enabled) entry.enabled = false;

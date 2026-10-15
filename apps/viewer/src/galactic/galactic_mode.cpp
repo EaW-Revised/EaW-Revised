@@ -1271,8 +1271,9 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
     if (state.loading) return;
     if (state.battle_dialog && state.battle_dialog->visible()) {
         const auto* mouse = Object::cast_to<InputEventMouse>(event.ptr());
-        if (state.battle_dialog->view().phase != galactic_view::BattleDialogPhase::choice
-            || (mouse && state.battle_dialog->blocks_world(mouse->get_position()))) { cancel_input(); return; }
+        if (state.battle_dialog->view().phase != galactic_view::BattleDialogPhase::choice) { cancel_input(); return; }
+        // WGUI-171: blocking the prompt's mouse surface must not release a held camera key.
+        if (mouse && state.battle_dialog->blocks_world(mouse->get_position())) { pointer_left(); return; }
     }
     if (state.hero_menu.blocker && state.hero_menu.blocker->is_visible_in_tree()) { cancel_input(); return; }
     if (state.weapon_menu.blocker && state.weapon_menu.blocker->is_visible_in_tree()) { cancel_input(); return; }

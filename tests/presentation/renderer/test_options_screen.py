@@ -53,6 +53,14 @@ class OptionsScreenStructure(unittest.TestCase):
                        "IDD_MAIN_OPTIONS_DIALOG", "IDD_IN_GAME_OPTIONS_DIALOG"):
             self.assertIn(dialog, screen)
 
+    def test_online_service_rows_use_the_loaded_network_dialog_and_validate_before_saving(self):
+        screen = (SRC / "options_screen.cpp").read_text(encoding="utf-8")
+        self.assertIn("data::Dialog service = *found", screen)
+        self.assertNotIn("std::erase_if(service.controls", screen)
+        self.assertIn("validate_online_settings(draft_.network)", screen)
+        self.assertIn('IDC_MAIN_OPTIONS_NETWORK', screen)
+        self.assertIn('state.dialog.emplace(build_dialog(service', screen)
+
     def test_settings_never_reach_the_simulation(self):
         # UI-C2 and UI-07: the model is engine-free and the screen and store include no simulation.
         model = (ROOT / "include/eawr/presentation/ui/settings.hpp").read_text(encoding="utf-8")
@@ -128,6 +136,37 @@ class OptionsScreenGraphical(unittest.TestCase):
         path = self.directory / f"{name}.cfg"
         path.unlink(missing_ok=True)
         return path
+
+    def test_online_service_settings_persist_validate_and_cancel(self):
+        settings = self.settings("online-service")
+        first = run_viewer(self, self.directory, "online-service-save", self.cache, settings,
+                           "--eawr-options-page", "network",
+                           "--eawr-options-do", "text:IDC_ONLINE_SERVICE_HOST=service.example",
+                           "--eawr-options-do", "text:IDC_ONLINE_SERVICE_PORT=27021",
+                           "--eawr-options-do", "text:IDC_ONLINE_SERVICE_PIN=" + "a" * 64,
+                           "--eawr-options-do", "set:IDC_ONLINE_RELAY_ONLY=1",
+                           "--eawr-options-do", "press:IDC_OK")
+        saved = settings.read_text(encoding="utf-8")
+        self.assertIn("network.online_host=service.example", saved)
+        self.assertIn("network.online_port=27021", saved)
+        self.assertIn("network.online_relay_only=1", saved)
+        self.assertNotIn("service.example", json.dumps(first))
+        reopened = run_viewer(self, self.directory, "online-service-reopen", self.cache, settings,
+                             "--eawr-options-page", "network",
+                             "--eawr-options-do", "text:IDC_ONLINE_SERVICE_PORT=0",
+                             "--eawr-options-do", "press:IDC_OK")
+        self.assertEqual(reopened["page"], "network", "invalid draft keeps the page open")
+        self.assertEqual(settings.read_text(encoding="utf-8"), saved)
+        self.assertEqual(controls(reopened)["IDC_ONLINE_SERVICE_HOST"]["text"], "configured")
+        for authored in ("IDC_NETWORK_PORT_NUMBER", "IDC_INTERNET_CONNECTION_SPEED_COMBO",
+                         "IDC_INTERNET_PREFERRED_LOCALE", "IDC_INTERNET_PREFERRED_QUICKMATCH_FACTION"):
+            self.assertIn(authored, controls(reopened))
+        cancelled = run_viewer(self, self.directory, "online-service-cancel", self.cache, settings,
+                              "--eawr-options-page", "network",
+                              "--eawr-options-do", "text:IDC_ONLINE_SERVICE_HOST=changed.example",
+                              "--eawr-options-do", "press:IDC_BACK")
+        self.assertEqual(settings.read_text(encoding="utf-8"), saved)
+        self.assertEqual(cancelled["page"], "hub")
 
     def test_a_changed_volume_and_video_state_persist_across_a_restart(self):
         # The #2927 GPU case: open the options, change a volume and the full-screen and vsync

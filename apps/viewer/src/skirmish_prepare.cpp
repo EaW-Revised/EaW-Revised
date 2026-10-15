@@ -142,11 +142,16 @@ core::Result<void> append_lan_ai_row(skirmish::SetupSelection& selection, const 
     if (colour >= palette_size) return core::Result<void>::failure(
         net::lobby_diagnostic(net::LobbyReason::invalid_choice, "There is no unused multiplayer colour for this row."));
     const auto host_team = selection.slots.empty() ? 0U : selection.slots.front().team;
-    // WSS-15/54: prefer an opposing team only when its faction and authored spawns admit this row.
-    for (const bool unused_team : {true, false}) {
+    // Project UI default: prefer a free authored marker before placing a new AI on
+    // an overflowing team. WSS-54 allows overflow; this preference is never a Start gate.
+    for (const bool free_marker : {true, false}) for (const bool unused_team : {true, false}) {
         if (!prefer_unused_team && unused_team) continue;
         for (const bool opposing : {true, false}) for (const auto& team : map.teams) {
             if (team.factions.empty() || (team.team != host_team) != opposing) continue;
+            const auto occupied = static_cast<std::size_t>(std::count_if(selection.slots.begin(), selection.slots.end(),
+                [&](const auto& row) { return row.team == team.team; }));
+            const bool has_free_marker = !team.spawn_capacity || occupied < *team.spawn_capacity;
+            if (has_free_marker != free_marker) continue;
             skirmish::LobbySlot added; added.slot = slot; added.team = team.team; added.colour_index = colour;
             const auto teammate = std::find_if(selection.slots.begin(), selection.slots.end(), [&](const auto& row) { return row.team == team.team; });
             if (prefer_unused_team && unused_team != (teammate == selection.slots.end())) continue;

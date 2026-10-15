@@ -66,6 +66,7 @@ public:
         bool colour_given{};
         // --eawr-profile-file: the player profile to use (a test names its own); default user://.
         std::filesystem::path profile_file;
+        std::filesystem::path settings_file;
         std::uint16_t broadcast_port{};
         std::vector<std::uint16_t> extra_ports;
         std::vector<std::string> games;

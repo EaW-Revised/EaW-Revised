@@ -491,3 +491,23 @@ recommendations. Implementation/service qualification remains pending.
 | 5. Guest access | Guest names and a no-hoops flow; compiled-build hash should match. Token usefulness questioned. | B checks local build hash at peer hello and setup. Proposed operator policy: optional token, OFF for public community servers; only protects service bandwidth, never player identity. |
 | 6. Recovery and longevity | Crash rejoin is a nice-to-have; hours-long connections required, with GC sessions in mind. | E qualifies refresh and lifts unintended service/tick limits. Crash persistence deferred; online GC remains outside this scope. |
 | 7. Matchmaking/ranked | Neither is a priority. | Public list is in I; automatic matchmaking/ranked have no release ticket. |
+
+## Current two-player game entry
+
+The shared screen reads the online service from Network Options: an empty project default,
+a host and port, explicit system/pin/CA-file trust, and the relay-only preference. The live
+source performs directory calls on its I/O worker and drains off the frame thread when the
+screen retires. Internet selects Online; the existing LAN menu route remains available.
+This is the two-player development bridge, not the planned nine-peer online release.
+
+A signalling publication returns a full invitation and a separate publisher-only ownership
+capability over TLS. Directory publication proves that ownership; successful admission returns
+only the invitation to one guest. Consumption belongs to the signalling session, so a room
+lease cannot re-arm it. Removing or expiring a directory room revokes its unpaired invitation,
+including any capability already delivered to a guest. An already-paired game continues.
+Neither capability appears in the list, chat, profile, UI view or report.
+
+Only public/direct publications may request a four-character alias. Password publications
+request no alias from the start. The screen displays only a four-character alias; with aliases
+disabled, a public room is still listed and has no displayed code. Room admission and direct
+public-code admission share the existing staging and start barrier.

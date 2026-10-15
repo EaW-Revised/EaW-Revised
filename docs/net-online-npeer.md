@@ -84,8 +84,10 @@ Room
 ```
 
 The host (directory owner) is slot 0. The service assigns slots 1..capacity-1: the
-directory's `Password join` already returns a "reserved seat"; that number becomes the
-slot and therefore the transport `PeerIndex`. One reservation table per room serves
+directory's `Password join` reply gains the reserved **slot** (and the member capability);
+the slot is the transport `PeerIndex`. The directory's own "seat" stays a never-reused chat
+label (N3 note: slots are reused when seats empty and refill, so only the slot identifies a
+signalling member). One reservation table per room serves
 directory admission and alias admission, committed on the owner thread before any
 reply, so the last vacant slot has exactly one winner (the existing ticket I rule,
 extended to the alias path).
@@ -133,8 +135,10 @@ unchanged on a room member connection; they do not need new IDs.
    30 s if not attached; expiry frees it. Against seat squatting in public rooms: at
    most two outstanding (unattached) reservations per room, reservations count toward
    the prefix's `unpaired_sessions_per_ip` (2), and a reservation that expires
-   unattached counts as a failed guess for its prefix, so rolling 30 s reservations
-   reach the existing five-per-minute cooldown.
+   unattached counts as a failed guess for its prefix. Two outstanding reservations
+   per prefix expire at most four times a minute, below the five-guess cooldown, so
+   N3 gives expiries a window of their own: the third unattached expiry in a rolling
+   minute starts the same 60 s cooldown.
 2. **Attach.** The guest opens its room member connection with the capability, gets its
    slot, TURN credentials and the roster. Every member gets the new roster revision.
 3. **Host pair first.** The newcomer connects to slot 0. Today's GNS hello is `'EAWR'`,
@@ -203,8 +207,8 @@ operators running busy servers raise `cloudflare_turn_calls_per_minute`.
 
 **coturn has no revocation.** REST credentials are HMAC usernames with an embedded
 expiry; nothing on the coturn side withdraws one early. A kicked or refused member keeps
-the right to allocate on the operator's coturn until that expiry (up to 24 h plus the
-margin). Re-issuing credentials on lease renewal does not shorten it: the renewal can
+the right to allocate on the operator's coturn until that expiry (up to `max_session_lifetime` plus the
+margin, clamped to 48 h). Re-issuing credentials on lease renewal does not shorten it: the renewal can
 only hand out new credentials, and live GNS connections cannot switch to them (ticket E,
 "Long sessions"), which is why pairing credentials cover the hard maximum in the first
 place. The residual is quota and bandwidth, not game access (a kicked member gets no
@@ -306,7 +310,10 @@ signalling path; it never proves the seat.
 
 **Asymmetric pair loss.** If pair (k, j) closes while both still reach everyone else, the
 match stalls (k cannot complete a tick without j's batch). Both ends first try a pair
-repair through the room within the existing initial grace (30 s). If that fails, the
+repair through the room within the existing initial grace (30 s), trying the TURN
+relay path before removal. When both endpoint reports can reach the decider, both
+must report failed relay repair. Across a cut the inside endpoint must report its
+failed relay attempt; an unreachable outside report is never invented or forwarded. If that fails, the
 choice of who leaves must not depend on what each seat happens to see: a seat cut off
 from part of the room cannot receive every report, so seats computing the selection
 locally could pick different victims and split the match. Only one seat decides, and
@@ -322,35 +329,90 @@ everyone else follows its announcement or leaves.
    all-open seats cannot both decide. An all-open seat decides only after it holds a
    current report from every other seat, no report has changed for 2 s, and no lower
    index has reported itself all-open.
-3. **Selection.** On the complete loss set the decider repeatedly removes the seat with
-   the most lost pairs, ties to the higher roster index, until the remaining seats form
+   If there is no all-open seat, the fallback is the largest reciprocal-open clique
+   forming a majority of the original active set. Equal-size clique ties use the
+   lexicographically lowest sorted seat list; its lowest seat decides. The decision
+   carries an explicit mask of the current reports it used. A seat can use only
+   reports delivered over its own open pairs, so unknown outside rows stay absent.
+   Receivers defer to a larger or earlier equal-size clique they already know.
+3. **Selection.** On the complete, agreed loss set the decider repeatedly removes the seat with
+   fewer reachable peers among the remaining seats, ties to the higher roster index, until the remaining seats form
    a complete mesh. The decider has no lost pairs, so it always survives; the survivor
    set is a clique.
+   With no all-open decider, selection is the majority clique above. With every
+   reported pair repaired and the full mesh open, selection is a **no-removal
+   restoration proposal**, with the lowest active seat deciding. A locally all-open
+   view never permits continuation by itself; restoration uses the same pledges and
+   confirmation as removal. Once complete fresh reports stay all-open for 2 s,
+   restoration may be proposed before the repair grace ends, avoiding a full 30 s
+   wait after a short repaired blip. Removals still wait for the agreed grace end.
 4. **Announcement.** The decider sends the decision (survivor set and the loss set it
    used; the sealed-departure app kind) to every seat. A receiver accepts it only if the
-   sender's latest report to it was all-open and no lower index reported all-open to it;
-   anything else fails closed.
-5. **Agreement and settle tick.** Each survivor closes its links to the removed seats and
+   sender's latest report to it was all-open and no lower index reported all-open to it
+   (or it is the validated lowest seat of the selected majority clique);
+   anything else fails closed. This is a proposal: no seat leaves or closes a pair
+   yet. Each active seat, including a prospective victim, pledges at most one exact
+   topology snapshot per incident and echoes it to the decider. RTT samples are
+   excluded. Before the agreed pledge cutoff, the decider confirms only after every
+   active seat has echoed the same snapshot. At cutoff a majority of the original
+   active set may confirm it, excluding every missing pledger from the survivor set;
+   later pledges cannot change that result. Without a majority the decider leaves.
+   The final survivor set must contain at least two seats. A fallback clique must
+   still be a majority after missing pledgers are excluded; otherwise nobody confirms.
+   One pledge per seat and intersecting majorities prevent competing proposals,
+   including proposals with disjoint survivors, from both becoming effective.
+   The first issued confirmation is frozen immediately; late or backdated echoes
+   cannot change it. Opening an additional pair while agreement is pending does
+   not alter the pledged snapshot or abort its surviving clique. Only a loss
+   between proposed survivors invalidates it.
+5. **Agreement and settle tick.** After the decider's confirmation, each survivor closes its links to the removed seats and
    runs the existing departure protocol for each of them over survivor pairs (proposal
    48 with a new pair-loss value in its u8 reason field, recovery 49, ready 50, acknowledgement 51). A pair-loss
    proposal without a matching accepted decision is refused. The **settle tick** for a
    removed seat is that protocol's agreed cutoff: the first tick missing from the union
    of the survivors' receive frontiers for that seat. Its batches before the cutoff
    count, none after; a second removal waits for the first, as today.
-6. **Everyone else leaves.** A seat named as removed leaves on the announcement. A seat
-   that receives no acceptable decision within 10 s after the repair grace ends leaves
-   locally with the pair-loss reason, and never computes a selection of its own. If no
-   seat is all-open (for example pairs a-b and c-d both lost among four seats), nobody
-   can decide, every seat times out, and the match ends for everyone. A further pair
+   The session bounds this existing departure protocol: `settling` itself owns no
+   timer in the pure policy. A confirmed restoration with no removals completes the
+   incident directly. Any verified authenticated exclusion stops an excluded seat,
+   even if it did not pledge or held a stale all-open view.
+6. **Everyone else leaves.** A seat named as removed leaves after the confirmation. A seat
+   that has not pledged by the agreed cutoff (10 s after the agreed repair grace ends) leaves
+   locally with the pair-loss reason. If no majority clique exists (for example
+   pairs a-b and c-d lost among four seats, or a 4-4 split at eight), nobody can decide
+   and the match ends. An isolated fourth seat leaves while the other three continue;
+   in a 5-4 split the five continue. Unreachable outsiders leave at the shared cutoff
+   and may rejoin; they cannot receive live game controls across the cut. A further pair
    loss after a decision is sent and before its departures settle also fails closed for
    everyone (the existing overlapping-departure rule).
+
+The session supplies a common incident-relative time base and an agreed pledge
+deadline covering the repair grace plus its 10 s decision window. Pledged seats allow
+another bounded 10 s for the decider's confirmation to arrive; without it they leave.
+Receivers add a fixed 500 ms tolerance to their give-up timers. A majority
+confirmation is accepted even if the receiver's clock has not reached the decider's
+cutoff: the decider alone fixes the pledge set. Policy calls clamp time to a monotonic
+high-water mark, so message receipt stamps processed after a timer cannot reopen it.
+The decider resends its unchanged proposal once a second until cutoff; a receiver
+may refuse a stale-view proposal and accept the same proposal later after its reports
+catch up. Echo only an accepted proposal, only to its decider, as a distinct pledge
+control. Proposal broadcasts must never be routed as pledges. The frozen confirmation
+is resent once a second through cutoff + 10 s, then resending stops.
+The confirmation carries the original proposal, its pledge set and the final survivor
+set, so every continuing seat excludes exactly the same missing members. Each seat may detect
+the loss at a different time. Election uses the agreed grace end (pledge deadline
+minus 10 s); local detection never restarts that grace or creates a private acceptance
+deadline. A valid proposal may arrive during a receiver's repair grace because
+both relay-failure reports already prove that repair was attempted. Local link truth
+does not age out; remote report freshness and the 2 s quiet period still gate election.
 
 Continuing therefore always requires the single decider's announcement, and every
 survivor runs the same agreed departure on it, so the two sides of a partition cannot
 both continue. With one lost pair among three or more seats a decider always exists and
 the seat of the pair with the higher roster index leaves, which is owner question 2's case.
 
-The removed seat leaves through the normal departure path (shared seats keep their
+The removed seat may rejoin through the existing departure/rejoin flow if its links recover.
+It leaves through the normal departure path (shared seats keep their
 faction; the last seat of a faction goes to the departure policy) and sees `Connection
 to <name> could not be restored. You have left the match.`; survivors see `<name> left:
 their connection to <other> failed.` Forwarding j's batches through a third peer in
@@ -507,20 +569,15 @@ Totals, adding each slice's cohort numbers with no multiplier: medians 23.894 h,
 **20.644 h**, p80s 5.854 + 20.973 + 5.854 + 5.854 + 9.909 = **48.444 h**. The cross-network qualification (section 5, last paragraph) is
 outside these PR-cycle measurements.
 
-## Open owner questions
+## Owner decisions
 
-Recommendation first in each; everything else in this document follows existing owner
-decisions or is an infrastructure choice the lanes make.
+Decided 2026-10-14 (legacy EAWR-3669):
 
-1. **A newcomer who cannot reach one player.** Recommended: refuse that newcomer with a
-   message naming the player it could not reach; the room keeps its seat open.
-   Alternative: keep it in staging as "not connected to X" and let the host decide; Start
-   stays blocked until it leaves. The first keeps rooms startable without host action.
-2. **Two players who lose only each other in battle.** Recommended: after the 30 s repair
-   attempt, the agreed rule removes one of them (the one with more lost connections, ties
-   to the later seat) and the match continues. Alternative: end the match for everyone.
-   The first follows "held seat then departure" (decision 4) for one seat instead of
-   stopping nine players. (Implementation note, not part of the question: the removal is
-   announced by one fully connected player and agreed through the departure protocol,
-   so both sides of a broken link always reach the same result; in the rare case where
-   no player is still connected to everyone, the match ends.)
+1. **A newcomer who cannot reach one player.** Refuse the newcomer with a curated
+   message naming that player; the room keeps the seat open for a refill.
+2. **Asymmetric pair loss in battle.** Try relay repair first. After repair fails,
+   remove the player with fewer reachable peers, ties to the later seat, using the
+   single decider and agreement protocol above. Tell every peer the reason; the
+   removed player may rejoin if its links recover. With no all-open decider,
+   the largest connected majority clique continues; without a majority clique,
+   everyone leaves at the deadline.

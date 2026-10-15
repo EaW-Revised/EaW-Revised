@@ -1341,8 +1341,16 @@ int serial_profile(const std::filesystem::path& root, const std::uint64_t ticks,
                     << counts.queries << ',' << counts.warm << ',' << counts.cold << ',' << counts.repeats << ','
                     << counts.cross_player << ',' << counts.scalar_hits << '\n';
             });
+            foc::ai::Engine::observe_inputs([](const std::uint64_t tick, const foc::ai::Engine::InputCounts& counts) noexcept {
+                std::cout << "AI-INPUT-COUNTS," << tick << ',' << counts.view_rows << ',' << counts.producer_entities
+                    << ',' << counts.producer_prepasses << ',' << counts.pad_rows << ',' << counts.pad_prepasses
+                    << ',' << counts.pad_queries << ',' << counts.late_prepasses << '\n';
+            });
         }
-        ~QueryReporting() { foc::ai::ThreatGrid::observe_queries(nullptr); }
+        ~QueryReporting() {
+            foc::ai::ThreatGrid::observe_queries(nullptr);
+            foc::ai::Engine::observe_inputs(nullptr);
+        }
     } query_reporting;
     auto content = load(root, false, false, {}, false, {}, {}, {}, false, true);
     if (!content) return 1;

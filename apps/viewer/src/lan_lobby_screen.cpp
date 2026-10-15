@@ -1,4 +1,6 @@
 #include "lan_lobby_screen.hpp"
+#include "online_service_settings.hpp"
+#include "settings_store.hpp"
 #include "skirmish_prepare.hpp"
 
 #include "viewer_path.hpp"
@@ -417,6 +419,10 @@ bool EawrLanLobby::build(Options options) {
     impl_->colour = options_.player_colour;
     impl_->lobby_chat = model::ChatLog();
     impl_->online_rooms = options_.online_rooms;
+    if (!options_.online_settings) {
+        if (const auto* saved = ActiveSettings::get()) options_.online_settings = saved->network;
+        else options_.online_settings = SettingsStore{}.load().settings.network;
+    }
 
     resources.content = options_.content;
     if (!resources.content) {
@@ -557,12 +563,13 @@ bool EawrLanLobby::build(Options options) {
         match_->configure_factions(scene::faction_order(*resources_->content->catalog));
     }
     built_ = true;
+    lan_match_ = match_;
     return true;
 }
 
 // ---- Showing and closing ----------------------------------------------------------------------
 
-void EawrLanLobby::show(Node& parent) {
+void EawrLanLobby::show(Node& parent, std::optional<model::LobbySourceKind> initial_source) {
     if (!built_ || shown_) return;
     parent.add_child(this);
     set_visible(true);
@@ -573,6 +580,7 @@ void EawrLanLobby::show(Node& parent) {
     impl_->source = impl_->join_selection.source() == model::LobbySourceKind::lan ? options_.source
                   : std::shared_ptr<model::LobbyGameSource>(impl_->online_rooms);
     open_lobby();
+    if (initial_source) select_source(*initial_source);
 }
 
 void EawrLanLobby::clear_page() {
@@ -1188,6 +1196,12 @@ void EawrLanLobby::refresh_lobby() {
         impl.list_notice = impl.online_rooms
             ? std::string(model::online_list_notice(impl.online_rooms->last_error().has_value(), impl.online_rooms_total))
             : std::string(model::online_join_notice(model::OnlineJoinStatus::not_configured));
+        if (!impl.online_rooms && options_.online_settings) {
+            if (const auto error = model::validate_online_settings(*options_.online_settings, true)) impl.list_notice = error->message;
+        } else if (impl.online_rooms) {
+            if (const auto error = impl.online_rooms->last_error(); error && (error->code == "EAWR-NET-1519" || error->code == "EAWR-NET-1528"))
+                impl.list_notice = "Could not reach or trust the online service. Check Network Options.";
+        }
         impl.chat_open = impl.online_rooms && !impl.players.empty();
         impl.status = impl.list_notice;
         if (auto* notice = EAWR_CONTROL(EawrUiLabel, online_notice_label)) {
@@ -1295,6 +1309,16 @@ void EawrLanLobby::select_source(const model::LobbySourceKind source) {
     if (page_ != Page::lobby || source == impl_->join_selection.source()) return;
     cancel_join();
     impl_->join_selection.select_source(source);
+    if (source == model::LobbySourceKind::online) {
+        if (!options_.online_rooms && !impl_->online_rooms && options_.online_settings) {
+            auto configured = online_match_options(*options_.online_settings);
+            if (configured) impl_->online_rooms = make_live_online_source(configured.value());
+        }
+        static_cast<void>(configure_online_match());
+    } else {
+        if (match_ && match_ != lan_match_) match_->cancel();
+        match_ = lan_match_;
+    }
     // No old source rows, queued chat, selection or invitation survives a switch.
     if (impl_->source) static_cast<void>(impl_->source->take_chat());
     impl_->source = source == model::LobbySourceKind::lan ? options_.source
@@ -1317,6 +1341,23 @@ void EawrLanLobby::select_source(const model::LobbySourceKind source) {
     impl_->last_message.clear();
     impl_->status.clear();
     open_lobby();
+    if (source == model::LobbySourceKind::online && !impl_->online_rooms) {
+        if (const auto error = model::validate_online_settings(*options_.online_settings, true)) {
+            note_chat(model::ChatKind::error, error->message); impl_->list_notice = error->message; refresh_lobby();
+        }
+    }
+}
+
+bool EawrLanLobby::configure_online_match() {
+    if (options_.match) { match_ = options_.match; return true; }
+    if (online_match_) { match_ = online_match_; return true; }
+    auto configured = online_match_options(*options_.online_settings);
+    if (!configured) return false;
+    if (match_ && match_ != lan_match_) match_->cancel();
+    match_ = make_online_match(std::move(configured).value(), options_.diagnostic_root, options_.input_delay);
+    match_->configure_factions(scene::faction_order(*resources_->content->catalog));
+    online_match_ = match_;
+    return true;
 }
 
 // The room code field: a four-character code or a full invitation goes straight to the two-player
@@ -1329,7 +1370,7 @@ void EawrLanLobby::join_code(const std::string& code) {
     if (!canonical) canonical = model::normalize_invitation_code(code);
     if (!canonical) {
         note_chat(model::ChatKind::error, "Enter four letters or digits.");
-    } else if (!match_) {
+    } else if (!impl_->online_rooms || !configure_online_match()) {
         note_chat(model::ChatKind::error, std::string(model::online_join_notice(model::OnlineJoinStatus::not_configured)));
     } else if (impl_->join_selection.begin(model::OnlineInvitationTarget{"online", *canonical})) {
         note_chat(model::ChatKind::notice, "Finding game…");
@@ -1337,7 +1378,7 @@ void EawrLanLobby::join_code(const std::string& code) {
         match_->configure_seats(std::vector<sim::tactical::PlayerId>(impl_->direct_seats, 1));
         configure_staging();
         match_->join(*canonical);
-        open_staging(false, {}, *canonical);
+        open_staging(false, {}, {});
         return;
     } else {
         note_chat(model::ChatKind::error, std::string(model::online_join_notice(model::OnlineJoinStatus::not_configured)));
@@ -1497,11 +1538,17 @@ void EawrLanLobby::pump_online() {
             // Admitted: the room's code goes into the two-player online bridge, then the shared staging.
             const std::string game = impl.join_game, room = impl.join_room;
             close_password_prompt();
+            if (!configure_online_match() || (!options_.match && result.admission->bridge_invitation.empty())) {
+                impl.online_rooms->cancel(result.attempt);
+                core::Diagnostic error; error.code = "EAWR-NET-1752"; error.message = "The game is no longer available.";
+                online_failure(error);
+                continue;
+            }
             impl.direct_seats = 2;
             match_->configure_seats(std::vector<sim::tactical::PlayerId>(impl.direct_seats, 1));
             configure_staging();
-            match_->join(room);
-            open_staging(false, game, room);
+            match_->join(options_.match ? room : result.admission->bridge_invitation);
+            open_staging(false, game, {});
             return;
         }
         const model::OnlineFailure failure = result.refusal ? model::classify_online_failure(result.refusal->code)
@@ -1728,12 +1775,14 @@ void EawrLanLobby::begin_hosting() {
     const auto* name = EAWR_CONTROL(EawrUiEdit, "IDC_INTERNET_GAME_NAME_EDIT");
     const std::optional<std::string> cleaned = model::clean_game_name(name != nullptr ? utf8(name->get_text()) : "");
     if (!cleaned) {
+        impl.host_password.clear(); impl.host_options.password.clear();
         // Retail puts the focus back on the name edit when it is empty.
         if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_INTERNET_GAME_NAME_EDIT")) edit->grab_focus();
         return;
     }
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
     if (online && !impl.online_rooms) {
+        impl.host_password.clear(); impl.host_options.password.clear();
         show_failure(std::string(model::online_join_notice(model::OnlineJoinStatus::not_configured)));
         return;
     }
@@ -1743,15 +1792,19 @@ void EawrLanLobby::begin_hosting() {
     impl.host_options.password = online && password != nullptr ? model::clamp_room_password(utf8(password->get_text())) : std::string{};
     impl.host_password = impl.host_options.password;
     impl.last_online_notice.clear();
+    if (online && !configure_online_match()) {
+        impl.host_password.clear(); impl.host_options.password.clear();
+        show_failure("Set the online service in Network Options first."); return;
+    }
     if (online && !impl.online_rooms->set_host_password(impl.host_password)) {
-        // The source still lists the previous room: hosting now would publish its password, not this one.
-        impl.host_password.clear();
+        impl.host_password.clear(); impl.host_options.password.clear();
         show_failure(std::string(model::online_failure_text(model::OnlineFailure::password_locked)));
         return;
     }
     match_->configure_seats(impl.human_owners);
     match_->set_port_mapping(state_->port_mapping && state_->port_mapping->is_pressed());
     configure_staging();
+    if (online) { impl.online_rooms->set_bridge_invitation({}); match_->set_public_invitation(impl.host_password.empty()); }
     match_->host(options_.game_port);
     open_staging(true, *cleaned, {});
 }
@@ -1863,6 +1916,13 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     }
     if (auto* title = EAWR_CONTROL(EawrUiLabel, "IDC_INTERNET_DIALOG_HEADER")) {
         title->set_text(resolved(resources.text, host ? "TEXT_INTERNET_HOST_GAME_TITLE" : "TEXT_INTERNET_JOIN_GAME_TITLE"));
+    }
+    if (host && impl.join_selection.source() == model::LobbySourceKind::online && impl.host_password.empty()) {
+        auto* invitation = memnew(EawrUiLabel); invitation->set_name("EAWR_ONLINE_PUBLIC_INVITATION");
+        invitation->set_position(Vector2(dialog.frame->get_size().x * 0.08F, dialog.frame->get_size().y * 0.10F));
+        invitation->set_size(Vector2(dialog.frame->get_size().x * 0.84F, 28.0F));
+        invitation->set_mouse_filter(Control::MOUSE_FILTER_IGNORE); dialog.frame->add_child(invitation);
+        state.controls["EAWR_ONLINE_PUBLIC_INVITATION"] = invitation;
     }
     // The joiner never edits the host's map; the host's list is filled below.
     if (!host) {
@@ -2216,6 +2276,14 @@ void EawrLanLobby::refresh_staging() {
     }
     match_->pump_setup(built ? *built : skirmish::FixtureOptions{});
     const LanView view = match_->view();
+    const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
+    if (online && impl.host && impl.online_rooms) {
+        impl.online_rooms->set_bridge_invitation(match_->bridge_invitation(), match_->bridge_ownership());
+        if (auto* invitation = EAWR_CONTROL(EawrUiLabel, "EAWR_ONLINE_PUBLIC_INVITATION")) {
+            // Display public invites in their own control, never in chat/status reports.
+            invitation->set_text(text(impl.host_password.empty() && view.invitation_code.size() == 4 ? "Room code: " + view.invitation_code : std::string{}));
+        }
+    }
     if (!impl.host) {
         if (auto offered = match_->offered_setup()) {
             if (!impl.offered || offered->map != impl.offered->map || !same_slots(offered->slots, impl.offered->slots)) {
@@ -2228,7 +2296,7 @@ void EawrLanLobby::refresh_staging() {
     // The status line is one notice per change, like a chat line.
     const auto room = match_->lobby_state();
     std::string status;
-    if (view.phase != LanPhase::idle && view.phase != LanPhase::running) status = lan_message(view);
+    if (view.phase != LanPhase::idle && view.phase != LanPhase::running) status = online ? view.message : lan_message(view);
     if (view.phase == LanPhase::setup && view.read_only && !view.accept_enabled) status = utf8(resolved(resources.text, "TEXT_WAITING"));
     if (lan_reconnect_disabled_notice(view)) {
         if (!status.empty()) status += "\n";

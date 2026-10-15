@@ -30,11 +30,26 @@ Existing starts continue to apply SK-01 to SK-24 and SC-01/SC-02.
   displayed from one while stored from zero. Start requires at least two
   occupied teams, each with one faction; opposing teams may use the same
   faction (WSS-16–18). Network humans remain a separate staging path.
-  Each occupied teammate needs a distinct valid spawn marker on its chosen
-  side (WSS-54); insufficient markers disable Start with a diagnostic.
+  Uneven splits within total map capacity are allowed; the lobby does not
+  limit teammates to their side's spawn-marker count (WSS-54). A teammate
+  beyond that count gets no starting fleet or marker-derived camera/facing;
+  no marker is reused and no fallback spawn is chosen. The player retains
+  its credits and population account. Coruscant's six-player map has three
+  spawn markers per team, so a 2v4 match starts with no fleet for the fourth
+  Team 2 player. Evidence: effective map data SS-OV01 and debug build
+  SS-OV02–04, recorded in the [setup walk](walks/skirmish-setup.md#uneven-teams-and-spawn-overflow).
   Stations are shared team structures owned by the first occupied teammate,
   rather than one station per player (WSS-61). Authored player capacity and
   team/start count remain separate limits.
+  A modded zero-spawn team follows the same overflow rule for every member.
+  Standalone special-weapon sources remain per playable player, independently
+  of spawn selection (WSW-01, debug build SS-OV05). The remake's zero yaw for
+  overflow is a project mapping of retail's zero facing vector; equal
+  reinforcement behavior is unverified. Project viewer defaults prefer a
+  free-marker team when adding a LAN AI row, then allow opposing-team overflow;
+  an overflow human camera uses the team's spawn centroid, then its first
+  station in record order, then the declared-extents centre. Retail assigns
+  no starting camera there. These defaults do not add a lobby refusal.
   Felucia, Kamino, Ryloth and Saleucami provide three independent starts;
   the other stock space maps provide two. A four-team free-for-all needs a
   custom map with four starts. Different teams remain hostile even when they

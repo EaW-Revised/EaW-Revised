@@ -363,6 +363,22 @@ public:
     [[nodiscard]] core::Result<ServiceReport> service(
         const sim::PartitionExecutor& executor, const ServiceOptions& options = {});
 
+    // Object turn (#3644 A2a, #3702): services only the given object-script
+    // instances inside the next tick, before that tick's barrier service(). Due
+    // events (key tick up to the next tick) addressed to them are delivered, the
+    // threads are pumped on the partitioned script-instances phase, and the
+    // staged output is committed in ascending instance ID (a faulted instance
+    // drops only its own output and is removed, as in service()). completed_tick
+    // does not advance; a later service() of the same tick still runs. The turn
+    // draws random numbers from its own key domain (turn_random_domain) on the
+    // instance's one draw counter, so no key of the barrier service repeats, also
+    // across save() and load() between the turn and the barrier. Commands and
+    // posts continue the instance's sequences. Fails with EAWR-SCRIPT-0210,
+    // before any state changes, for an unknown or non-object instance, a
+    // duplicate ID, the GC or query clock profile, or an immediate-effect host.
+    [[nodiscard]] core::Result<ServiceReport> service_turn(
+        const sim::PartitionExecutor& executor, const std::vector<std::uint64_t>& instances);
+
     // The engine reads a global of an instance at the tick barrier (#79):
     // its value when it is nil, a boolean, a number, a string or a handle;
     // nullopt otherwise. Reads only.

@@ -111,6 +111,33 @@ constexpr int detail_slot_maximum = 16;
 }
 
 // Command names are identifiers: letters, digits and underscores, so a key line stays one line.
+[[nodiscard]] bool valid_service_host(const std::string_view host) {
+    if (host.empty() || host.size() > 253) return false;
+    if (host.find(':') != std::string_view::npos) {
+        const auto compressed = host.find("::");
+        if (host.find(":::") != std::string_view::npos || (compressed != std::string_view::npos && host.find("::", compressed + 2) != std::string_view::npos)) return false;
+        if (compressed == std::string_view::npos && (host.front() == ':' || host.back() == ':')) return false;
+        std::size_t groups = 0, from = 0;
+        while (from <= host.size()) {
+            const auto end = std::min(host.find(':', from), host.size()); const auto group = host.substr(from, end - from);
+            if (!group.empty()) {
+                if (group.size() > 4 || !std::all_of(group.begin(), group.end(), [](unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); })) return false;
+                ++groups;
+            }
+            from = end + 1;
+        }
+        return compressed == std::string_view::npos ? groups == 8 : groups < 8;
+    }
+    std::size_t from = 0;
+    while (from <= host.size()) {
+        const auto end = std::min(host.find('.', from), host.size()); const auto label = host.substr(from, end - from);
+        if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-'
+            || !std::all_of(label.begin(), label.end(), [](unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'; })) return false;
+        from = end + 1;
+    }
+    return true;
+}
+
 [[nodiscard]] bool valid_command_name(const std::string_view name) {
     return !name.empty() && name.size() <= 64
         && std::all_of(name.begin(), name.end(), [](const char c) {
@@ -225,6 +252,35 @@ constexpr KeyFact key_facts[] = {
 
 } // namespace
 
+std::optional<core::Diagnostic> validate_online_settings(const NetworkSettings& settings, const bool require_service) {
+    const auto failure = [](const char* code, const char* message) {
+        core::Diagnostic diagnostic;
+        diagnostic.code = code; diagnostic.message = message;
+        return std::optional<core::Diagnostic>{std::move(diagnostic)};
+    };
+    if (settings.online_host.empty()) {
+        if (require_service) return failure("EAWR-NET-1745", "Set the online service in Network Options first.");
+        // The project default is deliberately unconfigured.
+    } else if (!valid_service_host(settings.online_host)) {
+        return failure("EAWR-NET-1746", "Enter a service host name or address without a URL or port.");
+    }
+    if (settings.online_port < 1 || settings.online_port > 65535)
+        return failure("EAWR-NET-1747", "Enter an online service port from 1 to 65535.");
+    if (settings.online_trust != "pin" && settings.online_trust != "ca-file" && settings.online_trust != "system")
+        return failure("EAWR-NET-1748", "Choose system, certificate pin or CA file trust.");
+    if (settings.online_trust == "system" && !settings.online_host.empty()
+        && (settings.online_host.find(':') != std::string::npos || std::all_of(settings.online_host.begin(), settings.online_host.end(), [](unsigned char c) { return (c >= '0' && c <= '9') || c == '.'; })))
+        return failure("EAWR-NET-1754", "System certificate trust needs the service's DNS host name. Use a pin or CA file for an address.");
+    if (settings.online_trust == "pin" && (!settings.online_host.empty() || !settings.online_pin.empty())
+        && (settings.online_pin.size() != 64 || !std::all_of(settings.online_pin.begin(), settings.online_pin.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        }))) return failure("EAWR-NET-1749", "Enter the server certificate's 64-digit SHA-256 pin.");
+    if (settings.online_ca_file.size() > 4096 || std::any_of(settings.online_ca_file.begin(), settings.online_ca_file.end(), [](unsigned char c) { return c < 32 || c == 127; })
+        || (settings.online_trust == "ca-file" && !settings.online_host.empty() && settings.online_ca_file.empty()))
+        return failure("EAWR-NET-1750", "Choose a CA certificate file for this service.");
+    return std::nullopt;
+}
+
 double GameplaySettings::scroll_speed() const noexcept {
     const int stop = std::clamp(scroll_stop, 0, scroll_stop_count - 1);
     return static_cast<double>(stop) * scroll_speed_maximum / static_cast<double>(scroll_stop_count - 1);
@@ -268,6 +324,16 @@ std::string serialize_settings(const PlayerSettings& settings) {
         text += detail_key(slot) + "=" + std::to_string(settings.video.detail[slot]) + "\n";
     }
     text += "video.render_profile=" + std::string(profile_name(settings.video.render_profile)) + "\n";
+    // Refuse line injection even when the caller has not validated a draft yet.
+    const auto line_value = [](const std::string& value) {
+        return std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }) ? value : std::string{};
+    };
+    text += "network.online_host=" + line_value(settings.network.online_host) + "\n";
+    text += "network.online_port=" + std::to_string(settings.network.online_port) + "\n";
+    text += "network.online_trust=" + line_value(settings.network.online_trust) + "\n";
+    text += "network.online_pin=" + line_value(settings.network.online_pin) + "\n";
+    text += "network.online_ca_file=" + line_value(settings.network.online_ca_file) + "\n";
+    text += "network.online_relay_only=" + std::to_string(settings.network.online_relay_only) + "\n";
     for (const auto& [command, key] : settings.keys) {
         if (valid_command_name(command) && valid_key_text(key)) text += "key." + command + "=" + key + "\n";
     }
@@ -308,6 +374,19 @@ SettingsLoad parse_settings(const std::string_view text) {
         }
         const std::string key(trim(line.substr(0, equals)));
         const std::string_view value = trim(line.substr(equals + 1));
+        if (key.rfind("network.online_", 0) == 0) {
+            auto& network = load.settings.network;
+            if (key == "network.online_host") network.online_host = value;
+            else if (key == "network.online_trust") network.online_trust = value;
+            else if (key == "network.online_pin") network.online_pin = value;
+            else if (key == "network.online_ca_file") network.online_ca_file = value;
+            else if (key == "network.online_port") network.online_port = parse_int(value).value_or(0);
+            else if (key == "network.online_relay_only") {
+                if (value == "0" || value == "1") network.online_relay_only = value == "1";
+                else load.notes.emplace_back("EAWR-NET-1751: Choose whether online games require the relay.");
+            } else load.notes.emplace_back("unknown online setting ignored");
+            continue;
+        }
         if (key.rfind("key.", 0) == 0) {
             const std::string command = key.substr(4);
             if (valid_command_name(command) && valid_key_text(value)) load.settings.keys[command] = std::string(value);
@@ -349,6 +428,7 @@ SettingsLoad parse_settings(const std::string_view text) {
     for (const std::string& repaired : clamp_settings(load.settings)) {
         load.notes.push_back("value out of range clamped: " + repaired);
     }
+    if (const auto error = validate_online_settings(load.settings.network)) load.notes.push_back(core::format_diagnostic(*error));
     return load;
 }
 

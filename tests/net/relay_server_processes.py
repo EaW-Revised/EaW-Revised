@@ -58,7 +58,7 @@ def directory_guest() -> None:
         principal, raw = field(opened[2:]); assert len(principal) == 32 and raw == b""
         send(stream, 25, text(credentials["room"]) + text(credentials["password"]) + text("Guest\n"))
         admitted = receive(stream); assert admitted[:2] == b"\x02\x21"
-        room, raw = field(admitted[2:]); assert room == credentials["room"] and struct.unpack("!I", raw)[0] == 2
+        room, raw = field(admitted[2:]); assert room == credentials["room"] and struct.unpack("!I", raw[:4])[0] == 2 and raw[4:] == text("")  # seat, no invitation
         send(stream, 27, text("hello from another process\n")); assert receive(stream) == b"\x02\x1e"
         send(stream, 26); assert receive(stream) == b"\x02\x1e"
     print("directory guest passed")
@@ -156,12 +156,13 @@ def main() -> None:
             assert system_health.returncode != 0 and "EAWR-NET-1740" in system_health.stderr, system_health
             assert str(cert) not in system_health.stderr and "127.0.0.1" not in system_health.stderr
             host = connect()
-            send(host, 1, text(token) + text("host") + struct.pack("!I", 1000))
+            send(host, 1, text(token) + text("host") + struct.pack("!II", 1000, 0))  # lifetime, alias flag
             published = receive(host); assert published[:2] == b"\x02\x05"
             code, raw = field(published[2:]); identity, raw = field(raw)
             alias, raw = field(raw)
-            assert alias == "" and len(raw) == 4
-            assert struct.unpack("!I", raw)[0] == 1000
+            assert alias == ""
+            assert struct.unpack("!I", raw[:4])[0] == 1000
+            owner, raw = field(raw[4:]); assert len(owner) == 32 and raw == b""  # publisher ownership capability
             assert len(code) == 32 and identity == "host"
             peer = connect(); send(peer, 2, text(code) + text("peer"))
             for stream, local, remote in ((host, "host", "peer"), (peer, "peer", "host")):
@@ -180,7 +181,7 @@ def main() -> None:
             sender, raw = field(forwarded[2:]); assert sender == "host" and raw == signal
             send(peer, 3, b"reverse")
             sender, raw = field(receive(host)[2:]); assert sender == "peer" and raw == b"reverse"
-            unauthorized = connect(); send(unauthorized, 1, text("wrong") + text("intruder") + struct.pack("!I", 1000))
+            unauthorized = connect(); send(unauthorized, 1, text("wrong") + text("intruder") + struct.pack("!II", 1000, 0))
             assert receive(unauthorized) == b"\x02\x09" + struct.pack("!I", 1520)
             malformed = connect(); send(malformed, 4, b"trailing")
             assert receive(malformed) == b"\x02\x09" + struct.pack("!I", 1521)
@@ -225,7 +226,7 @@ def main() -> None:
                                 ("Process room", "Host", "build", "protocol", "content", "mod", "mode", "map"))
             metadata += struct.pack("!IIII", 1, 2, 0, 0)
             room_password = "process-private"
-            send(directory_host, 22, text(token) + metadata + text(room_password))
+            send(directory_host, 22, text(token) + metadata + text(room_password) + text("") + text(""))  # no bridge invitation or owner
             response = receive(directory_host); assert response[:2] == b"\x02\x20"
             room, raw = field(response[2:]); ownership, raw = field(raw)
             assert len(room) == len(ownership) == 32 and room != ownership and struct.unpack("!I", raw)[0] == 30000

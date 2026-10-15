@@ -226,6 +226,9 @@ public:
     [[nodiscard]] const std::optional<BattleOutcome>& outcome() const noexcept;
     // Live units in ascending ID; a unit leaves the list when its hull reaches zero.
     [[nodiscard]] std::vector<UnitState> units() const;
+    // Const completed-world read, safe during a worker phase with no world writes.
+    // Copies only UnitState, without gathering unrelated service components.
+    [[nodiscard]] std::optional<UnitState> unit_state(EntityId unit) const;
     // Live squadrons in ascending container ID, each with its live craft (#271).
     [[nodiscard]] std::span<const Squadron> squadrons() const noexcept;
     // The retail fog cells of a session bound to fog rules (#274); null otherwise.

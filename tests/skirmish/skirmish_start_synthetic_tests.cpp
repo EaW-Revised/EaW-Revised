@@ -110,6 +110,15 @@ void synthetic_special_sources() {
         expect(unit.state.position == Vec3{} && unit.state.rotation == eawr::sim::math::identity_quat()
             && !unit.hull && !unit.combat_power && !unit.reveal_range,
             "WSW-01: absent map source falls back to the origin without ship health, power or sensor");
+    auto overflow_fixture = fixture;
+    overflow_fixture.slots.push_back({4, "Rebel", 0, false, {}});
+    inputs.lobby_colours.push_back({"Test_Overflow_Colour", {10, 11, 12}});
+    const auto overflow_source = skirmish::build_start(overflow_fixture, inputs);
+    expect(overflow_source && std::count_if(overflow_source.value().units.begin(), overflow_source.value().units.end(),
+        [](const auto& unit) { return unit.state.owner == 4 && unit.role == skirmish::UnitRole::special_weapon; }) == 1
+        && std::none_of(overflow_source.value().units.begin(), overflow_source.value().units.end(),
+            [](const auto& unit) { return unit.state.owner == 4 && unit.role != skirmish::UnitRole::special_weapon; }),
+        "WSW-01/WSS-54: an overflow playable player retains its standalone source but gets no fleet");
     auto backdrop = object(40, "Test_Planet", "SpaceProp", 3, "Neutral", at(700, -900), 90);
     backdrop.special_weapon_source = true; backdrop.layer_z_adjust = whole(-2500);
     backdrop.orientation_degrees->x = whole(12);
@@ -852,7 +861,10 @@ void synthetic_failures() {
     {
         auto inputs = base_inputs;
         inputs.placements.erase(inputs.placements.begin() + 4);
-        fails(base_fixture, inputs, skirmish::diagnostic_codes::fixture, "a team without a spawn marker fails");
+        const auto start = skirmish::build_start(base_fixture, inputs);
+        expect(start && std::none_of(start.value().units.begin(), start.value().units.end(), [](const auto& unit) {
+            return unit.state.owner == 2 && unit.role != skirmish::UnitRole::station;
+        }), "WSS-54: a team with no spawn marker keeps its station but gets no starting fleet");
     }
     {
         auto inputs = base_inputs;
@@ -1029,6 +1041,115 @@ void synthetic_heights() {
 }
 
 void setup_contract() {
+    // WSS-54: six-player capacity is independent of three spawn markers per team.
+    {
+        auto tables = synthetic_tables();
+        for (const auto* tag : {"MP_Default_Credits", "Tactical_Build_Time_Multiplier", "Space_Elevated_Vulnerability_Factor",
+            "Space_Elevated_Vulnerability_Duration", "Space_Reinforcement_Collision_Check_Distance"})
+            tables.constants.scalars.push_back({tag, whole(std::string_view(tag) == "MP_Default_Credits" ? 1000
+                : std::string_view(tag) == "Space_Elevated_Vulnerability_Factor" ? -1 : 1), {}});
+        tables.ai_credit_multiplier = whole(1);
+        auto inputs = synthetic_inputs(tables);
+        inputs.placements.pop_back();
+        inputs.placements.push_back(marker(15, "Team_00_Spawn_Point_Marker", at(50, 60), 90));
+        inputs.placements.push_back(marker(16, "Team_01_Spawn_Point_Marker", at(-30, -40), 225));
+        inputs.placements.push_back(marker(17, "Team_01_Spawn_Point_Marker", at(-50, -60), 270));
+        for (auto& faction : inputs.factions) faction.space_unit_cap = 25;
+        for (auto& forces : inputs.faction_forces) forces.garrison_delay_frames = 600;
+        for (std::uint32_t colour = 3; colour < 6; ++colour)
+            inputs.lobby_colours.push_back({"Test_Colour_" + std::to_string(colour), {10, 11, 12}});
+        skirmish::SetupMap map;
+        map.path = inputs.map;
+        map.metadata.capacity = 6;
+        map.metadata.new_markers = true;
+        map.metadata.start_positions = std::vector<eawr::assets::Vec2f>(2);
+        map.teams = {{0, {"Rebel", "Empire"}, 3}, {1, {"Rebel", "Empire"}, 3}};
+        const std::array maps{map};
+        for (const std::uint32_t first_team_players : {2U, 4U}) {
+            skirmish::SetupSelection selection;
+            selection.map = map.path;
+            selection.slots.clear();
+            for (std::uint32_t row = 1; row <= 6; ++row) {
+                const bool rebel = row <= first_team_players;
+                selection.slots.push_back({row, rebel ? "Rebel" : "Empire", rebel ? 0U : 1U, row == 1, {}});
+            }
+            const auto options = skirmish::setup_options(selection, maps);
+            expect(static_cast<bool>(options), "WSS-54: six-player lobby accepts both 2v4 and 4v2");
+            if (!options) continue;
+            auto fixture = synthetic_fixture();
+            fixture.slots = *options.value().slots;
+            const auto start = skirmish::build_start(fixture, inputs);
+            expect(static_cast<bool>(start), "WSS-54: uneven six-player battle builds");
+            if (!start) continue;
+            const auto overflow_player = first_team_players == 2 ? 6U : 4U;
+            expect(std::count_if(start.value().players.begin(), start.value().players.end(),
+                [](const auto& player) { return player.lobby; }) == 6,
+                "WSS-54: all six occupied players survive startup");
+            expect(std::count_if(start.value().units.begin(), start.value().units.end(),
+                [](const auto& unit) { return unit.role == skirmish::UnitRole::station; }) == 2,
+                "WSS-54/61: overflow does not duplicate shared stations");
+            expect(std::none_of(start.value().units.begin(), start.value().units.end(),
+                [&](const auto& unit) { return unit.state.owner == overflow_player; })
+                && std::none_of(start.value().markers.begin(), start.value().markers.end(),
+                    [&](const auto& marker) { return marker.player == overflow_player; })
+                && std::none_of(start.value().setup.free_garrisons.begin(), start.value().setup.free_garrisons.end(),
+                    [&](const auto& binding) { return binding.player == overflow_player; }),
+                "WSS-54: overflow has no fleet, marker or free-garrison binding");
+            for (const auto& slot : fixture.slots) {
+                if (slot.slot == overflow_player) continue;
+                expect(std::count_if(start.value().markers.begin(), start.value().markers.end(), [&](const auto& marker) {
+                    return marker.use == skirmish::MarkerUse::spawn && marker.player == slot.slot;
+                }) == 1, "WSS-54: each supported teammate retains one distinct spawn");
+            }
+            const auto economy = skirmish::economy_rules(start.value(), inputs, tables);
+            expect(economy && economy.value().players.size() == 6,
+                "WSS-54: overflow retains its economy account");
+            if (!economy) continue;
+            const auto* account = economy.value().player(overflow_player);
+            expect(account && account->credits == whole(1000) && account->population_cap == 25
+                && account->reinforcement_yaw == Fixed{}, "WSS-54: overflow retains credits, cap and default facing");
+            std::string expected_hash;
+            for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+                auto session = tactical::TacticalSession::create(start.value().setup, {}, {}, {}, std::nullopt, {}, {}, {}, economy.value());
+                expect(static_cast<bool>(session), "WSS-54: uneven lobby activates a six-ledger session");
+                if (!session) continue;
+                expect(session.value().ledgers().size() == 6, "WSS-54: every player has a ledger");
+                eawr::platform::ThreadWorkerAdapter pool(workers);
+                for (int tick = 0; tick < 8; ++tick) expect(static_cast<bool>(session.value().step(pool)), "WSS-54: uneven session ticks");
+                if (expected_hash.empty()) expected_hash = session.value().state_sha256();
+                expect(session.value().state_sha256() == expected_hash, "WSS-54: uneven start agrees on 1/2/4/8 workers");
+            }
+        }
+    }
+    // WSS-54: modded station-only teams are admitted; all their members overflow.
+    {
+        auto tables = synthetic_tables();
+        for (const auto* tag : {"MP_Default_Credits", "Tactical_Build_Time_Multiplier", "Space_Elevated_Vulnerability_Factor",
+            "Space_Elevated_Vulnerability_Duration", "Space_Reinforcement_Collision_Check_Distance"})
+            tables.constants.scalars.push_back({tag, whole(std::string_view(tag) == "MP_Default_Credits" ? 1000
+                : std::string_view(tag) == "Space_Elevated_Vulnerability_Factor" ? -1 : 1), {}});
+        tables.ai_credit_multiplier = whole(1);
+        auto inputs = synthetic_inputs(tables);
+        inputs.placements.erase(inputs.placements.begin() + 4);
+        for (auto& faction : inputs.factions) faction.space_unit_cap = 25;
+        auto fixture = synthetic_fixture();
+        fixture.slots = {{1, "Rebel", 0, true, {}}, {2, "Empire", 1, false, {}}, {3, "Empire", 1, false, {}}};
+        const auto start = skirmish::build_start(fixture, inputs);
+        expect(static_cast<bool>(start), "WSS-54: a station-only team with two overflow members starts");
+        if (start) {
+            expect(std::count_if(start.value().units.begin(), start.value().units.end(), [](const auto& unit) {
+                return unit.state.owner == 2 && unit.role == skirmish::UnitRole::station;
+            }) == 1 && std::none_of(start.value().units.begin(), start.value().units.end(), [](const auto& unit) {
+                return (unit.state.owner == 2 || unit.state.owner == 3) && unit.role != skirmish::UnitRole::station;
+            }), "WSS-54/61: the all-overflow team retains its one shared station and no fleet");
+            const auto economy = skirmish::economy_rules(start.value(), inputs, tables);
+            expect(economy && economy.value().players.size() == 3
+                && economy.value().player(2) && economy.value().player(3)
+                && economy.value().player(2)->reinforcement_yaw == Fixed{}
+                && economy.value().player(3)->reinforcement_yaw == Fixed{},
+                "WSS-54: every member of a zero-spawn team keeps its independent account and project default yaw");
+        }
+    }
     // WSS-54/61: a 2v2 roster shares two team stations and has four distinct spawns.
     {
         const auto tables = synthetic_tables();
@@ -1066,9 +1187,10 @@ void setup_contract() {
             }
         }
         auto overflow = fixture; overflow.slots.back().team = 0; overflow.slots.back().faction = "Rebel";
-        const auto rejected = skirmish::build_start(overflow, inputs);
-        expect(!rejected && rejected.error().message.find("spawn") != std::string::npos,
-            "a third teammate cannot reuse one of two spawns");
+        const auto overflow_start = skirmish::build_start(overflow, inputs);
+        expect(overflow_start && std::none_of(overflow_start.value().units.begin(), overflow_start.value().units.end(),
+            [](const auto& unit) { return unit.state.owner == 4; }),
+            "WSS-54: a third teammate on two spawns starts without a fleet or duplicate station");
         // Custom maps may author four starts; stock maps author at most three.
         fixture.slots[1].faction = "Rebel";
         for (std::uint32_t team = 2; team < 4; ++team) {
@@ -1381,8 +1503,10 @@ void setup_contract() {
     auto limited = maps;
     limited[0].teams[2].spawn_capacity = 2;
     const auto overflow = skirmish::setup_options(roster, limited);
-    expect(!overflow && overflow.error().message.find("spawn markers") != std::string::npos,
-        "setup rejects team spawn overflow despite sufficient total map capacity");
+    expect(static_cast<bool>(overflow), "WSS-54: setup allows team spawn overflow within total map capacity");
+    limited[0].teams[2].spawn_capacity = 0;
+    expect(static_cast<bool>(skirmish::setup_options(roster, limited)),
+        "WSS-54: zero spawn markers do not add a lobby team limit");
     auto custom = map;
     custom.metadata.capacity = 4;
     custom.metadata.start_positions->resize(4);

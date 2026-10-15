@@ -197,6 +197,7 @@ public:
         return eawr::core::Result<std::optional<GnsSignal>>::success({});
     }
     void outage() { outage_.store(true); }
+    bool outage_observed() const { return outage_.load(); }
     void expire_host() { expect(udp_.send(broker_port_, Bytes{4, role_}), "IPC request expiry"); }
     bool expiry_observed() const { return expiry_observed_; }
     void retry_ready() { expect(udp_.send(broker_port_, Bytes{8, role_}), "IPC retry ready"); }
@@ -233,6 +234,27 @@ private:
     std::size_t poll_calls_{};
     bool native_close_observed_{};
 };
+void closure_refusal_host(std::uint16_t port) {
+    auto endpoint = std::make_shared<ProxyEndpoint>(std::uint8_t{0}, port);
+    GnsOptions options; options.build_identity = "introduced-process-test";
+    options.handshake_timeout = 10s;
+    auto transport = require(GnsTransport::host_introduced(endpoint, options));
+    const auto deadline = Clock::now() + 10s;
+    while (!transport->diagnostic()) {
+        expect(!transport->poll(), "Refusal drain emits no application frame");
+        expect(Clock::now() < deadline, "Closure refusal deadline"); std::this_thread::sleep_for(1ms);
+    }
+    expect(endpoint->outage_observed() && transport->diagnostic()->code == "EAWR-NET-1503",
+        "Typed peer refusal survives earlier service closure");
+    const auto close_deadline = Clock::now() + 1s;
+    while (!transport->closed()) {
+        expect(!transport->poll(), "Terminal refusal emits no application frame");
+        expect(Clock::now() < close_deadline, "Service closure drain is bounded"); std::this_thread::sleep_for(1ms);
+    }
+    expect(transport->diagnostic()->code == "EAWR-NET-1503", "Generic closure never replaces the typed refusal");
+    endpoint->verify_refusal(); endpoint->finish();
+    std::cout << "Typed peer refusal after service closure and bounded terminal drain passed\n";
+}
 void retry_host(std::uint16_t port, bool native_reason = false) {
     auto endpoint = std::make_shared<ProxyEndpoint>(std::uint8_t{0}, port, !native_reason);
     GnsOptions options; options.build_identity = "introduced-process-test";
@@ -333,7 +355,7 @@ void u32(Bytes& bytes, std::uint32_t value) {
 // A native SDK client controls the ACK boundary that two fully automatic
 // adapters cannot expose deterministically. All game envelopes remain existing
 // TcpMessage kinds; IPC markers above belong solely to this test fixture.
-void delayed_ack_peer(std::uint16_t port, bool retry_case, bool native_reason = false) {
+void delayed_ack_peer(std::uint16_t port, bool retry_case, bool native_reason = false, bool closure_refusal = false) {
     auto endpoint = std::make_shared<ProxyEndpoint>(std::uint8_t{1}, port);
     SteamNetworkingIdentity identity{}; identity.SetGenericString(endpoint->rendezvous().local_identity.c_str());
     SteamNetworkingErrMsg reason{}; expect(GameNetworkingSockets_Init(&identity, reason), "Raw GNS initialization");
@@ -355,6 +377,40 @@ void delayed_ack_peer(std::uint16_t port, bool retry_case, bool native_reason = 
     SteamNetworkingConfigValue_t buffer{}; buffer.SetInt32(k_ESteamNetworkingConfig_SendBufferSize, 8 * 1024 * 1024);
     auto connection = sdk.ConnectP2PCustomSignaling(new Signal(endpoint), &remote, 0, 1, &buffer);
     expect(connection != k_HSteamNetConnection_Invalid, "Raw GNS connect");
+    if (closure_refusal) {
+        bool expiry_requested{}, refusal_sent{};
+        const auto deadline = Clock::now() + 10s;
+        while (!endpoint->host_refused()) {
+            expect(Clock::now() < deadline, "Raw closure-refusal deadline");
+            while (auto signal = require(endpoint->poll()))
+                expect(sdk.ReceivedP2PCustomSignal(signal->bytes.data(), static_cast<int>(signal->bytes.size()), &context), "Raw closure signal");
+            sdk.RunCallbacks();
+            SteamNetworkingMessage_t* message{};
+            while (sdk.ReceiveMessagesOnConnection(connection, &message, 1) > 0) {
+                const bool hello = message->m_cbSize > 0 && static_cast<const std::uint8_t*>(message->m_pData)[0] == static_cast<std::uint8_t>(TcpMessage::hello);
+                message->Release();
+                // Receiving the host hello proves its ICE path is ready. Send
+                // no application hello, so service closure precedes admission.
+                if (hello && !expiry_requested) { endpoint->expire_host(); expiry_requested = true; }
+            }
+            if (endpoint->expiry_observed() && !refusal_sent) {
+                // Only hosts send refusal envelopes. This guest sends a valid
+                // mismatched hello, which must produce 1503 on the receiving
+                // host even though signalling has already closed.
+                GnsOptions mismatch; mismatch.build_identity = "introduced-process-test-different";
+                Bytes packet{static_cast<std::uint8_t>(TcpMessage::hello), 'E', 'A', 'W', 'R'};
+                u32(packet, mismatch.protocol_version); u32(packet, static_cast<std::uint32_t>(mismatch.build_identity.size()));
+                packet.insert(packet.end(), mismatch.build_identity.begin(), mismatch.build_identity.end());
+                u32(packet, mismatch.max_frame_size); packet.push_back(1);
+                expect(sdk.SendMessageToConnection(connection, packet.data(), static_cast<uint32>(packet.size()),
+                    k_nSteamNetworkingSend_ReliableNoNagle, nullptr) == k_EResultOK, "Raw mismatched hello send");
+                refusal_sent = true;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        expect(expiry_requested && refusal_sent && endpoint->expiry_observed(), "Service closed before native refusal was sent");
+        sdk.CloseConnection(connection, 0, nullptr, false); endpoint->finish(); return;
+    }
     GnsOptions options; options.build_identity = "introduced-process-test";
     GnsFrameDecoder decoder(options, false);
     bool hello_sent = false, hello_seen = false, accepted = false, ack_sent = false, close_seen = false, tail_sent = false;
@@ -483,7 +539,13 @@ int main(int argc, char** argv) {
             expect(argc == 4, "introduced peer role and broker port required");
             const auto role = std::stoul(argv[2]), port = std::stoul(argv[3]);
             expect(role < 2 && port > 0 && port <= 65535, "introduced arguments");
-            if (std::string_view(argv[1]) == "retry-host" || std::string_view(argv[1]) == "retry-native-host") {
+            if (std::string_view(argv[1]) == "closure-refusal-host") {
+                expect(role == 0, "Closure refusal host role"); closure_refusal_host(static_cast<std::uint16_t>(port));
+            } else if (std::string_view(argv[1]) == "closure-refusal-peer") {
+#if EAWR_HAS_GNS
+                expect(role == 1, "Raw closure refusal role"); delayed_ack_peer(static_cast<std::uint16_t>(port), false, false, true);
+#endif
+            } else if (std::string_view(argv[1]) == "retry-host" || std::string_view(argv[1]) == "retry-native-host") {
                 expect(role == 0, "Retry host role"); retry_host(static_cast<std::uint16_t>(port), std::string_view(argv[1]) == "retry-native-host");
             } else if (std::string_view(argv[1]) == "delayed-ack" || std::string_view(argv[1]) == "retry-expiry"
                 || std::string_view(argv[1]) == "retry-native") {

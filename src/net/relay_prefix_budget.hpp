@@ -20,13 +20,19 @@ struct Budget {
 struct PrefixBudget : Budget {
     std::size_t live{}, unpaired{}, directory_rooms{};
     Budget directory, directory_principals, directory_hashes;
+    Budget room; // room member traffic (kinds 34..49 and its renew/ping), apart from the legacy per-prefix budget
     RelayServer::Clock::time_point guess_cooldown{};
     std::deque<RelayServer::Clock::time_point> guesses;
+    // Reservations that expired unattached; three in a rolling minute start the cooldown (see reservation_expired).
+    std::deque<RelayServer::Clock::time_point> expiries;
     void prune_guesses(RelayServer::Clock::time_point now) {
         while (!guesses.empty() && now - guesses.front() >= std::chrono::minutes(1)) guesses.pop_front();
     }
+    void prune_expiries(RelayServer::Clock::time_point now) {
+        while (!expiries.empty() && now - expiries.front() >= std::chrono::minutes(1)) expiries.pop_front();
+    }
     bool evictable(RelayServer::Clock::time_point now) const {
-        return live == 0 && directory_rooms == 0
+        return live == 0 && directory_rooms == 0 && unpaired == 0 && (expiries.empty() || now - expiries.back() >= std::chrono::minutes(1))
             && (directory_principals.operations == 0 || now - directory_principals.window >= std::chrono::minutes(1))
             && (directory_hashes.operations == 0 || now - directory_hashes.window >= std::chrono::minutes(1))
             && now >= guess_cooldown
@@ -45,7 +51,8 @@ public:
                 entry = entries_.erase(entry);
             else { entry->second.refresh(now); entry->second.directory.refresh(now);
                 entry->second.directory_principals.refresh(now); entry->second.directory_hashes.refresh(now);
-                entry->second.prune_guesses(now); ++entry; }
+                entry->second.room.refresh(now);
+                entry->second.prune_guesses(now); entry->second.prune_expiries(now); ++entry; }
         }
     }
     PrefixBudget* admit(const std::string& prefix, RelayServer::Clock::time_point now,
@@ -86,7 +93,18 @@ public:
         if (budget.guesses.size() >= 5) budget.guess_cooldown = now + std::chrono::seconds(60);
         if (alias_form) global_guesses_.push_back(now);
     }
+    // A seat reservation of this prefix expired unattached. Two outstanding reservations per prefix give at most four
+    // expiries a minute and each also counts as a failed guess, so on their own they would stay below the five-guess
+    // cooldown. A separate window starts the same 60-second cooldown at the third expiry in a rolling minute.
+    void reservation_expired(const std::string& prefix, RelayServer::Clock::time_point now) {
+        auto& budget = entries_.at(prefix); budget.prune_expiries(now);
+        budget.expiries.push_back(now);
+        if (budget.expiries.size() >= 3) budget.guess_cooldown = now + std::chrono::seconds(60);
+    }
     PrefixBudget& at(const std::string& prefix) { return entries_.at(prefix); }
+    PrefixBudget* find(const std::string& prefix) {
+        const auto found = entries_.find(prefix); return found == entries_.end() ? nullptr : &found->second;
+    }
     std::size_t size() const { return entries_.size(); }
 private:
     std::size_t capacity_, admissions_limit_;

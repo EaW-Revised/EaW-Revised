@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/skirmish/setup.hpp"
+#include "eawr/presentation/ui/settings.hpp"
 #include <godot_cpp/classes/base_button.hpp>
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/theme.hpp>
@@ -16,6 +17,7 @@ namespace eawr::presentation::ui { struct ThemeModel; }
 namespace eawr::presentation::godot_backend {
 
 class LanMatch;
+class EawrLanLobby;
 class FontProvider;
 class UiTextures;
 struct BattleContent;
@@ -67,6 +69,8 @@ public:
     [[nodiscard]] UiResources ui_resources() const;
     // The shell opens the screen at the single-player or the LAN connection and closes it again.
     void enter(bool lan);
+    void enter_online(presentation::ui::NetworkSettings settings);
+    [[nodiscard]] EawrLanLobby* online_lobby() const;
     void leave();
     [[nodiscard]] bool visible() const;
     [[nodiscard]] bool lan_selected() const;

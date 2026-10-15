@@ -30,6 +30,9 @@ set(EAWR_SLOW_TESTS
     inventory_contracts
     lua_numeric_sequences
     math_evidence_comparator_contracts
+    online_test_loopback
+    online_test_pin_loopback
+    online_test_package
     path_bench_melee_workers
     path_bench_owner_work
     replay_hash_comparator_contracts
@@ -144,7 +147,15 @@ function(eawr_check_test_tiers)
         message(FATAL_ERROR "These directories register tests without a tier label; end them with "
                             "eawr_label_tests() (cmake/EawrTestTiers.cmake):\n  ${listed}")
     endif()
+    # tests/online_test is only registered when both EAWR_ENABLE_RELAY and EAWR_ENABLE_GNS are ON.
+    set(online_test_registered OFF)
+    if(EAWR_ENABLE_RELAY AND EAWR_ENABLE_GNS)
+        set(online_test_registered ON)
+    endif()
     foreach(test IN LISTS EAWR_SLOW_TESTS EAWR_GPU_TESTS)
+        if(test MATCHES "^online_test_" AND NOT online_test_registered)
+            continue()
+        endif()
         if(NOT test IN_LIST all_tests AND NOT test MATCHES "^sim_boundary_")
             message(FATAL_ERROR "cmake/EawrTestTiers.cmake names ${test}, which no directory registers")
         endif()

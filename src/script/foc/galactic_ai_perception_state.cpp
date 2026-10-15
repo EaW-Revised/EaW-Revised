@@ -52,20 +52,50 @@ template<class Rows, class Less> auto canonical_rows(const Rows& rows, Less less
     std::sort(ordered.begin(), ordered.end(), [&](const auto* left, const auto* right) { return less(*left, *right); });
     return ordered;
 }
-Bytes encode(const GalacticPerceptionState& state, std::span<const std::uint8_t> markup) {
-    // WGA-195: sort references to canonical keys, preserving ordered bindings
-    // and identical archive bytes without copying every retained string/vector.
-    const auto cache = canonical_rows(state.cache, [](const auto& a, const auto& b) { return a.key < b.key; });
+struct KeyView {
+    tactical::PlayerId player{};
+    std::optional<tactical::PlayerId> enemy{}, human{};
+    galactic::PlanetId planet{};
+    const std::vector<std::string>* tokens{};
+    const std::vector<Binding>* bindings{};
+};
+bool canonical_less(const KeyView& a, const KeyView& b) {
+    const auto left = std::tie(a.player, a.enemy, a.human, a.planet, *a.tokens);
+    const auto right = std::tie(b.player, b.enemy, b.human, b.planet, *b.tokens);
+    if (left != right) return left < right;
+    for (std::size_t i = 0; i < std::min(a.bindings->size(), b.bindings->size()); ++i) {
+        const auto& x = (*a.bindings)[i]; const auto& y = (*b.bindings)[i];
+        if (x.parameter != y.parameter) return x.parameter < y.parameter;
+        if (x.value.index() != y.value.index()) return x.value.index() < y.value.index();
+        if (const auto* number = std::get_if<Real>(&x.value)) {
+            const auto other = std::get<Real>(y.value);
+            if (*number != other) return number->repr < other.repr;
+        } else if (std::get<std::string>(x.value) != std::get<std::string>(y.value))
+            return std::get<std::string>(x.value) < std::get<std::string>(y.value);
+    }
+    return a.bindings->size() < b.bindings->size();
+}
+template<class Rows, class Key>
+Bytes encode_rows(const GalacticPerceptionState& state, const Rows& rows,
+    std::span<const std::uint8_t> markup, Key key_of) {
+    // WGA-195: resolve spellings once per record, then sort borrowed views.
+    // Comparisons and encoding never repeat the intern-table lookups.
+    struct RecordView { const typename Rows::value_type* row{}; KeyView key{}; };
+    std::vector<RecordView> cache;
+    cache.reserve(rows.size());
+    for (const auto& row : rows) cache.push_back({&row, key_of(row.key)});
+    std::sort(cache.begin(), cache.end(), [](const auto& a, const auto& b) { return canonical_less(a.key, b.key); });
     const auto visibility = canonical_rows(state.visibility, [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.mask) < std::tie(b.player, b.planet, b.mask); });
     const auto flags = canonical_rows(state.flags, [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.name) < std::tie(b.player, b.planet, b.name); });
     const auto hints = canonical_rows(state.hints, [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.name) < std::tie(b.player, b.planet, b.name); });
-    Writer out; out.text(domain); out.word(3, 4); out.word(state.cache.size());
-    for (const auto* record : cache) {
-        const auto& row = *record;
-        out.word(row.key.player, 4); out.optional_player(row.key.enemy); out.optional_player(row.key.human); out.word(row.key.planet);
-        out.word(row.key.tokens.size()); for (const auto& token : row.key.tokens) out.text(token);
-        out.word(row.key.bindings.size());
-        for (const auto& binding : row.key.bindings) {
+    Writer out; out.text(domain); out.word(3, 4); out.word(rows.size());
+    for (const auto& record : cache) {
+        const auto& row = *record.row;
+        const auto& key = record.key;
+        out.word(key.player, 4); out.optional_player(key.enemy); out.optional_player(key.human); out.word(key.planet);
+        out.word(key.tokens->size()); for (const auto& token : *key.tokens) out.text(token);
+        out.word(key.bindings->size());
+        for (const auto& binding : *key.bindings) {
             out.text(binding.parameter); out.word(binding.value.index(), 1);
             if (const auto* value = std::get_if<Real>(&binding.value)) out.word(value->repr);
             else out.text(std::get<std::string>(binding.value));
@@ -80,6 +110,11 @@ Bytes encode(const GalacticPerceptionState& state, std::span<const std::uint8_t>
     for (const auto* record : hints) { const auto& row = *record; out.word(row.player, 4); out.text(row.planet); out.text(row.name); out.word(row.value.repr); }
     out.word(markup.size()); out.bytes.insert(out.bytes.end(), markup.begin(), markup.end());
     return std::move(out.bytes);
+}
+Bytes encode(const GalacticPerceptionState& state, std::span<const std::uint8_t> markup) {
+    return encode_rows(state, state.cache, markup, [](const GalacticCacheKey& key) {
+        return KeyView{key.player, key.enemy, key.human, key.planet, &key.tokens, &key.bindings};
+    });
 }
 struct Decoded { GalacticPerceptionState perception; Bytes markup; };
 core::Result<Decoded> decode(std::span<const std::uint8_t> bytes) {
@@ -135,8 +170,11 @@ core::Result<galactic_ai::NativeState> GalacticWorld::capture() const {
     const auto markup = markup_->encode();
     galactic_ai::NativeState out;
     {
-        std::scoped_lock lock(cache_mutex_);
-        out.components.emplace(component, encode(state_, markup));
+        const auto lock = query_lock();
+        out.components.emplace(component, encode_rows(state_, cache_, markup, [&](const GalacticInternedKey& key) {
+            return KeyView{key.player, key.enemy, key.human, key.planet,
+                &tokens_.at(key.token)->tokens, &bindings_[static_cast<std::size_t>(key.binding.spelling)]};
+        }));
     }
     const auto envelope = galactic_ai::encode_native_state(out);
     if (!envelope) return core::Result<galactic_ai::NativeState>::failure(envelope.error());

@@ -277,6 +277,20 @@ per-tick digests and command streams. `state_digest()` covers the scheduler stat
 instance's global data in canonical order; it is a test digest. The authoritative hash is
 `state_hash()` over the canonical save ([persistence](lua-persistence.md)).
 
+**Object turn.** `ScriptScheduler::service_turn(executor, instances)` services only the
+given object-script instances inside a tick, before that tick's barrier `service()`. It delivers their
+due events, pumps their threads on the same `script-instances` phase and commits their commands,
+posts and timers in ascending instance ID. A fault (budget, quota or script error) drops only that
+instance's turn output and removes it. `completed_tick` does not advance, and the barrier service of
+the tick still runs. The turn draws from the key `tick | turn_random_domain` (bit 62, above every
+script tick) on the instance's single draw counter, so a turn and a barrier service of one tick never
+use the same random key, also across a save and load between them; commands and posts continue the
+instance's own sequences, so event keys cannot repeat either. The call refuses an unknown or non-object
+instance, a duplicate, the GC and query clocks and an immediate-effect host (`EAWR-SCRIPT-0210`)
+without changing state. `lua_sandbox_scheduler` and `lua_sandbox_workers` cover subset equality,
+the key domains, save/restore between turn and barrier, faults and quotas, and 1/2/4/8 workers
+with reversed partitions and request order.
+
 ## Command routing
 
 `ScriptedTacticalSession` (`tactical_bridge.hpp`) runs one tactical session with its

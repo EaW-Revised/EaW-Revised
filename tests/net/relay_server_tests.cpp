@@ -78,6 +78,9 @@ struct Raw {
     }
     Bytes exchange(Bytes bytes) {
         expect(tls->queue(std::move(bytes)), "Raw request queued");
+        return receive();
+    }
+    Bytes receive() {
         std::optional<Bytes> reply;
         until([&] { tls->pump(); reply = tls->receive(); return reply.has_value() || tls->failed(); }, "Raw request timeout");
         expect(reply.has_value(), "Raw request received a typed response"); return std::move(*reply);
@@ -88,7 +91,7 @@ unsigned number(const Bytes& bytes) {
     return read_u32(std::span(bytes).subspan(2));
 }
 Bytes publish(std::string token = std::string(64, 'a'), std::string identity = "raw-host") {
-    auto bytes = message(Kind::publish); string(bytes, token); string(bytes, identity); u32(bytes, 1000); return bytes;
+    auto bytes = message(Kind::publish); string(bytes, token); string(bytes, identity); u32(bytes, 1000); u32(bytes, 1); return bytes;
 }
 
 struct DirectoryFixture {
@@ -98,7 +101,26 @@ struct DirectoryFixture {
     std::string prefix{"directory-test"};
     std::map<std::uint64_t, std::string> prefixes;
     std::map<std::string, bool> admitted_prefixes{{prefix, true}};
-    DirectoryFixture() { expect(budgets.admit(prefix, time, 128, 10000) != nullptr, "Directory prefix admitted"); }
+    struct BridgeSession { std::string owner; bool bound{}, used{}, revoked{}; };
+    std::map<std::string, BridgeSession> bridges;
+    DirectoryFixture() {
+        expect(budgets.admit(prefix, time, 128, 10000) != nullptr, "Directory prefix admitted");
+        directory.set_bridge_hooks({
+            [this](const auto& code, const auto& owner, bool, bool publishing) {
+                const auto found = bridges.find(code);
+                return found != bridges.end() && found->second.owner == owner && !found->second.used && !found->second.revoked
+                    && (publishing ? !found->second.bound : found->second.bound);
+            },
+            [this](const auto& code) { bridges.at(code).bound = true; },
+            [this](const auto& code) {
+                auto& session = bridges.at(code);
+                if (!session.bound || session.used || session.revoked) return false;
+                session.used = true; return true;
+            },
+            [this](const auto& code) { bridges.at(code).revoked = true; }
+        });
+    }
+    void bridge(const std::string& code) { bridges.emplace(code, BridgeSession{std::string(32, 'b')}); }
     Bytes call(std::uint64_t id, Bytes bytes) { return directory.request(id, prefixes.contains(id) ? prefixes.at(id) : prefix, bytes, time, budgets); }
     std::pair<std::uint64_t, std::string> open(std::string resume = {}) {
         if (!admitted_prefixes.contains(prefix)) {
@@ -115,8 +137,9 @@ OnlineRoomMetadata info() {
     value.build = "build-hash"; value.protocol = "protocol-tag"; value.content = "content-tag";
     value.mod = "mod-tag"; value.mode = "mode-from-data"; value.map = "map-from-data"; value.capacity = 3; return value;
 }
-Bytes room_publish(OnlineRoomMetadata value = info(), std::string password = {}) {
-    auto bytes = message(Kind::directory_publish); string(bytes, ""); metadata(bytes, value); string(bytes, password); return bytes;
+Bytes room_publish(OnlineRoomMetadata value = info(), std::string password = {}, std::string invitation = {}) {
+    auto bytes = message(Kind::directory_publish); string(bytes, ""); metadata(bytes, value); string(bytes, password); string(bytes, invitation);
+    string(bytes, invitation.empty() ? std::string{} : std::string(32, 'b')); return bytes;
 }
 OnlineRoomPublication publication(const Bytes& bytes) {
     expect(bytes[1] == static_cast<std::uint8_t>(Kind::directory_published), "Room published");
@@ -186,8 +209,8 @@ void password_seat_chat_contracts() {
     auto winner = admission.call(a, room_join(limited, password, " Guest\n\x01 "));
     expect(winner[1] == static_cast<std::uint8_t>(Kind::directory_admitted), "Full room ID/password unaffected by global alias cap");
     expect(number(admission.call(b, room_join(limited, password))) == 1545, "Exactly one last-seat reservation wins in owner order");
-    Reader seat_reader{std::span(winner).subspan(2)}; seat_reader.string(32); const auto seat = seat_reader.u32();
-    expect(seat == 2 && seat_reader.done(), "Typed reservation returns a stable seat");
+    Reader seat_reader{std::span(winner).subspan(2)}; seat_reader.string(32); const auto seat = seat_reader.u32(); const auto unbound = seat_reader.string(32);
+    expect(seat == 2 && unbound.empty() && seat_reader.done(), "Typed reservation returns a stable seat");
     auto chat = message(Kind::directory_chat); string(chat, " hi\n\x01there ");
     expect(admission.call(a, chat) == message(Kind::directory_ok), "Sanitized chat admitted");
     expect(number(admission.call(a, chat)) == 1551, "Chat throttle per principal");
@@ -318,6 +341,38 @@ eawr::core::Result<std::string> gated_queue_hash(std::string_view password, std:
     return eawr::core::Result<std::string>::success(std::string(64, 'a'));
 }
 struct ReleaseHash { ~ReleaseHash() { hash_release = true; } };
+
+void directory_bridge_contracts() {
+    DirectoryFixture unhooked; const auto [unhooked_host, unhooked_principal] = unhooked.open(); (void)unhooked_principal;
+    unhooked.directory.set_bridge_hooks({});
+    expect(number(unhooked.call(unhooked_host, room_publish(info(), {}, std::string(32, 'a')))) == 1544,
+        "directory without bridge hooks refuses a capability binding");
+    DirectoryFixture f; const auto [host, principal] = f.open(); (void)principal;
+    const std::string secret(32, 'a'); f.bridge(secret);
+    expect(number(f.call(host, room_publish(info(), {}, "ABCD"))) == 1540, "a guessable alias cannot authorize a room binding");
+    auto room = publication(f.call(host, room_publish(info(), "private", secret)));
+    const auto [guest, guest_principal] = f.open(); (void)guest_principal;
+    expect(number(f.call(guest, room_join(room, "wrong"))) == 1546, "wrong password never releases the game capability");
+    auto list = message(Kind::directory_list); string(list, ""); u32(list, 50);
+    const auto listed = f.call(guest, list);
+    expect(std::search(listed.begin(), listed.end(), secret.begin(), secret.end()) == listed.end(), "listing contains no bridge invitation");
+    const auto admitted = f.call(guest, room_join(room, "private"));
+    Reader reader{std::span(admitted).subspan(2)};
+    expect(admitted[1] == static_cast<std::uint8_t>(Kind::directory_admitted) && reader.string(32) == room.room && reader.u32() == 2
+        && reader.string(32) == secret && reader.done(), "only admitted guest receives the binding");
+    f.call(guest, message(Kind::directory_leave));
+    expect(number(f.call(guest, room_join(room, "private"))) == 1544, "binding cannot be released twice after a guest leaves");
+    f.call(host, removal(room));
+    expect(number(f.call(guest, room_join(room, "private"))) == 1544, "host removal destroys its binding");
+    expect(number(f.call(host, room_publish(info(), {}, secret))) == 1544, "retired fixture session cannot be rebound");
+    const std::string replacement(32, 'c'); f.bridge(replacement);
+    room = publication(f.call(host, room_publish(info(), {}, replacement)));
+    f.directory.set_bridge_hooks({});
+    expect(number(f.call(guest, room_join(room))) == 1544, "a bound room refuses admission when hooks disappear");
+    f.directory.invalidate_bridge(replacement);
+    expect(number(f.call(guest, room_join(room))) == 1544 && f.directory.rooms() == 0, "host signalling session end destroys its room binding");
+}
+
 void hash_worker_contracts(const std::string& certificate, const std::string& key) {
     for (unsigned i = 0; i < 32; ++i) { PasswordHashWorker idle; }
     hash_entered = false; hash_release = false;
@@ -391,8 +446,89 @@ void reconnect_and_race_contracts(const std::string& certificate, const std::str
         if (*first) require(a.leave()); else require(b.leave()); require(host.remove(room));
     }
 }
+
+void bridge_loopback(const std::string& certificate, const std::string& key) {
+    std::mutex diagnostics_mutex; std::vector<eawr::core::Diagnostic> diagnostics;
+    RelayServerOptions options;
+    options.diagnostics = [&](const auto& diagnostic) { std::lock_guard lock(diagnostics_mutex); diagnostics.push_back(diagnostic); };
+    options.room_aliases = true; options.idle_timeout = 5min;
+    Fixture f(options, certificate, key, false);
+    f.client.public_alias = false;
+    auto signal = require(NetworkGnsIntroduction(f.client).publish("private-host", 2min));
+    expect(signal.room_alias.empty() && code_valid(signal.publisher_ownership), "private publication returns host-only ownership and no alias");
+    auto early = NetworkGnsIntroduction(f.client).join("ABCD", "early-outsider");
+    expect(!early && early.error().code == "EAWR-NET-1523", "alias join refuses before password binding exists");
+    NetworkOnlineLobby owner(f.client), guest(f.client);
+    auto forged = owner.publish_bridge(info(), "private", signal.join_code, std::string(32, 'a'));
+    expect(!forged && forged.error().code == "EAWR-NET-1544", "possession of a guest invitation cannot bind another owner's session");
+    expect(require(owner.list()).rooms.empty(), "recoverable binding refusal leaves the directory client usable");
+    const auto room = require(owner.publish_bridge(info(), "private", signal.join_code, signal.publisher_ownership));
+    auto guessed = NetworkGnsIntroduction(f.client).join("ABCD", "outsider");
+    expect(!guessed && guessed.error().code == "EAWR-NET-1523", "alias join refuses throughout private publication");
+    auto wrong = guest.join(room.room, "wrong", "Guest");
+    expect(!wrong && wrong.error().code == "EAWR-NET-1546", "password refusal returns no capability");
+    const auto admitted = require(guest.join(room.room, "private", "Guest"));
+    expect(admitted.bridge_invitation == signal.join_code, "only admitted guest receives the private binding");
+    require(guest.leave());
+    auto repeated = guest.join(room.room, "private", "Guest");
+    expect(!repeated && repeated.error().code == "EAWR-NET-1544", "leaving cannot restore consumption");
+    require(owner.remove(room));
+    auto held = NetworkGnsIntroduction(f.client).join(admitted.bridge_invitation, "late-guest");
+    expect(!held && held.error().code == "EAWR-NET-1523", "room removal revokes a capability already held by a guest");
+    auto rebound = guest.publish_bridge(info(), {}, signal.join_code, std::string(32, 'a'));
+    expect(!rebound && rebound.error().code == "EAWR-NET-1544", "removed binding cannot be rebound by an admitted guest");
+    auto stale = owner.publish_bridge(info(), {}, signal.join_code, signal.publisher_ownership);
+    expect(!stale && stale.error().code == "EAWR-NET-1544", "removed session cannot be rearmed by its publisher either");
+    millis = 1000;
+    expect(require(owner.list()).rooms.empty(), "all refused publishes remain non-latching");
+
+    auto next = require(NetworkGnsIntroduction(f.client).publish("new-host", 2min));
+    const auto replacement = require(owner.publish_bridge(info(), {}, next.join_code, next.publisher_ownership));
+    require(next.endpoint->close_publication());
+    millis = 2000;
+    expect(require(owner.list()).rooms.empty(), "signalling revocation removes the directory row, independently of admission checks");
+    auto ended = guest.join(replacement.room, {}, "Guest");
+    expect(!ended && ended.error().code == "EAWR-NET-1544", "revoked signalling session has no binding");
+
+    millis = 62001; // advance beyond the shared-prefix guess cooldown before the fresh session
+    auto lapse = require(NetworkGnsIntroduction(f.client).publish("lapse-host", 2min));
+    const auto leased = require(owner.publish_bridge(info(), {}, lapse.join_code, lapse.publisher_ownership));
+    const auto before_lapse = require(guest.join(leased.room, {}, "Guest")); require(guest.leave());
+    millis = 94002;
+    expect(require(owner.list()).rooms.empty(), "lease expiry removes its consumed row");
+    auto rearmed = owner.publish_bridge(info(), {}, lapse.join_code, lapse.publisher_ownership);
+    expect(!rearmed && rearmed.error().code == "EAWR-NET-1544", "a consumed session cannot be rearmed by a new room after lapse");
+    auto expired_bearer = NetworkGnsIntroduction(f.client).join(before_lapse.bridge_invitation, "expired-guest");
+    expect(!expired_bearer && expired_bearer.error().code == "EAWR-NET-1523", "lease expiry revokes a previously delivered capability");
+    auto paired_host = require(NetworkGnsIntroduction(f.client).publish("paired-host", 2min));
+    const auto paired_room = require(owner.publish_bridge(info(), {}, paired_host.join_code, paired_host.publisher_ownership));
+    const auto pair_admission = require(guest.join(paired_room.room, {}, "Guest"));
+    auto paired_guest = require(NetworkGnsIntroduction(f.client).join(pair_admission.bridge_invitation, "paired-guest"));
+    until([&] { return !paired_host.endpoint->rendezvous().remote_identity.empty(); }, "Paired game begins before directory removal");
+    require(owner.remove(paired_room));
+    require(paired_guest->send(Bytes{77}));
+    std::optional<GnsSignal> live_signal;
+    until([&] { live_signal = require(paired_host.endpoint->poll()); return live_signal.has_value(); }, "Directory removal preserves a paired game's signalling");
+    expect(live_signal->bytes == Bytes{77}, "revocation applies to admission, not an already-paired game");
+    {
+        const std::lock_guard lock(diagnostics_mutex);
+        for (const auto& diagnostic : diagnostics) {
+            const auto logged = diagnostic.code + " " + diagnostic.message;
+            for (const auto& secret : {signal.join_code, signal.publisher_ownership, next.join_code, next.publisher_ownership,
+                    lapse.join_code, lapse.publisher_ownership, paired_host.join_code, paired_host.publisher_ownership,
+                    std::string("private"), std::string("wrong")})
+                expect(logged.find(secret) == std::string::npos, "server diagnostic sink contains no bridge credentials or passwords");
+        }
+    }
+    for (const auto& diagnostic : {wrong.error(), repeated.error(), forged.error(), stale.error(), rearmed.error()}) {
+        const auto logged = diagnostic.code + " " + diagnostic.message;
+        expect(logged.find(signal.join_code) == std::string::npos && logged.find(signal.publisher_ownership) == std::string::npos
+            && logged.find("private") == std::string::npos, "binding/password diagnostics contain no private credentials");
+    }
+}
 void directory_loopback(const std::string& certificate, const std::string& key) {
     RelayServerOptions options; Fixture f(options, certificate, key, false);
+    f.client.address = "localhost";
     NetworkOnlineLobby host(f.client), guest(f.client), outsider(f.client);
     const auto room = require(host.publish(info(), "private"));
     auto page = require(guest.list()); expect(page.rooms.size() == 1 && page.rooms[0].passworded, "Directory client list over TLS");
@@ -408,6 +544,7 @@ void loopback(const std::string& certificate, const std::string& key) {
     RelayServerOptions options;
     options.turn_uri = "turn:127.0.0.1:3478"; options.turn_secret = std::string(64, 'b');
     Fixture fixture(options, certificate, key);
+    fixture.client.address = "localhost";
     require(NetworkGnsIntroduction::health(fixture.client));
     std::shared_ptr<GnsSignallingEndpoint> host, client;
     std::string code;
@@ -539,11 +676,20 @@ void invitations(const std::string& certificate, const std::string& key) {
 }
 void authentication(const std::string& certificate, const std::string& key) {
     Fixture f({}, certificate, key);
+    f.client.address = "localhost";
+    auto unresolved = f.client; unresolved.address = "service.invalid"; unresolved.timeout = 500ms;
+    const auto absent_signal = NetworkGnsIntroduction::health(unresolved);
+    expect(!absent_signal && absent_signal.error().code == "EAWR-NET-1519"
+        && absent_signal.error().message.find(unresolved.address) == std::string::npos, "unresolved signalling host fails with a curated typed error");
+    NetworkOnlineLobby absent_lobby(unresolved); const auto absent_list = absent_lobby.list();
+    expect(!absent_list && absent_list.error().code == "EAWR-NET-1519"
+        && absent_list.error().message.find(unresolved.address) == std::string::npos, "unresolved directory host fails with a curated typed error");
     auto bad = f.client; bad.access_token = std::string(64, 'z');
     const auto denied = NetworkGnsIntroduction(bad).publish("host", 1s);
     expect(!denied && denied.error().code == "EAWR-NET-1520", "Unauthorized token rejected inside TLS");
     auto pin = f.client; pin.ca_file.clear(); pin.certificate_name.clear(); pin.certificate_sha256 = require(certificate_fingerprint(certificate));
     require(NetworkGnsIntroduction::health(pin));
+    NetworkOnlineLobby pinned_lobby(pin); expect(require(pinned_lobby.list()).rooms.empty(), "pinned directory connects through localhost");
     auto precedence = pin; precedence.ca_file = "missing-ca-file.pem"; precedence.certificate_name = "wrong.invalid";
     require(NetworkGnsIntroduction::health(precedence));
     auto system = f.client; system.ca_file.clear();
@@ -1133,6 +1279,30 @@ void renewal_contracts(const std::string& certificate, const std::string& key) {
     }
 }
 }
+// Room kinds (34..49) belong to room member connections only, and a room member connection answers nothing else.
+void room_routing_contracts(const std::string& certificate, const std::string& key) {
+    RelayServerOptions o;
+    Fixture f(o, certificate, key, false);
+    Raw session(f.client);
+    expect(session.exchange(publish())[1] == static_cast<std::uint8_t>(Kind::published), "Invitation published");
+    expect(number(session.exchange(message(Kind::room_leave))) == 1540, "A room kind on an invitation connection is refused");
+    Raw lobby(f.client);
+    auto opened = lobby.exchange([] { auto b = message(Kind::directory_open); string(b, ""); return b; }());
+    Reader principal_reader{std::span(opened).subspan(2)}; const auto principal = principal_reader.string(32);
+    const auto room = publication(lobby.exchange(room_publish()));
+    expect(number(lobby.exchange(message(Kind::room_lock))) == 1540, "A room kind on a directory connection is refused");
+    Raw member(f.client);
+    auto open = message(Kind::room_open); string(open, room.room); string(open, room.ownership); string(open, principal); string(open, "host-id"); u32(open, 0);
+    expect(member.exchange(open)[1] == static_cast<std::uint8_t>(Kind::room_opened), "The host opens the scope on its own connection");
+    expect(member.receive()[1] == static_cast<std::uint8_t>(Kind::room_roster), "The first roster follows the reply");
+    expect(number(member.exchange(publish())) == 1521, "An invitation kind on a room connection is refused");
+    Raw second(f.client);
+    expect(second.exchange(open)[1] == static_cast<std::uint8_t>(Kind::error), "A room opens once");
+    Raw directory_on_room(f.client);
+    auto again = message(Kind::room_open); string(again, room.room); string(again, room.ownership); string(again, principal); string(again, "other-id"); u32(again, 0);
+    expect(number(directory_on_room.exchange(again)) == room_unavailable, "...with the room-unavailable reason");
+}
+
 int main(int argc, char** argv) {
     try {
         expect(argc == 2, "Artifact directory argument");
@@ -1142,10 +1312,11 @@ int main(int argc, char** argv) {
         require(create_certificate(cert, key));
         key_permissions(key);
         expect(!create_certificate(cert, key), "Certificate generator refuses overwrite");
-        directory_contracts(); password_seat_chat_contracts(); directory_quota_contracts(); directory_codec_contracts();
-        hash_worker_contracts(cert, key); reconnect_and_race_contracts(cert, key); directory_loopback(cert, key);
+        directory_contracts(); directory_bridge_contracts(); password_seat_chat_contracts(); directory_quota_contracts(); directory_codec_contracts();
+        hash_worker_contracts(cert, key); reconnect_and_race_contracts(cert, key); directory_loopback(cert, key); bridge_loopback(cert, key);
         loopback(cert, key); invitations(cert, key); prefix_guess_contracts(); prefix_contracts(); prefix_pressure(); pinned_expired_certificate(directory); authentication(cert, key); malformed(cert, key);
         closing_deadline(cert, key); spoofed_sender(cert, key); queue_overflow(cert, key); expiry_limits(cert, key); renewal_contracts(cert, key);
+        room_routing_contracts(cert, key);
         std::filesystem::remove(std::filesystem::path(key)); std::filesystem::remove(std::filesystem::path(cert));
         std::filesystem::remove(directory);
         std::cout << "TLS relay protocol and loopback contracts passed\n"; return 0;

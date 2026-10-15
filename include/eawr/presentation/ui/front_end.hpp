@@ -27,6 +27,8 @@ enum class FrontEndScreen : std::uint8_t {
     options,
     load_game,
     campaign_setup,
+    online_setup,
+    network_options,
 };
 
 [[nodiscard]] std::string_view to_string(FrontEndScreen screen) noexcept;

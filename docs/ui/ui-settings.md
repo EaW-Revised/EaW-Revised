@@ -19,7 +19,7 @@ as the defaults. No compatibility is kept before 1.0: change the format, bump th
 |---|---|---|
 | ST-S1 | Loading never fails: an empty, unreadable or foreign file is the defaults; a bad line is dropped and a bad value keeps its default, each with a note; an out-of-range value is clamped with a note. | project |
 | ST-S2 | The first line carries the version (1). Any other version loads as the defaults. | project |
-| ST-S3 | Every field is an integer (percent, step, permille, 0/1), so a round trip is exact and a slider's stop is the stored value. | project |
+| ST-S3 | Numeric fields are integers (percent, step, permille, 0/1), so a round trip is exact and a slider's stop is the stored value. Online service text uses bounded single-line values. | project |
 | ST-S4 | Settings are UI state (UI-C2): they never enter a replay or a hash. A setting that changes a game's rules goes through the setup and command seams, not into the simulation from the screen. | project; UI-C2 |
 
 ## 2. What is stored, and its default
@@ -40,6 +40,7 @@ as the defaults. No compatibility is kept before 1.0: change the format, bump th
 | ST-G1 | Absolute scrolling, delayed tooltips, right-button scroll, both-buttons rotate, alternate mouse controls, simplified faction colours, ability autofire, ask for auto-resolve | 0/1 | on, off, off, off, off, off, on, off | debug build |
 | ST-N1 | Network port (1234 is "use the default port"), NAT negotiation, firewall bypass, UPnP | integer, 0/1 | 1234, on, on, on | debug build |
 | ST-N1 | Quickmatch default, connection speed, preferred faction, lobby locale | integers | 1 (land), 0 (modem), 0 (random), -1 (the game language) | debug build |
+| ST-N2 | Online service (project-authored) | host, port, trust mode, certificate pin or CA file, relay-only preference | empty host, port 27020, pin trust, relay-only off | project |
 | ST-K1 | Key overrides (command name to key text) | map | empty: the project's keys | project |
 
 The retail anti-aliasing level is not stored: its slider drives the render profile (section 4).
@@ -62,7 +63,7 @@ table of controls and reasons lives next to the record (`find_option_status`) an
 | ST-O1 | Galactic speed, auto-resolve | Disabled: the galactic game is not part of this build. |
 | ST-O1 | Scroll speed, absolute scroll, right-button scroll, rotate with both buttons, alternate mouse | Disabled: the camera takes its controls from the project's bindings. |
 | ST-O1 | Delayed tooltips, faction colours, ability autofire | Disabled: not selectable yet. |
-| ST-O1 | Network page | Disabled: online play is not built. |
+| ST-N2 | Network page | The online service host, port, certificate trust and relay-only preference. An empty host leaves Online unconfigured. Accept validates and saves; Cancel discards changes. All authored retail Network controls retain their positions and existing behavior; the service fields occupy an added column beside them. |
 | ST-K1, ST-K2 | Keyboard pages 1 to 5 | Read-only. The edit boxes show the key the project's battle input binds to the command (guard, attack, move, stop, attack-move, select all, groups 0 to 9, tactical overview) and are blank otherwise. Rebinding is a follow-up: the battle input's keys are code, not a table. |
 
 The retail difficulty radios appear only in a campaign game (debug build); this build has no
@@ -136,3 +137,5 @@ centred, with the network page); the pages are centred dialogs. It is a modal la
 - The keyboard pages' Accept stays disabled (no key can change yet, ST-K1), as retail disables it
   until a change.
 - The in-game menu does not open the screen; the pause menu's Options button is a follow-up.
+
+The online service fields are also reachable from Multiplayer → Network Options. Online uses the saved service only when selected; LAN keeps its existing transport. Certificate trust is explicit: `system` verifies a DNS host through the operating system certificate store; `pin` requires 64 hexadecimal SHA-256 digits, and `ca-file` requires a certificate file and verifies the service host. Invalid trust settings never fall back. Service addresses, certificate paths and pins are omitted from UI reports. Password-room invitations are sent privately to the service and handed to one admitted guest; public rooms may also display an invitation code.

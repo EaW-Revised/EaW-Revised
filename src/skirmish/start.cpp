@@ -369,12 +369,12 @@ private:
         const auto stations = markers_named(inputs_, prefix + "Space_Station");
         const auto bases = markers_named(inputs_, prefix + "Base_Position_Marker");
         const auto spawns = markers_named(inputs_, prefix + "Spawn_Point_Marker");
-        // WSS-54/61: spawns are per player; station markers belong to the team.
-        if (spawns.size() <= within_team || (!selected_ && start_.match.pre_built_base && stations.empty())) {
-            return Void::failure(fixture_error(player.start_side + " has too few "
-                + (spawns.size() <= within_team ? "spawn" : "station") + " markers for slot "
+        // WSS-54/61: stations belong to the team; a missing player spawn does not reject Start.
+        if (start_.match.pre_built_base && stations.empty()) {
+            return Void::failure(fixture_error(player.start_side + " has too few station markers for slot "
                 + std::to_string(slot.slot)));
         }
+        const bool has_spawn = within_team < spawns.size();
         const auto add_marker = [&](const MapPlacement& placement, const MarkerUse use, const PlayerId owner) -> Void {
             auto where = pose(placement);
             if (!where) return Void::failure(where.error());
@@ -390,7 +390,7 @@ private:
                 if (auto added = add_marker(*spawns[spawn], MarkerUse::spawn_unused, 0); !added) return added;
             }
         }
-        for (auto& marker : start_.markers) {
+        if (has_spawn) for (auto& marker : start_.markers) {
             if (marker.record == spawns[within_team]->record) {
                 marker.use = MarkerUse::spawn;
                 marker.player = slot.slot;
@@ -412,6 +412,13 @@ private:
                 }
                 if (auto added = add_unit(slot.slot, match->type, UnitRole::station, station); !added) return added;
             }
+        }
+
+        // WSS-54: overflow selects no marker and skips starting companies, without reusing
+        // another player's spawn. Keep the player and the team's shared station above.
+        if (!has_spawn) {
+            start_.players.push_back(std::move(player));
+            return Void::success();
         }
 
         std::vector<std::pair<std::string, UnitRole>> companies;

@@ -208,6 +208,19 @@ core::Result<bool> TacticalSession::reinforcement_point(const PlayerId player, c
 }
 const std::optional<BattleOutcome>& TacticalSession::outcome() const noexcept { return impl_->outcome; }
 std::vector<UnitState> TacticalSession::units() const { return impl_->sorted_units(); }
+std::optional<UnitState> TacticalSession::unit_state(const EntityId unit) const {
+    const auto found = impl_->handles.find(unit);
+    if (found == impl_->handles.end()) return std::nullopt;
+    const auto& registry = std::as_const(impl_->registry);
+    const auto& identity = registry.get<Identity>(found->second);
+    const auto& placement = registry.get<Placement>(found->second);
+    const auto* carried = registry.try_get<CarriedHeroes>(found->second);
+    return UnitState{unit, identity.type_id, identity.owner, placement.position, placement.rotation,
+        registry.get<CurrentOrder>(found->second).value, identity.purchase_type,
+        carried ? carried->value : std::vector<CarriedObject>{}, identity.purchase_token,
+        identity.barrage_source, identity.garrison_enabled};
+}
+
 std::span<const Squadron> TacticalSession::squadrons() const noexcept { return impl_->squadrons; }
 const FogCells* TacticalSession::fog_cells() const noexcept { return impl_->fog ? &*impl_->fog : nullptr; }
 std::span<const Projectile> TacticalSession::projectiles() const noexcept { return impl_->projectiles; }

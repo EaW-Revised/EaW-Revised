@@ -109,7 +109,7 @@ queues and never perform socket I/O or call GNS under a lock.
 
 ## Bounds and credentials
 
-Defaults: 128 live connections, 64 sessions, 8 connections per IPv4 address or
+Defaults: 128 live connections, 64 sessions, 18 connections per IPv4 address or
 IPv6 /64 prefix; at most 2 unpaired sessions per such prefix;
 30 accepted connections per IP per minute; 120 protocol operations and 1 MiB
 incoming TLS record bytes per IP per minute; 120 operations and 1 MiB per
@@ -207,9 +207,9 @@ GNS are not evidence that the deployed relay is reachable.
 
 `make_online_match` takes runtime TLS/service options and a guest peer identity.
 For a publicly issued certificate, populate `OnlineMatchOptions.service.address`
-with the numeric endpoint, set `certificate_name` to the service's DNS name, and
+with the service host name (or a numeric endpoint), set `certificate_name` to the service's DNS name, and
 leave `ca_file` and `certificate_sha256` empty to select system CA trust.
-The production Online settings wiring is a separate integration step.
+Service host resolution and connection run on the bounded I/O worker, preferring IPv4 and trying at most two addresses. Production Network Options supplies the host name for both connection and certificate verification.
 It performs no I/O during construction. Host/join run on a registered bounded
 worker; cancellation detaches that generation immediately and drains publication
 closure without blocking frames. A single retiring generation blocks another
@@ -341,13 +341,13 @@ shared resource/transport failures can close it.
 | Publish | 22 | publisher access token, metadata, password; 32 returns room ID, ownership and lease milliseconds |
 | Heartbeat | 23 | room ID, ownership, metadata; 30 empty acknowledgement |
 | Remove | 24 | room ID, ownership; 30 empty acknowledgement |
-| Password join | 25 | room ID, password, guest name; 33 returns room ID and reserved seat |
+| Password join | 25 | room ID, password, guest name; 33 returns room ID, directory seat and invitation, then (room with an open scope) the reserved slot and member capability |
 | Leave | 26 | empty; 30 empty acknowledgement |
 | Chat send | 27 | text; 30 empty acknowledgement |
 | Chat poll | 28 | last sequence; 31 returns through sequence, line count, lines (sequence, seat, name, text), roster count, members (seat, name) |
 | Chat removal | 29 | room ID, ownership, non-host seat; 30 empty acknowledgement |
 
-Diagnostics 1540..1553 cover malformed directory input, ownership/access,
+Diagnostics 1772..1777 belong to the room scope (see "N-peer rooms"). Diagnostics 1540..1553 cover malformed directory input, ownership/access,
 query throttle, existing room/membership, unavailable room, full room, wrong
 password, guess/hash cooldown, removed/nonmember chat, capacity, hash/random
 failure, chat throttle, client response timeout and duplicate guest name respectively. IDs 1555..1559
@@ -377,3 +377,229 @@ success clears the current error. Invalid begin_join requests still produce a
 refused completion. The source discards cancelled join completions and releases a
 late successful seat; it never blocks a frame on I/O. Shutdown may wait for the
 configured bounded request timeout and a final removal/leave exchange.
+
+## N-peer rooms (signalling scope)
+
+Design: [Online play for up to nine peers](net-online-npeer.md), slice N3. The
+room scope is the signalling counterpart of a directory room. It replaces
+two-peer pairing for rooms of 2..9 members; invitations (Kind 1..12) keep working
+unchanged. The service introduces and signals. It never carries game frames and
+never parses a signal blob: the pairs among members are ordinary GNS connections.
+Relay support stays OFF by default; nothing here starts with the viewer.
+
+### Model
+
+One room per published directory room, keyed by the same 128-bit room ID. The
+**host** opens the scope on its own TLS connection (a room member connection is
+separate from the directory connection) and holds slot 0. Slots `1..capacity-1`
+belong to guests; **the slot number is the transport peer index**. Capacity is
+the directory row's capacity at open time (2..9, the `max_match_seats` bound,
+separate from the directory's listing cap of 64) and cannot change while the
+scope is open. A heartbeat that names another capacity is refused (EAWR-NET-1540).
+
+| Slot state | Meaning |
+| --- | --- |
+| vacant | free |
+| reserved | admitted through the directory, not yet attached (30 s) |
+| attached | bound to a live member connection |
+| held | started match, connection lost, capability holder may reattach |
+| left | started match, member left, was kicked or the hold ran out |
+
+One reservation table serves the directory admission and the public alias. Every
+change commits on the owner thread before any reply or push, so the last vacant
+seat has exactly one winner whichever path asks. The directory's *Password join*
+reply (value 33) appends the reserved slot and a 128-bit **member capability**
+when the host has opened the scope; a room without a scope replies as before
+(slot 0, empty capability). The capability only opens the signalling path: it
+never proves the player to the other members (the pair secret and the reconnect
+proof do).
+
+### Operations (Kind 34..49)
+
+| Kind | Name | Direction | Body |
+| --- | --- | --- | --- |
+| 34 | room_open | host to service | room ID, ownership, principal, identity, u32 alias flag |
+| 35 | room_opened | service to host | slot, member capability, identity, alias, TURN URI/user/password, TURN lifetime s, lease ms, hard-maximum ms |
+| 36 | room_attach | guest to service | room ID or 4-character alias, member capability (empty for an alias), identity |
+| 37 | room_attached | service to member | as room_opened (also the Reattach reply) |
+| 38 | room_roster | service to attached | revision, capacity, state, count, per slot: state and identity |
+| 39 | room_signal | member to service | destination slot, blob (1..65,536 bytes) |
+| 40 | room_forwarded | service to member | source slot, source identity, blob |
+| 41 | room_leave | member to service | empty |
+| 42 | room_release | host to service | slot |
+| 43 | room_kick | host to service | slot |
+| 44 | room_lock | host to service | empty |
+| 45 | room_reattach | member to service | room ID, member capability, identity |
+| 46 | room_closed | service to member | reason; the connection closes after it |
+| 47 | room_ack | service to member | empty (release, kick, lock acknowledgements; leave closes with it) |
+
+Kinds 48..49 stay spare. The request router has an explicit range check for
+34..49; a room member connection answers only these plus ticket E's renewal
+(13) and the client heartbeat (Kind 10), and a directory or invitation connection
+refuses all of them.
+
+* **Roster.** One snapshot per revision (under 400 bytes at nine seats) to every
+  attached member on every slot change, including reservations. Identities appear
+  once a member has attached; no addresses, names or capabilities are ever sent.
+  The revision grows by one per change; a client ignores older revisions.
+* **Signals.** Delivered only between two attached members. The service stamps the
+  source slot and identity, and the receiving adapter checks that identity against
+  the roster. Because the roster reaches a member before the newcomer can signal
+  it, a forwarded signal from a slot the receiver does not know is malformed.
+  A signal to oneself, to a seat outside the room, an empty or oversize blob or a
+  malformed frame is a protocol violation and ends only the offender's connection.
+  A signal to a seat that is vacant, reserved, attaching, held or left is a benign
+  race (a member just left, a repair is under way, ICE retries): it is **dropped and
+  counted, and the sender stays**. A receiver whose output queue is full (server) or
+  receive queue is full (client) likewise loses the blob, never its connection.
+* **Alias.** A public room (no password) whose host asked for one receives a
+  four-character alias from the same namespace as invitation aliases, so a typed
+  code names one thing. Alias attach reserves the lowest free seat and attaches in
+  one step (no 30-second window to squat on); wrong aliases spend the prefix's
+  failed-guess budget (five per minute, 60-second cooldown) and the global alias cap.
+* **Leave, release, kick.** Before Start leave and release free the seat for a
+  refill (release never bans). Kick additionally denies the identity and the
+  directory principal for the room's lifetime (at most 64 of each) and works
+  after Start, where it marks the seat left. Only slot 0 may release, kick or lock.
+  Host races keep every connection: release or kick of a seat that just emptied is
+  a plain acknowledgement; a repeated Start and a release after Start are
+  acknowledged with a reason (Kind 47 carrying the u32 1775); a kick whose denylist
+  entry does not fit the bounded list still removes the member and is acknowledged
+  with 1777. Only a host naming itself or a seat outside the room is a violation.
+  The denial is a courtesy, not an identity guarantee: it covers the identity string
+  and the directory principal, both client-chosen, and an alias attach carries no
+  principal.
+* **Lock** is Start: pending reservations are dropped, nothing new may attach or
+  reserve, and the directory hides the row (its heartbeat can no longer clear the
+  flag). From then on a lost member connection **holds** its seat for
+  `room_hold_timeout_ms` (default 5 minutes), then marks it left. A started room
+  with nobody attached or held ends.
+* **Reattach** (after Lock only) binds a new connection to a held seat when the
+  member capability **and** identity match, issues fresh TURN credentials and
+  revokes the replaced ones. A still-bound old connection (half open) is taken
+  over and closed. The service capability opens the signalling path; the survivors
+  still demand the pair proof before any data.
+* **Host loss** before Start closes the room for everyone (reason EAWR-NET-1528)
+  and hides the directory row. After Start the host is held like any seat and the
+  room lives on; host-only operations are unavailable for the rest of the match.
+  A staging room whose directory row expires (no heartbeat for 30 s) ends too,
+  while a started match outlives its row.
+
+### Typed reasons
+
+| ID | Meaning |
+| --- | --- |
+| EAWR-NET-1772 | unknown or closed room, or not yours to open |
+| EAWR-NET-1773 | capability, identity or membership does not match |
+| EAWR-NET-1774 | seat unavailable: taken, reservation expired, duplicate identity, room already open |
+| EAWR-NET-1775 | room started; no new attachments |
+| EAWR-NET-1776 | released or kicked (also: a denied principal asks for a seat) |
+| EAWR-NET-1777 | member or room budget exceeded |
+
+Malformed room requests, forbidden signal destinations and an invalid room size
+reuse EAWR-NET-1521; a full room reuses 1545; an unknown alias 1523; alias
+exhaustion 1533; guess cooldowns 1532/1547; the prefix's outstanding reservations
+1527. A room refuses with a typed error frame and closes only the offending
+connection. Member and lease endings use room_closed with the reason.
+
+### Reservations and abuse bounds
+
+* At most two outstanding (unattached) reservations per room, a reservation
+  lasts 30 seconds (`room_reservation_timeout_ms`), and each counts toward the
+  reserving prefix's `unpaired_sessions_per_ip` (default 2) until it attaches,
+  expires or its directory connection ends.
+* A reservation that expires unattached spends one failed guess of its prefix and
+  has a window of its own: with the default two outstanding reservations per prefix a
+  squatter makes at most four expiries a minute, which alone would stay below the
+  five-guess cooldown, so the **third unattached expiry in a rolling minute starts
+  the same 60-second cooldown** (directory admissions from that prefix are refused
+  with 1547). Raising `unpaired_sessions_per_ip` raises the squatting rate
+  accordingly.
+* One directory principal holds one seat per room.
+* Room traffic has budgets of its own, separate from the legacy 120 operations /
+  1 MiB session budget and from the per-prefix legacy budget (players share a NAT):
+  `room_operations_per_member_per_minute` (480) and
+  `room_bytes_per_member_per_minute` (2 MiB) per member, seat-count times that per
+  room, and `connections_per_ip` times that per prefix. A renewal request costs one
+  operation and each member may start a renewal at most every 30 seconds, so one seat
+  cannot hammer a failing credential provider. A member over budget is closed
+  with EAWR-NET-1777 and costs the others nothing. Churning members cannot launder
+  operations through fresh seats because the room-wide budget is
+  capacity times the member budget. The defaults are provisional until the
+  introduced-path test measures blobs per pair.
+* `connections_per_ip` now defaults to 18 (twice `max_match_seats`): nine members
+  behind one NAT hold a directory and a room connection each. The per-prefix
+  operation, unpaired and guess budgets still bound abuse from the prefix.
+* Memory: about 10 KiB of room and member records per room; output queues stay
+  per connection (256 KiB / 64 frames).
+
+### TURN credentials per member
+
+Each member gets its own credential at attach and at reattach, valid for the
+rest of the room's hard maximum plus the 60-second allocation margin (clamped to
+48 h), and uses it for all of its pair connections. coturn issues one HMAC
+username per member. Cloudflare costs one generate call per member through the
+same `TurnRefresh` provider seam that renewals use, so the cap
+`cloudflare_turn_calls_per_minute` is shared; the attach reply waits for the call
+(the member attaches without relay candidates after `cloudflare_turn_timeout_ms`
+plus two seconds, and a credential that arrives late is revoked at once). A full
+room costs up to nine generates at attach, nine revokes at its end and one of each
+per kick, refused newcomer or reattach: about 20 calls over its life.
+
+The service remembers **every** credential username it issued to a seat (attach,
+each renewal, reattach; at most 64, the oldest revoked first) and revokes all of them
+when the seat ends: leave, release, kick, a held seat that times out into left, a
+reattach (the replaced connection's credentials) and room end. A revoke that finds the
+shared Cloudflare call cap spent waits in a bounded queue and goes out as calls free
+up. **coturn has no revocation**: a REST credential is an HMAC username with an
+embedded expiry, so a kicked member keeps the right to allocate until it expires
+(at most `max_session_lifetime_ms` plus the margin, clamped to 48 h). The residual is quota and bandwidth, not game access
+(a kicked member gets no pair secrets), and coturn's `user-quota` and `max-bps`
+bound it. Lower `max_session_lifetime_ms` for a shorter window. No relay
+configured at all is a plain attach with empty credentials; the client's
+`turn_credentials()` is then empty and members connect directly.
+
+### Lease and renewal in rooms
+
+The room carries ticket E's lease from the moment the host opens it:
+`session_lifetime_ms` (2 h) renewed up to `max_session_lifetime_ms` (24 h). At the
+renewal window every attached member receives Expiring (Kind 16); **any one**
+member may Renew (Kind 13). The service asks the provider for one fresh credential
+per attached member, then sends each its own Renewed (Kind 14); a second renewal
+while one runs, or before the window, is refused harmlessly (1734). A failed or
+late provider call refuses the renewal (1733) with the lease unchanged, and late
+credentials are revoked. At the end of the lease, or at the maximum (1730), every
+member receives room_closed with the typed reason. Live GNS connections cannot
+switch credentials; the client keeps the refreshed credential for connections
+dialed afterwards (`turn_credentials()`).
+
+### Client
+
+`NetworkGnsRoom` implements `GnsRoomEndpoint` over one worker thread and one TLS
+connection per member:
+
+* `NetworkGnsRoom::open` (host: the published room, its principal from
+  `NetworkOnlineLobby::principal()`, the member's GNS identity),
+* `attach` (guest with the directory admission: slot and member capability),
+* `attach_alias` (guest with a four-character alias) and
+* `reattach` (after Start, with the saved capability).
+
+The factories block for the bounded admission exchange, including the member's
+credential, so call them from an I/O worker; `send`, `poll`, `roster` and `lease`
+only touch copied, bounded queues (64 frames, 256 KiB by default) and are safe on
+GNS callbacks. Host-only operations refuse locally from any other slot. Hostnames in
+a credential's TURN list become numeric addresses on the worker thread, as for
+pairings.
+
+### Seat and slot
+
+The directory seat in an admission reply is the chat label of the *Password join*
+protocol and is never reused; the **slot** is the transport peer index, reused as seats
+empty and refill (guest A leaves, guest B gets directory seat 3 and slot 1). For a
+scoped room the slot is the only identifier of a signalling member: `NetworkGnsRoom`
+release and kick take slots, the directory chat kick (Kind 29) only mutes chat and
+never removes a member from the room. A guest must keep its `NetworkOnlineLobby`
+(the directory connection) until `NetworkGnsRoom::attach` returns, because the seat
+reservation ends with the directory admission. `accepts_per_minute` stays at 30 per
+prefix: nine members forming a room use 18 accepts, so a reconnect burst of a whole NAT
+can exceed it; raise it together with `connections_per_ip` on busy home-NAT communities.

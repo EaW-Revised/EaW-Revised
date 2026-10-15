@@ -23,8 +23,26 @@ enum class Kind : std::uint8_t {
     directory_join, directory_leave, directory_chat, directory_poll, directory_kick,
     directory_opened, directory_page, directory_published, directory_admitted,
     // Page and acknowledgement layouts are selected by the outstanding request.
-    directory_chat_page = directory_page, directory_ok = directory_opened
+    directory_chat_page = directory_page, directory_ok = directory_opened,
+    // N-peer room scope (34..49, EAWR-NET-1772..1777): layouts and rules in relay_room.hpp. 48..49 stay spare.
+    room_open = 34, room_opened, room_attach, room_attached, room_roster, room_signal, room_forwarded,
+    room_leave, room_release, room_kick, room_lock, room_reattach, room_closed, room_ack
 };
+inline constexpr unsigned room_kind_first = 34, room_kind_last = 49;
+inline bool room_kind(unsigned kind) { return kind >= room_kind_first && kind <= room_kind_last; }
+// Typed reasons of the room scope (EAWR-NET-1772..1777), in a Kind::error frame or room_closed.
+inline constexpr unsigned room_unknown = 1772;      // no such room, closed room, or not yours to open
+inline constexpr unsigned room_capability = 1773;   // capability, identity or membership does not match
+inline constexpr unsigned room_unavailable = 1774;  // slot reserved by someone else, expired, taken or duplicate identity
+inline constexpr unsigned room_locked = 1775;       // the host started the match; no new attachments
+inline constexpr unsigned room_denied = 1776;       // released or kicked (kick also denies identity and principal)
+inline constexpr unsigned room_budget = 1777;       // per-member or per-room operation/byte budget exceeded
+// What a room client may receive in an error frame or room_closed: the base service range, the directory range
+// (admission refusals reach a room member too), the room range and ticket E's lease endings.
+inline bool room_error_number(unsigned number) {
+    return (number >= 1519 && number <= 1559) || (number >= room_unknown && number <= room_budget) || number == 1730 || number == 1731;
+}
+
 inline core::Diagnostic error(unsigned number, std::string message) {
     core::Diagnostic result;
     result.code = "EAWR-NET-" + std::to_string(number);

@@ -7,6 +7,8 @@ set(EAWR_NET_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/tcp_transport.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gns_transport.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gns_signalling.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/gns_room_fixture.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/mesh_policy.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/gns_frame_codec.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/desync_monitor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/setup.cpp"

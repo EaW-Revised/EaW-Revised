@@ -18,6 +18,9 @@ struct OnlineLobbyJoinCompletion {
 // the host password, the password join, refresh and the hosting state. Nonblocking.
 class OnlineRoomSource : public presentation::ui::LobbyGameSource {
 public:
+    // The live source publishes only after its host's bridge invitation exists.
+    // Fixed presentation sources do not need a signalling capability.
+    virtual void set_bridge_invitation(std::string, std::string = {}) {}
     // False when the source refuses the change (for example while the room is listed).
     virtual bool set_host_password(std::string password) = 0;
     virtual void begin_join(presentation::ui::LobbyAttemptId, std::string room, std::string password, std::string name) = 0;
@@ -33,7 +36,8 @@ public:
 // the owned I/O worker. Directory advertisements never authorize game setup.
 class OnlineLobbyGameSource final : public OnlineRoomSource {
 public:
-    OnlineLobbyGameSource(std::unique_ptr<OnlineLobbyService>, OnlineRoomMetadata local_tags);
+    OnlineLobbyGameSource(std::unique_ptr<OnlineLobbyService>, OnlineRoomMetadata local_tags, bool require_bridge = false);
+    void set_bridge_invitation(std::string, std::string ownership = {}) override;
     ~OnlineLobbyGameSource() override;
     bool set_host_password(std::string password) override;
     void begin_join(presentation::ui::LobbyAttemptId, std::string room, std::string password, std::string name) override;

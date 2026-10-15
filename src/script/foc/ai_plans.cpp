@@ -106,9 +106,12 @@ core::Result<void> parse_entry(const Host& host, std::string_view text, TaskForc
                 continue;
             }
             if (found->second->craft) continue;
-            team.types.push_back(found->second->type_id);
+            // PL-20: the proposal list keeps the authored order, so equal weights resolve to the first
+            // name written, as the original's unit enumeration lists them; an id (name hash) order
+            // would pick among equals arbitrarily.
+            if (std::find(team.types.begin(), team.types.end(), found->second->type_id) == team.types.end())
+                team.types.push_back(found->second->type_id);
         }
-        std::sort(team.types.begin(), team.types.end());
     }
     // A team with no possible type is dropped. The host loads only the M2 types, but every category
     // and type name the FoC space plans use has FoC types (PL-11), so a team naming only types

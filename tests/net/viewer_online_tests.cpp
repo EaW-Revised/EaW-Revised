@@ -1,5 +1,6 @@
 #include "setup_test_support.hpp"
 #include "online_match.hpp"
+#include "online_service_settings.hpp"
 #include "eawr/net/gns_transport.hpp"
 #include <array>
 #include <chrono>
@@ -14,11 +15,37 @@ int main(int argc, char** argv) {
     try {
         if (!net::GnsTransport::available() || !net::NetworkGnsIntroduction::available()) return 77;
         expect(argc == 5, "role, relay port, trust file and invitation file required");
+        eawr::presentation::ui::NetworkSettings system_settings;
+        system_settings.online_host = "service.example"; system_settings.online_trust = "system";
+        system_settings.online_pin = std::string(64, 'a'); system_settings.online_ca_file = "inactive-file";
+        const auto system_options = require(viewer::online_match_options(system_settings));
+        expect(!system_options.identity.empty() && system_options.identity.size() <= net::gns_identity_max_bytes,
+            "settings factory identity fits the signalling and GNS transport limit");
+        expect(system_options.service.certificate_sha256.empty() && system_options.service.ca_file.empty()
+            && system_options.service.certificate_name == "service.example", "system trust cannot fall back to inactive pin or CA fields");
         const std::string role = argv[1]; const bool host = role.starts_with("host") || role == "cancel" || role == "retry";
         viewer::OnlineMatchOptions options; options.service.address = "127.0.0.1";
         options.service.port = static_cast<std::uint16_t>(std::stoul(argv[2]));
         options.service.ca_file = argv[3]; options.service.certificate_name = "localhost";
         options.identity = host ? "bridge-host" : "bridge-guest"; options.short_invitation = true;
+        const bool directory_room = role.find("directory-") != std::string::npos;
+        const bool private_room = role.ends_with("private");
+        std::shared_ptr<net::OnlineRoomSource> rooms;
+        if (directory_room) {
+            eawr::presentation::ui::NetworkSettings settings;
+            settings.online_host = "localhost"; settings.online_port = options.service.port;
+            settings.online_trust = "ca-file"; settings.online_ca_file = argv[3];
+            options = require(viewer::online_match_options(settings));
+            rooms = viewer::make_live_online_source(options);
+            if (host) {
+                expect(rooms->set_host_password(private_room ? "private-room" : ""), "host password configures live source");
+                eawr::presentation::ui::LobbyPresence presence;
+                presence.place = eawr::presentation::ui::LobbyPlace::hosting; presence.name = "Host";
+                presence.game = private_room ? "Directory private" : "Directory public";
+                presence.map = "map-from-data"; presence.game_type = "space"; presence.max_players = 2;
+                presence.passworded = private_room; rooms->announce(presence);
+            }
+        }
         if (role == "guest-mismatch") options.build_identity += "-different";
         // Windows can take seconds to report a refused localhost connect.
         // Let that refusal finish instead of racing the introduction timeout.
@@ -124,10 +151,37 @@ int main(int argc, char** argv) {
             expect(std::chrono::steady_clock::now() < deadline, "online bridge deadline role=" + role + " phase=" + std::to_string(static_cast<unsigned>(match->view().phase)) + " seats=" + std::to_string(match->view().connected_seats) + " diagnostic=" + match->view().diagnostic_code + details + ": " + match->view().message);
             std::this_thread::sleep_for(2ms);
         };
-        if (host) match->host(0);
+        if (host) { match->set_public_invitation(!private_room); match->host(0); }
         else {
             std::string code; std::ifstream(argv[4]) >> code;
-            expect(code.size() == 4, "server-generated short code is shared"); match->join(code);
+            if (directory_room) {
+                expect(code.size() == 32, "directory room id is shared, never its private invitation");
+                bool listed = false;
+                while (!listed) {
+                    static_cast<void>(rooms->pump());
+                    for (const auto& row : rooms->games()) if (row.address == code) {
+                        expect(row.version_matches && row.passworded == private_room, "live room tags/password are displayed"); listed = true;
+                    }
+                    if (!listed) pause();
+                }
+                const auto admit = [&](std::uint64_t generation, const std::string& password) {
+                    rooms->begin_join({eawr::presentation::ui::LobbySourceKind::online, generation}, code, password, "Guest");
+                    for (;;) {
+                        auto replies = rooms->take_join_results();
+                        if (!replies.empty()) return std::move(replies.front());
+                        pause();
+                    }
+                };
+                if (private_room) {
+                    const auto wrong = admit(1, "wrong-room-password");
+                    expect(wrong.refusal && wrong.refusal->code == "EAWR-NET-1546" && !wrong.admission, "wrong password releases no game binding");
+                }
+                auto admitted = admit(2, private_room ? "private-room" : "");
+                expect(admitted.admission && admitted.admission->bridge_invitation.size() == 32, "directory admission hands the bridge its one-use invitation");
+                match->join(std::move(admitted.admission->bridge_invitation));
+            } else {
+                expect(code.size() == 4, "server-generated short code is shared"); match->join(code);
+            }
         }
         if (role == "host-bad-setup") selected.slots.reset();
         bool written{}, saw_snapshot{}, ready_requested{};
@@ -152,9 +206,24 @@ int main(int argc, char** argv) {
                 if (role == "guest-silent") { terminal_proof("EAWR-NET-1536"); return 0; }
                 expect(false, "online admission: " + view.message);
             }
-            if (host && !written && !view.invitation_code.empty()) {
+            if (host && !written && (directory_room ? !match->bridge_invitation().empty() : !view.invitation_code.empty())) {
                 expect(view.invitation_expires > std::chrono::steady_clock::now(), "accepted invitation TTL shown");
-                std::ofstream(argv[4]) << view.invitation_code; written = true;
+                if (directory_room) {
+                    if (private_room) expect(view.invitation_code.empty(), "private game capability never enters the display view");
+                    rooms->set_bridge_invitation(match->bridge_invitation(), match->bridge_ownership());
+                    if (private_room || role.ends_with("no-alias")) expect(view.invitation_code.empty(), "no full capability appears without a public alias");
+                    if (!std::filesystem::exists(std::string(argv[4]) + ".private-audit")) {
+                        std::ofstream audit(std::string(argv[4]) + ".private-audit");
+                        audit << match->bridge_invitation() << '\n' << match->bridge_ownership() << '\n' << "private-room" << '\n' << "wrong-room-password";
+                    }
+                    const auto listed = rooms->games();
+                    const auto found = std::find_if(listed.begin(), listed.end(), [&](const auto& row) {
+                        return row.name == (private_room ? "Directory private" : "Directory public");
+                    });
+                    if (found == listed.end()) { pause(); continue; }
+                    std::ofstream(argv[4]) << found->address;
+                } else std::ofstream(argv[4]) << view.invitation_code;
+                written = true;
                 if (role == "cancel") {
                     const auto before = std::chrono::steady_clock::now(); match->cancel();
                     expect(std::chrono::steady_clock::now() - before < 100ms, "cancel never waits for publication teardown");

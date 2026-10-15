@@ -1,4 +1,5 @@
 #include "lan_lobby_mode.hpp"
+#include "settings_store.hpp"
 
 #include "capture_viewport.hpp"
 #include "lan_broadcast_source.hpp"
@@ -324,6 +325,7 @@ LanLobbyMode::Options LanLobbyMode::from_command_line() {
             options.name = value;
             options.name_given = true;
         } else if (argument == "--eawr-profile-file") options.profile_file = ViewerPath{value}.native();
+        else if (argument == "--eawr-settings-file") options.settings_file = ViewerPath{value}.native();
         else if (argument == "--eawr-lan-colour") {
             unsigned parsed{};
             if (std::from_chars(value.data(), value.data() + value.size(), parsed).ec == std::errc{}) {
@@ -511,6 +513,7 @@ bool LanLobbyMode::ready(Node3D& host) {
         state.options.name = model::effective_network_name(state.profile, platform);
     }
     if (!state.options.colour_given) state.options.colour = static_cast<std::uint32_t>(std::max(0, state.profile.lobby_colour));
+    screen_options.online_settings = SettingsStore{state.options.settings_file}.load().settings.network;
     screen_options.player_name = state.options.name;
     screen_options.player_colour = state.options.colour;
     if (!state.options.games.empty() || !state.options.players.empty()) {

@@ -186,6 +186,15 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertIn("src/skirmish_prepare.cpp", source_text("apps/viewer/CMakeLists.txt"))
         self.assertIn("skirmish_prepare.cpp", (ROOT / "tests/net/CMakeLists.txt").read_text(encoding="utf-8"))
 
+    def test_online_service_uses_saved_settings_and_live_adapters(self):
+        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        service = (SRC / "online_service_settings.hpp").read_text(encoding="utf-8")
+        self.assertIn("make_live_online_source(configured.value())", screen)
+        self.assertIn("make_online_match(std::move(configured).value()", screen)
+        self.assertIn("make_unique<net::NetworkOnlineLobby>", service)
+        self.assertIn("options.turn_only = settings.online_relay_only", service)
+        self.assertIn("match_ = lan_match_", screen)
+
     def test_the_online_half_binds_the_room_source_into_the_same_screen(self):
         screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
         header = (SRC / "lan_lobby_screen.hpp").read_text(encoding="utf-8")
@@ -196,7 +205,8 @@ class LanLobbyStructure(unittest.TestCase):
             self.assertNotIn(gone, screen)
             self.assertNotIn(gone, header)
         # A private room shows and publishes no invitation code: the screen never reads one.
-        self.assertNotRegex(screen, r"\.invitation_code|\binvitation_consumed")
+        self.assertIn("set_bridge_invitation(match_->bridge_invitation(), match_->bridge_ownership())", screen)
+        self.assertIn("impl.host_password.empty()", screen)
         self.assertNotIn("invitation_expires", screen)
         # Rows, paging, refresh, the password prompt, the hosting state and the chat window.
         for call in ("online_row_text(", "online_page(", "online_rooms->refresh()", "take_join_results()",
@@ -215,8 +225,8 @@ class LanLobbyStructure(unittest.TestCase):
         screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
         pump = screen.split("void EawrLanLobby::pump_online()", 1)[1].split("// ---- Host options", 1)[0]
         self.assertIn("if (result.admission)", pump)
-        self.assertIn("match_->join(room);", pump)
-        self.assertIn("open_staging(false, game, room);", pump)
+        self.assertIn("match_->join(options_.match ? room : result.admission->bridge_invitation);", pump)
+        self.assertIn("open_staging(false, game, {});", pump)
         code = screen.split("void EawrLanLobby::join_code(", 1)[1].split("void EawrLanLobby::join_online_selected", 1)[0]
         self.assertIn("match_->join(*canonical);", code)
         self.assertIn("normalize_short_code(code)", code)
@@ -335,12 +345,40 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertEqual(online["games"], [])
         self.assertEqual(online["players"], ["Solo"])
         self.assertEqual(online["chat"], [])
-        self.assertEqual(online["status"], "Online play is not available in this build or service configuration.")
+        self.assertEqual(online["status"], "Set the online service in Network Options first.")
         self.assertEqual(returned["players"], ["Solo", "Echo"])
         self.assertEqual(returned["chat"], [])
         self.assertTrue(returned["games"])
         self.assertEqual(staging["page"], "staging")
         self.assertEqual(report["sent_chat"], ["lobby:Solo: LAN only"])
+
+    def test_online_service_unconfigured_and_unreachable_fail_cleanly(self):
+        for configured in (False, True):
+            name = "online-service-live-" + str(configured)
+            settings = self.directory / (name + ".cfg")
+            if configured:
+                with socket.socket() as closed:
+                    closed.bind(("127.0.0.1", 0))
+                    port = closed.getsockname()[1]
+                settings.write_text("eawr-settings 1\nnetwork.online_host=127.0.0.1\n"
+                                    f"network.online_port={port}\nnetwork.online_pin=" + "a" * 64 + "\n", encoding="utf-8")
+            else:
+                settings.unlink(missing_ok=True)
+            picture = self.pictures / (name + ".png")
+            args = command(self.cache, name, self.directory, picture,
+                           "--eawr-settings-file", str(settings), "--eawr-lan-do", "source:online",
+                           "--eawr-lan-do", "sleep:360" if configured else "sleep:5",
+                           "--eawr-lan-do", "snapshot")
+            completed = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=300)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            result = load(self, self.directory, name, completed.stdout)
+            self.assertEqual(result["final"]["source"], "online")
+            notice = result["final"]["room_notice"]
+            self.assertIn("service" if configured else "Network Options", notice)
+            self.assertEqual(result["final"]["rooms_total"], 0)
+            self.assertNotIn("127.0.0.1", json.dumps(result))
+            self.assertNotIn("a" * 64, completed.stdout + completed.stderr + json.dumps(result))
+            self.assertNotIn("ERROR:", completed.stdout + completed.stderr)
 
     def test_online_rooms_page_prompt_for_a_password_and_join_into_the_staging(self):
         name = "online-rooms"

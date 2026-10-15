@@ -244,6 +244,18 @@ class FrontEndGpu(unittest.TestCase):
                     self.assertTrue(all(isinstance(problem, str) for problem in data["problems"]))
                     self.assertEqual(data["exit_reason"], "clean_quit" if scripted else "engine_shutdown")
 
+    def test_online_service_menu_routes_open_network_options_and_online_lobby(self):
+        with tempfile.TemporaryDirectory(prefix="front-end-online-service-") as temporary:
+            output = Path(temporary).resolve()
+            result, _ = run_front_end(output, "online-service-routes",
+                                      ("--eawr-front-end-test-online", "--eawr-settings-file", str(output / "settings.cfg"),
+                                       "--eawr-attract", "off"))
+            self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+            self.assertIn("EAWR online service lobby source: online", result.stdout)
+            self.assertIn("EAWR online service network page: network", result.stdout)
+            self.assertIn("EAWR online service options page: network", result.stdout)
+            self.assertNotIn("ERROR:", result.stdout)
+
     def test_front_end_unwritable_report_exits_two_on_both_quit_routes(self):
         with tempfile.TemporaryDirectory(prefix="front-end-report-failure-") as temporary:
             output = Path(temporary).resolve()
@@ -292,7 +304,7 @@ class FrontEndGpu(unittest.TestCase):
         expect(single, "IDC_CUSTOM_CAMPAIGN_BUTTON", "enabled", stock)
         expect(single, "IDC_DEBUG_LOAD_SKIRMISH_MAP_BUTTON", "hidden", stock)
         expect(multi, "IDC_MULTIPLAYER_LAN_BUTTON", "enabled", True)
-        expect(multi, "IDC_MULTIPLAYER_INTERNET_BUTTON", "disabled", stock)
+        expect(multi, "IDC_MULTIPLAYER_INTERNET_BUTTON", "enabled", stock)
         setups = SETUP_LINE.findall(log)
         self.assertEqual([(visible.lower(), lan.lower()) for visible, lan in setups],
                          [("true", "false"), ("true", "true")], setups)

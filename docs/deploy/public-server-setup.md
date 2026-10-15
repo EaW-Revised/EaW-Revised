@@ -20,9 +20,8 @@ Who does what:
 
 - **[Owner]** means it needs your account, a payment or a decision.
 - **[Claude]** means a coordinator or worker can do it.
-- **[Code]** means it waits for code that has not merged yet:
-  - optional publisher token (legacy EAWR-3603)
-  - room list (legacy EAWR-3622)
+- **[Code]** means it waits for code that has not merged yet. Today that is the in-game Online
+  setting (legacy EAWR-3667), which players need to pick this server.
 
 ## 0. Before you start
 
@@ -30,8 +29,9 @@ Who does what:
   manages the domain you want to use (for example `example.org`).
 - [Owner] Pick the public host name, for example `play.example.org`. This guide uses that
   name, and `203.0.113.10` stands for the server's IPv4 address.
-- [Claude] Tag a release of the repository that contains the relay server. You build the image
-  from that tag (step 3).
+- [Claude] The public repository carries the relay server source under the tag
+  `server-source-2026-10-15.2` (a source sync, not a release). You build the image from that tag
+  (step 3).
 
 ## 1. Cloudflare: TURN key and DNS
 
@@ -92,12 +92,16 @@ systemctl enable --now docker
 dpkg-reconfigure -plow unattended-upgrades   # security updates for the OS
 adduser --system --group --uid 10001 relay   # same UID/GID as the container user
 mkdir -p /srv/eawr/config /srv/eawr/src
-git clone https://github.com/<public repo> /srv/eawr/src
-cd /srv/eawr/src && git checkout <release tag>     # [Claude] gives you the tag
-docker build -f apps/relay_server/Dockerfile -t eawr-relay:<release tag> .
+git clone --depth 1 --branch server-source-2026-10-15.2 https://github.com/EaW-Revised/EaW-Revised.git /srv/eawr/src
+cd /srv/eawr/src
+docker build -f apps/relay_server/Dockerfile -t eawr-relay:server-source-2026-10-15.2 .
 ```
 
-The build takes a few minutes on a 2-vCPU server. Later updates repeat only the last two lines
+Once the public clone works, remove the old private-repo deploy key. On the server:
+`rm /root/.ssh/eawr_deploy*` and delete the `github-eawr` block from `/root/.ssh/config`. On
+GitHub: the private repository → Settings → Deploy keys → delete the key.
+
+The build takes a few minutes on a 2-vCPU server. Later updates fetch the new tag and rebuild
 (step 8).
 
 ## 4. Certificate (Let's Encrypt)
@@ -126,6 +130,9 @@ chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/eawr-relay.sh
 
 Let's Encrypt certificates last 90 days. Renewal runs about every 60 days.
 
+The renewal hook above has never run in a real renewal; the first one is about mid-December.
+Check it then with `certbot renew --dry-run` and `docker logs eawr-relay`.
+
 ## 5. Configuration and secrets
 
 `/srv/eawr/config/relay.local.conf` must be owned by `relay`, mode `0400`:
@@ -135,7 +142,7 @@ listen_address=0.0.0.0
 port=27020
 certificate_file=cert.pem
 key_file=key.pem
-# Public community server: no publisher token (owner answer, legacy #3461). [Code] key name from the publisher-token change (legacy #3603).
+# Public community server: no publisher token (owner answer, legacy #3461).
 require_access_token=0
 # Cloudflare Realtime TURN for relayed game traffic. The key ID and API token come from the
 # environment file below, never from this file.
@@ -168,7 +175,7 @@ docker run -d --name eawr-relay --restart unless-stopped \
   --env-file /srv/eawr/config/turn.env \
   --mount type=bind,source=/srv/eawr/config,target=/config,readonly \
   --memory 512m --cpus 1.5 \
-  eawr-relay:<release tag>
+  eawr-relay:server-source-2026-10-15.2
 docker ps                          # STATUS shows "healthy" after about 30 s
 docker logs --tail 50 eawr-relay   # sanitized; no secrets, codes or addresses
 docker exec eawr-relay eawr_relay_server --health --config /config/relay.local.conf
@@ -182,12 +189,13 @@ HEALTHCHECK runs every 30 seconds.
 [Owner] with [Claude] guiding. Use two PCs on different networks, for example home Wi-Fi and a
 phone hotspot.
 
-1. Health from outside the server, on either PC:
+1. (Done) Health from outside the server, on either PC:
    `eawr_relay_server --health --address <server IPv4> --port 27020 --certificate-name play.example.org`.
    It uses the system CA store and verifies the certificate chain and the DNS name;
    leave `--ca-file` and `--certificate-sha256` unset. It must print `healthy`.
    An untrusted certificate or wrong name fails with curated diagnostics.
-2. In the game on both PCs: Online → the service is `play.example.org:27020`. Host on PC 1 and
+2. [Code] Waits for the in-game Online setting (legacy EAWR-3667) and the two-PC test kit
+   (legacy EAWR-3646). In the game on both PCs: Online → the service is `play.example.org:27020`. Host on PC 1 and
    join on PC 2 with the 4-character code. Expect the lobby, Ready, Start and the battle.
 3. TURN check: repeat with "relay only" enabled in the game's network options. The
    match still connects, and Cloudflare's Realtime dashboard shows a small amount of TURN traffic.
@@ -197,17 +205,52 @@ phone hotspot.
      message, and a running match keeps going;
    - after `docker start eawr-relay` hosting works again.
 
-Record the date, the release tag and the results on the release issue.
+### Test kit without the game (no game data, GPU or Godot)
+
+For the two-network test, a small headless kit replaces the game on both PCs. It talks to the
+real service over TLS and GNS, plays 10 lockstep ticks on a synthetic match, compares the state
+and prints `RESULT: PASS` or `RESULT: FAIL` plus the route (`direct`, `relayed via TURN`, or `unknown` if the selected route cannot be confirmed).
+
+- [Claude] builds the zip from the source tag with the standard Windows pool job: target
+  `eawr_online_test_package` on preset `windows-msvc-ninja-relay`, with
+  `-DEAWR_ONLINE_TEST_ADDRESS=<your real service DNS name>`, `-DEAWR_ONLINE_TEST_PORT=27020` and
+  `-DEAWR_ONLINE_TEST_TRUST=system-ca` (or `pin:<SHA-256 of the certificate>`). The result is
+  `online-test-package/EAWR-online-test.zip` in the build tree. The address has no default;
+  configure refuses the placeholder `play.example.org`. The package includes the compiler
+  runtime DLLs, so testers need no separate VC++ runtime installation. The build's
+  `online_test_package` CTest writes the zip and a `pe-imports.json` dependents receipt;
+  [Claude] delivers that zip to [Owner].
+- `system-ca` uses the PC's OS certificate store and checks the DNS certificate name, with
+  no pin or CA file. An IP literal needs a pin (or a separately configured DNS certificate name).
+  For pin mode, on the server run
+  `eawr_relay_server --fingerprint --certificate-file /path/to/certificate.pem` and copy the
+  64 hexadecimal digits after `pin:` in `server.conf`. The input is the PEM certificate
+  (for a chain, the first/leaf certificate); the printed digest hashes that certificate's DER.
+  Update the pin whenever that certificate changes.
+- [Owner] unzips it on both PCs. `server.conf` holds the address and the trust setting; edit it
+  only if the service address differs.
+- PC 1: double-click `EAWR-online-test-host.cmd`. It prints `Invitation code: XXXX`.
+- PC 2 (other network): double-click `EAWR-online-test-join.cmd` and type the code.
+- Both windows end with `RESULT: PASS` only after receiving the matching peer hash at tick 10,
+  and show the same `Tick-10 state hash`. The `Route:` line says
+  whether GNS selected a direct path or TURN; carrier NAT can need TURN, but the
+  result depends on the selected connection. `unknown` means the tool cannot classify it. For step 3 start the kit from a command prompt as
+  `eawr_online_test.exe host --turn-only` (and `join --turn-only` on the other PC).
+- Each folder gets `online-test-host.log` or `online-test-join.log`. They hold no secrets,
+  codes or peer addresses and are safe to send. Windows may ask once to allow the program
+  through the firewall: allow private and public networks.
+
+Record the date, the tag and the results on the release issue.
 
 ## 8. Updates
 
-[Claude] announces a new release tag and says whether players need the matching game build. The
+[Claude] announces a new source tag and says whether players need the matching game build. The
 build identity must match, otherwise joins are refused with a build-mismatch message.
 
 [Owner] on the server:
 
 ```sh
-cd /srv/eawr/src && git fetch --tags && git checkout <new tag>
+cd /srv/eawr/src && git fetch --depth 1 origin tag <new tag> && git checkout <new tag>
 docker build -f apps/relay_server/Dockerfile -t eawr-relay:<new tag> .
 docker stop eawr-relay && docker rm eawr-relay
 # run the step 6 docker run command with eawr-relay:<new tag>
@@ -242,7 +285,7 @@ address.
 
 ## Open items
 
-- Optional publisher token and 4-character codes (legacy EAWR-3603). Public room list, passwords and chat
-  (legacy EAWR-3622) plus a later UI slice.
+- The in-game Online setting (legacy EAWR-3667) is still pending. The publisher token (legacy EAWR-3603) and
+  the room list (legacy EAWR-3622) and its follow-up (legacy EAWR-3652) are merged.
 - Ticket E: sessions longer than 2 hours and credential refresh.
-- No container image is published. You build it from a release tag on the server (step 3).
+- No container image is published. You build it from a source tag on the server (step 3).

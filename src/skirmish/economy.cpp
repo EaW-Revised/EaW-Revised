@@ -171,11 +171,11 @@ core::Result<tactical::EconomyRules> economy_rules(
         const auto marker = std::find_if(start.markers.begin(), start.markers.end(), [&](const StartMarker& entry) {
             return entry.use == MarkerUse::spawn && entry.player == player.player.player_id;
         });
-        if (marker == start.markers.end()) {
-            return Result::failure(failure("player " + std::to_string(player.player.player_id) + " has no spawn marker"));
-        }
+        // WSS-54: overflow still gets an account. Project mapping: zero yaw for retail's
+        // unassigned zero facing vector; equivalence of those representations is unverified.
+        const auto yaw = marker == start.markers.end() ? Fixed{} : marker->yaw_degrees;
         rules.players.push_back(tactical::EconomyPlayer{
-            player.player.player_id, *credits, *faction->space_unit_cap, !player.human, marker->yaw_degrees});
+            player.player.player_id, *credits, *faction->space_unit_cap, !player.human, yaw});
         rules.players.back().start_tech = static_cast<std::uint32_t>(start.match.start_tech);
         rules.players.back().max_tech = static_cast<std::uint32_t>(start.match.max_tech);
         rules.players.back().credit_multiplier = tables.ai_credit_multiplier.value_or(Fixed::from_raw(Fixed::scale));

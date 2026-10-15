@@ -18,6 +18,9 @@ template<class F> void until(F predicate) {
     while (!predicate()) { if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("Source worker did not reach checkpoint"); std::this_thread::sleep_for(2ms); }
 }
 OnlineRoomMetadata metadata() { OnlineRoomMetadata value; value.name = "Room"; value.host_name = "Host"; value.build = "local-build"; value.protocol = "local-protocol"; value.content = "content"; value.mod = "mod"; value.map = "custom-map"; value.mode = "custom-mode"; return value; }
+struct BlockingList {
+    std::atomic<bool> entered{}, released{}, destroyed{};
+};
 class FakeService final : public OnlineLobbyService {
 public:
     std::atomic<unsigned> lists{}, publishes{}, heartbeats{}, leaves{}, sends{}, joins{};
@@ -27,8 +30,13 @@ public:
     std::condition_variable condition;
     bool hold_join{}, release_join{};
     OnlineRoomMetadata published;
+    std::string bridge;
+    std::shared_ptr<BlockingList> list_gate;
+    ~FakeService() override { if (list_gate) list_gate->destroyed = true; }
     eawr::core::Result<OnlineRoomPage> list(std::string, std::uint32_t) override {
-        ++lists; auto value = metadata(); value.build = "foreign-build";
+        ++lists;
+        if (list_gate) { list_gate->entered = true; while (!list_gate->released) std::this_thread::sleep_for(2ms); }
+        auto value = metadata(); value.build = "foreign-build";
         return eawr::core::Result<OnlineRoomPage>::success({{{std::string(32, 'a'), value, true}}, {}});
     }
     eawr::core::Result<OnlineRoomPublication> publish(OnlineRoomMetadata value, std::string) override {
@@ -37,6 +45,10 @@ public:
         ++publishes;
         if (fail_publish > 0) { --fail_publish; return eawr::core::Result<OnlineRoomPublication>::failure(eawr::net::relay::error(1547, "Publish temporarily refused")); }
         return eawr::core::Result<OnlineRoomPublication>::success({std::string(32, 'a'), std::string(32, 'b'), 30000});
+    }
+    eawr::core::Result<OnlineRoomPublication> publish_bridge(OnlineRoomMetadata value, std::string password, std::string invitation, std::string) override {
+        { std::lock_guard lock(mutex); bridge = std::move(invitation); }
+        return publish(std::move(value), std::move(password));
     }
     eawr::core::Result<void> heartbeat(const OnlineRoomPublication&, const OnlineRoomMetadata& value) override {
         if (!eawr::net::relay::metadata_valid(value)) return eawr::core::Result<void>::failure(eawr::net::relay::error(1540, "Fake rejected invalid metadata"));
@@ -145,6 +157,31 @@ void live_source() {
     { std::lock_guard lock(fake->mutex); expect(fake->published.starting && fake->published.map == "custom-map", "Presence updates keep data-driven map and hide starting room"); }
     presence.place = LobbyPlace::lobby; source.announce(presence); until([&] { return fake->leaves == 1; });
 }
+void destruction_drains_off_frame() {
+    auto gate = std::make_shared<BlockingList>();
+    auto service = std::make_unique<FakeService>(); service->list_gate = gate;
+    auto source = std::make_unique<OnlineLobbyGameSource>(std::move(service), metadata());
+    until([&] { return gate->entered.load(); });
+    std::atomic<bool> frame_returned{};
+    std::jthread frame([owned = std::move(source), &frame_returned]() mutable { owned.reset(); frame_returned = true; });
+    struct Release { std::shared_ptr<BlockingList> gate; ~Release() { gate->released = true; } } release{gate};
+    until([&] { return frame_returned.load(); });
+    expect(!gate->released && !gate->destroyed, "frame destruction returns while the owned service call is still gated");
+    gate->released = true;
+    until([&] { return gate->destroyed.load(); });
+}
+
+void bridge_publication_waits() {
+    auto service = std::make_unique<FakeService>(); auto* fake = service.get();
+    OnlineLobbyGameSource source(std::move(service), metadata(), true);
+    LobbyPresence presence; presence.place = LobbyPlace::hosting; presence.name = "Host"; presence.game = "Room";
+    source.announce(presence); until([&] { return source.hosting_state() == OnlineHostingState::publishing; });
+    expect(fake->publishes == 0, "live room waits for the signalling publication before becoming joinable");
+    source.set_bridge_invitation(std::string(32, 'a')); until([&] { return fake->publishes == 1; });
+    { std::lock_guard lock(fake->mutex); expect(fake->bridge == std::string(32, 'a'), "invitation travels only to the service publication"); }
+    for (const auto& row : source.games()) expect(row.name.find(std::string(32, 'a')) == std::string::npos, "invitation is not display metadata");
+}
+
 void cancellation() {
     auto service = std::make_unique<FakeService>(); auto* fake = service.get(); fake->hold_join = true;
     OnlineLobbyGameSource source(std::move(service), metadata());
@@ -197,6 +234,6 @@ void recovery_and_validation() {
 
 }
 int main() {
-    try { fixtures(); fixed_password_rooms(); live_source(); cancellation(); recovery_and_validation(); std::cout << "Online lobby source and cancellation contracts passed\n"; return 0; }
+    try { fixtures(); fixed_password_rooms(); live_source(); destruction_drains_off_frame(); bridge_publication_waits(); cancellation(); recovery_and_validation(); std::cout << "Online lobby source and cancellation contracts passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

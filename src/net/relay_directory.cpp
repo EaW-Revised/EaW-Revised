@@ -1,4 +1,5 @@
 #include "relay_directory.hpp"
+#include "relay_room.hpp"
 #include "relay_tls.hpp"
 #include <algorithm>
 #include <limits>
@@ -15,6 +16,8 @@ void Directory::erase_room(std::map<std::string, Room>::iterator found) {
     const auto principal = principals_.find(found->second.principal);
     if (principal != principals_.end()) principal->second.hosted.clear();
     if (budgets_) --budgets_->at(found->second.prefix).directory_rooms;
+    if (!found->second.bridge_invitation.empty() && bridge_.revoke) bridge_.revoke(found->second.bridge_invitation);
+    if (scope_) scope_->directory_closed(found->first);
     rooms_.erase(found);
 }
 void Directory::expire(Time now) {
@@ -32,6 +35,7 @@ Directory::Room* Directory::member_room(std::uint64_t client) {
     return nullptr;
 }
 void Directory::leave(std::uint64_t client) {
+    if (scope_) scope_->release_reservation(client); // an unattached seat reservation ends with the admission
     if (auto* room = member_room(client)) {
         if (room->members.at(client).seat != 1) --room->row.metadata.occupancy;
         room->members.erase(client);
@@ -45,11 +49,32 @@ void Directory::disconnect(std::uint64_t client, Time now) {
     --principal.connections; principal.touched = now;
     clients_.erase(found);
 }
+void Directory::invalidate_bridge(const std::string& invitation) {
+    if (invitation.empty()) return;
+    for (auto it = rooms_.begin(); it != rooms_.end();) {
+        if (it->second.bridge_invitation == invitation) { auto dead = it++; erase_room(dead); }
+        else ++it;
+    }
+}
+void Directory::close_bridge(const std::string& invitation) {
+    for (auto& [id, room] : rooms_) { (void)id; if (room.bridge_invitation == invitation) { room.bridge_consumed = true; room.row.metadata.closed = true; } }
+}
 Directory::Room* Directory::owned(const std::string& room, const std::string& credential, const std::string& principal) {
     const auto found = rooms_.find(room);
     if (found == rooms_.end() || !secret_equal(found->second.principal, principal)
         || !secret_equal(found->second.ownership, credential)) return nullptr;
     return &found->second;
+}
+std::optional<Directory::ScopeInfo> Directory::scope_info(const std::string& room, const std::string& credential, const std::string& principal) {
+    const auto* found = owned(room, credential, principal);
+    if (!found || found->scope_closed || found->scope_locked || found->row.metadata.closed || found->row.metadata.starting) return {};
+    return ScopeInfo{found->row.metadata.capacity, found->row.passworded, found->bridge_bound};
+}
+void Directory::scope_state(const std::string& room, bool locked, bool closed) {
+    const auto found = rooms_.find(room);
+    if (found == rooms_.end()) return;
+    if (locked) { found->second.scope_locked = true; found->second.row.metadata.starting = true; }
+    if (closed) { found->second.scope_closed = true; found->second.row.metadata.closed = true; }
 }
 bool Directory::hash_allowed(const std::string& prefix, Time now) {
     hashes_.refresh(now);
@@ -111,15 +136,25 @@ Bytes Directory::request(std::uint64_t client, const std::string& prefix, const 
     if (kind == Kind::directory_publish) {
         const auto token = reader.string(256); // Authorization is checked by the TLS server boundary.
         (void)token;
-        auto info = metadata(reader); const auto password = reader.string(128);
+        auto info = metadata(reader); const auto password = reader.string(128); auto invitation = reader.string(32); const auto bridge_owner = reader.string(32);
         info.name = clean_text(info.name, 24); info.host_name = clean_text(info.host_name, 20);
         if (!reader.done() || !metadata_valid(info)) return refusal(1540);
+        if (invitation.empty() && !bridge_owner.empty()) return refusal(1540);
+        if (!invitation.empty()) {
+            if (!code_valid(invitation) || !code_valid(bridge_owner)) return refusal(1540);
+            if (!bridge_.valid || !bridge_.bind || !bridge_.admit || !bridge_.revoke
+                || !bridge_.valid(invitation, bridge_owner, !password.empty(), true)) return refusal(1544);
+        }
+        if (!invitation.empty() && std::any_of(rooms_.begin(), rooms_.end(), [&](const auto& row) {
+            return row.second.bridge_invitation == invitation;
+        })) return refusal(1544);
         if (!principal.hosted.empty() || member_room(client)) return refusal(1543);
         if (rooms_.size() >= max_rooms_ || budgets.at(prefix).directory_rooms >= 2) return refusal(1549);
         auto room_id = random_code(), ownership = random_code();
         auto salt = completed ? core::Result<std::string>::success(completed->salt) : random_code();
         if (!room_id || !ownership || !salt || rooms_.contains(room_id.value())) return refusal(1550);
         Room room;
+        room.bridge_invitation = invitation; room.bridge_ownership = bridge_owner; room.bridge_bound = !invitation.empty();
         if (!password.empty()) {
             if (!completed && !hash_allowed(prefix, now)) return refusal(1547);
             if (pending && !completed) { *pending = PasswordHashInput{password, salt.value()}; return {}; }
@@ -130,6 +165,7 @@ Bytes Directory::request(std::uint64_t client, const std::string& prefix, const 
         room.row = {room_id.value(), std::move(info), !password.empty()};
         room.prefix = prefix; room.principal = who->second; room.ownership = ownership.value(); room.expires = now + std::chrono::seconds(30);
         room.members.emplace(client, Member{1, room.row.metadata.host_name, who->second, false});
+        if (room.bridge_bound && bridge_.bind) bridge_.bind(invitation);
         principal.hosted = room_id.value();
         rooms_.emplace(room_id.value(), std::move(room)); ++budgets.at(prefix).directory_rooms;
         auto reply = message(Kind::directory_published); string(reply, room_id.value()); string(reply, ownership.value()); u32(reply, 30000); return reply;
@@ -142,8 +178,12 @@ Bytes Directory::request(std::uint64_t client, const std::string& prefix, const 
             auto info = metadata(reader); info.name = clean_text(info.name, 24); info.host_name = clean_text(info.host_name, 20);
             const auto guests = static_cast<std::uint32_t>(std::count_if(room->members.begin(), room->members.end(),
                 [](const auto& entry) { return entry.second.seat != 1; }));
-            if (!reader.done() || !metadata_valid(info) || info.capacity < guests + 1) return refusal(1540);
-            info.occupancy = std::max(info.occupancy, guests + 1);
+            // An open room scope fixes the capacity and owns the occupancy: its seat table, not the chat members.
+            const bool scoped = scope_ && scope_->has_scope(room_id);
+            if (!reader.done() || !metadata_valid(info) || (scoped ? info.capacity != scope_->capacity(room_id) : info.capacity < guests + 1)) return refusal(1540);
+            info.occupancy = scoped ? std::max<std::uint32_t>(1, scope_->occupied(room_id)) : std::max(info.occupancy, guests + 1);
+            if (room->bridge_consumed || room->scope_closed) info.closed = true;
+            if (room->scope_locked) info.starting = true;
             for (const auto& [id, member] : room->members) {
                 (void)id;
                 if (member.seat != 1 && name_key(member.name) == name_key(info.host_name)) return refusal(1553);
@@ -175,6 +215,8 @@ Bytes Directory::request(std::uint64_t client, const std::string& prefix, const 
         auto& room = found->second;
         if (secret_equal(room.principal, who->second)) return refusal(1543);
         if (room.row.metadata.starting || room.row.metadata.closed) return refusal(1544);
+        if (room.bridge_bound && (room.bridge_consumed || !bridge_.valid || !bridge_.bind || !bridge_.admit || !bridge_.revoke
+            || !bridge_.valid(room.bridge_invitation, room.bridge_ownership, room.row.passworded, false))) return refusal(1544);
         if (room.row.passworded) {
             if (password.empty()) { budgets.failed_guess(prefix, now, false); return refusal(1546); }
             room.passwords.refresh(now);
@@ -188,18 +230,31 @@ Bytes Directory::request(std::uint64_t client, const std::string& prefix, const 
             if (!hashed) return refusal(1550);
             if (!hashed || !secret_equal(hashed.value(), room.password_hash)) { budgets.failed_guess(prefix, now, false); return refusal(1546); }
         }
-        if (room.row.metadata.occupancy >= room.row.metadata.capacity) return refusal(1545);
+        const bool scoped = scope_ && scope_->has_scope(room_id);
+        if (!scoped && room.row.metadata.occupancy >= room.row.metadata.capacity) return refusal(1545);
         if (name_key(room.row.metadata.host_name) == name_key(name)) return refusal(1553);
         for (const auto& [id, member] : room.members) {
             (void)id;
             if (name_key(member.name) == name_key(name)) return refusal(1553);
         }
         if (room.next_seat == std::numeric_limits<std::uint32_t>::max()) return refusal(1549);
-        // Single-owner commit: reserve exactly once before another request is read.
+        // The signalling session owns consumption even if this room later expires.
+        if (room.bridge_bound && !bridge_.admit(room.bridge_invitation)) return refusal(1544);
+        // Single-owner commit: reserve exactly once before another request is read. A room with an open scope
+        // reserves its seat in the shared table first; the slot number is the transport peer index.
+        RoomService::Reservation reservation;
+        if (scoped) {
+            reservation = scope_->reserve(room_id, client, who->second, prefix, now);
+            if (reservation.refusal != 0) return refusal(reservation.refusal);
+        }
         const auto seat = room.next_seat++;
         room.members.emplace(client, Member{seat, std::move(name), who->second, false});
         ++room.row.metadata.occupancy;
-        auto reply = message(Kind::directory_admitted); string(reply, room_id); u32(reply, seat); return reply;
+        auto reply = message(Kind::directory_admitted); string(reply, room_id); u32(reply, seat);
+        string(reply, room.bridge_invitation);
+        if (scoped) { u32(reply, reservation.slot); string(reply, reservation.capability); }
+        if (room.bridge_bound) { room.bridge_consumed = true; room.row.metadata.closed = true; }
+        return reply;
     }
     if (kind == Kind::directory_leave) {
         if (!reader.done()) return refusal(1540);

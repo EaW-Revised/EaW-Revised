@@ -356,6 +356,7 @@ public:
         return core::Result<void>::success();
     }
     core::Result<void> run(const ga::ServiceInput& input, auth::ScriptScheduler& scripts) override {
+        const auto reads = world->owner_reads();
         if (auto synchronized = synchronize_reservations(); !synchronized) return synchronized;
         if (input.service == ga::Service::execution) {
             const auto route = routes.find(input.player);
@@ -394,10 +395,14 @@ public:
         return synchronize_reservations();
     }
     core::Result<void> finish_barrier(auth::ScriptScheduler& scripts) override {
+        const auto reads = world->owner_reads();
         if (auto committed = engine->commit_galactic_events(scripts, sequence); !committed) return committed;
-        return synchronize_reservations();
+        auto synchronized = synchronize_reservations();
+        world->finish_perception_queries();
+        return synchronized;
     }
     core::Result<void> after_service(auth::ServiceReport& report) override {
+        const auto reads = world->owner_reads();
         if (auto serviced = engine->after_service(report); !serviced) return serviced;
         std::vector<auth::ScriptCommand> kept;
         kept.reserve(report.commands.size());
@@ -410,6 +415,7 @@ public:
         return synchronize_reservations();
     }
     core::Result<void> prepare(const sim::PartitionExecutor& executor, const ga::gc::GalacticSession& parent, const ga::gc::GalacticTick& tick) {
+        const auto reads = world->owner_reads();
         gc_profile::Scope profile_scope(gc_profile::Phase::runtime_prepare);
         if (providers.publish_freestore) {
             if (auto published = providers.publish_freestore(*actions, *pool, *parent.snapshot(), executor); !published) return published;
@@ -454,6 +460,7 @@ public:
     bool admits_service(const ga::gc::GalacticTick& tick) const noexcept override { return manager_->admits_service(tick); }
     core::Result<auth::ServiceOptions> before_service(const sim::PartitionExecutor& executor,
         const ga::gc::GalacticSession& parent, const ga::gc::GalacticTick& tick, auth::ScriptScheduler& scripts) override {
+        const auto reads = owner_->world->owner_reads();
         owner_->active_executor = &executor;
         owner_->actions->set_executor(&executor);
         if (auto prepared = owner_->prepare(executor, parent, tick); !prepared) return core::Result<auth::ServiceOptions>::failure(prepared.error());

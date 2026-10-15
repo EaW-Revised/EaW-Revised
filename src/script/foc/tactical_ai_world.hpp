@@ -4,6 +4,8 @@
 // and snapshot inputs are rebound by the manager before every script barrier.
 #include "ai_engine.hpp"
 
+#include <array>
+
 namespace eawr::script::foc::detail {
 inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSession& world, const tactical::TacticalSnapshot& snapshot,
     const sim::PartitionExecutor* executor = nullptr) {
@@ -13,32 +15,70 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
     for (std::size_t index = 0; index < snapshot_players.size(); ++index) {
         view->players.push_back(ViewPlayer{snapshot_players[index].player_id, snapshot_players[index].team_id, index});
     }
-    std::map<sim::EntityId, const tactical::TacticalInstance*> instances;
-    for (const auto& instance : snapshot.instances()) instances.emplace(instance.entity_id, &instance);
-    std::map<sim::EntityId, const tactical::Squadron*> containers;
-    std::map<sim::EntityId, sim::EntityId> craft;
-    std::map<sim::EntityId, std::pair<sim::EntityId, bool>> formations;
-    for (const auto& squadron : world.squadrons()) {
-        containers.emplace(squadron.container, &squadron);
-        if (const auto state = world.squadron_state(squadron.container)) {
-            formations.emplace(squadron.container,
-                std::pair{state->target, state->mode == tactical::SquadronMode::move});
+    // Published instances and live containers already have ascending identities.
+    // Prepare only the member join and formation values; no per-tick node maps.
+    const auto instances = snapshot.instances();
+    const auto squadrons = world.squadrons();
+    using Member = std::pair<sim::EntityId, std::size_t>;
+    std::array<std::vector<Member>, sim::tick_partition_count> member_rows;
+    std::vector<std::optional<std::pair<sim::EntityId, bool>>> formations(squadrons.size());
+    // The current publication supplies identities even if the requested snapshot
+    // omits an instance. Read each exact live state in its own worker output row.
+    const auto completed = world.snapshot();
+    const auto units = completed->instances();
+    const sim::InlineExecutor inline_executor;
+    // Fixed work threshold, independent of wall time or worker count.
+    constexpr std::size_t parallel_view_rows = 256;
+    const auto& preparation_executor = executor && units.size() >= parallel_view_rows
+        ? *executor : static_cast<const sim::PartitionExecutor&>(inline_executor);
+    if (!squadrons.empty()) {
+        const auto indexed = preparation_executor.execute_phase("ai-world-view",
+            sim::tick_partition_count, [&](const std::size_t partition) {
+            auto& members = member_rows[partition];
+            const auto range = sim::partition_range(partition, squadrons.size());
+            for (auto index = range.begin; index < range.end; ++index) {
+                const auto& squadron = squadrons[index];
+                if (const auto state = world.squadron_state(squadron.container))
+                    formations[index] = std::pair{state->target, state->mode == tactical::SquadronMode::move};
+                for (const auto member : squadron.members) members.emplace_back(member, index);
+            }
+            // The original emplace retained the first container for a repeated member.
+            std::stable_sort(members.begin(), members.end(),
+                [](const Member& left, const Member& right) { return left.first < right.first; });
+        });
+        if (!indexed) throw std::runtime_error("AI world view preparation failed: " + indexed.error().message);
+    }
+    // Ordered balanced merge of the already sorted partition runs. Equal keys keep
+    // container/input order, exactly as the preceding first-emplace map did.
+    std::array<std::size_t, sim::tick_partition_count + 1> offsets{};
+    for (std::size_t index = 0; index < member_rows.size(); ++index)
+        offsets[index + 1] = offsets[index] + member_rows[index].size();
+    std::vector<Member> craft;
+    craft.reserve(offsets.back());
+    for (const auto& row : member_rows) craft.insert(craft.end(), row.begin(), row.end());
+    for (std::size_t width = 1; !craft.empty() && width < member_rows.size(); width *= 2) {
+        for (std::size_t first = 0; first < member_rows.size(); first += width * 2) {
+            const auto middle = std::min(first + width, member_rows.size());
+            const auto last = std::min(first + width * 2, member_rows.size());
+            std::inplace_merge(craft.begin() + static_cast<std::ptrdiff_t>(offsets[first]),
+                craft.begin() + static_cast<std::ptrdiff_t>(offsets[middle]),
+                craft.begin() + static_cast<std::ptrdiff_t>(offsets[last]),
+                [](const Member& left, const Member& right) { return left.first < right.first; });
         }
-        for (const sim::EntityId member : squadron.members) craft.emplace(member, squadron.container);
     }
     const auto fraction = [](math::Fixed part, math::Fixed whole) {
         if (whole.raw() <= 0) return LuaNumber(0);
         return numeric::from_fixed(part) / numeric::from_fixed(whole);
     };
-    const auto units = world.units();
     view->units.resize(units.size());
     view->capture_candidates.resize(units.size());
-    const sim::InlineExecutor inline_executor;
-    const auto prepared = (executor != nullptr ? *executor : inline_executor).execute_phase("ai-world-view",
+    const auto prepared = preparation_executor.execute_phase("ai-world-view",
         sim::tick_partition_count, [&](const std::size_t partition) {
       const auto range = sim::partition_range(partition, units.size());
       for (auto index = range.begin; index < range.end; ++index) {
-        const tactical::UnitState& unit = units[index];
+        const auto current_unit = world.unit_state(units[index].entity_id);
+        if (!current_unit) throw std::runtime_error("AI world view identity is not live");
+        const tactical::UnitState& unit = *current_unit;
         ViewUnit entry;
         entry.id = unit.entity_id;
         entry.type = unit.type_id;
@@ -49,20 +89,26 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
         entry.rotation = unit.rotation;
         entry.order = unit.order.kind;
         entry.order_target = unit.order.target;
-        if (const auto squadron = containers.find(unit.entity_id); squadron != containers.end()) {
+        const auto squadron = std::lower_bound(squadrons.begin(), squadrons.end(), unit.entity_id,
+            [](const tactical::Squadron& row, sim::EntityId id) { return row.container < id; });
+        if (squadron != squadrons.end() && squadron->container == unit.entity_id) {
             entry.container = true;
-            entry.members = squadron->second->members;
+            entry.members = squadron->members;
         }
-        if (const auto member = craft.find(unit.entity_id); member != craft.end()) {
+        const auto member = std::lower_bound(craft.begin(), craft.end(), unit.entity_id,
+            [](const Member& row, sim::EntityId id) { return row.first < id; });
+        if (member != craft.end() && member->first == unit.entity_id) {
             entry.craft = true;
-            entry.squadron = member->second;
+            entry.squadron = squadrons[member->second].container;
         }
-        if (const auto instance = instances.find(unit.entity_id); instance != instances.end()) {
-            entry.team = instance->second->team;
-            entry.visible_to = instance->second->visible_to;
-            entry.abilities = instance->second->abilities;
-            entry.planetary_weapon = instance->second->planetary_weapon;
-            if (const auto& durability = instance->second->durability) {
+        const auto instance = std::lower_bound(instances.begin(), instances.end(), unit.entity_id,
+            [](const tactical::TacticalInstance& row, sim::EntityId id) { return row.entity_id < id; });
+        if (instance != instances.end() && instance->entity_id == unit.entity_id) {
+            entry.team = instance->team;
+            entry.visible_to = instance->visible_to;
+            entry.abilities = instance->abilities;
+            entry.planetary_weapon = instance->planetary_weapon;
+            if (const auto& durability = instance->durability) {
                 entry.hull = durability->hull;
                 entry.max_hull = durability->max_hull;
                 entry.health = fraction(durability->hull, durability->max_hull);
@@ -87,10 +133,13 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
         if (const auto motion = world.motion_state(unit.entity_id)) entry.moving = motion->kind != tactical::MotionKind::none;
         // FH-23: a squadron (and its craft) reports the formation target before a weapon
         // target. Its container travels through the formation, without a ship motion state.
-        const auto formation = formations.find(entry.craft ? entry.squadron : entry.id);
-        if (formation != formations.end()) {
-            entry.formation_target = formation->second.first;
-            entry.formation_moving = formation->second.second;
+        const auto formation_owner = entry.craft ? squadrons.begin() + static_cast<std::ptrdiff_t>(member->second) : squadron;
+        if (formation_owner != squadrons.end() && formation_owner->container == (entry.craft ? entry.squadron : entry.id)) {
+            const auto& formation = formations[static_cast<std::size_t>(formation_owner - squadrons.begin())];
+            if (formation) {
+                entry.formation_target = formation->first;
+                entry.formation_moving = formation->second;
+            }
         }
         view->units[index] = std::move(entry);
         view->capture_candidates[index] = {{unit.entity_id, unit.owner, unit.position}, unit.type_id,

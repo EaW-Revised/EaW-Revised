@@ -237,18 +237,47 @@ core::Result<MapCameraConfig> skirmish_camera_config(
     const auto marker = std::find_if(start.markers.begin(), start.markers.end(), [&](const auto& entry) {
         return entry.use == skirmish::MarkerUse::spawn && entry.player == local_player;
     });
-    if (marker == start.markers.end()) return Result::failure(invalid("live skirmish camera has no local spawn marker"));
     const auto number = [](const skirmish::Fixed value) {
         return static_cast<double>(value.raw()) / static_cast<double>(skirmish::Fixed::scale);
     };
     double x = 0, y = 0;
     std::size_t count = 0;
-    for (const auto& unit : start.units) {
-        if (unit.state.owner != local_player || unit.record != marker->record
-            || (unit.role != skirmish::UnitRole::fleet && unit.role != skirmish::UnitRole::free_unit)) continue;
-        x += number(unit.state.position.x);
-        y += number(unit.state.position.y);
-        ++count;
+    if (marker != start.markers.end()) {
+        for (const auto& unit : start.units) {
+            if (unit.state.owner != local_player || unit.record != marker->record
+                || (unit.role != skirmish::UnitRole::fleet && unit.role != skirmish::UnitRole::free_unit)) continue;
+            x += number(unit.state.position.x);
+            y += number(unit.state.position.y);
+            ++count;
+        }
+        if (count == 0) { x = number(marker->position.x); y = number(marker->position.y); count = 1; }
+    } else {
+        const auto player = std::find_if(start.players.begin(), start.players.end(), [&](const auto& entry) {
+            return entry.player.player_id == local_player;
+        });
+        if (player == start.players.end()) return Result::failure(invalid("live skirmish camera has no local player"));
+        const auto on_team = [&](const skirmish::StartMarker& entry) {
+            const auto& side = player->start_side;
+            if (side.empty() || entry.type.size() <= side.size() || entry.type[side.size()] != '_') return false;
+            return std::equal(side.begin(), side.end(), entry.type.begin(), [](const char a, const char b) {
+                const auto upper = [](const char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c - ('a' - 'A')) : c; };
+                return upper(a) == upper(b);
+            });
+        };
+        // R-SETUP-01 project camera choice: retail assigns no overflow camera.
+        // Use the team's spawn centroid, then its first station, then the extents centre.
+        for (const auto& entry : start.markers) {
+            if (!on_team(entry) || (entry.use != skirmish::MarkerUse::spawn
+                && entry.use != skirmish::MarkerUse::spawn_unused)) continue;
+            x += number(entry.position.x); y += number(entry.position.y); ++count;
+        }
+        if (count == 0) {
+            const auto station = std::find_if(start.markers.begin(), start.markers.end(), [&](const auto& entry) {
+                return entry.use == skirmish::MarkerUse::station && on_team(entry);
+            });
+            if (station != start.markers.end()) { x = number(station->position.x); y = number(station->position.y); }
+            count = 1; // Declared extents are centred on the origin when no team marker exists.
+        }
     }
     MapCameraConfig config;
     config.mode = presentation::camera::Mode::space;
@@ -258,8 +287,8 @@ core::Result<MapCameraConfig> skirmish_camera_config(
     const float half_x = map.declared_extents->first * 0.5F;
     const float half_y = map.declared_extents->second * 0.5F;
     config.bounds = {-half_x, half_x, -half_y, half_y, start.map, "skirmish-declared-extents", "project-authored"};
-    config.target_x = std::clamp(static_cast<float>(count ? x / static_cast<double>(count) : number(marker->position.x)), -half_x, half_x);
-    config.target_y = std::clamp(static_cast<float>(count ? y / static_cast<double>(count) : number(marker->position.y)), -half_y, half_y);
+    config.target_x = std::clamp(static_cast<float>(x / static_cast<double>(count)), -half_x, half_x);
+    config.target_y = std::clamp(static_cast<float>(y / static_cast<double>(count)), -half_y, half_y);
     config.overrides_source_id = "space-camera-owner-deviations";
     config.overrides_authority = "project-authored";
     config.constant_overrides = {{"Distance_Min", "100"}, {"Tactical_Min_Scroll_Speed", "823.529412"}, {"Pitch_Min", "-60"}};

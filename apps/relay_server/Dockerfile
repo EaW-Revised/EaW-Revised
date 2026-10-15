@@ -4,6 +4,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends cmake ninja-bui
 WORKDIR /source
 COPY include/eawr/core include/eawr/core
 COPY include/eawr/net include/eawr/net
+# transport.hpp (via gns_room.hpp) takes max_match_seats from this one constants header.
+COPY include/eawr/sim/seat.hpp include/eawr/sim/seat.hpp
 COPY include/eawr/platform/relay_credentials.hpp include/eawr/platform/relay_credentials.hpp
 COPY include/eawr/presentation/ui/lan_lobby.hpp include/eawr/presentation/ui/lan_lobby.hpp
 COPY src/platform/relay_credentials.cpp src/platform/relay_credentials.cpp

@@ -150,9 +150,9 @@ use-auth-secret
 static-auth-secret=<operator-generated-secret>
 fingerprint
 min-port=49160
-max-port=49200
-user-quota=2
-total-quota=128
+max-port=49360
+user-quota=10
+total-quota=144
 max-bps=1048576
 bps-capacity=16777216
 no-multicast-peers
@@ -182,12 +182,32 @@ the operator must choose the appropriate IPv4/IPv6 ranges. Coturn's own quotas
 and bandwidth caps enforce relay abuse bounds; the introduction limits do not
 cover UDP game bytes.
 
-Open/forward **UDP 3478** and **UDP 49160..49200** to coturn, in addition to the
+Open/forward **UDP 3478** and **UDP 49160..49360** to coturn, in addition to the
 introduction's TCP port. The native GNS relay route in this slice uses UDP TURN;
 allowing TCP 3478 or TLS 5349 is not a claim of TCP/TLS TURN support in native
 ICE. Configure the external/private address mapping when coturn is behind NAT.
 If the host has CGNAT and cannot receive these ports, a reachable host under the
 operator's control is needed; this work provisions none.
+
+### Quotas for N-peer rooms
+
+A nine-peer room is a full GNS mesh: eight pair connections per member, 36 per
+room. GNS creates a TURN allocation per connection whenever TURN servers are
+configured, so a full room holds 9 x 8 = **72 allocations even when every pair is
+direct**. The earlier sample (`user-quota=2`, `total-quota=128`, 41 relay ports)
+cannot serve one full room. Size coturn as follows:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `user-quota` | at least 10 | 8 pair connections per member plus 2 during a repair; each member uses one REST username |
+| `total-quota` | at least 72 per concurrent full room (sample: 144, two rooms) | allocations, not bandwidth, are the binding limit |
+| `min-port`..`max-port` | at least 72 UDP relay ports per concurrent full room (sample: 49160..49360 = 201) | one relay port per allocation |
+| `max-bps`, `bps-capacity` | 1048576 per allocation, 16777216 total are ample | a relayed pair carries about 3.6 KB/s; about 60 fully relayed rooms by bandwidth |
+
+Open the whole relay port range in the firewall. A relayed nine-peer match is about
+0.93 GB of coturn egress per hour when every one of the 36 pairs is relayed (twice
+that when both ends of every pair are); real rooms relay only the pairs that fail
+direct ICE.
 
 Paired clients receive distinct coturn REST credentials over verified TLS.
 Their passwords are Base64 HMAC-SHA1 over the expiring username. The shared
@@ -276,7 +296,9 @@ secrets as CLI arguments; keep them in the protected config or environment.
 | `cloudflare_turn_key_id`, `cloudflare_turn_api_token` | Secrets of the Cloudflare provider; use `EAWR_RELAY_CLOUDFLARE_TURN_KEY_ID` / `EAWR_RELAY_CLOUDFLARE_TURN_API_TOKEN` or a protected config file |
 | `cloudflare_turn_calls_per_minute`, `cloudflare_turn_timeout_ms` | 30 outbound calls per rolling minute (1..600), 4000 ms request timeout (500..30000) |
 | `max_connections`, `max_sessions` | 128, 64 (caps 4096 / 2048) |
-| `connections_per_ip`, `accepts_per_minute`, `unpaired_sessions_per_ip` | 8 live connections, 30 accepts/minute, 2 unpaired sessions per IPv4 address or IPv6 /64; mapped IPv4 shares the IPv4 key |
+| `connections_per_ip`, `accepts_per_minute`, `unpaired_sessions_per_ip` | 18 live connections (twice `max_match_seats`: nine room members behind one NAT, each with a directory and a room connection), 30 accepts/minute, 2 unpaired sessions per IPv4 address or IPv6 /64; mapped IPv4 shares the IPv4 key. Outstanding room seat reservations count as unpaired sessions |
+| `room_operations_per_member_per_minute`, `room_bytes_per_member_per_minute` | 480 operations / 2,097,152 bytes per room member per minute (the room gets seat-count times that, a prefix `connections_per_ip` times); separate from the legacy session and per-prefix budgets. Provisional: raise them if the cross-network test shows signal bursts |
+| `room_reservation_timeout_ms`, `room_hold_timeout_ms` | 30,000 for an admitted guest to attach (1 s..10 min); 300,000 a started match holds a lost seat for repair (1 s..24 h) |
 | `directory_operations_per_minute`, `directory_bytes_per_minute` | 2,048 operations / 8,388,608 bytes per prefix for directory traffic; independent of legacy session budgets |
 | `operations_per_minute`, `bytes_per_minute` | 120 operations / 1,048,576 bytes per IP and per session; IP bytes include incoming TLS records, session bytes count protocol bodies |
 | `queue_bytes`, `queue_frames` | 262,144 / 64 outgoing bytes/frames per connection |
@@ -353,3 +375,33 @@ and coturn limits separately for game traffic. Do not add passwords, principal
 or ownership capabilities, peer addresses, or rejoin secrets to logs/metrics.
 The [service contract](../net-relay-server.md#room-directory-private-admission-and-room-chat)
 documents directory framing, diagnostics, resources and client/source APIs.
+
+## N-peer room limits
+
+The room scope shares the TLS listener (see [the service contract](../net-relay-server.md#n-peer-rooms-signalling-scope)).
+Operator-visible limits:
+
+* A room has 2..9 members and its capacity is fixed when the host opens it. The
+  directory still lists rooms up to 64 seats; only 2..9 can open a signalling scope.
+* Each member holds two connections (directory and room), so a prefix needs
+  `connections_per_ip` of at least 18 for nine members behind one NAT (the default).
+  Raise `max_connections` (default 128, cap 4,096) to host more than seven full rooms
+  at two connections per member.
+* Per-member room budgets (`room_operations_per_member_per_minute`,
+  `room_bytes_per_member_per_minute`) replace the legacy 120-operation budget for
+  room traffic. Output queues stay per connection (256 KiB, 64 frames), so total
+  queue memory is bounded by `max_connections` times `queue_bytes`.
+* TURN credentials are issued per member. With the Cloudflare provider a full room
+  costs about 20 provider calls over its life (nine generates, nine revokes, one
+  pair per kick, refused newcomer or reattach); at the default
+  `cloudflare_turn_calls_per_minute` of 30 that serves roughly one to one and a
+  half full rooms filling per minute. Raise it on busy servers.
+* **coturn credentials cannot be revoked.** A kicked or refused member keeps the
+  right to allocate until its credential expires (`max_session_lifetime_ms` plus the
+  60-second margin, clamped to 48 hours).
+  Coturn's `user-quota` and `max-bps` bound the residual; lowering
+  `max_session_lifetime_ms` also caps match length. Rotating coturn's shared
+  secret would end every live allocation.
+* A started match survives its directory row and a lost host: the room lives on
+  until its lease ends (renewed by any member), everyone has left, or the held
+  seats time out.

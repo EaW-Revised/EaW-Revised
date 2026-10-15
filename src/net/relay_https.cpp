@@ -123,6 +123,26 @@ Parse parse(const std::string& raw, bool eof, HttpsResponse& out) {
     return eof ? Parse::complete : Parse::more;
 }
 }
+socket::Handle connect_service(const std::string& host, std::uint16_t port, Clock::time_point deadline, std::stop_token stop) {
+    auto addresses = resolve_bounded(host, port, deadline, stop);
+    std::stable_sort(addresses.begin(), addresses.end(), [](const auto& a, const auto& b) {
+        return socket::numeric_ip(socket::numeric_host(a), false) && !socket::numeric_ip(socket::numeric_host(b), false);
+    });
+    if (addresses.size() > 2) addresses.resize(2);
+    for (std::size_t index = 0; index < addresses.size() && !stop.stop_requested() && Clock::now() < deadline; ++index) {
+        const auto budget = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now()) / static_cast<long>(addresses.size() - index);
+        const auto attempt_end = Clock::now() + budget;
+        Socket candidate{socket::connect(addresses[index])};
+        if (candidate.handle == socket::invalid) continue;
+        while (!stop.stop_requested() && Clock::now() < attempt_end) {
+            const auto state = socket::connected(candidate.handle);
+            if (state == socket::Status::ready) { const auto handle = candidate.handle; candidate.handle = socket::invalid; return handle; }
+            if (state != socket::Status::pending) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+    return socket::invalid;
+}
 core::Result<HttpsResponse> https_request(const HttpsRequest& request, std::stop_token stop) {
     using Out = core::Result<HttpsResponse>;
     if (!request_valid(request)) return Out::failure(failure("Invalid outbound HTTPS request"));

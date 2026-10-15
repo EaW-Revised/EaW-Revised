@@ -30,10 +30,13 @@ identity is the unit-table identity ([unit-data.md](unit-data.md#content-identit
   station owned by the first occupied player of that team. Its
   `Marker_For_Specific_Object_Type` entry whose `Affiliation` names the team's
   faction is placed on the marker with its yaw. Teammates use the allied station
-  and retain separate credits, population, production queues and spawn markers.
-  Station count does not limit team player count. Setup rejects a roster beyond
-  authored map capacity, or a team beyond its usable spawn-marker count, with a
-  diagnostic before Start. Three or four independent teams require three or four
+  and retain separate credits, population and production queues. A player beyond
+  its team's spawn-marker count keeps its account but has no spawn marker or
+  starting fleet: no reuse or fallback placement occurs (WSS-54, SS-OV01–04).
+  Standalone special-weapon sources are still created per playable player,
+  independently of those markers (WSW-01, SS-OV05). Station count and per-team
+  spawn count do not limit lobby team size; setup rejects a roster beyond total
+  authored map capacity with a diagnostic before Start. Three or four independent teams require three or four
   authored start positions respectively; stock space maps have at most three.
 - **Companies (SK-21, SK-22).** The faction's `Space_Skirmish_AI_Default_Forces`, then the fixture
   fleet, each with the marker's yaw on the first free point near the spawn marker, in that order

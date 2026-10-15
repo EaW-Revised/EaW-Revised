@@ -141,8 +141,15 @@ core::Result<void> Engine::before_service(const World& world,
     core::tick_profile::Scope tail("serial.ai.tail");
     struct StationReset final {
         decltype(station_levels_)& levels;
-        ~StationReset() { levels.reset(); }
-    } station_reset{station_levels_};
+        decltype(pad_inputs_)& pads;
+        ~StationReset() { levels.reset(); pads.reset(); }
+    } station_reset{station_levels_, pad_inputs_};
+    struct InputReset final {
+        Engine& engine;
+        ~InputReset() { engine.player_inputs_active_ = false; engine.report_inputs(); }
+    } input_reset{*this};
+    input_counts_ = {};
+    player_inputs_active_ = false;
     const auto timed = [](const std::string_view name, auto&& run) {
         core::tick_profile::Scope scope(name);
         return run();
@@ -153,6 +160,7 @@ core::Result<void> Engine::before_service(const World& world,
     host_->view = world.view();
     if (!host_->view) return core::Result<void>::failure(detail::make_error(
         authoritative::codes::session_abort, "AI barrier world has no completed view"));
+    input_counts_.view_rows = host_->view->units.size();
     const auto preparation = grid_.prepare(executor, *host_, *host_->view);
     perception_executor_ = executor;
     host_->credit_changes.clear(); // preceding commands are now in the authoritative snapshot
@@ -258,6 +266,11 @@ core::Result<void> Engine::before_service(const World& world,
     timed("serial.ai.taskforce-events", [&] { service_taskforce_events(); });
     if (!players_.empty()) timed("serial.ai.station-inputs", [&] { prepare_station_levels(executor); });
     if (!players_.empty()) timed("serial.ai.threat-inputs", [&] { grid_.prepare_contributions(); });
+    if (!players_.empty()) {
+        timed("serial.ai.producer-inputs", [&] { prepare_producers(executor); });
+        timed("serial.ai.pad-inputs", [&] { prepare_pad_inputs(executor); });
+    }
+    player_inputs_active_ = true;
     for (PlayerAi& player : players_) {
         AiServiceEvent served{static_cast<std::uint64_t>(frame_), player.player, false, false, false};
         if (player.next_goal <= service_frame) {
@@ -289,6 +302,7 @@ core::Result<void> Engine::before_service(const World& world,
             timed("serial.ai.learning", [&] { learning::sweep(player, frame_); });
         }
     }
+    player_inputs_active_ = false;
     if (auto attached = timed("serial.ai.attaches", [&] { return drain_attaches(scripts, sequence_); }); !attached) return attached;
     work_.plans_deferred = static_cast<std::uint32_t>(pending_attach_.size());
     for (ScriptEvent& event : events_) {

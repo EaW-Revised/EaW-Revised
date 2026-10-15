@@ -190,7 +190,10 @@ void GalacticMode::State::service_battle_dialog(double delta) {
     }
     if (battle_dialog->visible()) {
         cancel_fleet_drag();
-        held.clear(); orbiting = false; scrolling = false;
+        // WGUI-171: the pending HUD shell leaves keyboard camera input live.
+        // Progress and summary retain their modal input barrier.
+        if (battle_dialog->view().phase != galactic_view::BattleDialogPhase::choice) held.clear();
+        orbiting = false; scrolling = false;
     }
 }
 }

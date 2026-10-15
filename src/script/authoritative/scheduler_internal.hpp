@@ -94,6 +94,7 @@ struct Instance {
     std::uint64_t tick{};
     std::uint64_t time_tick{}; // completed ticks: GetCurrentTime
     RandomStream random{0, 0, 0};
+    std::uint64_t random_domain{}; // ORed into the stream's tick key: turn_random_domain during an object turn
     std::uint64_t command_sequence{};
     std::uint64_t post_sequence{};
     std::uint64_t timer_sequence{};

@@ -199,6 +199,10 @@ bool OptionsMode::State::run_action(const std::string& action) {
         return true;
     }
     if (verb == "press") return screen->press(argument);
+    if (verb == "text") {
+        const auto equals = argument.find('=');
+        return equals != std::string::npos && screen->set_text_control(argument.substr(0, equals), argument.substr(equals + 1));
+    }
     if (verb == "set") {
         const auto equals = argument.find('=');
         if (equals == std::string::npos) return false;
@@ -274,7 +278,8 @@ bool OptionsMode::State::write_report() const {
                << ", \"existed_at_start\": " << (screen->settings_file_existed() ? "true" : "false")
                << ", \"notes\": " << strings_json(screen->settings_notes()) << "}"
                << ",\n  \"page\": " << json(EawrOptionsScreen::page_name(screen->page()))
-               << ",\n  \"committed\": " << lines_json(model::serialize_settings(screen->committed()))
+               << ",\n  \"committed\": " << lines_json([&] { auto safe = screen->committed(); safe.network.online_host.clear();
+                    safe.network.online_pin.clear(); safe.network.online_ca_file.clear(); return model::serialize_settings(safe); }())
                << ",\n  \"applied\": " << strings_json(screen->last_apply().applied)
                << ",\n  \"skipped\": " << strings_json(screen->last_apply().skipped)
                << ",\n  \"notes\": " << strings_json(screen->notes())
@@ -370,8 +375,9 @@ std::optional<int> OptionsMode::process() {
     if (state.next_action < state.options.actions.size()) {
         const std::string& action = state.options.actions[state.next_action++];
         const bool ok = state.run_action(action);
-        state.performed.push_back(action + (ok ? " ok" : " FAILED"));
-        if (!ok && state.failure.empty()) state.failure = "action failed: " + action;
+        const std::string recorded = action.rfind("text:", 0) == 0 ? action.substr(0, action.find('=')) + "=***" : action;
+        state.performed.push_back(recorded + (ok ? " ok" : " FAILED"));
+        if (!ok && state.failure.empty()) state.failure = "action failed: " + recorded;
         return std::nullopt;
     }
     if (state.settle < 0) state.settle = settle_frames;

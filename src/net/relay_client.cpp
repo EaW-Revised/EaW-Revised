@@ -2,6 +2,7 @@
 #include "relay_protocol.hpp"
 #include "relay_renewal.hpp"
 #include "relay_directory_codec.hpp"
+#include "relay_client_options.hpp"
 
 #if EAWR_HAS_RELAY
 #include "relay_tls.hpp"
@@ -20,19 +21,7 @@ NetworkGnsIntroduction::NetworkGnsIntroduction(NetworkIntroductionOptions option
 bool NetworkGnsIntroduction::available() { return true; }
 namespace {
 using Clock = std::chrono::steady_clock;
-bool valid(const NetworkIntroductionOptions& o, bool token_optional) {
-    return !o.address.empty() && o.port != 0
-        && (!o.certificate_name.empty() || o.certificate_sha256.size() == 64)
-        // System trust consistently takes a DNS certificate name on both TLS backends.
-        && (!o.ca_file.empty() || !o.certificate_sha256.empty()
-            || (!socket::numeric_ip(o.certificate_name, false) && !socket::numeric_ip(o.certificate_name, true)
-                && o.certificate_name.find(':') == std::string::npos))
-        && (token_optional || o.access_token.empty() || (o.access_token.size() >= 32 && o.access_token.size() <= 256))
-        && o.renewal_retry.count() > 0 && o.renewal_retry <= std::chrono::minutes(1)
-        && o.timeout.count() > 0 && o.timeout <= std::chrono::seconds(60)
-        && o.queue_bytes >= max_body + 4 && o.queue_bytes <= 16 * 1024 * 1024
-        && o.queue_frames > 0 && o.queue_frames <= 4096;
-}
+bool valid(const NetworkIntroductionOptions& o, bool token_optional) { return client_options_valid(o, token_optional); }
 // GNS takes numeric TURN addresses only. A Paired message that lists hostnames (Cloudflare) is rewritten
 // here on the endpoint worker thread, never the game thread; numeric lists (coturn) pass through byte for byte.
 // When no hostname resolves the message keeps its rendezvous and carries no relay credentials.
@@ -74,6 +63,7 @@ public:
         if (failure_) return core::Result<void>::failure(*failure_);
         return core::Result<void>::success();
     }
+    std::string ownership() const { std::lock_guard lock(mutex_); return publisher_ownership_; }
     std::string alias() const { std::lock_guard lock(mutex_); return alias_; }
     Clock::time_point expires() const { std::lock_guard lock(mutex_); return expires_; }
     GnsRendezvous rendezvous() const override { std::lock_guard lock(mutex_); return rendezvous_; }
@@ -127,6 +117,7 @@ private:
     unsigned renew_attempts_{};
     Clock::time_point renew_retry_{};
     std::optional<core::Diagnostic> failure_;
+    std::string publisher_ownership_;
     bool admitted_{}, close_requested_{}, close_sent_{}, publication_closed_{};
     std::deque<Bytes> outbound_;
     std::deque<GnsSignal> inbound_;
@@ -153,8 +144,9 @@ private:
             rendezvous_.session = reader.string(32); rendezvous_.local_identity = reader.string(gns_identity_max_bytes);
             alias_ = reader.string(4);
             const auto lifetime = reader.u32();
+            publisher_ownership_ = reader.string(32);
             expires_ = Clock::now() + std::chrono::milliseconds(lifetime);
-            if ((!alias_.empty() && !alias_valid(alias_)) || lifetime == 0 || lifetime > 86400000 || !reader.done() || !code_valid(rendezvous_.session) || rendezvous_.local_identity != expected_identity_) malformed();
+            if ((!alias_.empty() && !alias_valid(alias_)) || lifetime == 0 || lifetime > 86400000 || !reader.done() || !code_valid(rendezvous_.session) || !code_valid(publisher_ownership_) || publisher_ownership_ == rendezvous_.session || rendezvous_.local_identity != expected_identity_) malformed();
             else admitted_ = true;
         } else if (kind == Kind::paired && rendezvous_.remote_identity.empty()) {
             GnsRendezvous r{reader.string(32), reader.string(gns_identity_max_bytes), reader.string(gns_identity_max_bytes)};
@@ -209,15 +201,15 @@ private:
         condition_.notify_all();
     }
     void run(std::stop_token stop) {
+        const auto deadline = Clock::now() + options_.timeout;
         auto ctx = client_context(options_.ca_file, options_.certificate_sha256);
         if (!ctx) { fail(ctx.error()); return; }
-        const auto handle = socket::connect(options_.address, options_.port);
-        if (handle == socket::invalid) { fail(error(1519, "Relay requires a valid numeric TCP endpoint")); return; }
+        const auto handle = connect_service(options_.address, options_.port, deadline, stop);
+        if (handle == socket::invalid) { fail(error(1519, "Relay service connection failed")); return; }
         TlsStream stream(std::move(ctx).value(), handle, false, options_.certificate_name,
             options_.certificate_sha256, options_.queue_bytes, options_.queue_frames);
         if (!stream.queue(request_)) { fail(error(1526, "Relay initial queue failed")); return; }
         auto heartbeat = Clock::now();
-        const auto deadline = heartbeat + options_.timeout;
         while (!stop.stop_requested()) {
             stream.pump();
             if (auto bytes = stream.receive()) response(numeric_turn(std::move(*bytes), stop));
@@ -258,11 +250,11 @@ core::Result<GnsIntroduction> NetworkGnsIntroduction::publish(std::string identi
     if (!identity_valid(identity) || lifetime.count() <= 0 || lifetime > std::chrono::hours(24))
         return core::Result<GnsIntroduction>::failure(error(1519, "Invalid relay publish request"));
     auto request = message(Kind::publish); string(request, options_.access_token); string(request, identity);
-    u32(request, static_cast<std::uint32_t>(lifetime.count()));
+    u32(request, static_cast<std::uint32_t>(lifetime.count())); u32(request, options_.public_alias ? 1 : 0);
     auto result = open(options_, std::move(request));
     if (!result) return core::Result<GnsIntroduction>::failure(result.error());
     auto endpoint = std::move(result).value();
-    return core::Result<GnsIntroduction>::success({endpoint->rendezvous().session, endpoint, endpoint->alias(), endpoint->expires()});
+    return core::Result<GnsIntroduction>::success({endpoint->rendezvous().session, endpoint, endpoint->alias(), endpoint->expires(), endpoint->ownership()});
 }
 core::Result<std::shared_ptr<GnsSignallingEndpoint>> NetworkGnsIntroduction::join(std::string code, std::string identity) {
     if (!identity_valid(identity) || (!code_valid(code) && !alias_valid(code)))
@@ -300,7 +292,7 @@ struct NetworkOnlineLobby::Impl {
                 if (reply->size() < 2 || (*reply)[0] != 2) { failure = error(1540, "Malformed lobby response"); break; }
                 if ((*reply)[1] == static_cast<std::uint8_t>(Kind::error)) {
                     Reader reader{std::span(*reply).subspan(2)}; const auto code = reader.u32();
-                    if (!reader.done() || code < 1519 || code > 1559) { failure = error(1540, "Malformed lobby refusal"); break; }
+                    if (!reader.done() || !room_error_number(code)) { failure = error(1540, "Malformed lobby refusal"); break; }
                     if (code == 1519 || code == 1525 || code == 1526 || code == 1527 || code == 1528) stream.reset();
                     return core::Result<Bytes>::failure(error(code, "Lobby service refused the request"));
                 }
@@ -320,7 +312,7 @@ struct NetworkOnlineLobby::Impl {
                 return core::Result<Bytes>::failure(error(1519, "Invalid lobby client configuration"));
             auto context = client_context(options.ca_file, options.certificate_sha256);
             if (!context) return core::Result<Bytes>::failure(context.error());
-            const auto handle = socket::connect(options.address, options.port);
+            const auto handle = connect_service(options.address, options.port, Clock::now() + options.timeout);
             if (handle == socket::invalid) return core::Result<Bytes>::failure(error(1519, "Lobby endpoint failed"));
             stream = std::make_unique<TlsStream>(std::move(context).value(), handle, false, options.certificate_name,
                 options.certificate_sha256, options.queue_bytes, options.queue_frames);
@@ -367,10 +359,15 @@ core::Result<OnlineRoomPage> NetworkOnlineLobby::list(std::string after, std::ui
     auto decoded = room_page(reply.value()); if (!decoded) impl_->latch_protocol(decoded.error()); return decoded;
 }
 core::Result<OnlineRoomPublication> NetworkOnlineLobby::publish(OnlineRoomMetadata value, std::string password) {
+    return publish_bridge(std::move(value), std::move(password), {}, {});
+}
+core::Result<OnlineRoomPublication> NetworkOnlineLobby::publish_bridge(OnlineRoomMetadata value, std::string password, std::string invitation, std::string ownership) {
     value.name = clean_text(value.name, 24); value.host_name = clean_text(value.host_name, 20);
-    if (!metadata_valid(value) || password.size() > 128 || impl_->options.access_token.size() > 256)
+    if (!metadata_valid(value) || password.size() > 128 || impl_->options.access_token.size() > 256
+        || (!invitation.empty() && (!code_valid(invitation) || !code_valid(ownership))))
         return core::Result<OnlineRoomPublication>::failure(error(1540, "Invalid room publication"));
     auto request = message(Kind::directory_publish); string(request, impl_->options.access_token); metadata(request, value); string(request, password);
+    string(request, invitation); string(request, ownership);
     auto reply = impl_->exchange(std::move(request));
     if (!reply) return core::Result<OnlineRoomPublication>::failure(reply.error());
     Reader reader{std::span(reply.value()).subspan(2)};
@@ -404,8 +401,13 @@ core::Result<OnlineRoomAdmission> NetworkOnlineLobby::join(std::string room, std
     auto request = message(Kind::directory_join); string(request, room); string(request, password); string(request, name);
     auto reply = impl_->exchange(std::move(request));
     if (!reply) return core::Result<OnlineRoomAdmission>::failure(reply.error());
-    Reader reader{std::span(reply.value()).subspan(2)}; OnlineRoomAdmission result{reader.string(32), reader.u32()};
-    if (reply.value()[1] != static_cast<std::uint8_t>(Kind::directory_admitted) || !reader.done() || result.room != room || result.seat < 2)
+    Reader reader{std::span(reply.value()).subspan(2)}; OnlineRoomAdmission result{reader.string(32), reader.u32(), reader.string(32)};
+    // A room with an open signalling scope appends its reserved slot and member capability (slice N3).
+    if (reader.valid && !reader.bytes.empty()) { result.slot = reader.u32(); result.member_capability = reader.string(32); }
+    if (reply.value()[1] != static_cast<std::uint8_t>(Kind::directory_admitted) || !reader.done() || result.room != room || result.seat < 2
+        || (!result.bridge_invitation.empty() && !code_valid(result.bridge_invitation))
+        || (!result.member_capability.empty() && (!code_valid(result.member_capability) || result.slot == 0 || result.slot >= max_match_seats))
+        || (result.member_capability.empty() && result.slot != 0))
     {
         auto diagnostic = error(1540, "Malformed room admission"); impl_->latch_protocol(diagnostic);
         return core::Result<OnlineRoomAdmission>::failure(std::move(diagnostic));

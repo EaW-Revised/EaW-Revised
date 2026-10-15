@@ -758,6 +758,22 @@
           "lan-host"
         ],
         "reason": "The scanner config quotes its own reviewed lan-host pin pattern."
+      },
+      {
+        "path": "tests/online_test/online_test_unit_tests.cpp",
+        "sha256": "b5a49e87eb697fadd2fd6e570b449f01351ca99a0b7cc22dfde4dbf31d4a8174",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Sample private addresses that the kit's log sanitizer must redact; test input, not a host."
+      },
+      {
+        "path": "apps/viewer/src/skirmish_setup_mode.cpp",
+        "sha256": "472c75068cb30e09049ca34b84200a025094095a0b7fb3129a395ddc9b49a057",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "C++ member access to the skirmish setup state LAN flag, not a host name."
       }
     ]
   },

@@ -47,9 +47,9 @@ constexpr std::array<Row, 25> rows{{
     {S::multiplayer, "IDC_MULTIPLAYER_LAN_BUTTON", {GadgetKind::open, S::lan_setup, {}}},
     {S::multiplayer, "IDC_OK_MAIN", {GadgetKind::back, S::multiplayer, {}}},
     {S::multiplayer, "IDC_MULTIPLAYER_INTERNET_BUTTON",
-        {GadgetKind::disabled, S::multiplayer, "Internet games need the online lobby, which is not built yet."}},
+        {GadgetKind::open, S::online_setup, {}}},
     {S::multiplayer, "IDC_MAIN_OPTIONS_NETWORK",
-        {GadgetKind::disabled, S::multiplayer, "Internet options belong to the online lobby, which is not built yet."}},
+        {GadgetKind::open, S::network_options, {}}},
     // FES-08, the credits emblem and the petroglyph logo button exist on all three dialogs.
     {S::main_menu, "IDC_MENU_CREDITS", {GadgetKind::disabled, S::main_menu, "The credits movie is not played yet."}},
     {S::single_player, "IDC_MENU_CREDITS", {GadgetKind::disabled, S::single_player, "The credits movie is not played yet."}},
@@ -68,6 +68,8 @@ std::string_view to_string(const FrontEndScreen screen) noexcept {
     case S::multiplayer: return "multiplayer";
     case S::skirmish_setup: return "skirmish_setup";
     case S::lan_setup: return "lan_setup";
+    case S::online_setup: return "online_setup";
+    case S::network_options: return "network_options";
     case S::options: return "options";
     case S::load_game: return "load_game";
     case S::campaign_setup: return "campaign_setup";

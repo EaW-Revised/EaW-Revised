@@ -351,7 +351,7 @@ void Instance::rollback(const Mark& mark) {
     staging.commands.resize(mark.commands);
     staging.posts.resize(mark.posts);
     staging.timers.resize(mark.timers);
-    random = RandomStream(shared->config.seed, tick, id, mark.draws);
+    random = RandomStream(shared->config.seed, tick | random_domain, id, mark.draws);
     command_sequence = mark.command_sequence;
     post_sequence = mark.post_sequence;
     timer_sequence = mark.timer_sequence;
@@ -915,6 +915,115 @@ core::Result<ServiceReport> ScriptScheduler::service(
     if (service_timer) report.managed_handles.service_nanoseconds = service_timer->elapsed_nanoseconds();
     impl_->managed_work = report.managed_handles;
     return core::Result<ServiceReport>::success(::std::move(report));
+}
+
+core::Result<ServiceReport> ScriptScheduler::service_turn(
+    const sim::PartitionExecutor& executor, const ::std::vector<::std::uint64_t>& requested) {
+    using Result = core::Result<ServiceReport>;
+    if (auto usable = impl_->check_usable(); !usable) return Result::failure(usable.error());
+    const auto& config = impl_->shared->config;
+    if (config.galactic_clock || config.query_clock || impl_->immediate_host) {
+        return Result::failure(detail::make_error(codes::invalid_request,
+            "object turns need the default clock profile and no immediate-effect host"));
+    }
+    // Validate everything before any state changes: ascending unique object instances.
+    ::std::vector<::std::uint64_t> subset = requested;
+    ::std::sort(subset.begin(), subset.end());
+    if (::std::adjacent_find(subset.begin(), subset.end()) != subset.end()) {
+        return Result::failure(detail::make_error(codes::invalid_request, "object turn lists an instance twice"));
+    }
+    ::std::vector<detail::Instance*> ordered;
+    ordered.reserve(subset.size());
+    for (const ::std::uint64_t id : subset) {
+        const auto found = impl_->instances.find(id);
+        if (found == impl_->instances.end() || !impl_->objects.contains(id)) {
+            return Result::failure(detail::make_error(codes::invalid_request,
+                "object turn instance " + ::std::to_string(id) + " is not a live object script"));
+        }
+        ordered.push_back(found->second.get());
+    }
+    const ::std::uint64_t tick = impl_->completed_tick + 1;
+    const ::std::uint64_t time_tick = tick - 1;
+
+    // Due events and timers of the subset, in key order. Everything the turn posts
+    // is keyed for a later tick, so nothing is delivered twice.
+    for (auto iterator = impl_->pending.begin(); iterator != impl_->pending.end() && iterator->first.tick <= tick;) {
+        if (!::std::binary_search(subset.begin(), subset.end(), iterator->second.target)) { ++iterator; continue; }
+        auto node = impl_->pending.extract(iterator++);
+        impl_->instances.find(node.mapped().target)->second->inbox.push_back(::std::move(node.mapped()));
+    }
+    // Serial: move each instance onto the turn's key domain, keeping its draw counter,
+    // so a draw of the turn never repeats a key of the barrier service of this tick.
+    for (detail::Instance* instance : ordered) {
+        if (instance->tick != tick) {
+            instance->tick = tick;
+            instance->random = RandomStream(config.seed, tick, instance->id);
+        }
+        instance->random_domain = turn_random_domain;
+        instance->random = RandomStream(config.seed, tick | turn_random_domain, instance->id, instance->random.draws());
+    }
+    ::std::vector<::std::int64_t> used(ordered.size());
+    ::std::vector<::std::string> failures(sim::tick_partition_count);
+    auto partition_service = [&](const ::std::size_t partition) {
+        const sim::PartitionRange range = sim::partition_range(partition, ordered.size());
+        try {
+            for (::std::size_t index = range.begin; index < range.end; ++index) {
+                detail::service_instance(*ordered[index], tick, true, time_tick);
+                if (::std::any_of(ordered[index]->staging.diagnostics.begin(), ordered[index]->staging.diagnostics.end(),
+                        [](const auto& diagnostic) { return diagnostic.code != codes::unsupported_api
+                            && diagnostic.code != codes::script_warning; })) {
+                    ordered[index]->outcome = InstanceOutcome::faulted;
+                }
+                used[index] = config.quotas.instructions_per_service - ordered[index]->sandbox->budget();
+                detail::settle_memory(*ordered[index]);
+            }
+        } catch (const ::std::exception& error) {
+            failures[partition] = error.what();
+        }
+    };
+    const core::Result<void> run = executor.execute_phase(script_phase_name, sim::tick_partition_count, partition_service);
+    for (const ::std::string& failure : failures) {
+        if (!failure.empty()) {
+            impl_->aborted = true;
+            return Result::failure(detail::make_error(codes::session_abort, failure));
+        }
+    }
+    if (!run) {
+        impl_->aborted = true;
+        return Result::failure(run.error());
+    }
+
+    // Serial commit in ascending instance ID, as service() does.
+    ServiceReport report;
+    report.tick = tick;
+    for (::std::size_t index = 0; index < ordered.size(); ++index) {
+        report.loads.push_back(InstanceLoad{ordered[index]->id, ::std::max<::std::int64_t>(used[index], 0)});
+    }
+    for (detail::Instance* instance : ordered) {
+        detail::Staging& staging = instance->staging;
+        for (ScriptDiagnostic& diagnostic : staging.diagnostics) report.diagnostics.push_back(::std::move(diagnostic));
+        if (instance->outcome != InstanceOutcome::faulted) {
+            for (ScriptCommand& command : staging.commands) report.commands.push_back(::std::move(command));
+            for (ScriptEvent& event : staging.posts) impl_->pending.emplace(event.key, ::std::move(event));
+            for (ScriptEvent& event : staging.timers) impl_->pending.emplace(event.key, ::std::move(event));
+        }
+        staging = detail::Staging{};
+        // Back to the barrier key domain on the same draw counter.
+        instance->random_domain = 0;
+        instance->random = RandomStream(config.seed, tick, instance->id, instance->random.draws());
+    }
+    for (detail::Instance* instance : ordered) {
+        const bool object_finished = ::std::none_of(
+            instance->slots.begin(), instance->slots.end(), [](const auto& slot) { return slot.live; });
+        if (instance->outcome == InstanceOutcome::running && !object_finished) continue;
+        report.removed_instances.push_back(instance->id);
+        impl_->instances.erase(instance->id);
+    }
+    // Events and timers addressed to removed instances are dropped; completed_tick stays.
+    for (auto iterator = impl_->pending.begin(); iterator != impl_->pending.end();) {
+        iterator = impl_->instances.contains(iterator->second.target) ? ::std::next(iterator) : impl_->pending.erase(iterator);
+    }
+    return Result::success(::std::move(report));
 }
 
 core::Result<::std::optional<Value>> ScriptScheduler::read_global(

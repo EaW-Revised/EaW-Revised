@@ -154,10 +154,309 @@ Register_Event('Bad', DispatchFailure)
 }
 } // namespace
 
+// ---- object turns (#3644 A2a, #3702) ----
+
+namespace {
+
+// Runs the partitions of a phase from the last to the first, on the calling thread.
+class ReversePartitionExecutor final : public eawr::sim::PartitionExecutor {
+public:
+    [[nodiscard]] std::size_t worker_count() const noexcept override { return 1; }
+    [[nodiscard]] eawr::core::Result<void> execute(
+        std::size_t partition_count, const std::function<void(std::size_t)>& partition) const override {
+        for (std::size_t index = partition_count; index-- > 0;) partition(index);
+        return eawr::core::Result<void>::success();
+    }
+};
+
+const char* const turn_object_source = R"LUA(
+Count = 0
+Last = -1
+Seed = Test_Random(0)
+function Base_Definitions() end
+function Barrier() Barrier_Last = Test_Random(0) Test_Report('barrier', Barrier_Last) end
+function main()
+    while true do
+        Count = Count + 1
+        Last = Test_Random(0)
+        Test_Report('turn', Count, Last)
+        coroutine.yield(true)
+    end
+end
+)LUA";
+
+Session make_object_session(const std::vector<std::uint64_t>& ids, const std::map<std::string, std::string>& extra = {},
+                            const std::map<std::uint64_t, std::string>& modules = {}, auth::SessionConfig config = default_config()) {
+    std::map<std::string, std::string> sources{{"Obj.lua", turn_object_source}};
+    sources.insert(extra.begin(), extra.end());
+    Session session = make_session(sources, std::move(config));
+    std::vector<auth::ObjectScript> objects;
+    for (const std::uint64_t id : ids) {
+        const auto found = modules.find(id);
+        objects.push_back({auth::Handle{1, id}, 1, id, found == modules.end() ? "Obj.lua" : found->second});
+    }
+    const auto attached = session.scheduler->reconcile_objects(objects);
+    expect(attached && attached.value().empty(), "object turn attach");
+    return session;
+}
+
+void submit_due(Session& session, std::uint64_t id, auth::ScriptEvent::Kind kind, std::uint64_t sequence, std::string name = {}) {
+    auth::ScriptEvent event;
+    event.key = {session.scheduler->completed_tick() + 1, auth::first_simulation_producer, id, sequence};
+    event.target = id;
+    event.kind = kind;
+    event.name = std::move(name);
+    expect(session.scheduler->submit_event(std::move(event)).has_value(), "submit object event");
+}
+
+// Pumps `ids` in one turn of the next tick; every report line is appended to `lines`.
+auth::ServiceReport turn(Session& session, const eawr::sim::PartitionExecutor& executor, const std::vector<std::uint64_t>& ids,
+                         std::uint64_t pump_sequence, std::vector<std::string>* lines = nullptr) {
+    for (const std::uint64_t id : ids) submit_due(session, id, auth::ScriptEvent::Kind::pump, pump_sequence);
+    auto report = session.scheduler->service_turn(executor, ids);
+    expect(report.has_value(), "service_turn: " + (report ? std::string() : report.error().code + " " + report.error().message));
+    if (!report) return {};
+    if (lines != nullptr) {
+        for (const auto& command : report.value().commands) lines->push_back(text(command));
+        for (const auto& diagnostic : report.value().diagnostics) lines->push_back("diag " + diagnostic.code);
+    }
+    return std::move(report).value();
+}
+
+std::vector<std::string> only_issuer(const std::vector<std::string>& lines, std::uint64_t issuer) {
+    std::vector<std::string> selected;
+    const std::string prefix = std::to_string(issuer) + "#";
+    for (const std::string& line : lines) if (line.rfind(prefix, 0) == 0) selected.push_back(line);
+    return selected;
+}
+
+std::int64_t global_number(Session& session, std::uint64_t id, std::string_view name) {
+    const auto value = session.scheduler->read_global(id, name);
+    if (!value || !value.value() || !std::holds_alternative<LuaNumber>(value.value()->data)) return -1;
+    return b64::to_int64_truncate(std::get<LuaNumber>(value.value()->data).repr);
+}
+
+// Test_Random(0) returns the draw's word >> 12 as an integer.
+std::int64_t unit_word(std::uint64_t tick_key, std::uint64_t id, std::uint64_t draw) {
+    return static_cast<std::int64_t>(auth::random_word(default_config().seed, tick_key, id, draw) >> 12);
+}
+
+void object_turn_contracts() {
+    const eawr::sim::InlineExecutor executor;
+    constexpr std::uint64_t domain = auth::turn_random_domain;
+    {
+        // A subset turn equals the full turn restricted to the subset; the rest stay untouched.
+        const std::vector<std::uint64_t> all{1, 2, 3, 4, 5, 6}, subset{2, 5};
+        Session partial = make_object_session(all);
+        Session full = make_object_session(all);
+        std::vector<std::string> partial_lines, full_lines;
+        turn(partial, executor, all, 10);
+        turn(full, executor, all, 10);
+        const auto partial_report = turn(partial, executor, subset, 11, &partial_lines);
+        turn(full, executor, all, 11, &full_lines);
+        expect(partial_report.tick == 1 && partial_report.loads.size() == 2 && partial.scheduler->completed_tick() == 0,
+               "subset turn reports its instances and does not advance completed_tick");
+        for (const std::uint64_t id : all) {
+            const bool serviced = id == 2 || id == 5;
+            expect(only_issuer(partial_lines, id).size() == (serviced ? 1U : 0U), "only the subset commands commit");
+            if (serviced) {
+                expect(only_issuer(partial_lines, id) == only_issuer(full_lines, id), "subset commands equal the full turn restricted");
+                expect(global_number(partial, id, "Count") == 2 && global_number(partial, id, "Last") == global_number(full, id, "Last"),
+                       "subset instance state equals the full turn");
+            } else {
+                expect(global_number(partial, id, "Count") == 1 && global_number(full, id, "Count") == 2, "other instances are not serviced");
+            }
+        }
+    }
+    {
+        // The turn draws in its own key domain, on the instance's one counter, and the barrier continues after it.
+        Session session = make_object_session({3});
+        expect(global_number(session, 3, "Seed") == unit_word(1, 3, 0), "creation draws from the barrier domain");
+        turn(session, executor, {3}, 10);
+        expect(global_number(session, 3, "Last") == unit_word(1 | domain, 3, 1), "turn draws from its own domain");
+        expect(global_number(session, 3, "Last") != unit_word(1, 3, 1), "turn never reuses the barrier key");
+        submit_due(session, 3, auth::ScriptEvent::Kind::call, 20, "Barrier");
+        const auto barrier = session.scheduler->service(executor);
+        expect(barrier && session.scheduler->completed_tick() == 1, "barrier service advances completed_tick after the turn");
+        expect(global_number(session, 3, "Barrier_Last") == unit_word(1, 3, 2), "barrier continues past the turn's draws");
+        turn(session, executor, {3}, 10);
+        expect(global_number(session, 3, "Last") == unit_word(2 | domain, 3, 0), "next tick's turn starts a fresh stream");
+    }
+    {
+        // Save and restore between the turn and the barrier continues byte-equal.
+        const std::vector<std::uint64_t> ids{1, 2, 3};
+        Session original = make_object_session(ids);
+        Session restored = make_object_session(ids);
+        turn(original, executor, ids, 10);
+        const auto saved = original.scheduler->save();
+        expect(saved.has_value(), "save between turn and barrier");
+        if (saved) expect(restored.scheduler->load(saved.value()).has_value(), "load between turn and barrier");
+        expect(restored.scheduler->state_hash().value() == original.scheduler->state_hash().value(), "restored hash equals");
+        std::vector<std::string> a, b;
+        turn(original, executor, ids, 11, &a);
+        turn(restored, executor, ids, 11, &b);
+        expect(a == b && original.scheduler->state_hash().value() == restored.scheduler->state_hash().value(),
+               "a second turn of the same tick continues the stream after restore");
+        for (Session* session : {&original, &restored}) {
+            submit_due(*session, 2, auth::ScriptEvent::Kind::call, 20, "Barrier");
+            step(*session, executor);
+        }
+        expect(original.commands == restored.commands && original.scheduler->state_hash().value() == restored.scheduler->state_hash().value(),
+               "barrier after restore is equal");
+        a.clear();
+        b.clear();
+        turn(original, executor, ids, 10, &a);
+        turn(restored, executor, ids, 10, &b);
+        expect(a == b && original.scheduler->save().value() == restored.scheduler->save().value(), "later turn is equal after restore");
+    }
+    {
+        // Timers set in the turn and at the barrier of one tick never collide and keep their order.
+        const std::string timer_source = R"LUA(
+Register_Event('Log', function(tag) Test_Report('log', tag) end)
+function Base_Definitions() end
+function Barrier() Test_Timer(0.1, 'Log', 'barrier') end
+function main()
+    Test_Timer(0.1, 'Log', 'turn')
+    while true do coroutine.yield(true) end
+end
+)LUA";
+        Session session = make_object_session({7}, {{"Timer.lua", timer_source}}, {{7, "Timer.lua"}});
+        turn(session, executor, {7}, 10);
+        submit_due(session, 7, auth::ScriptEvent::Kind::call, 20, "Barrier");
+        step(session, executor, 6);
+        expect(session.commands == std::vector<std::string>{"7#0 report log turn", "7#1 report log barrier"},
+               "turn and barrier timers fire in order\n" + joined(session.commands));
+    }
+    {
+        // Events of other instances stay queued; the turn delivers only what is due for its subset.
+        Session session = make_object_session({1, 2});
+        submit_due(session, 1, auth::ScriptEvent::Kind::pump, 10);
+        submit_due(session, 2, auth::ScriptEvent::Kind::pump, 10);
+        const auto report = session.scheduler->service_turn(executor, {1});
+        expect(report && report.value().commands.size() == 1 && global_number(session, 2, "Count") == 0, "unlisted instance keeps its events");
+        const auto later = session.scheduler->service_turn(executor, {2});
+        expect(later && later.value().commands.size() == 1 && global_number(session, 2, "Count") == 1, "its events are delivered by its own turn");
+        expect(session.scheduler->service(executor).has_value() && session.scheduler->completed_tick() == 1, "barrier follows");
+    }
+    {
+        // Faults drop only that instance's turn output; quota and error cases.
+        const std::map<std::string, std::string> extra{
+            {"Spin.lua", "function Base_Definitions() end\nfunction main() Test_Report('spin') Test_Timer(0.1, 'Log', 'x') while true do end end\n"},
+            {"Err.lua", "function Base_Definitions() end\nfunction main() Test_Report('err') error('turn boom') end\n"},
+            {"Spawn.lua", "function T() end\nfunction Base_Definitions() end\n"
+                          "function main() Test_Report('spawn') for i = 1, 10 do Create_Thread('T') end coroutine.yield(true) end\n"}};
+        const std::map<std::uint64_t, std::string> modules{{2, "Spin.lua"}, {4, "Err.lua"}, {5, "Spawn.lua"}};
+        auth::SessionConfig config = default_config();
+        config.quotas.thread_slots = 4;
+        Session faulty = make_object_session({1, 2, 3, 4, 5}, extra, modules, config);
+        Session clean = make_object_session({1, 3}, {}, {}, config);
+        std::vector<std::string> faulty_lines, clean_lines;
+        const auto report = turn(faulty, executor, {1, 2, 3, 4, 5}, 10, &faulty_lines);
+        turn(clean, executor, {1, 3}, 10, &clean_lines);
+        std::vector<std::string> survivors = only_issuer(faulty_lines, 1);
+        for (const auto& line : only_issuer(faulty_lines, 3)) survivors.push_back(line);
+        std::vector<std::string> reference = only_issuer(clean_lines, 1);
+        for (const auto& line : only_issuer(clean_lines, 3)) reference.push_back(line);
+        expect(survivors == reference && survivors.size() == 2, "healthy instances commit beside faulted ones");
+        expect(only_issuer(faulty_lines, 2).empty() && only_issuer(faulty_lines, 4).empty() && only_issuer(faulty_lines, 5).empty(),
+               "a faulted instance drops its turn output\n" + joined(faulty_lines));
+        expect(report.removed_instances == std::vector<std::uint64_t>{2, 4, 5} && faulty.scheduler->instances() == std::vector<std::uint64_t>{1, 3},
+               "faulted instances are removed");
+        expect(any_contains(faulty_lines, std::string("diag ") + std::string(auth::codes::instruction_budget)) &&
+               any_contains(faulty_lines, std::string("diag ") + std::string(auth::codes::script_error)) &&
+               any_contains(faulty_lines, std::string("diag ") + std::string(auth::codes::logical_quota)),
+               "budget, error and quota faults are diagnosed\n" + joined(faulty_lines));
+        expect(faulty.scheduler->completed_tick() == 0, "a faulting turn does not advance completed_tick");
+        const auto barrier = faulty.scheduler->service(executor);
+        expect(barrier && barrier.value().commands.empty() && barrier.value().removed_instances.empty() && barrier.value().diagnostics.empty()
+               && faulty.scheduler->completed_tick() == 1 && faulty.scheduler->instances() == std::vector<std::uint64_t>{1, 3},
+               "the barrier after a faulting turn is unaffected and finds no leftover event");
+    }
+    {
+        // Refusals change nothing.
+        Session session = make_object_session({1, 2});
+        expect(session.scheduler->create_instance(9, "Obj.lua").has_value(), "plain instance");
+        const auto before = session.scheduler->state_hash().value();
+        const auto refused = [&](const std::vector<std::uint64_t>& ids) {
+            const auto result = session.scheduler->service_turn(executor, ids);
+            return !result && result.error().code == auth::codes::invalid_request && session.scheduler->state_hash().value() == before;
+        };
+        expect(refused({1, 1}) && refused({1, 77}) && refused({9}) && refused({2, 9, 1}), "duplicate, unknown and non-object instances are refused");
+        expect(session.scheduler->service_turn(executor, {}).has_value(), "an empty turn is a no-op");
+        auth::SessionConfig clock = default_config();
+        clock.galactic_clock = true;
+        Session galactic = make_session({{"Obj.lua", turn_object_source}}, clock);
+        expect(!galactic.scheduler->service_turn(executor, {}), "the GC clock profile has no object turn");
+        // An immediate-effect session and the query clock are refused too, even for a valid object list.
+        Session immediate = make_object_session({1, 2});
+        expect(static_cast<bool>(immediate.scheduler->set_immediate_effect_host(std::make_shared<WalletHost>(), 4)), "immediate host on an object session");
+        const auto immediate_before = immediate.scheduler->state_hash().value();
+        const auto immediate_turn = immediate.scheduler->service_turn(executor, {1});
+        expect(!immediate_turn && immediate_turn.error().code == auth::codes::invalid_request
+                   && immediate.scheduler->state_hash().value() == immediate_before,
+               "an immediate-effect session has no object turn");
+        auth::SessionConfig query = default_config();
+        query.query_clock = true;
+        Session queried = make_object_session({1}, {}, {}, query);
+        const auto query_before = queried.scheduler->state_hash().value();
+        const auto query_turn = queried.scheduler->service_turn(executor, {1});
+        expect(!query_turn && query_turn.error().code == auth::codes::invalid_request
+                   && queried.scheduler->state_hash().value() == query_before,
+               "the query clock profile has no object turn");
+    }
+}
+
+// Many objects over many ticks: commands and digests equal on every executor and request order.
+struct TurnOutcome {
+    std::vector<std::string> digests, commands;
+};
+
+TurnOutcome run_turn_scenario(const eawr::sim::PartitionExecutor& executor, bool reverse_request) {
+    std::vector<std::uint64_t> ids;
+    for (std::uint64_t index = 1; index <= 12; ++index) ids.push_back(index * 5);
+    Session session = make_object_session(ids);
+    TurnOutcome outcome;
+    for (std::uint64_t tick = 1; tick <= 24; ++tick) {
+        std::vector<std::uint64_t> due;
+        for (const std::uint64_t id : ids) if (tick == 1 || (tick + id) % 3 != 0) due.push_back(id);
+        if (reverse_request) std::reverse(due.begin(), due.end());
+        std::vector<std::string> lines;
+        turn(session, executor, due, 10, &lines);
+        for (const std::uint64_t id : ids) if (tick > 1 && id % 4 == tick % 4) submit_due(session, id, auth::ScriptEvent::Kind::call, 20, "Barrier");
+        outcome.commands.insert(outcome.commands.end(), lines.begin(), lines.end());
+        step(session, executor);
+        outcome.digests.push_back(session.scheduler->state_digest());
+        if (tick % 5 == 0) outcome.digests.push_back(session.scheduler->state_hash().value());
+    }
+    outcome.commands.insert(outcome.commands.end(), session.commands.begin(), session.commands.end());
+    expect(session.diagnostics.empty(), "turn scenario diagnostics\n" + joined(session.diagnostics));
+    return outcome;
+}
+
+void object_turn_workers() {
+    const eawr::sim::InlineExecutor inline_executor;
+    const TurnOutcome reference = run_turn_scenario(inline_executor, false);
+    expect(reference.commands.size() > 150, "turn scenario issues commands");
+    for (const std::size_t workers : eawr::platform::determinism_worker_counts()) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (const bool reverse_request : {false, true}) {
+            const TurnOutcome outcome = run_turn_scenario(executor, reverse_request);
+            expect(outcome.digests == reference.digests && outcome.commands == reference.commands,
+                   std::to_string(workers) + " workers" + (reverse_request ? ", reversed request" : "") + ": object turns equal");
+        }
+    }
+    const ReversePartitionExecutor reverse;
+    const TurnOutcome outcome = run_turn_scenario(reverse, true);
+    expect(outcome.digests == reference.digests && outcome.commands == reference.commands, "reverse partitions: object turns equal");
+}
+
+} // namespace
+
 // ---- scheduler ----
 
 void run_scheduler() {
     immediate_contracts();
+    object_turn_contracts();
     const eawr::sim::InlineExecutor inline_executor;
     {
         const std::map<std::string, std::string> modules{{"Cache.lua", R"(
@@ -478,6 +777,7 @@ Outcome run_scenario(const eawr::sim::PartitionExecutor& executor, bool reverse_
 }
 
 void run_workers() {
+    object_turn_workers();
     constexpr int ticks = 90;
     constexpr int instances = 24;
     const eawr::sim::InlineExecutor inline_executor;

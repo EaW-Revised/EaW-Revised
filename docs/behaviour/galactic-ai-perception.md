@@ -73,6 +73,33 @@ hidden miss evaluation and gain/loss refresh are explicit. Unknown per-token
 intervals are uncached. Visibility signals must come from the qualified owner;
 observer presentation masks are not substituted for AI cache visibility.
 
+Equation loading compiles each token chain into a root enum and an interned
+identity with retained authored spelling. Perception stores compact keys for
+player, enemy, human, planet, token and ordered bindings in a flat open-addressing
+index. Token readers borrow the interned metadata; the archive writer resolves
+the spellings and sorts by the original complete keys. Intern IDs, table slots
+and their insertion order never enter decisions, digests or archives. Numeric
+zero bindings share lookup identity while their individual sign bits remain
+available for the unchanged WGA-195 bytes.
+
+Bindings enter the retained interner only when an ordinary remembered value is
+stored. Uncached, failed and read-only misses borrow their caller's arguments;
+economy memo bindings use a separate pool released on frame changes. At ordered
+boundaries between equations, excess unreferenced native spellings are reclaimed
+and compact IDs are rebuilt from retained records. This changes no native value,
+stamp or encoded key. Expired load-time token definitions are also reclaimed,
+so dynamic arguments and repeated loads do not add unbounded derived history.
+
+The admitted AI decision pass owns a sequential query scope. Usability prepares
+copied access facts in parallel, then reads perception in planet order on the
+owner thread. Candidate scoring and single-type means run on that same thread;
+bulk force, producer and route preparation retain fixed worker partitions and
+ordered commits. Nested barrier queries perform no mutex operation. Parallel
+battle-child queries of a retained galactic parent serialize whole equations,
+including calls to upstream lazy caches. Derived engine producer, build-budget
+and configuration caches are either reached on the owner or behind this parent
+query boundary; pure partitioned phases do not initialize them.
+
 WGA-62's raw base levels, authored global base denominators, trade-route
 denominators, raw open company slots and structure fraction are distinct.
 The store retains player/planet/name story flags, pre-clear reads and

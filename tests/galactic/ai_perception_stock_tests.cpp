@@ -13,6 +13,8 @@
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
+#include <thread>
 
 namespace {
 namespace ai = eawr::script::foc::ai;
@@ -385,6 +387,170 @@ std::string difficulty_seat_contracts(unsigned workers) {
         "WGA-424 requires Parameter_Difficulty_Level_Type and refuses unsourced numeric/named aliases");
     return host.world->state_hash().value();
 }
+std::vector<std::uint8_t> perception_archive(ai::GalacticPerceptionState state,
+    const std::vector<std::uint8_t>& markup) {
+    // Independent WGA-195 wire oracle: the runtime representation and its
+    // process-local intern IDs are deliberately unavailable to this writer.
+    std::sort(state.cache.begin(), state.cache.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
+    std::vector<std::uint8_t> bytes;
+    const auto word = [&](std::uint64_t value, unsigned width = 8) {
+        for (unsigned i = 0; i < width; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (8U * i)));
+    };
+    const auto text = [&](std::string_view value) {
+        word(value.size(), 4); bytes.insert(bytes.end(), value.begin(), value.end());
+    };
+    const auto optional = [&](std::optional<gc::PlayerId> value) {
+        word(value.has_value(), 1); if (value) word(*value, 4);
+    };
+    text("eawr-galactic-perception"); word(3, 4); word(state.cache.size());
+    for (const auto& row : state.cache) {
+        word(row.key.player, 4); optional(row.key.enemy); optional(row.key.human); word(row.key.planet);
+        word(row.key.tokens.size()); for (const auto& token : row.key.tokens) text(token);
+        word(row.key.bindings.size());
+        for (const auto& binding : row.key.bindings) {
+            text(binding.parameter); word(binding.value.index(), 1);
+            if (const auto* number = std::get_if<ai::Real>(&binding.value)) word(number->repr);
+            else text(std::get<std::string>(binding.value));
+        }
+        word(row.value.repr); word(row.interval.repr); word(row.frame);
+    }
+    word(state.visibility.size());
+    for (const auto& row : state.visibility) {
+        word(row.player, 4); word(row.planet); word(row.visible, 1); word(row.last_observed); word(row.mask, 4);
+    }
+    word(state.flags.size()); word(state.hints.size());
+    expect(state.flags.empty() && state.hints.empty(), "wire oracle fixture has no flags or hints");
+    word(markup.size()); bytes.insert(bytes.end(), markup.begin(), markup.end());
+    return bytes;
+}
+
+std::string owner_scope_contracts(unsigned workers) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    QueryHost host(fixture_setup(), fixture_data());
+    expect(static_cast<bool>(host.world->bind(fixture(10, 4), {}, executor, 10, 100)), "owner scope fixture binds");
+    host.initialize(executor); host.world->visibility_changed(1, 10, true);
+    QueryHost other(fixture_setup(), fixture_data());
+    expect(static_cast<bool>(other.world->bind(fixture(10, 2), {}, executor, 10, 100)), "second owner world binds distinct values");
+    other.initialize(executor); other.world->visibility_changed(1, 10, true);
+    {
+        const auto owner = host.world->owner_reads();
+        {
+            const auto nested = host.world->owner_reads();
+            expect(host.query("A").has_value(), "nested owner scope permits inline parent perception");
+        }
+        {
+            const auto other_owner = other.world->owner_reads();
+            expect(host.query("Ground") == real(4) && other.query("Ground") == real(2)
+                && host.query("Ground") == real(4),
+                "nested worlds admit the actual mutex owner and preserve each world's query inputs");
+        }
+        std::string refusal;
+        std::thread child([&] {
+            try { static_cast<void>(host.query("A")); }
+            catch (const std::logic_error& error) { refusal = error.what(); }
+        });
+        child.join();
+        expect(refusal == "parent perception query during galactic owner scope",
+            "foreign child query fails before waiting on an owner-held mutex, also after a nested scope closes");
+    }
+    std::optional<ai::Real> child_value;
+    std::thread child([&] { child_value = host.query("A"); });
+    child.join();
+    expect(child_value.has_value(), "child parent query is admitted after the owner scope releases");
+    return host.world->state_hash().value();
+}
+
+std::string interned_contracts(unsigned workers) {
+    static_assert(std::is_trivially_copyable_v<ai::GalacticInternedKey>);
+    static_assert(std::is_standard_layout_v<ai::GalacticInternedKey>);
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    QueryHost host(fixture_setup(), fixture_data());
+    expect(static_cast<bool>(host.world->bind(fixture(10, 4), {}, executor, 10, 100)), "interned fixture binds");
+    host.initialize(executor); host.world->visibility_changed(1, 10, true);
+    const auto* target = host.engine.target_of_object(10);
+    const ai::Context context{1, 2, 2, target};
+    // Grow and collide the flat index through several capacities, with ordered
+    // repeated parameters and strings; then revisit the oldest records.
+    for (unsigned pass = 0; pass < 2; ++pass) for (unsigned step = 0; step < 257; ++step) {
+        const auto i = pass == 0 ? 256U - step : step;
+        const auto equation = ai::parse_equation("INTERNED", "Variable_Target.StructureCount {Parameter_Type=\"A\",Parameter_Type=\"B\",Parameter_Unused="
+            + std::to_string(i) + "}", {});
+        if (!equation) throw std::runtime_error(equation.error().message);
+        ai::AiRandom random;
+        expect(host.world->perception(host.engine, equation.value(), context, random) == real(2), "flat cache preserves repeated parameter values after growth");
+    }
+    auto state = host.world->state();
+    expect(state.cache.size() == 257, "second pass reuses every complete binding identity");
+    // Numeric zero equality must share lookup identity while each record keeps
+    // its own sign bit for the unchanged canonical archive.
+    auto negative = state.cache.front(); negative.key.bindings = {{"PARAMETER_UNUSED", -ai::Real{}}};
+    auto positive = negative; positive.key.planet = 20; positive.key.bindings[0].value = ai::Real{};
+    state.cache.push_back(negative); state.cache.push_back(positive);
+    expect(static_cast<bool>(host.world->restore(state)), "signed-zero records on different contexts restore");
+    const auto captured = host.world->capture();
+    if (!captured) throw std::runtime_error(captured.error().message);
+    expect(captured.value().components.at("GALACTIC_PERCEPTION") == perception_archive(state, host.world->markup()->encode()),
+        "interned records encode exactly the original WGA-195 bytes including signed zeros");
+    auto duplicate = state; auto same = negative; same.key.bindings[0].value = ai::Real{}; duplicate.cache.push_back(same);
+    expect(!host.world->restore(duplicate), "signed-zero numeric equality still rejects duplicate cache identities");
+    QueryHost restored(fixture_setup(), fixture_data());
+    expect(static_cast<bool>(restored.world->bind(fixture(10, 4), {}, executor, 10, 100)), "cold interned restore binds");
+    restored.initialize(executor);
+    // Populate a different token identity first: archive sorting must never
+    // depend on process-local IDs, cache slots, or insertion order.
+    static_cast<void>(restored.query("A"));
+    expect(static_cast<bool>(restored.world->restore(captured.value())) && restored.world->state_hash().value() == host.world->state_hash().value(),
+        "cold restore and differently warmed IDs reproduce canonical archive bytes");
+    return host.world->state_hash().value();
+}
+
+std::string binding_lifetime_contracts(unsigned workers) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    QueryHost host(fixture_setup(), fixture_data());
+    expect(static_cast<bool>(host.world->bind(fixture(10, 4), {}, executor, 10, 100)), "binding lifetime fixture binds");
+    host.initialize(executor);
+    const ai::Context context{1, 2, 2, host.engine.target_of_object(10)};
+    const auto query = [&](std::string body, bool read_only = false) {
+        const auto equation = ai::parse_equation("BINDING_LIFETIME", body, {});
+        if (!equation) throw std::runtime_error(equation.error().message);
+        ai::AiRandom random;
+        return read_only ? host.world->perception_read_only(host.engine, equation.value(), context, random)
+            : host.world->perception(host.engine, equation.value(), context, random);
+    };
+    for (unsigned i = 0; i < 513; ++i) {
+        expect(query("Variable_Self.TechLevel {Parameter_Unused=" + std::to_string(i) + "}") == real(3), "uncached dynamic parameters retain the actual value");
+        expect(!query("Variable_Target.HasStructure {Parameter_Unused=" + std::to_string(i) + "}"), "failed cached getters remain unavailable");
+        expect(query("Variable_Target.StructureCount {Parameter_Type=\"A\",Parameter_Unused=" + std::to_string(i) + "}", true) == real(1),
+            "read-only dynamic parameters evaluate without publishing a binding");
+    }
+    expect(host.world->binding_storage().first == 0, "uncached, failed and read-only queries retain no native binding sets");
+    for (unsigned frame = 11; frame < 27; ++frame) {
+        host.world->set_synchronized_frame(frame);
+        const auto expected = query("Variable_Self.MaintenanceUnnormalized");
+        expect(query("Variable_Self.MaintenanceUnnormalized {Parameter_Unused=" + std::to_string(frame) + "}") == expected,
+            "frame memo retains the actual maintenance value");
+        expect(host.world->binding_storage().second == 1, "memo argument storage is bounded by the current frame");
+    }
+    // Many bit spellings of the same numeric-zero signature must not become
+    // unbounded derived history when one visible interval-zero record refreshes.
+    host.world->visibility_changed(1, 10, true);
+    for (unsigned spelling = 0; spelling < 513; ++spelling) {
+        std::string body = "Variable_Target.StarbaseLevelUnnormalized {";
+        for (unsigned bit = 0; bit < 10; ++bit) {
+            if (bit) body += ',';
+            body += "Parameter_Unused" + std::to_string(bit) + '=' + ((spelling & (1U << bit)) ? "-0" : "0");
+        }
+        body += '}';
+        expect(query(body) == real(2), "zero spellings share numeric cache identity");
+    }
+    expect(host.world->state().cache.size() == 1, "zero signature has one remembered native record");
+    const auto before = host.world->state_hash().value();
+    host.world->finish_perception_queries();
+    expect(host.world->binding_storage().first == 1 && host.world->state_hash().value() == before,
+        "ordered reclamation keeps only referenced spelling and exactly the same archive bytes");
+    return before;
+}
+
 std::string contracts(unsigned workers) {
     eawr::platform::ThreadWorkerAdapter executor(workers);
     QueryHost host(fixture_setup(), fixture_data());
@@ -963,7 +1129,7 @@ int main(int argc, char**) {
         else {
             std::string reference;
             for (const auto workers : {1U, 2U, 4U, 8U}) {
-                const auto trace = contracts(workers) + force_contracts(workers)
+                const auto trace = owner_scope_contracts(workers) + binding_lifetime_contracts(workers) + interned_contracts(workers) + contracts(workers) + force_contracts(workers)
                     + story_campaign_contracts(workers) + difficulty_seat_contracts(workers)
                     + producer_preparation_contracts(workers);
                 const auto target_trace = target_contrast_contracts(workers);

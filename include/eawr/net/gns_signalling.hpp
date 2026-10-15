@@ -71,6 +71,7 @@ struct GnsIntroduction {
     std::shared_ptr<GnsSignallingEndpoint> endpoint;
     std::string room_alias{};
     std::chrono::steady_clock::time_point expires{};
+    std::string publisher_ownership{}; // host-only binding proof, never given to a guest
 };
 class GnsIntroductionService {
 public:

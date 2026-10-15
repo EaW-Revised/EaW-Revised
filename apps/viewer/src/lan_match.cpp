@@ -864,6 +864,7 @@ private:
     std::optional<LanLobbyState> last_lobby_state_;
 public:
 
+    void set_public_invitation(bool value) override { if (online_options_) online_options_->service.public_alias = value; }
     void configure_online(OnlineMatchOptions options) {
         online_options_ = std::move(options);
         recovery_policy_ = {}; // Repair/lifetime qualification belongs to the online repair slice.
@@ -912,10 +913,12 @@ private:
           error = online_admission_->failure; endpoint = std::move(online_admission_->paired);
           const std::lock_guard view_lock(mutex_);
           view_.invitation_code = online_admission_->code; view_.invitation_expires = online_admission_->expires;
-          if (!view_.invitation_code.empty()) view_.message = "Waiting for a player to join...";
+          if (!online_admission_->bridge_code.empty()) view_.message = "Waiting for a player to join...";
         }
         if (error) { online_admission_->cancelled = true; online_retiring_ = std::move(online_admission_); set_failure(*error); return false; }
         if (!endpoint) return false;
+        if (online_options_->turn_credentials_observer)
+            if (const auto credentials = endpoint->turn_credentials()) online_options_->turn_credentials_observer(*credentials);
         net::GnsOptions options; options.build_identity = online_options_->build_identity;
         options.timeout = std::chrono::milliseconds(180000); options.turn_only = online_options_->turn_only;
         if (lobby_builder_) options.max_frame_size = static_cast<std::uint32_t>(net::max_lobby_frame_bytes);
@@ -1257,6 +1260,16 @@ public:
         return std::exchange(pending_, {});
     }
     std::optional<skirmish::FixtureOptions> offered_setup() const override { return offered_; }
+    std::string bridge_ownership() const override {
+        if (!online_admission_) return {};
+        const std::lock_guard lock(online_admission_->mutex);
+        return online_admission_->bridge_owner;
+    }
+    std::string bridge_invitation() const override {
+        if (!online_admission_) return {};
+        const std::lock_guard lock(online_admission_->mutex);
+        return online_admission_->bridge_code;
+    }
     LanView view() const override {
         const std::lock_guard lock(mutex_);
         auto result = view_;
@@ -1495,6 +1508,7 @@ private:
             else for (net::PeerIndex peer = 0; peer < owners_.size(); ++peer)
                 offer.seats.push_back({peer, sim::SeatId{peer + 1}, owners_[peer]});
             net::DesyncOptions options;
+            if (online_options_) options.exchange_every = online_options_->hash_exchange_every;
             options.diagnostic_sink = [root = diagnostic_root_](const net::DiagnosticBundle& bundle) -> core::Result<std::string> {
                 std::error_code error;
                 std::filesystem::create_directories(root, error);
@@ -1813,6 +1827,7 @@ private:
         }
         {
             const std::lock_guard lock(mutex_);
+            view_.peer_confirmed_tick = io_->monitor->peer_confirmed_tick();
             view_.link_stats.reset();
             for (net::PeerIndex peer = 0; peer < io_->transport.peer_count(); ++peer)
                 if (peer != io_->transport.self()) {
