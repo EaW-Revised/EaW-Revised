@@ -235,9 +235,11 @@ MinimapTypeLooks minimap_type_looks(const std::string_view type, const data::Cat
         if (value == nullptr) return std::nullopt;
         return trim(value->value.raw_text);
     };
+    // ML-24 (#3631): a blank or TBD variant colour inherits from its parent.
+    const auto inherited_colour = resolved.value().single("No_Colorization_Color");
     if (const auto value = text("Is_Visible_On_Radar")) looks.visible = boolean(*value).value_or(looks.visible);
     if (const auto value = text("Visible_On_Radar_When_Fogged")) looks.visible_when_fogged = boolean(*value).value_or(false);
-    if (const auto value = text("No_Colorization_Color")) looks.no_colorization = colour(*value);
+    if (inherited_colour) looks.no_colorization = colour(trim(inherited_colour->value.raw_text));
     if (const auto value = text("Is_Visible_On_Enemy_Radar")) {
         looks.visible_to_enemy = boolean(*value).value_or(looks.visible_to_enemy);
     }
@@ -295,6 +297,26 @@ std::array<double, 2> minimap_world(const MinimapExtents& extents, const Minimap
     const double width = extents.max_x - extents.min_x;
     const double height = extents.max_y - extents.min_y;
     return {extents.min_x + (point.x / 2.0 + 0.5) * width, extents.min_y + (point.y / 2.0 + 0.5) * height};
+}
+
+const sim::tactical::UnitState* minimap_initial_identity(
+    const std::span<const sim::tactical::UnitState> start, const sim::EntityId entity,
+    const sim::tactical::TypeId type) noexcept {
+    const auto found = std::find_if(start.begin(), start.end(), [=](const auto& unit) {
+        return unit.entity_id == entity && unit.type_id == type;
+    });
+    return found == start.end() ? nullptr : &*found;
+}
+
+std::array<double, 2> minimap_world_half_size(const sim::math::Mat3x4& transform,
+    const std::array<float, 3>& low, const std::array<float, 3>& high) noexcept {
+    std::array<double, 2> result{};
+    for (std::size_t row = 0; row < 2; ++row) for (std::size_t axis = 0; axis < 3; ++axis) {
+        const double scale = static_cast<double>(transform.rows[row][axis].raw())
+            / static_cast<double>(sim::math::Fixed::scale);
+        result[row] += std::abs(scale) * static_cast<double>(high[axis] - low[axis]) * 0.5;
+    }
+    return result;
 }
 
 std::optional<MinimapSquadronPose> minimap_squadron_pose(

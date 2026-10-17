@@ -43,6 +43,7 @@ target_include_directories(net_viewer_lan_tests PRIVATE "${PROJECT_SOURCE_DIR}/a
 target_link_libraries(net_viewer_lan_tests PRIVATE eawr::net eawr::platform eawr::skirmish eawr::ui_model eawr::scene)
 eawr_target_project_warnings(net_viewer_lan_tests)
 add_test(NAME net_viewer_lan_contracts COMMAND net_viewer_lan_tests)
+add_test(NAME net_pending_input_contracts COMMAND net_viewer_lan_tests --pending-inputs)
 add_executable(net_tcp_lockstep_tests tcp_lockstep_tests.cpp)
 target_link_libraries(net_tcp_lockstep_tests PRIVATE eawr::net eawr::platform)
 eawr_target_project_warnings(net_tcp_lockstep_tests)
@@ -72,6 +73,50 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME net_gns_introduced_paths COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/gns_introduced_processes.py" "$<TARGET_FILE:net_gns_introduced_tests>")
 set_tests_properties(net_gns_introduced_paths PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+
+# #3912: a relayed pair through a TURN server whose permissions and allocations expire after a few seconds. GNS must
+# keep refreshing its permission; before the carried patch (cmake/EawrGnsTurnPermissionRefresh.cmake) the relay went
+# silent after one permission lifetime while the connection still reported Connected.
+add_test(NAME net_gns_turn_permission COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_turn_processes.py" "$<TARGET_FILE:net_gns_introduced_tests>" permission)
+set_tests_properties(net_gns_turn_permission PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
+# The same server turns into a dead path: the link must name it (EAWR-NET-1507) long before GNS's own timeout.
+add_test(NAME net_gns_turn_silent COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_turn_processes.py" "$<TARGET_FILE:net_gns_introduced_tests>" silent)
+set_tests_properties(net_gns_turn_silent PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
+# The server rotates its nonce: every Refresh and CreatePermission is answered with 438 Stale Nonce first and must be
+# repeated with the new one (the pinned client treated that reply as success and never refreshed again).
+add_test(NAME net_gns_turn_nonce COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_turn_processes.py" "$<TARGET_FILE:net_gns_introduced_tests>" nonce)
+set_tests_properties(net_gns_turn_nonce PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
+
+# N-peer room mesh (N2): member processes meshed through a loopback room broker. The nine-member case skips (77)
+# unless EAWR_GNS_MESH_NINE=1; it runs once per slice at its final head, not per PR.
+add_executable(net_gns_mesh_tests gns_mesh_tests.cpp)
+target_link_libraries(net_gns_mesh_tests PRIVATE eawr::net eawr::platform Threads::Threads)
+eawr_target_project_warnings(net_gns_mesh_tests)
+add_test(NAME net_gns_mesh_paths COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_mesh_processes.py" "$<TARGET_FILE:net_gns_mesh_tests>")
+set_tests_properties(net_gns_mesh_paths PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+add_test(NAME net_gns_mesh_nine COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_mesh_processes.py" "$<TARGET_FILE:net_gns_mesh_tests>" nine)
+set_tests_properties(net_gns_mesh_nine PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+# #4021: six members, a pair silent twice 36 s apart (repaired both times), and the same with seat 5 unable to re-attach.
+add_test(NAME net_gns_mesh_twice COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_mesh_processes.py" "$<TARGET_FILE:net_gns_mesh_tests>" twice)
+set_tests_properties(net_gns_mesh_twice PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+# The second acceptor arms its repair 3 s after the dialer has dialled with the new epoch's material.
+add_test(NAME net_gns_mesh_twice_late COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_mesh_processes.py" "$<TARGET_FILE:net_gns_mesh_tests>" twice_late)
+set_tests_properties(net_gns_mesh_twice_late PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+# A pair the acceptor gave up on is not revived by the dialer's late request; only one of its two seats leaves.
+add_test(NAME net_gns_mesh_gave_up COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_mesh_processes.py" "$<TARGET_FILE:net_gns_mesh_tests>" gave_up)
+set_tests_properties(net_gns_mesh_gave_up PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+# Explicit final-head qualification; ordinary ^net_ selections keep the env-gated test above.
+add_test(NAME gns_mesh_nine_process COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_mesh_processes.py" "$<TARGET_FILE:net_gns_mesh_tests>" nine)
+set_tests_properties(gns_mesh_nine_process PROPERTIES ENVIRONMENT "EAWR_GNS_MESH_NINE=1" SKIP_RETURN_CODE 77 TIMEOUT 600)
 
 add_executable(net_gns_signalling_tests gns_signalling_tests.cpp)
 target_link_libraries(net_gns_signalling_tests PRIVATE eawr::net Threads::Threads)
@@ -112,6 +157,23 @@ add_executable(net_mesh_policy_tests mesh_policy_tests.cpp)
 target_link_libraries(net_mesh_policy_tests PRIVATE eawr::net Threads::Threads)
 eawr_target_project_warnings(net_mesh_policy_tests)
 add_test(NAME net_mesh_policy_contracts COMMAND net_mesh_policy_tests)
+# N-peer pair-loss agreement (N4): the incident driver, then LockstepSession with cuttable pairs, then the same over the real
+# tactical simulation with 1/2/4/8 sim workers. None needs GNS or a service.
+add_executable(net_mesh_incident_tests mesh_incident_tests.cpp)
+target_link_libraries(net_mesh_incident_tests PRIVATE eawr::net Threads::Threads)
+eawr_target_project_warnings(net_mesh_incident_tests)
+add_test(NAME net_mesh_incident_contracts COMMAND net_mesh_incident_tests)
+set_tests_properties(net_mesh_incident_contracts PROPERTIES TIMEOUT 300)
+add_executable(net_mesh_session_tests mesh_session_tests.cpp)
+target_link_libraries(net_mesh_session_tests PRIVATE eawr::net eawr::platform Threads::Threads)
+eawr_target_project_warnings(net_mesh_session_tests)
+add_test(NAME net_mesh_session_contracts COMMAND net_mesh_session_tests)
+set_tests_properties(net_mesh_session_contracts PROPERTIES TIMEOUT 600)
+add_executable(net_mesh_session_workers_tests mesh_session_workers_tests.cpp)
+target_link_libraries(net_mesh_session_workers_tests PRIVATE eawr::net eawr::platform Threads::Threads)
+eawr_target_project_warnings(net_mesh_session_workers_tests)
+add_test(NAME net_mesh_session_worker_contracts COMMAND net_mesh_session_workers_tests)
+set_tests_properties(net_mesh_session_worker_contracts PROPERTIES TIMEOUT 300)
 add_executable(net_port_mapping_tests port_mapping_tests.cpp)
 target_link_libraries(net_port_mapping_tests PRIVATE eawr::net)
 eawr_target_project_warnings(net_port_mapping_tests)
@@ -145,7 +207,7 @@ if(EAWR_ENABLE_RELAY)
     add_test(NAME net_viewer_online_contracts COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/viewer_online_processes.py" "$<TARGET_FILE:net_viewer_online_tests>"
         "$<TARGET_FILE:eawr_relay_server>" "${PROJECT_BINARY_DIR}/online-bridge-artifacts")
-    set_tests_properties(net_viewer_online_contracts PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
+    set_tests_properties(net_viewer_online_contracts PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
     add_executable(net_relay_server_tests relay_server_tests.cpp)
     target_include_directories(net_relay_server_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/net")
     target_link_libraries(net_relay_server_tests PRIVATE eawr_relay_service Threads::Threads)

@@ -1088,7 +1088,8 @@ void test_impact_shooter_bonus() {
 }
 
 void test_concentrate_damage() {
-    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U}) {
+    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U}) {
+        const bool speed_case = scenario >= 6;
         std::vector<std::string> baseline;
         for (const auto workers : {1U, 2U, 4U, 8U}) {
             auto health = durability();
@@ -1096,6 +1097,7 @@ void test_concentrate_damage() {
             tactical::AbilityProfile ordinary;
             ordinary.kind = tactical::AbilityKind::concentrate_fire;
             ordinary.expiration_frames = 100;
+            if (scenario == 6) ordinary.expiration_frames = 8;
             ordinary.recharge_frames = 20;
             ordinary.effective_radius = units(6000);
             ordinary.gui_activated_ability_name = "focus";
@@ -1104,6 +1106,7 @@ void test_concentrate_damage() {
             special.name = "focus"; special.kind = tactical::SpecialAbilityKind::concentrate_fire;
             special.style = tactical::SpecialActivationStyle::user_input; special.service_interval = 1;
             special.target_damage_increase = decimal("0.5"); special.filter.applicable_categories = 2;
+            if (speed_case) special.target_speed_decrease = decimal("0.4");
             hero.special = {special};
             tactical::AbilityTable abilities;
             abilities.profiles = {hero};
@@ -1126,7 +1129,7 @@ void test_concentrate_damage() {
                 {2, frigate_type, 2, at(300, 0), math::identity_quat(), {}},
                 {3, plain_type, 1, at(3000, 0), math::identity_quat(), {}}};
             tactical::EconomyRules economy;
-            if (scenario >= 4) {
+            if (scenario == 4 || scenario == 5) {
                 tactical::CommandBonusProfile bonus;
                 bonus.type = frigate_type; bonus.apply_to_self = true;
                 bonus.bonus.applicable = {frigate_type};
@@ -1134,9 +1137,11 @@ void test_concentrate_damage() {
                 bonus.bonus.percentages[4] = decimal("0.25");
                 economy.command_bonuses = {bonus};
             }
+            auto movement = speed_case ? motion() : tactical::MotionTable{};
+            for (auto& row : movement.profiles) { row.acceleration = row.max_speed; row.deceleration = row.max_speed; }
             auto created = tactical::TacticalSession::create(initial,
                 std::vector<tactical::SensorProfile>{{corvette_type, units(1000)}, {frigate_type, units(1000)}},
-                health, {}, std::nullopt, combat, {}, abilities, economy);
+                health, movement, std::nullopt, combat, {}, abilities, economy);
             expect(static_cast<bool>(created), "WHE-25: concentrate-fire damage session creates");
             if (!created) continue;
             auto session = std::move(created).value();
@@ -1148,7 +1153,11 @@ void test_concentrate_damage() {
                 tactical::AbilityPayload{ordinary.kind, tactical::AbilityAction::deactivate}))), "release submits before impact");
             if (scenario == 3) expect(static_cast<bool>(session.submit(command(2, 1, 3, 3,
                 tactical::DamagePayload{units(100000), tactical::hull_target}))), "source death submits before impact");
+            if (scenario == 7) expect(static_cast<bool>(session.submit(command(8, 1, 3, 3,
+                tactical::AbilityPayload{ordinary.kind, tactical::AbilityAction::deactivate}))), "speed effect releases before impact");
             const eawr::platform::ThreadWorkerAdapter executor(workers);
+            if (speed_case) expect(static_cast<bool>(session.submit(command(0, 2, 0, 2,
+                tactical::MovePayload{at(6000, 0)}))), "WHE-25: target moves through concentrate-fire speed changes");
             std::vector<std::string> hashes;
             unsigned hits = 0;
             for (unsigned frame = 0; frame < 30; ++frame) {
@@ -1156,6 +1165,20 @@ void test_concentrate_damage() {
                 expect(static_cast<bool>(step), "concentrate-fire damage step succeeds");
                 if (!step) break;
                 hashes.push_back(step.value().state_sha256);
+                if (speed_case && (frame == 3 || frame == 12)) {
+                    const auto* profile = movement.find(frigate_type);
+                    const auto state = session.motion_state(2);
+                    const auto sampled = state ? tactical::sample_motion(*state, session.completed_tick(),
+                        state->start_position, state->start_yaw) : eawr::core::Result<tactical::MotionSample>::failure({});
+                    const auto factor = frame == 3 ? Fixed::from_raw(one - decimal("0.4").raw()) : units(1);
+                    const auto expected_speed = profile ? math::multiply(profile->max_speed, factor)
+                        : eawr::core::Result<Fixed>::failure({});
+                    expect(sampled && expected_speed && sampled.value().speed == expected_speed.value(),
+                        "WHE-25: target slows by the authored fraction and regains speed when the effect expires; frame="
+                            + std::to_string(frame) + ", scenario=" + std::to_string(scenario)
+                            + ", expected=" + std::to_string(expected_speed ? expected_speed.value().raw() : -1)
+                            + ", sampled=" + std::to_string(sampled ? sampled.value().speed.raw() : -1));
+                }
                 for (const auto& event : step.value().snapshot->combat_events()) if (event.kind == tactical::CombatEventKind::projectile_hit) ++hits;
             }
             const auto final = session.durability_state(2);
@@ -1667,6 +1690,12 @@ void test_squadron_reveal_ping() {
             ability.spawned->reveal_range = units(1000);
             ability.spawned->hitpoint_damage = false;
             tactical::AbilityTable table; table.profiles = {unit_of(xwing_type, ability)};
+            if (!blocked && workers == 1) {
+                auto no_reveal = table;
+                no_reveal.profiles.front().abilities.front().spawned->reveal_range.reset();
+                expect(static_cast<bool>(tactical::validate_abilities(no_reveal)),
+                    "WFP-02: an authored spawned object without REVEAL does not refuse the ability table");
+            }
             auto health = hangar_durability(); health.damage = durability().damage;
             for (auto& profile : health.profiles) { profile.armor_type = 0; profile.shield_armor_type = 0; }
             tactical::FogRules fog; fog.map_left = units(-2000); fog.map_top = units(2000);
@@ -4374,6 +4403,262 @@ void test_full_salvo() {
     return table;
 }
 
+// WST-03/10/11: a team attack must not reinstall member targets after cloak activation.
+// Use the Phantom's 80-second duration with two independently armed members.
+[[nodiscard]] eawr::core::Result<tactical::TacticalSession> squadron_stealth_fixture(const bool distant = false) {
+    auto initial = setup();
+    initial.units = {{2, plain_type, 2, at(distant ? 2000 : 300, 0), math::identity_quat(), {}},
+        {10, xwing_squadron, 1, {}, math::identity_quat(), {}},
+        {11, xwing_type, 1, {}, math::identity_quat(), {}},
+        {12, xwing_type, 1, at(0, 10), math::identity_quat(), {}},
+        {20, xwing_squadron, 1, at(-20000, 0), math::identity_quat(), {}},
+        {21, xwing_type, 1, at(-20000, 0), math::identity_quat(), {}},
+        {22, xwing_type, 1, at(-20000, 10), math::identity_quat(), {}}};
+    initial.squadrons = {{10, {11, 12}}, {20, {21, 22}}};
+    auto movement = hangar_motion();
+    movement.squadrons.spawners.clear();
+    movement.squadrons.craft.front().min_speed = {};
+    movement.squadrons.craft.front().max_speed = units(1);
+    tactical::DurabilityTable health;
+    health.profiles = {{plain_type, units(1000000), {}, false, {}},
+        {xwing_type, units(1000000), {}, false, {}}};
+    tactical::WeaponProfile weapon;
+    weapon.range = units(distant ? 500 : 10000);
+    weapon.min_recharge_hundredths = 10; weapon.max_recharge_hundredths = 10;
+    weapon.cone_width = units(360); weapon.cone_height = units(180);
+    weapon.shot = tactical::ShotProfile{units(1), 0, units(10000), units(10000), true, true, {}};
+    tactical::CombatProfile craft;
+    craft.type_id = xwing_type; craft.max_attack_distance = weapon.range;
+    craft.collision = tactical::CollisionBox{at(-5, -5, -5), at(5, 5, 5)};
+    craft.weapons = {weapon};
+    auto enemy = craft; enemy.type_id = plain_type;
+    auto team = craft; team.type_id = xwing_squadron; team.weapons.clear();
+    tactical::CombatTable combat;
+    combat.profiles = {enemy, craft}; combat.unit_ai_types = {xwing_squadron};
+    combat.retaliation_team_types = {team};
+    auto abilities = stealth_abilities(2400);
+    abilities.profiles.front().type_id = xwing_type;
+    abilities.profiles.front().abilities.front().recharge_frames = 300;
+    abilities.profiles.front().special.front().stealth_transition = decimal("0.8");
+    const std::vector<tactical::SensorProfile> sensors{{plain_type, units(10000)}, {xwing_type, units(10000)}};
+    return tactical::TacticalSession::create(initial, sensors, health, movement,
+        std::nullopt, combat, {}, abilities);
+}
+
+void test_squadron_stealth() {
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto created = squadron_stealth_fixture();
+        expect(static_cast<bool>(created), "WST-03: squadron cloak fixture creates");
+        if (!created) { std::cerr << created.error().message << '\n'; continue; }
+        auto world = std::move(created).value();
+        const auto submit = [&](const tactical::PlayerCommand& item) {
+            expect(static_cast<bool>(world.submit(item)), "WST-03: squadron command submits");
+        };
+        submit(command(0, 1, 0, 10, tactical::AttackPayload{2}));
+        submit(command(0, 2, 0, 2, tactical::AttackPayload{10}));
+        submit(command(40, 1, 1, 10, tactical::AbilityPayload{tactical::AbilityKind::stealth, tactical::AbilityAction::activate}));
+        tactical::ObjectTurnUse reactivate;
+        reactivate.unit = 10; reactivate.sequence = 0; reactivate.ability = tactical::AbilityKind::stealth;
+        reactivate.action = tactical::AbilityAction::activate;
+        submit(command(2700, 1, 2, 10, tactical::AttackPayload{2}));
+        expect(static_cast<bool>(world.submit_object_turn({2740, reactivate})),
+            "WST-03: named object-turn activation submits on the squadron container");
+        // Explicit attacks remain usable while cloaked and their first shot ends the cloak (WST-05/10).
+        submit(command(2750, 1, 3, 10, tactical::AttackPayload{2}));
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        bool fired_before = false, own_fired_before = false, explicit_shot = false;
+        for (std::uint64_t frame = 0; frame <= 2760; ++frame) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "WST-03: squadron cloak step succeeds");
+            if (!step) { std::cerr << step.error().message << '\n'; break; }
+            hashes.push_back(step.value().state_sha256);
+            if (frame == 39) {
+                const auto mind = world.squadron_state(10);
+                expect(mind && mind->target == 2,
+                    "WST-03: fixture holds an explicit squadron attack before cloaking");
+            }
+            const bool hidden = (frame >= 40 && frame < 2440) || (frame >= 2740 && frame < 2750);
+            for (const auto id : {11U, 12U}) {
+                const auto state = world.ability_state(id);
+                expect(state.has_value(), "WST-03: every live member retains its ability state");
+                if (!state) continue;
+                if (hidden) expect(state->stealth_on && state->slots[0].active,
+                    "WST-03/10: all squadron members stay cloaked until expiry or a new explicit attack");
+                if (hidden) {
+                    const auto target = world.combat_state(id);
+                    expect(target && target->attack_target == eawr::sim::invalid_entity_id,
+                        "WST-03/10: a retained team attack cannot reinstall a cloaked member's target");
+                }
+                if (frame == 2440) expect(!state->stealth_on && !state->slots[0].active && state->slots[0].ready_tick == 2740,
+                    "WST-04: 80-second cloak expires and recharges independently on every member");
+            }
+            if (hidden) {
+                const auto mind = world.squadron_state(10);
+                expect(mind && mind->target == eawr::sim::invalid_entity_id,
+                    "WST-03: cloak activation releases the team's shared target");
+                const auto visible = step.value().snapshot->visible_entities(2);
+                expect(std::find(visible.begin(), visible.end(), 11) == visible.end()
+                    && std::find(visible.begin(), visible.end(), 12) == visible.end()
+                    && std::find(visible.begin(), visible.end(), 10) == visible.end(),
+                    "WST-11/13: enemies without detection cannot see cloaked members or their container");
+                if (frame != 40 && frame != 2740) {
+                    const auto target = world.combat_state(2);
+                    expect(target && target->attack_target == eawr::sim::invalid_entity_id,
+                        "WST-11: the enemy releases the hidden squadron container as a held target");
+                }
+            }
+            for (const auto& event : step.value().snapshot->combat_events()) {
+                if (event.kind != tactical::CombatEventKind::weapon_fired) continue;
+                fired_before = fired_before || frame < 40;
+                own_fired_before = own_fired_before || (frame < 40 && (event.shooter == 11 || event.shooter == 12));
+                // Commands and object turns follow the combat service of their activation tick.
+                if (hidden && frame != 40 && frame != 2740 && (event.shooter == 2 || event.shooter == 11 || event.shooter == 12)) expect(false,
+                    "WST-10/11: neither the cloaked squadron nor its undetecting enemy fires");
+                if (frame >= 2750 && (event.shooter == 11 || event.shooter == 12)) {
+                    if (!explicit_shot) {
+                        const auto state = world.ability_state(event.shooter);
+                        expect(state && !state->stealth_on,
+                            "WST-05: the first shot after a fresh explicit attack ends that member's cloak");
+                    }
+                    explicit_shot = true;
+                }
+            }
+        }
+        expect(fired_before && own_fired_before && explicit_shot,
+            "WST-05/10: fixture fires before cloak and after a fresh explicit attack");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "WST-03: squadron cloak hashes equal on 1/2/4/8 workers");
+        const auto encoded = tactical::write_replay(world.record());
+        const auto parsed = encoded ? tactical::parse_replay(encoded.value())
+                                    : eawr::core::Result<tactical::TacticalReplay>::failure(encoded.error());
+        expect(parsed && parsed.value() == world.record(), "WST-03: squadron cloak replay round-trips");
+    }
+}
+
+void test_squadron_stealth_orders() {
+    // Move, friendly Guard, each attack-endpoint path, mixed visibility, and each member-only seam.
+    for (unsigned scenario = 0; scenario < 7; ++scenario) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            const bool endpoint = scenario == 2 || scenario == 3;
+            auto created = squadron_stealth_fixture(endpoint);
+            expect(static_cast<bool>(created), "WST-03: cloak order fixture creates");
+            if (!created) { std::cerr << created.error().message << '\n'; continue; }
+            auto world = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            const auto submit = [&](const tactical::PlayerCommand& item) {
+                expect(static_cast<bool>(world.submit(item)), "WST-03: cloak order control submits");
+            };
+            const auto step = [&] {
+                const auto result = world.step(executor);
+                expect(static_cast<bool>(result), "WST-03: cloak order control steps");
+                if (!result) { std::cerr << result.error().message << '\n'; return false; }
+                hashes.push_back(result.value().state_sha256);
+                return true;
+            };
+            const bool guard = scenario == 1 || scenario >= 5;
+            if (guard) {
+                tactical::GuardPayload order; order.target = 20;
+                submit(command(0, 1, 0, 10, order));
+            } else if (scenario == 0) submit(command(0, 1, 0, 10, tactical::MovePayload{at(500, 500)}));
+            else submit(command(0, 1, 0, 10, tactical::AttackPayload{2}));
+            if (scenario == 4) submit(command(0, 2, 0, 2, tactical::AttackPayload{10}));
+
+            std::uint64_t activation = 40;
+            math::Vec3 expected_endpoint{};
+            bool path_found = false;
+            while (world.completed_tick() < (endpoint ? 180U : 40U)) {
+                if (!step()) break;
+                if (!endpoint) continue;
+                const auto team = world.squadron_state(10);
+                if (team && team->attack_path && !team->attack_path->stack.empty()
+                    && team->attack_path->stack.back().nodes.size() >= 2) {
+                    expected_endpoint = team->attack_path->stack.back().nodes.back();
+                    path_found = true;
+                    activation = world.completed_tick();
+                    break;
+                }
+            }
+            if (endpoint) {
+                expect(path_found, "WST-03: distant attack has an accepted path before cloaking");
+                if (!path_found) continue;
+            }
+            const eawr::sim::EntityId requested = scenario >= 5 ? 11 : 10;
+            if (scenario == 3 || scenario == 6) {
+                tactical::ObjectTurnUse use;
+                use.unit = requested; use.sequence = 0; use.ability = tactical::AbilityKind::stealth;
+                use.action = tactical::AbilityAction::activate;
+                expect(static_cast<bool>(world.submit_object_turn({activation, use})), "WST-03: object-turn cloak submits");
+            } else submit(command(activation, 1, 1, requested,
+                tactical::AbilityPayload{tactical::AbilityKind::stealth, tactical::AbilityAction::activate}));
+            if (!step()) continue;
+            auto team = world.squadron_state(10);
+            expect(team.has_value(), "WST-03: cloaked team remains live");
+            if (!team) continue;
+            const auto rows = world.units();
+            const auto container = std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.entity_id == 10; });
+            expect(container != rows.end(), "WST-03: team order remains published");
+            if (guard) {
+                expect(team->mode == tactical::SquadronMode::escort && team->escorted == 20
+                    && team->formation && team->formation->base_target == 20,
+                    "WST-03: a friendly Guard keeps its escort and formation base through cloak activation");
+                expect(container != rows.end() && container->order.kind == tactical::OrderKind::guard && container->order.target == 20,
+                    "WST-03: friendly Guard retains its player order");
+            } else if (scenario == 0) {
+                expect(team->mode == tactical::SquadronMode::move && team->anchor == at(500, 500),
+                    "WST-03: an ordinary move retains its destination through cloak activation");
+                const auto before = container != rows.end() ? container->position : math::Vec3{};
+                for (unsigned count = 0; count < 5; ++count) if (!step()) break;
+                const auto moved = world.units();
+                const auto after = std::find_if(moved.begin(), moved.end(), [](const auto& row) { return row.entity_id == 10; });
+                expect(after != moved.end() && after->position != before, "WST-03: the cloaked squadron keeps moving");
+            } else if (endpoint) {
+                expect(team->target == eawr::sim::invalid_entity_id && team->mode == tactical::SquadronMode::move
+                    && team->anchor == expected_endpoint, "WST-03: cloak replaces the attack with its accepted path endpoint");
+            }
+            if (scenario >= 5) {
+                const auto first = world.ability_state(11), second = world.ability_state(12);
+                expect(first && first->stealth_on && second && !second->stealth_on,
+                    "WST-03: a member-addressed request switches only that member and keeps the team order");
+            }
+            if (scenario == 4) {
+                submit(command(55, 1, 2, 10, tactical::MovePayload{at(1000, 0)}));
+                submit(command(60, 1, 3, 11,
+                    tactical::AbilityPayload{tactical::AbilityKind::stealth, tactical::AbilityAction::deactivate}));
+                submit(command(61, 2, 1, 2, tactical::AttackPayload{10}));
+                while (world.completed_tick() <= 62) {
+                    const auto tick = world.completed_tick();
+                    if (!step()) break;
+                    if (tick == 60) {
+                        const auto first = world.ability_state(11), second = world.ability_state(12);
+                        expect(first && !first->stealth_on && second && second->stealth_on,
+                            "WST-11: mixed visibility fixture has exactly one cloaked member");
+                        const auto snapshot = world.snapshot();
+                        const auto instances = snapshot->instances();
+                        const auto published = std::find_if(instances.begin(), instances.end(), [](const auto& row) { return row.entity_id == 10; });
+                        expect(published != instances.end() && !published->stealth_on && !published->stealth_invisible,
+                            "WST-11/13: a mixed live roster keeps the container visible");
+                        const auto visible = snapshot->visible_entities(2);
+                        expect(std::find(visible.begin(), visible.end(), 10) != visible.end()
+                            && std::find(visible.begin(), visible.end(), 11) != visible.end()
+                            && std::find(visible.begin(), visible.end(), 12) == visible.end(),
+                            "WST-13: a mixed team exposes the container and visible member only");
+                    }
+                    if (tick == 62) {
+                        const auto enemy = world.combat_state(2);
+                        expect(enemy && enemy->attack_target == 10, "WST-11: combat retains a visible mixed squadron as a target");
+                    }
+                }
+            }
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "WST-03/11/13: cloak order controls equal on 1/2/4/8 workers");
+        }
+    }
+}
+
 void test_stealth_session() {
     tactical::UnitAbilityProfile mod_profile;
     mod_profile.stealth_detection_frames = 67;
@@ -6561,6 +6846,15 @@ void test_hardpoint_dependencies() {
 }
 
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string_view(argv[1]) == "--stealth") {
+        test_stealth_session();
+        test_stealth_duration_modifiers();
+        test_squadron_stealth();
+        test_squadron_stealth_orders();
+        if (failures != 0) return EXIT_FAILURE;
+        std::cout << "stealth contracts accepted\n";
+        return EXIT_SUCCESS;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--reveal-ping") {
         test_squadron_reveal_ping();
         test_cluster_bomb_and_reveal_ping();
@@ -6583,6 +6877,8 @@ int main(int argc, char* argv[]) {
     test_full_salvo();
     test_stealth_session();
     test_stealth_duration_modifiers();
+    test_squadron_stealth();
+    test_squadron_stealth_orders();
     test_leech_shields();
     test_redirect_blaster();
     test_targeted_autofire();

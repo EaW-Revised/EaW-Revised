@@ -248,15 +248,22 @@ tech, the pool, victory and defeat. A command is authorized when its seat is act
 in the owning player. The new galactic envelope uses an explicit `SeatId`, separate from
 owning `PlayerId` (A1).
 The original galactic scope allows one to eight humans sharing one side against AI or
-forming two human sides. ADR-023 supersedes this capacity for online tactical matches:
-up to nine command seats share up to three opposing human owners; a fourth is refused. Faction count is independent and data-driven. All seats
-command their faction, last order wins in canonical seat order. In battle the
-session forwards seat commands as the faction's tactical player, so the tactical session and
-M2 replays need no seat concept. Selection, control groups and camera are per-seat presentation
-state. A seat leaving is a session command; remaining seats retain control and the configured
-AI/passive handover applies only when none remain. Setup, replay, checkpoint and loopback
-carry the seat/side tables. Galactic validation retains its original capacity; tactical
-seat routing and checkpoints use the nine-seat/three-owner limit. See
+forming two human sides. The owner decision of 2026-10-15 reserves shared ownership
+for Galactic Conquest: local, LAN and online space/ground skirmish give every human a
+separate owner with its own units, credits, base, faction and colour. Several owners
+may be allied through their per-row Team number. Up to nine human owners fit the
+command-seat bound, subject to the loaded map's owner-row capacity (eight on an
+eight-row map). Skirmish refuses shared-owner seat mappings and requires at least
+two opposing teams, including cooperative humans against AI.
+
+Galactic shared seats command their faction, last order wins in canonical seat order.
+In battle the session forwards seat commands as the faction's tactical player, so the
+tactical session and M2 replays need no seat concept. Selection, control groups and
+camera are per-seat presentation state. A seat leaving is a session command; remaining
+seats retain control and the configured AI/passive handover applies only when none
+remain. Setup, replay, checkpoint and loopback carry the seat/side tables. Galactic
+validation retains its original capacity; the common tactical router and checkpoint
+seat representation retain shared-owner support for Galactic Conquest. See
 [seats and coop](galactic-architecture.md#seats-and-coop-galactic-conquest).
 
 In versus battles against AI, the other team's lead assigns all its active seats to control
@@ -354,8 +361,12 @@ MP-9b service need follow-up in B; directory/password/chat need I, and a
 nine-peer roster needs G. This decision edits no relay protocol or code.
 
 Consequences: raise eight-peer setup/lockstep/TCP/lobby bounds and two-peer GNS
-admission; qualify three human sides, nine seats and 36 mesh pair paths. The
-tactical sim's `max_players = 64` is not that peer limit. More network/retained
+admission; qualify nine separate human owners, nine seats and 36 mesh pair paths.
+The owner decision of 2026-10-15 supersedes the earlier three-owner shared-control
+skirmish design: 3v3v3 means nine owners allied in three teams, each human controlling
+its own assets. Shared ownership remains for Galactic Conquest. Loaded-map lobby
+validation bounds owner rows, so eight-row maps support eight humans; a ninth human
+requires a ninth row. The tactical sim's `max_players = 64` is not that peer limit. More network/retained
 traffic needs bounded queue/frame-cap checks, while 1/2/4/8 simulation-worker
 equality tests remain; nine-peer performance testing is deferred by the owner.
 Before battle, host loss closes staging. During battle, use held-seat return

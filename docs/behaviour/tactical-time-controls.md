@@ -79,4 +79,23 @@
 - Audio pause and resume (TM-13) waits for the battle audio (battle audio foundation).
 - The camera's smoothing snap while paused (TM-11): the remake's camera keeps easing its distance
   while paused.
-- Multiplayer refusal (TM-04) is not modelled: the remake has no network game.
+- Multiplayer refusal (TM-04) is modelled only for the galactic fast-forward factor (see below); the tactical clock has no network refusal.
+
+## Galactic fast forward
+
+The galactic clock's fast-forward button (`b_fast_forward`) is enabled in live campaigns and sends the
+strategic speed command with factor 4 (TM-03's 120 ticks a second over the nominal 30), and back to 1 on
+the next press. The galactic gate is the same flag as the tactical one (WGM-210), so there is one named
+constant. Only ticks per wall-clock second change: tick counts, AI periods in ticks, saves, state hashes
+and replays are unchanged.
+
+The factor is applied by the live pacer's wall-clock schedule (`LivePaceSchedule`, docs/ui/perf-overlay.md,
+"Fast forward and the live pacer"), and the F3 overlay's TICKS/S row shows the rate actually delivered. A world
+whose ticks cost more than the 8.3 ms interval is bound by its tick cost: the pacer then runs ticks back to back
+and drops the missed wall time beyond five overdue ticks instead of spiralling.
+
+- Paused, the button is disabled and its press does nothing (TM-06, TMC-03). Pausing from fast forward
+  returns the strategic speed to 1 first, so play resumes at normal speed (TM-05, TMC-04).
+- With more than one active human seat the clock controls stay disabled in the HUD (TM-04), and the sim
+  refuses the fast-forward factor from any seat (`not_authorized`), so a hand-made command cannot bypass
+  the button. Other speed values are not refused in multiplayer.

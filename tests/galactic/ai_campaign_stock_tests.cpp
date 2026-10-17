@@ -644,6 +644,8 @@ void real_factory_contracts(bool configured_cadence = false) {
             throw std::runtime_error("fixture must not fabricate shadow placement");
         };
         auto configuration = std::make_shared<eawr::platform::CampaignServiceConfiguration>();
+        bool refuse_outer_scheduler{};
+        auth::ScriptScheduler* refusal_scripts{};
         std::vector<std::shared_ptr<unsigned>> route_reads;
         std::vector<std::shared_ptr<eawr::script::foc::ai::GalacticWorld>> worlds;
         std::vector<std::shared_ptr<eawr::script::foc::ai::Engine>> engines;
@@ -654,7 +656,8 @@ void real_factory_contracts(bool configured_cadence = false) {
         struct CopiedInput { std::uint8_t value{}; bool fail_once{}; };
         std::vector<std::shared_ptr<CopiedInput>> copied_inputs;
         unsigned births{};
-        must(cp::configure_galactic_ai_runtime(*configuration, setup, [providers, &route_reads, &worlds, &engines, &external, &tails, &states, &managers, &copied_inputs, &births] {
+        must(cp::configure_galactic_ai_runtime(*configuration, setup, [providers, &route_reads, &worlds, &engines, &external, &tails, &states, &managers, &copied_inputs, &births,
+            &refuse_outer_scheduler, &refusal_scripts, instance_bound = setup->immediate_instances] {
             auto fresh = providers;
             fresh.prepare_fresh_freestore = [&births](auto& actions, const auto&, const auto&) {
                 must(actions.capture()); ++births;
@@ -681,7 +684,8 @@ void real_factory_contracts(bool configured_cadence = false) {
             };
             fresh.observe = [&states, &managers](const auto& view) { states.push_back(view.state); managers.push_back(view.manager); };
             auto reads = std::make_shared<unsigned>();
-            fresh.bind_actions = [&worlds, &engines, &route_reads, reads](auto&, auto&, auto&, auto engine, auto world, auto) {
+            fresh.bind_actions = [&worlds, &engines, &route_reads, &refuse_outer_scheduler, &refusal_scripts, reads](auto& parent, auto&, auto&, auto engine, auto world, auto) {
+                if (refuse_outer_scheduler) refusal_scripts = &parent.galactic_scripts()->ai_scheduler();
                 worlds.push_back(std::move(world)); engines.push_back(std::move(engine)); route_reads.push_back(reads);
                 return eawr::core::Result<void>::success();
             };
@@ -705,6 +709,29 @@ void real_factory_contracts(bool configured_cadence = false) {
                 if (*reads > 1) std::reverse(input.planets.begin(), input.planets.end());
                 return eawr::core::Result<ga::ExecutionRouteInput>::success(std::move(input));
             };
+            if (refuse_outer_scheduler) {
+                struct RefusedImmediateHost final : auth::ImmediateEffectHost {
+                    static eawr::core::Diagnostic refusal() {
+                        eawr::core::Diagnostic error; error.code = "TEST-S6-OUTER-CAPTURE";
+                        error.message = "S6 fixture outer capture refused"; return error;
+                    }
+                    eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>> capture() const override {
+                        return eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>>::failure(refusal());
+                    }
+                    eawr::core::Result<void> publish(std::unique_ptr<auth::ImmediateEffectState>) override {
+                        return eawr::core::Result<void>::failure(refusal());
+                    }
+                };
+                fresh.initialize_freestore = [initialize = providers.initialize_freestore, &refusal_scripts, instance_bound]
+                    (auto player, auto& actions, const auto& snapshot, const auto& admitted) {
+                    if (auto initialized = initialize(player, actions, snapshot, admitted); !initialized) return initialized;
+                    if (!refusal_scripts) throw std::runtime_error("refusal fixture requires its borrowed scheduler");
+                    expect(refusal_scripts->instances().empty(), "empty-owner fixture pumps no player Lua before the outer service");
+                    // Replace the host after Manager's normal bind. With no
+                    // instances, its first capture is the bridge's outer service.
+                    return refusal_scripts->set_immediate_effect_host(std::make_shared<RefusedImmediateHost>(), instance_bound);
+                };
+            }
             return eawr::core::Result<cp::GalacticAiRuntimeProviders>::success(std::move(fresh));
         }));
         auto game = must(cp::GameSession::create(layout)); must(configuration->configure_native_ai(game));
@@ -846,6 +873,21 @@ void real_factory_contracts(bool configured_cadence = false) {
             continuation += expected;
         }
         if (baseline.empty()) baseline = continuation; else expect(baseline == continuation, "real serviced runtime equals on 1/2/4/8");
+        if (!configured_cadence) {
+            refuse_outer_scheduler = true;
+            auto faulted = must(cp::GameSession::create(layout)); must(configuration->configure_native_ai(faulted));
+            const auto refused = faulted.step(*executor);
+            expect(!refused && refused.error().message.find("S6 fixture outer capture refused") != std::string::npos,
+                "outer scheduler refuses after the runtime before_service hook completed");
+            refuse_outer_scheduler = false;
+            auto independent = must(galactic::GalacticSession::create(layout));
+            const std::vector<galactic::PlayerId> players{1};
+            auto opened = independent.begin_native_barrier(players, 1);
+            expect(opened && opened.value(), "a refused outer scheduler releases its barrier before the failed game is destroyed");
+            if (opened && opened.value()) {
+                must(opened.value()->begin_tail()); must(opened.value()->commit());
+            }
+        }
     }
 }
 void prepared_restore_contracts() {
@@ -1131,7 +1173,7 @@ int installed(bool release, const std::filesystem::path& directory, bool benchma
                 auto provider = std::make_shared<cp::GalacticAiUsabilityProvider>(usability);
                 cp::GalacticAiStockQueries out;
                 out.usability = [provider](auto player, const auto& snapshot, auto planet) { return provider->usability(player, snapshot, planet); };
-                out.connectivity = [provider](const auto& parent, auto& world, auto& engine, const auto& workers) { return provider->connectivity(parent, world, engine, workers); };
+                out.connectivity_publication = [provider](const auto& parent, auto& world, auto& engine, const auto& workers) { return provider->connectivity_publication(parent, world, engine, workers); };
                 out.movement = [provider](auto player, const auto& snapshot, const auto& world, const auto& engine, const auto& workers) { return provider->movement(player, snapshot, world, engine, workers); };
                 out.external.emplace("GALACTIC_USABILITY", std::move(provider));
                 return eawr::core::Result<cp::GalacticAiStockQueries>::success(std::move(out));
@@ -1256,10 +1298,11 @@ struct ProfileEvidence final {
 };
 int live_production(const std::filesystem::path& directory, std::uint64_t frames, bool performance_only,
     bool cadence_window = false, ga::ServicePeriods periods = ga::retail_service_periods,
-    ProfileEvidence* evidence = nullptr) {
+    ProfileEvidence* evidence = nullptr, bool short_record_contract = false) {
     using Live = eawr::platform::LiveGameSession;
     if (!frames) throw std::runtime_error("live production probe requires nonzero frames");
-    if (cadence_window && frames < 600) throw std::runtime_error("cadence proof requires at least two perception deadlines");
+    if (cadence_window && frames < (short_record_contract ? 32U : 600U))
+        throw std::runtime_error("cadence proof requires at least two perception deadlines");
     const bool profiling = eawr::gc_profile::enabled.exchange(false, std::memory_order_relaxed);
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
@@ -1363,7 +1406,7 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
     report << "],\"runs\":[";
     std::vector<std::string> reference;
     std::vector<galactic::GalacticEvent> reference_events;
-    for (const std::size_t workers : evidence ? std::vector<std::size_t>{1U, 8U} : std::vector<std::size_t>{1U, 2U, 4U, 8U}) {
+    for (const std::size_t workers : std::vector<std::size_t>{1U, 2U, 4U, 8U}) {
         Live::Options options; options.workers = workers; options.pacing = Live::Pacing::driven;
         options.saves.directory = (directory / ("w" + std::to_string(workers))).string();
         // Same initialized galaxy and ordinary campaign services; native AI
@@ -1555,6 +1598,13 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
 } // namespace
 int main(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string_view(argv[1]) == "--live-record-contracts") {
+            // Exercise the real composed owners and cross-worker midpoint restore in a short
+            // window. Accelerated service periods cross several deadlines; this is not timing evidence.
+            ProfileEvidence evidence;
+            return live_production(argc > 2 ? argv[2] : "out/galactic-ai-live-record-contracts",
+                32, true, true, ga::ServicePeriods{8, 3, 2, 2, 8, 5}, &evidence, true);
+        }
         if (argc > 1 && std::string_view(argv[1]) == "--live-profile-comparison") {
             const std::filesystem::path directory = argc > 2 ? argv[2] : "out/galactic-ai-profile";
             const auto frames = argc > 3 ? std::stoull(argv[3]) : 600;
@@ -1563,8 +1613,8 @@ int main(int argc, char** argv) {
             live_production(directory / "off", frames, true, true, ga::retail_service_periods, &off);
             eawr::gc_profile::enabled.store(true, std::memory_order_relaxed);
             live_production(directory / "on", frames, true, true, ga::retail_service_periods, &on);
-            expect(off.hashes == on.hashes && !off.hashes.empty(), "profile off/on preserves every live tick hash at 1 and 8 workers");
-            expect(off.galaxy_sha == on.galaxy_sha && !off.galaxy_sha.empty(), "profile off/on preserves canonical galaxy SHA at 1 and 8 workers");
+            expect(off.hashes == on.hashes && !off.hashes.empty(), "profile off/on preserves every live tick hash at 1/2/4/8 workers");
+            expect(off.galaxy_sha == on.galaxy_sha && !off.galaxy_sha.empty(), "profile off/on preserves canonical galaxy SHA at 1/2/4/8 workers");
             std::cout << "GC-AI-PROFILE-EQUALITY " << (failures ? "FAIL" : "PASS") << std::endl;
             return failures ? 1 : 0;
         }

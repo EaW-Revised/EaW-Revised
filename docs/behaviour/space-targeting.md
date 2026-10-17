@@ -81,6 +81,14 @@ with hostile ownership it supplies a positive control for both gates. The produc
 candidate predicate and installed-game Polus contracts cover all four combinations
 of neutral/hostile ownership and disabled/enabled collision permission.
 
+The same type admission governs a squadron's share of its team target (legacy EAWR-3922). Stock
+`Secure_Build_Pad_Space` orders an attack on a hostile-owned pad while a structure stands on it. The team
+holds the pad (a valid type passes WCC-25's direct assignment), but a member craft takes a team target
+only through the ship-level admission above, so a pad without living-projectile contact is never shared
+and its craft keep scanning; the debug build's member service adopts a formation target the same way and
+the retail observer shows craft engaging the structure, not the pad. The remake shares the target
+through the same predicate as scans and base adoption, so a pad authored collidable is shared.
+
 <a id="candidate-collection-order-469"></a>
 
 ## Candidate collection order

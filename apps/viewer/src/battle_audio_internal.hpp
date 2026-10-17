@@ -5,6 +5,7 @@
 #include "audio_output.hpp"
 
 #include "eawr/presentation/space/space.hpp"
+#include "eawr/presentation/ui/retreat_presentation.hpp"
 #include "eawr/skirmish/start.hpp"
 
 #include <godot_cpp/classes/audio_effect_hard_limiter.hpp>
@@ -35,4 +36,6 @@ namespace tactical = sim::tactical;
 [[nodiscard]] bool same(const std::string_view a, const std::string_view b);
 [[nodiscard]] std::string tag(const data::EffectiveObject& object, const std::string_view name);
 [[nodiscard]] float decibels(const double linear);
+// RP-01..RP-08: the Space_Retreat_* tags of one faction, resolved through its layers.
+[[nodiscard]] ui::RetreatFactionPresentation read_retreat_faction(const data::Catalog& catalog, const std::string& faction);
 } // namespace eawr::presentation::godot_backend::battle_audio_detail

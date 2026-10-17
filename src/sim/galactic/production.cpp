@@ -2,6 +2,8 @@
 #include "eawr/sim/galactic/income.hpp"
 #include "session_impl.hpp"
 #include "encoding.hpp"
+#include "native_population_projection.hpp"
+#include "native_production_admission.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -25,17 +27,8 @@ Fixed remaining(const ProductionEntry& entry, std::uint64_t frame) {
     const auto elapsed = frame > entry.start_frame ? frame - entry.start_frame : 0;
     return Fixed::from_ratio(static_cast<std::int64_t>(elapsed >= entry.duration_frames ? 0 : entry.duration_frames - elapsed), galactic_frames_per_second).value();
 }
-void start(ProductionEntry& entry, std::uint64_t frame) {
-    entry.start_frame = frame;
-    entry.duration_frames = production_frames(entry.full_seconds).value();
-    entry.last_remaining = entry.full_seconds;
-}
-Fixed paid(const ProductionEntry& entry) {
-    if (!entry.pay_as_you_go) return entry.price;
-    if (entry.full_seconds.raw() == 0) return Fixed{};
-    const auto fraction = math::subtract(one, math::divide(entry.last_remaining, entry.full_seconds).value()).value();
-    return math::multiply(entry.price, std::clamp(fraction, Fixed{}, one)).value();
-}
+void start(ProductionEntry& entry, std::uint64_t frame) { session_detail::native_production_start(entry, frame); }
+Fixed paid(const ProductionEntry& entry) { return session_detail::native_production_paid(entry); }
 bool prerequisites(const PlanetProduction& planet, const ProductionOffer& type, std::span<const Fleet> fleets,
     bool servicing = true) {
     if (servicing && (type.domain == ProductionDomain::ground ? type.required_ground_level > planet.ground_level
@@ -846,20 +839,43 @@ core::Result<std::vector<PopulationTotal>> population_totals(const PopulationCen
     return core::Result<Totals>::success(std::move(totals));
 }
 
-core::Result<void> GalacticSession::Impl::refresh_population(const PartitionExecutor& executor) {
-    if (!setup.census || !population_stale) return core::Result<void>::success();
+std::shared_ptr<const session_detail::NativePopulationSchema> session_detail::native_population_schema(const GalacticSetup& setup) {
+    if (!setup.census) return {};
+    auto schema = std::make_shared<NativePopulationSchema>();
+    schema->census = *setup.census;
+    auto& backed = schema->backed;
+    auto& initial_containers = schema->initial_containers;
+    for (const auto& row : setup.planets) backed.insert(row.id);
+    for (const auto& row : setup.fleets) {
+        backed.insert(row.id);
+        for (const auto& member : row.members) { backed.insert(member.id); initial_containers[member.id] = row.id; }
+    }
+    for (const auto& row : setup.fleet_control->detached_units) backed.insert(row.member.id);
+    if (setup.control) for (const auto& planet : setup.control->planets) for (const auto& force : planet.landed) backed.insert(force.id);
+    if (setup.movement) for (const auto& row : setup.movement->contents) for (const auto& child : row.children) {
+        backed.insert(child.id); initial_containers[child.id] = row.container;
+    }
+    for (const auto& planet : setup.production->planets) for (const auto& row : planet.objects) backed.insert(row.id);
+    return schema;
+}
+core::Result<session_detail::NativePopulationProjection> session_detail::project_native_population(
+    const NativePopulationSchema& schema, std::span<const Planet> planets, std::span<const Fleet> fleets,
+    std::span<const DetachedUnit> detached_units, const PoliticalControlSetup* control,
+    const MovementSetup* movement_inputs, std::span<const CensusObject> production_originals,
+    const ProductionSetup& production, const PartitionExecutor& executor) {
+    using Result = core::Result<NativePopulationProjection>;
     // Canonical gather only; per-object arithmetic is in population_totals.
     std::map<EntityId, CensusObject> owned;
     const auto gather = [&](EntityId id, TypeId type, PlayerId owner, PlanetId planet, EntityId container = 0) {
         auto [at, inserted] = owned.try_emplace(id, CensusObject{id, type, owner, planet, container, false, false, 0, 0, ActorCombatRole::unavailable, {}, {}});
         if (!inserted) { at->second.owner = owner; at->second.planet = planet; }
     };
-    for (const auto& row : sorted_planets()) gather(row.id, 0, row.owner, row.id);
-    for (const auto& row : sorted_fleets()) {
+    for (const auto& row : planets) gather(row.id, 0, row.owner, row.id);
+    for (const auto& row : fleets) {
         gather(row.id, 0, row.owner, row.orbit);
         for (const auto& member : row.members) gather(member.id, member.type, row.owner, row.orbit, row.id);
     }
-    for (const auto& [id, row] : detached_units) gather(id, row.member.type, row.owner, row.planet);
+    for (const auto& row : detached_units) gather(row.member.id, row.member.type, row.owner, row.planet);
     // WGM-49..53 / WGEP-68/78: landing changes the provider, not owned identity.
     if (control) for (const auto& planet : control->planets) for (const auto& force : planet.landed)
         gather(force.id, force.type, force.owner, planet.planet, planet.planet);
@@ -876,28 +892,17 @@ core::Result<void> GalacticSession::Impl::refresh_population(const PartitionExec
                 self(self, child.id);
             }
         };
-        for (const auto& fleet : sorted_fleets()) for (const auto& member : fleet.members) gather_children(gather_children, member.id);
-        for (const auto& [id, row] : detached_units) { (void)row; gather_children(gather_children, id); }
+        for (const auto& fleet : fleets) for (const auto& member : fleet.members) gather_children(gather_children, member.id);
+        for (const auto& row : detached_units) gather_children(gather_children, row.member.id);
         if (control) for (const auto& planet : control->planets) for (const auto& force : planet.landed)
             gather_children(gather_children, force.id);
     }
-    for (const auto& planet : production->planets) for (const auto& row : planet.objects)
+    for (const auto& planet : production.planets) for (const auto& row : planet.objects)
         // Orbital results also live in fleets: count their stable identity once.
         if (!owned.contains(row.id)) gather(row.id, row.type, row.owner, planet.planet);
-    std::set<EntityId> backed;
-    std::map<EntityId, EntityId> initial_containers;
-    for (const auto& row : setup.planets) backed.insert(row.id);
-    for (const auto& row : setup.fleets) {
-        backed.insert(row.id);
-        for (const auto& member : row.members) { backed.insert(member.id); initial_containers[member.id] = row.id; }
-    }
-    for (const auto& row : setup.fleet_control->detached_units) backed.insert(row.member.id);
-    if (setup.control) for (const auto& planet : setup.control->planets) for (const auto& force : planet.landed) backed.insert(force.id);
-    if (setup.movement) for (const auto& row : setup.movement->contents) for (const auto& child : row.children) {
-        backed.insert(child.id); initial_containers[child.id] = row.container;
-    }
-    for (const auto& planet : setup.production->planets) for (const auto& row : planet.objects) backed.insert(row.id);
-    for (const auto& row : setup.census->objects) {
+    const auto& backed = schema.backed;
+    const auto& initial_containers = schema.initial_containers;
+    for (const auto& row : schema.census.objects) {
         const auto at = owned.find(row.id);
         if (at != owned.end()) {
             auto metadata = row; metadata.owner = at->second.owner; metadata.planet = at->second.planet;
@@ -914,33 +919,29 @@ core::Result<void> GalacticSession::Impl::refresh_population(const PartitionExec
     }
     std::vector<CensusObject> objects;
     for (const auto& [id, row] : owned) { (void)id; objects.push_back(row); }
-    auto totals = population_totals(*setup.census, objects, *production, executor);
-    if (!totals) return core::Result<void>::failure(totals.error());
-    population_objects += objects.size(); population_producers += production->planets.size();
-    population_stale = false;
-    if (population != totals.value()) { population = std::move(totals).value(); dirty[11] = true; }
+    auto totals = population_totals(schema.census, objects, production, executor);
+    if (!totals) return Result::failure(totals.error());
     std::map<PlayerId, std::map<TypeId, std::uint64_t>> owned_counts;
     // WGEP-78: ordered exact-original owned count has no dead/delete guard.
     // It shares the canonical gather, not a new service traversal.
     for (const auto& row : objects) if (row.owner && row.original_type) ++owned_counts[row.owner][row.original_type];
-    for (const auto& planet : production->planets)
+    for (const auto& planet : production.planets)
         if (planet.starbase_owner && planet.starbase_type) ++owned_counts[planet.starbase_owner][planet.starbase_type];
-    const auto member_order = census_member_order(*setup.census);
-    if (!member_order) return invalid("invalid live census member graph");
-    original_owned_counts = std::move(owned_counts);
-    const auto& direct_counts = original_owned_counts;
-    std::vector<std::map<TypeId, std::uint64_t>> resolved(production->players.size());
+    const auto member_order = census_member_order(schema.census);
+    if (!member_order) return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "production: invalid live census member graph"));
+    const auto& direct_counts = owned_counts;
+    std::vector<std::map<TypeId, std::uint64_t>> resolved(production.players.size());
     auto phase = executor.execute_phase("galactic-census-owned-types", tick_partition_count, [&](std::size_t partition) {
         const auto range = partition_range(partition, resolved.size());
         for (auto i = range.begin; i < range.end; ++i) {
-            const auto player = production->players[i].player;
+            const auto player = production.players[i].player;
             if (const auto at = direct_counts.find(player); at != direct_counts.end()) resolved[i] = at->second;
             auto& counts = resolved[i];
             // WGEP-78: direct original count PLUS recursive member MAX, owner only.
             // Every DAG node is evaluated once; shared descendants are not re-expanded.
             for (auto id : *member_order) {
                 std::uint64_t maximum{};
-                for (auto member : census_type(*setup.census, id)->members) {
+                for (auto member : census_type(schema.census, id)->members) {
                     const auto at = counts.find(member);
                     if (at != counts.end()) maximum = std::max(maximum, at->second);
                 }
@@ -949,10 +950,15 @@ core::Result<void> GalacticSession::Impl::refresh_population(const PartitionExec
             }
         }
     });
-    if (!phase) return core::Result<void>::failure(phase.error());
-    for (std::size_t i = 0; i < population.size(); ++i) {
-        auto& player = production->players[i]; const auto& total = population[i];
-        if (player.population_used != total.used || player.population_capacity != total.capacity || player.uses_population_cap != total.uses_cap) dirty[8] = true;
+    if (!phase) return Result::failure(phase.error());
+    return Result::success({std::move(totals).value(), std::move(owned_counts), std::move(resolved), objects.size()});
+}
+bool session_detail::apply_native_population(std::vector<ProductionPlayer>& players, std::span<const PopulationTotal> totals,
+    std::vector<std::map<TypeId, std::uint64_t>>& resolved) {
+    bool changed{};
+    for (std::size_t i = 0; i < totals.size(); ++i) {
+        auto& player = players[i]; const auto& total = totals[i];
+        if (player.population_used != total.used || player.population_capacity != total.capacity || player.uses_population_cap != total.uses_cap) changed = true;
         player.population_used = total.used; player.population_capacity = total.capacity; player.uses_population_cap = total.uses_cap;
         // WGEP-25/78: resolved live owned identities replace the supplied seam;
         // historical completions remain a separate monotonic ledger.
@@ -961,8 +967,25 @@ core::Result<void> GalacticSession::Impl::refresh_population(const PartitionExec
         for (auto& count : player.counts) { count.owned = counts[count.type]; counts.erase(count.type); }
         for (const auto& [type, count] : counts) player.counts.push_back({type, count, 0});
         std::sort(player.counts.begin(), player.counts.end(), [](const auto& a, const auto& b) { return a.type < b.type; });
-        if (player.counts != previous) dirty[8] = true;
+        if (player.counts != previous) changed = true;
     }
+    return changed;
+}
+core::Result<void> GalacticSession::Impl::refresh_population(const PartitionExecutor& executor) {
+    if (!setup.census || !population_stale) return core::Result<void>::success();
+    std::vector<DetachedUnit> detached;
+    detached.reserve(detached_units.size());
+    for (const auto& [id, row] : detached_units) { (void)id; detached.push_back(row); }
+    auto projected = session_detail::project_native_population(*native_population_schema, sorted_planets(), sorted_fleets(), detached,
+        control ? &*control : nullptr, movement_inputs.get(), production_originals, *production, executor);
+    if (!projected) return core::Result<void>::failure(projected.error());
+    auto result = std::move(projected).value();
+    population_objects += result.objects; population_producers += production->planets.size();
+    population_stale = false;
+    if (population != result.totals) { population = std::move(result.totals); dirty[11] = true; }
+    original_owned_counts = std::move(result.original_counts);
+    auto resolved = std::move(result.resolved_counts);
+    if (session_detail::apply_native_population(production->players, population, resolved)) dirty[8] = true;
     return core::Result<void>::success();
 }
 
@@ -1315,37 +1338,48 @@ core::Result<NestedCreationResult> place_nested_force(const NestedCreationSetup&
     return core::Result<NestedCreationResult>::success(std::move(out));
 }
 
+core::Result<session_detail::NativeProductionFinish> session_detail::prepare_native_production_finish(
+    const ProductionSetup& production, std::span<const Planet> planets, EntityId build, bool salvage) {
+    using Result = core::Result<NativeProductionFinish>;
+    for (std::size_t index = 0; index < production.planets.size(); ++index) {
+        const auto& planet = production.planets[index];
+        for (std::size_t domain = 0; domain < planet.queues.size(); ++domain) {
+            const auto& queue = planet.queues[domain];
+            const auto at = std::find_if(queue.begin(), queue.end(), [&](const auto& row) { return row.build_id == build; });
+            if (at == queue.end()) continue;
+            const auto owner = std::lower_bound(planets.begin(), planets.end(), planet.planet, [](const auto& row, auto id) { return row.id < id; })->owner;
+            const auto payer = std::find_if(production.players.begin(), production.players.end(), [&](const auto& row) { return row.player == owner; });
+            if (payer == production.players.end()) return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                "production: finished task requires the current planetary owner"));
+            if (salvage || !payer->pay_as_you_go) return Result::success({});
+            assert(at->builder == owner);
+            return Result::success({true, index, domain, static_cast<std::size_t>(at - queue.begin()), *at, owner});
+        }
+    }
+    return Result::success({});
+}
 core::Result<void> GalacticSession::finish_native_production_task(EntityId build, bool salvage, Fixed multiplier) {
     auto& impl = *impl_;
     if (impl.failed || !impl.production || !impl.economy) return invalid("finished task requires its live producer");
-    for (std::size_t index = 0; index < impl.production->planets.size(); ++index) {
-        auto& planet = impl.production->planets[index];
-        for (auto& queue : planet.queues) {
-            auto at = std::find_if(queue.begin(), queue.end(), [&](const auto& row) { return row.build_id == build; });
-            if (at == queue.end()) continue;
-            const auto owner = impl.registry.get<session_detail::PlanetData>(impl.planets.at(planet.planet)).owner;
-            const auto payer = std::find_if(impl.production->players.begin(), impl.production->players.end(), [&](const auto& row) { return row.player == owner; });
-            if (payer == impl.production->players.end()) return invalid("finished task requires the current planetary owner");
-            if (salvage || !payer->pay_as_you_go) return core::Result<void>::success(); // keep entry/id, drop task association
-            if (at != queue.begin()) return invalid("finished-current-task cancellation requires the queue front");
-            const auto entry = *at;
-            assert(entry.builder == owner); // WGEP-64/WGA-159: mismatch is debug-invalid, not a recipient reroute
-            auto refund = add_credits(owner, paid(entry), multiplier);
-            if (!refund) return core::Result<void>::failure(refund.error());
-            queue.erase(at);
-            if (!queue.empty()) start(queue.front(), impl.clock.galactic_frame);
-            if (planet.queues[0].empty() && planet.queues[1].empty()) impl.active_producers.erase(index);
-            impl.population_stale = true; impl.dirty[8] = impl.dirty[1] = impl.dirty[0] = true;
-            const auto old = impl.snapshot->events(); std::vector<GalacticEvent> events(old.begin(), old.end());
-            events.push_back({impl.completed_tick, GalacticEventKind::production_cancelled, {}, planet.planet,
-                entry.build_id, entry.type, GalacticRejectReason::none});
-            if (impl.native_production_outcome_handler)
-                impl.native_production_outcome_handler({entry.builder, entry.build_id, 0, false});
-            impl.snapshot = impl.make_snapshot(std::move(events));
-            return core::Result<void>::success();
-        }
-    }
-    return core::Result<void>::success(); // completion/cancel signal already removed the entry
+    if (auto* shadow = native_shadow()) return stage_native_production_finish(*shadow, build, salvage, multiplier);
+    auto checked = session_detail::prepare_native_production_finish(*impl.production, impl.sorted_planets(), build, salvage);
+    if (!checked) return core::Result<void>::failure(checked.error());
+    const auto& prepared = checked.value();
+    if (!prepared.cancel) return core::Result<void>::success();
+    auto& planet = impl.production->planets[prepared.planet_index]; auto& queue = planet.queues[prepared.domain_index];
+    auto refund = add_credits(prepared.owner, paid(prepared.entry), multiplier);
+    if (!refund) return core::Result<void>::failure(refund.error());
+    queue.erase(queue.begin() + static_cast<std::ptrdiff_t>(prepared.entry_index));
+    if (prepared.entry_index == 0 && !queue.empty()) start(queue.front(), impl.clock.galactic_frame);
+    if (planet.queues[0].empty() && planet.queues[1].empty()) impl.active_producers.erase(prepared.planet_index);
+    impl.population_stale = true; impl.dirty[8] = impl.dirty[1] = impl.dirty[0] = true;
+    const auto old = impl.snapshot->events(); std::vector<GalacticEvent> events(old.begin(), old.end());
+    events.push_back({impl.completed_tick, GalacticEventKind::production_cancelled, {}, planet.planet,
+        prepared.entry.build_id, prepared.entry.type, GalacticRejectReason::none});
+    if (impl.native_production_outcome_handler)
+        impl.native_production_outcome_handler({prepared.entry.builder, prepared.entry.build_id, 0, false});
+    impl.snapshot = impl.publish_native_snapshot(std::move(events));
+    return core::Result<void>::success();
 }
 
 core::Result<void> GalacticSession::Impl::service_production(const PartitionExecutor& executor, std::uint64_t tick,

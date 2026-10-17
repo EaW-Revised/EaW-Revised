@@ -260,7 +260,7 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
     Factory factory = [setup, starting, space, queries, observe, observe_battle]() -> core::Result<GalacticAiRuntimeProviders> {
         auto fresh = queries(); if (!fresh) return core::Result<GalacticAiRuntimeProviders>::failure(fresh.error());
         auto query = std::move(fresh).value();
-        if (!query.usability || !query.connectivity || !query.movement || !query.external.contains("GALACTIC_USABILITY"))
+        if (!query.usability || (!query.connectivity && !query.connectivity_publication) || !query.movement || !query.external.contains("GALACTIC_USABILITY"))
             return absent<GalacticAiRuntimeProviders>("qualified B usability/connectivity/movement/native owner");
         GalacticAiRuntimeProviders out; out.external = std::move(query.external); out.observe = observe;
         if (!query.freestore_members) query.freestore_members = freestore_member_qualifier(setup->content);
@@ -302,6 +302,7 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
             return copy_stock_execution_input(*setup, player, snapshot, world, engine, usable, reconstruction);
         };
         out.prepare_connectivity = std::move(query.connectivity);
+        out.prepare_connectivity_publication = std::move(query.connectivity_publication);
         out.placement = [starting](const auto& request, const auto& snapshot, auto first_free) {
             return stock_native_force_builder(starting, {request.player, request.target, request.type, {}})(snapshot, first_free);
         };
@@ -339,6 +340,19 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
             engine->set_galactic_stage_combat_skip([](auto, const auto& snapshot, auto actor) {
                 return snapshot.actor_combat_skip(actor);
             });
+            // WGA-485: original type (company transport when authored), faction,
+            // logical tick rate and the active movement mode determine the estimate.
+            engine->set_galactic_stage_speed([content](auto player, const auto& snapshot, auto type) {
+                using namespace script::foc::ai;
+                const auto object = content->types.find(type);
+                const auto faction = content->faction_speed.find(player);
+                if (object == content->types.end() || faction == content->faction_speed.end() || !snapshot.movement())
+                    return absent<Real>("synchronized staging type/faction/mode speed");
+                const auto speed = to_single(to_single(to_single(object->second.hyperspace_speed * faction->second)
+                    * real(sim::tactical::logical_frames_per_second))
+                    * script::numeric::from_fixed(snapshot.movement()->mode_modifier));
+                return core::Result<Real>::success(speed);
+            });
             // WGA-400..404: actual live identity, qualified containing source
             // and literal grandparent; absent source reads no permission.
             actions.bind_freestore_movement([usable](auto player, const auto& facts, const auto& snapshot) {
@@ -370,6 +384,11 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
             ga::bind_movement_references(actions, engine);
             const auto weak_engine = std::weak_ptr<GalacticAiRuntimeProviders::Engine>(engine);
             const auto weak_world = std::weak_ptr<GalacticAiRuntimeProviders::World>(world);
+            actions.bind_movement_frontier([weak_world, executor, parent = &galaxy](auto player, auto snapshot) {
+                const auto world = weak_world.lock(); const auto* workers = executor();
+                if (!world || !workers) return absent<void>("native movement frontier owner/worker adapter");
+                return world->bind_native_frontier(player, std::move(snapshot), *workers, parent->next_entity_id());
+            });
             actions.bind_movement([movement, weak_world, weak_engine, executor](auto player, const auto& snapshot) {
                 const auto* workers = executor();
                 const auto world = weak_world.lock(); const auto engine = weak_engine.lock();
@@ -430,7 +449,32 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
             const auto generation = snapshot.observer_input_generation();
             if (cache->source != source.value() || cache->generation != generation || !cache->value) {
                 auto derived = std::make_shared<ga::FreestorePool>(*source.value());
-                if (auto safety = ga::prepare_freestore_safety(*derived, snapshot, types, executor); !safety) return safety;
+                const bool same_world = cache->source && cache->value && cache->generation == generation;
+                if (same_world && cache->source->objects == source.value()->objects) {
+                    // Reservation/callback-only writes reuse the safety projection.
+                    derived->objects = cache->value->objects; derived->surfaces = cache->value->surfaces;
+                    derived->work = cache->value->work;
+                } else if (auto safety = ga::prepare_freestore_safety(*derived, snapshot, types, executor); !safety) return safety;
+                for (const auto& [player, rows] : source.value()->players) {
+                    std::shared_ptr<const ga::FreestorePool> value;
+                    if (same_world) {
+                        const auto old_source = cache->source->players.find(player), old_value = cache->value->players.find(player);
+                        if (old_source != cache->source->players.end() && old_value != cache->value->players.end()
+                            && old_source->second == rows) value = old_value->second;
+                    }
+                    if (!value) {
+                        auto next = std::make_shared<ga::FreestorePool>(*rows);
+                        // Surface safety is built once over the frozen world, then split into player views.
+                        for (auto& actor : next->objects) {
+                            const auto row = std::lower_bound(derived->objects.begin(), derived->objects.end(), actor.id,
+                                [](const auto& a, auto id) { return a.id < id; });
+                            actor.safe = row->safe;
+                        }
+                        next->surfaces = derived->surfaces; next->work.safety_rows = derived->work.safety_rows;
+                        value = std::move(next);
+                    }
+                    derived->players[player] = std::move(value);
+                }
                 cache->source = source.value(); cache->generation = generation; cache->value = std::move(derived);
             }
             input.pool = cache->value; return core::Result<void>::success();

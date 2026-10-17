@@ -94,6 +94,7 @@ public:
         std::span<const std::uint8_t> canonical_inputs = {}, bool match_end = false) override;
     // Flush the last partial window when a match ends after an already recorded tick.
     [[nodiscard]] core::Result<void> finish(std::span<const std::uint8_t> canonical_encoding = {});
+    [[nodiscard]] core::Result<void> on_link_repair(PeerIndex peer, std::function<bool(PeerIndex)> ownership = {}) override;
     [[nodiscard]] core::Result<void> on_departure(PeerIndex peer, std::uint64_t tick) override;
     [[nodiscard]] core::Result<void> on_input_delay(std::uint64_t delay, std::uint64_t retained_delay) override;
     [[nodiscard]] core::Result<void> on_reconnect(std::uint64_t tick, std::string_view hash,
@@ -136,7 +137,11 @@ private:
         bool rows_sent{};
     };
     std::optional<AgreedWindow> previous_;
-    bool previous_frozen_{};
+    // A retry can carry the sender's previous window after we have already
+    // agreed its current one. Keep only the last retired digest per peer, no rows.
+    std::map<std::uint32_t, Summary> retired_summaries_;
+    bool previous_frozen_{}, repair_enabled_{};
+    std::function<bool(PeerIndex)> repair_ownership_;
     MessageTransport& transport_;
     DesyncOptions options_;
     bool valid_{true}, started_{}, waiting_{}, frozen_{}, ended_{}, failed_{}, rows_sent_{}, setup_agreed_{};

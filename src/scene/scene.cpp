@@ -38,7 +38,7 @@ constexpr std::array<Cause, 18> cause_order{
 // draws at the Highest shader detail (#199); their fixed-function rows remain
 // renderer selectors, not scene selections. So do BatchMeshGloss,
 // MeshAlphaGloss and BatchMeshAlpha with their DX8 technique (#200).
-constexpr std::array<LegacySelector, 15> selector_table{{
+constexpr std::array<LegacySelector, 22> selector_table{{
     {"MeshGloss.fx", "sph_t0", "sph_t0_p0", false},
     // The laser pads (#80): its GlossTexture is uploaded as its own binding (MULTITEX-01).
     {"MeshGlossColorize.fx", "sph_t0", "sph_t0_p0", false},
@@ -55,12 +55,19 @@ constexpr std::array<LegacySelector, 15> selector_table{{
     {"MeshAdditiveVColor.fx", "t0", "t0_p0", true},
     {"Tree.fx", "sph_t1", "sph_t1_p0", false},
     {"Grass.fx", "sph_t0", "sph_t0_p0", true},
+    {"MeshAdditive2x.fx", "t0", "t0_p0", true},
+    {"MeshBumpSpecGlowColorize.fx", "sph_t2", "sph_t2_p0", false, true},
+    {"RSkinAdditive.fx", "t0", "t0_p0", true},
+    {"RSkinAlpha.fx", "sph_t0", "sph_t0_p0", true, true},
+    {"MeshShield.fxo", "t0", "t0_p0", true},
+    {"MeshShieldFarseer.fxo", "sph_t3", "sph_t3_p0", true},
+    {"Planet_Deathstar.fx", "sph_t3", "sph_t3_p0", false, true},
 }};
 
 // Effects whose P1-02 descriptor declares the engine-driven Colorization.
-constexpr std::array<std::string_view, 8> colorizing_programs{
+constexpr std::array<std::string_view, 9> colorizing_programs{
     "MeshAlphaGloss.fx", "MeshBumpColorize.fx", "MeshBumpReflectColorize.fx", "MeshGlossColorize.fx",
-    "RSkinAlphaGloss.fx", "RSkinBumpColorize.fx", "RSkinBumpReflectColorize.fx", "RSkinGlossColorize.fx",
+    "MeshBumpSpecGlowColorize.fx", "RSkinAlphaGloss.fx", "RSkinBumpColorize.fx", "RSkinBumpReflectColorize.fx", "RSkinGlossColorize.fx",
 };
 
 } // namespace
@@ -147,8 +154,13 @@ bool blocks_drawing(const Cause cause) noexcept {
 std::span<const LegacySelector> legacy_selectors() noexcept { return selector_table; }
 
 const LegacySelector* find_legacy_selector(const std::string_view program) noexcept {
+    // CEM-05: qualified compiled names select the same canonical descriptor.
+    std::string_view canonical = program;
+    if (ieq(program, "MeshGloss.fxo")) canonical = "MeshGloss.fx";
+    else if (ieq(program, "MeshAdditive.fxo")) canonical = "MeshAdditive.fx";
+    else if (ieq(program, "MeshAdditive2x.fxo")) canonical = "MeshAdditive2x.fx";
     for (const LegacySelector& selector : selector_table) {
-        if (ieq(selector.program, program)) return &selector;
+        if (ieq(selector.program, canonical)) return &selector;
     }
     return nullptr;
 }

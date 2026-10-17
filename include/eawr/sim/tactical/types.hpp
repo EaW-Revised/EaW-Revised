@@ -31,6 +31,17 @@ using TeamId = std::uint32_t;
 using FactionId = std::uint64_t;
 using TypeId = std::uint64_t;
 
+// A fighter squadron (#271, docs/behaviour/space-visibility.md V-03): its team container,
+// a unit of its own that carries the squadron's sensor, and its craft in strictly increasing
+// ID. The container sits at the centre of its live craft's bounding box and leaves the
+// session with its last craft.
+struct Squadron {
+    EntityId container{};
+    std::vector<EntityId> members;
+    friend bool operator==(const Squadron&, const Squadron&) = default;
+};
+
+
 // WDF-05 (WU-27): both fighter grids are laid over the space map's box from its low corner. The
 // session carries that corner; the default is the world origin (a session built without a map).
 struct MapBox {

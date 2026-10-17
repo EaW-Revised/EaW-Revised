@@ -261,6 +261,8 @@ void test_cpu_steady_state_allocates_nothing();
 void test_particle_detail_batch();
 void test_release_and_replacement_lifecycle();
 void test_effect_brightness();
+void test_corruption_registry_settings();
+void test_corruption_actual_reservation_budget();
 void test_emitter_glow_follows_turning_pose();
 void test_present_allocates_nothing();
 void test_legacy_moving_kite();

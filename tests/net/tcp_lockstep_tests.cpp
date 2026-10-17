@@ -129,18 +129,13 @@ void battle(DepartureCase departure = DepartureCase::none) {
             while (!reported && Clock::now() - killed < tcp.timeout) {
                 const auto time = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count());
                 if (departure == DepartureCase::silent) (void)client->poll(); // Keep TCP alive, stop game inputs/hashes.
-                const auto pumped = take(first.pump(time));
-                if (!pumped.departure_outcomes.empty()) {
-                    const auto& outcome = pumped.departure_outcomes.front();
-                    expect(outcome.player == 2 && outcome.event.reason == (departure == DepartureCase::closed
-                            ? net::DepartureReason::disconnect : net::DepartureReason::timeout),
-                        "TCP close or application stall gives typed opponent departure");
-                    expect(outcome.state == net::DepartureState::won_by_departure, "TCP remaining peer wins by departure");
-                    if (departure == DepartureCase::silent) {
+                const auto pumped = first.pump(time);
+                if (!pumped) {
+                    expect(pumped.error().code == net::session_errors::stalled, "unconfirmed transport loss is typed connection loss");
+                    expect(first.departure_outcomes().empty() && !first.simulation().outcome(), "unconfirmed close or application stall awards no winner");
+                    if (departure == DepartureCase::silent)
                         expect(host->link(1) == net::LinkState::open && client->link(0) == net::LinkState::open,
-                            "Application stall departs despite healthy TCP keepalives");
-                        expect(!first_monitor.frozen(), "Silent hash voter does not freeze desync agreement");
-                    }
+                            "application loss remains distinct from transport keepalive closure");
                     reported = true;
                 }
                 std::this_thread::sleep_for(1ms);
@@ -157,6 +152,99 @@ void battle(DepartureCase departure = DepartureCase::none) {
     expect(waited, "Real TCP exercises lockstep completeness waiting");
     expect(shots[0] > 0 && shots[0] == shots[1], "Both TCP peers execute equal weapon fire");
 }
+// Real TCP/GNS continues its keepalives while the fixture drops selected application frames.
+class GapTransport final : public net::MessageTransport {
+public:
+    explicit GapTransport(net::MessageTransport& transport, bool hash_gap) : transport_(transport), hash_gap_(hash_gap) {}
+    bool gap{};
+    eawr::core::Result<void> send(net::PeerIndex peer, std::span<const std::uint8_t> frame) override {
+        return gap && drops(frame) ? eawr::core::Result<void>::success() : transport_.send(peer, frame);
+    }
+    std::optional<net::Received> poll() override {
+        for (unsigned count = 0; count < 256; ++count) {
+            auto next = transport_.poll();
+            if (!next || !gap || !drops(next->frame)) return next;
+        }
+        return {};
+    }
+    net::LinkState link(net::PeerIndex peer) const override { return transport_.link(peer); }
+    net::PeerIndex self() const override { return transport_.self(); }
+    std::uint32_t peer_count() const override { return transport_.peer_count(); }
+private:
+    bool drops(std::span<const std::uint8_t> bytes) const {
+        return !bytes.empty() && (hash_gap_ ? bytes.front() == net::desync_combined_kind || bytes.front() == net::desync_rows_kind
+            : bytes.front() == net::sealed_batch_kind);
+    }
+    net::MessageTransport& transport_;
+    bool hash_gap_{};
+};
+void mutual_loss_or_real_quit(unsigned workers, bool hash_gap, bool real_quit = false) {
+    TestOptions options; options.build_identity = "mutual-loss-contract"; options.timeout = 10s;
+    auto host = take(TestTransport::host("127.0.0.1", 0, options));
+    auto client = take(TestTransport::connect("127.0.0.1", host->port(), options));
+    const auto deadline = Clock::now() + 10s;
+    while (host->link(1) != net::LinkState::open || client->link(0) != net::LinkState::open) {
+        (void)host->poll(); (void)client->poll();
+        expect(Clock::now() < deadline, "mutual-loss handshake deadline"); std::this_thread::sleep_for(1ms);
+    }
+    GapTransport left(*host, hash_gap), right(*client, hash_gap);
+    tactical::TacticalSetup setup; setup.seed = 3794;
+    setup.departure_policy = tactical::MultiplayerDeparturePolicy{{1, 2}};
+    setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+    for (std::uint32_t player = 1; player <= 2; ++player) {
+        tactical::UnitState unit; unit.entity_id = player; unit.type_id = 1; unit.owner = player;
+        unit.position = {units(player == 1 ? -50 : 50), {}, {}}; unit.rotation = sim::math::identity_quat(); setup.units.push_back(unit);
+    }
+    const std::vector<tactical::SeatBinding> seats{{sim::SeatId{1}, 1, true, false}, {sim::SeatId{2}, 2, true, false}};
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    net::SessionOptions policy; policy.final_tick_count = 1000; policy.completeness_timeout_ms = 30'000;
+    net::DesyncOptions checks; checks.input_delay = policy.input_delay; checks.exchange_every = 2;
+    net::DesyncMonitor left_monitor(left, checks), right_monitor(right, checks);
+    auto first = take(net::TacticalLockstepSession::create(setup, {}, left, executor, seats, policy, hash_gap ? &left_monitor : nullptr));
+    auto second = take(net::TacticalLockstepSession::create(setup, {}, right, executor, seats, policy, hash_gap ? &right_monitor : nullptr));
+    std::array<net::TacticalLockstepSession*, 2> sessions{&first, &second};
+    std::uint64_t now{};
+    while (first.simulation().completed_tick() < 20 || second.simulation().completed_tick() < 20) {
+        take(first.pump(now)); take(second.pump(now++));
+        expect(Clock::now() < deadline, "mutual-loss warmup deadline"); std::this_thread::sleep_for(1ms);
+    }
+    if (real_quit) take(first.submit({{}, tactical::QuitPayload{}}));
+    else left.gap = right.gap = true;
+    const auto gap_start = now;
+    std::array<std::uint64_t, 2> wait_start{gap_start, gap_start};
+    for (unsigned peer = 0; peer < 2; ++peer)
+        if (const auto& waiting = sessions[peer]->waiting_for()) wait_start[peer] = waiting->since_ms;
+    std::array<bool, 2> lost{};
+    while (!(real_quit ? first.simulation().outcome().has_value() && second.simulation().outcome().has_value() : lost[0] && lost[1])) {
+        for (unsigned peer = 0; peer < 2; ++peer) if (!lost[peer]) {
+            auto result = sessions[peer]->pump(now);
+            if (!result) {
+                expect(!real_quit && result.error().code == net::session_errors::stalled, "mutual receive gap is connection loss, never a quit");
+                expect(now - wait_start[peer] >= 30'000, "loss does not fire before the required peer has been missing for 30 seconds");
+                expect(result.error().message.starts_with("Connection lost: the match could not continue"), "both peers get explicit connection-loss cause");
+                lost[peer] = true;
+            }
+        }
+        now += real_quit ? 1U : 100U;
+        expect(Clock::now() < deadline && now - gap_start < 40'000, "both loss decisions remain bounded");
+        std::this_thread::sleep_for(1ms);
+    }
+    if (real_quit) {
+        for (auto* session : sessions)
+            expect(session->simulation().outcome()->condition == tactical::VictoryCondition::intentional_quit
+                && session->simulation().outcome()->winner == 2, "a received real Quit still gives the opponent the win");
+    } else for (auto* session : sessions) {
+        expect(!session->simulation().outcome() && session->departure_outcomes().empty(), "neither isolated peer wins or manufactures a departure");
+        const auto replay = session->simulation().record();
+        expect(replay.final_tick_count == session->simulation().completed_tick(), "loss replay records only completed prefix");
+        for (const auto& command : replay.commands)
+            expect(!std::holds_alternative<tactical::QuitPayload>(command.payload), "loss replay contains no invented Quit");
+        expect(take(tactical::parse_replay(take(tactical::write_replay(replay)))) == replay, "completed loss prefix roundtrips without a binary format change");
+    }
+    expect(host->link(1) == net::LinkState::open && client->link(0) == net::LinkState::open,
+        "mutual loss is injected application silence, not a transport-close shortcut");
+}
+
 }
 int main() {
     try {
@@ -164,6 +252,10 @@ int main() {
         if (!TestTransport::available()) { std::cout << "GNS disabled: lockstep test skipped\n"; return 77; }
 #endif
         battle(); battle(DepartureCase::closed); battle(DepartureCase::silent);
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            mutual_loss_or_real_quit(workers, false); mutual_loss_or_real_quit(workers, true);
+            mutual_loss_or_real_quit(workers, false, true);
+        }
         std::cout << "Transport lockstep scripted battle passed\n"; return 0;
     }
     catch (const std::exception& failure) { std::cerr << failure.what() << '\n'; return 1; }

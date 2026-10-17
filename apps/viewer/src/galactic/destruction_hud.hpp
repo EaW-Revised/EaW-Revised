@@ -1,5 +1,5 @@
 #pragma once
-#include "eawr/sim/galactic/snapshot.hpp"
+#include "map_input.hpp"
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/label.hpp>
 namespace eawr::presentation::godot_backend {
@@ -9,6 +9,7 @@ struct DestructionHudState {
     godot::Label* text{};
     std::shared_ptr<const sim::galactic::GalacticSnapshot> fixture,publication;
     std::optional<sim::galactic::DestructionPreparation> facts;
+    viewer::galactic::PendingAbilityDrop pending{};
     std::uint64_t rebuilds{},accepts{};
     sim::galactic::hero_actions::Id accepted_source{};
     sim::galactic::PlanetId accepted_planet{};

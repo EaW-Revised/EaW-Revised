@@ -34,7 +34,7 @@ int main() {
     }
     // GHUD-S68: the focused planet's structure row. Capacity is authored data; the built land
     // structures need structure knowledge and arrive in creation order.
-    for (const auto name : {"ground-structures", "ground-structures-hidden", "ground-contents"}) {
+    for (const auto name : {"ground-structures", "ground-structures-hidden", "ground-contents", "ground-launch-move"}) {
         auto setup = view::synthetic_live_setup();
         view::configure_synthetic_hud_clock(setup);
         std::vector<gc::FleetDisplayType> traits;
@@ -49,6 +49,16 @@ int main() {
         if (!stepped) { std::cerr << "FAIL: " << name << ": " << stepped.error().message << '\n'; return 1; }
         const auto roster = view::ground_roster(*session.snapshot(), 1, 101);
         const std::string_view fixture = name;
+        if (fixture == "ground-launch-move") {
+            const auto submitted = session.submit({{1, gc::SeatId{1}, 1}, gc::LaunchFleet{{8001}, {101, 102}, {}}});
+            if (!submitted) { std::cerr << "FAIL: " << submitted.error().message << '\n'; return 1; }
+            const auto moved = session.step(executor);
+            if (!moved) { std::cerr << "FAIL: " << moved.error().message << '\n'; return 1; }
+            galactic_test::expect(std::any_of(session.snapshot()->fleets().begin(), session.snapshot()->fleets().end(),
+                [](const auto& fleet) { return fleet.motion.transit && fleet.motion.transit->path.back() == 102
+                    && std::any_of(fleet.members.begin(), fleet.members.end(), [](const auto& member) { return member.id == 8001; }); }),
+                "native launch fixture admits the real combined command and publishes its moving member");
+        }
         if (fixture == "ground-structures") {
             galactic_test::expect(roster.accessible && roster.structures_known && roster.structure_capacity == 5,
                 "known structures: capacity is the authored land position count");

@@ -32,6 +32,9 @@ private:
     core::Result<void> projectile_inputs();
     core::Result<void> launch_shots();
     core::Result<void> abilities_tracking();
+    core::Result<void> object_turn_seam();
+    core::Result<RejectReason> apply_object_turn_use(const ObjectTurnUse& use, std::vector<EntityId>& replans);
+    void commit_object_turn();
     core::Result<void> impacts();
     core::Result<void> late_impacts();
     core::Result<void> retaliation();
@@ -153,6 +156,9 @@ private:
     };
     std::vector<SpecialShot> special_shots_;
     std::vector<EntityId> projectile_defence_order_; // ordered activation notifications, committed only on success
+    std::vector<LiveUnit> object_turn_births_; // sparse turn creations join after indexed tracking rows
+    std::vector<ObjectTurnRecord> object_turn_log_; // #3644: uses applied this tick, moved to the record on success
+    std::vector<ObjectTurnOutcome> object_turn_outcomes_; // #3644: reported on TacticalTick
     std::vector<EntityId> created_static_defences_; // creation notifications within this frame
     std::vector<Event> manual_feedback_;
     struct Metrics {

@@ -126,9 +126,39 @@ void test_surfaces_and_billboards() {
     expect(!surfaces.empty() && near(surfaces[0].model.meshes[0].submeshes[0].vertices[0].position, {99.0F, 0.0F, -1.0F}),
            "the rigid chain is baked into a plain surface");
     expect(space::environment_family(plain) == space::EnvironmentFamily::none, "a MeshAdditive model is no family");
+    for (const std::string shader : {"MeshAdditive.fxo", "mEsHaDdItIvE.FXO", "MeshAdditive2x.fxo"}) {
+        const auto compiled = space::scene_surfaces(quad_model(shader, 0));
+        const auto expected = shader == "MeshAdditive2x.fxo"
+            ? space::SceneRoute::meshadditive2x : space::SceneRoute::meshadditive;
+        expect(compiled.size() == 1 && compiled[0].problem.empty() && compiled[0].route == expected
+                   && compiled[0].meshadditive.has_value(), "compiled additive layer: " + shader);
+    }
+    for (const std::string shader : {"MeshGloss.fxo", "MeshGlossForStarfields.fxo", "meshglossforstarfields.FXO"}) {
+        auto sky = quad_model(shader, 0);
+        auto& parameters = sky.meshes[0].submeshes[0].parameters;
+        parameters.push_back({"Emissive", assets::ParameterKind::vector3, assets::Vec3f{0.5F, 0.5F, 0.5F}});
+        parameters.push_back({"Diffuse", assets::ParameterKind::vector3, assets::Vec3f{1.0F, 1.0F, 1.0F}});
+        parameters.push_back({"Specular", assets::ParameterKind::vector3, assets::Vec3f{0.0F, 0.0F, 0.0F}});
+        const auto compiled = space::scene_surfaces(sky);
+        expect(compiled.size() == 1 && compiled[0].problem.empty()
+                   && compiled[0].route == space::SceneRoute::meshgloss && compiled[0].meshgloss.has_value(),
+               "compiled sky uses authored gloss values: " + shader);
+        parameters.pop_back();
+        expect(!space::scene_surfaces(sky)[0].problem.empty(), "compiled sky still requires Specular: " + shader);
+    }
+    for (const std::string shader : {"MeshGloss.fxoo", "MeshGlossForStarfields.fx", "MeshAdditive2x.fxo.extra"}) {
+        expect(space::scene_surfaces(quad_model(shader, 0))[0].route == space::SceneRoute::unsupported,
+               "unqualified near-name stays unsupported: " + shader);
+    }
     expect(space::environment_family(quad_model("Nebula.fx", 0)) == space::EnvironmentFamily::nebula, "Nebula.fx is a nebula");
     expect(space::environment_family(quad_model("planet.FX", 0)) == space::EnvironmentFamily::planet,
            "Planet.fx is a planet, case-insensitively");
+    const auto deathstar = quad_model("planet_deathstar.FX", 0);
+    const auto deathstar_surfaces = space::scene_surfaces(deathstar);
+    expect(space::environment_family(deathstar) == space::EnvironmentFamily::planet
+               && deathstar_surfaces.size() == 1 && deathstar_surfaces[0].problem.empty()
+               && deathstar_surfaces[0].route == space::SceneRoute::legacy_mesh,
+           "Death Star background placements remain environment-owned with their ordinary family route");
     expect(space::scene_surfaces(quad_model("MeshShadowVolume.fx", 0))[0].route == space::SceneRoute::unsupported,
              "an unrouted shader is listed as unsupported");
     const auto companion = space::scene_surfaces(quad_model("MeshAlpha.fx", 0));
@@ -177,6 +207,43 @@ void test_sunlight_glow_offset() {
            "an orbit changes the camera-facing plane and the glow's lit-side mask");
     expect(!space::sunlight_glow_offset({}, {0.0F, -1.0F, 0.0F}, 2.0F, 1.0F),
            "a missing light direction fails closed");
+}
+
+void test_skydome_surface() {
+    // #4027: Sky_Bespin_00 is a Skydome.fx sky object; it must route, not drop.
+    auto surfaces = space::scene_surfaces(quad_model("Skydome.fx", 0));
+    expect(surfaces.size() == 1 && surfaces[0].problem.empty() && surfaces[0].route == space::SceneRoute::skydome,
+           "a Skydome.fx surface with a BaseTexture is drawable");
+    expect(surfaces[0].base_texture == "glow.tga", "the skydome surface keeps its BaseTexture");
+    expect(surfaces[0].skipped.empty(), "a skydome without cloud parameters skips nothing");
+    auto clouded = quad_model("Skydome.fx", 0);
+    clouded.meshes[0].submeshes[0].parameters.push_back({"CloudTexture", assets::ParameterKind::texture, std::string("cloud.tga")});
+    const auto cloud_surfaces = space::scene_surfaces(clouded);
+    expect(cloud_surfaces[0].problem.empty() && !cloud_surfaces[0].skipped.empty(),
+           "a skydome cloud layer stays drawable but is reported as skipped");
+    auto bare = quad_model("Skydome.fx", 0);
+    bare.meshes[0].submeshes[0].parameters.clear();
+    expect(!space::scene_surfaces(bare)[0].problem.empty(), "a Skydome.fx surface without a BaseTexture is refused");
+    expect(space::scene_surfaces(quad_model("Skydome.fxx", 0))[0].route == space::SceneRoute::unsupported,
+           "a near-name stays unsupported");
+}
+
+void test_missing_effect_surface() {
+    auto model = quad_model("InventedAbsent.fx", 0);
+    model.meshes[0].submeshes[0].parameters.clear();
+    expect(space::scene_surfaces(model)[0].route == space::SceneRoute::unsupported,
+           "without file-absence evidence an unknown effect remains unsupported");
+    const auto surfaces = space::scene_surfaces(model, [](const std::string_view program) {
+        return program == "InventedAbsent.fx";
+    });
+    expect(surfaces.size() == 1 && surfaces[0].route == space::SceneRoute::missing_effect
+               && surfaces[0].problem.empty() && surfaces[0].base_texture.empty(),
+           "ALDEFAULT-01 admits a confirmed missing effect without texture or material parameters");
+    expect(near(surfaces[0].model.meshes[0].submeshes[0].vertices[0].position, {99.0F, 0.0F, -1.0F}),
+           "the missing-effect route keeps the ordinary rigid bone bake");
+    model.meshes[0].visible = false;
+    expect(space::scene_surfaces(model, [](const std::string_view) { return true; }).empty(),
+           "the fallback does not reveal an authored hidden mesh");
 }
 
 void test_default_camera() {
@@ -271,6 +338,8 @@ int main() {
     test_environment_light();
     test_transforms();
     test_surfaces_and_billboards();
+    test_missing_effect_surface();
+    test_skydome_surface();
     test_sunlight_glow_offset();
     test_default_camera();
     test_camera_relative_sky();

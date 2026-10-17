@@ -36,6 +36,10 @@ public:
     // Whether the next frame() forgets the ticks before it (after a hidden spell).
     [[nodiscard]] bool wants_rebase() const noexcept { return rebase_; }
 
+    // The session clock in effect, for the TICKS/S row: the speed factor over the 30 Hz base, the
+    // tick rate that factor asks for, and whether the clock is paused. Call before frame(); never
+    // called (map runs without a strategic clock) leaves the row with the measured rate only.
+    void set_clock(double speed_factor, double nominal_ticks_per_second, bool paused);
     // One presented frame. `ticks` are the costs of the simulation ticks completed since the
     // last call (empty when no session runs); `visible_units` is the count the caller draws.
     void frame(const std::vector<presentation::ui::PerfTick>& ticks, std::optional<std::size_t> visible_units,
@@ -59,6 +63,10 @@ private:
     bool shown_{};
     bool rebase_{true};
     bool tick_source_{};
+    bool clock_known_{};
+    bool clock_paused_{};
+    double speed_factor_{1.0};
+    double nominal_tps_{};
     std::optional<std::size_t> visible_units_;
     presentation::ui::PerfStats stats_;
     std::optional<Clock::time_point> last_frame_;

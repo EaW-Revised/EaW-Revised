@@ -472,8 +472,12 @@ struct UnitType final {
         bool operator==(const ObjectTurret&) const = default;
     };
     std::string id;
+    // Position in the type table: the object's file in registry order, then its place in the file.
+    // The AI's category teams enumerate in this order (PL-20); it is not part of the content identity.
+    std::uint64_t table_order{};
     UnitKind kind{UnitKind::ship};
     std::string campaign_ship_class; // WGT-45: opt-in Ship_Class, independent of movement layer
+    bool campaign_hyperspace{};      // WSL-16a: opt-in Hyperspace tag; a station-spawned ship with it arrives by hyperspace
     std::string xml_type; // SpaceUnit, StarBase, Squadron
     std::vector<std::string> variant_chain;
     std::string affiliation;
@@ -611,6 +615,14 @@ struct UnitType final {
         bool operator==(const PlanetaryWeapon&) const = default;
     };
     std::optional<PlanetaryWeapon> planetary_weapon;
+    // TSW-01: an effective TACTICAL_SUPER_WEAPON behaviour's start placement data. The debug build repositions
+    // the object once, at its first service, relative to the nearest enemy-owned super weapon target.
+    struct TacticalSuperWeapon {
+        Fixed start_distance{}, attack_distance{}, z_adjust{};
+        bool start_pos_match_target_z{};
+        bool operator==(const TacticalSuperWeapon&) const = default;
+    };
+    std::optional<TacticalSuperWeapon> tactical_super_weapon;
     struct SpecialUnlock {
         bool enable{}, all_allies{}, reverse{};
         bool operator==(const SpecialUnlock&) const = default;
@@ -666,6 +678,9 @@ struct UnitType final {
     // WNO-29: authored order, resolved independently of ordinary weapons.
     std::vector<std::string> death_projectiles{};
     std::vector<std::uint32_t> death_projectile_indices{};
+    // RP-09: the projectile a station creates at its position when a retreat destroys it.
+    std::string retreat_self_destruct{};
+    std::uint32_t retreat_self_destruct_index{no_index};
     bool operator==(const UnitType&) const = default;
 };
 

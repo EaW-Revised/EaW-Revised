@@ -54,9 +54,10 @@ The three space superweapon purchase objects `RS_Ion_Cannon_Use_Upgrade`,
 player's purchase independently. Level-1 station research and station level-up
 objects instead author `Build_Limit_Current_For_All_Allies` 1.
 
-The core's existing prerequisite permission uses the buyer's owned count rather
-than allied ownership. That discrepancy remains a separate accounting gap;
-the menu change does not alter purchase permission.
+The command-bar gate follows WPR-33: an allied held prerequisite both shows and enables the card, so a
+teammate who owns no station may start the shared station's level-up (legacy EAWR-3924). The allied current limit makes it
+one at a time for the team: while any ally has it queued the card stays visible and disabled, the starter alone pays
+and is refunded on cancel, and the finished replacement serves every ally (WPR-52).
 
 Production has no per-unit update. It runs in four places:
 1. **At the start:** the skirmish start places each player's starting forces and sets its

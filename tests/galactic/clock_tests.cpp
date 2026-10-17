@@ -1,9 +1,11 @@
 #include "galactic_support.hpp"
 
+#include "eawr/platform/live_game_session.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/replay.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -17,6 +19,7 @@
 namespace {
 
 using namespace galactic_test;
+using eawr::platform::LiveGameSession;
 using galactic::GalacticSession;
 using galactic::GameCommand;
 using Kind = galactic::GalacticEventKind;
@@ -195,6 +198,78 @@ void speed_is_pacing_only() {
     expect(paced.snapshot()->clock().strategic_speed == paced.clock().strategic_speed, "snapshot clock = session clock");
 }
 
+// TM-03/04: the fast-forward factor and back is pacing only; with several active humans the sim refuses it.
+void fast_forward() {
+    const eawr::sim::InlineExecutor executor;
+    const auto raw = galactic::fast_forward_factor_raw;
+    // Pacing: 120 ticks a second at 4x against the nominal 30.
+    expect(raw == (std::int64_t{4} << 24), "fast forward is 4x");
+    expect(LiveGameSession::tick_interval(math::Fixed::from_raw(raw)) == std::chrono::nanoseconds(1'000'000'000 / 120),
+        "4x paces 120 ticks a second");
+    expect(LiveGameSession::tick_interval(math::Fixed::from_raw(1 << 24)) == std::chrono::nanoseconds(1'000'000'000 / 30),
+        "1x paces 30 ticks a second");
+    {
+        galactic::SyntheticGalaxyOptions options;
+        options.coop_seat = true;
+        auto setup = galactic::synthetic_galaxy(options);
+        setup.rules = stock_rules();
+        setup.seats[1].kind = galactic::SeatKind::ai; // one active human seat: fast forward is allowed (TM-04)
+        setup.seats[2].active = false;
+        auto plain = GalacticSession::create(setup).value();
+        auto paced = GalacticSession::create(setup).value();
+        const auto human = setup.seats[0].seat_id;
+        for (const auto& command : script(setup, 60)) {
+            expect(static_cast<bool>(plain.submit(command)) && static_cast<bool>(paced.submit(command)), "scripted command");
+        }
+        for (int index = 0; index < 60; ++index) {
+            expect(plain.step(executor).value().state_sha256 == paced.step(executor).value().state_sha256, "scripted ticks match");
+        }
+        expect(static_cast<bool>(paced.submit(speed(60, human, 105, false, raw))), "fast forward");
+        expect(static_cast<bool>(paced.submit(speed(90, human, 106, false, 1 << 24))), "fast forward off");
+        for (int index = 60; index < 120; ++index) {
+            const auto left = plain.step(executor).value();
+            const auto right = paced.step(executor).value();
+            expect(left.state_sha256 == right.state_sha256, "tick " + std::to_string(left.completed_tick) + ": fast forward changes no hash");
+            if (index == 70) expect(paced.clock().strategic_speed.raw() == raw, "fast forward is on");
+        }
+        expect(paced.clock().strategic_speed.raw() == (1 << 24), "toggled back to 1x");
+    }
+    {
+        // TM-05: fast forward then pause with no snapshot in between (the HUD submits 1x first), then resume at 1x.
+        galactic::SyntheticGalaxyOptions options;
+        options.coop_seat = true;
+        auto setup = galactic::synthetic_galaxy(options);
+        setup.rules = stock_rules();
+        setup.seats[1].kind = galactic::SeatKind::ai;
+        setup.seats[2].active = false;
+        auto session = GalacticSession::create(setup).value();
+        const auto human = setup.seats[0].seat_id;
+        expect(static_cast<bool>(session.submit(speed(0, human, 1, false, raw))), "fast forward");
+        expect(static_cast<bool>(session.submit(speed(0, human, 2, false, 1 << 24))), "pause resets to 1x");
+        expect(static_cast<bool>(session.submit(pause(0, human, 3))), "pause");
+        (void)session.step(executor).value();
+        expect(session.clock().pause_depth == 1 && session.clock().strategic_speed.raw() == (1 << 24), "paused at 1x");
+        expect(static_cast<bool>(session.submit(resume(1, human, 4))), "resume");
+        (void)session.step(executor).value();
+        expect(session.clock().pause_depth == 0 && session.clock().strategic_speed.raw() == (1 << 24), "play resumes at 1x");
+    }
+    {
+        // Two active humans: the sim refuses the fast-forward factor itself, not only the button.
+        galactic::SyntheticGalaxyOptions options;
+        options.coop_seat = true;
+        auto setup = galactic::synthetic_galaxy(options);
+        setup.rules = stock_rules();
+        auto session = GalacticSession::create(setup).value();
+        const auto coop = setup.seats[2].seat_id;
+        expect(static_cast<bool>(session.submit(speed(0, coop, 1, false, raw))), "the command is admitted to the queue");
+        const auto tick = session.step(executor).value();
+        const auto rejected = std::count_if(tick.snapshot->events().begin(), tick.snapshot->events().end(),
+            [](const galactic::GalacticEvent& event) { return event.kind == Kind::command_rejected
+                && event.reason == galactic::GalacticRejectReason::not_authorized; });
+        expect(rejected == 1 && session.clock().strategic_speed.raw() == (1 << 24), "two humans: fast forward is refused");
+    }
+}
+
 void live_equals_replay() {
     galactic::SyntheticGalaxyOptions options;
     options.coop_seat = true;
@@ -241,6 +316,7 @@ int main() {
     pause_nesting();
     seat_authorization();
     speed_is_pacing_only();
+    fast_forward();
     live_equals_replay();
     if (failures != 0) {
         std::cerr << failures << " galactic clock check(s) failed\n";

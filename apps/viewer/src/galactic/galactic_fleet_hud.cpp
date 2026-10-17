@@ -120,11 +120,10 @@ bool GalacticMode::State::build_fleet_hud() {
         button->set_action([this, name] {
             if (!map_input.hud_event() || !map_input.gates.world_allowed()) return;
             const std::size_t slot = static_cast<std::size_t>(name[1] - '1');
-            const sim::galactic::ObservedFleet* card = nullptr;
-            for (const auto& row : fleet_intelligence.cards) {
-                if (row.planet != selected_planet) continue;
-                if (slot < 3 ? row.local && row.orbit_slot == slot : !row.local) { card = &row; break; }
-            }
+            // Cells act on their panel's card; the aggregate icons keep the local slot / other-owner cards.
+            const sim::galactic::ObservedFleet* card = name.ends_with("_fleet") ? shown_fleet_cards[slot] : slot < 3 ? shown_panel_cards[slot] : nullptr;
+            // The other owner's panel is read-only: its ships cannot be selected or given orders.
+            if (card && !card->local && !name.ends_with("_fleet")) return;
             if (!card) return;
             selected_fleet = card->fleet.value_or(0); selected_fleet_member = 0;
             if (!name.ends_with("_fleet") && slot < 3) {
@@ -156,7 +155,7 @@ bool GalacticMode::State::build_fleet_hud() {
             if (!name.ends_with("_0000")) attach_fleet_drag(button, name, [this, name, button] {
                 if (!button->is_visible_in_tree() || button->is_disabled()) return FleetDragSource{};
                 const auto slot = static_cast<std::size_t>(name[1] - '1');
-                const auto* card = shown_fleet_cards[slot];
+                const auto* card = shown_panel_cards[slot];
                 if (!card || !card->local || !card->fleet) return FleetDragSource{};
                 const auto& names = fleet_group_buttons[slot];
                 const auto cell = static_cast<std::size_t>(std::find(names.begin(), names.end(), name) - names.begin());
@@ -177,6 +176,17 @@ bool GalacticMode::State::build_fleet_hud() {
         std::sort(slots.begin(), slots.end());
         slots.erase(std::remove_if(slots.begin(), slots.end(), [](const auto& name) { return name.ends_with("_0000"); }), slots.end());
     }
+    // WGUI-175: TEXT_FLEET_PANE_n captions in the authored text_fleet1..3 style, placed on each panel's frame (the
+    // shell's Text_Fleet bones carry no mesh anchor); hidden with the shell.
+    for (std::size_t panel = 0; panel < fleet_captions.size(); ++panel) {
+        const std::string name = "text_fleet" + std::to_string(panel + 1);
+        if (!fleet_anchors.find("q" + std::to_string(panel + 1) + "_frame") || !command_catalog.find(name)) continue;
+        auto* label = memnew(EawrHudText);
+        label->set_name(String::utf8(("fleet_caption_" + std::to_string(panel + 1)).c_str()));
+        label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        fleet_organize->add_child(label);
+        fleet_captions[panel] = label;
+    }
     fleet_organize->hide();
     build_fleet_drag_receiver();
     build_fleet_stack_popup();
@@ -190,10 +200,12 @@ std::map<galactic_view::ObjectId, std::int64_t> GalacticMode::State::fleet_order
     if (!displayed_snapshot || !galaxy) return result;
     const auto actors = displayed_snapshot->actor_records();
     for (const auto& fleet : displayed_snapshot->fleets()) {
-        if (fleet.owner != galaxy->local.player || fleet.orbit != selected_planet || fleet.orbit_slot >= shown_fleet_cards.size()) continue;
-        const auto* card = shown_fleet_cards[fleet.orbit_slot];
+        if (fleet.owner != galaxy->local.player || fleet.orbit != selected_planet || fleet.orbit_slot >= shown_panel_cards.size()) continue;
+        // WGUI-175: with another owner aware here, slots 0 and 2 both list in panel 3.
+        const auto panel = galactic_view::fleet_panel_for_slot(fleet_panels.mode, fleet.orbit_slot);
+        const auto* card = shown_panel_cards[panel];
         if (!card || !card->local) continue;
-        const auto& layout = fleet_cell_layouts[fleet.orbit_slot];
+        const auto& layout = fleet_cell_layouts[panel];
         for (const auto& member : fleet.members) {
             const auto actor = std::lower_bound(actors.begin(), actors.end(), member.id,
                 [](const auto& row, auto key) { return row.id < key; });
@@ -399,7 +411,7 @@ void GalacticMode::State::update_fleet_hud() {
                 button->add_child(badge.ship);
                 button->set_action([this, planet = planet] {
                     if (!map_input.hud_event() || map_input.gates.selection_locked || !map_input.gates.world_allowed()) return;
-                    const auto planets = input_planets();
+                    const auto planets = selection_planets();
                     apply_selection(map_input.select(planets, planet, seat_flight().state()));
                 });
                 attach_fleet_drag(button, "g_planet_fleet", [this, key, button] {
@@ -441,8 +453,10 @@ void GalacticMode::State::update_fleet_hud() {
     }
     if (changed) {
         fleet_view_planet = selected_planet; fleet_view_selection = selected_fleet; fleet_view_member = selected_fleet_member;
-        shown_fleet_cards.fill(nullptr); shown_enemy_count = 0;
+        shown_fleet_cards.fill(nullptr); shown_panel_cards.fill(nullptr); shown_enemy_count = 0;
+        std::vector<const sim::galactic::ObservedFleet*> at_planet;
         for (const auto& card : fleet_intelligence.cards) if (card.planet == selected_planet) {
+            at_planet.push_back(&card);
             if (card.local && card.orbit_slot && *card.orbit_slot < 3) {
                 if (!shown_fleet_cards[*card.orbit_slot]) shown_fleet_cards[*card.orbit_slot] = &card;
             } else if (!card.local) {
@@ -454,6 +468,11 @@ void GalacticMode::State::update_fleet_hud() {
                 if (!shown_fleet_cards[3]) shown_fleet_cards[3] = &card;
             }
         }
+        // WGUI-175: the three orbit panels show the local fleets by slot until another owner is aware here.
+        fleet_panels = galactic_view::plan_fleet_panels(at_planet, mixed_fleet_planets.contains(selected_planet),
+            fleet_group_buttons[0].size());
+        for (std::size_t panel = 0; panel < 3; ++panel)
+            if (fleet_panels.panel[panel]) shown_panel_cards[panel] = &*fleet_panels.panel[panel];
     }
     // GHUDL-09/11: retain the authored aggregate parking; the organization
     // shell is admitted only in the focused view, outside the advanced map.
@@ -470,7 +489,7 @@ void GalacticMode::State::update_fleet_hud() {
             for (const auto& name : fleet_group_buttons[slot]) coordinates.push_back(presentation::ui::fleet_cell_coordinate(name));
             std::vector<FleetCellLook> looks;
             std::vector<presentation::ui::FleetCellIcon> icons;
-            if (const auto* card = shown_fleet_cards[slot]) for (const auto& group : card->groups) {
+            if (const auto* card = shown_panel_cards[slot]) for (const auto& group : card->groups) {
                 FleetCellLook look;
                 look.planet = card->planet; look.owner = card->owner;
                 look.type = group.type; look.gui_index = group.gui_index;
@@ -540,7 +559,7 @@ void GalacticMode::State::update_fleet_hud() {
                 fleet_cell_rects[slot][cell_at] = rect;
             }
         }
-        const sim::galactic::ObservedFleet* card = shown_fleet_cards[slot];
+        const sim::galactic::ObservedFleet* card = name.ends_with("_fleet") ? shown_fleet_cards[slot] : shown_panel_cards[slot];
         button->set_disabled(!map_input.gates.hud_enabled || map_input.gates.tutorial_locked);
         if (!changed) continue; // No text, icon resolution or allocations per render frame.
         if (!name.ends_with("_fleet")) {
@@ -635,6 +654,34 @@ void GalacticMode::State::update_fleet_hud() {
             button->set_order_selected(sim::galactic::holds_fleet(*card, selected_fleet));
         }
         button->set_visible(visible); button->set_disabled(!map_input.gates.hud_enabled || map_input.gates.tutorial_locked);
+    }
+    if (changed) for (std::size_t panel = 0; panel < fleet_captions.size(); ++panel) {
+        auto* label = fleet_captions[panel];
+        if (!label) continue;
+        const std::string name = "text_fleet" + std::to_string(panel + 1);
+        const auto* anchor = fleet_anchors.find("q" + std::to_string(panel + 1) + "_frame");
+        const auto* component = command_catalog.find(name);
+        if (!anchor || !component) { label->hide(); continue; }
+        auto look = *presentation::ui::hud_readout_style(command_catalog, name, *anchor);
+        const auto face = hud_fonts->resolve({look.text.face, look.text.point_size}, "english");
+        const int pixels = std::max(1, presentation::ui::font_pixel_height(face.point_size, camera.height));
+        label->set_style(look, hud_fonts->command_font(face, pixels), [this, face](std::int32_t height) {
+            return presentation::ui::gdi_text_cell(hud_fonts->cache(), face, height);
+        }, pixels, static_cast<float>(placement.scale), 1.0F / static_cast<float>(placement.scale));
+        // The master text keys count from zero: TEXT_FLEET_PANE_0 is "Fleet 1".
+        const std::string key = "TEXT_FLEET_PANE_" + std::to_string(panel);
+        label->set_text(String::utf8((battle_text ? battle_text(key) : key).c_str()));
+        // Owner retail capture 2026-10-16: the caption sits on the panel's lower-left tab, its centre about 0.236 of the
+        // frame width from the left edge and 0.07 of the frame height above its bottom edge (the mesh reaches past the
+        // drawn panel edge), on all three panels.
+        const auto box = presentation::ui::shell_to_screen(anchor->rect, placement);
+        const float width = static_cast<float>(box.width) * 0.40F;
+        const float height = static_cast<float>(pixels) * 1.6F;
+        label->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
+        label->set_size(Vector2(width, height));
+        label->set_position(Vector2(static_cast<float>(box.x + box.width * 0.236) - width * 0.5F,
+            static_cast<float>(box.y + box.height * 0.93) - height * 0.5F));
+        label->show();
     }
     service_fleet_stack_popup();
 }
@@ -785,6 +832,18 @@ void GalacticMode::State::write_fleet_report(std::ostream& output) const {
                 << ", \"count\": " << entry.count << "}";
         }
         output << "]}";
+    }
+    output << "], \"captions\": [";
+    for (std::size_t panel = 0; panel < fleet_captions.size(); ++panel) {
+        const auto* label = fleet_captions[panel];
+        output << (panel ? ", " : "") << "{\"panel\": " << panel + 1 << ", \"exists\": " << (label ? "true" : "false");
+        if (label) {
+            const auto rect = label->get_global_rect();
+            output << ", \"visible\": " << (label->is_visible_in_tree() ? "true" : "false")
+                << ", \"text\": " << json(std::string(label->get_text().utf8().get_data()))
+                << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]";
+        }
+        output << "}";
     }
     output << "], \"stack_popup\": {\"key\": " << fleet_popup_key
         << ", \"admitted\": " << (fleet_popup_admitted ? "true" : "false")

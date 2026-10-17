@@ -8,6 +8,7 @@
 #include "eawr/presentation/space/projectiles.hpp"
 #include "render_profile_viewport.hpp"
 #include "viewer_path.hpp"
+#include "eawr/core/tick_profile.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
 
@@ -90,6 +91,10 @@ void MapMode::close_requested() {
 
 std::optional<int> MapMode::process(const double delta) {
     State& state = *state_;
+    state.service_game_menu();
+    core::tick_profile::Recording ui_recording;
+    std::optional<core::tick_profile::Capture> ui_capture;
+    if (state.perf_trace) ui_capture.emplace(ui_recording);
     if (state.perf_trace) state.perf_trace->begin_frame();
     state.hud_ms = 0.0;
     core::load_profile::Scope first_frame_scope(core::load_profile::Phase::session);
@@ -155,6 +160,11 @@ std::optional<int> MapMode::process(const double delta) {
             if (state.unit_emitters) frame.emitter_particles = state.unit_emitters->particles();
             frame.particle_ms = state.particle_ms;
             frame.emitter_frame_ms = state.emitter_frame_ms;
+            if (state.unit_emitters) frame.emitter_owner_ms = state.unit_emitters->owner_timings();
+            if (state.battle_effects) {
+                frame.effects_owner_ms = state.battle_effects->owner_timings();
+                frame.effects_owner_counts = state.battle_effects->owner_counts();
+            }
             frame.effects_frame_ms = state.effects_frame_ms;
             frame.debris_frame_ms = state.debris_frame_ms;
             frame.tick_wait_ms = state.live_session->tick_wait_ms();
@@ -184,6 +194,9 @@ std::optional<int> MapMode::process(const double delta) {
             frame.idle_frame_ms = state.space_population->idle_frame_ms();
             frame.idle_sample_ms = state.space_population->idle_sample_ms();
             frame.idle_upload_ms = state.space_population->idle_upload_ms();
+            frame.idle_skin_work = state.space_population->idle_skin_work();
+            frame.idle_placements = state.space_population->idle_placement_count();
+            frame.idle_surfaces = state.space_population->idle_surface_count();
 
             for (const platform::LiveTickCost& cost : state.live_session->tick_costs_after(state.perf_trace_tick)) {
                 state.perf_trace_tick = cost.tick;
@@ -208,10 +221,32 @@ std::optional<int> MapMode::process(const double delta) {
                         frame.sim_lock_ms += phase.ms;
                     } else if (phase.name == "publish-tail") {
                         frame.sim_publish_ms += phase.ms;
+                    } else if (phase.name == "pacing-lag") {
+                        frame.sim_pacing_lag_ms = std::max(frame.sim_pacing_lag_ms, phase.ms);
+                    } else if (phase.name == "pacing-discarded-wall") {
+                        frame.sim_discarded_wall_ms += phase.ms;
                     } else if (phase.name.starts_with("worker.")) {
                         frame.worker_phases.emplace_back(phase.name.substr(7), phase.ms);
+                    } else if (phase.name.starts_with("serial.")) {
+                        // A scope may occur thousands of times per tick. Copy and format each
+                        // distinct name once per frame, summing all completed ticks' instances.
+                        const auto found = std::find_if(frame.serial_phases.begin(), frame.serial_phases.end(),
+                            [&](const auto& entry) { return entry.first == phase.name; });
+                        if (found == frame.serial_phases.end()) frame.serial_phases.emplace_back(phase.name, phase.ms);
+                        else found->second += phase.ms;
                     }
                 }
+            }
+            frame.sim_completed_tick = state.perf_trace_tick;
+            frame.presentation_lag_ticks = static_cast<double>(frame.sim_completed_tick)
+                - state.live_session->presented_tick();
+            for (const auto& phase : ui_recording.costs) {
+                if (!phase.name.starts_with("ui.lock.")) continue;
+                frame.ui_accessor_lock_wait_ms += phase.ms;
+                const auto found = std::find_if(frame.ui_accessor_lock_phases.begin(), frame.ui_accessor_lock_phases.end(),
+                    [&](const auto& entry) { return entry.first == phase.name; });
+                if (found == frame.ui_accessor_lock_phases.end()) frame.ui_accessor_lock_phases.emplace_back(phase.name, phase.ms);
+                else found->second += phase.ms;
             }
             state.perf_trace->frame(frame);
         }
@@ -721,6 +756,12 @@ void MapMode::input(const Ref<InputEvent>& event) {
         if (state.battle && state.live_session && state.space_population
             && state.battle->input(event, *state.live_session, *state.space_population, *state.space)) {
             state.sync_cards();
+            return;
+        }
+        // MNU-19: Escape that nothing above used (a targeting mode takes it first) opens the in-game menu.
+        if (const auto* key = Object::cast_to<InputEventKey>(event.ptr());
+            key && key->is_pressed() && !key->is_echo() && key->get_keycode() == KEY_ESCAPE
+            && state.open_game_menu()) {
             return;
         }
         // The same Godot event translation as the land camera; the space

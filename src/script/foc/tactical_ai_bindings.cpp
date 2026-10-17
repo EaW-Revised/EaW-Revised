@@ -140,6 +140,8 @@ core::Result<ValueList> find_nearest(const Host& host, const ValueList& argument
             if (const bool* flag = std::get_if<bool>(&arguments[next + 1].data)) ally = *flag;
         }
     }
+    if (host.in_object_turn && player_filter)
+        return fail("object turn dynamic-read tripwire: Find_Nearest raw fog");
     const ViewUnit* nearest = nullptr;
     std::optional<math::Fixed> best;
     for (const ViewPlayer& player : host.view->players) {
@@ -218,8 +220,16 @@ core::Result<ValueList> evaluate_perception(const Host& host, BindingContext& co
 
 } // namespace
 
-void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors) {
+void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors, bool install_type_lists) {
     const auto add = [&](std::string_view name, Binding binding) {
+        // Dynamic manager/parent queries still depend on a completed barrier.
+        // Fail before entering their transitive world/snapshot readers in a turn.
+        if (name == "EvaluatePerception" || name == "Evaluate_In_Galactic_Context") {
+            binding = [host, name = std::string(name), call = std::move(binding)](BindingContext& context, const ValueList& arguments) {
+                if (host->in_object_turn) return fail("object turn dynamic-read tripwire: " + name);
+                return call(context, arguments);
+            };
+        }
         if (auto added = scripts.register_binding(name, std::move(binding)); !added) errors.push_back(added.error());
     };
     add("Suspend_AI", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
@@ -334,14 +344,22 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
     // lists feed the goal system's contrast sizing, which is not hosted: the handle is opaque
     // and Parse only checks its arguments (the host's own contrast weights, FH-30, come from
     // the same function through load_contrast).
-    add("WeightedTypeList.Create", [](BindingContext&, const ValueList&) { return one(handle(handle_type_list, 1)); });
+    if (install_type_lists) add("WeightedTypeList.Create", [](BindingContext&, const ValueList&) { return one(handle(handle_type_list, 1)); });
 }
 
-void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors) {
+void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors, bool install_type_lists) {
+    const auto guard_dynamic_read = [host](std::string_view name, Binding binding) -> Binding {
+        return [host, name = std::string(name), call = std::move(binding)](BindingContext& context, const ValueList& arguments) {
+            if (host->in_object_turn) return fail("object turn dynamic-read tripwire: " + name);
+            return call(context, arguments);
+        };
+    };
     const auto object = [&](std::string_view name, Binding binding) {
+        if (name == "Fire_Special_Weapon" || name == "Get_Build_Pad_Contents" || name == "Can_Move") binding = guard_dynamic_read(name, std::move(binding));
         if (auto added = scripts.register_method(handle_game_object, name, std::move(binding)); !added) errors.push_back(added.error());
     };
     const auto player = [&](std::string_view name, Binding binding) {
+        if (name == "Get_Credits" || name == "Get_Tech_Level") binding = guard_dynamic_read(name, std::move(binding));
         if (auto added = scripts.register_method(handle_player, name, std::move(binding)); !added) errors.push_back(added.error());
     };
     const auto type = [&](std::string_view name, Binding binding) {
@@ -378,9 +396,11 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
     object("Get_Distance", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const ViewUnit* unit = live_object(*host, arguments[0]);
         if (unit == nullptr || arguments.size() < 2) return none();
-        const auto other = position_of(*host, arguments[1]);
+        // EX-51: use the same position extraction as movement and TaskForce
+        // distance, including an AI target's live object or region centre.
+        const auto other = unit_destination(*host, *unit, arguments[1], false, false);
         if (!other) return fail("Get_Distance: parameter 1 is not a live object or a position");
-        const auto length = distance(unit->position, *other);
+        const auto length = distance(unit->position, other->position);
         if (!length) return fail("Get_Distance: distance out of range");
         return one(number(numeric::from_fixed(*length)));
     });
@@ -390,11 +410,18 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
             if (unit == nullptr) return none();
             if (arguments.size() != 2 || as_text(arguments[1]) == nullptr) return fail("expects one name");
             const auto& names = categories ? host->setup.content.categories : host->setup.content.properties;
-            const auto bit = names.find(upper(*as_text(arguments[1])));
-            if (bit == names.end()) return fail("unknown name " + *as_text(arguments[1]));
+            // EX-56: both APIs parse an authored bitmask and test any overlap.
+            std::uint64_t requested{};
+            const auto requested_names = ai::split_names(*as_text(arguments[1]), "|");
+            if (requested_names.empty()) return fail("unknown name " + *as_text(arguments[1]));
+            for (const auto& name : requested_names) {
+                const auto bit = names.find(upper(name));
+                if (bit == names.end()) return fail("unknown name " + name);
+                requested |= bit->second;
+            }
             const AiType* type = host->type(unit->type);
             const std::uint64_t bits = type == nullptr ? 0 : (categories ? type->category_bits : type->property_bits);
-            return one(boolean((bits & bit->second) != 0));
+            return one(boolean((bits & requested) != 0));
         };
     };
     object("Is_Category", has_bits(true));
@@ -413,6 +440,37 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         auto fraction = math::divide(*unit->hull, *unit->max_hull);
         if (!fraction) return one(number(LuaNumber(1)));
         return one(number(numeric::from_fixed(fraction.value())));
+    });
+    // EX-53: the completed object's engine-enabled state, not its speed.
+    object("Are_Engines_Online", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) {
+            context.report(authoritative::codes::script_error, "Are_Engines_Online -- this object is already dead");
+            return none();
+        }
+        return one(boolean(unit->engines_online));
+    });
+    object("Can_Move", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) {
+            context.report(authoritative::codes::script_error, "Can_Move -- this object is already dead");
+            return none();
+        }
+        if (host->ai_world && host->ai_world->goal_mode() != "SPACE") return fail("Can_Move requires the SPACE movement projection");
+        return one(boolean(unit->can_move));
+    });
+    // EX-59 / #3844: this state-changing operation is explicitly skipped until
+    // the simulation hosts per-unit targeting sets. Keep the caller running.
+    object("Set_Targeting_Priorities", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (live_object(*host, arguments[0]) == nullptr) {
+            context.report(authoritative::codes::script_error, "Set_Targeting_Priorities -- this object is already dead");
+            return none();
+        }
+        const auto* name = arguments.size() == 2 ? as_text(arguments[1]) : nullptr;
+        if (name == nullptr) return fail("Set_Targeting_Priorities expects one targeting set name");
+        context.report(authoritative::codes::unsupported_api,
+            "Set_Targeting_Priorities skipped override " + *name + ": per-unit targeting sets are not hosted");
+        return none();
     });
     // SOS-19: the immutable container view holds actual live members, including
     // its leader. Inherited script names never supply an absent ability.
@@ -615,7 +673,10 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
                 if (query.type && unit.type != query.type->id) continue;
                 auto low = unit.position;
                 auto high = unit.position;
-                if (type != nullptr && type->proximity_bounds) {
+                if (unit.proximity_bounds) {
+                    low = (*unit.proximity_bounds)[0];
+                    high = (*unit.proximity_bounds)[1];
+                } else if (type != nullptr && type->proximity_bounds) {
                     const auto matrix = math::to_matrix(unit.rotation, unit.position);
                     if (!matrix) continue;
                     bool first = true;
@@ -646,7 +707,10 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         return none();
     });
     for (const char* name : {"Lock_Current_Orders"}) {
-        object(name, [](BindingContext&, const ValueList&) { return none(); });
+        object(name, [name = std::string(name)](BindingContext& context, const ValueList&) {
+            context.report(authoritative::codes::unsupported_api, name + " skipped: per-unit order locks are not hosted");
+            return none();
+        });
     }
     // WTA-34: a team answers for its leader. Get_Current_Projectile_Type is the object weapon's
     // projectile (index 0 of Projectile_Types, the only one the tables keep); a unit without an
@@ -769,7 +833,16 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
     player("Is_Human", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const auto self = static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id);
         const auto found = host->players.find(self);
-        return one(boolean(found != host->players.end() && !found->second->ai && !found->second->neutral));
+        return one(boolean(found != host->players.end() && !host->ai(self) && !found->second->neutral));
+    });
+    player("Is_Ally", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto self = static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id);
+        const Handle* other = arguments.size() == 2 ? as_handle(arguments[1], handle_player) : nullptr;
+        if (other == nullptr) {
+            context.report(authoritative::codes::script_error, "Is_Ally expects one player");
+            return one(boolean(false));
+        }
+        return one(boolean(host->allied(self, static_cast<tactical::PlayerId>(other->id))));
     });
     player("Is_Enemy", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const auto self = static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id);
@@ -853,7 +926,7 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         return core::Result<ValueList>::success(ValueList{number(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id >> 32U))),
             number(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id & 0xffffffffU))), number(LuaNumber(0))});
     });
-    if (auto added = scripts.register_method(handle_type_list, "Parse", [](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+    if (install_type_lists) if (auto added = scripts.register_method(handle_type_list, "Parse", [](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
             const auto* names = arguments.size() == 3 ? std::get_if<std::vector<Value>>(&arguments[1].data) : nullptr;
             const auto* weights = arguments.size() == 3 ? std::get_if<std::vector<Value>>(&arguments[2].data) : nullptr;
             if (names == nullptr || weights == nullptr || names->size() != weights->size()) {

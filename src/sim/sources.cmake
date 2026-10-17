@@ -61,6 +61,7 @@ set(EAWR_SIM_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_storage.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_squadrons.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_abilities.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/session_object_turn.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_economy.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_tracking.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_world.cpp"

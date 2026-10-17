@@ -2,6 +2,7 @@
 #include "galactic/weapon_action_live_fixture.hpp"
 #include "galactic/hud_clock_fixture.hpp"
 #include "galactic/galaxy_view.hpp"
+#include "galactic/map_input.hpp"
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
@@ -18,13 +19,13 @@ template<class T> T take(eawr::core::Result<T> r) {
 void take(eawr::core::Result<void> r) { if (!r) throw std::runtime_error(r.error().message); }
 
 constexpr gc::PlayerId local = 1;
-gc::GalacticSetup make_setup(eawr::sim::SeatId& seat) {
+gc::GalacticSetup make_setup(eawr::sim::SeatId& seat, std::string_view fixture = "hack-live") {
     auto setup = view::synthetic_live_setup();
     view::configure_synthetic_hud_clock(setup);
     std::vector<gc::FleetDisplayType> traits;
     std::vector<gc::FleetDisplayVisibility> visibility;
     std::map<gc::TypeId, std::string> names;
-    view::configure_weapon_action_live_fixture(setup, local, traits, visibility, names);
+    view::configure_weapon_action_live_fixture(setup, local, traits, visibility, names, fixture);
     for (const auto& row : setup.seats) if (row.player == local && row.active && row.kind == eawr::sim::SeatKind::human) { seat = row.seat_id; break; }
     return setup;
 }
@@ -58,11 +59,48 @@ gc::PreparedAbility open_menu(eawr::campaign::GameSession& game, eawr::sim::Seat
         "the menu carries the authored price, the display-only weapon and an affordable verdict");
     return *hack.live_prepared;
 }
+void live_destruction(const eawr::sim::PartitionExecutor& pool) {
+    for (const auto fixture : {"destruction-live", "destruction-live-contested"}) {
+        eawr::sim::SeatId seat{};
+        auto setup = make_setup(seat, fixture);
+        auto game = take(eawr::campaign::GameSession::create(setup));
+        take(game.step(pool));
+        auto snapshot = game.galaxy().snapshot();
+        expect(view::ability_source_in_fleet(*snapshot, local, 7004, 602), "current actor parent binds to dragged fleet");
+        expect(!view::ability_source_in_fleet(*snapshot, local, 7004, 601), "other fleet cannot use capability");
+        expect(!view::ability_source_in_fleet(*snapshot, 2, 7004, 602), "foreign fleet cannot use capability");
+        expect(!view::ability_source_in_fleet(*snapshot, local, 99999, 602), "missing actor fails closed");
+        const auto before = credits(game);
+        order(game, seat, 1, gc::PrepareGalacticAbility{7004, 101, gc::AbilityKind::planet_destruction});
+        take(game.step(pool)); snapshot = game.galaxy().snapshot();
+        const auto* menus = snapshot->hero_action_menus();
+        expect(menus && menus->destruction && menus->destruction->live_prepared, "host publishes real destruction preparation");
+        const auto prepared = *menus->destruction->live_prepared;
+        expect(prepared.actor == 7004 && prepared.planet == 101, "original actor identity reaches drop");
+        view::MapInput input; view::DropIntent intent;
+        intent.kind = view::DropKind::ability; intent.source = prepared.actor; intent.planet = prepared.planet;
+        intent.ability = gc::ExecutePreparedAbility{prepared};
+        const std::vector<view::InputPlanet> visible{{101, {}, 2, true}};
+        auto command = input.command(intent, visible); expect(command.has_value(), "typed map drop accepted");
+        order(game, seat, 2, *command); take(game.step(pool));
+        const auto* state = game.galaxy().ability_state();
+        const bool contested = std::string_view(fixture) == "destruction-live-contested";
+        expect(state && state->results.size() == 1 && state->results.front().actor == 7004
+            && state->results.front().outcome == (contested ? gc::AbilityOutcome::refused : gc::AbilityOutcome::purchased),
+            "shared host settles success or contested refusal");
+        expect(credits(game) == before && present(game, 7004) && owner(game, 101) == 2,
+            "destruction drop never charges, consumes actor or transfers allegiance");
+        const auto* control = game.galaxy().snapshot()->control();
+        const auto surface = std::find_if(control->planets.begin(), control->planets.end(), [](const auto& row) { return row.planet == 101; });
+        expect(surface != control->planets.end() && surface->destroyed == !contested, "only successful execution ruins target");
+    }
+}
 } // namespace
 
 int main() {
     try {
         const eawr::platform::ThreadWorkerAdapter pool(1);
+        live_destruction(pool);
         eawr::sim::SeatId seat{};
         {   // Choose: the typed capability executes the hack through the shared host.
             const auto setup = make_setup(seat);

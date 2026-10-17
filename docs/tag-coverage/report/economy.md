@@ -4,15 +4,16 @@
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 305 | 305 |
-| partial | 262 | 262 |
-| todo | 216 | 216 |
+| applied | 319 | 319 |
+| partial | 263 | 263 |
+| todo | 199 | 199 |
 | presentation-later | 0 | 0 |
 | foc-ignores | 57 | 57 |
 | deferred | 2 | 2 |
-| land-or-galactic | 0 | 281 |
+| by-design | 0 | 0 |
+| land-or-galactic | 0 | 266 |
 | multiplayer | 0 | 3 |
-| **Total** | **842** | **1126** |
+| **Total** | **840** | **1109** |
 
 Tables group the exact object class families listed together in the registry. Object kinds
 are station, ship, squadron or craft when specified; an empty kind list means the whole
@@ -28,7 +29,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Audio_Galactic_3D_Rolloff_Distance_Mod | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-27 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
 | Audio_Galactic_3D_Saturation_Distance_Mod | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-27 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
 | SFXEvent_MP_Give_Teammate_Credits | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
-| SFXEvent_Planet_Capture_Bonus_Reward | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Planet_Capture_Bonus_Reward | applied | local committed first-capture award (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-53 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
 | SFXEvent_Planet_Revealed | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
 
 ## BlackMarketItems
@@ -51,7 +52,6 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| AI_Player_Control | todo | application not recorded | — | 1120 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | AI_Victory_Conditions | applied | galactic victory (src/campaign/setup.cpp) | WGS-15, WGS-16, WGS-78, WGS-83 | — | src/campaign/setup.cpp | basis: reviewed |
 | AI_Victory_Cycle_Limit | applied | galactic victory (src/campaign/setup.cpp) | WGS-15, WGS-16, WGS-78, WGS-83 | — | src/campaign/setup.cpp | basis: reviewed |
 | Autoresolve_Exclusion_Locations | applied | whole class (src/platform/galactic/live_game_session.cpp) | WAR-10, WAR-65, WAR-75 | 1115 | src/platform/galactic/live_game_session.cpp | Read-only retained campaign retreat policy publication; native midbattle solver remains unavailable and no tactical state/hash/codec changes are made.; basis: reviewed |
@@ -59,15 +59,13 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Camera_Shift_X | todo | application not recorded | — | 1157 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | Camera_Shift_Y | todo | application not recorded | — | 1157 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | Campaign_Set | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
-| Description_Text | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | Empire_Story_Name | todo | application not recorded | — | 683 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | Good_Victory_Planet_Names | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Home_Location | partial | initial overview position and home selection (apps/viewer/src/galactic/galactic_mode.cpp); first home object for the local faction (apps/viewer/src/galactic/scene_content.cpp); authored campaign startup requests (src/campaign/setup.cpp); missing: home discovery/intelligence refresh remains legacy &#35;1153; dynamic persisted homes remain legacy &#35;1149 | WGP-41, WGP-42; WGP-42; WGS-09 | 1149 | apps/viewer/src/galactic/galactic_mode.cpp; apps/viewer/src/galactic/scene_content.cpp; src/campaign/setup.cpp | camera startup resolves the first authored home without an owned-planet fallback; discovery and persisted homes remain with their owning services; basis: reviewed |
 | Human_Victory_Conditions | applied | galactic victory (src/campaign/setup.cpp) | WGS-15, WGS-16, WGS-78, WGS-83 | — | src/campaign/setup.cpp | basis: reviewed |
 | Human_Victory_Planet_Names | applied | galactic victory (src/campaign/setup.cpp) | WGS-15, WGS-16, WGS-78, WGS-83 | — | src/campaign/setup.cpp | basis: reviewed |
 | Is_Autoresolve_Allowed | applied | whole class (src/platform/galactic/live_game_session.cpp) | WAR-10, WAR-65, WAR-75 | 1115 | src/platform/galactic/live_game_session.cpp | Read-only retained campaign retreat policy publication; native midbattle solver remains unavailable and no tactical state/hash/codec changes are made.; basis: reviewed |
-| Is_Listed | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
-| Is_Multiplayer | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Is_Multiplayer | applied | whole class (src/platform/galactic/live_game_session.cpp) | WGP-65 | — | src/platform/galactic/live_game_session.cpp | basis: reviewed |
 | Is_Quickmatch_Allowed | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | Is_Story_Campaign | partial | prepared galactic AI Game.IsStoryCampaign input (src/campaign/ai_perception_content.cpp); missing: story activation, dialogs and other non-AI consumers | WGA-423, WGS-10 | 1149 | src/campaign/ai_perception_content.cpp | AI reads immutable authored campaign state; other story owners remain on the ticket.; basis: reviewed |
 | Locations | partial | authored campaign startup requests (src/campaign/galaxy.cpp); authored campaign startup requests (src/campaign/setup.cpp); missing: neutral ordered planet/scene requests and campaign graph; scene-only instantiation requires the owning location provider | WGM-16; WGS-09 | 1149 | src/campaign/galaxy.cpp; src/campaign/setup.cpp | neutral ordered planet/scene requests and campaign graph; scene-only instantiation requires the owning location provider; basis: reviewed |
@@ -76,7 +74,6 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Planet_Auto_Reveal | applied | whole class (src/campaign/setup.cpp) | WGS-04, WGUI-04 | — | src/campaign/setup.cpp | basis: reviewed |
 | Rebel_Story_Name | todo | application not recorded | — | 683 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | Show_Completed_Tab | todo | application not recorded | — | 1149 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
-| Sort_Order | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | Special_Case_Production | partial | authored campaign startup requests (src/campaign/setup.cpp); missing: startup required initial-placement marks only; production allow-list and queues remain legacy &#35;682 | WGS-70 | 682 | src/campaign/setup.cpp | startup required initial-placement marks only; production allow-list and queues remain legacy &#35;682; basis: reviewed |
 | Starting_Active_Player | partial | campaign preview local faction and seats (apps/viewer/src/galactic/scene_content.cpp); galactic victory condition installation (src/campaign/setup.cpp); single-player starting-faction condition selection (src/sim/galactic/victory.cpp); missing: Full live player/seat setup and persisted starting-faction state remain with the session owner. | WGP-42; WGS-15; WGS-15 | 1149 | apps/viewer/src/galactic/scene_content.cpp; src/campaign/setup.cpp; src/sim/galactic/victory.cpp | Authored starting faction selects human versus AI victory lists for single player and the preview local seat; full session setup is not claimed.; basis: reviewed |
 | Starting_Credits | applied | authored campaign player setup (src/campaign/setup.cpp) | WGS-11, WGS-12, WGS-69 | — | src/campaign/setup.cpp | First matching authored value or admitted custom value initializes represented player credits; no cap clamp.; basis: reviewed |
@@ -85,7 +82,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Supports_Custom_Settings | partial | single-player advanced campaign technology options (apps/viewer/src/campaign_setup_screen.cpp); authored campaign player setup (src/campaign/setup.cpp); missing: Full menu filtering, tutorial/story visibility and network option UI remain WGS-U02. | WGP-190, WGP-69, WGP-74; WGS-12, WGS-13 | 1149 | apps/viewer/src/campaign_setup_screen.cpp; src/campaign/setup.cpp | Staging gates custom options; omitted support retains the sourced true constructor default. Accepted technology options enter the existing player setup model.; basis: reviewed |
 | Text_ID | todo | application not recorded | — | 1962 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | Trade_Routes | applied | whole class (src/campaign/galaxy.cpp) | WGM-16 | — | src/campaign/galaxy.cpp | basis: reviewed |
-| Tutorial | todo | application not recorded | — | 1150 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Tutorial | applied | whole class (src/presentation/ui/campaign_setup.cpp) | WGP-65 | — | src/presentation/ui/campaign_setup.cpp | basis: reviewed |
 | Underworld_Story_Name | todo | application not recorded | — | 683 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 
 ## Campaign_Files, Trade_Route_Files
@@ -233,7 +230,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Hyperspace | land-or-galactic | application not recorded | — | — | — |  Initial placement authoring is retained by the validated galactic loaders (docs/galactic-types.md); parsing alone does not claim runtime application.; SCOPE-GALACTIC |
+| Hyperspace | partial | ships a campaign station spawns (src/units/unit_motion.cpp); missing: bought units in the skirmish purchase lane (H2, &#35;3995), squadron entries of a station | WSL-16a | 654 | src/units/unit_motion.cpp | In the tactical scene a station-spawned ship with the tag enters by the reinforcement arrival lane; the rest of its tactical use is not audited (&#35;4002).; basis: reviewed |
 
 ## Decal
 
@@ -277,14 +274,14 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Planet_Icon_Scale | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | SFXEvent_Build_Impossible_Location_Blockaded | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
 | SFXEvent_Bunker_Garrisoned | todo | application not recorded | — | 654 | — | — |
-| SFXEvent_Corruption_Removed | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| SFXEvent_Enemy_Fleet_Approaching_Planet | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Corruption_Removed | applied | local due corruption completion (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-54 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
+| SFXEvent_Enemy_Fleet_Approaching_Planet | applied | local faction approach cue (apps/viewer/src/galactic/galactic_audio.cpp); committed fleet enroute assignment (src/sim/galactic/movement.cpp) | WGP-27; WGUI-114, WGUI-122 | — | apps/viewer/src/galactic/galactic_audio.cpp; src/sim/galactic/movement.cpp | Accepted enroute assignment qualifies the exact local recipient from current allegiance, explicit enemy relation, combat-skip and local orbital presence; retained runtime delivery applies the per-player wall-clock guard and resolves the authored faction cue.; basis: reviewed |
 | SFXEvent_Exit_Into_Hyperspace | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | SFXEvent_GUI_Start_Campaign | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | SFXEvent_HUD_Lost_Tactical_Corruption_Mission | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | SFXEvent_HUD_Won_Tactical_Corruption_Mission | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | SFXEvent_Max_Credits_Limit_Reached | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
-| SFXEvent_Planet_Corrupted | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
+| SFXEvent_Planet_Corrupted | applied | local due corruption completion (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-54 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
 | SFXEvent_Planet_Gained_Control | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-27 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
 | SFXEvent_Planet_Lost_Control | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-27 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
 | SFXEvent_Sabotage_Success | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
@@ -354,14 +351,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Corruption_Encyclopedia_Left_Edge | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | Corruption_Encyclopedia_Money_Icon | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | Corruption_Encyclopedia_Spacing | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Corruption_Line_Grow_Seconds | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Corruption_Line_Radius | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Corruption_Line_Start_End_Offset | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | Corruption_Mission_Requirement_Icon_Name | applied | whole class (apps/viewer/src/galactic/corruption_hud.cpp) | WGCH-04, WGCH-49 | — | apps/viewer/src/galactic/corruption_hud.cpp | Prepared snapshot corruption menu consumes display tables; live campaign action host and retail layout capture remain seams.; basis: reviewed |
-| Corruption_Particle_Line_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Corruption_Path_Color | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Corruption_Path_Offset | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Corruption_Path_Width | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | Corruption_Planet_Icon | partial | galactic planet status icons (apps/viewer/src/galactic/galactic_hud.cpp); missing: per-type icons of corrupted planets (corruption layer and type publication) | GHUDL-15 | 1130 | apps/viewer/src/galactic/galactic_hud.cpp | Only the information entry is applied: an uncorrupted planet while the local faction benefits from corruption.; SCOPE-GALACTIC; basis: reviewed |
 | Corruption_Planet_Icon_Encyclopedia_Desc | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | Corruption_Planet_Icon_Encyclopedia_Name | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
@@ -402,7 +392,6 @@ and are plain numbers. Code locations are repository paths without identifier an
 | MaxCreditIncomeAlignmentPenalty | applied | galactic (src/sim/galactic/income.cpp) | WGEP-07 | — | src/sim/galactic/income.cpp | Shared fiscal payment and forecast contribution (WGEP-06..09/75).; basis: reviewed |
 | MaximumFleetMovementDistance | applied | whole class (src/campaign/galaxy.cpp) | WGM-16 | — | src/campaign/galaxy.cpp | basis: reviewed |
 | MaximumGroundbaseLevel | partial | galactic AI base-level perception normalization (src/campaign/ai_perception_content.cpp); missing: Other base-level gameplay consumers outside the galactic AI perception provider | WGA-284 | 654 | src/campaign/ai_perception_content.cpp | basis: reviewed |
-| MaximumPoliticalControl | todo | application not recorded | — | 1114 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | MaximumSpecialStructures | todo | application not recorded | — | 654 | — | — |
 | MaximumSpecialStructuresSpace | todo | application not recorded | — | 654 | — | — |
 | MaximumStarbaseLevel | partial | galactic AI base-level perception normalization (src/campaign/ai_perception_content.cpp); missing: Other base-level gameplay consumers outside the galactic AI perception provider | WGA-284 | 654 | src/campaign/ai_perception_content.cpp | basis: reviewed |
@@ -436,9 +425,6 @@ and are plain numbers. Code locations are repository paths without identifier an
 | MP_Default_Win_Condition_Int_Param | partial | space option record (src/skirmish/inputs.cpp); missing: mode-qualified runtime consumers | WSS-22, WSS-24 | 654 | src/skirmish/inputs.cpp | Complete copied Defaults/Accept/Cancel record retains this field; no new space control or runtime execution is claimed. Prebuilt construction remains qualified by WSS-27/SS-U3; victory belongs to G7 and other mode-specific consumers remain separate.; basis: reviewed |
 | Multiplayer_Losing_Team_Bonus_Credit_Percentage | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
 | OffMapCostPenalty | todo | application not recorded | — | 654 | — | — |
-| Particle_Brightness_Per_Corruption_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Particle_Energy_Per_Corruption_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Particle_Scale_Per_Corruption_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | Pay_As_You_Go | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-28, WGEP-32, WGUI-18 | 654 | src/campaign/live_setup.cpp | basis: reviewed |
 | Planet_Ability_Icon_Names | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | Planet_Ability_RGBs | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
@@ -474,10 +460,8 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Skirmish_Buy_Credits | todo | application not recorded | — | 530 | — | money the skirmish purchasing reads or should read (&#35;530, &#35;556) |
 | Space_Auto_Resolve_Delay_Seconds | land-or-galactic | application not recorded | — | — | — | debug build: read by the galactic auto-resolve solver or its conflict service for the space conflict's dialog auto-resolve timer (WAR-06) (docs/behaviour/walks/gc-autoresolve.md) |
 | Space_Capture_Allowed_Countdown_Seconds | land-or-galactic | application not recorded | — | — | — | debug build: read only by the campaign-only single-player space capture point countdown (docs/behaviour/walks/build-pads.md WBP-04: multiplayer has none) |
-| Space_Collidable_Grid_Cull_Size | todo | application not recorded | — | 654 | — | — |
-| Space_Large_Ship_Grid_Cull_Size | todo | application not recorded | — | 654 | — | — |
 | Starting_Galactic_Camera_Position | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Strategic_Queue_Tactical_Battles | todo | application not recorded | — | 1115 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Strategic_Queue_Tactical_Battles | applied | whole class (src/campaign/conflict_policy.cpp) | GFC-20 | — | src/campaign/conflict_policy.cpp | basis: reviewed |
 | Tactical_Build_Time_Multiplier | applied | whole class (src/skirmish/economy.cpp) | PU-13 | — | src/skirmish/economy.cpp | basis: reviewed |
 | Tactical_Overrun_Multiple | multiplayer | application not recorded | — | — | — | debug build: read only by the overwhelming-odds audio service, which runs only in network multiplayer (docs/behaviour/walks/audio.md SND-65) |
 | TradeRouteMovementFactor | todo | application not recorded | — | 680 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
@@ -917,7 +901,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Describe_Advantage | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); campaign space loading (src/presentation/ui/loading_screen.cpp); missing: full planet-info dialog and ordinary planet encyclopedia, land and other mission loading | WGUI-167, WGUI-168; WGP-31 | 3355 | apps/viewer/src/galactic/galactic_hud.cpp; src/presentation/ui/loading_screen.cpp | Inherited mounted metadata supplies selected bonus icon, localized title and first authored encyclopedia entry; no stock planet-name assumptions.; basis: reviewed |
 | Describe_Tactical | partial | campaign space loading (src/presentation/ui/loading_screen.cpp); missing: land and other mission loading | WGP-31 | 2299 | src/presentation/ui/loading_screen.cpp | Campaign space loading localizes and wraps the actual planet description in the non-selectable tactical list.; basis: reviewed |
 | Describe_Wildlife | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Destroyed_Galactic_Model_Name | todo | application not recorded | — | 1994 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Destroyed_Galactic_Model_Name | applied | whole class (src/platform/galactic/live_game_session.cpp) | WGP-08 | — | src/platform/galactic/live_game_session.cpp | basis: reviewed |
 | Destroyed_Space_Tactical_Map | todo | application not recorded | — | 1989 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | Encyclopedia_Text | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); missing: full planet-info dialog and ordinary planet encyclopedia | WGUI-167, WGUI-168 | 3355 | apps/viewer/src/galactic/galactic_hud.cpp | Inherited mounted metadata supplies selected bonus icon, localized title and first authored encyclopedia entry; no stock planet-name assumptions.; basis: reviewed |
 | Encyclopedia_Weather_Info | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
@@ -929,7 +913,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Hyperspace_Fleet_Reveal_Range | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | Land_Tactical_Map | todo | application not recorded | — | 1989 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
 | Mass | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Max_Space_Base | todo | application not recorded | — | 682 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Max_Space_Base | applied | whole class (src/campaign/live_setup.cpp) | WGS-90 | — | src/campaign/live_setup.cpp | basis: reviewed |
 | Name_Adjust | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | Planet_Ability_Description | deferred | application not recorded | — | 3355 | — | Parsed and preserved; no retail reader found: all-symbol search plus direct displacement scan (WGUI-167). Distinct from Describe_Advantage and first Encyclopedia_Text, which supply the bonus popup. |
 | Planet_Ability_Icon | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); missing: galaxy ability filter, quick reference and production summary | WGUI-167, WGUI-168 | 2987 | apps/viewer/src/galactic/galactic_hud.cpp | Inherited mounted metadata supplies selected bonus icon, localized title and first authored encyclopedia entry; no stock planet-name assumptions.; basis: reviewed |
@@ -949,15 +933,15 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Planet_Slice_Affinity_Types | partial | live typed theft preparation (src/sim/galactic/ability_theft.cpp); missing: AI action routing, ordinary selector activation | WGCH-33 | 1143 | src/sim/galactic/ability_theft.cpp | basis: reviewed |
 | Planet_Slice_Difficulty_Rating | partial | live typed theft preparation (src/sim/galactic/ability_theft.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-33 | 1143 | src/sim/galactic/ability_theft.cpp | basis: reviewed |
 | Planet_Starbase_Stealth | applied | whole class (src/campaign/setup.cpp) | WGUI-10, WGUI-103 | — | src/campaign/setup.cpp | basis: reviewed |
-| Planet_Surface_Accessible | todo | application not recorded | — | 1115 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Planet_Surface_Accessible | applied | whole class (src/campaign/live_setup.cpp) | WGS-92 | — | src/campaign/live_setup.cpp | basis: reviewed |
 | Planet_Tech_Availability_Rating | partial | live typed theft preparation (src/sim/galactic/ability_theft.cpp); missing: AI action routing, ordinary selector activation | WGCH-169, WGCH-33 | 1143 | src/sim/galactic/ability_theft.cpp | basis: reviewed |
 | Political_Control | partial | explicit galactic control inputs (src/campaign/control.cpp); missing: campaign runtime binding, political faction resolution | WGM-69 | 1114 | src/campaign/control.cpp | Authored values feed src/sim/galactic/control.cpp; resolved live presence and missing consumers stay explicit seams.; basis: reviewed |
 | Potential_Indigenous_Power | partial | galactic enemy raw-ground force (src/script/foc/galactic_ai_forces.cpp); missing: Indigenous presence and affiliated-type Lua queries; tactical spawner and survivor lifecycle | WGA-184, WGA-273, WGA-274 | 2684 | src/script/foc/galactic_ai_forces.cpp | basis: reviewed |
 | Pre_Lit | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
 | Space_Tactical_Map | partial | prepared campaign space entry (src/campaign/space_entry_stock.cpp); missing: Unsupported scene and qualification boundaries in docs/behaviour/galactic-space-entry.md | WGT-04 | 2006 | src/campaign/space_entry_stock.cpp | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
 | Special_Structures | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC |
-| Special_Structures_Land | todo | application not recorded | — | 682 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
-| Special_Structures_Space | todo | application not recorded | — | 682 | — | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket |
+| Special_Structures_Land | applied | whole class (src/campaign/live_setup.cpp) | WGS-90 | — | src/campaign/live_setup.cpp | basis: reviewed |
+| Special_Structures_Space | applied | whole class (src/campaign/live_setup.cpp) | WGS-90 | — | src/campaign/live_setup.cpp | basis: reviewed |
 | Terrain | partial | live galactic auto-resolve (src/campaign/auto_resolve_live.cpp); missing: other tactical consumers | WAR-18, WAR-35 | 1965 | src/campaign/auto_resolve_live.cpp |  Live galactic auto-resolve reads the effective authored value; other tactical consumers remain outside this adapter.; basis: reviewed |
 | The_Force | applied | galactic (src/sim/galactic/income.cpp) | WGEP-75 | — | src/sim/galactic/income.cpp | Shared fiscal payment and forecast contribution (WGEP-06..09/75). |
 
@@ -1123,7 +1107,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Abilities/Stealth_Ability/Must_Be_Bought_On_Black_Market | land-or-galactic | application not recorded | — | — | — | FOCU-BM-GATE |
 | Prevents_Story_Campaign_Autoresolve | partial | represented conflicting force types with confirmed prevention (src/platform/galactic/live_game_session.cpp); missing: unrepresented outer fleet and container types | WAR-10, WAR-65, WAR-75 | 2026 | src/platform/galactic/live_game_session.cpp | WAR-10 positive-only retained story policy: flattened manifests cannot prove a negative for omitted parents; unknown keeps the solver dialog closed. Complete relevant roster qualification remains with the retreat provider.; basis: reviewed |
-| Space_Override_Population_Value | todo | application not recorded | — | 654 | — | — |
+| Space_Override_Population_Value | applied | whole class (src/skirmish/economy.cpp) | PU-21 | — | src/skirmish/economy.cpp | basis: reviewed |
 
 ## SpaceUnit, UniqueUnit, UpgradeObject
 

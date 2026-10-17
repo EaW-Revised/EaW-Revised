@@ -152,6 +152,7 @@ struct MapPlacement final {
     bool discardable{true};
     std::optional<Fixed> layer_z_adjust{};      // Layer_Z_Adjust (SK-05)
     bool special_weapon_source{}; // WSW-01: DUMMY_SPECIAL_WEAPON_SOURCE
+    bool tactical_super_weapon_target{}; // TSW-01: DUMMY_TACTICAL_SUPER_WEAPON_TARGET
     // WGT-121: copied campaign branch facts; ordinary skirmish does not consume them.
     bool branched_discardable{true};
     bool loads_when_faction_present{};
@@ -354,6 +355,25 @@ struct SkirmishStart final {
 // SK-05 (space-movement LZ-01): a created object stands at the point it is created at, raised
 // by its type's Layer_Z_Adjust (none: 0).
 [[nodiscard]] core::Result<Vec3> layer_position(Vec3 at, std::optional<Fixed> layer_z_adjust);
+
+// TSW-01: where the debug build puts a TACTICAL_SUPER_WEAPON object at its first service. `targets` are the
+// positions of the enemy-owned super weapon targets (tactical_super_weapon_targets); the nearest one to
+// `current` anchors the start: the object stands start_distance from it (attack_distance when its owner is the
+// defending player), on the line from the target through `current`, at the target's height when
+// start_pos_match_target_z is set, then z_adjust higher. With no target it stays where it is. Either way it then
+// faces the battlefield centre (the origin), keeping only the heading.
+struct TacticalSuperWeaponStart final {
+    Vec3 position{};
+    Fixed yaw_degrees{};
+};
+[[nodiscard]] core::Result<TacticalSuperWeaponStart> tactical_super_weapon_start(
+    const units::UnitType::TacticalSuperWeapon& data, Vec3 current, std::span<const Vec3> targets, bool owner_defends);
+// Position of every DUMMY_TACTICAL_SUPER_WEAPON_TARGET placement that is not owned by `own_faction`, in record order: its
+// map position as authored; the debug build does not add the prop's Layer_Z_Adjust to the target's height. A target whose
+// editor owner names no faction (an unmapped index) is not owned by `own_faction` and counts; an empty `own_faction`
+// skips nothing.
+[[nodiscard]] core::Result<std::vector<Vec3>> tactical_super_weapon_targets(
+    const std::vector<MapPlacement>& placements, std::string_view own_faction);
 
 // True when a TED placement can become a map-object unit (add_map_objects): it names a catalog
 // type, is not a designer marker, and is not a SpaceProp decoration. Map-object units are not in

@@ -21,6 +21,17 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
     const auto owner = name == "ground-count" || name == "ground-foreign" || name == "ground-structures-hidden" ? enemy : local;
     std::erase_if(setup.fleets, [local](const auto& row) { return row.owner != local; });
     setup.fleet_control->types[0].transport = true;
+    if (name == "ground-launch-move") {
+        setup.planets[1].position = setup.planets[0].position;
+        setup.planets[1].position.x = sim::math::Fixed::from_raw(setup.planets[0].position.x.raw()
+            + 4 * sim::math::Fixed::scale);
+        setup.planets[1].position.z = sim::math::Fixed::from_raw(setup.planets[0].position.z.raw()
+            + 10 * sim::math::Fixed::scale);
+        // Explicit synthetic empty transport payloads, including the already orbiting companies.
+        for (auto& type : setup.movement->types) if (type.type == 1000) type.transport = true;
+        for (const auto id : {7001ULL, 7002ULL, 7004ULL, 8001ULL, 8002ULL, 8003ULL})
+            setup.movement->contents.push_back({id, {}});
+    }
     names[1000] = "Stormtrooper_Team";
     setup.control.emplace(); auto& control = *setup.control;
     control.change_seconds = sim::math::Fixed::from_raw(60 * sim::math::Fixed::scale);

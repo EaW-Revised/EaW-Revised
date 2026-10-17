@@ -30,6 +30,9 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticPerceptionSetup>> pr
         const auto* radius = data.constant("MaximumFleetMovementDistance");
         if (!radius || !radius->number) throw std::runtime_error("stock force neighbourhood radius unavailable");
         out->maximum_fleet_distance = script::numeric::from_fixed(*radius->number);
+        // WGA-475: absent or zero leaves TargetPoliticalControl unavailable instead of dividing.
+        if (const auto* control = data.constant("MaximumPoliticalControl"); control && control->number && control->number->raw())
+            out->maximum_political_control = script::numeric::from_fixed(*control->number);
         const auto* fog = data.constant("AIUsesFogOfWarGalactic");
         const auto uses_fog = fog ? data::retail::boolean(fog->text) : std::nullopt;
         if (!uses_fog) throw std::runtime_error("authored galactic AI fog flag unavailable");
@@ -84,7 +87,7 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticPerceptionSetup>> pr
                 ai::to_single(script::numeric::from_fixed(*planet->planet_credit_value) / largest_income),
                 planet->special_structures_land ? std::optional{ai::to_single(ai::real(*planet->special_structures_land) / maximum_slots)} : std::nullopt,
                 planet->special_structures_land ? std::optional{ai::real(std::min<std::int64_t>(*planet->special_structures_land, 5)) / *out->maximum_ground_level} : std::nullopt,
-                {}, authored->second.indigenous_potential});
+                {}, authored->second.indigenous_potential, planet->planet_retains_residual_influence.value_or(true)});
         }
         const auto identity = [&](std::string_view name) {
             for (const auto& [id, original] : content.types)

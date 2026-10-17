@@ -123,6 +123,17 @@ void refresh_text_oversampling(CanvasItem& root) {
     root.set_oversampling_with_scale(mode);
 }
 
+LetterboxLayout fit_letterbox_canvas(Control& canvas, const Vector2& viewport, const Vector2& reference) {
+    const float scale = std::min(viewport.x / reference.x, viewport.y / reference.y);
+    const Vector2 offset = ((viewport - canvas.get_size() * scale) * 0.5F).round();
+    canvas.set_position(offset);
+    if (canvas.get_scale() != Vector2(scale, scale)) {
+        canvas.set_scale(Vector2(scale, scale));
+        refresh_text_oversampling(canvas);
+    }
+    return {scale, offset};
+}
+
 void register_ui_kit_classes() {
     GDREGISTER_CLASS(EawrUiFrame);
     GDREGISTER_CLASS(EawrUiButton);

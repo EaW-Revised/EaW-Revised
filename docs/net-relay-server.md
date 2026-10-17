@@ -211,18 +211,31 @@ with the service host name (or a numeric endpoint), set `certificate_name` to th
 leave `ca_file` and `certificate_sha256` empty to select system CA trust.
 Service host resolution and connection run on the bounded I/O worker, preferring IPv4 and trying at most two addresses. Production Network Options supplies the host name for both connection and certificate verification.
 It performs no I/O during construction. Host/join run on a registered bounded
-worker; cancellation detaches that generation immediately and drains publication
-closure without blocking frames. A single retiring generation blocks another
-attempt until closure is known or its invitation expires. Service health is
-observed without consuming opaque GNS signals during pairing.
+worker; cancellation detaches that generation immediately and drains room closure
+without blocking frames. A single retiring generation blocks another attempt until
+closure is known or its lease expires.
+
+Since slice N4 of [net-online-npeer.md](net-online-npeer.md) the match joins a room, not a
+two-peer pairing. The host's room source publishes the directory room; the match polls
+`OnlineMatchOptions::hosted_room` (bounded by `invitation_lifetime`, failing with the source's typed
+error through `hosting_failure`), opens the signalling scope with `NetworkGnsRoom::open` and builds
+`GnsTransport::host_room`. A guest passes its directory admission (`LanMatch::join_admitted`: slot and
+member capability) or the four-character alias (`LanMatch::join`) to `NetworkGnsRoom::attach` /
+`attach_alias`, then builds `GnsTransport::join_room`. The guest's room source keeps its directory
+connection until the attach returns. `bind_online_room_source` and `host_standalone_room`
+(`online_service_settings.hpp`) wire a source to the options for hosts without the lobby screen, such as
+`eawr_online_test`. A host that can only be joined by code sets `OnlineMatchOptions::require_short_code`: on a service
+with `room_aliases=0` it then fails at once with EAWR-NET-1787 instead of waiting for a code that never comes.
+Service health is observed without consuming opaque GNS signals.
 
 The admitted GNS stream uses the same staging, setup providers and live driver
 as LAN. Peer hello compares `core::build_identity()` before content building;
 `SetupOffer::identity.build` and the locally computed agreement use that same
 compiled identity. Content and tick-zero barriers stay on the existing setup
-path. Online admission remains two-seat, opt-in, with recovery delegated to the
-online repair slice. This bridge exposes a factory for the shared lobby UI;
-public room lists, passwords and online chat discovery are separate slices.
+path. Online admission is opt-in, with recovery delegated to the online repair slice;
+the visible seat limits of the viewer (two humans in the host options) are slice N6's. This bridge
+exposes a factory for the shared lobby UI; public room lists, passwords and online chat discovery
+are separate slices.
 
 Diagnostics added here: 1530 unavailable online/recovery capability, 1532 guess
 cooldown/global budget, 1533 alias generation exhaustion, 1534 unconfirmed publication close, 1535 invalid online staging setup, and
@@ -548,8 +561,10 @@ per kick, refused newcomer or reattach: about 20 calls over its life.
 
 The service remembers **every** credential username it issued to a seat (attach,
 each renewal, reattach; at most 64, the oldest revoked first) and revokes all of them
-when the seat ends: leave, release, kick, a held seat that times out into left, a
-reattach (the replaced connection's credentials) and room end. A revoke that finds the
+when the seat ends: leave, release, kick, a held seat that times out into left and
+room end. A reattach does not revoke them (legacy EAWR-4021): the seat's live pair links keep
+refreshing their TURN allocation and permissions with the credential they were dialled
+with, and revoking it could cut every other live link of a re-attaching seat. A revoke that finds the
 shared Cloudflare call cap spent waits in a bounded queue and goes out as calls free
 up. **coturn has no revocation**: a REST credential is an HMAC username with an
 embedded expiry, so a kicked member keeps the right to allocate until it expires

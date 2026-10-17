@@ -1,4 +1,6 @@
 #include "skirmish_start_support.hpp"
+#include "setup_map_reference.hpp"
+#include "setup_map_golden.hpp"
 
 namespace skirmish_start_test_support {
 
@@ -927,6 +929,21 @@ void foc_start(const std::filesystem::path& fixtures) {
     foc_victory(start, tables.value());
     foc_mc80(start, tables.value());
     foc_heights(start);
+    {
+        // TSW-01: Coruscant's urban backdrop is its one super weapon target. A Death Star the debug build spawned on this
+        // map stood 3100 below the ship plane (rig capture 2026-10-16): the target's authored height plus the type's 1200.
+        const auto targets = skirmish::tactical_super_weapon_targets(inputs.value().placements, {});
+        expect(targets && targets.value().size() == 1 && targets.value().front().z == whole(-4300),
+            "TSW-01: the planet backdrop stands 4300 below the plane, 3100 + 1200");
+        const auto marked = std::find_if(inputs.value().placements.begin(), inputs.value().placements.end(),
+            [](const auto& placement) { return placement.tactical_super_weapon_target; });
+        expect(marked != inputs.value().placements.end(), "TSW-01: Coruscant has a super weapon target");
+        if (marked != inputs.value().placements.end() && !marked->owner_faction.empty()) {
+            std::cout << "TSW-01: the Coruscant backdrop is owned by " << marked->owner_faction << '\n';
+            const auto own = skirmish::tactical_super_weapon_targets(inputs.value().placements, marked->owner_faction);
+            expect(own && own.value().empty(), "TSW-01: the backdrop's own faction does not target it");
+        }
+    }
     foc_reinforced_victory(start, inputs.value(), tables.value());
     foc_replay_policy(fixture, inputs.value(), tables.value());
     {
@@ -975,6 +992,21 @@ void foc_start(const std::filesystem::path& fixtures) {
         const auto maps = skirmish::setup_maps(filesystem.value(), catalog.value().catalog);
         expect(maps && maps.value().size() == 24, "setup enumerates all 24 stock space maps");
         if (!maps) return;
+        const auto golden=setup_map_golden::read(fixtures/"setup-map-eager-foc.sha256");
+        expect(golden.size()==25, "all 24 pre-change installed fixtures and inputs have frozen hashes");
+        const auto list=golden.find("@maps");
+        expect(list!=golden.end() && setup_map_golden::map_digest(maps.value())==list->second.map,
+            "installed map bytes and order match frozen pre-change list");
+        for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+            const auto parallel = skirmish::setup_maps(filesystem.value(), catalog.value().catalog, {}, workers);
+            expect(parallel && list!=golden.end() && setup_map_golden::map_digest(parallel.value())==list->second.map,
+                "installed map bytes agree with frozen pre-change output on 1/2/4/8 workers");
+        }
+        for (const auto& map:maps.value()) {
+            const auto row=golden.find(map.path);
+            expect(row!=golden.end() && setup_map_golden::row(map,filesystem.value(),catalog.value().catalog)==row->second,
+                "chosen fixture and complete start-input values match frozen pre-change hashes: "+map.path);
+        }
         std::optional<eawr::units::UnitTables> underworld_tables;
         bool polus_ran = false;
         for (const auto& map : maps.value()) {

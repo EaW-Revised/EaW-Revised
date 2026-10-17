@@ -10,6 +10,45 @@
 
 namespace eawr::sim::galactic {
 
+std::shared_ptr<const GalacticSnapshot> GalacticSnapshot::native_view(
+    std::shared_ptr<const GalacticSnapshot> base, NativeSnapshotChanges changes) {
+    if (!base) return {};
+    auto view = std::shared_ptr<GalacticSnapshot>(new GalacticSnapshot());
+    if (changes.touched_planets && (!base->native_base_ || base->native_planet_revisions_)) {
+        auto& ids = *changes.touched_planets;
+        std::sort(ids.begin(), ids.end()); ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        if (!ids.empty() && !ids.front()) ids.erase(ids.begin());
+        if (ids.empty() && base->native_planet_revisions_) view->native_planet_revisions_ = base->native_planet_revisions_;
+        else {
+            auto revisions = base->native_planet_revisions_ ? *base->native_planet_revisions_ : NativePlanetRevisions{};
+            auto touched = std::make_shared<const std::vector<PlanetId>>(std::move(ids));
+            for (const auto planet : *touched) revisions[planet] = touched;
+            view->native_planet_revisions_ = std::make_shared<const NativePlanetRevisions>(std::move(revisions));
+        }
+    }
+    view->native_columns_ = base->native_columns_;
+    view->native_base_ = base->native_base_ ? base->native_base_ : std::move(base);
+    view->native_changes_ = std::make_shared<const NativeSnapshotChanges>(std::move(changes));
+    if (view->native_changes_->fleets) view->native_columns_[static_cast<std::size_t>(NativeColumn::fleets)] = view->native_changes_;
+    if (view->native_changes_->events) view->native_columns_[static_cast<std::size_t>(NativeColumn::events)] = view->native_changes_;
+    if (view->native_changes_->fleet_control) view->native_columns_[static_cast<std::size_t>(NativeColumn::fleet_control)] = view->native_changes_;
+    if (view->native_changes_->movement) view->native_columns_[static_cast<std::size_t>(NativeColumn::movement)] = view->native_changes_;
+    if (view->native_changes_->economy) view->native_columns_[static_cast<std::size_t>(NativeColumn::economy)] = view->native_changes_;
+    if (view->native_changes_->production) view->native_columns_[static_cast<std::size_t>(NativeColumn::production)] = view->native_changes_;
+    if (view->native_changes_->control) view->native_columns_[static_cast<std::size_t>(NativeColumn::control)] = view->native_changes_;
+    if (view->native_changes_->population) view->native_columns_[static_cast<std::size_t>(NativeColumn::population)] = view->native_changes_;
+    if (view->native_changes_->observer) view->native_columns_[static_cast<std::size_t>(NativeColumn::observer)] = view->native_changes_;
+    if (view->native_changes_->victory) view->native_columns_[static_cast<std::size_t>(NativeColumn::victory)] = view->native_changes_;
+    if (view->native_changes_->production_offers) view->native_columns_[static_cast<std::size_t>(NativeColumn::production_offers)] = view->native_changes_;
+    if (view->native_changes_->observations) view->native_columns_[static_cast<std::size_t>(NativeColumn::observations)] = view->native_changes_;
+    if (view->native_changes_->economy_forecast) view->native_columns_[static_cast<std::size_t>(NativeColumn::economy_forecast)] = view->native_changes_;
+    if (view->native_changes_->originals) view->native_columns_[static_cast<std::size_t>(NativeColumn::originals)] = view->native_changes_;
+    if (view->native_changes_->actors) view->native_columns_[static_cast<std::size_t>(NativeColumn::actors)] = view->native_changes_;
+    if (view->native_changes_->observer_generation) view->native_columns_[static_cast<std::size_t>(NativeColumn::observer_generation)] = view->native_changes_;
+    if (view->native_changes_->economy_generation) view->native_columns_[static_cast<std::size_t>(NativeColumn::economy_generation)] = view->native_changes_;
+    return view;
+}
+
 GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const GalacticClock clock,
     std::vector<GalacticPlayer> players, std::vector<Planet> planets, std::vector<Route> routes, std::vector<Fleet> fleets,
     std::vector<GalacticEvent> events, std::optional<math::Fixed> maximum_movement_distance, std::optional<FleetControlSetup> fleet_control, std::shared_ptr<const MovementSetup> movement, std::optional<SeatControlState> seat_control, std::vector<Seat> seats, std::optional<PlayerEconomySetup> player_economy, std::optional<ProductionSetup> production, std::optional<PoliticalControlSetup> control,
@@ -25,7 +64,8 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
     std::shared_ptr<const std::vector<AbilityResult>> ability_results,
     std::shared_ptr<const HeroActionMenus> live_hero_action_menus,
     std::shared_ptr<const CorruptionMenu> live_corruption_menu,
-    std::shared_ptr<const std::vector<CensusType>> sale_types)
+    std::shared_ptr<const std::vector<CensusType>> sale_types,
+    std::shared_ptr<const std::vector<LiveCorruptionTransition>> corruption_transitions)
     : completed_tick_(completed_tick),
       clock_(clock),
       commissioned_originals_(std::move(commissioned_originals)),
@@ -46,6 +86,7 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
     live_corruption_menu_ = std::move(live_corruption_menu);
     black_market_menus_ = std::move(black_market_menus);
     ability_results_ = std::move(ability_results);
+    corruption_transitions_ = std::move(corruption_transitions);
     live_hero_action_menus_ = std::move(live_hero_action_menus);
     if (!black_market_menus_ && economy_corruption_ && player_economy_ && observer_)
         black_market_menus_ = std::make_shared<const std::vector<ObservedBlackMarketMenu>>(
@@ -79,84 +120,111 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
     }
 }
 
-std::uint64_t GalacticSnapshot::completed_tick() const noexcept { return completed_tick_; }
-const GalacticClock& GalacticSnapshot::clock() const noexcept { return clock_; }
-std::span<const GalacticPlayer> GalacticSnapshot::players() const noexcept { return players_; }
-std::span<const Planet> GalacticSnapshot::planets() const noexcept { return planets_; }
-std::span<const Route> GalacticSnapshot::routes() const noexcept { return routes_; }
-std::span<const Fleet> GalacticSnapshot::fleets() const noexcept { return fleets_; }
-std::span<const GalacticEvent> GalacticSnapshot::events() const noexcept { return events_; }
+std::uint64_t GalacticSnapshot::completed_tick() const noexcept {
+    if (native_base_) return native_base_->completed_tick();
+    return completed_tick_;
+}
+const GalacticClock& GalacticSnapshot::clock() const noexcept {
+    if (native_base_) return native_base_->clock();
+    return clock_;
+}
+std::span<const GalacticPlayer> GalacticSnapshot::players() const noexcept {
+    if (native_base_) return native_base_->players();
+    return players_;
+}
+std::span<const Planet> GalacticSnapshot::planets() const noexcept {
+    if (native_base_) return native_base_->planets();
+    return planets_;
+}
+std::span<const Route> GalacticSnapshot::routes() const noexcept {
+    if (native_base_) return native_base_->routes();
+    return routes_;
+}
+std::span<const Fleet> GalacticSnapshot::fleets() const noexcept {
+    if (native_base_) {
+        if (const auto* changes = native_column(NativeColumn::fleets)) return std::span<const Fleet>(*changes->fleets);
+        return native_base_->fleets();
+    }
+    return fleets_;
+}
+std::span<const GalacticEvent> GalacticSnapshot::events() const noexcept {
+    if (native_base_) {
+        if (const auto* changes = native_column(NativeColumn::events)) return std::span<const GalacticEvent>(*changes->events);
+        return native_base_->events();
+    }
+    return events_;
+}
 
 std::vector<std::uint8_t> GalacticSnapshot::canonical_bytes() const {
     std::vector<std::uint8_t> bytes(detail::snapshot_magic.begin(), detail::snapshot_magic.end());
     detail::put_u32(bytes, 3); // WGM-169/GAG-03: canonical live actor facts
-    detail::put_u64(bytes, completed_tick_);
-    detail::put_u64(bytes, clock_.session_tick);
-    detail::put_u64(bytes, clock_.galactic_frame);
-    detail::put_u64(bytes, clock_.tactical_frame);
-    detail::put_u32(bytes, clock_.pause_depth);
-    detail::put_u64(bytes, clock_.fiscal_start);
-    detail::put_u64(bytes, clock_.fiscal_end);
-    detail::put_u64(bytes, clock_.fiscal_cycle);
-    detail::put_i64(bytes, clock_.strategic_speed.raw());
-    detail::put_i64(bytes, clock_.tactical_speed.raw());
-    detail::encode_players(bytes, players_);
-    if (player_economy_) detail::encode_player_economy(bytes, *player_economy_);
-    detail::put_u32(bytes, static_cast<std::uint32_t>(planets_.size()));
-    for (const auto& planet : planets_) detail::encode_planet(bytes, planet);
-    detail::put_u32(bytes, static_cast<std::uint32_t>(routes_.size()));
-    for (const auto& route : routes_) detail::encode_route(bytes, route);
-    detail::put_u32(bytes, static_cast<std::uint32_t>(fleets_.size()));
-    for (const auto& fleet : fleets_) detail::encode_fleet(bytes, fleet);
-    detail::put_u32(bytes, static_cast<std::uint32_t>(events_.size()));
-    for (const auto& event : events_) detail::encode_event(bytes, event);
-    if (maximum_movement_distance_) {
+    detail::put_u64(bytes, completed_tick());
+    detail::put_u64(bytes, clock().session_tick);
+    detail::put_u64(bytes, clock().galactic_frame);
+    detail::put_u64(bytes, clock().tactical_frame);
+    detail::put_u32(bytes, clock().pause_depth);
+    detail::put_u64(bytes, clock().fiscal_start);
+    detail::put_u64(bytes, clock().fiscal_end);
+    detail::put_u64(bytes, clock().fiscal_cycle);
+    detail::put_i64(bytes, clock().strategic_speed.raw());
+    detail::put_i64(bytes, clock().tactical_speed.raw());
+    detail::encode_players(bytes, players());
+    if (player_economy()) detail::encode_player_economy(bytes, *player_economy());
+    detail::put_u32(bytes, static_cast<std::uint32_t>(planets().size()));
+    for (const auto& planet : planets()) detail::encode_planet(bytes, planet);
+    detail::put_u32(bytes, static_cast<std::uint32_t>(routes().size()));
+    for (const auto& route : routes()) detail::encode_route(bytes, route);
+    detail::put_u32(bytes, static_cast<std::uint32_t>(fleets().size()));
+    for (const auto& fleet : fleets()) detail::encode_fleet(bytes, fleet);
+    detail::put_u32(bytes, static_cast<std::uint32_t>(events().size()));
+    for (const auto& event : events()) detail::encode_event(bytes, event);
+    if (maximum_movement_distance()) {
         detail::put_u16(bytes, 1); // GC graph extension tag
-        detail::put_i64(bytes, maximum_movement_distance_->raw());
-        detail::put_u32(bytes, static_cast<std::uint32_t>(routes_.size()));
-        for (const auto& route : routes_) {
+        detail::put_i64(bytes, maximum_movement_distance()->raw());
+        detail::put_u32(bytes, static_cast<std::uint32_t>(routes().size()));
+        for (const auto& route : routes()) {
             detail::put_u64(bytes, route.id);
             detail::put_i64(bytes, route.hs_speed_factor.raw());
         }
     }
-    if (fleet_control_) {
+    if (fleet_control()) {
         detail::put_u16(bytes, 2);
-        detail::encode_fleet_control(bytes, *fleet_control_, fleets_);
+        detail::encode_fleet_control(bytes, *fleet_control(), fleets());
     }
-    if (movement_) { detail::put_u16(bytes, 4); detail::encode_movement(bytes, *movement_, fleets_); }
-    if (seat_control_) {
+    if (movement()) { detail::put_u16(bytes, 4); detail::encode_movement(bytes, *movement(), fleets()); }
+    if (seat_control()) {
         detail::put_u16(bytes, 5); // coordinator-reserved
-        detail::encode_seat_control_state(bytes, *seat_control_);
-        detail::put_u32(bytes, static_cast<std::uint32_t>(seats_.size()));
-        for (const auto& seat : seats_) {
+        detail::encode_seat_control_state(bytes, *seat_control());
+        detail::put_u32(bytes, static_cast<std::uint32_t>(seats().size()));
+        for (const auto& seat : seats()) {
             detail::put_u32(bytes, seat.seat_id.value); detail::put_u32(bytes, seat.player);
             detail::put_u8(bytes, static_cast<std::uint8_t>(seat.kind)); detail::put_u32(bytes, seat.lobby_slot);
             detail::put_u8(bytes, seat.active ? 1 : 0); detail::put_u32(bytes, seat.human_side_id);
         }
     }
-    if (production_) {
+    if (production()) {
         detail::put_u16(bytes, 7);
-        detail::encode_production(bytes, *production_);
+        detail::encode_production(bytes, *production());
     }
-    if (control_) {
-        detail::put_u16(bytes, 8); detail::encode_control(bytes, *control_);
-        detail::put_u32(bytes, static_cast<std::uint32_t>(control_effects_.size()));
-        for (const auto& effect : control_effects_) {
+    if (control()) {
+        detail::put_u16(bytes, 8); detail::encode_control(bytes, *control());
+        detail::put_u32(bytes, static_cast<std::uint32_t>(control_effects().size()));
+        for (const auto& effect : control_effects()) {
             detail::put_u64(bytes, effect.planet); detail::put_u32(bytes, effect.old_owner); detail::put_u32(bytes, effect.new_owner);
             detail::put_u8(bytes, effect.owner_changed ? 1 : 0); detail::put_u8(bytes, effect.stop_production ? 1 : 0);
             detail::put_u8(bytes, effect.refresh_visibility ? 1 : 0); detail::put_u8(bytes, effect.first_capture ? 1 : 0);
             detail::put_i64(bytes, effect.capture_reward.raw());
         }
     }
-    if (!population_.empty()) {
+    if (!population().empty()) {
         detail::put_u16(bytes, 10);
-        detail::encode_population(bytes, population_);
+        detail::encode_population(bytes, population());
     }
-    if (observer_) { detail::put_u16(bytes, 12); detail::encode_observer(bytes, *observer_); }
-    if (income_) { detail::put_u16(bytes, 13); detail::encode_income_state(bytes, *income_); }
-    if (victory_) { detail::put_u16(bytes, 14); detail::encode_victory(bytes, *victory_); }
-    if (economy_corruption_) { detail::put_u16(bytes, 15); detail::encode_economy_corruption(bytes, *economy_corruption_); }
-    if (planet_access_) { detail::put_u16(bytes, 19); detail::encode_planet_access(bytes, *planet_access_); }
+    if (observer()) { detail::put_u16(bytes, 12); detail::encode_observer(bytes, *observer()); }
+    if (income()) { detail::put_u16(bytes, 13); detail::encode_income_state(bytes, *income()); }
+    if (victory()) { detail::put_u16(bytes, 14); detail::encode_victory(bytes, *victory()); }
+    if (economy_corruption()) { detail::put_u16(bytes, 15); detail::encode_economy_corruption(bytes, *economy_corruption()); }
+    if (planet_access()) { detail::put_u16(bytes, 19); detail::encode_planet_access(bytes, *planet_access()); }
     PopulationCensus records;
     records.objects.assign(actor_records().begin(), actor_records().end());
     detail::encode_census(bytes, records);
@@ -235,9 +303,9 @@ core::Result<bool> GalacticSnapshot::actor_combat_skip(EntityId id) const {
     return galactic::actor_combat_skip(actor_records(), id, movement(), fleets());
 }
 core::Result<bool> GalacticSnapshot::fleet_combat_skip(FleetId id) const {
-    const auto at = std::lower_bound(fleets_.begin(), fleets_.end(), id,
+    const auto at = std::lower_bound(fleets().begin(), fleets().end(), id,
         [](const auto& row, auto key) { return row.id < key; });
-    if (at == fleets_.end() || at->id != id) return missing_actor_fact("fleet_combat_skip_unavailable");
+    if (at == fleets().end() || at->id != id) return missing_actor_fact("fleet_combat_skip_unavailable");
     return galactic::fleet_combat_skip(*at, actor_records(), movement());
 }
 core::Result<bool> GalacticSnapshot::actor_garrison(EntityId id) const {

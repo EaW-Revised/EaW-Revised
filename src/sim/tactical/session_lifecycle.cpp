@@ -406,6 +406,10 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
             return core::Result<TacticalSession>::failure(submitted.error());
         }
     }
+    for (const auto& record : replay.object_turns) {
+        if (const auto submitted = session.submit_object_turn(record); !submitted)
+            return core::Result<TacticalSession>::failure(submitted.error());
+    }
     return core::Result<TacticalSession>::success(std::move(session));
 }
 
@@ -428,12 +432,23 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
     if (!result) return result;
     for (const auto& command : replay.commands)
         if (auto submitted = result.value().submit(command); !submitted) return core::Result<TacticalSession>::failure(submitted.error());
+    for (const auto& record : replay.object_turns) {
+        if (record.tick >= replay.final_tick_count) {
+            return core::Result<TacticalSession>::failure(detail::diagnostic(diagnostic_codes::malformed,
+                "object-turn record tick is not less than final tick count"));
+        }
+        if (auto submitted = result.value().submit_object_turn(record); !submitted) return core::Result<TacticalSession>::failure(submitted.error());
+    }
     return result;
 }
 
 
 
 core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
+    if (impl_->object_turn_running) {
+        return core::Result<EntityId>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            "stage_spawn during an object-turn provider call"));
+    }
     if (!impl_->teams.contains(unit.owner)) {
         return core::Result<EntityId>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
             "staged unit owner " + std::to_string(unit.owner) + " is not a declared player"));
@@ -498,6 +513,10 @@ core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
 }
 
 core::Result<void> TacticalSession::stage_remove(const EntityId unit) {
+    if (impl_->object_turn_running) {
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            "stage_remove during an object-turn provider call"));
+    }
     auto live = impl_->sorted_live();
     const auto found = std::find_if(
         live.begin(), live.end(), [&](const LiveUnit& entry) { return entry.state.entity_id == unit; });

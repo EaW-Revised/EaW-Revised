@@ -1626,9 +1626,44 @@ void test_independent_emitter_capacity() {
         "every-vertex burst exposes clamp-before-multiply admission and dropped count");
 }
 
+void test_dynamic_corruption_inputs(){
+    auto emitter=base_emitter();emitter.bursting=true;emitter.particles_per_interval=16;
+    emitter.spawn_interval=1;emitter.stop_time=0;emitter.lifetime=10;emitter.velocity.shape=particles::Shape::point;
+    emitter.velocity.point={4,0,0};emitter.size.keys={{0,4},{1,4}};
+    auto cpu=system_with(emitter,19,64);
+    expect(bool(cpu.set_dynamic(3,2)),"WGP-47 accepts dynamic size and energy independently");
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==16,"PS-17 energy above one admits every ordinary birth");
+    for(const auto& particle:cpu.particles())expect(close(particle.size,12)&&close(particle.velocity.x,8),
+        "PS-17/28 dynamic energy scales birth velocity and size scales live billboard extent");
+    expect(bool(cpu.set_dynamic(2,0)),"zero energy is valid");
+    for(const auto& particle:cpu.particles())expect(close(particle.size,8)&&close(particle.velocity.x,8),
+        "size changes immediately while energy does not rescale existing velocity");
+    expect(cpu.advance(1.01F).spawned==0&&cpu.particles().size()==16,"zero energy suppresses new births without killing old particles");
+    expect(!cpu.set_dynamic(-1,1)&&!cpu.set_dynamic(1,std::numeric_limits<float>::quiet_NaN()),
+        "invalid dynamic inputs fail closed");
+    auto pinched=system_with(emitter,31,64);
+    expect(bool(pinched.set_pinched_cylinder(5,80,0)),"WGP-49 local volume accepts authored dimensions");
+    static_cast<void>(pinched.advance(std::numeric_limits<float>::min()));
+    for(const auto& particle:pinched.particles())expect(close(particle.position.z,0)||close(particle.position.z,80),
+        "zero line growth emits only at the two cylinder ends");
+    expect(!pinched.set_pinched_cylinder(5,-1,0)&&!pinched.set_pinched_cylinder(5,80,-1),
+        "unqualified negative geometry is rejected without replacing live particles");
+    auto dark=system_with(emitter,99,64);expect(bool(dark.set_dynamic(1,0)),"dark fixture configured");
+    expect(dark.advance(0.1F).spawned==0,"zero energy rejects the first burst too");
+    auto mesh=mesh_emitter(particles::MeshSpawnMode::every_vertex);mesh.bursting=true;
+    auto binding=asymmetric_mesh();std::size_t vertices{};
+    for(const auto& part:binding.geometry.submeshes)vertices+=part.vertices.size();
+    particles::SystemDefinition definition;definition.emitters={mesh};
+    particles::CpuSystem half_mesh(definition,17,128,binding);
+    expect(bool(half_mesh.set_dynamic(1,0.5F)),"mesh energy is admitted");
+    expect(half_mesh.advance(std::numeric_limits<float>::min()).spawned==vertices/2,
+        "PS-17 every-vertex energy truncates the scaled batch instead of applying random birth gates");
+}
+
 } // namespace
 
 int main(const int argc,char** argv){
+    test_dynamic_corruption_inputs();
     test_walk_trails();
     test_walk_births();
     test_inherited_birth_motion();

@@ -71,6 +71,7 @@ core::Result<bool> Manager::Impl::positive(const PlayerSelection& player, std::s
 
 core::Result<void> Manager::Impl::initialize(PlayerLifecycle& player) {
     const auto& type = data.players.at(player.selected.player_type);
+    policy_changed(player.selected.player); // initialization rewrites the policy below.
     for (const auto& [name, goal] : data.goals) if (goal.mode == "GALACTIC") player.policy.goal_types[name] = {false, 1};
     for (const auto& plan : plans) player.policy.plan_names[plan.name] = {false, 1};
     if (!type.galactic_templates.empty()) {
@@ -139,11 +140,15 @@ core::Result<void> Manager::Impl::templates(PlayerLifecycle& player) {
         for (const auto index : order) policy = apply_template(data, plans, std::move(policy), data.templates.at(names[index]));
         if (auto cleared = capabilities.services->clear_equations(player.selected.player); !cleared) return cleared;
     }
-    if (removed || policy != player.policy) if (auto applied = capabilities.services->apply_policy(player.selected.player, policy,
+    const bool policy_differs = policy != player.policy;
+    if (removed || policy_differs) if (auto applied = capabilities.services->apply_policy(player.selected.player, policy,
         removed ? PolicyWrite::reversal : PolicyWrite::ordinary); !applied) return applied;
     player.active_templates = std::move(active);
     player.activation_order = std::move(order);
-    player.policy = std::move(policy);
+    if (policy_differs) {
+        player.policy = std::move(policy);
+        policy_changed(player.selected.player);
+    }
     player.template_cursor = cursor;
     return core::Result<void>::success();
 }

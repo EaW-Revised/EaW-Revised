@@ -59,6 +59,7 @@ namespace eawr::presentation::godot_backend {
     if (options.policy == lighting::Policy::sh) {
         matrices = lighting::source_to_render(lighting::sph_light_all(options.environment));
         fill = lighting::source_to_render(lighting::sph_light_fill(options.environment));
+        state.ambient = {options.environment.ambient.r * options.environment.ambient.a, options.environment.ambient.g * options.environment.ambient.a, options.environment.ambient.b * options.environment.ambient.a};
         state.sun_diffuse = lighting::sun_diffuse(options.environment);
         const lighting::Vec3 sun = options.environment.lights[0].direction;
         toward = lighting::source_to_render(lighting::Vec3{-sun.x, -sun.y, -sun.z});
@@ -97,8 +98,9 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
         mesh.submeshes = {source_mesh.submeshes[submesh_index]};
         single.meshes.push_back(std::move(mesh));
         const assets::Submesh& submesh = single.meshes.front().submeshes.front();
+        const bool effect_missing = selector.program == scene::missing_effect_selector().program;
         assets::Texture texture = placeholder_texture();
-        if (!texture_path.empty()) {
+        if (!effect_missing && !texture_path.empty()) {
             auto found = textures.find(texture_path);
             if (found == textures.end()) {
                 auto decoded = assets::load_texture(filesystem, texture_path);
@@ -115,13 +117,13 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
             .pass_name = std::string(selector.pass),
             .bindings = {},
         };
-        for (const assets::MaterialParameter& parameter : submesh.parameters) {
+        if (!effect_missing) for (const assets::MaterialParameter& parameter : submesh.parameters) {
             material.bindings.push_back({parameter.name, parameter.value});
         }
         if (legacy::reads_effect_time(material)) {
             material.bindings.push_back({"eawr_effect_time", 0.0F});
         }
-        if (colour && scene::colorizes(submesh.shader)) {
+        if (colour && !effect_missing && scene::colorizes(submesh.shader)) {
             std::erase_if(material.bindings, [](const MaterialBinding& binding) { return ieq(binding.name, "Colorization"); });
             material.bindings.push_back({"Colorization", scene::colorization_binding(material.program, *colour)});
         }
@@ -188,10 +190,23 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_shell(
         mesh.visible = true;
         single.meshes.push_back(std::move(mesh));
         const assets::Submesh& submesh = single.meshes.front().submeshes.front();
-        const MaterialDescription material = meshshield_material(submesh, neutral_distortion);
+        const bool effect_missing = scene::missing_material_effect(cache.access(), submesh.shader);
+        const bool texture_free = effect_missing
+            || shield_name_equal(submesh.shader, legacy::mesh_shield::farseer_family.program);
+        MaterialDescription material = meshshield_material(submesh, neutral_distortion);
+        if (effect_missing) {
+            const auto& selector = scene::missing_effect_selector();
+            material.route = MaterialRoute::legacy_effect;
+            material.pass = RenderPass::opaque;
+            material.program = std::string(selector.program);
+            material.technique = std::string(selector.technique);
+            material.pass_name = std::string(selector.pass);
+            material.bindings.clear();
+        }
         std::optional<assets::Texture> base;
         std::vector<GodotRenderer::BindingTexture> extra;
-        for (const std::string_view binding : {std::string_view("BaseTexture"), std::string_view("WaveTexture"),
+        if (texture_free) base = placeholder_texture();
+        if (!texture_free) for (const std::string_view binding : {std::string_view("BaseTexture"), std::string_view("WaveTexture"),
                                                std::string_view("DistortionTexture")}) {
             const MaterialBinding* found = nullptr;
             for (const MaterialBinding& entry : material.bindings) {
@@ -234,7 +249,7 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_shell(
         upload.renderer_asset = next_asset++;
         uploaded_.push_back(upload.renderer_asset);
         passes_.emplace(upload.renderer_asset, material.pass);
-        shield_assets_.push_back(upload.renderer_asset);
+        if (!texture_free) shield_assets_.push_back(upload.renderer_asset);
         const std::int32_t bone = single.meshes.front().bone;
         if (!single.bones.empty() && (bone >= 0 || !submesh.skin_bones.empty())) {
             if (auto player = animation::Player::create(single)) {

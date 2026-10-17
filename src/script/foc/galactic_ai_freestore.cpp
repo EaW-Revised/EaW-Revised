@@ -1,5 +1,7 @@
+#include "eawr/core/gc_profile.hpp"
 #include "galactic_ai_execution.hpp"
 #include "galactic_ai_freestore.hpp"
+#include "galactic_ai_estimates.hpp"
 #include "host.hpp"
 #include "mode_time.hpp"
 
@@ -414,44 +416,46 @@ core::Result<void> QualifiedFreestore::update(FreestoreFacts row) {
     const auto old = facts_.find(row.object.id);
     if (old != facts_.end() && old->second.object.owner != row.object.owner)
         return unavailable_store<void>("freestore ownership must use the owner-change operation");
-    if (old == facts_.end() || old->second != row) { facts_[row.object.id] = std::move(row); changed(); }
+    if (old == facts_.end() || old->second != row) { facts_[row.object.id] = row; update_fact_record(row.object.id); changed(row.object.owner); }
     return core::Result<void>::success();
 }
 core::Result<void> QualifiedFreestore::initialize(gc::PlayerId player, std::span<const sim::EntityId> offers) {
     if (!player || stores_.contains(player)) return unavailable_store<void>("freestore initialization requires a fresh player owner");
     // Validate the full ordered offer frontier before any native publication.
     for (const auto id : offers) if (!facts(id)) return unavailable_store<void>("initial freestore offer has no authoritative actor facts");
-    stores_.emplace(player, Store{}); changed();
+    stores_.emplace(player, std::make_shared<Store>()); update_store_record(player); changed(player);
     for (const auto id : offers) { auto added = offer(player, id); if (!added) return core::Result<void>::failure(added.error()); }
     return core::Result<void>::success();
 }
 core::Result<bool> QualifiedFreestore::offer(gc::PlayerId player, sim::EntityId id) {
     const auto found = stores_.find(player); const auto* row = facts(id);
     if (found == stores_.end() || !row) return unavailable_store<bool>("freestore offer requires its initialized manager and actor facts");
-    if (!freestore_admission(*row, player) || found->second.members.contains(id)) return core::Result<bool>::success(false);
-    found->second.members.insert(id); found->second.additions.push_back(id); changed();
+    if (!freestore_admission(*row, player) || found->second->members.contains(id)) return core::Result<bool>::success(false);
+    auto& store = write_store(player); store.members.insert(id); store.additions.push_back(id); update_store_record(player); changed(player);
     return core::Result<bool>::success(true);
 }
 void QualifiedFreestore::remove(gc::PlayerId player, sim::EntityId id) {
     const auto found = stores_.find(player); if (found == stores_.end()) return;
-    auto& store = found->second;
+    auto& store = write_store(player);
     const bool removed = store.members.erase(id) != 0;
     const bool released = store.reservations.erase(id) != 0;
     const auto old_size = store.additions.size(); std::erase(store.additions, id);
-    if (removed || released || old_size != store.additions.size()) changed();
+    if (removed || released || old_size != store.additions.size()) { update_store_record(player); changed(player); }
 }
 core::Result<void> QualifiedFreestore::owner_changed(FreestoreFacts row, bool initialized) {
     if (!valid_facts(row) || !facts(row.object.id)) return unavailable_store<void>("freestore owner change requires qualified retained actor facts");
     if (initialized && !stores_.contains(row.object.owner)) return unavailable_store<void>("freestore new owner manager is absent");
     remove(facts(row.object.id)->object.owner, row.object.id);
     row.object.transit = !row.object.planet || row.enroute || row.tracked_movement;
-    facts_[row.object.id] = row; changed();
+    records_.erase(facts_.at(row.object.id).object.owner, 1, row.object.id);
+    facts_[row.object.id] = row; update_fact_record(row.object.id); changed(row.object.owner);
     if (initialized) { auto added = offer(row.object.owner, row.object.id); if (!added) return core::Result<void>::failure(added.error()); }
     return core::Result<void>::success();
 }
 void QualifiedFreestore::lost(sim::EntityId id) {
     const auto* row = facts(id); if (!row) return;
-    remove(row->object.owner, id); facts_.erase(id); lost_.insert(id); changed();
+    const auto player = row->object.owner; remove(player, id); records_.erase(player, 1, id); facts_.erase(id); lost_.insert(id);
+    core::RecordDigest::Bytes key; core::RecordDigest::append(key, id); records_.set(0, 3, id, key); changed(player);
 }
 core::Result<void> QualifiedFreestore::prevent_ai_usage(gc::PlayerId player, sim::EntityId id, bool prevent) {
     const auto* row = facts(id);
@@ -487,65 +491,82 @@ LandingGate automatic_landing_gate(bool human, const FreestoreObject& actor,
     return LandingGate::admitted;
 }
 bool QualifiedFreestore::contains(gc::PlayerId player, sim::EntityId id) const noexcept {
-    const auto found = stores_.find(player); return found != stores_.end() && found->second.members.contains(id);
+    const auto found = stores_.find(player); return found != stores_.end() && found->second->members.contains(id);
 }
 std::uint64_t QualifiedFreestore::object_count(gc::PlayerId player, std::optional<bool> nontransport) const {
     const auto found = stores_.find(player); if (found == stores_.end()) return 0;
     std::uint64_t count{};
-    for (const auto id : found->second.members) { const auto* row = facts(id);
+    for (const auto id : found->second->members) { const auto* row = facts(id);
         if (row && (!nontransport || *nontransport != row->object.transport)) ++count;
     }
     return count;
 }
 QualifiedFreestore QualifiedFreestore::clone() const {
-    QualifiedFreestore out; out.facts_ = facts_; out.stores_ = stores_; out.lost_ = lost_; return out;
+    QualifiedFreestore out; out.facts_ = facts_; out.stores_ = stores_; out.lost_ = lost_;
+    out.published_ = published_; out.records_ = records_; return out;
 }
 void QualifiedFreestore::replace(const QualifiedFreestore& other) {
-    if (facts_ == other.facts_ && stores_ == other.stores_ && lost_ == other.lost_) return;
-    facts_ = other.facts_; stores_ = other.stores_; lost_ = other.lost_; changed();
+    const bool same_stores = stores_.size() == other.stores_.size()
+        && std::equal(stores_.begin(), stores_.end(), other.stores_.begin(), [](const auto& a, const auto& b) {
+            return a.first == b.first && (a.second == b.second || *a.second == *b.second);
+        });
+    if (facts_ == other.facts_ && same_stores && lost_ == other.lost_) return;
+    facts_ = other.facts_; stores_ = other.stores_; lost_ = other.lost_;
+    published_ = other.published_; records_ = other.records_;
+    if (changed_) changed_();
 }
 core::Result<bool> QualifiedFreestore::reserve(gc::PlayerId player, sim::EntityId id, std::uint64_t plan) {
     if (!plan || !contains(player, id)) return unavailable_store<bool>("freestore reservation requires retained membership and a plan identity");
-    auto& held = stores_.at(player).reservations;
+    auto& held = write_store(player).reservations;
     if (held.contains(id)) return core::Result<bool>::success(false);
-    held.emplace(id, plan); changed(); return core::Result<bool>::success(true);
+    held.emplace(id, plan); update_store_record(player); changed(player); return core::Result<bool>::success(true);
 }
 void QualifiedFreestore::release(gc::PlayerId player, std::uint64_t plan) {
     const auto found = stores_.find(player); if (found == stores_.end() || !plan) return;
-    auto& held = found->second.reservations;
+    auto& held = write_store(player).reservations;
     const auto old = held.size(); std::erase_if(held, [&](const auto& row) { return row.second == plan; });
-    if (old != held.size()) changed();
+    if (old != held.size()) { update_store_record(player); changed(player); }
 }
 void QualifiedFreestore::release_object(gc::PlayerId player, sim::EntityId id, std::uint64_t plan) {
     const auto store = stores_.find(player); if (store == stores_.end() || !plan) return;
-    const auto held = store->second.reservations.find(id);
-    if (held != store->second.reservations.end() && held->second == plan) {
-        store->second.reservations.erase(held); changed();
+    // WGA-163: assignment removes membership; task return attempts ordinary
+    // admission when the actor is no longer present to hold a reservation.
+    if (!store->second->members.contains(id)) {
+        if (facts(id)) {
+            const auto offered = offer(player, id);
+            if (!offered) throw std::runtime_error(offered.error().message);
+        }
+        return;
+    }
+    const auto held = store->second->reservations.find(id);
+    if (held != store->second->reservations.end() && held->second == plan) {
+        write_store(player).reservations.erase(id); update_store_record(player); changed(player);
     }
 }
 FreestoreAssignment QualifiedFreestore::assign(gc::PlayerId player, sim::EntityId id, std::uint64_t plan) {
     if (!contains(player, id)) return FreestoreAssignment::failed;
-    const auto& held = stores_.at(player).reservations;
+    const auto& held = stores_.at(player)->reservations;
     const auto reservation = held.find(id);
     if ((reservation == held.end() ? 0 : reservation->second) != plan) return FreestoreAssignment::failed;
     const auto* row = facts(id);
     if (!row || row->object.transit || !row->object.planet) return FreestoreAssignment::waiting;
     remove(player, id); return FreestoreAssignment::assigned;
 }
-core::Result<std::shared_ptr<const FreestorePool>> QualifiedFreestore::publish(const sim::PartitionExecutor& executor) const {
+core::Result<std::shared_ptr<const FreestorePool>> QualifiedFreestore::publish(gc::PlayerId player,
+    const sim::PartitionExecutor& executor) const {
     using Result = core::Result<std::shared_ptr<const FreestorePool>>;
-    if (published_) return Result::success(published_);
-    auto pool = std::make_shared<FreestorePool>(); pool->qualified = true;
+    const auto found = stores_.find(player);
+    if (found == stores_.end()) return unavailable_store<std::shared_ptr<const FreestorePool>>("freestore publication requires an initialized player");
+    if (found->second->published) return Result::success(found->second->published);
+    auto pool = std::make_shared<FreestorePool>(); pool->qualified = true; pool->qualified_players.insert(player);
     std::vector<const FreestoreFacts*> rows;
-    for (const auto& [player, store] : stores_) {
-        pool->qualified_players.insert(player);
-        for (const auto id : store.members) {
-            const auto* row = facts(id);
-            if (!row || row->object.owner != player || !row->qualified) return unavailable_store<std::shared_ptr<const FreestorePool>>("retained freestore identity facts are unavailable");
-            rows.push_back(row);
-        }
-        pool->reservations.insert(store.reservations.begin(), store.reservations.end());
+    for (const auto id : found->second->members) {
+        const auto* row = facts(id);
+        if (!row || row->object.owner != player || !row->qualified)
+            return unavailable_store<std::shared_ptr<const FreestorePool>>("retained freestore identity facts are unavailable");
+        rows.push_back(row);
     }
+    pool->reservations = found->second->reservations;
     pool->objects.resize(rows.size());
     const auto stage = executor.execute_phase("galactic-ai-qualified-freestore", sim::tick_partition_count, [&](std::size_t part) {
         const auto range = sim::partition_range(part, rows.size());
@@ -556,21 +577,64 @@ core::Result<std::shared_ptr<const FreestorePool>> QualifiedFreestore::publish(c
         }
     });
     if (!stage) return Result::failure(stage.error());
+    pool->work.objects = rows.size(); found->second->published = pool; return Result::success(std::move(pool));
+}
+core::Result<std::shared_ptr<const FreestorePool>> QualifiedFreestore::publish(const sim::PartitionExecutor& executor) const {
+    gc_profile::Scope profile_scope(gc_profile::Phase::freestore_publish);
+    using Result = core::Result<std::shared_ptr<const FreestorePool>>;
+    if (published_) return Result::success(published_);
+    auto pool = std::make_shared<FreestorePool>(); pool->qualified = true;
+    for (const auto& [player, store] : stores_) {
+        static_cast<void>(store);
+        auto rows = publish(player, executor);
+        if (!rows) return rows;
+        pool->players.emplace(player, rows.value());
+        pool->qualified_players.insert(player);
+        pool->objects.insert(pool->objects.end(), rows.value()->objects.begin(), rows.value()->objects.end());
+        pool->reservations.insert(rows.value()->reservations.begin(), rows.value()->reservations.end());
+    }
     std::sort(pool->objects.begin(), pool->objects.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
-    // WGA-436: a lost actor, or one retained only until its loss notification, is a null wrapper.
+    // WGA-436: only the combined object facade needs globally removed handles.
     std::set<sim::EntityId> removed = lost_;
     for (const auto& [id, row] : facts_) if (row.dead || row.deleting) removed.insert(id);
     pool->removed.assign(removed.begin(), removed.end());
-    pool->work.objects = rows.size(); published_ = std::move(pool); return Result::success(published_);
+    pool->work.objects = pool->objects.size(); published_ = std::move(pool); return Result::success(published_);
 }
 std::span<const sim::EntityId> QualifiedFreestore::additions(gc::PlayerId player) const noexcept {
-    const auto found = stores_.find(player); return found == stores_.end() ? std::span<const sim::EntityId>{} : std::span<const sim::EntityId>(found->second.additions);
+    const auto found = stores_.find(player); return found == stores_.end() ? std::span<const sim::EntityId>{} : std::span<const sim::EntityId>(found->second->additions);
 }
 core::Result<void> QualifiedFreestore::consume_additions(gc::PlayerId player, std::size_t count) {
     const auto found = stores_.find(player);
-    if (found == stores_.end() || count > found->second.additions.size()) return unavailable_store<void>("freestore callback frontier is invalid");
-    if (count) { found->second.additions.erase(found->second.additions.begin(), found->second.additions.begin() + static_cast<std::ptrdiff_t>(count)); changed(); }
+    if (found == stores_.end() || count > found->second->additions.size()) return unavailable_store<void>("freestore callback frontier is invalid");
+    if (count) {
+        auto& additions = write_store(player).additions;
+        additions.erase(additions.begin(), additions.begin() + static_cast<std::ptrdiff_t>(count));
+        update_store_record(player);
+        // Callback consumption changes native order, not the pool or its safety inputs.
+        if (changed_) changed_();
+    }
     return core::Result<void>::success();
+}
+void QualifiedFreestore::update_fact_record(sim::EntityId id) {
+    const auto& fact = facts_.at(id); QualifiedFreestore row; row.facts_.emplace(id, fact);
+    records_.set(fact.object.owner, 1, id, row.encode());
+}
+void QualifiedFreestore::update_store_record(gc::PlayerId player) {
+    QualifiedFreestore row; row.stores_.emplace(player, stores_.at(player)); records_.set(player, 2, 0, row.encode());
+}
+core::RecordDigest QualifiedFreestore::rebuild_records() const {
+    core::RecordDigest rebuilt;
+    for (const auto& [id, fact] : facts_) {
+        QualifiedFreestore row; row.facts_.emplace(id, fact); rebuilt.set(fact.object.owner, 1, id, row.encode());
+    }
+    for (const auto& [player, store] : stores_) {
+        QualifiedFreestore row; row.stores_.emplace(player, store); rebuilt.set(player, 2, 0, row.encode());
+    }
+    for (const auto id : lost_) { core::RecordDigest::Bytes key; core::RecordDigest::append(key, id); rebuilt.set(0, 3, id, key); }
+    return rebuilt;
+}
+std::string QualifiedFreestore::record_sync_hash(bool cold) const {
+    return cold ? rebuild_records().digest("qualified-freestore-v3") : records_.digest("qualified-freestore-v3");
 }
 std::vector<std::uint8_t> QualifiedFreestore::encode() const {
     std::vector<std::uint8_t> bytes; store_word(bytes, 3); store_word(bytes, facts_.size());
@@ -585,9 +649,9 @@ std::vector<std::uint8_t> QualifiedFreestore::encode() const {
     }
     store_word(bytes, stores_.size());
     for (const auto& [player, store] : stores_) {
-        store_word(bytes, player); store_word(bytes, store.members.size()); for (const auto id : store.members) store_word(bytes, id);
-        store_word(bytes, store.reservations.size()); for (const auto& [id, plan] : store.reservations) { store_word(bytes, id); store_word(bytes, plan); }
-        store_word(bytes, store.additions.size()); for (const auto id : store.additions) store_word(bytes, id);
+        store_word(bytes, player); store_word(bytes, store->members.size()); for (const auto id : store->members) store_word(bytes, id);
+        store_word(bytes, store->reservations.size()); for (const auto& [id, plan] : store->reservations) { store_word(bytes, id); store_word(bytes, plan); }
+        store_word(bytes, store->additions.size()); for (const auto id : store->additions) store_word(bytes, id);
     }
     store_word(bytes, lost_.size()); for (const auto id : lost_) store_word(bytes, id);
     return bytes;
@@ -625,7 +689,8 @@ core::Result<void> QualifiedFreestore::restore(std::span<const std::uint8_t> byt
         const auto player = read(); const auto members = read();
         if (!valid || player > std::numeric_limits<gc::PlayerId>::max() || player <= prior || !owner(static_cast<gc::PlayerId>(player)) || members > (bytes.size() - at) / 8)
             return unavailable_store<void>("freestore membership framing is invalid");
-        auto& store = staged.stores_[static_cast<gc::PlayerId>(player)]; last = 0;
+        auto& slot = staged.stores_[static_cast<gc::PlayerId>(player)]; slot = std::make_shared<Store>();
+        auto& store = *slot; last = 0;
         for (std::uint64_t m = 0; m < members; ++m) {
             const auto id = read(); const auto* row = staged.facts(id);
             if (!valid || id <= last || !row || row->object.owner != player) return unavailable_store<void>("freestore membership owner reference is invalid");
@@ -653,7 +718,7 @@ core::Result<void> QualifiedFreestore::restore(std::span<const std::uint8_t> byt
         staged.lost_.insert(id); last = id;
     }
     if (!valid || at != bytes.size()) return unavailable_store<void>("freestore state has trailing or truncated bytes");
-    facts_ = std::move(staged.facts_); stores_ = std::move(staged.stores_); lost_ = std::move(staged.lost_); changed(); return core::Result<void>::success();
+    facts_ = std::move(staged.facts_); stores_ = std::move(staged.stores_); lost_ = std::move(staged.lost_); records_ = rebuild_records(); changed(); return core::Result<void>::success();
 }
 core::Result<std::vector<sim::EntityId>> initial_freestore_offers(const gc::GalacticSnapshot& snapshot, std::span<const FreestoreType> types) {
     std::map<gc::TypeId, bool> transport;
@@ -698,12 +763,17 @@ ai::GalacticFreestoreSelectionProvider qualified_freestore_selection(std::shared
             || !world || !manager.lock() || !selection)
             return unavailable_store<std::vector<ai::GalacticSelectionObject>>("qualified freestore membership, assignment, path and garrison producers are required");
         std::vector<ai::GalacticSelectionObject> out;
-        for (const auto& row : input->pool->objects) if (row.owner == player) {
+        const auto shard = input->pool->players.find(player);
+        const auto& objects = shard == input->pool->players.end() ? input->pool->objects : shard->second->objects;
+        for (const auto& row : objects) if (row.owner == player) {
             const auto copied = selection(player, target, row.id, plan);
             if (!copied) return core::Result<std::vector<ai::GalacticSelectionObject>>::failure(copied.error());
             const auto cost = copied.value().first;
             if ((cost.repr & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL || cost < Number(0))
                 return unavailable_store<std::vector<ai::GalacticSelectionObject>>("freestore selection cost must be qualified finite and nonnegative");
+            // BTP-S02: failed staging rejects the actor before allocation and
+            // WGA-60 path normalization, including an actor already reserved.
+            if (cost == ai::galactic_goals::rejected_estimate()) continue;
             out.push_back({row.id, cost, copied.value().second, row.type, row.transit});
         }
         return core::Result<std::vector<ai::GalacticSelectionObject>>::success(std::move(out));

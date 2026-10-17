@@ -10,6 +10,7 @@
 #include "eawr/sim/tactical/combat.hpp"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <span>
 #include <set>
@@ -51,10 +52,12 @@ struct ViewUnit {
     std::optional<math::Fixed> time_till_dead;
     sim::EntityId squadron{};            // a craft's team container
     std::vector<sim::EntityId> members;  // a container's live craft
+    std::optional<std::array<math::Vec3, 2>> proximity_bounds; // post-movement collection box in an object turn
     std::vector<tactical::AbilityStatus> abilities; // #76: the snapshot's (none on a container)
     tactical::TypeId purchase_type{}; // SAE-11/WHE-49: logical identity; combat still reads type
     std::uint64_t purchase_token{}; // SAE-11: distinguish concurrent arrivals of the same type
     std::optional<tactical::TacticalInstance::PlanetaryWeaponView> planetary_weapon;
+    bool can_move{}; // completed SPACE formation eligibility, including active movement locks
 };
 
 struct ViewPlayer {

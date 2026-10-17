@@ -6,6 +6,8 @@
 #include "eawr/presentation/animation/animation.hpp"
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/texture_button.hpp>
+#include <godot_cpp/classes/texture_rect.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 
 using namespace godot;
 namespace eawr::presentation::godot_backend {
@@ -134,6 +136,34 @@ BuiltPendingBattleHud build_pending_battle_hud(const vfs::Vfs& filesystem,
             label->set_position(Vector2(static_cast<float>(point.x) - shift,
                 static_cast<float>(point.y) - label->get_size().y * 0.5F));
         }
+    }
+    // WGUI-176: the centre graphs between the choice buttons (left = the local side, right = its opponent). Each is
+    // a stack texture picked by unit count with the side's best ship on it; the dialog fills them from its view.
+    for (const char* graph : {"graph_left", "graph_right"}) {
+        const auto* anchor = anchors.find(graph);
+        const auto* component = catalog.find(graph);
+        if (!anchor || !component) continue;
+        auto* box = memnew(Control);
+        box->set_name(graph); box->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        frame->add_child(box);
+        const auto rect = presentation::ui::shell_to_screen(anchor->rect, placement);
+        box->set_position(Vector2(static_cast<float>(rect.x), static_cast<float>(rect.y)));
+        box->set_size(Vector2(static_cast<float>(rect.width), static_cast<float>(rect.height)));
+        for (const char* part : {"stack", "ship"}) {
+            auto* image = memnew(TextureRect);
+            image->set_name(part); image->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            image->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+            image->set_stretch_mode(TextureRect::STRETCH_SCALE);
+            box->add_child(image);
+        }
+        PackedStringArray stacks;
+        for (const auto& name : component->list(data::ui::Field::blank_texture_name)) stacks.push_back(String::utf8(name.c_str()));
+        box->set_meta("graph_stacks", stacks);
+        box->set_meta("graph_icon_scale", component->vec2(data::ui::Field::size).value_or(data::ui::Vec2{1.0F, 0.0F}).x);
+        box->set_meta("graph_layer", component->vec2(data::ui::Field::offset).value_or(data::ui::Vec2{}).x);
+        box->set_meta("graph_scale", static_cast<float>(placement.scale));
+        box->hide();
+        built.gadgets.push_back({graph, graph, "", "graph", "", "", box, rect});
     }
     return built;
 }

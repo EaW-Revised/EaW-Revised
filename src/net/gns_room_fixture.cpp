@@ -46,7 +46,7 @@ struct Room {
 };
 class Endpoint final : public GnsRoomEndpoint {
 public:
-    Endpoint(std::shared_ptr<Room> room, PeerIndex seat) : room_(std::move(room)), seat_(seat), generation_(room_->generation[seat]) {}
+    Endpoint(std::shared_ptr<Room> room, PeerIndex seat) : room_(std::move(room)), seat_(seat), generation_(room_->generation[seat]), identity_(room_->roster.slots[seat].identity) {}
     PeerIndex local_slot() const override { return seat_; }
     GnsRoomRoster roster() const override { std::lock_guard guard(room_->mutex); return room_->roster; }
     GnsRoomLease lease() const override { std::lock_guard guard(room_->mutex); return room_->lease; }
@@ -76,6 +76,21 @@ public:
         auto value = std::move(room_->inbox[seat_].front()); room_->inbox[seat_].pop_front();
         room_->used[seat_] -= value.bytes.size();
         return core::Result<std::optional<GnsRoomSignal>>::success(std::move(value));
+    }
+    core::Result<bool> repair_attachment(std::uint64_t epoch) override {
+        std::lock_guard guard(room_->mutex);
+        if (epoch == 0 || epoch < repair_epoch_ || !room_->healthy() || room_->roster.state != GnsRoomState::locked
+            || room_->roster.slots[seat_].identity != identity_
+            || (room_->roster.slots[seat_].state != GnsRoomSlotState::attached && room_->roster.slots[seat_].state != GnsRoomSlotState::held))
+            return core::Result<bool>::failure(room_error("EAWR-NET-1791", "Room cannot reattach this member"));
+        if (epoch == repair_epoch_) return core::Result<bool>::success(true);
+        // The fixture has no provider. It must never pretend cached TURN is a
+        // fresh credential; explicit attach(turn) is required in provider tests.
+        if (room_->turn[seat_]) return core::Result<bool>::failure(room_error("EAWR-NET-1791", "Fixture cannot refresh TURN"));
+        room_->clear(seat_, GnsRoomSlotState::held);
+        room_->roster.slots[seat_].state = GnsRoomSlotState::attached;
+        generation_ = room_->generation[seat_]; repair_epoch_ = epoch; ++room_->roster.revision;
+        return core::Result<bool>::success(true);
     }
     core::Result<void> leave() override {
         std::lock_guard guard(room_->mutex);
@@ -124,7 +139,8 @@ private:
     }
     std::shared_ptr<Room> room_;
     PeerIndex seat_{};
-    std::uint64_t generation_{};
+    std::uint64_t generation_{}, repair_epoch_{};
+    std::string identity_;
 };
 }
 struct InProcessGnsRoom::Impl { std::shared_ptr<Room> room{std::make_shared<Room>()}; };

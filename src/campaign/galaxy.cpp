@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <set>
 #include <utility>
 
 namespace eawr::campaign {
@@ -35,24 +36,59 @@ core::Result<GalaxyModel> build_campaign_galaxy(const data::galactic::GalacticDa
     GalaxyModel result;
     result.next_id = first_free;
     result.maximum_movement_distance = *maximum->number;
+    const auto warn = [&](std::string code, std::string message) {
+        core::Diagnostic diagnostic;
+        diagnostic.code = std::move(code);
+        diagnostic.severity = core::Severity::warning;
+        diagnostic.logical_path = campaign.file;
+        diagnostic.message = campaign.name + ": " + std::move(message);
+        result.diagnostics.push_back(std::move(diagnostic));
+    };
     std::map<std::string, sim::galactic::PlanetId> ids;
+    std::set<std::string> duplicate_endpoints;
     for (const auto& name : campaign.planets) {
         const auto* planet = data.planet(name);
         if (data.galaxy_art_object(name) || (planet && !planet->has_planetary_behavior()))
             return invalid(campaign, "non-conquerable galaxy art object listed as a planet: " + name);
         if (!planet || !planet->galactic_position) return invalid(campaign, "missing Galactic_Position for " + name);
         const auto id = result.next_id++;
-        if (!ids.emplace(key(name), id).second) return invalid(campaign, "duplicate campaign planet " + name);
+        // WGS-184: live lookup visits front-inserted objects, so the last-created exact type wins.
+        if (!ids.insert_or_assign(key(planet->name), id).second)
+            duplicate_endpoints.insert(key(planet->name));
         const auto& p = *planet->galactic_position;
         result.planets.push_back({id, {p.x, p.y, p.z}, initial_owner});
         result.names.push_back({id, planet->name});
     }
+    std::set<std::pair<sim::galactic::PlanetId, sim::galactic::PlanetId>> linked_pairs;
     for (const auto& name : campaign.trade_routes) {
         const auto* route = data.trade_route(name);
-        if (!route || !route->hs_speed_factor || route->hs_speed_factor->raw() <= 0)
-            return invalid(campaign, "missing or invalid HS_Speed_Factor for " + name);
+        if (!route)
+            return invalid(campaign, "missing trade route " + name);
+        if (!data.planet(route->point_a) || !data.planet(route->point_b))
+            return invalid(campaign, "unknown route endpoint type: " + name);
+        // WGS-182/183: no link without both live endpoint types. Variants do not alias
+        // their parent type. Keep skipped definitions in content identity, not graph IDs.
         const auto a = ids.find(key(route->point_a)); const auto b = ids.find(key(route->point_b));
-        if (a == ids.end() || b == ids.end()) return invalid(campaign, "route endpoint outside campaign: " + name);
+        // Diagnose ambiguity only when a route actually looks up this endpoint type.
+        for (const auto& endpoint : {route->point_a, route->point_b}) {
+            if (duplicate_endpoints.contains(key(endpoint)))
+                warn("campaign_route_duplicate_endpoint", "route " + name
+                    + " endpoint selects first live (last-created) campaign planet instance: " + endpoint);
+        }
+        if (a == ids.end() || b == ids.end()) {
+            if (a != ids.end() || b != ids.end())
+                warn("campaign_route_external_endpoint", "skipped route " + name
+                    + ": endpoint outside campaign: " + (a == ids.end() ? route->point_a : route->point_b));
+            continue;
+        }
+        // WGS-185: later authored routes cannot replace an already linked planet pair.
+        const auto pair = std::minmax(a->second, b->second);
+        if (!linked_pairs.emplace(pair.first, pair.second).second) {
+            warn("campaign_route_duplicate_pair", "ignored later route for an already linked endpoint pair: " + name);
+            continue;
+        }
+        if (!route->hs_speed_factor || route->hs_speed_factor->raw() <= 0)
+            return invalid(campaign, "missing or invalid HS_Speed_Factor for " + name);
         const auto id = result.next_id++;
         result.routes.push_back({id, a->second, b->second, *route->hs_speed_factor});
         result.names.push_back({id, route->name});

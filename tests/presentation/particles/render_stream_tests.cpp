@@ -1,4 +1,5 @@
 #include "render_test_support.hpp"
+#include "../../../apps/viewer/src/galactic/corruption_budget.hpp"
 
 #include <atomic>
 #include <cstdlib>
@@ -28,6 +29,40 @@ void operator delete(void* const memory, std::size_t) noexcept { std::free(memor
 #endif
 
 namespace particle_render_contracts {
+void test_corruption_actual_reservation_budget() {
+    RecordingBackend backend;
+    particles::EffectRegistry registry(backend);
+    eawr::viewer::galactic::CorruptionParticleBudget budget;
+    particles::SystemDefinition system;
+    system.emitters.push_back(drawable_emitter());
+    std::vector<particles::EffectHandle> handles;
+    std::size_t expected{};
+    for (std::uint32_t seed = 1; seed <= 129; ++seed) {
+        auto spawned = budget.spawn(registry, system, seed);
+        expect(spawned && spawned.value().has_value(), "more than 64 small corruption effects fit the owner budget");
+        if (!spawned || !spawned.value()) break;
+        handles.push_back(*spawned.value());
+        const auto reserved = registry.reserved_particles(handles.back());
+        expect(reserved > 0 && reserved < 4096, "small effect reserves its actual slots rather than its offered cap");
+        expected += reserved;
+    }
+    expect(handles.size() == 129 && budget.used() == expected && budget.refused() == 0,
+        "all 129 attachments or lines are admitted and charged by real reservation");
+    for (const auto handle : handles) expect(bool(budget.release(registry, handle)), "budget releases live effect");
+    expect(budget.used() == 0 && registry.live_effects() == 0 && registry.live_backend_resources() == 0,
+        "owner teardown returns all slots and resources");
+    eawr::viewer::galactic::CorruptionParticleBudget tiny(1);
+    const auto first = tiny.spawn(registry, system, 1);
+    const auto refused = tiny.spawn(registry, system, 2);
+    expect(first && first.value() && refused && !refused.value() && tiny.used() == 1 && tiny.refused() == 1,
+        "exhausted budget reports a refused effect without exceeding its limit");
+    if (first && first.value()) expect(bool(tiny.release(registry, *first.value())), "release frees exhausted owner");
+    tiny.begin_frame();
+    const auto recovered = tiny.spawn(registry, system, 3);
+    expect(recovered && recovered.value() && tiny.refused() == 0, "freed budget admits effects on the next frame");
+    if (recovered && recovered.value()) expect(bool(tiny.release(registry, *recovered.value())), "recovered effect releases");
+}
+
 void test_legacy_sort_triangles_and_atlas() {
     // Interleaved system storage, ineligible slots and equal-distance ties:
     // partitioning by emitter must preserve every geometry bit and sort key.
@@ -741,6 +776,24 @@ void test_release_and_replacement_lifecycle() {
         }
         expect(stats.value().emitters[3].maximum_alpha == 0.0F, "an undrawn emitter reports no alpha");
     }
+}
+
+void test_corruption_registry_settings() {
+    RecordingBackend backend; particles::EffectRegistry registry(backend);
+    const auto handle = registry.spawn(mixed_system(), 21, 256);
+    expect(bool(handle), "corruption registry fixture spawns");
+    if (!handle) return;
+    expect(bool(registry.set_dynamic(handle.value(), 2, 0)), "registry forwards dynamic settings");
+    const auto none = registry.advance(handle.value(), 0.1F, test_camera());
+    expect(none && none.value().particles == 0, "registry zero energy creates no particles");
+    expect(bool(registry.set_pinched_cylinder(handle.value(), 4, 80, 0.5F)), "registry forwards a live line volume");
+    expect(bool(registry.set_dynamic(handle.value(), 2, 1)), "registry resumes ordinary energy");
+    const auto resumed = registry.advance(handle.value(), 0.25F, test_camera());
+    expect(resumed && resumed.value().particles > 0, "valid volume and energy draw after a change");
+    expect(!registry.set_dynamic(handle.value(), -1, 1), "registry rejects invalid size");
+    expect(bool(registry.release(handle.value())), "corruption effect releases");
+    expect(!registry.set_dynamic(handle.value(), 1, 1) && !registry.set_pinched_cylinder(handle.value(), 1, 1, 1),
+        "released effects reject dynamic mutation");
 }
 
 void test_effect_brightness() {

@@ -53,6 +53,7 @@ CommandLayer layer_of(const CommandPayload& payload) noexcept {
                           [](const ExecutePreparedAbility&) { return CommandLayer::galactic; },
                           [](const CancelGalacticAbility&) { return CommandLayer::galactic; },
                           [](const LaunchFromSurface&) { return CommandLayer::galactic; },
+                          [](const LaunchFleet&) { return CommandLayer::galactic; },
                           [](const TransferFleetMembers&) { return CommandLayer::galactic; },
 
                       },
@@ -93,6 +94,7 @@ std::uint16_t opcode_of(const CommandPayload& payload) noexcept {
                           [](const ExecutePreparedAbility&) { return galactic_opcodes::special_execute; },
                           [](const CancelGalacticAbility&) { return galactic_opcodes::special_cancel; },
                           [](const LaunchFromSurface&) { return galactic_opcodes::launch_from_surface; },
+                          [](const LaunchFleet&) { return galactic_opcodes::launch_fleet; },
                           [](const TransferFleetMembers&) { return galactic_opcodes::transfer_fleet_members; },
 
                       },
@@ -143,6 +145,14 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                    },
                    [&](const SellObject& command) {
                        detail::put_u64(bytes, command.planet); detail::put_u64(bytes, command.object);
+                   },
+                   [&](const LaunchFleet& command) {
+                       detail::put_u32(bytes, static_cast<std::uint32_t>(command.units.size()));
+                       for (const auto id : command.units) detail::put_u64(bytes, id);
+                       detail::put_u32(bytes, static_cast<std::uint32_t>(command.path.size()));
+                       for (const auto id : command.path) detail::put_u64(bytes, id);
+                       detail::put_u8(bytes, command.destination_slot ? 1 : 0);
+                       if (command.destination_slot) detail::put_u8(bytes, *command.destination_slot);
                    },
                    [&](const ProductionCommand& command) {
                        detail::put_u64(bytes, command.planet); detail::put_u64(bytes, command.type);
@@ -354,6 +364,32 @@ std::optional<CommandPayload> decode_payload(
             }
             if (!reader.read_u64(c.target) || !reader.read_u8(c.slot) || c.slot > 2 || (c.target && c.slot)
                 || reader.remaining()) return std::nullopt;
+            return CommandPayload{std::move(c)};
+        }
+        if (opcode == galactic_opcodes::launch_fleet) {
+            if (bytes.size() > galactic_replay_max_payload) return std::nullopt;
+            LaunchFleet c; std::uint32_t count{}; std::uint8_t present{};
+            if (!reader.read_u32(count) || count == 0 || std::size_t{count} > reader.remaining() / 8) return std::nullopt;
+            std::set<EntityId> units;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                EntityId id{};
+                if (!reader.read_u64(id) || !id || !units.insert(id).second) return std::nullopt;
+                c.units.push_back(id);
+            }
+            if (!reader.read_u32(count) || count < 2 || count > 4096 || std::size_t{count} > reader.remaining() / 8) return std::nullopt;
+            std::set<PlanetId> planets;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                PlanetId id{};
+                if (!reader.read_u64(id) || !id || !planets.insert(id).second) return std::nullopt;
+                c.path.push_back(id);
+            }
+            if (!reader.read_u8(present) || present > 1) return std::nullopt;
+            if (present) {
+                std::uint8_t slot{};
+                if (!reader.read_u8(slot) || slot > 2) return std::nullopt;
+                c.destination_slot = slot;
+            }
+            if (reader.remaining()) return std::nullopt;
             return CommandPayload{std::move(c)};
         }
         if (opcode == galactic_opcodes::recheck_orbit) {

@@ -12,6 +12,7 @@
 #include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/fog_cells.hpp"
 #include "eawr/sim/tactical/motion.hpp"
+#include "eawr/sim/tactical/object_turn.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/sim/tactical/types.hpp"
@@ -79,6 +80,9 @@ struct TacticalTick {
     // GC return hand-off: ordered stable IDs with final-blow owners, opt-in shared allocator
     // sessions only. Tick output, never new tactical state or replay/snapshot bytes.
     std::vector<std::pair<EntityId, PlayerId>> deaths;
+    // #3644: what the object-turn seam did with each use of this tick, in (unit, sequence) order; empty
+    // without a provider or when none was due. Diagnostics only: never hashed, never in a snapshot.
+    std::vector<ObjectTurnOutcome> object_turn;
 };
 
 // Deterministic home of one tactical session. Commands are queued by submit() in
@@ -152,6 +156,18 @@ public:
     // the digest the synchronous path returns in state_sha256. Null (the default) hashes on the
     // stepping thread. The hasher is not state: it never changes a hash or a replay.
     void set_state_hasher(std::shared_ptr<StateHasher> hasher) noexcept;
+    // #3644: installs (or, with null, removes) the object-turn provider. Not state: a session with none
+    // installed steps exactly as before. The provider is called from inside step(), at the seam after the
+    // ability service and its special handlers and before tracking, late impacts and the commands (see
+    // object_turn.hpp and docs/simulation.md). While either provider call runs, step(), submit(),
+    // submit_human(), submit_object_turn(), set_object_turn_service(), load_checkpoint_state(),
+    // stage_spawn(), stage_remove(), configure_retreat() and request_projectile_explosion() fail or
+    // refuse (the re-entrancy guard); the void setters cannot, and a provider must not call them.
+    [[nodiscard]] core::Result<void> set_object_turn_service(std::shared_ptr<ObjectTurnService> service);
+    // Replay input: a use the world applies at the seam of `record.tick` (no provider needed). Like
+    // submit(), it refuses a tick that has already executed and keeps (tick, unit, sequence) strictly
+    // increasing within the session. A tick that has a recorded use must not also have a due provider.
+    [[nodiscard]] core::Result<void> submit_object_turn(const ObjectTurnRecord& record);
     // Optional caller-owned profiling clock: begin/end of serial commit sections, never state.
     void set_commit_observer(std::function<void(std::string_view, bool)> observer);
 
@@ -269,6 +285,8 @@ public:
 
     // The replay of this session so far: its setup, final tick = completed tick, and
     // every executed command (accepted or rejected at execution) in canonical order.
+    // Every use the object-turn provider issued at the seam, applied or refused, is in `object_turns`, in
+    // (tick, unit, sequence) order; the record is empty only when no use was issued.
     [[nodiscard]] TacticalReplay record() const;
     // The replay through the next tick (#615): record() with the final tick one past the
     // completed tick and that tick's queued commands. A failed step changes nothing, so after a

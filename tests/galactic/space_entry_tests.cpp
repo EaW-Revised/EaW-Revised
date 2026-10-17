@@ -14,6 +14,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/visibility.hpp"
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <map>
@@ -121,12 +122,14 @@ void script_manifest_contracts() {
     const std::string state_machine = "Data/Scripts/Library/PGStateMachine.lua";
     expect(modules.contains(vader) && modules.contains(state_machine),
         "SOS-40/45: a reachable companion root and state-machine dependency enter the battle manifest");
-    expect(!modules.contains("Data/Scripts/GameObject/OBJECTSCRIPT_MILLENNIUMFALCON.lua")
-        && !modules.contains("Data/Scripts/GameObject/SUNDERED_HEART.lua")
-        && !modules.contains("Data/Scripts/GameObject/HeroPlanAttach.lua"),
-        "unrelated candidate object roots and their private dependencies stay out of the session");
-    expect(modules.size() == foc::required_modules(battle).size() + foc::plan_library_modules().size() + foc::selected_plans().size(),
-        "repeated and mixed-case attachment declarations select one root and retain campaign plan modules");
+    // ML-34: the whole mounted script corpus is admitted (mods may reach any root by data), so the unrelated
+    // candidate roots are part of the manifest; repeated and mixed-case spellings still make one copy each.
+    expect(modules.contains("Data/Scripts/GameObject/OBJECTSCRIPT_MILLENNIUMFALCON.lua")
+        && modules.contains("Data/Scripts/GameObject/SUNDERED_HEART.lua")
+        && modules.contains("Data/Scripts/GameObject/HeroPlanAttach.lua"),
+        "the mounted candidate object roots and their private dependencies are admitted with the corpus");
+    expect(modules.size() == cached.size(),
+        "repeated and mixed-case attachment declarations select one copy of each mounted module");
     auth::ModuleManifest manifest;
     for (const auto& [path, bytes] : modules) check(manifest.add(path, bytes));
     auto scheduler = take(auth::ScriptScheduler::create({}, std::move(manifest)));
@@ -135,7 +138,7 @@ void script_manifest_contracts() {
     expect(marker.has_value(), "the selected companion root resolves through canonical manifest lookup");
 
     const auto plain = take(skirmish::select_ai_modules(cached, {}, true));
-    expect(!plain.contains(vader) && !plain.contains(state_machine), "a plain battle admits no unrelated object roots or state-machine dependency");
+    expect(plain.size() == cached.size(), "a plain battle admits the same mounted corpus (ML-34)");
     auto incomplete = cached; incomplete.erase(vader);
     const auto missing_root = skirmish::select_ai_modules(incomplete, battle, true);
     expect(!missing_root && missing_root.error().code == auth::codes::module_rejected
@@ -1096,6 +1099,135 @@ void garrison_contracts() {
     auto unchanged=legacy; unchanged.campaign_ability_locks.clear(); unchanged.units.back().campaign_ship_class="super"; unchanged.units.back().production.battlefield_bonuses={{"x",0,whole(1),{},true,true}};
     expect(units::canonical_encoding(legacy)==units::canonical_encoding(unchanged),"ordinary skirmish content encoding excludes every opt-in campaign extension");
 }
+// #3956 / WSL-16, WSL-16a, WGT-10: a campaign station also launches a ship type (no squadron members) as one
+// single ship: starting count 1, a lost ship is replaced from the unlimited reserve, skirmish tables drop the
+// entry. The ship's own Hyperspace tag decides how it enters: with it down the reinforcement arrival lane, without
+// it straight from the bay; the squadron entry always leaves the hangar. Level 2 places the "Station" row with a Tartan-like ship;
+// level 4 places its own "Station4" row (a different authored station type, as in the retail level-4 station)
+// with an Acclamator-like ship; the rule is the same.
+void station_ship_spawn_scenario(const std::string& ship_name, const bool hyperspace, const std::uint32_t level) {
+    const auto ship_type = skirmish::type_id(ship_name);
+    const std::string station_name = level == 4 ? "Station4" : "Station";
+    const auto build = [&](const bool campaign_scene) {
+        auto tables = tables_for_entry(); tables.campaign_scene = campaign_scene;
+        if (level == 4) { auto clone = *tables.find("Station"); clone.id = station_name; tables.units.push_back(clone); }
+        if (ship_name != "Ship") { auto clone = *tables.find("Ship"); clone.id = ship_name; tables.units.push_back(clone); }
+        const_cast<units::UnitType*>(tables.find(ship_name))->campaign_hyperspace = hyperspace;
+        auto* station = const_cast<units::UnitType*>(tables.find(station_name));
+        station->spawner->starting = {{"Squadron", units::no_index, 1}, {ship_name, units::no_index, 1}};
+        station->spawner->reserves = {{"Squadron", units::no_index, -1}, {ship_name, units::no_index, -1}};
+        auto input = entry_inputs(tables); input.riders.clear(); input.types[0].escorts.clear();
+        if (level == 4) {
+            campaign::SpaceEntryType type; type.galactic = 8; type.tactical = station_name; type.population = whole(0);
+            input.types.push_back(type); input.station_type = station_name; input.station_galactic_type = 8;
+        }
+        campaign::ConflictRecord record; record.id = 90; record.invader = 1; record.defender = 2;
+        record.map_identity = input.map.map; record.station_level = level; record.forces = {{20, 1, 1, 10}, {30, 1, 2, 12}};
+        return take(campaign::build_space_entry(record, input, 100, 17));
+    };
+    const auto skirmish_like = build(false);
+    expect(std::none_of(skirmish_like.content.motion.squadrons.spawners.begin(), skirmish_like.content.motion.squadrons.spawners.end(),
+        [](const auto& profile) { return std::any_of(profile.entries.begin(), profile.entries.end(), [](const auto& e) { return e.ship; }); }),
+        "a table outside the campaign scene keeps dropping ship spawn entries");
+    const auto entry = build(true);
+    const auto* profile = entry.content.motion.squadrons.find_spawner(skirmish::type_id(station_name), 2);
+    expect(entry.conflict.station_level == level && profile != nullptr && profile->entries.size() == 2 && !profile->entries[0].ship && !profile->entries[0].arrival
+        && profile->entries[1].ship && profile->entries[1].arrival == hyperspace
+        && profile->entries[1].squadron == ship_type && profile->entries[1].starting == 1 && profile->entries[1].reserve == -1,
+        ship_name + ": level " + std::to_string(level) + " campaign station keeps its ship row (starting count, unlimited reserve) and the arrival follows the Hyperspace tag");
+    std::vector<std::string> reference;
+    for (const auto workers : std::array<std::size_t, 4>{1, 2, 4, 8}) {
+        const platform::ThreadWorkerAdapter executor(workers);
+        auto battle = take(tt::TacticalSession::create(entry.conflict.tactical, entry.content));
+        std::vector<std::string> hashes;
+        const auto garrison_ships = [&]() {
+            std::vector<sim::EntityId> ids;
+            for (const auto& unit : battle.snapshot()->instances())
+                if (unit.type_id == ship_type && unit.owner == 2 && unit.garrison_unit) ids.push_back(unit.entity_id);
+            return ids;
+        };
+        // Only the station's ship may arrive by hyperspace: never its squadron craft or container.
+        const auto arriving_ships = [&]() {
+            std::size_t count = 0;
+            for (const auto& unit : battle.snapshot()->instances()) {
+                if (!unit.arrival || unit.owner != 2) continue;
+                expect(unit.type_id == ship_type, ship_name + ": only the station ship arrives by hyperspace");
+                ++count;
+            }
+            return count;
+        };
+        bool seen_arriving = false;
+        for (unsigned tick = 0; tick < 120; ++tick) {
+            hashes.push_back(take(battle.step(executor)).state_sha256);
+            seen_arriving = seen_arriving || arriving_ships() != 0;
+        }
+        const auto first = garrison_ships();
+        expect(first.size() == 1, ship_name + ": the station launches its starting ship once and holds the cap (found " + std::to_string(first.size()) + ")");
+        expect(seen_arriving == hyperspace, ship_name + ": the station ship arrives by hyperspace exactly when its Hyperspace tag says so");
+        expect(std::any_of(battle.snapshot()->instances().begin(), battle.snapshot()->instances().end(),
+            [](const auto& unit) { return unit.type_id == skirmish::type_id("Craft") && unit.owner == 2 && !unit.arrival; }),
+            ship_name + ": the station still launches its squadron from the hangar beside the ship");
+        if (first.size() != 1) return;
+        for (unsigned tick = 0; tick < 160; ++tick) hashes.push_back(take(battle.step(executor)).state_sha256);
+        expect(arriving_ships() == 0, ship_name + ": the arrival ends and the ship is an ordinary garrison unit");
+        check(battle.submit({{battle.completed_tick(), 1, 77}, {first.front()}, tt::DamagePayload{whole(100000)}}));
+        seen_arriving = false;
+        for (unsigned tick = 0; tick < 200; ++tick) {
+            hashes.push_back(take(battle.step(executor)).state_sha256);
+            seen_arriving = seen_arriving || arriving_ships() != 0;
+        }
+        const auto again = garrison_ships();
+        expect(again.size() == 1 && again.front() != first.front(),
+            ship_name + ": a lost station ship is replaced from the unlimited reserve (found " + std::to_string(again.size()) + ")");
+        expect(seen_arriving == hyperspace, ship_name + ": the replacement enters the same way as the first ship");
+        if (workers == 1) reference = hashes;
+        else expect(reference == hashes, ship_name + ": station ship launch and replacement equal on 1/2/4/8 workers");
+    }
+}
+// WSL-16: a blocked spot means no spawn and the slot is returned; the spawn happens once the spot clears. The
+// ship's reserve is finite (starting 1, reserve 0), so a slot that leaked on a blocked attempt would never launch.
+void station_ship_blocked_contract() {
+    auto tables = tables_for_entry(); tables.campaign_scene = true;
+    auto patrol = *tables.find("Ship"); patrol.id = "Tartan"; patrol.campaign_hyperspace = false; tables.units.push_back(patrol);
+    auto* station = const_cast<units::UnitType*>(tables.find("Station"));
+    station->spawner->starting = {{"Tartan", units::no_index, 1}};
+    station->spawner->reserves = {{"Tartan", units::no_index, 0}};
+    auto input = entry_inputs(tables); input.riders.clear(); input.types[0].escorts.clear();
+    campaign::ConflictRecord record; record.id = 90; record.invader = 1; record.defender = 2;
+    record.map_identity = input.map.map; record.station_level = 2; record.forces = {{20, 1, 1, 10}, {30, 1, 2, 12}};
+    auto entry = take(campaign::build_space_entry(record, input, 100, 17));
+    // The campaign content carries no placement boxes of its own: the two opening "Ship" units get one wide enough
+    // to cover the bay end and every ring spot, the station ship a small one.
+    const auto box = [](const std::int64_t half) { return tt::FootprintProfile{0, tt::PlacementBox{whole(-half), whole(-half), whole(half), whole(half)}, {}}; };
+    auto wide = box(5000); wide.type = skirmish::type_id("Ship");
+    auto small = box(5); small.type = skirmish::type_id("Tartan");
+    entry.content.economy.footprints = {wide, small};
+    std::sort(entry.content.economy.footprints.begin(), entry.content.economy.footprints.end(), [](const auto& a, const auto& b) { return a.type < b.type; });
+    entry.content.victory = {};
+    const platform::ThreadWorkerAdapter executor(1);
+    auto battle = take(tt::TacticalSession::create(entry.conflict.tactical, entry.content));
+    const auto patrols = [&]() {
+        std::size_t count = 0;
+        for (const auto& unit : battle.snapshot()->instances())
+            if (unit.type_id == skirmish::type_id("Tartan") && unit.owner == 2 && unit.garrison_unit) ++count;
+        return count;
+    };
+    for (unsigned tick = 0; tick < 400; ++tick) take(battle.step(executor));
+    expect(patrols() == 0, "no free spot beside the bay: the station ship is not created");
+    std::vector<sim::EntityId> blockers;
+    for (const auto& unit : battle.snapshot()->instances()) if (unit.type_id == skirmish::type_id("Ship")) blockers.push_back(unit.entity_id);
+    expect(blockers.size() == 2, "both opening ships are live blockers");
+    for (const auto id : blockers) check(battle.submit({{battle.completed_tick(), 1, 77 + id}, {id}, tt::DamagePayload{whole(100000)}}));
+    for (unsigned tick = 0; tick < 400; ++tick) take(battle.step(executor));
+    expect(patrols() == 1, "once the spot clears the station ship spawns from the returned slot (found " + std::to_string(patrols()) + ")");
+}
+void station_ship_spawn_contracts() {
+    station_ship_spawn_scenario("Tartan", true, 2);        // level-2 station: a Hyperspace=Yes ship hyperspaces in
+    station_ship_spawn_scenario("Acclamator", true, 4);    // level-4 station row: a Hyperspace=Yes ship, same rule
+    station_ship_spawn_scenario("Tartan", false, 2);       // a modded Hyperspace=no flips it to the bay launch
+    station_ship_spawn_scenario("Acclamator", false, 4);
+    station_ship_blocked_contract();
+}
 void commander_contracts() {
     std::vector<std::string> reference;
     for (const auto workers : {1U,2U,4U,8U}) for (const auto scenario : {0U,1U,2U,3U,4U,5U,6U,7U,8U,9U}) {
@@ -1715,7 +1847,7 @@ void installed_commanders(const campaign::CampaignSetupPlan& plan, const units::
         if(reference.empty()) reference=hashes; else expect(reference==hashes,"stock company-to-battle commander path agrees on 1/2/4/8 workers");
     }
 }
-void installed(bool garrison_only = false, bool population_only = false, bool commander_only = false) {
+void installed(bool garrison_only = false, bool population_only = false, bool commander_only = false, bool superweapon_only = false) {
     std::optional<std::string> root;
 #if defined(_MSC_VER)
     char* value{}; std::size_t size{};
@@ -1733,7 +1865,7 @@ void installed(bool garrison_only = false, bool population_only = false, bool co
     if (!garrison_only && !population_only && !commander_only) stock_scene_relation_graphs(authored, files, catalog.catalog);
     const auto types = units::galactic_type_table(catalog.catalog);
     data::galactic::Campaign fixture; fixture.name = "SpaceEntryFixture";
-    fixture.locations = {"Shola", "Kamino"}; fixture.planets = fixture.locations; fixture.starting_active_player = "Rebel";
+    fixture.locations = {superweapon_only ? "NalHutta" : "Shola", "Kamino"}; fixture.planets = fixture.locations; fixture.starting_active_player = "Rebel";
     fixture.starting_tech_levels = {{"Rebel", 0}, {"Empire", 0}}; fixture.max_tech_levels = {{"Rebel", 5}, {"Empire", 5}};
     authored.campaigns.push_back(fixture);
     campaign::CampaignSetupOptions options; options.seed = 17; options.local_observer = 1;
@@ -1752,6 +1884,58 @@ void installed(bool garrison_only = false, bool population_only = false, bool co
         if (at == plan.type_bindings().end()) throw std::runtime_error("stock fixture missing binding");
         return at->id;
     };
+    if (superweapon_only) {
+        // #3935: a Death Star in the attacking fleet is deployed at the map's Death_Star_Position marker and keeps
+        // its superweapon identity; the same battle without one deploys none.
+        const auto super_name = std::string_view{"Death_Star_II"};
+        for (const bool with_super : {true, false}) {
+            gc::GalacticSetup initial; initial.seed = options.seed; initial.content_identity = plan.galaxy().content_identity;
+            initial.players = plan.galaxy().players; initial.seats = options.seats; initial.planets = plan.galaxy().planets;
+            initial.planets.front().owner = 1;
+            initial.fleets = {{10, 1, initial.planets.front().id, {{100, type_id("Corellian_Corvette")}}},
+                {11, 2, initial.planets.front().id, {{200, type_id("Star_Destroyer")}}}};
+            if (with_super) initial.fleets.back().members.push_back({201, type_id(super_name)});
+            initial.player_economy = gc::PlayerEconomySetup{{{1, whole(10000), whole(100000), 0, 5},
+                {2, whole(10000), whole(100000), 0, 5}, {3, whole(10000), whole(100000), 0, 5}, {4, {}, whole(100000), 0, 5}}};
+            auto galaxy = take(gc::GalacticSession::create(initial));
+            campaign::ConflictRecord conflict; conflict.id = 900; conflict.planet = initial.planets.front().id;
+            conflict.invader = 2; conflict.defender = 1; conflict.seats = {{{1}, 1}, {{2}, 2}};
+            const auto location = std::find_if(plan.locations().begin(), plan.locations().end(), [&](const auto& row) {
+                return row.planet && row.planet->id == conflict.planet;
+            });
+            conflict.map_identity = authored.planet(location->original_type)->space_tactical_map;
+            for (const auto& fleet : initial.fleets) for (const auto& member : fleet.members)
+                conflict.forces.push_back({member.id, member.type, fleet.owner, fleet.id});
+            std::sort(conflict.forces.begin(), conflict.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+            const auto resolved = take(provider->resolve(conflict, *galaxy.snapshot(), 901));
+            const auto& units = resolved.conflict.tactical.units;
+            for (const auto& unit : units) std::cout << "SUPERWEAPON_UNIT with=" << with_super << " id=" << unit.entity_id
+                << " type=" << unit.type_id << " owner=" << unit.owner
+                << " x=" << unit.position.x.raw() / sim::math::Fixed::scale << " y=" << unit.position.y.raw() / sim::math::Fixed::scale
+                << " z=" << unit.position.z.raw() / sim::math::Fixed::scale << "\n";
+            const auto super_units = std::count_if(units.begin(), units.end(), [&](const auto& unit) {
+                return unit.type_id == skirmish::type_id(super_name);
+            });
+            expect(super_units == (with_super ? 1 : 0), with_super ? "the attacking Death Star is a battle unit" : "no Death Star in the fleet, none in the battle");
+            if (with_super) {
+                // TSW-01: form_space_entry repositions it from the map's planet backdrop: below the ship plane (the
+                // backdrop's authored height plus the type's 1200; the installed run puts it at z -2800 on this map) and
+                // facing the battlefield centre, wherever the formation put it. The rule's arithmetic is pinned by
+                // skirmish_start_contracts; this proves the campaign path applies it.
+                const auto unit = std::find_if(units.begin(), units.end(), [&](const auto& row) { return row.type_id == skirmish::type_id(super_name); });
+                const auto scale = static_cast<double>(sim::math::Fixed::scale);
+                const auto x = static_cast<double>(unit->position.x.raw()) / scale, y = static_cast<double>(unit->position.y.raw()) / scale;
+                expect(unit->position.z == whole(-2800), "TSW-01: the Death Star stands at the backdrop's height plus 1200");
+                const auto yaw = 2.0 * std::atan2(static_cast<double>(unit->rotation.z.raw()), static_cast<double>(unit->rotation.w.raw()));
+                const auto toward_centre = std::atan2(-y, -x);
+                auto turn = std::fabs(yaw - toward_centre); if (turn > 3.14159265358979) turn = 6.28318530717959 - turn;
+                expect((x != 0.0 || y != 0.0) && turn < 0.01, "TSW-01: the Death Star faces the battlefield centre");
+            }
+
+            expect(resolved.conflict.superweapon == (with_super ? 201U : 0U), "the conflict names the superweapon force");
+        }
+        return;
+    }
     if (population_only) {
         for (const auto name : {std::string_view{"Executor_Super_Star_Destroyer"}, std::string_view{"Slave_I"}}) {
             const bool executor = name == "Executor_Super_Star_Destroyer";
@@ -2006,6 +2190,13 @@ void installed(bool garrison_only = false, bool population_only = false, bool co
     expect(staging.state_sha256() == hash_before_presentation,
         "presentation metadata creation leaves the authoritative state hash unchanged");
     expect(!view->tables.find("UM06_EclipseDefensePad"), "unreachable story rocket is absent from this battle's table");
+    // The campaign subset keeps a type's retreat self-destruct explosion with the type (star bases author one).
+    for (const auto& type : view->tables.units) {
+        if (type.retreat_self_destruct.empty()) continue;
+        expect(type.retreat_self_destruct_index < view->tables.projectiles.size()
+            && view->tables.projectiles[type.retreat_self_destruct_index].id == type.retreat_self_destruct,
+            "campaign battle table resolves " + type.id + " retreat self-destruct explosion");
+    }
     const auto* squadron = view->tables.find("Rebel_X-Wing_Squadron");
     expect(view->tables.find("Tartan_Patrol_Cruiser") && squadron && !squadron->members.empty()
         && std::all_of(squadron->members.begin(), squadron->members.end(), [&](const auto& member) { return view->tables.find(member.craft); }),
@@ -2182,7 +2373,7 @@ int main(int argc, char** argv) {
 #else
     setenv("EAWR_VERIFY_GALACTIC_HASH", "1", 1);
 #endif
-    try { if (argc > 1 && std::string_view(argv[1]) == "--installed-commanders") installed(false, false, true); else if (argc > 1 && std::string_view(argv[1]) == "--installed-space-population") installed(false, true); else if (argc > 1 && std::string_view(argv[1]) == "--installed-garrison") installed(true); else if (argc > 1 && std::string_view(argv[1]) == "--installed") installed(); else { salvage_contracts(); script_manifest_contracts(); preparation_contracts(); nonparticipant_team_contracts(); scene_contracts(); reserve_order_contract(); orbital_owner_admission(); formation_contracts(); team_origin_contract(); formation_stage_contracts(); mixed_class_contracts(); garrison_contracts(); commander_contracts(); ground_passenger_contracts(); admitted_cycle(); ai_retreat_completion(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--installed-commanders") installed(false, false, true); else if (argc > 1 && std::string_view(argv[1]) == "--installed-space-population") installed(false, true); else if (argc > 1 && std::string_view(argv[1]) == "--installed-superweapon") installed(false, false, false, true); else if (argc > 1 && std::string_view(argv[1]) == "--installed-garrison") installed(true); else if (argc > 1 && std::string_view(argv[1]) == "--installed") installed(); else { salvage_contracts(); script_manifest_contracts(); preparation_contracts(); nonparticipant_team_contracts(); scene_contracts(); reserve_order_contract(); orbital_owner_admission(); formation_contracts(); team_origin_contract(); formation_stage_contracts(); mixed_class_contracts(); garrison_contracts(); station_ship_spawn_contracts(); commander_contracts(); ground_passenger_contracts(); admitted_cycle(); ai_retreat_completion(); } }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

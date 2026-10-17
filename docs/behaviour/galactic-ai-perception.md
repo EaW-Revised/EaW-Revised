@@ -64,6 +64,33 @@ The current/retained engines also need a shared handle registry or
 consumer routing before cross-manager target handles can be used by every
 object/TaskForce API. This provider alone does not implement that registry.
 
+## World reader (S3a)
+
+`GalacticWorld` reads a completed tick through an `AiWorldReader`: a structural
+index plus the published world view. The index resolves every object identity
+(planets, fleets and members, landed forces, production objects, nested
+payloads) once, first resolution winning, with its containing planet, container
+and enroute membership. It is rebuilt by the partitioned attach prepass only
+when the roster-bearing inputs change; a motion-only tick keeps it and moves
+positions. The fog bits of the view come from the observer's per-viewer ranges,
+not from a whole-table search per unit and viewer (WGUI-18 object-details rule
+and WGA-08 no-fog rule unchanged).
+
+Shared derived data (the index, the per-planet force aggregates and neighbourhood
+sums, the fog bits) is built before the decision pass and frozen while players
+decide; nothing shared is written lazily from inside a decision. Per-viewer and
+per-player memos may stay lazy and belong to the player that fills them. The
+retail AI performs no such prepass: it reads live objects through per-binding
+caches (WGA-65). The reader keeps those caches' semantics, so a warm world and a
+cold world bound to the same tick hold the same bits.
+
+The view is double-buffered. The publication before the current one is reused
+once no reader holds it; a roster epoch (process-local, never saved, hashed or
+compared across processes) says whether only positions can differ. A reader that
+still holds an older publication keeps an unchanged copy. The producer catalog of
+an unchanged tick keeps its job list: credit-only and queue-clock-only changes
+share the previous jobs and prices, and equal reservations keep their record.
+
 ## Cache and retained context
 
 Cache identity includes selected player, enemy/human roots, planet, full token
@@ -161,3 +188,33 @@ separate owner. The source-separated reach pick is a supporting fixture using
 declared route records. The final installed stock reach/action/frozen-child
 proof awaits composed lifecycle, execution and campaign owners; this initial
 component test does not close the opponent slice.
+
+## Offensive goal readers
+
+The stock offensive desire equations (Conquer_Pirate, Conquer_Opponent, Conquer_To_Reconnect, Raid, Weaken_Planet and the
+unrestricted grabs) read `IsCorrupted`, `IsConnectedToCorruption`, `HasCreditSiphon`, `BaseIncomeNBTP`, `AnyCurrentThreats`,
+`TargetPoliticalControl` and `WorstIslandFractionOfLargest`. WGA-449..452 and WGA-473..476 qualify these readers; WGA-477 and
+WGA-478 record why the human-targeting goals stay at zero in an all-AI game and when the first-attack grace period ends. A
+missing owning fact (corruption state, observer row, island sizes, authored constants) stays unavailable and fails the equation
+under WGA-418; a successful reader may legitimately return zero.
+
+## Economy and connectivity publications
+
+The economy aggregate memo belongs to its querying player. Ownership observations,
+expiry and funding inputs retain WGA-65/293/299 semantics. Immutable retained
+budget rows and complete build-head publications are shared between tick headers;
+readers do not copy those records into alternating DTO buffers.
+
+Connectivity is an immutable shared publication. Execution matrices are separate
+immutable generations per player, indexed by source and candidate identity. A
+player refresh replaces only that player's matrix. The deadline refresh accepts
+an explicit executor and can run as a standalone prepass; its current invocation
+stays at the admitted execution boundary (WGA-138/139, GFC-A07/A16).
+
+Pure production-site results are memoized per player, target and policy over the
+complete access input and immutable graph. Equal inputs may reuse a result even
+when unrelated observation generations change. Initialization remains partitioned
+with ordered publication. The retained lists and stamps still refresh at their
+existing boundaries, including unread native rows (GFS-A14, GFC-A14, WGA-329).
+Changing that retained cadence to demand time is a separate fidelity change; this
+publication optimization does not change native bytes or save/restore behavior.

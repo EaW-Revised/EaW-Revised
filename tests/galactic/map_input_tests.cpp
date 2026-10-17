@@ -1,4 +1,6 @@
 #include "galactic/map_input.hpp"
+#include "galactic/fleet_panels.hpp"
+#include "galactic/fleet_traits.hpp"
 #include "eawr/sim/galactic/session.hpp"
 
 #ifdef NDEBUG
@@ -7,6 +9,10 @@
 #include <cassert>
 #include <algorithm>
 #include <array>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
 
 using namespace eawr::viewer::galactic;
 namespace {
@@ -160,9 +166,137 @@ void wheel_radar_and_typed_commands() {
         launch = {DropKind::launch, 50, 0, 1, {}, 0, {50, 50}, std::nullopt}; assert(!input.command(launch, planets)); // distinct
         launch = {DropKind::launch, 50, 0, 2, {}, 0, {}, std::nullopt}; assert(!input.command(launch, planets)); // undiscovered
     }
+    {
+        const DropIntent launch_move{DropKind::launch, 50, 0, 1, {1, 3}, 0, {50, 52}, std::nullopt};
+        const auto order = input.command(launch_move, planets);
+        assert(order && std::holds_alternative<eawr::sim::galactic::LaunchFleet>(*order));
+        const auto& typed = std::get<eawr::sim::galactic::LaunchFleet>(*order);
+        assert(typed.units == launch_move.members && typed.path == launch_move.path && !typed.destination_slot);
+        auto invalid = launch_move; invalid.path = {1, 2};
+        assert(!input.command(invalid, planets)); // Undiscovered destination.
+        invalid = launch_move; invalid.path = {3, 1};
+        assert(!input.command(invalid, planets)); // Wrong source.
+        invalid = launch_move; invalid.target = 51;
+        assert(!input.command(invalid, planets)); // Launch/move creates its own fleet.
+    }
     assert(!input.command({DropKind::ability, 50, 0, 1, {}, 0, {}, std::nullopt}, planets));
     input.gates.tutorial_locked = true;
     assert(!input.command({DropKind::land, 50, 0, 1, {}, 0, {}, std::nullopt}, planets));
+}
+void live_hero_containment_and_home() {
+    namespace gc = eawr::sim::galactic;
+    const auto base = std::make_shared<const gc::GalacticSnapshot>(0, gc::GalacticClock{},
+        std::vector<gc::GalacticPlayer>{}, std::vector<gc::Planet>{{1, {}, 1}, {3, {}, 2}},
+        std::vector<gc::Route>{}, std::vector<gc::Fleet>{{10, 1, 1, {{30, 8}}}}, std::vector<gc::GalacticEvent>{});
+    std::vector<gc::CensusObject> actors{{20, 7, 2, 3, 3, false, false, 7},
+        {21, 7, 1, 999, 30, false, false, 7}, {22, 7, 1, 3, 3, false, false, 7},
+        {30, 8, 1, 1, 10, false, false, 8}};
+    const auto snapshot = [&] {
+        gc::NativeSnapshotChanges changes;
+        changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(actors);
+        return gc::GalacticSnapshot::native_view(base, std::move(changes));
+    };
+    assert(first_hero_planet(*snapshot(), 7) == 3); // Foreign first identity still wins, like retail's type query.
+    actors[0].current_type = 9;
+    assert(first_hero_planet(*snapshot(), 7) == 1); // Nested parents resolve; stale .planet ignored.
+    assert(actor_containing_planet(*snapshot(), 22) == 3); // Direct surface parent.
+    assert(!first_hero_planet(*snapshot(), 0));
+    assert(!first_hero_planet(*snapshot(), 99));
+    actors[1].container = 999;
+    assert(!first_hero_planet(*snapshot(), 7)); // Unresolved first live match does not pick the second.
+    actors[1].container = 30; actors[3].container = 21;
+    assert(!first_hero_planet(*snapshot(), 7)); // Cycle.
+    actors[3].container = 10; actors[3].dead = true;
+    assert(!first_hero_planet(*snapshot(), 7));
+    actors[3].dead = false; actors[3].delete_pending = true;
+    assert(!first_hero_planet(*snapshot(), 7));
+    actors[3].delete_pending = false; actors[3].owner = 2;
+    assert(first_hero_planet(*snapshot(), 7) == 1); // Ownership is not a containment predicate.
+    actors[3].owner = 1;
+    actors[1].dead = true; assert(first_hero_planet(*snapshot(), 7) == 3);
+    actors[1].dead = false; actors[1].delete_pending = true; assert(first_hero_planet(*snapshot(), 7) == 3);
+    actors[1].delete_pending = false; actors[1].current_type = 8;
+    assert(first_hero_planet(*snapshot(), 7) == 3); // Current type, no original-type fallback.
+    actors[1].current_type = 7;
+    gc::NativeSnapshotChanges travelling;
+    travelling.actors = std::make_shared<const std::vector<gc::CensusObject>>(actors);
+    travelling.fleets = std::vector<gc::Fleet>{{10, 1, 1, {{30, 8}}}};
+    travelling.fleets->front().motion.transit.emplace();
+    assert(!first_hero_planet(*gc::GalacticSnapshot::native_view(base, std::move(travelling)), 7));
+    MapInput input;
+    assert(!input.go_home(planets, 999, CameraState::overview).accepted && input.home == 0);
+    assert(!input.go_home(planets, 0, CameraState::overview).accepted && input.home == 0);
+    const auto resolved = first_hero_planet(*snapshot(), 7);
+    assert(input.go_home(planets, resolved, CameraState::overview).accepted && input.home == 1);
+    assert(input.go_home(planets, 3, CameraState::overview).target == 1); // Valid cached fallback remains.
+    input.gates.selection_locked = true;
+    assert(!input.hero(planets, true, false, resolved, CameraState::overview, false).accepted);
+    input.gates.selection_locked = false;
+    assert(!input.hero(planets, true, true, resolved, CameraState::overview, false).accepted);
+    assert(!input.hero(planets, false, false, resolved, CameraState::overview, false).accepted);
+    const auto effect = input.hero(planets, true, false, resolved, CameraState::overview, true);
+    assert(effect.accepted && effect.position && effect.zoom && effect.target == 1);
+    input.selected = 0; // WGUI-47 accepts unchanged selection before checking discovery.
+    auto hidden = planets; hidden.front().discovered = false;
+    assert(!input.hero(hidden, true, false, resolved, CameraState::overview, false).accepted);
+}
+void queued_ability_drop_is_scoped_to_preparation_and_owner() {
+    namespace gc = eawr::sim::galactic;
+    auto owner = std::make_shared<int>(1);
+    const std::weak_ptr<const void> lifetime = owner;
+    gc::PreparedAbility capability; capability.actor = 50; capability.planet = 1; capability.preparation = 77;
+    capability.kind = gc::AbilityKind::planet_destruction;
+    PendingAbilityDrop pending;
+    assert(!pending.matches(lifetime, capability));
+    pending.arm(lifetime, capability);
+    assert(pending.matches(lifetime, capability)); // Another release before a publication queues nothing.
+    const auto next_publication = capability;
+    pending.observe(&next_publication);
+    assert(pending.matches(lifetime, capability)); // A new snapshot with the same capability is still pending.
+    auto reopened = capability; ++reopened.preparation;
+    assert(!pending.matches(lifetime, reopened));
+    pending.observe(&reopened);
+    assert(!pending.matches(lifetime, capability));
+    pending.arm(lifetime, reopened); pending.observe(nullptr);
+    assert(!pending.matches(lifetime, reopened)); // Retraction/settlement permits a later publication.
+    pending.arm(lifetime, capability);
+    auto replacement = std::make_shared<int>(2);
+    const std::weak_ptr<const void> restored_lifetime = replacement;
+    assert(!pending.matches(restored_lifetime, capability)); // Loaded owners may reuse numeric ids.
+    owner.reset();
+    assert(!pending.matches(restored_lifetime, capability));
+}
+void typed_ability_intents_preserve_capabilities() {
+    namespace gc = eawr::sim::galactic;
+    MapInput input;
+    DropIntent intent; intent.kind = DropKind::ability; intent.source = 50; intent.planet = 1;
+    const gc::PrepareGalacticAbility prepare{50, 1, gc::AbilityKind::planet_destruction};
+    intent.ability = prepare;
+    auto command = input.command(intent, planets);
+    assert(command && std::get<gc::PrepareGalacticAbility>(*command) == prepare);
+    gc::PreparedAbility capability;
+    capability.actor = 50; capability.planet = 1; capability.preparation = 77;
+    capability.kind = gc::AbilityKind::technology_theft; capability.choice = 4; capability.item = 99;
+    capability.price = eawr::sim::math::Fixed::from_integer(321).value(); capability.owned = true;
+    intent.ability = gc::ExecutePreparedAbility{capability};
+    command = input.command(intent, planets);
+    assert(command && std::get<gc::ExecutePreparedAbility>(*command).prepared == capability);
+    intent.source = 51; assert(!input.command(intent, planets)); intent.source = 50;
+    intent.planet = 3; assert(!input.command(intent, planets)); intent.planet = 1;
+    auto undiscovered = planets; undiscovered.front().discovered = false;
+    assert(!input.command(intent, undiscovered));
+    input.gates.selection_locked = true; assert(!input.command(intent, planets)); input.gates.selection_locked = false;
+    input.gates.action_menu = true; assert(!input.command(intent, planets)); input.gates.action_menu = false;
+    input.gates.hud_enabled = false; assert(!input.command(intent, planets)); input.gates.hud_enabled = true;
+    input.gates.tutorial_locked = true; assert(!input.command(intent, planets)); input.gates.tutorial_locked = false;
+    input.gates.active_mode = false; assert(!input.command(intent, planets)); input.gates.active_mode = true;
+    input.gates.galactic = false; assert(!input.command(intent, planets)); input.gates.galactic = true;
+    intent.ability = gc::CancelGalacticAbility{50, 77};
+    command = input.command(intent, undiscovered); // Cancellation remains possible after discovery is lost.
+    assert(command && std::get<gc::CancelGalacticAbility>(*command) == (gc::CancelGalacticAbility{50, 77}));
+    intent.source = 51; assert(!input.command(intent, planets)); intent.source = 50;
+    intent.ability = gc::CancelGalacticAbility{50, 0}; assert(!input.command(intent, planets));
+    intent.ability.reset(); assert(!input.command(intent, planets));
 }
 void fleet_destination_uses_live_routes() {
     namespace gc = eawr::sim::galactic;
@@ -309,12 +443,160 @@ void published_discovery_is_player_specific() {
     assert(observer_discovery(*snapshot, 1, 999) == std::optional(false));
     assert(observer_discovery(*snapshot, 99, 101) == std::optional(false));
 }
+// WGUI-05/60/62: the per-planet alternate and the per-surface draw decision.
+void undiscovered_planets_show_only_the_grid_shell() {
+    PlanetShellInput art;
+    art.galaxy_planet = true; art.has_shell = true; art.world_layer = true;
+    art.camera_target = true; art.camera_alternate = 1;
+    // Undiscovered: alternate 2 whatever the camera does, in the world layer and in a secondary scene layer.
+    assert(planet_alternate(art) == 2);
+    art.world_layer = false;
+    assert(planet_alternate(art) == 2);
+    // The shell surface draws, the camera alternates and the plain model surfaces do not; untagged surfaces always do.
+    assert(surface_drawn(2, 2) && !surface_drawn(0, 2) && !surface_drawn(1, 2) && surface_drawn(-1, 2));
+    // Discovered mid-game: the same planet falls back to the camera rule and the shell disappears.
+    art.discovered = true;
+    assert(planet_alternate(art) == 0 && !surface_drawn(2, planet_alternate(art)) && surface_drawn(0, planet_alternate(art)));
+    art.world_layer = true;
+    assert(planet_alternate(art) == 1 && surface_drawn(1, 1) && !surface_drawn(0, 1));
+    art.camera_target = false;
+    assert(planet_alternate(art) == 0);
+    // A model with no alternate-2 surface (mod planet): undiscovered keeps the old rule, so it never vanishes.
+    PlanetShellInput plain;
+    plain.galaxy_planet = true; plain.world_layer = true;
+    assert(planet_alternate(plain) == 0 && surface_drawn(0, planet_alternate(plain)));
+    plain.camera_target = true; plain.camera_alternate = 1;
+    assert(planet_alternate(plain) == 1 && surface_drawn(1, planet_alternate(plain)));
+    // Scene-only art never takes the shell, and non-planet objects (fleets, cursor, station) stay on alternate 0.
+    PlanetShellInput scene;
+    scene.galaxy_planet = true; scene.scene_art = true; scene.has_shell = true; scene.world_layer = true;
+    assert(planet_alternate(scene) == 0);
+    assert(planet_alternate(PlanetShellInput{}) == 0);
+}
+// WGUI-05: the decision site of the grid shell, over a model's surface list and across publications.
+struct TestSurface { std::string status; int alternate; };
+void shell_decisions_follow_models_and_discovery() {
+    const std::vector<TestSurface> stock{{"drawn", -1}, {"drawn", 0}, {"drawn", 1}, {"drawn", 2}};
+    const std::vector<TestSurface> mod{{"drawn", 0}, {"drawn", 1}, {"drawn", -1}};
+    const std::vector<TestSurface> skipped{{"drawn", 0}, {"skipped", 2}};
+    assert(has_shell_surface(stock));
+    assert(!has_shell_surface(mod));         // no alternate-2 surface at all
+    assert(!has_shell_surface(skipped));     // an undrawn alternate-2 surface is no shell
+    assert(!has_shell_surface(std::vector<TestSurface>{}));
+    // A mod planet with no shell stays visible while undiscovered: every surface it authors still draws.
+    PlanetShellInput plain;
+    plain.galaxy_planet = true; plain.world_layer = true; plain.has_shell = has_shell_surface(mod);
+    const int desired = planet_alternate(plain);
+    assert(surface_drawn(0, desired) && surface_drawn(-1, desired));
+    // Publication 1: planet 103 undiscovered (grid shell, and it is listed). Publication 2: it is discovered.
+    const std::vector<ObjectId> galaxy{101, 102, 103, 900};
+    const std::vector<ObjectId> scene_art{900};
+    std::set<ObjectId> known{101, 102};
+    const auto listed = [&] {
+        return undiscovered_planets(galaxy, scene_art, [&](ObjectId id) { return known.contains(id); });
+    };
+    const auto before = listed();
+    assert(before == std::vector<ObjectId>{103}); // scene art never takes the shell
+    PlanetShellInput art;
+    art.galaxy_planet = true; art.world_layer = true; art.has_shell = has_shell_surface(stock);
+    art.discovered = known.contains(103);
+    assert(planet_alternate(art) == 2);
+    for (const auto& surface : stock) assert(surface_drawn(surface.alternate, 2) == (surface.alternate == 2 || surface.alternate < 0));
+    known.insert(103); // discovered mid-game
+    const auto after = listed();
+    assert(after.empty() && after != before); // the changed list is what makes the HUD resubmit
+    art.discovered = known.contains(103);
+    assert(planet_alternate(art) == 0);
+    for (const auto& surface : stock) assert(surface_drawn(surface.alternate, 0) == (surface.alternate == 0 || surface.alternate < 0));
+    assert(!surface_drawn(2, planet_alternate(art))); // the shell surface is gone
+}
+// WGUI-175: the three orbit panels, friendly and with another owner's fleet present.
+eawr::sim::galactic::ObservedFleet panel_card(eawr::sim::galactic::PlayerId owner, bool local,
+    int slot, std::vector<std::pair<std::optional<std::uint64_t>, std::size_t>> groups,
+    std::uint64_t fleet) {
+    eawr::sim::galactic::ObservedFleet card;
+    card.fleet = fleet; card.planet = 7; card.owner = owner; card.local = local;
+    if (slot >= 0) card.orbit_slot = static_cast<std::uint8_t>(slot);
+    for (const auto& [type, count] : groups) {
+        eawr::sim::galactic::ObservedFleetGroup group;
+        group.count = count; group.type = type; group.fleet = fleet;
+        card.groups.push_back(group); card.count += count;
+    }
+    return card;
+}
+void fleet_panels_follow_the_retail_layouts() {
+    using eawr::sim::galactic::ObservedFleet;
+    const auto local0 = panel_card(1, true, 0, {{101, 3}, {102, 1}}, 10);
+    const auto local1 = panel_card(1, true, 1, {{103, 2}}, 11);
+    const auto local2 = panel_card(1, true, 2, {{101, 4}}, 12);
+    const auto enemy = panel_card(2, false, -1, {{201, 11}, {202, 11}, {203, 11}}, 20);
+    const auto second_enemy = panel_card(2, false, -1, {{201, 5}, {std::nullopt, 2}}, 21);
+    const auto plan = [](std::initializer_list<const ObservedFleet*> cards, bool aware, std::size_t capacity = 12) {
+        const std::vector<const ObservedFleet*> list(cards);
+        return plan_fleet_panels(list, aware, capacity);
+    };
+    // Friendly layout: each local fleet in the panel of its orbit slot, the other panels empty.
+    auto friendly = plan({&local0, &local1}, false);
+    assert(friendly.mode == FleetPanelMode::friendly);
+    assert(friendly.panel[0] && friendly.panel[0]->groups.size() == 2 && friendly.panel[1] && !friendly.panel[2]);
+    assert(friendly.drop_slot[0] == 0 && friendly.drop_slot[1] == 1 && friendly.drop_slot[2] == 2);
+    assert(!friendly.first_other && friendly.other_count == 0);
+    // Another owner's aware fleet: it takes panel 1 (merged by type), slot 0 moves to panel 3, slot 1 stays.
+    auto hostile = plan({&local0, &local1, &enemy}, false);
+    assert(hostile.mode == FleetPanelMode::enemy);
+    assert(hostile.panel[0] && !hostile.panel[0]->local && hostile.panel[0]->groups.size() == 3);
+    assert(hostile.panel[0]->groups[0].count == 11 && hostile.panel[0]->groups[0].type == 201);
+    assert(hostile.panel[1] && hostile.panel[1]->groups.size() == 1 && hostile.panel[1]->orbit_slot == 1);
+    assert(hostile.panel[2] && hostile.panel[2]->orbit_slot == 0 && hostile.panel[2]->groups.size() == 2);
+    assert(!hostile.drop_slot[0] && hostile.drop_slot[1] == 1 && hostile.drop_slot[2] == 0);
+    assert(hostile.first_other == &enemy && hostile.other_count == 33);
+    // Presence alone (no card) also flips the layout; the other panel stays empty.
+    auto presence = plan({&local0}, true);
+    assert(presence.mode == FleetPanelMode::enemy && !presence.panel[0] && presence.panel[2] && presence.panel[2]->orbit_slot == 0);
+    // Several other fleets merge: same type sums, count-only groups stay separate.
+    auto crowd = plan({&enemy, &second_enemy}, false);
+    assert(crowd.panel[0]->groups.size() == 4 && crowd.panel[0]->groups[0].count == 16 && crowd.panel[0]->count == 40);
+    assert(!crowd.panel[0]->groups.back().type && crowd.panel[0]->groups.back().count == 2);
+    // Slots 0 and 2 share panel 3: types sum, and the card names no single slot (no drag from a mixed card).
+    auto shared = plan({&local0, &local2, &enemy}, false);
+    assert(shared.panel[2]->groups.size() == 2 && shared.panel[2]->groups[0].count == 7 && !shared.panel[2]->orbit_slot);
+    // The panel capacity bounds the merged groups.
+    auto capped = plan({&enemy}, false, 2);
+    assert(capped.panel[0]->groups.size() == 2);
+    assert(fleet_panel_for_slot(FleetPanelMode::friendly, 2) == 2 && fleet_panel_for_slot(FleetPanelMode::enemy, 0) == 2
+        && fleet_panel_for_slot(FleetPanelMode::enemy, 1) == 1 && fleet_panel_for_slot(FleetPanelMode::enemy, 2) == 2);
+}
+}
+// WGUI-72..74: the live campaign supplies one display trait per type from the authored object. Without a trait an
+// enemy group is a bare count, so deleting this fill hides every enemy unit icon (owner capture 2026-10-16).
+void live_fleet_traits_follow_the_authored_art() {
+    struct Row { bool hero{}, named_hero{}, force_sensitive{}; std::optional<float> max_health; };
+    const std::map<std::string, Row> art{{"Star_Destroyer", {false, false, false, 1000.0F}},
+        {"Darth_Vader", {true, true, true, std::nullopt}}, {"Generic_Hero", {true, false, false, 250.0F}},
+        {"Tartan_Patrol_Cruiser", {false, false, false, 400.0F}}};
+    const std::map<eawr::sim::galactic::TypeId, std::string> names{{1, "Star_Destroyer"}, {2, "Darth_Vader"},
+        {3, "Tartan_Patrol_Cruiser"}, {4, "Unknown_Type"}, {5, "Generic_Hero"}};
+    const auto traits = eawr::viewer::galactic::live_fleet_display_traits(names, art);
+    assert(traits.size() == 4); // one per type with authored art, in type order; a type without art gets none
+    assert(traits[0].type == 1 && !traits[0].hero && !traits[0].named_hero && !traits[0].force_sensitive);
+    assert(traits[0].damage && traits[0].damage->raw() == 1000 * eawr::sim::math::Fixed::scale);
+    assert(traits[1].type == 2 && traits[1].hero && traits[1].named_hero && traits[1].force_sensitive && !traits[1].damage);
+    assert(traits[2].type == 3 && traits[2].damage && traits[2].damage->raw() == 400 * eawr::sim::math::Fixed::scale);
+    assert(traits[3].type == 5 && traits[3].hero && !traits[3].named_hero && !traits[3].force_sensitive);
+    assert(eawr::viewer::galactic::live_fleet_display_traits(names, std::map<std::string, Row>{}).empty());
 }
 int main() {
     selection_and_caller_gates(); deferred_revalidation(); navigation_and_heroes();
     rectangle_and_widget_drop_order(); wheel_radar_and_typed_commands();
     inward_refocus_immediately_focuses();
     published_discovery_is_player_specific();
+    undiscovered_planets_show_only_the_grid_shell();
+    shell_decisions_follow_models_and_discovery();
+    fleet_panels_follow_the_retail_layouts();
+    live_fleet_traits_follow_the_authored_art();
+    live_hero_containment_and_home();
+    queued_ability_drop_is_scoped_to_preparation_and_owner();
+    typed_ability_intents_preserve_capabilities();
     fleet_destination_uses_live_routes();
     dragged_card_moves_as_one_stack();
 }

@@ -1,5 +1,8 @@
 #pragma once
 
+#include "eawr/core/gc_profile.hpp"
+#include "eawr/core/record_digest.hpp"
+
 // The FoC tactical AI engine side (#449, docs/behaviour/foc-tactical-ai.md "Goal system",
 // "Perception", "Plans and TaskForces"): the per-player perception, goal, planning, execution
 // and learning systems that decide which plans run and with which units. Decisions commit
@@ -15,12 +18,16 @@
 #include <cstdint>
 #include <array>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
 #include <tuple>
+#include <stdexcept>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace eawr::script::foc::galactic_ai { class NativeActions; }
@@ -45,6 +52,39 @@ inline constexpr std::string_view verb_ai = "foc.ai";
 
 // Plan script instances: 100000 + n, n counting from 0 over the battle.
 inline constexpr std::uint64_t first_plan_instance = 100000;
+
+// S9-early, galactic only: every AI player allocates its targets, task forces, plans (potential and
+// running share one counter) and plan-script instances from its own range, selected by its slot
+// (its position in the setup's player list, below galactic_max_players). Identities below stay under
+// 2^53 so they survive a trip through a binary64 number. Instances stay below 2^32 because a block
+// identity carries its instance in the upper 32 bits. The tactical engine keeps its engine-wide counters.
+inline constexpr std::uint32_t galactic_id_slots = 64;
+inline constexpr unsigned galactic_id_shift = 40;       // slot + 1 above the counter
+inline constexpr unsigned galactic_instance_shift = 24; // slot above the instance counter
+inline constexpr std::uint64_t galactic_id_counter_limit = std::uint64_t{1} << galactic_id_shift;
+inline constexpr std::uint64_t galactic_instance_counter_limit = std::uint64_t{1} << galactic_instance_shift;
+[[nodiscard]] constexpr std::uint64_t galactic_id_base(std::uint32_t slot) noexcept {
+    return (std::uint64_t{slot} + 1U) << galactic_id_shift;
+}
+[[nodiscard]] constexpr std::uint64_t galactic_instance_base(std::uint32_t slot) noexcept {
+    return first_plan_instance + (std::uint64_t{slot} << galactic_instance_shift);
+}
+// The slot a galactic identity or instance was allocated for, or galactic_id_slots when out of range.
+[[nodiscard]] constexpr std::uint32_t galactic_id_slot(std::uint64_t id) noexcept {
+    const auto high = id >> galactic_id_shift;
+    return high >= 1 && high <= galactic_id_slots ? static_cast<std::uint32_t>(high - 1) : galactic_id_slots;
+}
+[[nodiscard]] constexpr std::uint32_t galactic_instance_slot(std::uint64_t instance) noexcept {
+    if (instance < first_plan_instance) return galactic_id_slots;
+    const auto slot = (instance - first_plan_instance) >> galactic_instance_shift;
+    return slot < galactic_id_slots ? static_cast<std::uint32_t>(slot) : galactic_id_slots;
+}
+// Shared GFS-A21/A24 seed mix for galactic and tactical players; the name predates tactical adoption.
+[[nodiscard]] constexpr std::uint32_t galactic_stream_seed(std::uint32_t game_seed, std::uint32_t player) noexcept {
+    std::uint32_t h = game_seed ^ ((player + 1U) * 0x9e3779b9U);
+    h ^= h >> 16U; h *= 0x85ebca6bU; h ^= h >> 13U; h *= 0xc2b2ae35U; h ^= h >> 16U;
+    return h;
+}
 
 // SAE-10: one requested point, then expanding ten-angle rings; one ring per service.
 [[nodiscard]] std::optional<math::Vec3> reinforcement_candidate(const math::Vec3& requested,
@@ -95,6 +135,26 @@ public:
     [[nodiscard]] bool ready() const noexcept { return x_cells_ > 0; }
     // PG-03: each object's entries are refreshed on the object's own cadence.
     void service(const WorldView& view, const Host& host, std::int64_t frame);
+    // PE-25: stamps each player's threat cell with the frame its last fog cell reached 0. Called on
+    // every enabled turn, also while the AI is held; the first call only records the fog.
+    void observe_fog(const Host& host, std::int64_t frame);
+    // Records the current fog without stamping (a restored grid resumes from the completed tick).
+    void baseline_fog(const Host& host);
+    // PE-25 state, for tests and restore checks: the frame a player's threat cell (column, row)
+    // was last stamped, 0 when never; how many session players are watched.
+    [[nodiscard]] std::int64_t last_seen(std::size_t fog_player, std::int32_t column, std::int32_t row) const noexcept {
+        if (fog_player >= fog_watch_.size() || column < 0 || row < 0 || column >= x_cells_ || row >= y_cells_) return 0;
+        const auto& stamps = fog_watch_[fog_player].last_seen;
+        const auto index = static_cast<std::size_t>(row) * static_cast<std::size_t>(x_cells_) + static_cast<std::size_t>(column);
+        return index < stamps.size() ? stamps[index] : 0;
+    }
+    [[nodiscard]] std::size_t watched_players() const noexcept { return fog_watch_.size(); }
+    // PG-03 state: the entity limit recorded at the first service (stations below it never join).
+    [[nodiscard]] sim::EntityId setup_limit() const noexcept { return setup_limit_; }
+    [[nodiscard]] bool setup_scanned() const noexcept { return setup_scanned_; }
+    // PE-25: the mean seconds since the fogged threat cells a rectangle touches were last seen.
+    [[nodiscard]] Real time_since_seen(const Host& host, const Rect& rect, tactical::PlayerId player,
+        std::int64_t frame) const;
     // Prepare last turn's demand using this turn's completed view. Cold keys stay inline.
     void prepare_contributions();
     struct QueryCounts {
@@ -108,6 +168,9 @@ public:
     // PG-05: the threat in a rectangle of the objects of `player`'s allies (friendly) or enemies.
     [[nodiscard]] Real force(const Host& host, const WorldView& view, const Rect& rect, std::uint64_t category,
         tactical::PlayerId player, bool friendly, Real attenuator, sim::EntityId excluded) const;
+    // PG-09: company power per admitted entry whose rounded base cell is queried.
+    [[nodiscard]] Real concentration(const Host& host, const WorldView& view, const Rect& rect,
+        std::uint64_t category, tactical::PlayerId player, bool friendly) const;
     // PG-06: the combat power of every object of `player`'s allies (friendly) or enemies;
     // player 0 counts every player's.
     [[nodiscard]] Real total_force(const Host& host, const WorldView& view, std::uint64_t category,
@@ -144,6 +207,19 @@ private:
     // Per cell, the (object, entry index) pairs whose zone covers it, in insertion order.
     std::vector<std::vector<std::pair<sim::EntityId, std::size_t>>> cells_;
     std::map<sim::EntityId, Tracked> tracked_;
+    // PG-03: the first service records the entity IDs of the battle's setup; a station created
+    // with it (ID below the limit) is not admitted to the grid. 0 until then.
+    sim::EntityId setup_limit_{};
+    bool setup_scanned_{};
+    // PE-25: per session player (fog index order), the previous sweep's fog rows and, per threat
+    // cell, the frame its last fog cell reached 0 (0 until then). The rows are derived and are
+    // not saved; a restore re-records them from the completed tick.
+    struct FogWatch {
+        std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> rows;
+        std::vector<std::int64_t> last_seen;
+    };
+    void sweep_fog(const Host& host, std::int64_t frame, bool stamp);
+    std::vector<FogWatch> fog_watch_;
     using TotalKey = std::tuple<std::uint64_t, tactical::PlayerId, bool, std::uint64_t>;
     using ForceKey = std::tuple<std::uint64_t, tactical::PlayerId, bool, std::uint64_t,
         std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, sim::EntityId>;
@@ -241,6 +317,9 @@ struct PlanDef {
     Real min_contrast{};
     Real max_contrast{};
     std::vector<std::uint64_t> required_categories;
+    bool galactic_contrast_qualified{};
+    std::vector<std::uint64_t> galactic_contrast_order;
+    std::map<std::uint64_t, std::vector<detail::ContrastEntry>> galactic_contrast;
 };
 
 // One entry of a contrast list (PL-30): a category's force (entry 0: the total).
@@ -268,6 +347,7 @@ struct PotentialPlan {
     std::vector<Contrast> target_contrast;     // PL-31: the target's contrast list
     std::vector<Contrast> current_contrast;    // what the selected units leave of it
     Real threshold{};
+    std::vector<std::size_t> contrast_indices; // GS-22: retained allocation categories, 0 is total force
     bool target_contrast_disabled{}; // WGA-341: GC Produce_Force without staging
 };
 // SAE-05: one activation gate; SAE-09's tactical activation estimate is zero.
@@ -318,6 +398,13 @@ struct BuildTask {
     sim::galactic::PlanetId staging{}, associated_producer{};
     std::uint64_t state_entered{};
     bool salvage{}, allocated{}, joined{}, synchronized_staging{};
+    // WGA-485: assignment/member insertion precedes completed galactic staging.
+    // These fields are absent from the tactical native archive.
+    enum class GalacticAssembly : std::uint8_t { none, assigned, moving, staged, orbital, complete, failed, waiting, countdown };
+    GalacticAssembly galactic_assembly{};
+    std::uint64_t galactic_assembly_request{};
+    Real galactic_stage_seconds{}, galactic_stage_remaining{};
+    std::uint64_t galactic_stage_tick{};
 };
 
 // A blocking object a plan script waits on (EX-20).
@@ -452,7 +539,142 @@ struct History {
     std::vector<std::pair<bool, std::int64_t>> entries;
 };
 
+// WTA-23, WTA-26 to WTA-28: a unit's attack-positioning flag and service state.
+inline constexpr std::int64_t attack_positioning_frames = 150; // WTA-27
+struct AttackPositioning {
+    std::uint64_t instance{};    // the plan instance whose TaskForce switched it on: the orders' issuer
+    std::int64_t next{};         // the frame of the unit's next positioning
+    sim::EntityId target{};      // the attack target of its last move to an ideal position
+};
+
+// #957 (SCH-04): a goal whose plan script waits for an attach budget.
+struct PendingAttach {
+    tactical::PlayerId player{};
+    std::uint64_t goal{};
+};
+
+// A free-store pad held for a goal's pad build (EX-01, WBP-47/48).
+struct PadReservation {
+    tactical::PlayerId player{};
+    std::uint64_t goal{};
+    tactical::TypeId type{};
+    bool consumed{};
+    std::uint64_t issued{};
+};
+
+// ---- Player effects (S-T3b, GFS-A24) --------------------------------------------------------
+//
+// What the AI engine writes to engine-wide state while one player's turn runs goes through the
+// player's PlayerEffects instead: events and orders (their keys and sequence numbers are numbered
+// at the commit), wallet deltas, pad claims and releases, attachment intents, runtime-index
+// retirements, scheduler removals, native-record invalidations, journal rows, input counters and work
+// counters. The turns still run one after another, and a later turn reads the earlier turns' effects
+// stacked on the committed state (credits, pad claims). Engine::commit_effects applies them in
+// ascending player order at the serial boundary after the player loop, which numbers and orders them
+// exactly as the sequential pass did when it wrote them directly. A player task of S-T4 owns its
+// PlayerEffects the same way.
+//
+// Writes to a row another player owns (a TaskForce, plan or block of a foreign handle) go through
+// typed CrossOwnerOps. The turns are still sequential, so an op applies in place at once and the
+// owner's later turn sees it exactly as before; the ops are counted, and S-T4 stages them for the
+// commit under barrier-start reads (GFS-A22). Stock play never produces one.
+
+// The engine's ID-to-player runtime indices.
+enum class RuntimeTable : std::uint8_t { plans, taskforces, blocks, instances };
+
+// A typed operation on a TaskForce, plan or block that another player owns (a handle that
+// resolves to a foreign row). Sequential turns apply it in place; S-T4 stages it for the commit, in
+// ascending acting-player order, onto the row as it is then.
+struct CrossOwnerOp {
+    enum class Kind : std::uint8_t { taskforce_join, taskforce_pool, taskforce_consume, plan_release_pad, block_finish };
+    Kind kind{};
+    std::uint64_t id{};      // the foreign row's identity: TaskForce, plan or block
+    std::uint64_t first{};   // join: unit; pool: type; consume: type; release: pad
+    std::uint64_t second{};  // pool: token; consume: producer
+    bool flag{};             // join: the unit counts as the TaskForce's first (had_units); finish: the result
+};
+
+// Reads a player's turn made of other players' uncommitted effects or rows (the overlay depth S-T4
+// has to unstack). A read counts only when its answer depends on the other player's data.
+struct EffectReads {
+    std::uint64_t credits{};   // credit balances that included another player's staged delta
+    std::uint64_t pads{};      // pad claims answered by another player's staged claim
+    std::uint64_t pad_rows{};  // other players' running plans scanned for pads their goals hold
+    std::uint64_t handles{};   // plan/TaskForce/block handles that resolved to another player's row
+    std::uint64_t row_scans{}; // other players' runtime rows visited by a global scan
+    bool operator==(const EffectReads&) const = default;
+};
+
+struct EffectCounts {
+    std::uint64_t turns{};        // player turns that staged
+    // credit_deltas and pad_effects count the players and pads whose net change the turn staged, not writes.
+    std::uint64_t events{}, orders{}, removals{}, credit_deltas{}, pad_effects{}, attach_intents{};
+    std::uint64_t index_effects{}, operations{}, diagnostics{}, invalidations{};
+    EffectReads reads;
+    bool operator==(const EffectCounts&) const = default;
+};
+
+struct PlayerEffects {
+    tactical::PlayerId owner{};
+    // Scheduler-facing effects, chronological. An event takes its sequence at the commit; `submit` ones
+    // go straight to the scheduler (the freestore's service tests), the others wait in the engine's events.
+    struct SchedulerEvent { authoritative::ScriptEvent event; bool submit{}; };
+    struct SchedulerRemoval { std::uint64_t instance{}; };
+    std::vector<std::variant<SchedulerEvent, SchedulerRemoval>> scheduler;
+    std::vector<authoritative::ScriptCommand> orders; // sequence taken at the commit
+    std::map<tactical::PlayerId, math::Fixed> credits; // wallet deltas, summed
+    std::map<sim::EntityId, std::optional<PadReservation>> pads; // net claim per pad; none = released
+    std::vector<PendingAttach> attaches;
+    // Runtime-index retirements, chronological (the owner already erased the row). Inserts happen at the
+    // serial attach boundary, never inside a turn.
+    struct IndexEffect { RuntimeTable table{}; std::uint64_t id{}; };
+    std::vector<IndexEffect> index;
+    std::uint64_t operations{}; // typed operations on foreign rows (applied in place, counted here)
+    // Pad-perception inputs the turn asked for: the late-prepass counter and the open-pad requests.
+    std::uint64_t pad_queries{};
+    std::set<tactical::PlayerId> pad_open;
+    // Native-record invalidations; a revision bump per mark_native_state_changed of the turn.
+    struct Invalidation { std::uint32_t owner{}, kind{}; std::uint64_t key{}; bool exact{}; };
+    std::vector<Invalidation> invalidations;
+    std::uint64_t revisions{};
+    std::size_t scope_depth{}; // nested NativeRecordWrite scopes of the turn; never publish inside it
+    // Journal and records, chronological.
+    struct JournalPlan { PlanEvent row; bool raw{}; };
+    std::vector<std::variant<PlanRecord, JournalPlan, AiServiceEvent>> diagnostics;
+    TickCost work{};
+    std::uint64_t producer_candidates{};
+    EffectReads reads;
+    // Galactic only: task changes of the turn, and the turn's own build publication memo (never committed).
+    std::uint64_t tasks_revision{};
+    std::shared_ptr<const std::vector<GalacticBudgetBuild>> build_cache;
+    std::array<std::uint64_t, 3> build_cache_key{};
+
+    [[nodiscard]] bool empty() const noexcept {
+        return scheduler.empty() && orders.empty() && credits.empty() && pads.empty() && attaches.empty()
+            && index.empty() && operations == 0 && invalidations.empty() && revisions == 0
+            && diagnostics.empty() && producer_candidates == 0 && pad_queries == 0 && pad_open.empty()
+            && tasks_revision == 0;
+    }
+    // Back to a fresh turn, keeping the vectors' capacity.
+    void clear(tactical::PlayerId player) noexcept {
+        owner = player;
+        scheduler.clear(); orders.clear(); credits.clear(); pads.clear(); attaches.clear(); index.clear();
+        operations = 0; pad_queries = 0; pad_open.clear();
+        invalidations.clear(); revisions = 0; scope_depth = 0; diagnostics.clear();
+        work = {}; producer_candidates = 0; reads = {};
+        tasks_revision = 0; build_cache.reset(); build_cache_key = {};
+    }
+};
+
+// #3944: why a galactic goal or budget evaluation produced nothing (observer counters only).
+enum class GalacticRefusal : std::uint8_t { unavailable, blocked, desire, no_plan, units, time, funds, budget };
 struct PlayerAi {
+    // Mutable execution state belongs to this player; serial adapters preserve global ID order.
+    std::map<std::uint64_t, TaskForce> taskforces;
+    std::map<std::uint64_t, Plan> running;
+    std::map<std::uint64_t, Block> blocks;
+    std::map<std::uint64_t, std::uint64_t> plan_of_instance;
+    std::map<sim::EntityId, AttackPositioning> positioning;
     tactical::PlayerId player{};
     const PlayerType* type{};
     const Template* space_template{};
@@ -467,6 +689,7 @@ struct PlayerAi {
     // #957 (SCH-02): the player's position among the AI players, in ascending ID; its phase, in
     // frames, under the staggered schedule.
     std::int64_t phase{};
+    bool admission_pending{}; // fixture controller: refresh budget on its first admitted service
     // Goal system (GS-02 to GS-05).
     std::int64_t sleep_frames{};
     std::int64_t per_frame{1};
@@ -477,6 +700,7 @@ struct PlayerAi {
     std::vector<Goal> proposed;
     std::vector<Goal> active;
     std::uint32_t proposal_blocks{};               // Block_Goal_Proposal holders
+    std::map<std::uint64_t, std::uint32_t> proposal_blockers; // EX-55: goal -> holder count
     // Learning (LS): by (goal, target ID) and (plan index, target ID); plan success by plan.
     std::map<std::pair<std::string, std::uint64_t>, History> activations;
     std::map<std::pair<std::string, std::uint64_t>, History> goal_outcomes;
@@ -494,20 +718,19 @@ struct PlayerAi {
     std::map<std::uint64_t, Real> reserved_credits;
     std::vector<BuildTask> tasks;
     std::uint64_t next_goal_id{1};
-};
-
-// WTA-23, WTA-26 to WTA-28: a unit's attack-positioning flag and service state.
-inline constexpr std::int64_t attack_positioning_frames = 150; // WTA-27
-struct AttackPositioning {
-    std::uint64_t instance{};    // the plan instance whose TaskForce switched it on: the orders' issuer
-    std::int64_t next{};         // the frame of the unit's next positioning
-    sim::EntityId target{};      // the attack target of its last move to an ideal position
-};
-
-// #957 (SCH-04): a goal whose plan script waits for an attach budget.
-struct PendingAttach {
-    tactical::PlayerId player{};
-    std::uint64_t goal{};
+    // GFS-A21/A24: per-player synchronized draws in either mode.
+    AiRandom sync;
+    // Galactic only: the slot selects the identity/instance bases; counters hold the next local number.
+    std::uint32_t slot{};
+    std::uint64_t next_target_local{1}, next_taskforce_local{1}, next_plan_local{1}, next_instance_local{};
+    // S-T3b: this player's uncommitted writes to engine-wide state. Empty outside a player loop; never saved.
+    PlayerEffects effects;
+    // Observer counters (#3944), player-local: (refusal, goal function index or budget category) -> count. Written
+    // only while gc_profile::enabled; never saved, hashed or read by a decision.
+    std::map<std::pair<GalacticRefusal, std::uint64_t>, std::uint64_t> refusals;
+    void count_refusal(GalacticRefusal why, std::uint64_t index) {
+        if (gc_profile::enabled.load(std::memory_order_relaxed)) ++refusals[{why, index}];
+    }
 };
 
 // ---- The engine -----------------------------------------------------------------------------
@@ -543,6 +766,19 @@ struct StaggeredServiceClock {
     }
 };
 
+// Orders native record rows like std::less on the (owner, kind, identity) tuple; it also compares a row key
+// with an (owner, kind) prefix so range lookups never build a key with an empty identity.
+struct NativeRecordPrefix { std::uint32_t owner; std::uint32_t kind; };
+struct NativeRecordLess {
+    using is_transparent = void;
+    using Key = std::tuple<std::uint32_t, std::uint32_t, core::RecordDigest::Bytes>;
+    static std::pair<std::uint32_t, std::uint32_t> head(const Key& key) { return {std::get<0>(key), std::get<1>(key)}; }
+    static std::pair<std::uint32_t, std::uint32_t> head(const NativeRecordPrefix& prefix) { return {prefix.owner, prefix.kind}; }
+    bool operator()(const Key& a, const Key& b) const { return a < b; }
+    bool operator()(const Key& a, const NativeRecordPrefix& b) const { return head(a) < head(b); }
+    bool operator()(const NativeRecordPrefix& a, const Key& b) const { return head(a) < head(b); }
+};
+
 class Engine {
 public:
     Engine(std::shared_ptr<Host> host, AiData data, std::vector<PlanDef> plans);
@@ -553,8 +789,46 @@ public:
     [[nodiscard]] core::Result<void> restore_tactical_native(std::span<const std::uint8_t>,
         std::string_view content_identity, authoritative::ScriptScheduler&);
     // Continuation mutations, including synchronized draws, invalidate goals.
-    void mark_native_state_changed() noexcept { if (++native_revision_ == 0) std::terminate(); }
-    [[nodiscard]] std::uint64_t native_state_revision() const noexcept { return native_revision_; }
+    // A player turn stages the bump in its effects (the commit applies the count); anything else bumps now.
+    void mark_native_state_changed() noexcept {
+        if (auto* effects = staged()) { ++effects->revisions; return; }
+        if (++native_revision_ == 0) std::terminate();
+        native_record_header_dirty_ = true;
+    }
+    // The revision readers see: the committed counter plus the bumps staged by player turns that have not
+    // committed (the passes are still sequential, so a later read must see an earlier turn's change).
+    // Serial only: it reads every player's staged effects without a lock, so no partitioned phase may call it.
+    [[nodiscard]] std::uint64_t native_state_revision() const noexcept {
+        std::uint64_t staged_total{};
+        for (const auto& player : players_) staged_total += player.effects.revisions;
+        return native_revision_ + staged_total;
+    }
+    // Nested mutations publish their record deltas at the outer owner boundary. A player turn runs inside
+    // the outer scope of the barrier and never publishes, so its scopes count in its own effects.
+    class NativeRecordWrite {
+    public:
+        explicit NativeRecordWrite(Engine& owner) noexcept : owner_(owner), staged_(owner.staged()) {
+            if (staged_) ++staged_->scope_depth; else ++owner_.native_record_depth_;
+        }
+        NativeRecordWrite(const NativeRecordWrite&) = delete;
+        ~NativeRecordWrite() {
+            if (staged_) { --staged_->scope_depth; return; }
+            if (--owner_.native_record_depth_ == 0 && owner_.native_records_enabled_) owner_.refresh_native_records();
+        }
+    private:
+        Engine& owner_;
+        PlayerEffects* staged_;
+    };
+    [[nodiscard]] NativeRecordWrite native_record_scope() { return NativeRecordWrite(*this); }
+    // Semantic writers identify the records they can change. A group is used
+    // when the operation owns a whole ordered list or visits an entire map.
+    static constexpr std::uint32_t native_all_players = UINT32_MAX;
+    void native_records_changed(std::uint32_t owner, std::initializer_list<std::uint32_t> kinds);
+    void native_record_changed(std::uint32_t owner, std::uint32_t kind, std::uint64_t key);
+    void native_records_replaced() noexcept { native_records_all_dirty_ = true; }
+    [[nodiscard]] const std::array<std::uint64_t, 34>& native_record_work() const noexcept { return native_record_work_; }
+    [[nodiscard]] std::uint64_t native_record_inspections() const noexcept { return native_record_inspections_; }
+
     // WGA-01..05: the same native engine state, with manager-owned due tests.
     [[nodiscard]] core::Result<void> begin_galactic_barrier(const World&, galactic_ai::Clocks,
         authoritative::ScriptScheduler&, std::uint64_t& sequence, std::span<const galactic_ai::PlayerSelection>,
@@ -568,6 +842,8 @@ public:
     using GalacticStageObjectReader = std::function<core::Result<bool>(tactical::PlayerId, const sim::galactic::GalacticSnapshot&, sim::EntityId)>;
     void set_galactic_stage_garrison(GalacticStageObjectReader reader) { galactic_stage_garrison_ = std::move(reader); }
     void set_galactic_stage_combat_skip(GalacticStageObjectReader reader) { galactic_stage_combat_skip_ = std::move(reader); }
+    using GalacticStageSpeed = std::function<core::Result<Real>(tactical::PlayerId, const sim::galactic::GalacticSnapshot&, tactical::TypeId)>;
+    void set_galactic_stage_speed(GalacticStageSpeed reader) { galactic_stage_speed_ = std::move(reader); }
     [[nodiscard]] core::Result<std::pair<Real, bool>> galactic_freestore_selection_facts(
         tactical::PlayerId, sim::galactic::PlanetId target, sim::EntityId object, const PlanDef&) const;
     void set_galactic_build_observer(GalacticBuildObserver observer) { galactic_build_observer_ = std::move(observer); }
@@ -586,21 +862,47 @@ public:
     [[nodiscard]] core::Result<GalacticBuildPublication> galactic_build_budgets(
         const galactic_ai::NativeActions&, const GalacticFunding&) const;
     [[nodiscard]] core::Result<math::Fixed> galactic_build_remaining_cost(tactical::PlayerId, const BuildTask&) const;
-    void mark_galactic_tasks_changed() noexcept { if (++galactic_tasks_revision_ == 0) std::terminate(); galactic_build_cache_.reset(); }
-    [[nodiscard]] std::uint64_t galactic_build_tasks_revision() const noexcept { return galactic_tasks_revision_; }
+    // S9a: a player turn counts its task changes in its effects (the commit applies them) and keeps its own
+    // publication memo; the committed memo and counter are only written outside a turn.
+    void mark_galactic_tasks_changed() noexcept {
+        if (auto* turn = staged()) { ++turn->tasks_revision; turn->build_cache.reset(); return; }
+        if (++galactic_tasks_revision_ == 0) std::terminate();
+        galactic_build_cache_.reset();
+    }
+    // Serial only, like native_state_revision().
+    [[nodiscard]] std::uint64_t galactic_build_tasks_revision() const noexcept {
+        std::uint64_t staged_total{};
+        for (const auto& player : players_) staged_total += player.effects.tasks_revision;
+        return galactic_tasks_revision_ + staged_total;
+    }
     [[nodiscard]] std::optional<std::uint64_t> galactic_potential_for_goal(tactical::PlayerId, std::uint64_t goal) const;
     [[nodiscard]] std::vector<GalacticGoalIdentity> galactic_goals(tactical::PlayerId) const;
     [[nodiscard]] core::Result<void> service_galactic_system(tactical::PlayerId, galactic_ai::Service,
         authoritative::ScriptScheduler&, std::uint64_t& sequence);
     [[nodiscard]] core::Result<void> commit_galactic_events(authoritative::ScriptScheduler&, std::uint64_t& sequence);
+    // S9a: every galactic service call runs as a player turn that stages its writes to engine-wide state in the
+    // player's effects. While deferral is on (the barrier owner turns it on after begin_galactic_barrier), the
+    // staged effects of all players wait for commit_galactic_events and apply there in ascending player order,
+    // so no player's pass sees another's appends (GFS-A20); otherwise each call commits its own turn on return.
+    void defer_galactic_effects(bool deferred) noexcept { galactic_deferred_ = deferred; }
+    // S9a: the player whose Lua chain a galactic script instance belongs to (a freestore instance carries its
+    // player, a plan instance its slot's player), or 0 for an instance no player owns.
+    [[nodiscard]] std::uint64_t galactic_chain_owner(std::uint64_t instance) const;
 
     // Serial, before the script service: perception, goals, planning and execution of every AI
     // player in ascending player ID (GS-01). Engine events for the scripts are submitted to
     // `scripts` with keys from `sequence`. WTA-01/02: on a player's execution frame,
     // `execution_hook` (the freestore's service tests) runs after its goals and planning and
     // before its build tasks.
-    // Hooks allocate event keys from the engine's live counter during the barrier.
-    using ExecutionHook = std::function<core::Result<void>(tactical::PlayerId, std::uint64_t&)>;
+    // What an execution hook writes (S-T3b): freestore scheduler events keyed from `sequence`, and journal
+    // rows. A deferred turn hands the hook a local counter and stages both; the commit numbers the events
+    // from the engine's live counter and submits them in the order the hook did.
+    struct ExecutionEffects {
+        std::uint64_t& sequence;
+        std::function<core::Result<void>(authoritative::ScriptEvent)> submit;
+        std::function<void(PlanEvent)> journal;
+    };
+    using ExecutionHook = std::function<core::Result<void>(tactical::PlayerId, ExecutionEffects&)>;
     [[nodiscard]] core::Result<void> before_service(const World& world,
         authoritative::ScriptScheduler& scripts, std::uint64_t& sequence,
         const sim::PartitionExecutor* executor = nullptr, const ExecutionHook& execution_hook = {});
@@ -633,12 +935,20 @@ public:
     [[nodiscard]] sim::EntityId deadly_enemy(const std::vector<sim::EntityId>& objects) const;
     [[nodiscard]] const std::vector<PlanRecord>& records() const noexcept { return records_; }
     [[nodiscard]] const std::vector<TickCost>& costs() const noexcept { return costs_; }
+    [[nodiscard]] std::uint64_t records_dropped() const noexcept { return records_dropped_; }
+    // Observer output only (#3944): galactic refusals (goal allocation and selection outcomes, unavailable budget
+    // equations) summed over the players, by player and "goal:"/"alloc:<goal>:<reason>"/"budget:<category>" name.
+    // Empty unless gc_profile::enabled; never read by a decision, saved or hashed.
+    [[nodiscard]] std::map<std::pair<tactical::PlayerId, std::string>, std::uint64_t> galactic_refusals() const;
+    [[nodiscard]] std::uint64_t costs_dropped() const noexcept { return costs_dropped_; }
     [[nodiscard]] std::int64_t frame() const noexcept { return frame_; }
     [[nodiscard]] const AiData& data() const noexcept { return data_; }
     [[nodiscard]] const std::vector<PlanDef>& plans() const noexcept { return plans_; }
     // The region target that holds a point (FT-02).
     [[nodiscard]] const Target* region_at(Real x, Real y) const;
     [[nodiscard]] const std::vector<std::uint64_t>* target_list(tactical::PlayerId player) const;
+    // WGA-452: exact category membership of the current manager's active set.
+    [[nodiscard]] std::optional<std::uint64_t> active_goal_count(tactical::PlayerId player, std::uint64_t category) const;
     [[nodiscard]] std::optional<Real> global_value(const std::string& name) const;
     // A unit's type as the goal system counts it (a squadron container's squadron type).
     [[nodiscard]] bool in_freestore(const ViewUnit& unit, tactical::PlayerId player) const;
@@ -669,6 +979,14 @@ public:
     using InputObserver = void (*)(std::uint64_t, const InputCounts&) noexcept;
     static void observe_inputs(InputObserver) noexcept;
     [[nodiscard]] InputCounts input_counts() const noexcept { return input_counts_; }
+    // S-T3b: what the player turns staged since the engine started, and the reads they made of other
+    // players' uncommitted effects. Diagnostics only: never saved, hashed or read by a decision.
+    [[nodiscard]] const EffectCounts& effect_counts() const noexcept { return effect_totals_; }
+    // Optional write-only profiling sink, called once per barrier with that barrier's counts.
+    using EffectObserver = void (*)(std::uint64_t tick, const EffectCounts&) noexcept;
+    static void observe_effects(EffectObserver) noexcept;
+    // The wallet change of turns that have not committed yet (raw fixed units); stacked onto Host::credits.
+    [[nodiscard]] std::int64_t uncommitted_credits(tactical::PlayerId) const noexcept;
 
 private:
     friend struct EngineContractAccess;
@@ -676,6 +994,72 @@ private:
     friend class GoalStateContributor;
     friend struct GoalStateCodec;
     void report_inputs() const noexcept;
+    void report_effects() const noexcept;
+    using PadReservation = ai::PadReservation;
+
+    // ---- Player effects (S-T3b) ----
+    // One player's turn: its writes to engine-wide state stage in player.effects while the scope is
+    // bound to the running thread (a player task of S-T4 binds its own). Only the staggered schedule's
+    // tactical players defer: the faithful schedule attaches plans inside the pass and galactic services
+    // are driven one at a time, so they keep writing directly.
+    class TurnScope {
+    public:
+        // The tactical default: only the staggered schedule's tactical players stage. `stage` decides it outright.
+        TurnScope(Engine& engine, PlayerAi& player) noexcept;
+        TurnScope(Engine& engine, PlayerAi& player, bool stage) noexcept;
+        TurnScope(const TurnScope&) = delete;
+        TurnScope& operator=(const TurnScope&) = delete;
+        ~TurnScope();
+    private:
+        const Engine* previous_engine_;
+        PlayerEffects* previous_effects_;
+    };
+    // The serial boundary inside a galactic turn (plan attachment creates scheduler instances): the running
+    // thread's turn is unbound for the scope, so the code inside writes directly, then the turn is restored.
+    class BoundaryScope {
+    public:
+        BoundaryScope() noexcept;
+        BoundaryScope(const BoundaryScope&) = delete;
+        BoundaryScope& operator=(const BoundaryScope&) = delete;
+        ~BoundaryScope();
+    private:
+        PlayerEffects* previous_effects_;
+    };
+    // Attaches the plans the player's goal service queued as intents, at the boundary after the service.
+    [[nodiscard]] core::Result<void> settle_galactic_attaches(PlayerAi& player, authoritative::ScriptScheduler& scripts);
+    // The running turn's effects, or null when the caller writes directly (serial phases, other threads).
+    [[nodiscard]] PlayerEffects* staged() const noexcept;
+    // Applies every player's staged effects in ascending player order (the serial boundary after the loop).
+    [[nodiscard]] core::Result<void> commit_effects(authoritative::ScriptScheduler& scripts);
+    // Drops a player's staged turn without applying it. The revision counts it staged still move the
+    // committed counters, so a revision a reader has seen never goes backwards and never names two states.
+    void discard_effects(PlayerAi& player) noexcept;
+    void queue_event(authoritative::ScriptEvent event);   // for the barrier's script events
+    void queue_order(authoritative::ScriptCommand order); // for the next tick's orders
+    void stage_removal(authoritative::ScriptScheduler& scripts, std::uint64_t instance);
+    void journal_plan(PlanEvent row, bool raw = false) const;
+    void journal_service(const AiServiceEvent& row);
+    // A pad-count perception read: counts the late input and asks for the open-pad prepass, staged in a turn.
+    void note_pad_query(tactical::PlayerId player, bool open) const;
+    [[nodiscard]] TickCost& work() noexcept { auto* effects = staged(); return effects ? effects->work : work_; }
+    // Stacked pad claims: the committed claim under the staged ones of earlier turns and the own turn.
+    [[nodiscard]] const PadReservation* pad_claim(sim::EntityId pad) const;
+    void set_pad_claim(sim::EntityId pad, const PadReservation& claim);
+    void release_pad_claim(sim::EntityId pad);
+    void release_pad_claims(tactical::PlayerId player, std::uint64_t goal);
+    [[nodiscard]] math::Fixed stacked_credits(tactical::PlayerId player) const;
+    // Typed operations on a row another player owns: applied in place and counted (S-T4 stages them).
+    void operate(const CrossOwnerOp& op);
+    void apply_operation(const CrossOwnerOp& op);
+    // Whether the identity belongs to a row another player owns, as seen from the running turn.
+    [[nodiscard]] bool foreign_row(RuntimeTable table, std::uint64_t id) const;
+    void retire_runtime(RuntimeTable table, std::uint64_t id);
+    void note_handle(tactical::PlayerId owner) const noexcept;
+    static constexpr std::uint32_t touch_only_kind = 0xFFFFFFFFU; // marks the owner's group dirty, sets no bit
+    void apply_native_records_changed(std::uint32_t owner, std::uint32_t kind);
+    void apply_native_record_changed(std::uint32_t owner, std::uint32_t kind, std::uint64_t key);
+    EffectCounts effect_totals_;
+    EffectCounts effect_tick_;
     void prepare_producers(const sim::PartitionExecutor* executor = nullptr) const;
     // Perception.
     void prepare_station_levels(const sim::PartitionExecutor*);
@@ -725,6 +1109,7 @@ private:
     [[nodiscard]] sim::galactic::funding::GoalRequest galactic_funding_request(const PlayerAi&, const Goal&) const;
     [[nodiscard]] bool galactic_fundable(const PlayerAi&, const Goal&, bool activation) const;
     void service_galactic_execution(PlayerAi&);
+    void service_galactic_assembly(PlayerAi&);
     void begin_galactic_maintenance(PlayerAi&);
     void salvage_galactic_goal(PlayerAi&, std::uint64_t goal);
     [[nodiscard]] bool production_time_allowed(const PlayerAi& player, const Goal& goal) const;
@@ -772,8 +1157,27 @@ private:
     void return_galactic_actor(const TaskForce&, sim::EntityId);
     [[nodiscard]] bool defines_function(std::uint64_t instance, const std::string& name) const;
     void record(const Plan* plan, tactical::PlayerId player, std::string event, std::string detail = {});
+    void publish_record(PlanRecord line);
     [[nodiscard]] PlayerAi* player_ai(tactical::PlayerId player);
     [[nodiscard]] const PlayerAi* player_ai(tactical::PlayerId player) const;
+    // GFS-A21/A24: every synchronized AI draw names its owner explicitly, in either mode.
+    // No "active player" member exists to race in a parallel barrier.
+    [[nodiscard]] AiRandom& stream(PlayerAi& player) {
+        native_records_changed(player.player, {1});
+        return player.sync;
+    }
+    // Identity allocation; the tactical engine keeps its engine-wide counters. A galactic range that is
+    // exhausted refuses deterministically (nullopt) instead of wrapping into another player's range.
+    [[nodiscard]] std::optional<std::uint64_t> allocate_target_id(PlayerAi& player);
+    [[nodiscard]] std::optional<std::uint64_t> allocate_taskforce_id(PlayerAi& player);
+    [[nodiscard]] std::optional<std::uint64_t> allocate_plan_id(PlayerAi& player);
+    [[nodiscard]] std::optional<std::uint64_t> allocate_instance_id(PlayerAi& player);
+    // Whether a galactic identity lies inside its owner's allocated range (the archive and request checks).
+    [[nodiscard]] bool galactic_target_issued(std::uint64_t id) const;
+    [[nodiscard]] bool galactic_taskforce_issued(std::uint64_t id) const;
+    [[nodiscard]] bool galactic_plan_issued(std::uint64_t id) const;
+    [[nodiscard]] bool galactic_instance_issued(std::uint64_t instance) const;
+    [[nodiscard]] const PlayerAi* player_of_slot(std::uint32_t slot) const;
     [[nodiscard]] Goal* find_goal(PlayerAi& player, std::uint64_t id);
     [[nodiscard]] std::string target_name(const Target* target) const;
     [[nodiscard]] Real power(const ViewUnit& unit) const;
@@ -783,6 +1187,24 @@ private:
     void issue_order(const Plan& plan, const ViewUnit& unit, std::string_view verb, sim::EntityId target,
         const math::Vec3& destination);
 
+    using NativeRecordKey = std::tuple<std::uint32_t, std::uint32_t, core::RecordDigest::Bytes>;
+    using NativeRecordRows = std::map<NativeRecordKey, core::RecordDigest::Bytes, NativeRecordLess>;
+    void enable_native_records();
+    void refresh_native_records() noexcept;
+    [[nodiscard]] bool native_record_selected(const NativeRecordKey&) const;
+    [[nodiscard]] bool native_record_kind_selected(std::uint32_t) const;
+    [[nodiscard]] bool native_record_owner_kind_selected(std::uint32_t, std::uint32_t) const;
+    core::RecordDigest native_records_;
+    NativeRecordRows native_record_rows_;
+    std::optional<core::Diagnostic> native_record_failure_;
+    std::size_t native_record_depth_{};
+    bool native_records_enabled_{};
+    bool native_records_all_dirty_{};
+    bool native_record_header_dirty_{};
+    std::map<std::uint32_t, std::uint64_t> native_record_dirty_groups_;
+    std::set<NativeRecordKey, std::less<>> native_record_dirty_keys_;
+    std::array<std::uint64_t, 34> native_record_work_{};
+    std::uint64_t native_record_inspections_{}; // candidate encodes + retained rows reconciled, never saved/hashed
     std::uint64_t native_revision_{1};
     std::uint64_t galactic_tasks_revision_{1}; // derived publication invalidation, not saved state
     mutable std::shared_ptr<const std::vector<GalacticBudgetBuild>> galactic_build_cache_;
@@ -793,39 +1215,101 @@ private:
     mutable ProducerWork producer_work_{};
     mutable InputCounts input_counts_{};
     bool player_inputs_active_{};
+    bool galactic_deferred_{}; // S9a: galactic turns' effects wait for commit_galactic_events
     const sim::PartitionExecutor* perception_executor_{};
     GalacticSelectionProvider galactic_selection_;
     std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> galactic_stage_catalog_;
     GalacticStageUsability galactic_stage_usability_;
     GalacticStageObjectReader galactic_stage_garrison_, galactic_stage_combat_skip_;
+    GalacticStageSpeed galactic_stage_speed_;
     GalacticBuildObserver galactic_build_observer_;
-    struct PadReservation {
-        tactical::PlayerId player{};
-        std::uint64_t goal{};
-        tactical::TypeId type{};
-        bool consumed{};
-        std::uint64_t issued{};
-    };
     std::map<sim::EntityId, PadReservation> pad_reservations_;
     AiData data_;
     std::vector<PlanDef> plans_;
     mutable std::string native_configuration_; // immutable closure, computed once
     ThreatGrid grid_;
     std::vector<PlayerAi> players_;
+    // Incrementally published by serial mutations; adapters and bindings only read it. Never encoded.
+    struct RuntimeIndex {
+        std::map<std::uint64_t, tactical::PlayerId> plans, taskforces, blocks, instances;
+    };
+    RuntimeIndex runtime_index_;
+    void rebuild_runtime_index();
+    template<class T> static T* runtime_row(std::map<std::uint64_t, T>& rows, std::uint64_t id) {
+        const auto found = rows.find(id); return found == rows.end() ? nullptr : &found->second;
+    }
+    // Serial adapters retain global foreign-handle reads and writes while rows stay player-owned.
+    template<class T> class RuntimeLookup {
+        Engine& engine_;
+        std::map<std::uint64_t, T> PlayerAi::* member_;
+        const std::map<std::uint64_t, tactical::PlayerId>& index_;
+    public:
+        struct Iterator {
+            std::uint64_t id{};
+            T* row{};
+            struct Entry { std::uint64_t first; T& second; };
+            struct Arrow { Entry entry; Entry* operator->() { return &entry; } };
+            Arrow operator->() const { return {{id, *row}}; }
+            bool operator==(const Iterator& other) const { return row == other.row; }
+        };
+        RuntimeLookup(Engine& engine, std::map<std::uint64_t, T> PlayerAi::* member,
+            const std::map<std::uint64_t, tactical::PlayerId>& index) : engine_(engine), member_(member), index_(index) {}
+        Iterator find(std::uint64_t id) const {
+            const auto found = index_.find(id);
+            if (found == index_.end()) return {};
+            engine_.note_handle(found->second);
+            const auto* owner = std::as_const(engine_).player_ai(found->second);
+            if (!owner) return {};
+            return {id, runtime_row(const_cast<PlayerAi*>(owner)->*member_, id)};
+        }
+        Iterator end() const { return {}; }
+        bool contains(std::uint64_t id) const { return find(id) != end(); }
+        T& at(std::uint64_t id) const {
+            const auto found = find(id);
+            if (found == end()) throw std::out_of_range("missing AI runtime identity");
+            return found->second;
+        }
+    };
+    [[nodiscard]] RuntimeLookup<TaskForce> all_taskforces() { return {*this, &PlayerAi::taskforces, runtime_index_.taskforces}; }
+    [[nodiscard]] RuntimeLookup<Plan> all_plans() { return {*this, &PlayerAi::running, runtime_index_.plans}; }
+    [[nodiscard]] RuntimeLookup<Block> all_blocks() { return {*this, &PlayerAi::blocks, runtime_index_.blocks}; }
+    static void index_runtime(std::map<std::uint64_t, tactical::PlayerId>& index, std::uint64_t id, tactical::PlayerId owner) {
+        if (!index.emplace(id, owner).second) throw std::logic_error("duplicate AI runtime identity");
+    }
+    [[nodiscard]] const Block* raw_block(std::uint64_t) const;
+    [[nodiscard]] PlayerAi* positioning_owner(sim::EntityId);
+    [[nodiscard]] Plan* mutable_plan(std::uint64_t);
+    [[nodiscard]] Plan* mutable_plan_of_instance(std::uint64_t);
+    [[nodiscard]] AttackPositioning* positioning(sim::EntityId);
+    template<class T> auto ordered_runtime(std::map<std::uint64_t, T> PlayerAi::* member) {
+        std::map<std::uint64_t, T*> result;
+        auto* turn = staged();
+        for (auto& owner : players_) for (auto& [id, row] : owner.*member) {
+            if (turn && owner.player != turn->owner) ++turn->reads.row_scans;
+            if (!result.emplace(id, &row).second) throw std::logic_error("duplicate AI runtime identity");
+        }
+        return result;
+    }
+    template<class T> auto ordered_runtime(std::map<std::uint64_t, T> PlayerAi::* member) const {
+        std::map<std::uint64_t, const T*> result;
+        auto* turn = staged();
+        for (const auto& owner : players_) for (const auto& [id, row] : owner.*member) {
+            if (turn && owner.player != turn->owner) ++turn->reads.row_scans;
+            if (!result.emplace(id, &row).second) throw std::logic_error("duplicate AI runtime identity");
+        }
+        return result;
+    }
+
     std::map<std::uint64_t, Target> targets_;
-    std::map<std::uint64_t, TaskForce> taskforces_;
-    std::map<std::uint64_t, Plan> running_;
-    std::map<std::uint64_t, Block> blocks_;
-    std::map<std::uint64_t, std::uint64_t> plan_of_instance_;
     // DT-01: per damaged object, the attackers' threat.
     std::map<sim::EntityId, std::map<sim::EntityId, Real>> threats_;
     // This tick's first hit on each object: (attacker, deliberate) (EX-44).
     std::map<sim::EntityId, std::pair<sim::EntityId, bool>> last_hits_;
     std::map<std::string, Real, std::less<>> globals_;
-    // WTA-23: the units whose attack-positioning flag is on, ascending ID.
-    std::map<sim::EntityId, AttackPositioning> positioning_;
     std::vector<PlanRecord> records_;
     std::vector<TickCost> costs_;
+    std::uint64_t records_dropped_{};
+    std::uint64_t costs_dropped_{};
     // #957: counters of the barrier step in progress and the plans waiting to be attached.
     TickCost work_{};
     std::vector<PendingAttach> pending_attach_;
@@ -835,7 +1319,7 @@ private:
     std::uint64_t event_tick_{};
     std::uint64_t sequence_{}; // owned across before/after service
     authoritative::ScriptScheduler* scripts_{};
-    AiRandom sync_;                  // the goal system's synchronized draws (GS-07)
+    AiRandom sync_;                  // retained archive field; do not draw here, use stream(player)
     std::uint32_t game_seed_{};
     std::int64_t frame_{};
     std::uint64_t next_target_id_{1};

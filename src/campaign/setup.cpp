@@ -454,6 +454,7 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     // WGS-02/03: only a new root starts its allocator at one. Child construction never calls here.
     auto model = build_campaign_galaxy(data, types, *campaign, neutral, 1);
     if (!model) return core::Result<CampaignSetupPlan>::failure(model.error());
+    plan.diagnostics_ = model.value().diagnostics;
     plan.galaxy_.planets = model.value().planets;
     plan.galaxy_.routes = model.value().routes;
     plan.galaxy_.content_identity = model.value().content_identity;
@@ -486,6 +487,9 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     std::map<std::string, gc::PlanetId> planets;
     for (const auto& planet : model.value().planets) {
         const auto named = std::find_if(model.value().names.begin(), model.value().names.end(), [&](const auto& row) { return row.id == planet.id; });
+        // WGS-184 qualifies route lookup only. Full setup duplicate Locations
+        // continuation (including repeated force placement) remains unverified;
+        // see campaign-setup.md before relaxing this binding boundary.
         if (named == model.value().names.end() || !planets.emplace(key(named->name), planet.id).second)
             return invalid<CampaignSetupPlan>("galaxy model has missing or duplicate planet names", campaign->file);
     }

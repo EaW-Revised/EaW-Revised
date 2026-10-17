@@ -165,6 +165,14 @@ struct MinimapMemory {
     std::array<double, 2> world_half_size{};
 };
 
+// MM-18: borrow only the immutable battle-start identity. Current hidden ownership/pose
+// and objects first spawned later cannot contribute initial knowledge.
+[[nodiscard]] const sim::tactical::UnitState* minimap_initial_identity(
+    std::span<const sim::tactical::UnitState> start, sim::EntityId entity,
+    sim::tactical::TypeId type) noexcept;
+[[nodiscard]] std::array<double, 2> minimap_world_half_size(const sim::math::Mat3x4& transform,
+    const std::array<float, 3>& low, const std::array<float, 3>& high) noexcept;
+
 // MM-15: live members in team order, including members hidden by fog.
 struct MinimapSquadronMember {
     double x{}, y{}, yaw_degrees{};

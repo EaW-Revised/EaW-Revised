@@ -14,6 +14,8 @@ endif()
 
 if(EAWR_GNS_PROVIDER STREQUAL "SYSTEM")
     find_package(GameNetworkingSockets CONFIG REQUIRED)
+    message(WARNING "EAWR_GNS_PROVIDER=SYSTEM cannot carry the TURN permission refresh patch: relayed matches "
+        "lose their path about five minutes in unless that GameNetworkingSockets refreshes TURN permissions (#3912)")
     target_link_libraries(eawr_gns_dependency INTERFACE GameNetworkingSockets::static)
 elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
     # Only this explicit opt-in downloads anything. Upstream projects are built
@@ -37,10 +39,20 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
         GIT_TAG "${_eawr_protobuf_revision}"
         GIT_SUBMODULES ""
     )
+    # Upstream never refreshes a TURN permission, so a relayed match dies about five minutes in (#3912).
+    include("${CMAKE_CURRENT_LIST_DIR}/EawrGnsTurnPermissionRefresh.cmake")
+    # A reused build tree may hold a source patched by an older revision of that patch: get a pristine one first.
+    if(NOT FETCHCONTENT_SOURCE_DIR_EAWR_GNS_SOURCE)
+        eawr_gns_discard_outdated_patched_source(
+            "${FETCHCONTENT_BASE_DIR}/eawr_gns_source-src"
+            "${FETCHCONTENT_BASE_DIR}/eawr_gns_source-subbuild/eawr_gns_source-populate-prefix/src/eawr_gns_source-populate-stamp")
+    endif()
     FetchContent_GetProperties(eawr_gns_source)
     if(NOT eawr_gns_source_POPULATED)
         FetchContent_Populate(eawr_gns_source)
     endif()
+    eawr_gns_patch_turn_permission_refresh("${eawr_gns_source_SOURCE_DIR}")
+    eawr_gns_patch_turn_diagnostics("${eawr_gns_source_SOURCE_DIR}")
     FetchContent_GetProperties(eawr_protobuf_source)
     if(NOT eawr_protobuf_source_POPULATED)
         FetchContent_Populate(eawr_protobuf_source)
@@ -50,6 +62,8 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
     # binaries, including reused offload trees. FetchContent replaces sources
     # independently of ExternalProject's otherwise-complete build stamps.
     string(SUBSTRING "${_eawr_gns_revision}" 0 12 _eawr_gns_build_id)
+    # The carried patch changes the built library too, so it takes part in the prefix.
+    string(APPEND _eawr_gns_build_id "-${EAWR_GNS_TURN_PERMISSION_PATCH_ID}")
     string(SUBSTRING "${_eawr_protobuf_revision}" 0 12 _eawr_protobuf_build_id)
     set(_eawr_gns_prefix "${CMAKE_BINARY_DIR}/gns-deps/${_eawr_gns_build_id}-${_eawr_protobuf_build_id}")
     set(_eawr_gns_config "$<IF:$<CONFIG:Debug>,Debug,Release>")

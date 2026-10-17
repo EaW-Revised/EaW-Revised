@@ -114,6 +114,38 @@ void guards_and_hostility() {
     fixture.context.control.planets[0].landed = {{60, 9, 1}, {61, 9, 1}};
     expect(fixture.place(10).value().fleets.size() == 1, "full surface list forces orbit placement");
 }
+void duplicate_authored_starbases() {
+    // WGS-180: renamed types and changing owners distinguish last-wins from
+    // first-wins, highest-level and owner-matched selection.
+    for (const std::int64_t second_level : {2, 3, 4}) {
+        Fixture fixture;
+        auto second = fixture.source(13); second.name = "OtherStation"; second.base_level = second_level;
+        fixture.inputs.types.types.push_back(second);
+        fixture.inputs.bindings.push_back({18, second.name});
+        fixture.inputs.runtime_types.push_back({18, false, false, {}});
+        const auto first = fixture.place(13);
+        expect(first && cp::apply_starting_force_placement(fixture.inputs, fixture.request(13), first.value(),
+            fixture.galaxy, fixture.context), "first authored station commits");
+        const cp::StartingForceRequest request{1, 2, 18, second.name, false, f(1)};
+        auto placed = cp::place_starting_force(fixture.inputs, request, 100, fixture.galaxy, fixture.context);
+        expect(placed && placed.value().starbase == gc::ControlBase{2, static_cast<std::uint32_t>(second_level)}
+            && placed.value().starbase_type == 18 && !placed.value().created && placed.value().next_id == 100,
+            "second authored station replaces type, level and supplied owner without allocation");
+        if (!placed) continue;
+        expect(bool(cp::apply_starting_force_placement(fixture.inputs, request, placed.value(),
+            fixture.galaxy, fixture.context)), "second authored station commits");
+        const auto& production = fixture.context.production.planets.front();
+        expect(fixture.context.control.planets.front().starbase == placed.value().starbase
+            && production.starbase_type == 18 && production.starbase_owner == 2
+            && production.space_level == static_cast<std::uint32_t>(second_level),
+            "control and production retain the same last authored station");
+    }
+    Fixture invalid;
+    invalid.source(13).base_level.reset(); expect(!invalid.place(13), "missing station level refuses");
+    invalid.source(13).base_level = -1; expect(!invalid.place(13), "negative station level refuses");
+    invalid.source(13).base_level = 0; expect(!invalid.place(13), "zero station level refuses");
+    invalid.source(13).base_level = 6; expect(!invalid.place(13), "out-of-range station level refuses");
+}
 void bases_structures_and_chains() {
     Fixture fixture;
     auto base = fixture.place(13);
@@ -917,6 +949,7 @@ int main() {
 #else
     expect(setenv("EAWR_VERIFY_GALACTIC_HASH", "1", 1) == 0, "full galactic hash verifier enabled");
 #endif
+    duplicate_authored_starbases();
     allocation_and_identity(); nested_live_stealth(); guards_and_hostility(); bases_structures_and_chains(); root_checkpoint_and_parity(); root_checkpoint_and_parity(true); root_checkpoint_and_parity(false, true); initial_ability_predicates(); initial_relations(); initial_geometry(); initial_movement_roles();
     return galactic_test::failures ? 1 : 0;
 }

@@ -249,6 +249,10 @@ void test_point_and_scale() {
 <Container Name="Point"><Variant_Of_Existing_Type>Fixed</Variant_Of_Existing_Type><Radar_Icon_Name></Radar_Icon_Name><Radar_Blip_Size>2.9</Radar_Blip_Size></Container>
 <Container Name="Scaled"><Variant_Of_Existing_Type>Fixed</Variant_Of_Existing_Type><Radar_Draw_To_Scale>Yes</Radar_Draw_To_Scale></Container>
 <Container Name="Bad"><Variant_Of_Existing_Type>Point</Variant_Of_Existing_Type><Radar_Blip_Size>NaN</Radar_Blip_Size></Container>
+<Container Name="BlankColour"><Variant_Of_Existing_Type>Fixed</Variant_Of_Existing_Type><No_Colorization_Color></No_Colorization_Color></Container>
+<Container Name="TbdColour"><Variant_Of_Existing_Type>BlankColour</Variant_Of_Existing_Type><No_Colorization_Color>TBD</No_Colorization_Color></Container>
+<Container Name="OwnColour"><Variant_Of_Existing_Type>TbdColour</Variant_Of_Existing_Type><No_Colorization_Color>1,2,3,255</No_Colorization_Color></Container>
+<Container Name="LoneBlank"><No_Colorization_Color></No_Colorization_Color></Container>
 </Objects>)xml");
     const std::array mounts{vfs::MountSpec{"synthetic", tree.root, "data", {}}};
     auto filesystem = vfs::Vfs::mount(mounts);
@@ -258,10 +262,15 @@ void test_point_and_scale() {
     expect(static_cast<bool>(loaded), "radar style fixture loads");
     if (!loaded) return;
     std::map<std::string, ui::MinimapTypeLooks, std::less<>> types;
-    for (const auto name : {"Fixed", "Point", "Scaled", "Bad"}) types[name] = ui::minimap_type_looks(name, &loaded.value().catalog);
+    for (const auto name : {"Fixed", "Point", "Scaled", "Bad", "BlankColour", "TbdColour", "OwnColour", "LoneBlank"}) types[name] = ui::minimap_type_looks(name, &loaded.value().catalog);
     expect(types["Point"].visible_when_fogged && types["Point"].no_colorization == data::ui::Rgba8{11,22,33,255}
         && !ui::minimap_type_looks("Absent", &loaded.value().catalog).visible_when_fogged,
         "WNO-41/43: effective inherited fogged flag and unassigned colour, absent flag defaults false");
+    // ML-24 (#3631): a blank or TBD variant colour inherits (The_Peacebringer), a real one replaces it.
+    expect(types["BlankColour"].no_colorization == data::ui::Rgba8{11,22,33,255}
+        && types["TbdColour"].no_colorization == data::ui::Rgba8{11,22,33,255}
+        && types["OwnColour"].no_colorization == data::ui::Rgba8{1,2,3,255} && !types["LoneBlank"].no_colorization,
+        "ML-24: blank and TBD variant No_Colorization_Color inherit; a real colour replaces; a lone blank has none");
     expect(types["Fixed"].icon == "i_radar_default_blip.tga" && !types["Fixed"].draw_to_scale
         && near(types["Fixed"].space_scale, 200), "MM-17: authored scale alone preserves default fixed icon size");
     expect(types["Point"].icon.empty() && near(types["Point"].point_size, 2.9, 1e-6)
@@ -394,6 +403,71 @@ void test_fog_cells() {
     expect(!shared.revealed(-1200.0, 0.0) && !shared.revealed(0.0, 600.0), "shared rows keep grid clipping");
 }
 
+void test_initial_radar_knowledge() {
+    using Fixed = sim::math::Fixed;
+    const auto fixed = [](const std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); };
+    std::array<sim::tactical::UnitState, 3> initial{};
+    for (std::size_t index = 0; index < initial.size(); ++index) {
+        initial[index].entity_id = index + 1;
+        initial[index].type_id = 77;
+        initial[index].owner = index == 0 ? 1U : 2U;
+        initial[index].position = {fixed(static_cast<std::int64_t>(index) * 100), fixed(50), {}};
+    }
+    const auto start = initial; // the battle's immutable start tick, independent of render cadence
+    auto current = initial;
+    current[0].owner = 2;
+    current[0].position = {fixed(700), fixed(-500), {}};
+    current[0].rotation = {};
+    const auto* remembered = ui::minimap_initial_identity(start, current[0].entity_id, current[0].type_id);
+    expect(remembered && *remembered == start[0],
+        "MM-18: hidden ownership/pose changes before the first presentation cannot refresh start knowledge");
+    expect(!ui::minimap_initial_identity(start, 99, 77),
+        "MM-18: a later spawn or respawn identity cannot supply initial knowledge");
+    expect(!ui::minimap_initial_identity(start, start[0].entity_id, 88),
+        "MM-18: a replacement type cannot borrow the start identity's model");
+
+    const data::ui::Rgba8 own{20, 140, 230, 255}, enemy{230, 40, 80, 255};
+    std::vector<ui::MinimapMemory> memories;
+    for (std::size_t index = 0; index < current.size(); ++index) {
+        const auto* identity = ui::minimap_initial_identity(start, current[index].entity_id, current[index].type_id);
+        expect(identity != nullptr, "MM-18: start identities are available before sensor discovery");
+        if (!identity) continue;
+        ui::MinimapMemory memory;
+        memory.id = identity->entity_id;
+        memory.type = "Known";
+        memory.owner_colour = identity->owner == 1 ? own : enemy;
+        memory.hostile = identity->owner == 2;
+        memory.capture_point = index == 2;
+        memory.previously_revealed = true;
+        memory.retained_model = true;
+        memory.x = static_cast<double>(identity->position.x.raw()) / static_cast<double>(Fixed::scale);
+        memory.y = static_cast<double>(identity->position.y.raw()) / static_cast<double>(Fixed::scale);
+        memories.push_back(memory);
+    }
+    ui::MinimapTypeLooks type;
+    type.visible = true;
+    const auto looks = [&](std::string_view) -> const ui::MinimapTypeLooks& { return type; };
+    const auto extents = ui::minimap_extents(-1000, 1000, -1000, 1000);
+    const auto draw = [&] { return ui::minimap_blips({}, looks, extents, {}, memories); };
+    const auto blips = draw();
+    expect(blips.size() == 3, "MM-18: owned, enemy-owned and capture-point initial memories draw");
+    if (blips.size() == 3) {
+        expect(blips[2].colour == own && blips[1].colour == enemy
+            && blips[0].colour == data::ui::Rgba8{100, 100, 100, 255},
+            "MM-18: ordinary memories retain stored ownership; enemy capture points remain Neutral grey");
+        expect(blips[2].remembered && blips[2].centre == ui::minimap_point(extents, 0, 50),
+            "MM-18: hidden current position is not substituted for the immutable initial transform");
+    }
+    type.visible_to_enemy = false;
+    expect(draw().size() == 1, "MM-18: initial knowledge retains enemy radar permission");
+
+    auto transform = sim::math::identity_matrix();
+    transform.rows[0][0] = fixed(-2);
+    transform.rows[1][1] = fixed(3);
+    expect(ui::minimap_world_half_size(transform, {-4, -2, -1}, {4, 2, 1}) == std::array<double, 2>{8, 6},
+        "MM-17: copied model bounds preserve scale and reflected axes without accumulating old extents");
+}
+
 void test_radar_fog_contract() {
     ui::MinimapTypeLooks type;
     type.visible = true;
@@ -522,6 +596,13 @@ int main() {
     expect(survivor && survivor->yaw_degrees == 100 && survivor->x == 0,
         "MM-15: deleting members changes the centre and the first live member together");
     if (const auto filesystem = test::ui::foc_corpus("hazard minimap")) {
+        const auto catalog = data::load_catalog(*filesystem, data::Profile::foc);
+        expect(static_cast<bool>(catalog), "stock catalog loads for inherited asteroid-base radar policy");
+        if (catalog) {
+            const auto hutt = ui::minimap_type_looks("Skirmish_Hutt_Asteroid_Base", &catalog.value().catalog);
+            expect(hutt.visible && hutt.visible_when_fogged && hutt.icon == "i_radar_station1_p.tga",
+                "MM-06/12: the skirmish asteroid base inherits radar permission and icon from its parent type");
+        }
         const auto constants = data::load_document(*filesystem, "data/xml/gameconstants.xml");
         expect(static_cast<bool>(constants), "stock GameConstants load for fallback contracts");
         if (constants) {
@@ -559,6 +640,7 @@ int main() {
     test_fog();
     test_fog_cells();
     test_radar_fog_contract();
+    test_initial_radar_knowledge();
     if (test::ui::failures() != 0) {
         std::cerr << test::ui::failures() << " minimap check(s) failed\n";
         return 1;

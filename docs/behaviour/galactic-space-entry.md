@@ -197,6 +197,27 @@ shared map builder can still create background players. Original numeric teams a
 faction relationships are separate mechanisms; copying the default team zero
 would incorrectly ally tactical enemies in this representation.
 
+## TSW-01 Tactical super weapon start
+
+An object whose effective behaviour list has `TACTICAL_SUPER_WEAPON` (the Death Star) does not keep the pose its
+marker or formation gave it. At its first service the debug build finds the nearest enemy-owned object that carries
+`DUMMY_TACTICAL_SUPER_WEAPON_TARGET` (the planet backdrop props; nearest by distance from the object, the first on a tie, owner
+faction different from the object's). A target owned by the object's own faction is skipped, compared by faction name. A
+target whose editor owner index names no faction is not owned by the object's faction, so it counts: the rule as found is
+"owner faction different from the object's" and no capture covers an unmapped owner, so the remake reads it literally
+(an owner that is no faction differs from every one). With one it stands `TSW_Start_Distance_From_Target` from it, or
+`TSW_Attack_Distance_From_Target` when its owner is the defending player (a campaign entry only: a skirmish has no
+defender, both sides arrive the same way, so the skirmish start always uses the start distance), on the line from the target through the
+object's current position; its height is the target's when `TSW_Start_Pos_Match_Targets_Z` is set (else the line's own),
+then raised by `TSW_Z_Adjust_Relative_To_Target_Pos`. With no target it stays put. Either way it then faces the
+battlefield centre, keeping only the heading; an object standing exactly on the centre (x and y both zero) has no
+direction to face and gets heading zero. Rig capture 2026-10-16 (Coruscant skirmish, script-spawned
+`Death_Star_II`): its height was -3100, which is the target prop's authored map height (-4300) plus 1200; the prop's
+`Layer_Z_Adjust` (-2500 there) is not added to the target's height. The remake applies the rule when the start is built (skirmish, `place_tactical_super_weapons`)
+and after the class form-up (campaign entry, `form_space_entry`). Not modelled: the following move into attack range
+(attacker only), the in-range-and-ready state the defender starts in, and the super weapon's attack stages; the
+free-space search the debug build runs when a script spawns the object (xy only, not part of a campaign entry).
+
 ## Boundaries retained for qualification
 
 - Generic map choice/cache and destroyed-planet backdrop replacement have qualified

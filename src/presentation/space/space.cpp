@@ -444,8 +444,8 @@ EnvironmentSelection select_environment(const assets::Map& map) {
     result.environment_name = selected.name;
     if (selected.secondary_sky) {
         result.not_rendered.push_back({"secondary_sky", *selected.secondary_sky, "declared_not_rendered",
-            "secondary sky composition (order, blend, transform, time) has no clean evidence; "
-            "this slice renders the primary sky only"});
+            "this plan slice renders the primary sky only; the viewer's environment scene composes the "
+            "secondary sky through its own surface routes (see its report)"});
     }
     if (selected.cloud_texture) {
         result.not_rendered.push_back({"cloud_texture", *selected.cloud_texture, "declared_not_rendered",

@@ -1,12 +1,15 @@
 #pragma once
 
 #include "eawr/presentation/animation/animation.hpp"
+#include "eawr/presentation/skin_pose_profile.hpp"
 
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
 #include <span>
+#include <memory>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -66,11 +69,60 @@ void store_skin_pose(const std::span<const animation::BonePose> bones,
     }
 }
 
+// A batch owns no source bones. Callers keep source spans and the conversion policy immutable until
+// clear(); only the prepared palette may outlive the batch through its consumers.
+template <typename Transform>
+struct SkinPosePalette final {
+    std::vector<animation::Matrix> palette;
+    std::vector<Transform> model_transforms;
+};
+
+template <typename Transform>
+class SkinPoseBatch final {
+public:
+    using Palette = SkinPosePalette<Transform>;
+    void clear() { palettes_.clear(); }
+
+    template <typename Convert>
+    [[nodiscard]] std::shared_ptr<const Palette> prepare(const std::span<const animation::BonePose> bones,
+        Convert&& convert, SkinPoseWork* work = nullptr) {
+        const auto cached = palettes_.find(bones.data());
+        if (cached != palettes_.end() && cached->second->palette.size() == bones.size()) return cached->second;
+        SkinPoseTimer validation(work ? &work->validation_ms : nullptr);
+        if (work) ++work->validations;
+        if (!valid_skin_pose(bones)) return {};
+        validation.finish();
+        SkinPoseTimer build(work ? &work->build_ms : nullptr);
+        if (work) ++work->builds;
+        auto next = std::make_shared<Palette>();
+        store_skin_pose(bones, next->palette, next->model_transforms, std::forward<Convert>(convert));
+        palettes_.insert_or_assign(bones.data(), next);
+        return next;
+    }
+private:
+    std::unordered_map<const animation::BonePose*, std::shared_ptr<const Palette>> palettes_;
+};
+
+inline void skin_palette_changes(const std::span<const animation::Matrix> previous,
+    const std::span<const animation::Matrix> next, std::vector<std::uint8_t>& changes, const bool force) {
+    const bool replaced = force || previous.size() != next.size();
+    changes.assign(next.size(), 0);
+    for (std::size_t bone = 0; bone < next.size(); ++bone) {
+        if (replaced || std::bit_cast<std::array<std::uint32_t, 16>>(previous[bone])
+                != std::bit_cast<std::array<std::uint32_t, 16>>(next[bone])) changes[bone] = 1;
+    }
+}
+
 template <typename Poses, typename Entity, typename Asset, typename Convert>
 bool cache_skin_pose(Poses& poses, const Entity entity, const Asset asset,
     const std::span<const animation::BonePose> bones, Convert&& convert,
-    std::vector<std::uint8_t>* changes = nullptr) {
+    std::vector<std::uint8_t>* changes = nullptr, SkinPoseWork* work = nullptr) {
+    SkinPoseTimer validation(work ? &work->validation_ms : nullptr);
+    if (work) ++work->validations;
     if (!valid_skin_pose(bones)) return false;
+    validation.finish();
+    SkinPoseTimer build(work ? &work->build_ms : nullptr);
+    if (work) ++work->builds;
     auto& pose = poses[entity];
     const bool replaced = pose.asset_id != asset;
     pose.asset_id = asset;

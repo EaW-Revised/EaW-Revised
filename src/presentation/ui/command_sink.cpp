@@ -45,8 +45,10 @@ bool consumes(const TacticalIntent& pending, const TacticalIntent& request) {
 }
 
 tactical::EconomyView pending_economy(tactical::EconomyView view,
-    const std::span<const PendingCommand> pending, const PendingBuildOption& option_of) {
+    const std::span<const PendingCommand> pending, const PendingBuildOption& option_of,
+    const std::optional<std::uint64_t> completed_tick) {
     for (const auto& row : pending) {
+        if (completed_tick && row.execution_tick && *row.execution_tick < *completed_tick) continue;
         const auto& intent = row.intent;
         if (intent.verb == TacticalVerb::buy || intent.verb == TacticalVerb::pad_build) {
             const auto* option = option_of(intent.units.front(), intent.type);
@@ -101,7 +103,9 @@ tactical::EconomyView pending_economy(tactical::EconomyView view,
 void CommandScheduler::present_snapshot(const std::uint64_t completed_tick) {
     const std::lock_guard lock(mutex_);
     reservations_enabled_ = true;
-    if (!intent_epoch_ && std::erase_if(reservations_, [completed_tick](const auto& row) { return row.handed_off && row.tick < completed_tick; }))
+    if (std::erase_if(reservations_, [completed_tick](const auto& row) {
+        return row.execution_tick && *row.execution_tick < completed_tick;
+    }))
         ++reservation_revision_;
 }
 void CommandScheduler::present_result(const std::uint64_t sequence) {

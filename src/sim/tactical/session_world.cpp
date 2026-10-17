@@ -273,6 +273,33 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
             }
             world.teams.emplace_back(squadron.container, std::move(members));
         }
+        // WST-11: suitability tests the held team object before resolving a firing member.
+        // Derive its cloak from the same nonempty/all-live-members rule as attack admission.
+        std::vector<std::uint8_t> team_stealth(world.teams.size());
+        const auto cloaked = executor.execute_phase("combat-team-stealth", tick_partition_count,
+            [&](const std::size_t partition) {
+            const auto range = partition_range(partition, world.teams.size());
+            for (auto slot = range.begin; slot < range.end; ++slot) {
+                bool any = false, on = true, hidden = true;
+                for (const auto member : world.teams[slot].second) {
+                    const auto* craft = world.find(member);
+                    if (craft == nullptr) continue;
+                    any = true;
+                    on = on && craft->stealth_on;
+                    hidden = hidden && craft->stealth_invisible;
+                }
+                team_stealth[slot] = static_cast<std::uint8_t>((any && on ? 1U : 0U) | (any && hidden ? 2U : 0U));
+            }
+        });
+        if (!cloaked) return core::Result<detail::CombatWorld>::failure(cloaked.error());
+        for (std::size_t slot = 0; slot < world.teams.size(); ++slot) {
+            const auto container = world.teams[slot].first;
+            const auto found = std::lower_bound(world.units.begin(), world.units.end(), container,
+                [](const detail::CombatUnit& unit, const EntityId id) { return unit.id < id; });
+            if (found == world.units.end() || found->id != container) continue;
+            found->stealth_on = (team_stealth[slot] & 1U) != 0;
+            found->stealth_invisible = (team_stealth[slot] & 2U) != 0;
+        }
         // AB-66 (#561): the craft of a squadron whose ION_CANNON_SHOT is on hold every other shot.
         const auto live = [&](const EntityId id) -> const LiveUnit* {
             const auto found = std::lower_bound(units.begin(), units.end(), id,

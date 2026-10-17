@@ -91,10 +91,11 @@ core::Result<void> validate_combat(const CombatTable& table) {
             return invalid("invalid target footprint");
         }
     }
-    // W-07's yaw and pitch assume an orthonormal frame: each axis of unit length and each pair
-    // perpendicular, every dot product within frame_tolerance_raw of 1 or 0. Bounded components
-    // keep the dot products in range.
-    const auto axes_ok = [](const std::optional<std::array<math::Vec3, 3>>& axes) {
+    // W-07: fire-cone projection accepts the supplied axes without a pairwise orthogonality
+    // gate. The binder normalizes each axis; retain those length/component safety checks.
+    // Articulated turret frames retain their separate orthogonality contract.
+    const auto axes_ok = [](const std::optional<std::array<math::Vec3, 3>>& axes,
+                           const bool require_orthogonal = true) {
         if (!axes) return true;
         const auto small = [](const math::Fixed value) { return std::llabs(value.raw()) <= 2 * one_raw; };
         if (!std::all_of(axes->begin(), axes->end(),
@@ -105,8 +106,8 @@ core::Result<void> validate_combat(const CombatTable& table) {
             const auto product = math::dot((*axes)[left], (*axes)[right]);
             return product && std::llabs(product.value().raw() - expected) <= frame_tolerance_raw;
         };
-        return near(0, 0, one_raw) && near(1, 1, one_raw) && near(2, 2, one_raw) && near(0, 1, 0) && near(0, 2, 0)
-            && near(1, 2, 0);
+        return near(0, 0, one_raw) && near(1, 1, one_raw) && near(2, 2, one_raw)
+            && (!require_orthogonal || (near(0, 1, 0) && near(0, 2, 0) && near(1, 2, 0)));
     };
     for (std::size_t set = 0; set < table.priority_sets.size(); ++set) {
         const auto& rows = table.priority_sets[set].rows;
@@ -147,7 +148,7 @@ core::Result<void> validate_combat(const CombatTable& table) {
                 || weapon.min_recharge_hundredths > weapon.max_recharge_hundredths
                 || weapon.max_recharge_hundredths > max_recharge_hundredths || weapon.pulse_count == 0
                 || weapon.pulse_delay_frames > max_recharge_hundredths || !point_in_bounds(weapon.fire_a)
-                || !point_in_bounds(weapon.fire_b) || !axes_ok(weapon.fire_axes)
+                || !point_in_bounds(weapon.fire_b) || !axes_ok(weapon.fire_axes, false)
                 || !distance_ok(weapon.manual_min_range) || weapon.manual_min_range > weapon.range
                 || weapon.manual_cooldown_frames > 108000
                 || weapon.full_salvo_delay.raw() < 0 || weapon.full_salvo_delay.raw() > max_ability_multiplier * one_raw
@@ -274,12 +275,15 @@ core::Result<void> validate_combat(const CombatTable& table) {
         [](const CombatProfile& profile) { return !profile.meshes.empty(); });
     CombatTable death_payloads;
     for (const auto& profile : table.profiles) {
-        if (!profile.death_projectiles.empty()) {
+        if (!profile.death_projectiles.empty() || profile.retreat_explosion) {
             if (!within_distance(profile.ranged_target_z_adjust, max_combat_distance))
                 return invalid("death projectile height adjustment out of range");
             CombatProfile payload;
             payload.type_id = profile.type_id;
-            for (const auto& shot : profile.death_projectiles) {
+            // RP-09: the retreat explosion is validated with the death payloads, as one more created projectile.
+            auto shots = profile.death_projectiles;
+            if (profile.retreat_explosion) shots.push_back(*profile.retreat_explosion);
+            for (const auto& shot : shots) {
                 if (meshes && shot.speed.raw() > max_mesh_extent * one_raw)
                     return invalid("death projectile speed exceeds collision mesh bound");
                 WeaponProfile weapon;

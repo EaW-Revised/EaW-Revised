@@ -223,14 +223,14 @@ void run_contracts() {
   <Tactical_Health>100</Tactical_Health>
   <Nested mode="base"><Leaf>base</Leaf><Tactical_Health>999</Tactical_Health></Nested>
   <BaseOnly>kept</BaseOnly><Numeric> 1.5 </Numeric><NumericOverflow>999999999999999999999999</NumericOverflow>
-  <Death_Clone>Damage_Fire, Base_Clone</Death_Clone>
+  <Death_Clone>Damage_Fire, Base_Clone</Death_Clone><SFXEvent_Select>Unit_Select_Base</SFXEvent_Select><SFXEvent_Lone>TBD</SFXEvent_Lone><SFXEvent_Lower>base_lower</SFXEvent_Lower>
 </SpaceUnit>
 <SpaceUnit Name="MID"><Variant_Of_Existing_Type>base</Variant_Of_Existing_Type>
   <ReplaceTag>mid</ReplaceTag><MergeTag>B</MergeTag><Tuple>three, 3</Tuple>
-  <Ignored>mid-ignored</Ignored><Death_Clone>Damage_Fire, Mid_Clone</Death_Clone>
+  <Ignored>mid-ignored</Ignored><Death_Clone>Damage_Fire, Mid_Clone</Death_Clone><SFXEvent_Select>TBD</SFXEvent_Select>
 </SpaceUnit>
 <SpaceUnit Name="TOP"><Variant_Of_Existing_Type>mId</Variant_Of_Existing_Type>
-  <ReplaceTag>top</ReplaceTag><MergeTag>C</MergeTag><Empty></Empty><IgnoredNew>derived-only</IgnoredNew>
+  <ReplaceTag>top</ReplaceTag><MergeTag>C</MergeTag><Empty></Empty><IgnoredNew>derived-only</IgnoredNew><SFXEvent_Select> </SFXEvent_Select><SFXEvent_Lower>tbd</SFXEvent_Lower>
   <Nested mode="top"><Leaf><Deep>top</Deep></Leaf></Nested><TopOnly>new</TopOnly>
 </SpaceUnit>
 <SpaceUnit Name="MISSING"><Variant_Of_Existing_Type>NO_BASE</Variant_Of_Existing_Type></SpaceUnit>

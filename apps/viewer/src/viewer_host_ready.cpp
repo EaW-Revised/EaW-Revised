@@ -1,9 +1,11 @@
 #include "viewer_host_internal.hpp"
 #include "audio_buses.hpp"
 #include "audio_output.hpp"
+#include "font_provision.hpp"
 #include "gpu_memory_trace.hpp"
 #include "settings_store.hpp"
 #include "startup_trace.hpp"
+#include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 
 namespace eawr::presentation::godot_backend {
@@ -47,6 +49,22 @@ void ViewerHost::_ready() try {
     if (options_->render_profile_missing || (!options_->render_profile.empty() && !requested_render_profile)) {
         status_message_ = "--eawr-render-profile expects retail or enhanced";
         UtilityFunctions::printerr(String(status_message_.c_str()));
+        static_cast<void>(write_report("failed"));
+        stop(2);
+        return;
+    }
+
+    // #3963: a player's fonts are extracted natively into user data before any screen reads the cache.
+    if (const std::string fonts = provision_fonts(options_->game_root, options_->allow_unknown_build,
+                                                  options_->skirmish_setup || options_->front_end);
+        !fonts.empty()) {
+        status_message_ = fonts;
+        // A player who double-clicked the exe has no console: say why the start stops. Evidence, headless and
+        // probe runs have no one to read a dialog and only get the report and the exit code.
+        if (DisplayServer::get_singleton()->get_name() != String("headless") && options_->capture_path.empty()
+            && !options_->headless_probe && !options_->benchmark) {
+            OS::get_singleton()->alert(String::utf8(fonts.c_str()), "EAWR cannot start");
+        }
         static_cast<void>(write_report("failed"));
         stop(2);
         return;
@@ -171,6 +189,7 @@ void ViewerHost::_ready() try {
                     return reason.empty() ? std::string("The campaign could not be started.") : reason;
                 }
                 galactic_mode_ = std::move(campaign);
+                galactic_host_ = campaign_host;
                 return std::string{};
             };
             front_options.saved_game_launcher = [start_galactic](const presentation::ui::SavedGameRequest& request) {

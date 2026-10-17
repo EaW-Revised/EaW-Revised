@@ -10,6 +10,7 @@
 | presentation-later | 0 | 0 |
 | foc-ignores | 0 | 0 |
 | deferred | 0 | 0 |
+| by-design | 0 | 0 |
 | land-or-galactic | 0 | 0 |
 | multiplayer | 0 | 0 |
 | **Total** | **74** | **74** |

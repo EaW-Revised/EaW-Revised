@@ -83,6 +83,7 @@ struct GalacticAiRuntimeView {
     std::weak_ptr<const script::foc::galactic_ai::Manager> manager;
     GalacticParentQueryFactory child_parent_queries;
     std::weak_ptr<const script::foc::ai::GalacticFunding> funding;
+    std::function<core::Result<void>(sim::galactic::PlayerId, std::uint64_t, const sim::PartitionExecutor&)> prepare_path_table{};
 };
 struct GalacticAiRuntimeProviders {
     using Actions = script::foc::galactic_ai::NativeActions;
@@ -93,6 +94,9 @@ struct GalacticAiRuntimeProviders {
         sim::galactic::PlayerId, const sim::galactic::GalacticSnapshot&, const World&, const Engine&, const script::foc::ai::DerivedExecutionRestore*)> execution_input;
     std::function<core::Result<script::foc::ai::GalacticConnectivity>(
         const sim::galactic::GalacticSession&, World&, Engine&, const sim::PartitionExecutor&)> prepare_connectivity;
+    using ConnectivityPublication = std::shared_ptr<const script::foc::ai::GalacticConnectivity>;
+    std::function<core::Result<ConnectivityPublication>(
+        const sim::galactic::GalacticSession&, World&, Engine&, const sim::PartitionExecutor&)> prepare_connectivity_publication{};
     std::function<core::Result<void>(GameSession&, sim::galactic::GalacticSession&, Actions&, std::shared_ptr<Engine>,
         std::shared_ptr<World>, std::function<const sim::PartitionExecutor*()>)> bind_actions;
     struct ChildScripts {
@@ -152,6 +156,7 @@ class StockSpaceEntry;
 struct GalacticAiStockQueries {
     GalacticAiUsability usability;
     decltype(GalacticAiRuntimeProviders::prepare_connectivity) connectivity;
+    decltype(GalacticAiRuntimeProviders::prepare_connectivity_publication) connectivity_publication{};
     std::function<core::Result<GalacticAiRuntimeProviders::Actions::MovementInput>(sim::galactic::PlayerId,
         const sim::galactic::GalacticSnapshot&, const GalacticAiRuntimeProviders::World&,
         const GalacticAiRuntimeProviders::Engine&, const sim::PartitionExecutor&)> movement;

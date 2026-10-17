@@ -381,6 +381,43 @@ void living_collision_admission() {
 
 // AU-82 boolean and spawned-pair parsing. M2 single/list inheritance remains unchanged.
 void retail_value_rules() {
+    for (const auto style : {std::string_view{}, std::string_view{"Space_Automatic"}, std::string_view{"User_Input"}}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string_view tag = "<SpaceUnit Name=\"Test_Frigate\">";
+        const auto position = xml.find(tag);
+        expect(position != std::string::npos, "WAB-36: target-handler fixture has its unit");
+        if (position == std::string::npos) continue;
+        const std::string fields = R"(<Unit_Ability>
+          <Type>TRACTOR_BEAM</Type><Recharge_Seconds>20</Recharge_Seconds>
+          <GUI_Activated_Ability_Name>Test_Beam</GUI_Activated_Ability_Name>
+          </Unit_Ability>)";
+        const auto list_end = xml.find("</Unit_Abilities_Data>", position);
+        expect(list_end != std::string::npos, "WAB-36: target-handler fixture has its ability list");
+        if (list_end == std::string::npos) continue;
+        xml.insert(list_end, fields);
+        if (!style.empty()) xml.insert(position + tag.size(), "<Abilities SubObjectList=\"Yes\"><Tractor_Beam_Attack_Ability Name=\"Test_Beam\">"
+            "<Activation_Style>" + std::string(style) + "</Activation_Style><Activation_Max_Range>500</Activation_Max_Range>"
+            "<Target_Speed_Decrease_Percent>0.5</Target_Speed_Decrease_Percent></Tractor_Beam_Attack_Ability></Abilities>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "WAB-36: target-handler fixture loads");
+        if (!loaded.tables) continue;
+        const auto* ship = loaded.tables->find("Test_Frigate");
+        const bool retained = ship && std::any_of(ship->abilities.begin(), ship->abilities.end(), [](const auto& ability) {
+            return ability.type == "TRACTOR_BEAM";
+        });
+        expect(ship && retained == !style.empty(), "WAB-36: only the unresolved ability row is skipped; its unit remains");
+        expect(ship && std::any_of(ship->abilities.begin(), ship->abilities.end(), [](const auto& ability) {
+            return eawr::sim::tactical::ability_kind(ability.type) == eawr::sim::tactical::AbilityKind::defend;
+        }), "WAB-36: an independent valid ability remains on the same unit");
+        expect(static_cast<bool>(eawr::units::ability_table(*loaded.tables)),
+            "WAB-36: missing or space-automatic handlers never refuse the whole loaded closure");
+        if (style.empty()) expect(std::any_of(loaded.tables->notes.begin(), loaded.tables->notes.end(), [](const auto& row) {
+            return row.field == "GUI_Activated_Ability_Name" && row.value == "Test_Beam"
+                && row.reason.find("unresolved") != std::string::npos;
+        }), "WAB-36: skipping an unresolved row emits a counted diagnostic");
+    }
     // ML-24: single values use the last real occurrence, preserving inherited values.
     for (const auto& [base_value, variant_value, expected] : {
         std::tuple{std::string{"Frigate"}, std::string{" \t\n"}, std::string{"Frigate"}},
@@ -2207,6 +2244,28 @@ void priority_rules() {
 }
 
 void content_identity() {
+    // Duplicate names are a known catalog seam (legacy #3741), not a retail overlay rule.
+    // Pin today's deterministic winner position until separate indexed entries are supported.
+    {
+        TempTree tree;
+        write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+        write(tree.root / "XML" / "GameObjectFiles.xml",
+            "<Game_Object_Files><File>eawr_units.xml</File><File>later.xml</File></Game_Object_Files>");
+        write(tree.root / "XML" / "later.xml",
+            "<Objects><SpaceUnit Name=\"Test_Frigate\"><Tactical_Health>7200</Tactical_Health></SpaceUnit></Objects>");
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "PL-20: later-file duplicate fixture loads");
+        if (loaded.tables) {
+            const auto* duplicate = loaded.tables->find("Test_Frigate");
+            // The squadron follows the original frigate, but precedes its later-file duplicate.
+            const auto* earlier = loaded.tables->find("Test_Squadron");
+            expect(duplicate && earlier && duplicate->table_order > earlier->table_order,
+                "PL-20: duplicate names retain the later catalog winner's position pending the retail seam");
+            expect(std::count_if(loaded.tables->units.begin(), loaded.tables->units.end(),
+                [](const auto& unit) { return unit.id == "Test_Frigate"; }) == 1,
+                "PL-20: duplicate fixture exposes the existing single-winner catalog seam");
+        }
+    }
     TempTree tree;
     write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
     const auto first = load(tree.root, models(-40.0F));
@@ -2214,6 +2273,20 @@ void content_identity() {
     if (!first.tables || !second.tables) return;
     const auto identity = eawr::units::content_identity(*first.tables);
     expect(identity == eawr::units::content_identity(*second.tables), "identity is stable across loads");
+    // PL-20: table_order is the object's place in the authored files, whatever its name hashes to.
+    {
+        const auto xml = units_xml("3600", "Unit_Select_Test");
+        std::vector<std::pair<std::size_t, std::uint64_t>> placed;
+        for (const auto& unit : first.tables->units) {
+            const auto at = xml.find("Name=\"" + unit.id + "\"");
+            if (at != std::string::npos) placed.emplace_back(at, unit.table_order);
+        }
+        std::sort(placed.begin(), placed.end());
+        expect(placed.size() > 2, "PL-20: the fixture's types have document positions");
+        expect(std::is_sorted(placed.begin(), placed.end(), [](const auto& a, const auto& b) { return a.second < b.second; })
+                && std::adjacent_find(placed.begin(), placed.end(), [](const auto& a, const auto& b) { return a.second == b.second; }) == placed.end(),
+            "PL-20: table_order follows the authored document order");
+    }
 
     const auto moved = load(tree.root, models(-41.0F));
     if (moved.tables) expect(identity != eawr::units::content_identity(*moved.tables), "a moved bone changes the identity");
@@ -2386,6 +2459,30 @@ void hunt_tables() {
 }
 
 void bind_frame_errors() {
+    // W-07: a model's slightly skewed frame must not discard its weapon or its unit.
+    TempTree tree;
+    write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+    auto assets = models(-40.0F);
+    assets.at("data/art/models/test_frigate.alo").bones[1].relative_transform[2] = 0.002F;
+    const auto loaded = load(tree.root, assets);
+    expect(loaded.tables.has_value(), "W-07: nonorthogonal model frame loads");
+    if (loaded.tables) {
+        const auto combat = eawr::units::combat_table(*loaded.tables);
+        expect(static_cast<bool>(combat), "W-07: nonorthogonal model frame binds without a loader refusal");
+        const auto* ship = combat ? combat.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+        expect(ship && !ship->weapons.empty() && ship->weapons.front().fire_axes,
+            "W-07: the skewed weapon remains present with its fire frame");
+        if (ship && !ship->weapons.empty() && ship->weapons.front().fire_axes) {
+            const auto& axes = *ship->weapons.front().fire_axes;
+            const auto product = eawr::sim::math::dot(axes[1], axes[2]);
+            expect(product && (product.value().raw() < -eawr::sim::tactical::frame_tolerance_raw
+                    || product.value().raw() > eawr::sim::tactical::frame_tolerance_raw),
+                "W-07: binding preserves skew rather than orthogonalizing the authored frame");
+        }
+        expect(std::any_of(loaded.tables->notes.begin(), loaded.tables->notes.end(), [](const auto& row) {
+            return row.field == "Fire_Bone_A" && row.reason == "W-07: nonorthogonal bone axes retained";
+        }), "W-07: the retained fire frame has a counted data diagnostic");
+    }
     auto cycle = model("data/art/models/cycle.alo", {bone("A", 1, {0, 0, 0}), bone("B", 0, {0, 0, 0})});
     expect(!eawr::units::bind_frames(cycle), "a bone cycle fails");
     auto huge = model("data/art/models/huge.alo", {bone("A", -1, {std::numeric_limits<float>::infinity(), 0, 0})});

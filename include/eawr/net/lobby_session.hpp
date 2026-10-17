@@ -23,7 +23,9 @@ enum class LobbyPhase : std::uint8_t { staging, starting, committed, closed };
 enum class LobbyReason : std::uint8_t {
     malformed, authority, stale_revision, invalid_choice, full, denied,
     not_ready, frozen, chat_limit, setup_failed, left, kicked, host_closed,
-    link_closed, resource_limit, recovery_unavailable
+    link_closed, resource_limit, recovery_unavailable,
+    // Online room mesh (slice N4): their diagnostics are EAWR-NET-1762 and EAWR-NET-1764 (the 1760..1779 range), not 1600+n.
+    pair_unreachable, mesh_incomplete
 };
 struct LobbySelection {
     std::string name, faction;
@@ -100,7 +102,8 @@ struct LobbySetupContext {
 };
 struct LobbyHooks {
     // Mandatory loaded-data validator. Validate choices/owner consistency, map
-    // capacity and canonical options; starting=true also checks complete teams.
+    // capacity and canonical options; starting=true checks complete teams at
+    // Ready, Start and frozen snapshots. Editable staging may be incomplete.
     std::function<core::Result<void>(const LobbySnapshot&, bool starting)> validate;
     // Build the EXACT frozen revision; returned seats must match the supplied
     // dense setup roster. Never reuse a previously built offer after an edit.
@@ -111,6 +114,11 @@ struct LobbyHooks {
     // Host only: close admitted streams and cancel reservations for this identity.
     // The closed notice is best-effort; must not destroy the room transport.
     std::function<void(PeerIndex, LobbyReason)> remove_peer;
+    // Online room mesh, host only; LAN sets neither (docs/net-online-npeer.md, section 3). mesh_complete is checked by Start:
+    // every agreed seat present and every pair verified. lock_room runs once the setup is agreed, just before the commitment
+    // is published; a refusal returns the room to staging. Neither may block.
+    std::function<core::Result<void>()> mesh_complete;
+    std::function<core::Result<void>()> lock_room;
 };
 struct LobbyRuntime;
 class LobbyResult final {
@@ -151,10 +159,19 @@ public:
         LobbySelection selection = {});
     [[nodiscard]] core::Result<void> chat(std::string text);
     [[nodiscard]] core::Result<void> kick(PeerIndex peer, std::uint64_t revision);
+    // Host only, before Start. Online room mesh: `newcomer` could not reach `unreachable` (a seat of this room, or a seat that
+    // already left) through any direct or relayed path, so it is refused, not the room (owner decision 1, #3669). The newcomer
+    // gets a closed notice with mesh_newcomer_refusal_text(name, relay_configured); the room gets one chat line naming both
+    // players; the host's notice() carries the diagnostic EAWR-NET-1762. No ban: the slot is free for another player.
+    [[nodiscard]] core::Result<void> refuse_unreachable(PeerIndex newcomer, PeerIndex unreachable, bool relay_configured);
     [[nodiscard]] core::Result<void> close();
     [[nodiscard]] core::Result<void> start(std::uint64_t revision);
     [[nodiscard]] core::Result<void> accept_setup(); // Separate explicit SetupSession::accept.
     [[nodiscard]] core::Result<void> pump(std::uint64_t now_ms);
+    // True once the host's commitment is accepted AND this peer's own setup barrier (tick-zero agreement with every
+    // peer) is ready. Callers wait on this before take_result: the host commits on its own readiness, which does not prove
+    // this guest has every other guest's tick-zero summary yet (#3929).
+    [[nodiscard]] bool result_ready() const;
     [[nodiscard]] core::Result<LobbyResult> take_result();
     [[nodiscard]] const LobbySnapshot& snapshot() const;
     [[nodiscard]] const std::deque<LobbyChat>& chat_history() const;

@@ -119,7 +119,7 @@ private:
     std::size_t waypoint_stubs_omitted_{};
     std::size_t max_waypoint_paths_{}, max_waypoint_flags_{};
     struct HardpointUi final {
-        std::string texture;  // reticle art stem, empty: none
+        ui::HardpointReticleArt art; // independent authored art for each marker state
         std::string tooltip; // WU-51: localised HardPoint Tooltip_Text
         bool targetable{};
         std::array<float, 3> local{};

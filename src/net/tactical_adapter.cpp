@@ -109,7 +109,8 @@ core::Result<Bytes> TacticalSessionAdapter::canonical_input() const {
     auto replay = session_.record();
     const auto tick = session_.completed_tick();
     std::erase_if(replay.commands, [tick](const auto& command) { return command.key.tick + 1 != tick; });
-    if (replay.commands.empty()) return core::Result<Bytes>::success({});
+    std::erase_if(replay.object_turns, [tick](const auto& command) { return command.tick + 1 != tick; });
+    if (replay.commands.empty() && replay.object_turns.empty()) return core::Result<Bytes>::success({});
     return tactical::write_replay(replay);
 }
 core::Result<CompletedTick> TacticalSessionAdapter::step() {

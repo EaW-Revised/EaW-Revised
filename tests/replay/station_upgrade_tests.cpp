@@ -606,6 +606,22 @@ void test_teammate_level_up() {
             "WPR-52: every ally's pending queue follows replacement station");
 }
 
+void test_teammate_level_up_one_at_a_time() {
+    // #3924: any teammate may start the shared station's level-up, but only one at a time for the team.
+    auto world = create(); if (!world) return;
+    expect(world->build_allowed(3, 1, 91) && world->build_allowed(2, 1, 91), "#3924: idle level-up is open to every teammate");
+    expect(static_cast<bool>(world->submit(buy(0, 2, 0, 1, 91))), "#3924: teammate starts the level-up");
+    expect(static_cast<bool>(world->submit(buy(0, 3, 0, 1, 91))), "#3924: same-tick second start submits");
+    const auto events = through(*world, 1);
+    const auto rejected = std::count_if(events.begin(), events.end(), [](const auto& event) {
+        return event.kind == t::EventKind::order_rejected;
+    });
+    expect(rejected == 1, "#3924: the second same-tick level-up start is rejected");
+    expect(!world->build_allowed(1, 1, 91) && !world->build_allowed(3, 1, 91),
+        "#3924: no teammate may start a second level-up while one is queued");
+    expect(account(*world, 2).credits == whole(5990) && account(*world, 3).credits == whole(6000),
+        "#3924: only the teammate who started the level-up pays");
+}
 void test_roster_gate() {
     for (const auto disabled : {90ULL, 91ULL, 41ULL}) {
         auto rules = economy();
@@ -2047,6 +2063,7 @@ int main() {
     test_disabled_authored_bay();
     test_free_garrison_replay();
     test_teammate_level_up();
+    test_teammate_level_up_one_at_a_time();
     test_no_upgrade_layout(); test_replacement_attack(); test_order_after_reinforcement(); test_replacement_projectiles(); test_destroyed_station(); test_hangar_replacement(); test_production_work();
     test_staged_source_removal();
     test_upgrade_holder_loss();

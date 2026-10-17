@@ -9,6 +9,24 @@
 using namespace eawr::presentation::audio;
 
 int main() {
+    const auto f = [](std::int64_t n) { return eawr::sim::math::Fixed::from_raw(n * eawr::sim::math::Fixed::scale); };
+    // WGP-55/59: supplied admitted observations, including queued usage. No HUD
+    // polling, baseline lifecycle, cue existence or voice admission is inferred.
+    for (const auto previous : {0, 1, 5, 6, 8}) for (const auto current : {0, 1, 5, 6, 8})
+        for (const auto capacity : {0, 5, 6, 10}) {
+            const bool expected = previous > 0 && current > previous && current >= capacity;
+            assert(galactic_population_warning(3, 3, true, f(previous), f(current), f(capacity)) == expected);
+            assert(!galactic_population_warning(2, 3, true, f(previous), f(current), f(capacity)));
+            assert(!galactic_population_warning(3, 3, false, f(previous), f(current), f(capacity)));
+            assert(!galactic_population_warning(0, 0, true, f(previous), f(current), f(capacity)));
+        }
+    auto previous = f(4);
+    for (const auto current : {5, 6, 7}) {
+        assert(galactic_population_warning(3, 3, true, previous, f(current), f(5)));
+        // Caller stores even if a missing/refused cue makes the request silent.
+        previous = f(current);
+        assert(!galactic_population_warning(3, 3, true, previous, f(current), f(5)));
+    }
     using Kind = eawr::sim::galactic::GalacticEventKind;
     eawr::sim::galactic::GalacticEvent event;
     assert(galactic_event_sound(event, 3, {}, {}, false, 3) == GalacticSound::construction_options);
@@ -17,6 +35,9 @@ int main() {
     const std::vector<Field> unlock_faction{{"SFXEvent_New_Construction_Options_Available", "custom_unlock"}};
     assert(galactic_sound_event(GalacticSound::construction_options, unlock_faction, {}) == "custom_unlock");
     assert(galactic_sound_event(GalacticSound::construction_options, {}, unlock_faction).empty());
+    const std::vector<Field> approach_faction{{"SFXEvent_Enemy_Fleet_Approaching_Planet", "renamed_approach"}};
+    assert(galactic_sound_event(GalacticSound::enemy_approaching, approach_faction, {}) == "renamed_approach");
+    assert(galactic_sound_event(GalacticSound::enemy_approaching, {}, approach_faction).empty());
     event.kind = Kind::discovery_feedback; event.value = 3;
     assert(galactic_event_sound(event, 3, {}, {}, false) == GalacticSound::planet_revealed);
     assert(!galactic_event_sound(event, 2, {}, {}, false) && !galactic_event_sound(event, 0, {}, {}, false));
@@ -39,6 +60,17 @@ int main() {
     assert(!galactic_event_sound(event, 3, {}, {}, false));
     event.kind = Kind::victory_matured;
     assert(!galactic_event_sound(event, 3, {}, {}, false)); // No sourced campaign loser yet.
+    using Notice = eawr::sim::galactic::GalacticFeedbackNotice;
+    for (const auto& [kind, expected] : {
+        std::pair{Notice::Kind::capture_reward, GalacticSound::capture_bonus},
+        std::pair{Notice::Kind::enemy_approaching, GalacticSound::enemy_approaching},
+        std::pair{Notice::Kind::planet_corrupted, GalacticSound::planet_corrupted},
+        std::pair{Notice::Kind::corruption_removed, GalacticSound::corruption_removed}}) {
+        const Notice notice{kind, 3, 10};
+        assert(galactic_event_sound(event, 3, {}, {}, false, {}, notice) == expected);
+        assert(!galactic_event_sound(event, 2, {}, {}, false, {}, notice));
+        assert(!galactic_event_sound(event, 0, {}, {}, false, {}, notice));
+    }
     assert(galactic_owner_sound(3, 2, 3, true) == GalacticSound::planet_gained);
     assert(galactic_owner_sound(3, 3, 2, true) == GalacticSound::planet_lost);
     assert(!galactic_owner_sound(3, 1, 2, true));
@@ -143,7 +175,7 @@ int main() {
     assert(galactic_sound_event(GalacticSound::capture_bonus, faction, audio) == "mod_bonus");
     assert(galactic_sound_event(GalacticSound::planet_corrupted, faction, audio).empty());
     for (const auto cue : {GalacticSound::planet_gained, GalacticSound::planet_lost,
-        GalacticSound::planet_corrupted, GalacticSound::enemy_approaching, GalacticSound::planet_revealed,
+        GalacticSound::planet_corrupted, GalacticSound::corruption_removed, GalacticSound::enemy_approaching, GalacticSound::planet_revealed,
         GalacticSound::capture_bonus, GalacticSound::population_cap, GalacticSound::credit_cap,
         GalacticSound::mission_added, GalacticSound::construction_options, GalacticSound::starbase_upgraded,
         GalacticSound::enemy_starbase_upgraded, GalacticSound::ally_starbase_upgraded, GalacticSound::blockade,

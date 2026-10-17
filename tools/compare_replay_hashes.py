@@ -108,7 +108,7 @@ def compare_bundle(evidence: pathlib.Path, fixtures: pathlib.Path, targets: tupl
                     except (ValueError, KeyError, TypeError) as error:
                         raise ValueError(f"{path}: invalid tick-zero census: {error}") from error
                     # Frozen EAWRTST setup hash, independently checked by the skirmish CLI test.
-                    if state != "78697a3cd28322cd6f19b659de3b131a7cb8d6cf312e7dcfb684d63689cdaeda":
+                    if state != "38a8d8870dc82ea2e435b7ca5d6a568caa7603b0f2b88e5ddb031068b2908854":
                         raise ValueError(f"{path}: skirmish tick-zero state differs from frozen setup")
                     rows = required_bytes(directory / f"skirmish-workers-{workers}.snapshots.csv").splitlines()
                     if len(rows) < 2 or rows[1] != f"0,{snapshot}".encode():

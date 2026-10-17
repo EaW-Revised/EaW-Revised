@@ -1,7 +1,9 @@
 # Release on a version tag (docs/releasing.md): builds and tests each platform on GitHub-hosted runners,
 # packages the headless tools and the viewer project with its GDExtension (no game data, no Godot
-# binary), attests the build provenance of every archive, and opens a DRAFT GitHub Release with
-# generated notes and SHA-256 sums. A maintainer reviews and publishes the draft by hand.
+# binary), on Windows also the portable player folder (EAWR.exe, the pinned Godot runtime, the pre-imported
+# project) and a separate debug archive built in the Debug configuration, attests the build provenance of every
+# archive, and opens a DRAFT GitHub Release with generated notes and SHA-256 sums. The archives are not
+# code-signed. A maintainer reviews and publishes the draft by hand.
 name: Release
 
 on:
@@ -23,7 +25,7 @@ jobs:
   build:
     name: build-${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: read
       id-token: write
@@ -90,11 +92,20 @@ jobs:
           cmake -S apps/viewer -B out/build/viewer -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14
           cmake --build out/build/viewer --target eawr_viewer
 
+      # Online play (the relay client and GameNetworkingSockets, fetched and built by the viewer's own configure)
+      # is part of the Windows viewer, as in the preview builds.
       - name: Build the viewer extension (Windows)
         if: ${{ runner.os == 'Windows' }}
         run: |
-          cmake -S apps/viewer -B out/build/viewer -G "Visual Studio 17 2022" -A x64
+          cmake -S apps/viewer -B out/build/viewer -G "Visual Studio 17 2022" -A x64 -DEAWR_ENABLE_RELAY=ON -DEAWR_ENABLE_GNS=ON
           cmake --build out/build/viewer --config Release --target eawr_viewer
+
+      - name: Fetch the pinned Godot runtime (Windows player folder)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $exe = ./tools/release/fetch_pinned_godot.ps1 -Out out/godot-runtime
+          "PLAYER_ARGS=--godot $exe --launcher $PWD/out/build/windows-msvc/apps/launcher/Release/EAWR.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Package
         shell: bash
@@ -104,7 +115,7 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: >-
           python tools/release/package_release.py --build-dir "out/build/${PRESET}"
-          --platform "$PLATFORM" --version "$VERSION" --out out/release
+          --platform "$PLATFORM" --version "$VERSION" --out out/release ${PLAYER_ARGS:-}
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -119,9 +130,91 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The debug archive (docs/debug-build.md): the Debug configuration of the viewer extension and the headless
+  # tools, with PDBs and the compiler's asserts, in the same folder layout as the player archive. Its own
+  # job, so the Release build above keeps its time budget; its tests are the Release job's.
+  build-windows-debug:
+    name: build-windows-x64-debug
+    runs-on: windows-2022
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require the tagged commit on main
+        shell: bash
+        env:
+          TAG_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$TAG_COMMIT" origin/main
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build the headless tools and the launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -r requirements-dev.txt
+          # A static debug C runtime, so the programs run on a PC without Visual Studio; this build is not a gate.
+          cmake --preset windows-msvc -B out/build/windows-msvc-debug -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF
+          cmake --build out/build/windows-msvc-debug --config Debug --parallel --target sim_headless sim_bench path_bench asset_scan asset_validate xml_scan scene_scan sky_scan unit_scan script_smoke hud_movie_prepare
+          cmake --build out/build/windows-msvc-debug --config Release --parallel --target eawr_launcher
+
+      - name: Fetch the pinned godot-cpp
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$GODOT_CPP_TAG" https://github.com/godotengine/godot-cpp.git out/godot/deps/godot-cpp
+          test "$(git -C out/godot/deps/godot-cpp rev-parse HEAD)" = "$GODOT_CPP_COMMIT"
+
+      - name: Build the viewer extension (Debug)
+        run: |
+          cmake -S apps/viewer -B out/build/viewer-debug -G "Visual Studio 17 2022" -A x64 -DEAWR_ENABLE_RELAY=ON -DEAWR_ENABLE_GNS=ON
+          cmake --build out/build/viewer-debug --config Debug --target eawr_viewer
+
+      - name: Fetch the pinned Godot runtime
+        shell: pwsh
+        run: |
+          $exe = ./tools/release/fetch_pinned_godot.ps1 -Out out/godot-runtime
+          "GODOT_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Package the debug archive
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: >-
+          python tools/release/package_release.py --debug --build-dir out/build/windows-msvc-debug
+          --platform windows-x64 --version "$VERSION" --out out/release
+          --godot "$GODOT_EXE" --launcher out/build/windows-msvc-debug/apps/launcher/Release/EAWR.exe
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/release/*.zip
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-windows-x64-debug
+          path: out/release/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
   draft-release:
     name: Draft release
-    needs: build
+    needs: [build, build-windows-debug]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -149,4 +242,4 @@ jobs:
         run: >-
           gh release create "$TAG" out/release/*.zip out/release/SHA256SUMS.txt
           --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes --title "EaW Revised $TAG"
-          --notes "Needs your own installation of Empire at War: Forces of Corruption and the pinned Godot 4.7.2; see docs/releasing.md."
+          --notes "Needs your own installation of Empire at War: Forces of Corruption. The player archive bundles the pinned Godot 4.7.2; the other archives need it separately. Nothing is code-signed; see docs/releasing.md and the player guide."

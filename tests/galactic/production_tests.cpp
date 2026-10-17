@@ -1,4 +1,6 @@
 #include "galactic_support.hpp"
+#include "eawr/core/sha256.hpp"
+#include "eawr/core/gc_profile.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -11,12 +13,17 @@
 
 #include <algorithm>
 #include <cstdlib>
+#if defined(_MSC_VER) && !defined(NDEBUG)
+#include <crtdbg.h>
+#endif
 
 #include <filesystem>
+#include <array>
 #include <fstream>
 #include <sstream>
 #include <set>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 using namespace galactic_test;
@@ -566,6 +573,26 @@ void refund_recipient() {
     expect(game.snapshot()->player_economy()->players[1].credits == f(125), "refund credits the supplied recipient");
 #endif // The mismatched builder intentionally violates the WGEP-64 debug assertion.
 }
+// WGA-159: a plan that ends while its admitted build still waits behind the front entry cancels it by identity.
+void finish_task_behind_front() {
+    eawr::sim::InlineExecutor serial; auto config = setup(); config.player_economy->players[0].credits = f(2000);
+    config.production->players[0].pay_as_you_go = true;
+    auto game = take(galactic::GalacticSession::create(config));
+    submit(game, buy(0, 1)); submit(game, buy(0, 2)); submit(game, buy(0, 3)); (void)take(game.step(serial));
+    const auto before = game.snapshot()->production()->planets[0].queues[0];
+    expect(before.size() == 3, "three pay-as-you-go entries queue on the planet");
+    const auto credits = game.snapshot()->player_economy()->players[0].credits;
+    expect(static_cast<bool>(game.finish_native_production_task(before[1].build_id, false, f(1))),
+        "finished task behind the front entry cancels instead of failing the session");
+    const auto after = game.snapshot()->production()->planets[0].queues[0];
+    expect(after.size() == 2 && after[0] == before[0] && after[1] == before[2],
+        "only the finished entry leaves; the front keeps its countdown and the tail keeps its place");
+    expect(game.snapshot()->player_economy()->players[0].credits == credits, "an unstarted entry has nothing paid to refund");
+    expect(static_cast<bool>(game.finish_native_production_task(before[0].build_id, false, f(1))), "finished front entry still cancels");
+    const auto last = game.snapshot()->production()->planets[0].queues[0];
+    expect(last.size() == 1 && last[0].build_id == before[2].build_id && last[0].start_frame == game.snapshot()->clock().galactic_frame,
+        "front cancellation starts its successor");
+}
 void queue_policies() {
     eawr::sim::InlineExecutor serial; auto config = setup(); config.player_economy->players[0].credits = f(2000);
     auto game = take(galactic::GalacticSession::create(config));
@@ -909,6 +936,297 @@ galactic::GalacticSetup census_setup() {
     auto config = setup(); config.player_economy->players[0].credits = f(2000);
     config.census = galactic::PopulationCensus{{{1000, f(1), 0}, {1001, f(0), 0}}, {{1, 2, false, {}}}, {}};
     return config;
+}
+void native_action_production_barrier() {
+    namespace gc = galactic;
+    const auto require = [](const auto& result) { if (!result) throw std::runtime_error(result.error().message); };
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto config = census_setup(); config.rules.fiscal_cycle_frames = 1000;
+        config.production->players.front().human = false; config.production->players.front().pay_as_you_go = true;
+        config.seats.front().kind = gc::SeatKind::ai;
+        config.seats.front().human_side_id = 0;
+        config.census->players.front().base_capacity = 20; config.census->players.front().ai_uses_cap = true;
+        config.fleet_control->types = {{1000, false, true, false}, {1001, false, true, false}};
+        config.movement.emplace(); auto& movement = *config.movement; movement.mode_modifier = f(1);
+        movement.types = {{1000, f(1), f(100), 0, true, false, false, false}, {1001, f(1), f(100), 0, true, false, false, false}};
+        movement.players = {{1, f(1), f(1), false}};
+        for (const auto& planet : config.planets) {
+            movement.planets.push_back({planet.id, f(1), false}); movement.access.push_back({1, planet.id, true, false});
+        }
+        config.control.emplace(); auto& control = *config.control; control.change_seconds = f(7); control.max_ground_forces = 10;
+        control.players = {{1, true, false, config.players.front().faction_id}}; control.relations = {{1, 1, true}}; control.types = {{1000, 1, false, false}, {1001, 1, false, false}};
+        for (const auto& planet : config.planets) {
+            gc::ControlPlanet row; row.planet = planet.id; row.type = planet.id; row.surface_accessible = true;
+            row.ground_base = {1, 1}; row.starbase = {1, 1}; control.planets.push_back(row);
+        }
+        for (const auto& route : config.routes) control.routes.push_back({route.id, f(1)});
+        auto& creation = config.production->nested_creation.emplace(); creation.fleet_type = 1001;
+        creation.types = {{1000, 0, {}, {}, false, false, gc::ActorCombatRole::ordinary, {}},
+            {1001, 0, {}, {}, false, false, gc::ActorCombatRole::ordinary, {}}}; creation.relations = {{1, 1, false}};
+        for (const auto& fleet : config.fleets) for (const auto& member : fleet.members) {
+            gc::CensusObject actor; actor.id = member.id; actor.original_type = actor.current_type = member.type;
+            actor.owner = fleet.owner; actor.planet = fleet.orbit; actor.container = fleet.id; actor.combat_role = gc::ActorCombatRole::ordinary;
+            config.census->objects.push_back(actor);
+        }
+        std::sort(config.census->objects.begin(), config.census->objects.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        config.income.emplace(); gc::EconomicType mine; mine.type = 1000; mine.mining = gc::PlanetIncomeAbility{{}, f(7), f(1)};
+        config.income->types.push_back(mine);
+        for (auto& planet : config.production->planets) {
+            config.income->planets.push_back({planet.planet, false, false, false});
+            for (auto& offer : planet.offers) {
+                offer.seconds = f(10); config.income->offers.push_back({planet.planet, offer.type, offer.price, offer.seconds});
+            }
+        }
+        config.production->fleet_blockers.emplace();
+        for (const auto& fleet : config.fleets) config.production->fleet_blockers->push_back({fleet.id, false, false, true});
+        auto staged = take(gc::GalacticSession::create(config)); auto direct = take(gc::GalacticSession::create(config));
+        std::vector<std::string> staged_notices, direct_notices;
+        const auto bind = [&](gc::GalacticSession& world, std::vector<std::string>& notices) {
+            auto* owner = &world; auto* output = &notices;
+            const auto publication = [owner] { return eawr::core::sha256_hex(owner->snapshot()->canonical_bytes()); };
+            world.set_native_production_handler([output, publication](const auto& input) {
+                output->push_back("mark:" + std::to_string(static_cast<unsigned>(input.kind)) + ":" + std::to_string(input.build)
+                    + ":" + std::to_string(input.amount.raw()) + ":" + publication());
+                return eawr::core::Result<gc::GalacticSession::NativeProductionPayment>::success({true, input.player, input.amount});
+            });
+            world.set_credit_notification_handler([output, publication](const auto& input) {
+                output->push_back("cash:" + std::to_string(input.player) + ":" + std::to_string(input.credits.raw())
+                    + ":" + std::to_string(input.amount.raw()) + ":" + publication());
+                return eawr::core::Result<void>::success();
+            });
+            world.set_native_production_outcome_handler([output, publication](const auto& input) {
+                output->push_back("outcome:" + std::to_string(input.build) + ":" + std::to_string(input.completed) + ":" + publication());
+            });
+            world.set_native_actor_changes_handler([output](const auto& snapshot, auto changes) {
+                auto value = "actors:" + eawr::core::sha256_hex(snapshot.canonical_bytes());
+                for (const auto& change : changes) value += ":" + std::to_string(static_cast<unsigned>(change.kind)) + "/"
+                    + std::to_string(change.actor) + "/" + std::to_string(change.source);
+                output->push_back(std::move(value)); return eawr::core::Result<void>::success();
+            });
+        };
+        bind(staged, staged_notices); bind(direct, direct_notices);
+        const auto planet = config.planets.front().id;
+        const auto placement = [planet](eawr::sim::EntityId frontier, const std::vector<Fixed>& special) {
+            gc::GalacticSession::NativeForcePlacement output; output.next_id = frontier + 1; output.special_control = special;
+            output.structures.push_back({frontier, 1000, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+            gc::CensusObject actor; actor.id = frontier; actor.original_type = actor.current_type = 1000;
+            actor.owner = 1; actor.planet = actor.container = planet; actor.combat_role = gc::ActorCombatRole::ordinary;
+            output.originals.push_back(actor); return output;
+        };
+        const auto full_builder = [&](const gc::GalacticSnapshot& snapshot, eawr::sim::EntityId frontier) {
+            return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(placement(frontier, snapshot.control()->planets.front().special_control));
+        };
+        const auto private_builder = [&](const gc::GalacticSession::NativeForceView& view, eawr::sim::EntityId frontier) {
+            return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(placement(frontier, view.presence.special_control));
+        };
+        const std::array<gc::PlayerId, 1> players{1};
+        const auto check = [&] {
+            expect(staged.snapshot()->canonical_bytes() == direct.snapshot()->canonical_bytes(), "native producer publication matches the live oracle");
+            expect(staged.snapshot()->economy_input_generation()->income == direct.snapshot()->economy_input_generation()->income,
+                "native producer income projection matches the live source gather");
+            expect(staged_notices == direct_notices, "native funding, outcome and actor notices retain their order and publication boundary");
+        };
+        const auto commit_barrier = [&](auto& pending, bool publishes = true) {
+            const auto profiling = eawr::gc_profile::enabled.exchange(true);
+            const auto index = static_cast<std::size_t>(eawr::gc_profile::Phase::make_snapshot);
+            const auto before_calls = eawr::gc_profile::snapshot()[index].calls;
+            auto committed = pending->commit();
+            const auto calls = eawr::gc_profile::snapshot()[index].calls - before_calls;
+            eawr::gc_profile::enabled.store(profiling);
+            require(committed);
+            expect(calls == (publishes ? 1U : 0U), "a prepared native barrier constructs at most one full snapshot");
+        };
+        auto initial = staged.canonical_state_bytes();
+        auto opened = staged.begin_native_barrier(players, 64); require(opened); auto barrier = std::move(opened).value(); require(barrier->select_player(1));
+#ifndef NDEBUG
+#ifdef _MSC_VER
+        char probe_value[2]{}; std::size_t probe_length{};
+        const bool foreign_probe = getenv_s(&probe_length, probe_value, sizeof(probe_value), "EAWR_GC_FOREIGN_BARRIER_PROBE") == 0
+            && std::string_view(probe_value) == "1";
+#else
+        const bool foreign_probe = std::getenv("EAWR_GC_FOREIGN_BARRIER_PROBE") != nullptr;
+#endif
+        if (foreign_probe) {
+#ifdef _MSC_VER
+            _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+            _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+            _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
+            std::thread foreign([&] { (void)staged.snapshot(); });
+            foreign.join();
+            throw std::runtime_error("foreign-thread barrier probe did not assert");
+        }
+#endif
+        const auto initial_income = staged.snapshot()->economy_input_generation()->income->front().second;
+        auto made = staged.create_native_force({1, planet, 1000, {}}, full_builder);
+        auto oracle_made = direct.create_native_force({1, planet, 1000, {}}, full_builder);
+        require(made); require(oracle_made); expect(made.value() == oracle_made.value(), "staged magic reserves the live identity frontier"); check();
+        expect(staged.snapshot()->economy_input_generation()->income->front().second == take(eawr::sim::math::add(initial_income, f(7))),
+            "a new mining structure contributes exactly once before the next player read");
+        const auto published = staged.snapshot(); const auto oracle_published = direct.snapshot();
+        auto refused = staged.admit_native_production({1, planet, 999999, f(100)}, executor);
+        auto oracle_refused = direct.admit_native_production({1, planet, 999999, f(100)}, executor);
+        require(refused); require(oracle_refused); expect(refused.value().admission == oracle_refused.value().admission && !refused.value().build,
+            "refused native offer refreshes private census without inventing a marker");
+        expect(staged.snapshot() == published && direct.snapshot() == oracle_published, "refused native offer does not publish its private count refresh"); check();
+        auto cash = staged.add_credits(1, f(13), f(1)); auto oracle_cash = direct.add_credits(1, f(13), f(1));
+        require(cash); require(oracle_cash); expect(cash.value() == oracle_cash.value(), "staged cash returns the exact capped windfall"); check();
+        auto admitted = staged.admit_native_production({1, planet, 1000, f(100)}, executor);
+        auto oracle_admitted = direct.admit_native_production({1, planet, 1000, f(100)}, executor);
+        require(admitted); require(oracle_admitted);
+        expect(admitted.value().admission == gc::ProductionAdmission::allowed && admitted.value().build == oracle_admitted.value().build
+            && admitted.value().price == oracle_admitted.value().price, "staged paid queue uses the current producer and population admission"); check();
+        const auto build = admitted.value().build;
+        expect(staged.canonical_state_bytes() == initial, "producer decisions leave the main galaxy unchanged");
+        require(barrier->begin_tail()); commit_barrier(barrier); barrier.reset();
+        expect(staged.canonical_state_bytes() == direct.canonical_state_bytes(), "first producer barrier commits the exact live state"); check();
+        std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 2; ++tick) {
+            auto actual = staged.step(executor); auto oracle = direct.step(executor); require(actual); require(oracle);
+            expect(actual.value().state_sha256 == oracle.value().state_sha256, "paid queue progress matches after staged admission"); hashes.push_back(actual.value().state_sha256);
+        }
+        initial = staged.canonical_state_bytes(); opened = staged.begin_native_barrier(players, 64); require(opened); barrier = std::move(opened).value();
+        const auto running_front = staged.snapshot()->production()->planets.front().queues[0].front();
+        auto waiting = staged.admit_native_production({1, planet, 1000, f(100)}, executor);
+        auto oracle_waiting = direct.admit_native_production({1, planet, 1000, f(100)}, executor);
+        require(waiting); require(oracle_waiting);
+        expect(waiting.value().admission == gc::ProductionAdmission::allowed && waiting.value().build == oracle_waiting.value().build,
+            "a second native paid task waits behind the running front"); check();
+        require(staged.finish_native_production_task(waiting.value().build, false, f(1)));
+        require(direct.finish_native_production_task(oracle_waiting.value().build, false, f(1))); check();
+        expect(staged.snapshot()->production()->planets.front().queues[0].front() == running_front,
+            "staged cancellation behind the front preserves its running countdown");
+        require(staged.finish_native_production_task(build, false, f(1))); require(direct.finish_native_production_task(build, false, f(1))); check();
+        require(barrier->begin_players()); require(barrier->select_player(1));
+        auto batch_result = staged.begin_native_actions(16); auto oracle_batch_result = direct.begin_native_actions(16);
+        require(batch_result); require(oracle_batch_result); auto batch = std::move(batch_result).value(); auto oracle_batch = std::move(oracle_batch_result).value();
+        cash = batch.add_credits(1, f(7), f(1)); oracle_cash = oracle_batch.add_credits(1, f(7), f(1)); require(cash); require(oracle_cash);
+        made = batch.create_force({1, planet, 1000, {}}, private_builder, executor);
+        oracle_made = oracle_batch.create_force({1, planet, 1000, {}}, private_builder, executor);
+        require(made); require(oracle_made); expect(made.value() == oracle_made.value(), "private immediate creation reserves matching identities");
+        cash = batch.add_credits(1, f(-2), f(1)); oracle_cash = oracle_batch.add_credits(1, f(-2), f(1)); require(cash); require(oracle_cash);
+        require(staged.commit_native_actions(batch)); require(direct.commit_native_actions(oracle_batch)); check();
+        require(barrier->begin_tail());
+        cash = staged.add_credits(1, f(3), f(1)); oracle_cash = direct.add_credits(1, f(3), f(1)); require(cash); require(oracle_cash); check();
+        const auto last_publication = staged.snapshot(); const auto oracle_last = direct.snapshot();
+        refused = staged.admit_native_production({1, planet, 999999, f(100)}, executor);
+        oracle_refused = direct.admit_native_production({1, planet, 999999, f(100)}, executor); require(refused); require(oracle_refused);
+        expect(staged.snapshot() == last_publication && direct.snapshot() == oracle_last, "last refused request keeps the prior publication at barrier end"); check();
+        expect(staged.canonical_state_bytes() == initial, "prelude, immediate batch and tail remain private until ordered commit");
+        commit_barrier(barrier); barrier.reset();
+        expect(staged.canonical_state_bytes() == direct.canonical_state_bytes() && staged.record() == direct.record(),
+            "producer prelude, immediate grouping and tail commit exact state and journal bytes"); check();
+        opened = staged.begin_native_barrier(players, 16); require(opened); barrier = std::move(opened).value();
+        require(barrier->begin_players()); require(barrier->select_player(1));
+        batch_result = staged.begin_native_actions(1); oracle_batch_result = direct.begin_native_actions(1);
+        require(batch_result); require(oracle_batch_result);
+        batch = std::move(batch_result).value(); oracle_batch = std::move(oracle_batch_result).value();
+        require(staged.commit_native_actions(batch)); require(direct.commit_native_actions(oracle_batch)); check();
+        require(barrier->begin_tail()); commit_barrier(barrier); barrier.reset();
+        expect(staged.canonical_state_bytes() == direct.canonical_state_bytes(),
+            "an empty immediate batch publishes a prior refused request's private census exactly once"); check();
+        opened = staged.begin_native_barrier(players, 16); require(opened); barrier = std::move(opened).value();
+        require(barrier->begin_players()); require(barrier->select_player(1));
+        const auto created_fleet = staged.next_entity_id();
+        const auto space_builder = [planet](const gc::GalacticSnapshot&, eawr::sim::EntityId frontier) {
+            gc::GalacticSession::NativeForcePlacement output; output.next_id = frontier + 3;
+            output.fleets.push_back({frontier, 1, planet, {{frontier + 1, 1001}, {frontier + 2, 1001}}});
+            for (eawr::sim::EntityId offset = 0; offset < 3; ++offset) {
+                gc::CensusObject actor; actor.id = frontier + offset; actor.original_type = actor.current_type = 1001;
+                actor.owner = 1; actor.planet = planet; actor.container = offset ? frontier : planet;
+                actor.combat_role = offset ? gc::ActorCombatRole::ordinary : gc::ActorCombatRole::fleet;
+                if (offset == 1) { actor.abilities.present = true; actor.abilities.combat_skip = true; actor.abilities.self_target = true; }
+                output.originals.push_back(actor);
+            }
+            return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(output));
+        };
+        made = staged.create_native_force({1, planet, 1001, {}}, space_builder);
+        oracle_made = direct.create_native_force({1, planet, 1001, {}}, space_builder);
+        require(made); require(oracle_made); expect(made.value() == oracle_made.value(), "new fleet constructor identities match"); check();
+        auto detached = staged.admit_native_fleet(1, gc::RemoveFleetMembers{created_fleet, {created_fleet + 2}}, false);
+        auto oracle_detached = direct.admit_native_fleet(1, gc::RemoveFleetMembers{created_fleet, {created_fleet + 2}}, false);
+        require(detached); require(oracle_detached); expect(detached.value().admitted && oracle_detached.value().admitted, "new fleet membership changes are admitted"); check();
+        const auto& blockers = *staged.snapshot()->production()->fleet_blockers;
+        const auto blocker = std::find_if(blockers.begin(), blockers.end(), [created_fleet](const auto& row) { return row.fleet == created_fleet; });
+        expect(blocker != blockers.end() && blocker->skips_space_combat,
+            "a fleet created in an earlier layer refreshes its live combat-skip blocker after membership changes");
+        require(barrier->begin_tail()); commit_barrier(barrier); barrier.reset();
+        expect(staged.canonical_state_bytes() == direct.canonical_state_bytes(), "new fleet blocker commits the exact live state"); check();
+        const auto unchanged = staged.snapshot();
+        opened = staged.begin_native_barrier(players, 16); require(opened); barrier = std::move(opened).value();
+        require(barrier->begin_players()); require(barrier->begin_tail()); commit_barrier(barrier, false); barrier.reset();
+        expect(staged.snapshot() == unchanged, "an untouched barrier retains its completed publication without a full rebuild");
+        opened = staged.begin_native_barrier(players, 256); require(opened); barrier = std::move(opened).value();
+        require(barrier->select_player(1));
+        auto previous_generation = staged.snapshot()->economy_input_generation()->accounts;
+        for (unsigned action = 0; action < 64; ++action) {
+            const auto delta = f(action % 2 ? -1 : 1);
+            require(staged.add_credits(1, delta, f(1))); require(direct.add_credits(1, delta, f(1)));
+            const auto generation = staged.snapshot()->economy_input_generation()->accounts;
+            expect(generation > previous_generation, "coalesced account publications advance their derived invalidation key");
+            previous_generation = generation;
+        }
+        require(staged.add_credits(1, f(5), f(1))); require(direct.add_credits(1, f(5), f(1)));
+        auto shifted = staged.admit_native_fleet(1, gc::SetFleetOrbitSlot{created_fleet, 2}, false);
+        auto oracle_shifted = direct.admit_native_fleet(1, gc::SetFleetOrbitSlot{created_fleet, 2}, false);
+        require(shifted); require(oracle_shifted); expect(shifted.value().admitted && oracle_shifted.value().admitted,
+            "checkpoint fixture changes a fleet in the current player frontier");
+        made = staged.create_native_force({1, planet, 1000, {}}, full_builder);
+        oracle_made = direct.create_native_force({1, planet, 1000, {}}, full_builder);
+        require(made); require(oracle_made);
+        const auto checkpoint_actor = made.value().front();
+        expect(barrier->work().layers == 2, "ordinary actions retain only the prelude and current player layers"); check();
+        for (unsigned transaction = 0; transaction < 40; ++transaction) {
+            auto empty = staged.begin_native_actions(1); auto oracle_empty = direct.begin_native_actions(1);
+            require(empty); require(oracle_empty);
+            require(staged.commit_native_actions(empty.value())); require(direct.commit_native_actions(oracle_empty.value()));
+        }
+        expect(barrier->work().read_checkpoints > 0, "long immediate chains checkpoint their sparse read frontier");
+        {
+            auto probe = staged.begin_native_actions(1); require(probe);
+            const auto* inherited_fleet = probe.value().fleet(created_fleet);
+            expect(inherited_fleet && inherited_fleet->orbit_slot == 2 && inherited_fleet->members.size() == 1
+                && inherited_fleet->members.front().id == created_fleet + 1,
+                "checkpoint reads retain the newest sparse fleet membership");
+            expect(probe.value().actor(checkpoint_actor) && probe.value().created_object(checkpoint_actor)
+                && probe.value().credits(1) == direct.snapshot()->player_economy()->players.front().credits,
+                "checkpoint reads retain actor and account frontiers");
+        }
+        require(barrier->begin_tail()); commit_barrier(barrier); barrier.reset();
+        expect(staged.canonical_state_bytes() == direct.canonical_state_bytes() && staged.record() == direct.record(),
+            "coalesced actions and checkpointed immediate batches preserve state and journal bytes"); check();
+        {
+            auto aborted_result = gc::GalacticSession::create(config); require(aborted_result);
+            auto aborted = std::move(aborted_result).value();
+            const auto completed_publication = aborted.snapshot();
+            auto pending_result = aborted.begin_native_barrier(players, 16); require(pending_result);
+            std::thread destroy([pending = std::move(pending_result).value()]() mutable { pending.reset(); });
+            destroy.join(); // the creator is quiescent for the entire foreign destruction
+            expect(aborted.snapshot() == completed_publication
+                && !aborted.begin_native_barrier(players, 16) && !aborted.step(executor),
+                "foreign barrier destruction expires the creator context and leaves an aborted owner");
+        }
+        {
+            auto bounded_result = gc::GalacticSession::create(config); require(bounded_result);
+            auto bounded = std::move(bounded_result).value();
+            auto pending_result = bounded.begin_native_barrier(players, 1); require(pending_result);
+            auto pending = std::move(pending_result).value();
+            auto first_empty = bounded.begin_native_actions(1); require(first_empty);
+            require(bounded.commit_native_actions(first_empty.value()));
+            auto second_empty = bounded.begin_native_actions(1); require(second_empty);
+            expect(!bounded.commit_native_actions(second_empty.value()), "empty transactions cannot bypass the barrier retention budget");
+            expect(!pending->commit(), "a rejected retention boundary cannot later enter ordered replay");
+            pending.reset();
+            expect(!bounded.step(executor), "an exhausted native barrier is unusable after abandonment");
+        }
+        for (unsigned tick = 0; tick < 12; ++tick) {
+            auto actual = staged.step(executor); auto oracle = direct.step(executor); require(actual); require(oracle);
+            expect(actual.value().state_sha256 == oracle.value().state_sha256, "producer continuation matches after cancellation and grouped creation"); hashes.push_back(actual.value().state_sha256);
+        }
+        if (workers == 1) reference = hashes; else expect(reference == hashes, "producer barrier continuation is equal at 1/2/4/8 workers");
+    }
 }
 void unit_sale() {
     namespace gc = galactic;
@@ -1618,8 +1936,8 @@ int main(int argc, char** argv) {
         if (argc == 3 && std::string_view(argv[1]) == "--write-corpus") { write_corpus(argv[2]); return 0; }
         else if (argc != 2) throw std::runtime_error("expected <fixtures directory> or --write-corpus <new directory>");
         fixture_root = argv[1];
-        ground_structure_sale(); unit_sale();
-        admission(); offer_projection(); orbit_completion_shares_slot_card(); technology_price_production(); cancel_identity(); timing_and_cancel(); inactive_work_budget(); refund_recipient(); queue_policies(); content_and_placement(); base_and_tech_completion(); live_starbase_blockers(); production_corpus_bytes(); blocker_parity_checkpoint(); parity_checkpoint();
+        native_action_production_barrier(); ground_structure_sale(); unit_sale();
+        admission(); offer_projection(); orbit_completion_shares_slot_card(); technology_price_production(); cancel_identity(); timing_and_cancel(); inactive_work_budget(); refund_recipient(); finish_task_behind_front(); queue_policies(); content_and_placement(); base_and_tech_completion(); live_starbase_blockers(); production_corpus_bytes(); blocker_parity_checkpoint(); parity_checkpoint();
         shared_technology_writer(); census_admission(); census_campaign_retained_counts(); company_original_binding(); census_container_and_capacity(); census_rounding_and_data(); census_composite_counts(); census_stock_composite_boundary(); census_corpus_checkpoint();
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -327,9 +327,15 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
         spawner.type_id = assets::object_type_crc(unit.id);
         for (const auto& entry : unit.spawner->starting) {
             const auto id = assets::object_type_crc(entry.squadron);
-            if (!has_squadron(id)) continue;
+            // WSL-16/WGT-10: a campaign station also launches a type without squadron members as one single
+            // ship; skirmish tables keep dropping such entries (the owner's station-spawn decision).
+            const auto* spawned = tables.campaign_scene && !has_squadron(id) ? tables.find(entry.squadron) : nullptr;
+            const bool ship = spawned != nullptr && spawned->kind == UnitKind::ship;
+            if (!has_squadron(id) && !ship) continue;
             tactical::SpawnEntryProfile row;
             row.squadron = id;
+            row.ship = ship;
+            row.arrival = ship && spawned->campaign_hyperspace;
             row.starting = entry.count;
             // SK-36 (owner, #179 Q2): the M2 fixture ignores Reserve_Spawned_Units_Tech_0, so each
             // entry launches its starting squadrons once and a lost one is not replaced. The

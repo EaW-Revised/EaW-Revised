@@ -265,8 +265,12 @@ struct EconomyRules {
     std::vector<PadSaleProfile> pad_sales; // increasing completed type
     std::vector<std::pair<TypeId, math::Fixed>> bounty_values{}; // WGCH-65: current type, selected mode
     bool bounty_collection_enabled{true};
+    // Optional fixture/controller boundary, in completed ticks. Rules stay immutable;
+    // economic commits use the effective human/AI policy for their current tick.
+    std::map<PlayerId, std::uint64_t> player_ai_start_ticks{};
     [[nodiscard]] bool empty() const noexcept { return players.empty(); }
     [[nodiscard]] const EconomyPlayer* player(PlayerId id) const noexcept;
+    [[nodiscard]] std::optional<EconomyPlayer> player_at(PlayerId id, std::uint64_t tick) const noexcept;
     [[nodiscard]] const StationMenu* menu(TypeId station, FactionId faction) const noexcept;
     [[nodiscard]] const IncomeProfile* stream(TypeId source) const noexcept;
     [[nodiscard]] const PadSaleProfile* pad_sale(TypeId type) const noexcept;

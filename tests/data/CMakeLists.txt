@@ -6,6 +6,13 @@ eawr_target_project_warnings(data_tests)
 
 add_test(NAME data_contracts COMMAND data_tests)
 
+# ML-24 (#3631): the stock variants whose blank or TBD values inherit (installed game).
+add_executable(xml_installed_ml24_tests xml_installed_ml24_tests.cpp)
+target_link_libraries(xml_installed_ml24_tests PRIVATE eawr::data eawr::vfs)
+target_compile_features(xml_installed_ml24_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(xml_installed_ml24_tests)
+eawr_add_game_data_test(NAME xml_installed_ml24_contracts COMMAND xml_installed_ml24_tests)
+
 add_executable(xml_namespace_tests xml_namespace_tests.cpp)
 target_link_libraries(xml_namespace_tests PRIVATE eawr::data)
 target_compile_features(xml_namespace_tests PRIVATE cxx_std_20)

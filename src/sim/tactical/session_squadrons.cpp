@@ -1,6 +1,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
+#include "eawr/sim/math/trig.hpp"
 #include "eawr/sim/tactical/formation.hpp"
 #include "eawr/sim/tactical/pathfind.hpp"
 
@@ -117,6 +118,8 @@ void apply_squadron_order(SquadronState& state, const CommandPayload& payload, c
     }
     // WMV-17/18: player movement replaces the base destination. A stop's degenerate
     // position destination completes at once; moving destinations retain their own completion.
+    // FO-03/05: member preparation clears a direct target that no longer names this
+    // retained base. Face returned above preserves its kind and that target projection.
     const bool reached_done = state.formation && state.formation->has_reached_done;
     state.formation = SquadronFormationState{state.anchor, state.escorted, false, reached_done, false};
     if (const auto* attack = std::get_if<AttackPayload>(&payload)) {
@@ -191,7 +194,8 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
     const SpawnDecision& decision, const std::uint64_t frame, EntityId& next, std::vector<LiveUnit>& survivors,
     std::vector<TacticalInstance>& instances, std::vector<Squadron>& squadron_list,
     detail::MapStage<CraftState>& flights, detail::MapStage<SquadronState>& orders,
-    const TypeId free_type, const PlayerId free_owner, std::vector<EntityId>* registered) const {
+    const TypeId free_type, const PlayerId free_owner, std::vector<EntityId>* registered,
+    std::map<EntityId, ArrivalState>* lane_arrivals) const {
         using Void = core::Result<void>;
         const auto& table = motion.squadrons;
         const auto company_type = free_type != 0 ? free_type : profile.entries[decision.entry].squadron;
@@ -219,6 +223,83 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
             next = state.entity_id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : state.entity_id + 1;
             return Void::success();
         };
+        if (free_type == 0 && profile.entries[decision.entry].ship) {
+            // WSL-16: a type without squadron members is created as one single ship. Facing runs from the
+            // bay point to the end of its spawn vector; a ring search around that end (radius 0, then 200
+            // to 800 in steps of 200, eight bearings 45 degrees apart) takes the first free spot. Without
+            // one nothing is created and the hangar returns the slot.
+            if (next == invalid_entity_id) return Void::failure(detail::diagnostic(diagnostic_codes::resource_limit,
+                context + "stable ID space exhausted"));
+            const auto& origin = position.value();
+            const auto& along = direction.value();
+            math::Vec3 endpoint{};
+            if (!math::try_add(origin.x, along.x, endpoint.x) || !math::try_add(origin.y, along.y, endpoint.y)
+                || !math::try_add(origin.z, along.z, endpoint.z)) {
+                return Void::failure(detail::diagnostic(diagnostic_codes::worker_failure, context + "bay point overflows"));
+            }
+            const auto turns = math::atan2_turn(along.y, along.x);
+            if (!turns) return Void::failure(turns.error());
+            const auto yaw = math::multiply(turns.value(), math::Fixed::from_raw(360 * math::Fixed::scale));
+            if (!yaw) return Void::failure(yaw.error());
+            auto facing = yaw_rotation(yaw.value());
+            if (!facing) return Void::failure(facing.error());
+            const auto* footprint = economy.footprint_of(company_type);
+            std::vector<PlacementBox> blockers;
+            if (footprint != nullptr && footprint->box) for (const auto& unit : survivors) {
+                if (auto blocked = block_placement(unit.state, blockers); !blocked) return blocked;
+            }
+            const auto free_at = [&](const math::Vec3& at) -> core::Result<bool> {
+                if (footprint == nullptr || !footprint->box) return core::Result<bool>::success(true);
+                auto bounds = blocker_bounds(*footprint->box, at, yaw.value());
+                if (!bounds) return core::Result<bool>::failure(bounds.error());
+                const auto& box = bounds.value();
+                return core::Result<bool>::success(std::none_of(blockers.begin(), blockers.end(), [&](const PlacementBox& blocker) {
+                    return box.min_x < blocker.max_x && blocker.min_x < box.max_x
+                        && box.min_y < blocker.max_y && blocker.min_y < box.max_y;
+                }));
+            };
+            std::optional<math::Vec3> found;
+            for (std::int64_t ring = 0; ring <= 4 && !found; ++ring) {
+                const auto radius = math::Fixed::from_raw(ring * 200 * math::Fixed::scale);
+                for (std::int64_t bearing = 0; bearing < 8 && !found; ++bearing) {
+                    const auto [sine, cosine] = math::sin_cos_turn(math::Fixed::from_raw(bearing * math::Fixed::scale / 8));
+                    math::Fixed dx, dy;
+                    math::Vec3 at = endpoint;
+                    if (!math::try_multiply(radius, cosine, dx) || !math::try_multiply(radius, sine, dy)
+                        || !math::try_add(endpoint.x, dx, at.x) || !math::try_add(endpoint.y, dy, at.y)) {
+                        return Void::failure(detail::diagnostic(diagnostic_codes::worker_failure, context + "ring candidate overflows"));
+                    }
+                    at.z = {};
+                    auto vacant = free_at(at);
+                    if (!vacant) return Void::failure(vacant.error());
+                    if (vacant.value()) found = at;
+                    if (ring == 0) break;
+                }
+            }
+            if (!found) return Void::success();
+            const auto raised = math::add(found->z, footprint != nullptr ? footprint->layer_z : math::Fixed{});
+            if (!raised) return Void::failure(raised.error());
+            found->z = raised.value();
+            auto start = *found;
+            const auto id = next;
+            const bool arriving = lane_arrivals != nullptr && profile.entries[decision.entry].arrival;
+            if (arriving) {
+                // WSL-16a: the ship's own Hyperspace tag sends it down the reinforcement arrival lane (PU-34,
+                // PU-35), ending at the free spot beside the bay's spawn vector.
+                const auto lane = planar_direction(yaw.value());
+                if (!lane) return Void::failure(lane.error());
+                const ArrivalState arrival{0, *found, lane.value()};
+                auto placed = arrival_position(arrival);
+                if (!placed) return Void::failure(placed.error());
+                start = placed.value();
+                lane_arrivals->emplace(id, arrival);
+            }
+            if (auto added = add(UnitState{id, company_type, owner, start, facing.value(), {}}); !added) return added;
+            if (arriving && economy.vulnerability_frames != 0 && economy.vulnerability.raw() != 0) {
+                survivors.back().arrival_vulnerable_until = frame + 1 + economy.vulnerability_frames;
+            }
+            return Void::success();
+        }
         if (free_type != 0 && (squadron == nullptr || table.find_craft(company_type) != nullptr)) {
             if (next == invalid_entity_id) return Void::failure(detail::diagnostic(diagnostic_codes::resource_limit,
                 context + "stable ID space exhausted"));

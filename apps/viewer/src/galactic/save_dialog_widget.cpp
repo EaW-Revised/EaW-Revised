@@ -2,6 +2,7 @@
 #include "galactic_mode_internal.hpp"
 #include "ui/battle_overlay.hpp"
 #include "ui/theme_builder.hpp"
+#include "options_screen.hpp"
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/property_tweener.hpp>
 #include <godot_cpp/classes/v_scroll_bar.hpp>
@@ -27,6 +28,9 @@ void selected_slot(int64_t index, int64_t address) {
 }
 void activated_slot(int64_t index, int64_t address) {
     reinterpret_cast<GalacticSaveControls*>(address)->activate_slot(index);
+}
+void options_closed_thunk(int64_t address) {
+    reinterpret_cast<GalacticSaveControls*>(address)->options_closed();
 }
 void caption(Control* control, const std::string& text) {
     if (auto* label = Object::cast_to<EawrUiLabel>(control)) label->set_text(String::utf8(text.c_str()));
@@ -123,7 +127,8 @@ bool GalacticSaveControls::build_widgets() {
         auto theme = presentation::ui::build_theme_model(sources,
             presentation::ui::reference_space({static_cast<std::uint32_t>(size.x), static_cast<std::uint32_t>(size.y)}));
         data::ui::TextLookup lookup(*text);
-        auto built = build_dialog(*definition, theme, &lookup, presentation::ui::Placement::centre);
+        auto built = build_dialog(*definition, theme, &lookup, presentation::ui::Placement::centre, false,
+            [this](std::string_view cue) { if (state_.audio) state_.audio->ui_sound(cue); });
         built.frame->set_theme(build_theme(theme, *textures, *state_.hud_fonts));
         return built;
     };
@@ -158,11 +163,10 @@ bool GalacticSaveControls::build_widgets() {
             else if (id == "IDC_SAVE_GAME_BUTTON") action(control, [this] { save(); });
             else if (id == "IDC_LOAD_GAME_BUTTON") action(control, [this] { load(); });
             else if (id == "IDC_DELETE_GAME_BUTTON") action(control, [this] { erase(); });
-            else if (id == "IDC_INGAME_OPTIONS" || id == "IDC_GAME_OPTIONS_QUIT") {
-                // GHUD-S44/S47 own settings and exit dispatch; expose the authored
-                // controls disabled until their provider routes are attached.
-                control->set_meta("provider_seam", "GHUD-S44/S47");
-            } else if (id == "IDC_SAVE_GAME_NAME_EDIT") {
+            else if (id == "IDC_INGAME_OPTIONS") action(control, [this] { open_options(); });
+            // WGS-165: Quit Game asks TEXT_QUIT_SURE first; Yes ends the campaign for the main menu.
+            else if (id == "IDC_GAME_OPTIONS_QUIT") action(control, [this] { show_modal(Modal::quit, localized("TEXT_QUIT_SURE")); });
+            else if (id == "IDC_SAVE_GAME_NAME_EDIT") {
                 name_ = Object::cast_to<LineEdit>(control); name_->set_name("SaveName");
                 name_->set_max_length(63); // Toolkit scrolling remains the filename-control seam (WGS-154).
             } else if (id == "IDC_SAVE_GAME_LIST") {
@@ -180,6 +184,33 @@ bool GalacticSaveControls::build_widgets() {
     modal_root_->set_name("SaveModal"); modal_root_->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
     modal_root_->set_mouse_filter(Control::MOUSE_FILTER_STOP); modal_root_->hide();
     root_->hide(); return true;
+}
+// MNU-19: the menu's Options button shows the in-game options hub; its Back returns to the menu.
+void GalacticSaveControls::open_options() {
+    if (options_ != nullptr && !UtilityFunctions::is_instance_id_valid(options_id_)) options_ = nullptr;
+    if (options_ != nullptr && options_->shown()) return;
+    if (options_ == nullptr) {
+        auto* screen = memnew(EawrOptionsScreen);
+        EawrOptionsScreen::Options screen_options;
+        screen_options.filesystem = state_.filesystem;
+        screen_options.game_root = state_.options.game_root;
+        screen_options.mod_root = state_.options.mod_root;
+        screen_options.context = EawrOptionsScreen::Context::in_game;
+        screen_options.apply_window = state_.options.capture_path.empty();
+        if (!screen->build(std::move(screen_options))) {
+            widget_failure_ = screen->failure();
+            memdelete(screen);
+            return;
+        }
+        options_ = screen; options_id_ = static_cast<int64_t>(screen->get_instance_id());
+        options_->connect("closed", callable_mp_static(&options_closed_thunk)
+            .bind(reinterpret_cast<int64_t>(this)));
+    }
+    escape_dialog_->frame->hide();
+    options_->show(*state_.host, EawrOptionsScreen::Page::hub);
+}
+void GalacticSaveControls::options_closed() {
+    if (escape_dialog_ && screen_ == Screen::escape) escape_dialog_->frame->show();
 }
 void GalacticSaveControls::show_screen(Screen screen) {
     if (modal_ != Modal::none) return;
@@ -256,7 +287,7 @@ void GalacticSaveControls::show_modal(Modal modal, std::string text) {
     if (modal_dialog_) { modal_dialog_->frame->hide(); modal_dialog_->frame->queue_free(); }
     modal_ = modal; ++modal_admissions_; message(std::move(text));
     const bool progress = modal == Modal::progress_save || modal == Modal::progress_load;
-    const bool confirmation = modal == Modal::overwrite || modal == Modal::erase;
+    const bool confirmation = modal == Modal::overwrite || modal == Modal::erase || modal == Modal::quit;
     modal_dialog_ = build_(progress ? "IDD_DIALOG_BOX_SMALL" : confirmation ? "IDD_DIALOG_BOX2" : "IDD_DIALOG_BOX1");
     if (!modal_dialog_->frame) { widget_failure_ = "Save result dialog unavailable."; modal_ = Modal::none; return; }
     modal_root_->add_child(modal_dialog_->frame); modal_root_->show();
@@ -280,6 +311,7 @@ void GalacticSaveControls::show_modal(Modal modal, std::string text) {
 void GalacticSaveControls::dismiss_modal(bool yes) {
     if (modal_ == Modal::progress_save || modal_ == Modal::progress_load) return;
     const auto previous = modal_; modal_ = Modal::none; modal_root_->hide();
+    if (previous == Modal::quit && yes) { state_.leave_requested = true; return; }
     if (previous == Modal::overwrite && yes) { begin_progress(true, pending_name_, true); return; }
     if (previous == Modal::erase && yes) {
         auto removed = state_.game->delete_save(pending_name_);

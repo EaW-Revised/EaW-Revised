@@ -3,6 +3,7 @@
 #include "scene_internal.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <string_view>
 
 namespace eawr::scene {
@@ -18,7 +19,16 @@ namespace {
 // Whether a comma or whitespace separated behaviour list names `behaviour`.
 [[nodiscard]] bool lists(const data::EffectiveObject& object, const std::string_view tag,
                          const std::string_view behaviour) {
-    const data::EffectiveValue* value = object.value(tag);
+    // ML-24 (#3631): a blank or TBD variant LandBehavior inherits from its parent. Behavior and
+    // SpaceBehavior keep the plain value() read; the issue names LandBehavior only.
+    std::optional<data::EffectiveValue> inherited;
+    const data::EffectiveValue* value = nullptr;
+    if (tag == "LandBehavior") {
+        inherited = object.single(tag);
+        value = inherited ? &*inherited : nullptr;
+    } else {
+        value = object.value(tag);
+    }
     if (value == nullptr) return false;
     const std::string_view text = value->value.raw_text;
     std::size_t start = 0;

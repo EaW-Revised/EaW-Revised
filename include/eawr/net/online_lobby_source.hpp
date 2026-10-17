@@ -14,6 +14,12 @@ struct OnlineLobbyJoinCompletion {
     std::optional<OnlineRoomAdmission> admission;
     std::optional<core::Diagnostic> refusal;
 };
+// The room this host published and the principal that owns it: what NetworkGnsRoom::open needs to open the room's signalling
+// scope (docs/net-online-npeer.md, section 2). A secret pair, handed to the match only and never to a row, chat or log.
+struct OnlineHostedRoom {
+    OnlineRoomPublication publication;
+    std::string principal;
+};
 // What the shared lobby screen needs from an online room source beyond the list, members and chat:
 // the host password, the password join, refresh and the hosting state. Nonblocking.
 class OnlineRoomSource : public presentation::ui::LobbyGameSource {
@@ -31,6 +37,12 @@ public:
     virtual std::optional<core::Diagnostic> last_error() const = 0;
     virtual OnlineHostingState hosting_state() const = 0;
     virtual std::vector<core::Diagnostic> take_notices() = 0;
+    // Empty until the room is published, and again once it is removed or lost.
+    virtual std::optional<OnlineHostedRoom> hosted_room() const { return {}; }
+    // Stops the source's worker and waits for it (the room is removed, a held admission is left). Blocks for at most the
+    // service call in flight: for tools that exit right after their match, never for a frame thread. The destructor does the
+    // same on a drain thread instead.
+    virtual void close() {}
 };
 // Nonblocking frame seam. All service calls, including lease renewal, run on
 // the owned I/O worker. Directory advertisements never authorize game setup.
@@ -47,6 +59,8 @@ public:
     std::optional<core::Diagnostic> last_error() const override;
     OnlineHostingState hosting_state() const override;
     std::vector<core::Diagnostic> take_notices() override;
+    std::optional<OnlineHostedRoom> hosted_room() const override;
+    void close() override;
     void announce(const presentation::ui::LobbyPresence&) override;
     void send_chat(presentation::ui::LobbyChatScope, const std::string&, const std::string&, const std::string&) override;
     bool pump() override;

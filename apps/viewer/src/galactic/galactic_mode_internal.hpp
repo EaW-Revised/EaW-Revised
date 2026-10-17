@@ -13,6 +13,8 @@
 #include "planet_hud.hpp"
 #include "fleet_hud_fixture.hpp"
 #include "fleet_stacks.hpp"
+#include "fleet_panels.hpp"
+#include "fleet_traits.hpp"
 #include "fleet_drag.hpp"
 #include "ground_hud.hpp"
 #include "orbit_hud.hpp"
@@ -29,6 +31,7 @@
 #include "clock_input.hpp"
 #include "eawr/data/ui/command_bar.hpp"
 #include "ui/font_provider.hpp"
+#include "ui/perf_overlay_view.hpp"
 #include "ui/hud_icon_text.hpp"
 #include "ui/tactical_hud.hpp"
 #include "ui/unit_cards_view.hpp"
@@ -52,6 +55,7 @@
 #include "loading_screen.hpp"
 #include "eawr/sim/tactical/retreat.hpp"
 #include <godot_cpp/classes/canvas_layer.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 
 #include <godot_cpp/classes/sub_viewport_container.hpp>
 #include <godot_cpp/classes/sub_viewport.hpp>
@@ -62,6 +66,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <map>
 #include <tuple>
@@ -69,12 +74,16 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <unordered_set>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace eawr::presentation::godot_backend {
+// `--eawr-perf-overlay on|off` (map_mode_hud.cpp, #558): an error message, or empty with `requested` set.
+[[nodiscard]] std::string parse_perf_overlay_argument(const godot::PackedStringArray& arguments, bool& requested);
+
 namespace galactic_view = eawr::viewer::galactic;
 
 namespace galactic_detail {
@@ -99,6 +108,7 @@ struct ModelUpload final {
     std::optional<std::array<float, 6>> model_bounds;
     std::optional<galactic_view::Vec3> station_anchor;
     std::optional<animation::Player> authored_idle_probe;
+    std::vector<sim::AssetId> effect_clock_assets;
     struct Surface final {
         std::string mesh;
         std::string shader;
@@ -156,6 +166,7 @@ public:
     struct Quad final {
         std::array<std::array<float, 3>, 4> points;
         galactic_view::LineColour colour;
+        friend bool operator==(const Quad&, const Quad&) = default;
     };
     bool initialize(const godot::RID& scenario, const vfs::Vfs& filesystem,
                     const std::string& texture, std::string& failure);
@@ -185,17 +196,34 @@ struct GalacticMode::State final {
     galactic_view::CorruptionVisuals corruption_visuals;
     // Transition/type/level and one-shot producers supply this admitted seam.
     std::optional<galactic_view::CorruptionPublication> corruption_publication;
-    std::unique_ptr<CorruptionParticles> corruption_particles;
+    galactic_view::CorruptionPublication corruption_frame_publication;
+    galactic_view::CorruptionObservationScratch corruption_observation_scratch;
+    galactic_view::CorruptionIndex<galactic_view::PlanetView> corruption_planet_index;
+    galactic_view::CorruptionIndex<galactic_view::CorruptionPlanetFact> corruption_fact_index;
+    std::map<std::string, std::size_t, std::less<>> corruption_particle_layers;
+    std::array<std::unique_ptr<CorruptionParticles>, 4> corruption_particles;
+    std::unique_ptr<CorruptionParticles> corruption_lines;
+    std::unique_ptr<galactic_detail::RouteGeometry> corruption_paths;
+    std::vector<galactic_detail::RouteGeometry::Quad> corruption_quads, corruption_uploaded_quads;
+    std::size_t corruption_path_quads{};
+    double corruption_fixture_seconds{};
     [[nodiscard]] bool service_corruption(double elapsed);
     galactic_view::GalaxySnapshotStub metadata;
     sim::galactic::GalacticSetup galaxy_setup;
     std::unique_ptr<platform::PreparedLiveCampaign> campaign_root;
+    // Faction and AI player type the runtime installed (log-only; empty when AI is off or restored).
+    struct NativeAiRow { sim::galactic::PlayerId player{}; std::string faction, player_type; };
+    std::vector<NativeAiRow> native_ai_players;
+    bool ai_activity{}; // Native AI installed on a fresh start: ai_activity counters are whole-game.
     bool native_ai_installed{}; // Confirmed prepared-owner startup fact, retained after transfer.
     // Validated WGEP-05 public display bases; no actual-income modifier state.
     std::map<galactic_view::ObjectId, double> basic_planet_income, destroyed_planet_income;
     galactic_view::PlayerId neutral_owner{galactic_view::synthetic_neutral_owner};
     std::vector<galactic_view::ObjectId> scene_objects;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> displayed_snapshot;
+    // #3931: the session's own latest publication. Equals displayed_snapshot unless the galaxy reveal
+    // is on, when displayed_snapshot is the omniscient draw view; command gating reads this one.
+    std::shared_ptr<const sim::galactic::GalacticSnapshot> published_snapshot;
     std::vector<sim::galactic::GalacticEvent> snapshot_events;
     galactic_view::CampaignCaptureMetrics capture_metrics;
     std::uint64_t proof_requested_tick{};
@@ -281,6 +309,11 @@ struct GalacticMode::State final {
     bool clock_controls_enabled{};
     // #1979: profile-to-speed selection is not published yet.
     std::optional<sim::math::Fixed> fast_forward_factor;
+    // Strategic speed this client last submitted; trusted only while displayed_snapshot is still the snapshot seen then.
+    std::optional<sim::math::Fixed> submitted_strategic_speed;
+    std::shared_ptr<const sim::galactic::GalacticSnapshot> submitted_speed_snapshot;
+    sim::math::Fixed strategic_speed_now() const;
+    void submit_strategic_speed(sim::math::Fixed factor);
     std::size_t command_meshes{};
     presentation::ui::EncyclopediaTiming encyclopedia_timing;
     presentation::ui::EncyclopediaConstants encyclopedia_globals;
@@ -300,6 +333,7 @@ struct GalacticMode::State final {
     [[nodiscard]] bool build_destruction_hud();
     void update_destruction_hud();
     void position_destruction_hud(galactic_view::ObjectId, godot::Vector2, float, float);
+    [[nodiscard]] bool destruction_source(galactic_view::ObjectId) const;
     bool drop_destruction(galactic_view::ObjectId, bool);
     void write_destruction_report(std::ostream&) const;
     WeaponActionHudState weapon_menu;
@@ -359,6 +393,7 @@ struct GalacticMode::State final {
     void update_ground_hud();
     void ground_pointer(int kind, godot::Vector2 point, bool control, bool twice);
     bool request_ground_land(bool submit, galactic_view::ObjectId fleet = 0);
+    const galactic_view::GroundRoster* command_roster(galactic_view::ObjectId planet) const;
     bool ground_launch_drop(godot::Vector2 point);
     bool ground_pad_drop(godot::Vector2 point);
     void write_ground_report(std::ostream&) const;
@@ -366,6 +401,8 @@ struct GalacticMode::State final {
     data::ui::ShellAnchors fleet_anchors;
     std::map<std::string, godot::TextureButton*> fleet_buttons;
     std::map<std::string, godot::Label*> fleet_counts;
+    // TEXT_FLEET_PANE_n at the authored text_fleet1..3 anchors of the organize shell.
+    std::array<EawrHudText*, 3> fleet_captions{};
     std::array<std::vector<std::string>, 3> fleet_group_buttons;
     struct FleetCellResources final {
         presentation::ui::ResolvedFont face;
@@ -418,7 +455,11 @@ struct GalacticMode::State final {
     galactic_view::ObjectId fleet_view_planet{}, fleet_view_selection{}, fleet_view_member{};
     std::optional<std::uint32_t> fleet_diorama_alternate; // GHUD-S52: the organize shell's shown panel index
     float fleet_diorama_alpha{1.0F};
+    // The aggregate icons' cards: local fleets by orbit slot (0..2), the first other-owner card (3).
     std::array<const sim::galactic::ObservedFleet*, 4> shown_fleet_cards{};
+    // WGUI-175: what each of the three orbit panels lists, which depends on whether another owner is aware here.
+    galactic_view::FleetPanels fleet_panels;
+    std::array<const sim::galactic::ObservedFleet*, 3> shown_panel_cards{};
     std::size_t shown_enemy_count{};
     std::uint64_t fleet_projection_rebuilds{};
     // #3072: a drag source names its fleet and, for a whole card or stack icon,
@@ -531,6 +572,19 @@ struct GalacticMode::State final {
     // Published observer discovery takes precedence; HUD facts and the explicit
     // preview adapter are used only for setups with no observer configuration.
     [[nodiscard]] std::vector<galactic_view::InputPlanet> input_planets() const;
+    // The local observer's discovery of one planet in the displayed view (published observer first, then HUD facts).
+    [[nodiscard]] bool planet_discovered(galactic_view::ObjectId id) const;
+    // The same for one explicit publication: command gating passes the truth publication, never the reveal view.
+    [[nodiscard]] bool planet_discovered_in(const std::shared_ptr<const sim::galactic::GalacticSnapshot>& source,
+        galactic_view::ObjectId id) const;
+    // Planets last computed as undiscovered (WGUI-05); submit() may run without updating it.
+    std::vector<galactic_view::ObjectId> undiscovered_planets;
+    // Planets whose model has a drawn alternate-2 surface (the grid shell); rebuilt with the instances.
+    std::set<galactic_view::ObjectId> shell_planets;
+    // The galaxy planet ids, rebuilt with the instances (submit() looks each instance up).
+    std::unordered_set<galactic_view::ObjectId> galaxy_planet_ids;
+    // #3931: planets for selection only; with the reveal on, undiscovered planets are selectable (view only, commands keep input_planets).
+    std::vector<galactic_view::InputPlanet> selection_planets() const;
     void apply_selection(const galactic_view::SelectionEffects& effects);
     galactic_view::OrbitCamera overview;
     FixedCamera camera;
@@ -631,6 +685,9 @@ struct GalacticMode::State final {
     // WGP-38: presentation-only stream; never the simulation's keyed draws or hashes.
     std::mt19937_64 presentation_random{std::random_device{}()};
     std::optional<platform::CampaignScoreDestination> score_destination;
+    // The in-game menu's Quit Game was confirmed (WGS-165): published like a score destination, for
+    // the host to show the main menu.
+    bool leave_requested{};
     std::string score_failure;
     bool score_consumed{};
     bool score_ledger_script{}; // -ledger score fixture: script a build and ownership history
@@ -641,6 +698,12 @@ struct GalacticMode::State final {
     [[nodiscard]] bool configure_score_fixture(platform::LiveGameSession::Options& live);
     std::uint64_t audio_event_cursor{};
     std::uint64_t audio_event_gaps{};
+    std::deque<godot::String> approach_text;
+    godot::Label* approach_label{};
+    double advisor_character_seconds{}, approach_delay{};
+    std::uint8_t approach_alpha{};
+    void enqueue_approach(sim::galactic::PlanetId);
+    void service_approach(double delta);
     // WGEP-96: build identities whose recorded builder is the local player, from the
     // displayed queues and the local seat's start events; completion events carry no builder.
     std::set<sim::EntityId> local_builds;
@@ -750,6 +813,14 @@ struct GalacticMode::State final {
     void submit();
     void apply_camera();
     [[nodiscard]] bool write_report() const;
+    // #4031: the F3 performance overlay (docs/ui/perf-overlay.md) over the galactic view. Tick costs come
+    // from the live game session; the clock row shows the speed factor the displayed snapshot is under.
+    bool perf_requested{};
+    EawrPerfOverlay* perf{};
+    std::uint64_t perf_last_tick{};
+    void set_perf_overlay(bool shown);
+    void sync_perf_overlay();
+    [[nodiscard]] std::string perf_report_json() const;
     [[nodiscard]] galactic_view::OrbitCamera& seat_camera();
     [[nodiscard]] galactic_view::PlanetCamera& seat_flight();
     [[nodiscard]] const galactic_view::PlanetView* picked_planet(float x, float y) const;

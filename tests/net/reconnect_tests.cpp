@@ -156,6 +156,16 @@ struct Match {
     std::vector<std::vector<std::pair<std::uint64_t, Bytes>>> controls;
 };
 
+bool connection_lost(const Match& match, net::PeerIndex peer, const eawr::core::Result<net::PumpResult>& result) {
+    if (result) return false;
+    expect(result.error().code == net::session_errors::stalled
+        && result.error().message.starts_with("Connection lost: the match could not continue"),
+        "unconfirmed loss has a typed connection-loss reason");
+    expect(match.adapters[peer]->simulation().departure_controls().empty() && !match.adapters[peer]->simulation().outcome(),
+        "unconfirmed loss cannot invent a departure or award a winner");
+    return true;
+}
+
 void connecting_rejoin(bool expire) {
     Match match(1);
     match.until(8); match.hold(1);
@@ -601,16 +611,12 @@ void unavailable_authenticated_departure() {
     const auto tag = net::rejoin_authenticator(options.seat_tokens[1], options.match_identity, match.seats[1].seat.value, 1, nonce);
     response.insert(response.end(), tag.begin(), tag.end());
     match.network.inbox[0].push_back({match.now, {1, response}});
-    bool departed{};
-    for (unsigned round = 0; round < 5; ++round) {
+    bool lost{};
+    for (unsigned round = 0; round < 5 && !lost; ++round) {
         match.network.round = match.now;
-        const auto result = require(match.sessions[0]->pump(match.now++));
-        for (const auto& departure : result.departure_events) {
-            departed = true;
-            expect(departure.reason == net::DepartureReason::disconnect, "authenticated replacement departs as disconnect");
-        }
+        lost = connection_lost(match, 0, match.sessions[0]->pump(match.now++));
     }
-    expect(departed, "unavailable authenticated replacement departs promptly without completeness timeout");
+    expect(lost, "unavailable authenticated replacement ends neutrally without completeness timeout");
 }
 
 void authentication_domain_isolation(bool poison_transfer) {
@@ -736,16 +742,19 @@ void delayed_held_batch() {
     bool delivered{};
     for (unsigned round = 0; round < 175; ++round) {
         match.network.round = match.now;
+        // Closed-stream recovery still holds; open-link application expiry now ends neutrally.
+        if (round == 1) match.network.open[1] = false;
         const bool late = std::any_of(match.network.inbox[0].begin(), match.network.inbox[0].end(), [&](const auto& entry) {
             return entry.due <= match.now && entry.received.from == 1 && entry.received.frame.front() == net::sealed_batch_kind;
         });
         require(match.sessions[0]->pump(match.now));
+        if (round == 1) match.network.open[1] = true;
         if (round == 0) require(match.sessions[1]->pump(match.now));
         if (late && round > 100) delivered = true;
         ++match.now;
     }
     expect(delivered && match.sessions[0]->reconnect_status().phase == net::ReconnectPhase::held,
-        "a timeout holds the still-open seat and ignores its delivered old batch");
+        "a closed-stream hold ignores an old batch delivered after the link reopens");
     expect(!match.sessions[0]->failure(), "late WAN traffic does not fail the survivor");
 }
 
@@ -816,14 +825,12 @@ void budget_exhaustion() {
             "budget exhaustion emits a persistent typed notice");
     }
     match.network.open[1] = false;
-    bool departure{};
-    for (unsigned round = 0; round < 30; ++round) {
+    bool lost{};
+    for (unsigned round = 0; round < 30 && !lost; ++round) {
         match.network.round = match.now;
-        const auto result = require(match.sessions[0]->pump(match.now++));
-        departure = departure || !result.departures.empty();
+        lost = connection_lost(match, 0, match.sessions[0]->pump(match.now++));
     }
-    expect(departure && match.sessions[0]->reconnect_status().phase == net::ReconnectPhase::playing,
-        "drop after budget exhaustion uses ordinary departure");
+    expect(lost, "drop after budget exhaustion ends without an unconfirmed lone-survivor win");
 }
 
 void slow_transfer(bool cap) {
@@ -846,16 +853,15 @@ void slow_transfer(bool cap) {
         match.until(50);
         expect(match.adapters[0]->state_hash() == match.adapters[1]->state_hash(), "healthy transfer longer than grace completes with progress");
     } else {
-        bool departure{}, timed_out{};
+        bool lost{}, timed_out{};
         for (unsigned round = 0; round < 150; ++round) {
             match.network.round = match.now;
-            const auto result = require(match.sessions[0]->pump(match.now));
-            departure = departure || !result.departures.empty();
+            if (!lost) lost = connection_lost(match, 0, match.sessions[0]->pump(match.now));
             const auto target = match.sessions[1]->pump(match.now);
             if (!target) { expect(target.error().code == net::reconnect_errors::timeout, "hard-cap returner times out"); timed_out = true; }
             ++match.now;
         }
-        expect(chunks >= 4 && departure && timed_out, "hard cap expires a transfer despite earlier accepted progress");
+        expect(chunks >= 4 && lost && timed_out, "hard cap ends a transfer neutrally despite earlier accepted progress");
     }
 }
 
@@ -867,8 +873,8 @@ void grace_boundary() {
     expect(match.sessions[0]->reconnect_status().phase == net::ReconnectPhase::held, "grace minus one still holds");
     match.network.round = 15;
     require(match.sessions[0]->pump(15));
-    const auto result = require(match.sessions[0]->pump(15));
-    expect(!result.departures.empty(), "grace expires exactly at its agreed boundary");
+    expect(connection_lost(match, 0, match.sessions[0]->pump(15)),
+        "grace expires exactly at its agreed boundary without inventing a departure");
 }
 
 void ready_crosses_hard_cap() {
@@ -1148,9 +1154,13 @@ void recovery_without_rejoin() {
     match.until(12);
     expect(match.adapters[0]->completed_tick() > before && !match.sessions[0]->reconnect_available(), "stray HELLO cannot stop play");
     match.network.open[1] = false;
-    for (unsigned round = 0; round < 100 && match.adapters[0]->completed_tick() < 20; ++round) match.pump(1);
-    expect(match.adapters[0]->completed_tick() >= 20 && match.sessions[0]->reconnect_status().phase == net::ReconnectPhase::playing,
-        "history-only recovery uses ordinary departure without a reconnect hold");
+    bool lost{};
+    for (unsigned round = 0; round < 100 && !lost; ++round) {
+        match.network.round = match.now;
+        lost = connection_lost(match, 0, match.sessions[0]->pump(match.now++));
+    }
+    expect(lost && match.sessions[0]->reconnect_status().phase != net::ReconnectPhase::held,
+        "history-only recovery ends neutrally without a reconnect hold");
 }
 
 template<class Function> void run_case(std::string_view name, Function function) {
@@ -1169,7 +1179,36 @@ void erased_keys_ignore_rejoin() {
 }
 }
 
+void replacement_pair_proof() {
+    net::RejoinNonce match{}, key{}; match.fill(14); key.fill(33);
+    net::RejoinLinkProof a(match, key, 0, 2, 7, "EAWR-GNS-rejoin-v1"), b(match, key, 2, 0, 7, "EAWR-GNS-rejoin-v1");
+    auto ac = require(a.start()), bc = require(b.start());
+    expect(!a.proven() && !b.proven(), "no pair is published on the room capability alone");
+    auto ar = require(a.receive(bc)), br = require(b.receive(ac));
+    expect(ar && br && !a.proven() && !b.proven(), "a challenge alone cannot prove a pair");
+    require(a.receive(*br)); require(b.receive(*ar));
+    expect(a.proven() && b.proven(), "both pair keys prove the replacement connection");
+    net::RejoinLinkProof replay(match, key, 0, 2, 7, "EAWR-GNS-rejoin-v1");
+    require(replay.start());
+    expect(!replay.receive(*br), "a captured proof cannot answer a fresh OS nonce");
+    net::RejoinLinkProof epoch(match, key, 0, 2, 8, "EAWR-GNS-rejoin-v1"); require(epoch.start());
+    expect(!epoch.receive(bc), "a stale incident cannot authenticate a replacement");
+    net::RejoinLinkProof wrong_pair(match, key, 0, 1, 7, "EAWR-GNS-rejoin-v1"); require(wrong_pair.start());
+    expect(!wrong_pair.receive(bc), "a proof cannot move to another pair");
+    net::RejoinLinkProof wrong_domain(match, key, 0, 2, 7, "EAWR-TCP-rejoin-v1"); require(wrong_domain.start());
+    expect(!wrong_domain.receive(bc), "proofs are transport-domain bound");
+    auto bad_key = key; bad_key[0] ^= 1;
+    net::RejoinLinkProof attacker(match, bad_key, 2, 0, 7, "EAWR-GNS-rejoin-v1");
+    auto challenge = require(attacker.start());
+    net::RejoinLinkProof victim(match, key, 0, 2, 7, "EAWR-GNS-rejoin-v1");
+    auto fresh = require(victim.start()); require(victim.receive(challenge));
+    auto forged = require(attacker.receive(fresh));
+    expect(forged && !victim.receive(*forged), "the right room identity with the wrong key cannot send data");
+    expect(!victim.receive(Bytes{1}), "application bytes before proof are refused");
+}
+
 int main() {
+    replacement_pair_proof();
     std::string expiry_reference;
     for (const auto workers : {1U, 2U, 4U, 8U}) run_case("retained timing expiry", [&] {
         const auto hash = retained_timing_expiry(workers);

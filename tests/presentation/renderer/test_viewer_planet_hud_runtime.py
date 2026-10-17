@@ -64,8 +64,10 @@ class PlanetHudRuntime(unittest.TestCase):
         # a preview seam assertion, not a retail campaign first-frame rule.
         self.assertEqual(discovered, {hud["selected"]}, "neutral-layout ownership seam leaves only the selected authored home discovered")
         self.assertNotEqual(hud["selected"], 0)
-        self.assertEqual({label["planet"] for label in hud["labels"]}, discovered)
-        self.assertEqual({label["planet"] for label in hud["labels"] if label["visible"]}, discovered)
+        # WGUI-38: every named planet keeps its name; undiscovered ones in the neutral colour.
+        named_world = {planet["id"] for planet in data["planets"] if planet["layer"] == "world" and planet["show_name"]}
+        self.assertEqual({label["planet"] for label in hud["labels"]}, named_world)
+        self.assertEqual({label["planet"] for label in hud["labels"] if label["visible"]}, named_world)
         for planet, fact in facts.items():
             if planet not in discovered:
                 self.assertEqual(fact["name"], "")

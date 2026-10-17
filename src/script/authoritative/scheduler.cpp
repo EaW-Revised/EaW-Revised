@@ -1,11 +1,13 @@
 #include "scheduler_internal.hpp"
 
 #include "eawr/core/sha256.hpp"
+#include "eawr/core/tick_profile.hpp"
 #include "eawr/sim/world.hpp"
 #include "../../sim/tactical/diagnostic_timer.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <set>
 #include <span>
@@ -260,6 +262,7 @@ void service_instance(Instance& instance, ::std::uint64_t tick, bool host_paced,
 // or the measurement itself) ends the instance like any fault.
 void settle_memory(Instance& instance) {
     if (instance.outcome == InstanceOutcome::faulted) return;
+    core::tick_profile::AuxiliaryScope memory_scope("memory-settle");
     instance.sandbox->settle_memory();
     record_fault(instance);
 }
@@ -711,6 +714,24 @@ core::Result<ServiceReport> ScriptScheduler::service(
     const auto time_tick = config.query_clock ? *options.time_tick
         : config.galactic_clock ? impl_->galactic_frame : tick - 1;
 
+    ::std::vector<detail::Instance*> ordered, deferred;
+    ::std::vector<::std::uint64_t> deferred_ids;
+    ordered.reserve(impl_->instances.size());
+    for (auto& [id, instance] : impl_->instances) {
+        if (!options.defer_instance || !options.defer_instance(id)) {
+            ordered.push_back(instance.get());
+        } else {
+            if (!impl_->objects.contains(id) || config.galactic_clock || config.query_clock || impl_->immediate_host)
+                return core::Result<ServiceReport>::failure(detail::make_error(codes::invalid_request,
+                    "deferral requires a default-profile object instance without immediate effects"));
+            deferred.push_back(instance.get());
+            deferred_ids.push_back(id);
+        }
+    }
+    const auto is_deferred = [&](::std::uint64_t id) {
+        return ::std::binary_search(deferred_ids.begin(), deferred_ids.end(), id);
+    };
+
     // Query timers use upstream frame deadlines; ordinary event keys retain
     // their invocation domain. Deliver elapsed timers before this invocation's
     // host events, with each domain retaining canonical key order.
@@ -718,7 +739,8 @@ core::Result<ServiceReport> ScriptScheduler::service(
         for (const bool timers : {true, false}) {
             for (auto iterator = impl_->pending.begin(); iterator != impl_->pending.end();) {
                 const auto& key = iterator->first;
-                if ((key.producer == producer_script_timer) != timers || key.tick > (timers ? time_tick : tick)) { ++iterator; continue; }
+                if ((key.producer == producer_script_timer) != timers || key.tick > (timers ? time_tick : tick)
+                    || is_deferred(iterator->second.target)) { ++iterator; continue; }
                 auto node = impl_->pending.extract(iterator++);
                 const auto found = impl_->instances.find(node.mapped().target);
                 if (found != impl_->instances.end()) found->second->inbox.push_back(::std::move(node.mapped()));
@@ -726,15 +748,13 @@ core::Result<ServiceReport> ScriptScheduler::service(
         }
     } else {
         // The normal and GC event ordering and tick domain are unchanged.
-        while (!impl_->pending.empty() && impl_->pending.begin()->first.tick <= tick) {
-            auto node = impl_->pending.extract(impl_->pending.begin());
+        for (auto iterator = impl_->pending.begin(); iterator != impl_->pending.end() && iterator->first.tick <= tick;) {
+            if (is_deferred(iterator->second.target)) { ++iterator; continue; }
+            auto node = impl_->pending.extract(iterator++);
             const auto found = impl_->instances.find(node.mapped().target);
             if (found != impl_->instances.end()) found->second->inbox.push_back(::std::move(node.mapped()));
         }
     }
-    ::std::vector<detail::Instance*> ordered;
-    ordered.reserve(impl_->instances.size());
-    for (auto& [id, instance] : impl_->instances) ordered.push_back(instance.get());
     // Serial: the host's pacing choice is read before the partitioned phase.
     ::std::vector<char> paced(ordered.size());
     for (::std::size_t index = 0; index < ordered.size(); ++index) {
@@ -750,7 +770,20 @@ core::Result<ServiceReport> ScriptScheduler::service(
     auto partition_service = [&](const ::std::size_t partition) {
         const sim::PartitionRange range = sim::partition_range(partition, ordered.size());
         try {
+            // A deferred VM does no Lua work, but its serialized clock still
+            // reaches this barrier. Its callbacks retain their original keys
+            // in pending until the next subset service, rather than inbox.
+            const auto deferred_range = sim::partition_range(partition, deferred.size());
+            for (auto index = deferred_range.begin; index < deferred_range.end; ++index) {
+                auto& instance = *deferred[index];
+                const auto draws = instance.tick == tick ? instance.random.draws() : 0;
+                instance.tick = tick;
+                instance.time_tick = time_tick;
+                instance.random_domain = 0;
+                instance.random = RandomStream(config.seed, tick, instance.id, draws);
+            }
             for (::std::size_t index = range.begin; index < range.end; ++index) {
+                core::tick_profile::JobScope instance_job_scope("job.script-instance", ordered[index]->id);
                 detail::service_instance(*ordered[index], tick, paced[index] != 0, time_tick);
                 if (impl_->objects.contains(ordered[index]->id) && ::std::any_of(
                         ordered[index]->staging.diagnostics.begin(), ordered[index]->staging.diagnostics.end(),
@@ -771,24 +804,68 @@ core::Result<ServiceReport> ScriptScheduler::service(
         // shadow. Only this explicitly bounded script set runs in order; no
         // world entity loop is added and default/tactical service is unchanged.
         try {
-            auto captured = impl_->immediate_host->capture();
-            if (!captured) throw ::std::runtime_error(captured.error().message);
-            ::std::shared_ptr<ImmediateEffectState> shadow = ::std::move(captured).value();
-            if (!shadow) throw ::std::runtime_error("immediate effect capture is null");
-            bool changed = false;
+            // S9a: the instances of one owner run as a chain of their own over a shadow of their own. The chains
+            // keep the ID order inside and run in ascending owner order; the last chain (key 0: no owner) also
+            // carries the census, which is why it exists whenever handles are managed. The (key, index) rows sit in
+            // a scratch member, so a steady tick allocates nothing here.
+            constexpr ::std::uint64_t unowned_key = ::std::numeric_limits<::std::uint64_t>::max();
+            auto& order = impl_->chain_order;
+            order.clear();
             for (::std::size_t index = 0; index < ordered.size(); ++index) {
-                auto& instance = *ordered[index];
-                instance.immediate = shadow;
-                instance.immediate_changed = false;
-                detail::service_instance(instance, tick, paced[index] != 0, time_tick);
-                used[index] = impl_->shared->config.quotas.instructions_per_service - instance.sandbox->budget();
-                detail::settle_memory(instance);
-                if (instance.outcome != InstanceOutcome::faulted) {
-                    shadow = instance.immediate;
-                    changed = changed || instance.immediate_changed;
+                const auto key = options.chain_of ? options.chain_of(ordered[index]->id) : 0;
+                order.emplace_back(key == 0 ? unowned_key : key, index);
+            }
+            ::std::sort(order.begin(), order.end());
+            const auto owners_end = static_cast<::std::size_t>(::std::find_if(order.begin(), order.end(),
+                [](const auto& row) { return row.first == unowned_key; }) - order.begin());
+            const bool tail = owners_end < order.size() || impl_->managed_handles || order.empty();
+            ::std::shared_ptr<ImmediateEffectState> shadow;
+            bool changed = false;
+            bool recapture = true;
+            for (::std::size_t begin = 0;;) {
+                const bool owned = begin < owners_end;
+                ::std::size_t end = begin;
+                if (owned) {
+                    while (end < owners_end && order[end].first == order[begin].first) ++end;
+                } else {
+                    end = order.size();
                 }
-                instance.immediate.reset();
-                instance.immediate_changed = false;
+                const bool last = owned ? end == owners_end && !tail : true;
+                if (options.chain_of && last && begin == end && !impl_->managed_handles) break;
+                // A shadow is copy-on-write, so one that no chain changed still equals the host: no new capture.
+                if (recapture || !shadow) {
+                    auto captured = impl_->immediate_host->capture();
+                    if (!captured) throw ::std::runtime_error(captured.error().message);
+                    shadow = ::std::move(captured).value();
+                    if (!shadow) throw ::std::runtime_error("immediate effect capture is null");
+                }
+                changed = false;
+                for (auto row = begin; row < end; ++row) {
+                    const auto index = order[row].second;
+                    auto& instance = *ordered[index];
+                    instance.immediate = shadow;
+                    instance.immediate_changed = false;
+                    detail::service_instance(instance, tick, paced[index] != 0, time_tick);
+                    used[index] = impl_->shared->config.quotas.instructions_per_service - instance.sandbox->budget();
+                    detail::settle_memory(instance);
+                    if (instance.outcome != InstanceOutcome::faulted) {
+                        shadow = instance.immediate;
+                        changed = changed || instance.immediate_changed;
+                    }
+                    instance.immediate.reset();
+                    instance.immediate_changed = false;
+                }
+                if (last) break;
+                // A finished chain publishes before the next one captures; the last chain publishes after the census.
+                recapture = changed;
+                if (changed) {
+                    auto publication = shadow->clone();
+                    if (!publication) throw ::std::runtime_error("immediate effect clone is null");
+                    auto published = impl_->immediate_host->publish(::std::move(publication));
+                    if (!published) throw ::std::runtime_error(published.error().message);
+                    changed = false;
+                }
+                begin = end;
             }
             // WGA-471/472: census the prospective completed state, then release
             // within this same shadow. No callback runs during VM destruction.
@@ -868,6 +945,7 @@ core::Result<ServiceReport> ScriptScheduler::service(
             return core::Result<ServiceReport>::failure(detail::make_error(codes::session_abort, error.what()));
         }
     } else {
+        core::tick_profile::prepare_jobs(ordered.size());
         run = executor.execute_phase(script_phase_name, sim::tick_partition_count, partition_service);
     }
     for (const ::std::string& failure : failures) {
@@ -968,6 +1046,7 @@ core::Result<ServiceReport> ScriptScheduler::service_turn(
         const sim::PartitionRange range = sim::partition_range(partition, ordered.size());
         try {
             for (::std::size_t index = range.begin; index < range.end; ++index) {
+                core::tick_profile::JobScope instance_job_scope("job.object-instance", ordered[index]->id);
                 detail::service_instance(*ordered[index], tick, true, time_tick);
                 if (::std::any_of(ordered[index]->staging.diagnostics.begin(), ordered[index]->staging.diagnostics.end(),
                         [](const auto& diagnostic) { return diagnostic.code != codes::unsupported_api
@@ -981,6 +1060,7 @@ core::Result<ServiceReport> ScriptScheduler::service_turn(
             failures[partition] = error.what();
         }
     };
+    core::tick_profile::prepare_jobs(ordered.size());
     const core::Result<void> run = executor.execute_phase(script_phase_name, sim::tick_partition_count, partition_service);
     for (const ::std::string& failure : failures) {
         if (!failure.empty()) {
@@ -1038,8 +1118,8 @@ core::Result<::std::optional<Value>> ScriptScheduler::read_global(
     detail::Instance& target = *found->second;
     detail::InstanceScope scope(target);
     lua_State* state = target.sandbox->state();
-    lua_pushlstring(state, name.data(), name.size());
-    lua_rawget(state, LUA_GLOBALSINDEX);
+    const int top = lua_gettop(state);
+    target.sandbox->push_global(name);
     ::std::optional<Value> value;
     detail::sf::HostHandle handle;
     switch (lua_type(state, -1)) {
@@ -1061,7 +1141,7 @@ core::Result<::std::optional<Value>> ScriptScheduler::read_global(
     default:
         break;
     }
-    lua_settop(state, 0);
+    lua_settop(state, top);
     return ReadResult::success(::std::move(value));
 }
 

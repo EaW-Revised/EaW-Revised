@@ -499,7 +499,7 @@ class Builder:
             entry.update(status="todo", ticket=self.ticket(leaf, area, tag, object_class),
                          note="read by a loader, but nothing applies the value")
             return entry
-        named = seed.scope_of_name(leaf, tag)
+        named = seed.scope_of_name(leaf, tag, object_class)
         money = seed.named_todo(leaf)
         if money and not (named and named[2] in ("SCOPE-LAND", "SCOPE-GALACTIC")):
             entry.update(status=money[0], area=money[1], ticket=money[2], note=money[3])

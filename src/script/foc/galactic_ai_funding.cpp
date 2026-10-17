@@ -1,4 +1,5 @@
 #include "galactic_ai_funding.hpp"
+#include "eawr/script/foc/galactic_ai_state.hpp"
 #include "ai_equations.hpp"
 #include "eawr/script/numeric/q24_boundary.hpp"
 
@@ -6,6 +7,10 @@
 #include <utility>
 
 namespace eawr::script::foc::ai {
+GalacticFunding::GalacticFunding() : record_digest_(galactic_ai::funding_records(state_)) {}
+std::string GalacticFunding::record_sync_hash(bool cold) const {
+    return cold ? galactic_ai::funding_records(state_).digest("funding") : record_digest_.digest("funding");
+}
 core::Result<funding::Amount> funding_equation_weight(const funding::Ledger* current,
     funding::CategoryId category, std::optional<galactic_ai::Number> evaluated) {
     if (evaluated) return numeric::to_fixed(to_single(*evaluated));
@@ -50,7 +55,10 @@ core::Result<void> GalacticFunding::commit_rows(State changes, const std::functi
     }
     if (auto published = publish(); !published) return published;
     if (++revision_ == 0) std::terminate();
-    for (auto& [player, ledger] : changes) state_.at(player) = std::move(ledger);
+    for (auto& [player, ledger] : changes) {
+        auto previous = std::move(state_.at(player)); state_.at(player) = std::move(ledger);
+        galactic_ai::update_funding_records(record_digest_, player, &previous, &state_.at(player));
+    }
     return core::Result<void>::success();
 }
 core::Result<void> GalacticFunding::restore(State state) {
@@ -62,13 +70,14 @@ core::Result<void> GalacticFunding::restore(State state) {
         if (!valid) return core::Result<void>::failure(valid.error());
     }
     if (++revision_ == 0) std::terminate();
-    state_ = std::move(state);
+    state_ = std::move(state); record_digest_ = galactic_ai::funding_records(state_);
     return core::Result<void>::success();
 }
 core::Result<void> GalacticFunding::commit(sim::galactic::PlayerId player, core::Result<funding::Ledger> result) {
     if (!result) return core::Result<void>::failure(result.error());
     if (++revision_ == 0) std::terminate();
-    state_.at(player) = std::move(result).value();
+    auto previous = std::move(state_.at(player)); state_.at(player) = std::move(result).value();
+    galactic_ai::update_funding_records(record_digest_, player, &previous, &state_.at(player));
     return core::Result<void>::success();
 }
 core::Result<funding::Amount> GalacticFunding::commit_transfer(sim::galactic::PlayerId player,
@@ -76,13 +85,14 @@ core::Result<funding::Amount> GalacticFunding::commit_transfer(sim::galactic::Pl
     if (!result) return core::Result<funding::Amount>::failure(result.error());
     auto value = std::move(result).value();
     if (++revision_ == 0) std::terminate();
-    state_.at(player) = std::move(value.ledger);
+    auto previous = std::move(state_.at(player)); state_.at(player) = std::move(value.ledger);
+    galactic_ai::update_funding_records(record_digest_, player, &previous, &state_.at(player));
     return core::Result<funding::Amount>::success(value.credits);
 }
 core::Result<void> GalacticFunding::set_timeline(std::int32_t timeline) {
     if (timeline < 0 || timeline > 5) return invalid<void>("invalid retained timeline input");
     if (++revision_ == 0) std::terminate();
-    state_.timeline = timeline;
+    state_.timeline = timeline; galactic_ai::update_funding_metadata(record_digest_, state_);
     return core::Result<void>::success();
 }
 core::Result<void> GalacticFunding::initialize(sim::galactic::PlayerId player,
@@ -98,6 +108,7 @@ core::Result<void> GalacticFunding::initialize(sim::galactic::PlayerId player,
     if (!initialized) return core::Result<void>::failure(initialized.error());
     if (++revision_ == 0) std::terminate();
     state_.emplace(player, std::move(initialized).value());
+    galactic_ai::update_funding_records(record_digest_, player, nullptr, &state_.at(player));
     return core::Result<void>::success();
 }
 core::Result<void> GalacticFunding::apply_template(sim::galactic::PlayerId player, const EvaluatedFundingTemplate& input) {

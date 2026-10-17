@@ -78,7 +78,7 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   radar pass, never a live target. Asteroid fields, ion storms and nebulae never show as ordinary
   blips. Capture colours follow WNO-43, including raw-fog Neutral colour and capture progress,
   after selected recolouring. See the [neutral-object radar rules](walks/neutral-objects.md).
-  The stock asteroid-base live-versus-memory runtime witness remains unverified (UN-04).
+  Initial knowledge also admits the remembered path (MM-18).
 - MM-13 (MME-6). Draw order: the background layer (MM-14), the fog layer, the backdrop grid, the
   point layer, the unit icons, the camera outline, all alpha-blended. The backdrop quad's texture coordinates run 0 to 25 with
   wrapping, so the 32-texel grid tile repeats 25 times on each axis (the retail still shows a line
@@ -121,6 +121,39 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   `Radar_Draw_To_Scale` have no authored occurrences in the pinned FoC inventory, hence no
   registry rows; existing icon-name and space-scale consumers record application.
 
+- MM-18 (debug build; XML; owner playtest). `Last_State_Visible_Under_FOW` admits a
+  remembered identity and `Initial_State_Visible_Under_FOW` makes its initial model known
+  before sensor discovery. Such an identity belongs on the minimap even when no unit has
+  revealed its location. The viewer stores the battle-start type, owner and transform for
+  initially known build pads when a composed model exists; this radar copy does not require
+  a world mesh to have been drawn. Start identities come from the immutable battle setup,
+  so later spawns/respawns and hidden changes before the first rendered frame supply no new
+  initial ownership or position. The model-slot lookup is read-only.
+  Subsequent hidden changes do not refresh it. Observation replaces the initial values,
+  and the existing remembered-object lifecycle retires knowledge when appropriate.
+  This is separate from `Visible_On_Radar_When_Fogged`, which retains MM-12's live gates.
+  Capture-point memories are Neutral grey regardless of current ownership; visible live
+  capture points retain the owner/progress rules of WNO-43. Other memories retain their
+  stored owner colour. The new initial-copy route is limited to the data-defined
+  `TACTICAL_BUILD_OBJECTS` build-pad category; other initial-known categories remain pending
+  a runtime witness and continue to need an observed retained model for radar submission.
+  Stock types carrying both memory flags are:
+
+  | Effective type | Source | New initial-copy admission |
+  |---|---|---|
+  | `Mineral_Extractor_Pad` | `SpaceBuildablesSkirmish.xml` | Build pad; retail fog-on Coruscant witness |
+  | `N_Orbital_Construction_Pod` | `SpaceBuildablesSkirmish.xml` | Restricted: non-build-pad witness pending |
+  | `Skirmish_Merchant_Dock` | `SecondaryStructures.xml` | Restricted: non-build-pad witness pending |
+  | `Skirmish_Hutt_Asteroid_Base` | `SecondaryStructures.xml` | Restricted: non-build-pad witness pending |
+
+  The Hutt skirmish variant inherits `Is_Visible_On_Radar=Yes`,
+  `Visible_On_Radar_When_Fogged=true` and `i_radar_station1_p.tga` from
+  `Hutt_Asteroid_Base` in `SecondaryStructures.xml`; the variant does not override them.
+  This settles the live radar permission source without claiming an initial-memory witness.
+  Ordinary skirmish starbases author last-state Yes and initial-state No, so they need
+  discovery. Field/storm/nebula types remain environmental layers, never ordinary blips.
+  The rule uses effective inherited data, including mod overrides, without a type-name list.
+
 ## Cases
 
 - K-1. The M2 Coruscant start, Rebel local player: the Rebel station and fleet blips in the Rebel
@@ -134,8 +167,14 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
 
 ## Unverified / fidelity list
 
-- The retail fog-on still shows some Neutral objects (grey icons, the planet star) through the fog;
-  ours shows only what the snapshot's visibility shows the local player.
+- Exact live-versus-memory overlap during asteroid-base hide/fade transitions remains UN-04;
+  initially known build-pad radar identities follow MM-18. Other Neutral objects (grey icons,
+  including the planet star) are visible through fog in the retail still; their unobserved
+  radar admission remains open beyond the build-pad category and is not claimed fixed here.
+- A mod combining initial fog knowledge with `Radar_Draw_To_Scale` needs model bounds before
+  the first visible pose; the initial radar copy currently has bounds only when a posed box
+  exists. Stock initial icons use fixed sizes, and the stock inventory authors no draw-to-scale
+  override (MM-17).
 - Fog reads the local player's fog cells that the live session publishes with each tick (world fog rendering, the
   grid of [space-visibility.md](space-visibility.md) V-11 to V-19): a texel is fogged where its cell
   is zero, so it lingers and is quantised as FoC's is, and it matches the fog drawn in the world

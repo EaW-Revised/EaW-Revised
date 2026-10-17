@@ -70,6 +70,50 @@ Bytes encode_state(const GalacticMarkupState& state) {
     return std::move(out.bytes);
 }
 }
+void GalacticMarkup::update_records(const GalacticMarkupState* before) {
+    const GalacticMarkupState empty;
+    const auto& old = before ? *before : empty;
+    const auto update = [&](const auto& previous, const auto& current, std::uint32_t kind, auto player, auto slot, auto encode_record) {
+        for (const auto& [key, value] : previous) { static_cast<void>(value); if (!current.contains(key)) record_digest_.erase(player(key), kind, slot(key)); }
+        for (const auto& [key, value] : current) {
+            const auto encoded = encode_record(key, value);
+            const auto at = previous.find(key); if (at != previous.end() && encode_record(key, at->second) == encoded) continue;
+            record_digest_.set(player(key), kind, slot(key), encoded);
+        }
+    };
+    const auto integer_slot = [](auto id) { return static_cast<std::uint64_t>(id); };
+    update(old.hints, state_.hints, 1, [](auto id) { return id; }, integer_slot, [](auto key, const auto& value) {
+        GalacticMarkupState row; row.hints.emplace(key, value); return encode_state(row);
+    });
+    for (const auto& [key, value] : old.values) {
+        static_cast<void>(value);
+        if (!state_.values.contains(key)) record_digest_.erase(key.observer, 2U + key.player_target, key.target);
+    }
+    for (const auto& [key, value] : state_.values) {
+        const auto at = old.values.find(key); if (at != old.values.end() && at->second.repr == value.repr) continue;
+        GalacticMarkupState row; row.values.emplace(key, value);
+        record_digest_.set(key.observer, 2U + key.player_target, key.target, encode_state(row));
+    }
+    update(old.handles, state_.handles, 4, [](auto) { return std::uint32_t{}; }, integer_slot, [](auto key, const auto& value) {
+        GalacticMarkupState row; row.handles.emplace(key, value); return encode_state(row);
+    });
+    Writer metadata; metadata.word(state_.next_handle); record_digest_.set(0, 0, 0, metadata.bytes);
+}
+core::RecordDigest GalacticMarkup::rebuild_records() const {
+    core::RecordDigest rebuilt;
+    Writer metadata; metadata.word(state_.next_handle); rebuilt.set(0, 0, 0, metadata.bytes);
+    for (const auto& [key, value] : state_.hints) { GalacticMarkupState row; row.hints.emplace(key, value); rebuilt.set(key, 1, key, encode_state(row)); }
+    for (const auto& [key, value] : state_.values) { GalacticMarkupState row; row.values.emplace(key, value); rebuilt.set(key.observer, 2U + key.player_target, key.target, encode_state(row)); }
+    for (const auto& [key, value] : state_.handles) { GalacticMarkupState row; row.handles.emplace(key, value); rebuilt.set(0, 4, key, encode_state(row)); }
+    return rebuilt;
+}
+std::size_t GalacticMarkup::record_byte_upper_bound() const noexcept {
+    std::scoped_lock lock(mutex_); return record_digest_.byte_size() + 1024;
+}
+std::string GalacticMarkup::record_sync_hash(bool cold) const {
+    std::scoped_lock lock(mutex_);
+    return cold ? rebuild_records().digest("markup") : record_digest_.digest("markup");
+}
 std::vector<std::uint8_t> GalacticMarkup::encode() const { return encode_state(state()); }
 core::Result<GalacticMarkupState> GalacticMarkup::decode(std::span<const std::uint8_t> bytes) const {
     using Result = core::Result<GalacticMarkupState>;

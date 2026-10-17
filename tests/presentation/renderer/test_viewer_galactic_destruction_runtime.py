@@ -14,8 +14,12 @@ except ImportError:
 
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
 class GalacticDestructionRuntime(unittest.TestCase):
-    def drop(self, fixture, cancel=False):
-        initial, _ = support.PlanetHudRuntime.capture(self, "synthetic", "--eawr-galactic-hud-fixture", "destruction-ready")
+    def drop(self, fixture, cancel=False, repeat=False):
+        live = fixture.startswith("destruction-live")
+        # A driven live capture must advance past the queued preparation; copied fixtures need no command.
+        preparation_frames = ("--eawr-galactic-paused", "no", "--eawr-galactic-ticks", "3") if live else ()
+        initial, _ = support.PlanetHudRuntime.capture(self, "synthetic", "--eawr-galactic-hud-fixture",
+                                                    fixture if live else "destruction-ready", *preparation_frames)
         alpha = next(row for row in initial["planets"] if row["id"] == 101)
         camera = dict(initial["camera"])
         x, y, z = alpha["position"]
@@ -27,7 +31,7 @@ class GalacticDestructionRuntime(unittest.TestCase):
         def shifted(rect):
             x, y, w, h = rect
             return [x+w/2+new[0]-old[0], y+h/2+new[1]-old[1]]
-        source = shifted(next(row["rect"] for row in initial["fleet_hud"]["presence"] if row["owner"] == 1 and row["fleet"] == 601))
+        source = shifted(next(row["rect"] for row in initial["fleet_hud"]["presence"] if row["owner"] == 1 and row["fleet"] == (602 if live else 601)))
         target = shifted(initial["destruction_hud"]["rect"])
         self.assertGreater(initial["destruction_hud"]["rect"][2], 0)
         self.assertGreater(initial["destruction_hud"]["rect"][3], 0)
@@ -87,13 +91,16 @@ func _process(delta):
         var slot = viewport.find_child("galaxy_destruction_first_slot",true,false)
         print("S33_PREVIEW=",slot.is_visible_in_tree()," DRAG=",viewport.gui_is_dragging())
         viewport.get_texture().get_image().save_png(%s)
-    if frame == 42: mouse(%s,false)
+    if frame == 42:
+        mouse(%s,false)
+%s
     if frame == 100:
         current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
         quit()
     return false
 ''' % (json.dumps(source), json.dumps(target), json.dumps(str(capture).replace("\\","/")),
-       "[1260,20]" if cancel else "target"), encoding="utf-8")
+       "[1260,20]" if cancel else "target",
+       "        motion(source,false)\n        mouse(source,true)\n        motion([source[0]+24,source[1]],true)\n        motion(target,true)\n        mouse(target,false)" if repeat else ""), encoding="utf-8")
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"],"--resolution","1280x720",
             "--path",str(support.ROOT / "apps/viewer/project"),"--script",str(driver),"--",
             "--eawr-galactic","synthetic","--eawr-galactic-hud-fixture",fixture,
@@ -106,13 +113,13 @@ func _process(delta):
         data=json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(data["map_input"]["selected"],101)
         self.assertEqual(data["map_input"]["selection_invalidations"],initial["map_input"]["selection_invalidations"]+2)
-        self.assertEqual(data["live_session"]["submitted_orders"],0)
+        self.assertEqual(data["live_session"]["submitted_orders"],int(live and not cancel))
         self.assertEqual(data["fleet_hud"]["drag"]["orders"],0)
         self.assertEqual(data["fleet_hud"]["drag"]["active_fleet"],0)
         self.assertFalse(data["destruction_hud"]["second_visible"])
         self.assertFalse(data["destruction_hud"]["visible"])
         self.assertTrue(capture.is_file())
-        return data["destruction_hud"]
+        return data if live else data["destruction_hud"]
 
     def test_release_preserves_original_source_even_with_contested_execution_refusal(self):
         for fixture, refusal in [("destruction-ready", 0), ("destruction-contested", 19)]:
@@ -125,3 +132,27 @@ func _process(delta):
     def test_absent_preview_and_release_outside_slot_do_not_accept(self):
         self.assertEqual(self.drop("destruction-absent")["accepts"],0)
         self.assertEqual(self.drop("destruction-ready",cancel=True)["accepts"],0)
+
+    def test_live_prepared_drop_executes_shared_host_once(self):
+        for fixture, outcome in [("destruction-live", 1), ("destruction-live-contested", 2)]:
+            with self.subTest(fixture=fixture):
+                data = self.drop(fixture)
+                hud = data["destruction_hud"]
+                self.assertEqual(hud["source"], "campaign-snapshot")
+                self.assertEqual((hud["accepts"], hud["accepted_source"], hud["accepted_planet"], hud["outcome"]),
+                                 (1, 7004, 101, outcome))
+                self.assertEqual(data["live_session"]["submitted_orders"], 1)
+                self.assertIn(602, [row["fleet"] for row in data["fleet_hud"]["presence"]], "execution must retain actor's fleet")
+
+    def test_live_prepared_drop_outside_slot_submits_nothing(self):
+        data = self.drop("destruction-live", cancel=True)
+        self.assertEqual(data["destruction_hud"]["accepts"], 0)
+        self.assertEqual(data["destruction_hud"]["outcome"], 0)
+
+    def test_live_prepared_drop_ignores_repeat_before_publication(self):
+        # Both complete gestures are injected synchronously in one process frame: the displayed snapshot is unchanged.
+        data = self.drop("destruction-live", repeat=True)
+        self.assertEqual(data["fleet_hud"]["drag"]["begins"], 2, "the duplicate gesture must actually begin")
+        self.assertEqual(data["fleet_hud"]["drag"]["ends"], 2)
+        self.assertEqual((data["destruction_hud"]["accepts"], data["destruction_hud"]["outcome"]), (1, 1))
+        self.assertEqual(data["live_session"]["submitted_orders"], 1)

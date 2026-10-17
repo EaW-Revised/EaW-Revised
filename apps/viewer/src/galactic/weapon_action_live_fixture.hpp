@@ -18,16 +18,23 @@ namespace eawr::viewer::galactic {
 inline constexpr sim::EntityId live_hack_actor = 7004;
 inline constexpr sim::galactic::PlanetId live_hack_planet = 101;
 inline constexpr sim::galactic::TypeId live_hack_required_type = 1002;
-[[nodiscard]] inline bool weapon_action_live_fixture(std::string_view name) { return name == "hack-live"; }
+[[nodiscard]] inline bool weapon_action_live_fixture(std::string_view name) { return name == "hack-live" || name == "destruction-live" || name == "destruction-live-contested"; }
 
 // Run after configure_synthetic_hud_clock: the economy rows and credits come from there.
 inline void configure_weapon_action_live_fixture(sim::galactic::GalacticSetup& setup,
     sim::galactic::PlayerId local, std::vector<sim::galactic::FleetDisplayType>& traits,
-    std::vector<sim::galactic::FleetDisplayVisibility>& visibility, std::map<sim::galactic::TypeId, std::string>& names) {
+    std::vector<sim::galactic::FleetDisplayVisibility>& visibility, std::map<sim::galactic::TypeId, std::string>& names, std::string_view name = "hack-live") {
     namespace gc = sim::galactic;
     const auto whole = [](std::int64_t value) { return sim::math::Fixed::from_raw(value * sim::math::Fixed::scale); };
     // Observer actor 7004 (fleet 602) and the enemy weapon 7009 (fleet 604) share planet 101.
     configure_fleet_hud_fixture(setup, local, "fleet-count", traits, visibility, names);
+    const bool destruction = name.starts_with("destruction-live");
+    if (destruction) {
+        const gc::PlayerId enemy = local == 1 ? 2 : 1;
+        for (auto& planet : setup.planets) if (planet.id == live_hack_planet) planet.owner = enemy;
+        if (name == "destruction-live")
+            std::erase_if(setup.fleets, [local](const auto& fleet) { return fleet.owner != local; });
+    }
     constexpr gc::TypeId planet_type = 3000;
     auto& census = setup.census.emplace();
     census.types = {{1000, whole(1), 0}, {1001, whole(0), 0}, {1002, whole(0), 0}, {1003, whole(1), 0}, {planet_type, {}, 0}};
@@ -69,7 +76,10 @@ inline void configure_weapon_action_live_fixture(sim::galactic::GalacticSetup& s
     auto& host = setup.ability_host.emplace();
     host.default_hero_absence = whole(360);
     gc::GalacticAbilityProfile profile; profile.type = 1000; profile.has_market = false;
-    profile.hack = gc::HackAbilityProfile{"HACK", true};
+    if (destruction) {
+        profile.destruction = gc::DestructionAbilityProfile{"SYNTHETIC_PLANET_RUIN", true};
+        host.activated_destruction_abilities = {"SYNTHETIC_PLANET_RUIN"};
+    } else profile.hack = gc::HackAbilityProfile{"HACK", true};
     host.profiles.push_back(profile);
     host.activated_hack_abilities = {"HACK"};
     host.hack_required_type = live_hack_required_type;

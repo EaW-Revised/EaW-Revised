@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace eawr::script::authoritative::detail {
@@ -180,6 +181,8 @@ struct ScriptScheduler::Impl {
     std::optional<ManagedHandlePolicy> managed_handles{};
     std::function<ValueList()> managed_roots{};
     ManagedHandleWork managed_work{};
+    // Scratch of the immediate-effect service: (chain key, ordered index) rows, reused every tick.
+    std::vector<std::pair<std::uint64_t, std::size_t>> chain_order;
 
     [[nodiscard]] core::Result<void> check_usable() const {
         if (aborted) return core::Result<void>::failure(detail::make_error(codes::session_abort, "the script session was aborted"));

@@ -1,4 +1,5 @@
 #include "world_ui_view.hpp"
+#include "family_textures.hpp"
 
 #include "ui/theme_builder.hpp"
 
@@ -123,6 +124,7 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
         unresolved_.push_back("hardpoint text: " + core::format_diagnostic(loaded.error()));
     }
     std::string tooltip_face, tooltip_small_face;
+    const auto reticle_art = ui::hardpoint_reticle_art(filesystem);
     reticle_sizes_ = ui::hardpoint_reticle_sizes(filesystem);
     if (!reticle_sizes_) unresolved_.push_back("hardpoint reticle screen sizes: missing/invalid GameConstants; reticles disabled");
     // WSU-36: validated VFS XML controls render admission, independently of the sim grid.
@@ -278,7 +280,9 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
                     if (!key.empty()) unresolved_.push_back("hardpoint Tooltip_Text unresolved: " + key);
                 }
             }
-            hardpoint.texture = std::string(ui::hardpoint_reticle_texture(trim(source.type_name)));
+            if (const auto art = reticle_art.find(trim(source.type_name)); art != reticle_art.end()) {
+                hardpoint.art = art->second;
+            }
             hardpoint.targetable = source.targetable;
             if (profile != nullptr) {
                 for (const auto& point : profile->hardpoints) {
@@ -289,9 +293,12 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
             if (health != nullptr && index < health->hardpoints.size()) {
                 hardpoint.max_health = to_float(health->hardpoints[index].max_health);
             }
-            if (!hardpoint.texture.empty() && !reticles_.contains(hardpoint.texture)) {
-                reticles_[hardpoint.texture] = standalone(filesystem, hardpoint.texture);
-                reticles_[hardpoint.texture + "_tracked"] = standalone(filesystem, hardpoint.texture + "_tracked");
+            for (const auto* name : {&hardpoint.art.enemy, &hardpoint.art.enemy_tracked,
+                    &hardpoint.art.friendly, &hardpoint.art.friendly_tracked, &hardpoint.art.repairing,
+                    &hardpoint.art.disabled, &hardpoint.art.disabled_tracked}) {
+                for (const auto& texture : *name) {
+                    if (!reticles_.contains(texture)) reticles_[texture] = standalone(filesystem, texture);
+                }
             }
             ui_type.hardpoints.push_back(std::move(hardpoint));
         }
@@ -333,7 +340,11 @@ void WorldUiView::prepare_waypoints(const vfs::Vfs& filesystem, const std::share
     const auto& model = loaded.value();
     for (const auto& mesh : model.meshes) for (const auto& submesh : mesh.submeshes) {
         if (!mesh.visible || lower(submesh.shader) == "meshshadowvolume.fx") continue;
-        const auto* selector = scene::find_legacy_selector(submesh.shader);
+        const scene::AssetAccess effect_access{
+            .exists = [&filesystem](const std::string_view path) { return static_cast<bool>(filesystem.stat(path)); },
+        };
+        const bool effect_missing = scene::missing_material_effect(effect_access, submesh.shader);
+        const auto* selector = scene::material_selector(submesh.shader, effect_missing);
         if (!selector) { unresolved_.push_back("waypoint flag shader: " + submesh.shader); continue; }
         MaterialDescription material;
         material.program = std::string(selector->program);
@@ -341,14 +352,15 @@ void WorldUiView::prepare_waypoints(const vfs::Vfs& filesystem, const std::share
         material.pass_name = std::string(selector->pass);
         material.pass = selector->transparent ? RenderPass::transparent : RenderPass::opaque;
         std::string texture;
-        for (const auto& parameter : submesh.parameters) {
+        if (!effect_missing) for (const auto& parameter : submesh.parameters) {
             material.bindings.push_back({parameter.name, parameter.value});
             if (parameter.name == "BaseTexture" && std::holds_alternative<std::string>(parameter.value))
                 texture = std::get<std::string>(parameter.value);
         }
         std::optional<assets::Texture> texels;
+        if (effect_missing) texels = family_placeholder_texture(legacy::TexturePlaceholder::black);
         const auto dot = texture.find_last_of('.');
-        for (const auto suffix : {".dds", ".tga"}) {
+        if (!effect_missing) for (const auto suffix : {".dds", ".tga"}) {
             const auto path = "data/art/textures/" + texture.substr(0, dot) + suffix;
             if (!filesystem.stat(path)) continue;
             if (auto value = assets::load_texture(filesystem, path)) texels = std::move(value).value();

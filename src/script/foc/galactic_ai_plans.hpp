@@ -6,6 +6,8 @@
 #include "eawr/script/foc/galactic_ai.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 
+#include <span>
+
 namespace eawr::script::foc::ai::galactic_goals {
 
 struct PlanTeamData {
@@ -23,6 +25,8 @@ struct PlanDefinitionData {
     std::optional<Real> failure_adjust, minimum_contrast, maximum_contrast, minimum_cost, additional_cost, pool_count;
     std::vector<std::string> required_categories;
     std::optional<bool> allow_special_weapons;
+    // WGA-445: each definition owns its authored enemy/friendly lists.
+    std::vector<std::pair<std::string, std::vector<std::pair<std::string, Real>>>> contrast;
     bool operator==(const PlanDefinitionData&) const = default;
 };
 struct PlanCatalog {
@@ -58,6 +62,9 @@ struct MaterializedPlanCatalog {
 // identities. Attachment/stage options remain typed facts for their consumers.
 [[nodiscard]] core::Result<MaterializedPlanCatalog> materialize_plan_catalog(
     const detail::Host&, const PlanCatalog&);
+
+// WGA-448: retained native category-map iteration, independent of the host STL.
+[[nodiscard]] std::vector<std::uint64_t> galactic_contrast_category_order(std::span<const std::uint64_t>);
 
 // WGA-16/19/25: categories name goal types; A materializes plan-name policy
 // from template category/type/name switches. Missing policy never enables a plan.

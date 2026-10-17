@@ -1,6 +1,7 @@
 #include "ai_data.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <utility>
 
 namespace eawr::script::foc::ai {
@@ -250,7 +251,19 @@ std::vector<std::string> ai_xml_files() {
 
 core::Result<AiData> load_ai_data(
     const std::map<std::string, std::string, std::less<>>& xml, const ConverterFunction& converters) {
-    return load_ai_data_files(xml, converters, ai_xml_files());
+    // AI-16: the host freezes the mounted directory inventory. Do not reduce it
+    // back to the historical stock fixture filenames here.
+    std::vector<std::string> paths;
+    for (const auto& [path, text] : xml) {
+        static_cast<void>(text);
+        std::string normal = path;
+        std::transform(normal.begin(), normal.end(), normal.begin(), [](char c) {
+            return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c;
+        });
+        if (normal.starts_with("data/xml/ai/") || normal == "data/xml/difficultyadjustments.xml"
+            || normal == "data/xml/gameconstants.xml") paths.push_back(std::move(normal));
+    }
+    return load_ai_data_files(xml, converters, paths);
 }
 
 core::Result<AiData> load_ai_data_files(
@@ -294,6 +307,12 @@ core::Result<AiData> load_ai_data_files(
         if (path.find("/players/") != std::string::npos) {
             PlayerType player;
             player.name = root.child_text("Name");
+            const auto extension = root.child_text("GoalSetExtensionSize");
+            if (!extension.empty()) {
+                const auto parsed = std::from_chars(extension.data(), extension.data() + extension.size(), player.goal_set_extension);
+                if (parsed.ec != std::errc{} || parsed.ptr != extension.data() + extension.size())
+                    return DataResult::failure(error(path + ": invalid GoalSetExtensionSize integer"));
+            }
             for (const std::string& set : split_names(root.child_text("GoalProposalFunctionSets"), ", \t\r\n")) {
                 player.function_sets.push_back(upper_case(set));
             }

@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -75,7 +76,7 @@ inline constexpr Affine identity_affine{1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F
 enum class EnvironmentFamily : std::uint8_t { none, planet, nebula };
 [[nodiscard]] std::string_view to_string(EnvironmentFamily family) noexcept;
 
-// A model with a visible Planet.fx surface is a planet; otherwise one with a
+// A model with a visible Planet.fx or Planet_Deathstar.fx surface is a planet; otherwise one with a
 // visible Nebula.fx surface is a nebula. The environment composes exactly
 // these placements, every surface of their model included; the populated scene
 // composes everything else.
@@ -86,10 +87,13 @@ enum class EnvironmentFamily : std::uint8_t { none, planet, nebula };
 enum class SceneRoute : std::uint8_t {
     meshgloss,            // MeshGloss.fx: the sky MeshGloss route, unlit policy
     meshadditive,         // MeshAdditive.fx: the t0 additive route
+    meshadditive2x,       // MeshAdditive2x.fxo: doubled, saturated additive colour
     meshadditive_vcolor,  // MeshAdditiveVColor.fx: additive times vertex colour
+    skydome,              // Skydome.fx: the sky's BaseTexture, unlit (no cloud layer)
     planet,               // Planet.fx: plan_environment_effect t0
     nebula,               // Nebula.fx: plan_environment_effect t0
     legacy_mesh,          // companion surfaces, using the ordinary scene selector
+    missing_effect,       // ALDEFAULT-01: mounted-file lookup selects the green placeholder
     unsupported,
 };
 [[nodiscard]] std::string_view to_string(SceneRoute route) noexcept;
@@ -105,6 +109,9 @@ struct SceneSurface final {
     std::int32_t mesh_bone{-1};
     // Empty when the surface can be drawn; otherwise why it is not.
     std::string problem;
+    // A drawable surface's authored part that is not drawn (a Skydome.fx cloud
+    // layer); empty when nothing is skipped.
+    std::string skipped;
     // One mesh, one submesh, no bones, in the model's own space. A plain
     // surface has its rigid bone chain baked in; a billboard keeps its local
     // geometry, and `bone_origin` is its parent's bind-pose origin in model
@@ -120,7 +127,8 @@ struct SceneSurface final {
 
 // Every submesh of every visible mesh, in mesh-then-submesh order. Hidden
 // meshes are skipped.
-[[nodiscard]] std::vector<SceneSurface> scene_surfaces(const assets::Model& model);
+[[nodiscard]] std::vector<SceneSurface> scene_surfaces(const assets::Model& model,
+    const std::function<bool(std::string_view)>& effect_missing = {});
 // The largest distance from the model origin of a drawable non-billboard
 // vertex; 0 when there is none.
 [[nodiscard]] float surface_radius(std::span<const SceneSurface> surfaces) noexcept;

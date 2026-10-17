@@ -57,6 +57,68 @@ control service subsequently applies eligible trade influence through its existi
 | CGS-01 | Home lookup visits stored faction records in order and returns the first case-insensitive match, or no home. | debug build; WGS-09 |
 | CGS-02 | Initial political calculation excludes trade contributions and assigns the calculated owner to both current and target allegiance. | debug build; WGS-09; WGM-C04, WGM-66..70 |
 | CGS-03 | Delegated creation dispatches separately to base, structure, company, squadron and ship paths; direct ground-base dispatch asserts. Nested objects share the supplied owner and allocation frontier. | debug build; WGS-80/82/92/93; WGEP-84 |
+| WGS-180 | Starting starbase records are applied in authored order. Each admitted record replaces the planet's starbase type, level and supplied faction owner, even at an equal or lower level. There is no first/highest-level selection or planet-controller faction filter. The debug build diagnoses a non-increasing level, then continues to the unconditional base update. | debug build; starting placement and base initialization; WGS-70/80 |
+| WGS-181 | Authored starting companies may leave transports of different owners in the same ordered surface list. Surface linking appends the transport without filtering against a prior transport owner or changing its owner. The trailing debug owner-consistency check is bypassed during startup; its later mismatch diagnostics do not rewrite the list. Identity validity and the shared authored ground-force capacity still apply. Downstream mixed-list readers are qualified by WGS-186..188. | debug build; company placement and final surface linking; WGS-80/93 |
+| WGS-186 | A nonzero ground base supplies political controller and ground occupation. Without it, political control selects the first non-delete-pending linked transport, while ground occupation selects the first linked transport. The troop military contribution is zero until a non-delete-pending entry supplies one; an all-deleting list supplies neither troop controller nor military presence. Mixed-owner diagnostics do not replace either result with a consensus or last owner. Default invasion defense instead uses the ground base, then target political allegiance; only the invalid-player sentinel or neutral target falls back to the first linked transport. Our zero target represents that sentinel; unknown nonzero player identities refuse world admission before these readers. Explicit invasion defenders remain authoritative. | debug build; political presence reduction, ground occupation and invasion admission; WGM-66, WGM-C01 |
+| WGS-187 | Surface linking appends the arriving transport with its own owner, even when an earlier transport has a different owner. No same-owner or alliance filter exists in the link. Caller-specific safety, invasion, accessibility and capacity gates still apply: automatic AI safety scans every nonnull surface entry for nonalliance, independently of the ground-occupation result. | debug build; surface linking and AI safety; WGA-407/410/413 |
+| WGS-188 | Undefended invasion cleanup retains transports owned by the recorded defender and removes other surface owners before linking the admitted invaders in their retained order. This differs from invader battle-victory cleanup, which removes remaining non-invader surface entries. Each scan tests the individual transport owner rather than treating the first owner as the entire list's owner. | debug build; undefended invasion and completed land auto-resolve branches; WGM-53/186 |
+
+Route admission follows the campaign's live endpoint types, with the following
+qualified rules. A defined endpoint type outside the selected campaign differs
+from an undefined type, which still refuses. Case differences resolve to the same
+type; a derived type retains its own identity and does not stand in for its parent.
+Skipped routes allocate no graph/name identity and add no movement edge. Their
+original definitions remain in the validated content digest. Admission warnings
+are carried by the model and setup plan, outside persistent graph state.
+
+| ID | Route endpoint rule | Evidence and qualification |
+|---|---|---|
+| WGS-182 | With exactly one endpoint present, omit the link and continue campaign admission. Emit `campaign_route_external_endpoint` as a warning naming the campaign, route and absent endpoint. | Debug build: the live endpoint selects the route, reports a data-error dialog and a positive-match-count assertion, then guards insertion on a nonempty match list. Shipping continuation is inferred from the coordinator's report that the affected mod campaigns run in retail; removal of the assertion in a release executable was not independently verified. |
+| WGS-183 | With both defined endpoint types absent, no live planet selects the route; omit it without an admission warning. | Debug build: route selection compares each endpoint's exact type identity to the current live object's type before looking up the opposite endpoint. |
+| WGS-184 | Endpoint lookup uses exact type identity, not ancestry or position. When multiple live instances match, choose the first in live-object order (the last-created matching instance) and emit `campaign_route_duplicate_endpoint`. | Debug build: object creation follows Locations order; creation inserts each new live object at the front of the object list; lookup appends exact-type matches in that traversal order. Linking asserts that one match exists, then takes the first if execution continues. Shipping continuation has the same inference qualification as WGS-182. Duplicate XML definition winners and higher-level setup name bindings are separate boundaries. |
+
+WGS-185: For a repeated unordered endpoint pair, retain the first route in
+campaign-authored route order and ignore later routes with the named warning
+`campaign_route_duplicate_pair`. The retained route supplies its original factor
+and graph identity; ignored definitions allocate no identity. The debug build's
+link insertion scans existing links and returns before inserting an already
+linked other planet. This differs from repeated route **names** in the XML
+registry, whose definition winner remains separately tracked (legacy EAWR-2380).
+
+The assertions/dialog in WGS-182/184 remain a debug-build fidelity distinction;
+this adapter implements the coordinator-directed shipping continuation rather
+than turning those debug diagnostics into a campaign refusal. Undefined endpoint
+types and invalid speed factors on admitted links continue to refuse. Speed
+factors on omitted links do not participate in graph construction.
+
+`campaign_route_duplicate_endpoint` is emitted per ambiguous route endpoint
+lookup and names that route and endpoint. Duplicate location entries that no
+route references do not produce this route diagnostic.
+
+Full setup deliberately retains its duplicate-planet-name refusal. The inspected
+debug setup creates every authored `Locations` entry, then revisits those entries
+for starting forces. For each it finds exact-type live planets, asserts that
+there is exactly one match and selects the first match if execution continues.
+Consequently continuation would place forces repeatedly on the last-created
+matching planet, rather than once on each created instance. The effective stock
+data has no duplicate locations across its 33 registered campaign definitions.
+Shipping continuation for duplicate `Locations` at this setup boundary remains
+**unverified**; the route continuation qualification in WGS-184 does not establish
+it. The planner refuses before producing aliased location bindings or partial
+placement. WGS-184 therefore qualifies graph admission only when duplicate
+planet names are authored; accepting full setup needs separate evidence for
+creation, repeated placement and home resolution.
+
+The stock `Campaigns_Underworld_GC.xml` authors `Empire_Star_Base_2` followed by
+`Underworld_Star_Base_2` on Bothawui and Mandalore in `Sandbox_Origin_Rebel`.
+`Sandbox_Origin_Empire` authors `Rebel_Star_Base_2` followed by
+`Underworld_Star_Base_2` on Honoghr, Kashyyyk, Korriban, NalHutta, Saleucami
+and The_Maw. WGS-180 retains the authored records: the
+later Underworld station wins. The implementation applies this rule to every
+authored type and planet; data overrides remain the way to change these campaigns.
+The Origin definitions also author companies of different factions on the same
+planet. WGS-181 preserves these records and their individual owners through
+startup, ordinary control and checkpoint restore.
 
 Private debug-build checks CGS-01/02 corroborate two WGS-09 details. The home
 getter scans stored faction records in order and returns the first case-insensitive
@@ -160,3 +222,17 @@ explicit binding to a faction with authored `Is_Playable=true`. A non-playable
 binding such as Pirates refuses before planning or simulation-thread startup;
 AI and neutral bindings retain their existing roles. Explicit synthetic root
 services keep their separate setup contract.
+
+## Fidelity list
+
+- **Verified (WGS-181, WGS-186..188):** mixed-list political control, ground
+  occupation, default invasion defender, land-conflict capability, surface-link
+  admission, AI safety and owner-filtered invasion cleanup were compared with
+  the debug build. Controller deletion filtering, target-defender precedence,
+  owner-unfiltered landing and defender-preserving undefended cleanup now match
+  the inspected branches. AI force/intelligence publication retains individual
+  owners (WGA-184/186/303); land-conflict admission retains its first capable
+  entry rule (WGM-107). Full tactical loss/listener, retreat and failed-link
+  composition remains qualified by WGM-PC-U01; this does not close that capture.
+- Level-0 starbase placement remains **unverified** and stays refused at this
+  boundary; WGS-180 covers admitted positive-level stations.

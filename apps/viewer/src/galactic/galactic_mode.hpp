@@ -50,8 +50,10 @@ public:
         std::string queue_type;
         std::uint32_t queue_planet{}; // 0 = first planet the local player is offered the type on
         bool red_green_routes{}; // Profile adapter seam; explicit in synthetic captures.
-        bool native_ai{}; // --eawr-galactic-ai on|off: fresh campaign install, default off.
+        bool native_ai{true}; // --eawr-galactic-ai on|off: fresh campaign install, default on.
         bool native_ai_invalid{};
+        bool galactic_reveal{}; // --eawr-galactic-reveal on|off: draw-only fog reveal, default off (#3931).
+        bool galactic_reveal_invalid{};
         bool all_ai_capture{}; // Capture-only: preserve the camera perspective, replace simulation human seats.
         bool proof_options_invalid{};
         std::optional<std::uint64_t> capture_seed{};
@@ -98,7 +100,7 @@ public:
     void input_gates(viewer::galactic::InputGates gates);
     bool select_planet(std::uint64_t planet, bool delayed = false);
     void navigate(viewer::galactic::Navigation direction);
-    void select_hero(bool nonnull_type, bool inactive, std::uint64_t containing_planet, bool twice);
+    void select_hero(sim::galactic::TypeId type, bool inactive, bool twice);
     bool widget_drop(const viewer::galactic::DropIntent& intent);
     bool choose_battle(std::uint64_t conflict, bool tactical);
     // #2263 supplies rendered widgets, containment and drop-target resolution.
@@ -117,6 +119,9 @@ public:
     // The destination the campaign score published (exit button or Escape); the mode keeps
     // running and only the host decides what it means. Empty until the player chose.
     [[nodiscard]] std::optional<platform::CampaignScoreDestination> score_destination() const;
+    // The in-game menu's Quit Game was confirmed; like the score destination, the host decides what
+    // leaving means (the main menu when there is one).
+    [[nodiscard]] bool leave_requested() const;
     // The window closed: an interactive run writes its report.
     void close();
     // Why ready() or a frame failed; empty while running (e.g. a refused restore_save).

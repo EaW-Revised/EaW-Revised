@@ -9,6 +9,8 @@
 namespace godot { class CanvasLayer; class Control; class ItemList; class LineEdit; class Label; class BaseButton; }
 namespace eawr::presentation::godot_backend {
 
+class EawrOptionsScreen;
+
 // GHUD-S18/19: WGS-152..164 resource routes over the session save provider.
 class GalacticSaveControls final {
 public:
@@ -20,6 +22,10 @@ public:
     [[nodiscard]] std::string report_json() const;
     void select_slot(std::int64_t index);
     void activate_slot(std::int64_t index);
+    // The options screen opened from the menu's Options button closed: the menu shows again.
+    void options_closed();
+    // The HUD's options button: the same menu Escape opens.
+    void open_menu() { open(); }
     // #3035: the same validation and owner replacement as an in-campaign load, before the
     // first presented frame. A refusal sets the mode failure instead of opening a modal.
     [[nodiscard]] bool restore_at_start(const std::string& name);
@@ -35,8 +41,9 @@ private:
     bool accept_loaded(std::unique_ptr<platform::PreparedLiveRestore>, bool at_start = false);
     bool refuse_load(std::string text, bool at_start);
     enum class Screen { escape, save, load };
-    enum class Modal { none, overwrite, erase, progress_save, progress_load, acknowledgement };
+    enum class Modal { none, overwrite, erase, progress_save, progress_load, acknowledgement, quit };
     void show_screen(Screen);
+    void open_options();
     bool build_widgets();
     void show_modal(Modal, std::string text);
     void dismiss_modal(bool yes = false);
@@ -51,6 +58,8 @@ private:
     std::function<std::string(std::string_view)> lookup_;
     std::optional<BuiltDialog> escape_dialog_, save_dialog_, load_dialog_, modal_dialog_;
     godot::Control* modal_root_{};
+    EawrOptionsScreen* options_{};
+    std::int64_t options_id_{};
     godot::ItemList* save_slots_{}, *load_slots_{};
     godot::Ref<godot::Tween> fade_;
     Screen screen_{Screen::escape};

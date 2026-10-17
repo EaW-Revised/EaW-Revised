@@ -6,6 +6,7 @@
 #include <exception>
 #include <optional>
 #include <utility>
+#include <tuple>
 
 namespace eawr::script::authoritative {
 namespace {
@@ -221,6 +222,10 @@ core::Result<void> ScriptedTacticalSession::set_engine(std::shared_ptr<ScriptEng
         if (!state) return core::Result<void>::failure(state.error());
         if (state.value()) return core::Result<void>::failure(make_error(codes::load_rejected, "stateful child engine is missing its native continuation"));
     }
+    auto provider = engine ? engine->object_turn_service(impl_->world, impl_->scripts)
+        : core::Result<std::shared_ptr<tactical::ObjectTurnService>>::success({});
+    if (!provider) return core::Result<void>::failure(provider.error());
+    if (auto installed = impl_->world.set_object_turn_service(std::move(provider).value()); !installed) return installed;
     impl_->engine = std::move(engine);
     return core::Result<void>::success();
 }
@@ -325,6 +330,11 @@ core::Result<ScriptedTick> ScriptedTacticalSession::step(
             return core::Result<ScriptedTick>::failure(taken.error());
         }
     }
+    // Turn and barrier output share per-instance sequences. The engine merges
+    // both services before routing or saving the next tick's commands.
+    std::sort(out.scripts.commands.begin(), out.scripts.commands.end(), [](const auto& left, const auto& right) {
+        return std::tie(left.issuer, left.sequence) < std::tie(right.issuer, right.sequence);
+    });
     impl.pending = out.scripts.commands;
     if (!impl.authoritative_hash) return core::Result<ScriptedTick>::success(std::move(out));
     core::tick_profile::Scope capture("serial.bridge.capture");
@@ -369,6 +379,7 @@ core::Result<std::string> ScriptedTacticalSession::script_state_hash() {
 }
 
 core::Result<std::string> ScriptedTacticalSession::script_state_hash(const sim::PartitionExecutor& executor) {
+    if (impl_->failure) return core::Result<std::string>::failure(*impl_->failure);
     if (impl_->pending_native) return core::Result<std::string>::failure(make_error(codes::load_rejected, "native child state needs its owner"));
     auto lua = impl_->scripts.state_hash(executor);
     if (!lua || !impl_->engine) return lua;

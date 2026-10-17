@@ -258,7 +258,7 @@ const tactical::EconomyView* LiveSessionView::local_economy() const {
                 }
                 for (const auto& menu : economy_.menus) if (const auto* option = menu.find(type)) return option;
                 return nullptr;
-            });
+            }, battle_frame_.latest->completed_tick());
             pending_economy_tick_ = battle_frame_.latest->completed_tick();
             pending_economy_revision_ = revision;
         }
@@ -490,7 +490,9 @@ bool LiveSessionView::reinforce(const tactical::TypeId type, const sim::math::Ve
     const auto* ledger = local_economy();
     const auto* reserve = economy_.campaign ? campaign_reserve(type) : nullptr;
     if (reserve) intent.reinforcement_token = reserve->token;
-    if (!economy_.campaign && ledger) for (std::size_t index = 0; index < ledger->pool.size() && index < ledger->pool_tokens.size(); ++index) {
+    // Ordinary network skirmish admits the first pooled unit of a type; persistent
+    // reserve identities require the campaign route's separate authorization.
+    if (!economy_.campaign && !options_.lan && ledger) for (std::size_t index = 0; index < ledger->pool.size() && index < ledger->pool_tokens.size(); ++index) {
         if (ledger->pool[index] != type || ledger->pool_tokens[index] == 0) continue;
         const auto token = ledger->pool_tokens[index];
         intent.reinforcement_token = token;

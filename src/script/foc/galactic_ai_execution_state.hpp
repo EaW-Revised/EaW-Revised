@@ -1,6 +1,7 @@
 #pragma once
 
 #include "galactic_ai_execution.hpp"
+#include "eawr/core/record_digest.hpp"
 
 namespace eawr::script::foc::galactic_ai { class LiveExecutionStateContributor; }
 namespace eawr::campaign { class GalacticAiUsabilityProvider; }
@@ -43,7 +44,10 @@ public:
     [[nodiscard]] core::Result<NativeState> capture() const override;
     [[nodiscard]] core::Result<void> restore(const NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
+    [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return records_.byte_size() + 1024; }
 private:
+    core::RecordDigest records_;
     ExecutionRetainedState state_;
     Validator validator_;
 };
@@ -54,7 +58,7 @@ class LiveExecutionStateContributor final : public TrackedStateContributor {
 public:
     // Borrowed state is untracked until its runtime binds every writer to this
     // owner. Debug/full verification checks the opt-in promise at each hash.
-    void enable_revision_tracking() noexcept { mark_state_changed(); tracked_ = true; }
+    void enable_revision_tracking();
     [[nodiscard]] std::optional<std::uint64_t> state_revision() const noexcept override {
         return tracked_ ? TrackedStateContributor::state_revision() : std::nullopt;
     }
@@ -68,7 +72,10 @@ public:
     [[nodiscard]] core::Result<NativeState> capture() const override;
     [[nodiscard]] core::Result<void> restore(const NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
+    [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return tracked_ ? records_.byte_size() + 1024 : 0; }
 private:
+    core::RecordDigest records_;
     bool tracked_{};
     ExecutionRetainedState& retained_;
     std::map<gc::PlayerId, ExecutionRoutes>& routes_;

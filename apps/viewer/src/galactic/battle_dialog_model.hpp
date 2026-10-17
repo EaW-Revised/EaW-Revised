@@ -20,6 +20,10 @@ struct BattleDialogSide {
     std::string name, icon;
     std::array<float, 3> colour{1, 1, 1};
     std::vector<std::string> combatants;
+    // WGUI-176: the pending shell's centre graph shows this side's best ship (Icon_Name) on a stack
+    // texture chosen by its unit count; both come from the conflict's own forces, not from observer filtering.
+    std::size_t units{};
+    std::string best_icon;
     friend bool operator==(const BattleDialogSide&, const BattleDialogSide&) = default;
 };
 struct CampaignRecordEntry {
@@ -72,6 +76,7 @@ struct BattleDialogView {
     std::array<BattleDialogSide, 2> sides; // defender, invader (WAR-67)
     bool pending_visible{true}, single_button{}, waiting_for_opponent{}, roster_complete{};
     bool involved{}, choice_ready{true}, fight_allowed{}, tactical_available{}, auto_allowed{}, retreat_allowed{}, won{};
+    bool local_invader{}; // the local player attacks: sides[1] is local (WGUI-176 left graph)
     std::string refusal;
     double elapsed_seconds{}, display_seconds{}; // validated AutoResolveDisplayTime
     CampaignResults results;

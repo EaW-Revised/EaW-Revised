@@ -58,6 +58,8 @@ core::Result<std::shared_ptr<NetworkGnsRoom>> room_failure(core::Diagnostic diag
 struct NetworkGnsRoom::Impl {
     NetworkIntroductionOptions options;
     Bytes request;
+    std::string room_reference;
+    std::uint64_t repair_requested{}, repair_inflight{}, repair_completed{};
     Kind request_kind{};
     std::string expected_identity;
     std::optional<std::uint32_t> expected_slot; // a directory admission already named the seat
@@ -77,14 +79,22 @@ struct NetworkGnsRoom::Impl {
     std::size_t outbound_bytes{}, inbound_bytes{};
     std::uint64_t dropped{};
     std::string last_refusal;
+    std::pair<std::uint64_t, std::string> renewal_failure;
     bool renew_wanted{};
     unsigned renew_attempts{};
     Clock::time_point renew_retry{};
     std::jthread worker;
     Impl(NetworkIntroductionOptions o, Bytes bytes, std::string identity)
-        : options(std::move(o)), request(std::move(bytes)), request_kind(static_cast<Kind>(request[1])), expected_identity(std::move(identity)) {}
+        : options(std::move(o)), request(std::move(bytes)), request_kind(static_cast<Kind>(request[1])), expected_identity(std::move(identity)) {
+        Reader reader{std::span(request).subspan(2)};
+        room_reference = reader.string(32);
+    }
     ~Impl() {
-        worker.request_stop();
+        {
+            std::lock_guard lock(mutex);
+            worker.request_stop();
+        }
+        condition.notify_all();
         if (worker.joinable()) worker.join();
     }
     void start() { worker = std::jthread([this](std::stop_token stop) { run(stop); }); }
@@ -119,8 +129,13 @@ struct NetworkGnsRoom::Impl {
             || (expected_slot && *expected_slot != assigned)) {
             malformed(); return;
         }
-        slot = assigned; capability = std::move(cap); alias = std::move(room_alias);
+        slot = assigned; capability = std::move(cap);
+        // Reattach deliberately omits the host-only alias in its reply.
+        // Retain the code already learned from Open across that refresh.
+        if (request_kind == Kind::room_open || !room_alias.empty()) alias = std::move(room_alias);
+        turn.reset();
         if (!credentials.uri.empty()) turn = std::move(credentials);
+        repair_completed = repair_inflight;
         const auto now = Clock::now();
         lease.expires = now + std::chrono::milliseconds(remaining); hard_ends = now + std::chrono::milliseconds(hard);
         renewable = hard > remaining; admitted = true;
@@ -194,13 +209,36 @@ struct NetworkGnsRoom::Impl {
         } else if (kind == Kind::renew_refused) {
             const auto refusal = parse_refused(reader);
             if (!refusal) malformed();
-            else if (refusal->reason == renew_refused_maximum) { renew_wanted = false; renewable = false; }
-            else if (refusal->reason == renew_refused_credentials) { renew_wanted = renew_attempts < 6; renew_retry = Clock::now() + options.renewal_retry; }
+            else if (refusal->reason == renew_refused_maximum) {
+                ++renewal_failure.first; renewal_failure.second = "EAWR-NET-1732";
+                renew_wanted = false; renewable = false;
+            }
+            else if (refusal->reason == renew_refused_credentials) {
+                ++renewal_failure.first; renewal_failure.second = "EAWR-NET-1733";
+                renew_wanted = renew_attempts < 6; renew_retry = Clock::now() + options.renewal_retry;
+            }
             else renew_wanted = false; // Early: another member's renewal is already in progress.
         } else malformed();
         condition.notify_all();
     }
     void run(std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            run_connection(stop);
+            // A repair request wakes this same TLS owner, even after an outage.
+            // No join, DNS, TLS or provider request runs on the game/GNS thread.
+            std::unique_lock lock(mutex);
+            condition.wait(lock, [&] { return stop.stop_requested() || repair_requested > repair_inflight; });
+            if (stop.stop_requested()) return;
+            repair_inflight = repair_requested;
+            request = message(Kind::room_reattach);
+            string(request, room_reference); string(request, capability); string(request, expected_identity);
+            request_kind = Kind::room_reattach; expected_slot = slot;
+            failure.reset(); admitted = false; finished = leaving = false;
+            turn.reset(); outbound.clear(); inbound.clear(); outbound_bytes = inbound_bytes = 0;
+            renew_wanted = false; renew_attempts = 0;
+        }
+    }
+    void run_connection(std::stop_token stop) {
         const auto deadline = Clock::now() + options.timeout;
         auto ctx = client_context(options.ca_file, options.certificate_sha256);
         if (!ctx) { fail(ctx.error()); return; }
@@ -215,7 +253,7 @@ struct NetworkGnsRoom::Impl {
             if (auto bytes = stream.receive()) response(numeric_room_turn(std::move(*bytes), stop));
             {
                 std::lock_guard lock(mutex);
-                if (failure || finished) return;
+                if (failure || finished || repair_requested > repair_inflight) return;
                 if (!admitted && Clock::now() >= deadline) { failure = error(1528, "Relay room request timed out"); condition.notify_all(); return; }
                 // One owner performs all TLS I/O; GNS-thread callbacks never block on the network.
                 if (admitted && !outbound.empty() && stream.queue(outbound.front())) {
@@ -315,6 +353,27 @@ core::Result<std::optional<GnsRoomSignal>> NetworkGnsRoom::poll() {
     auto signal = std::move(impl_->inbound.front()); impl_->inbound.pop_front(); impl_->inbound_bytes -= signal.bytes.size();
     return core::Result<std::optional<GnsRoomSignal>>::success(std::move(signal));
 }
+core::Result<bool> NetworkGnsRoom::repair_attachment(std::uint64_t epoch) {
+    std::lock_guard lock(impl_->mutex);
+    if (epoch == 0 || epoch < impl_->repair_requested || impl_->capability.empty() || !code_valid(impl_->room_reference)
+        || impl_->leaving) {
+        return core::Result<bool>::failure(error(1791, "Room cannot reattach for this repair epoch"));
+    }
+    if (epoch > impl_->repair_requested) {
+        // A committed GNS match can precede this TLS owner's Lock roster.
+        // Let a live owner finish receiving it before replacing that connection.
+        // On an outage its cached roster may stay open forever: reattach then
+        // validates the locked room and capability at the service instead.
+        if (impl_->roster.state == GnsRoomState::open && !impl_->failure)
+            return core::Result<bool>::success(false);
+        impl_->repair_requested = epoch; impl_->condition.notify_all();
+        return core::Result<bool>::success(false);
+    }
+    if (impl_->repair_completed == epoch) return core::Result<bool>::success(true);
+    if (impl_->repair_inflight == epoch && impl_->failure)
+        return core::Result<bool>::failure(*impl_->failure);
+    return core::Result<bool>::success(false);
+}
 core::Result<void> NetworkGnsRoom::leave() { return impl_->queue(message(Kind::room_leave), true); }
 core::Result<void> NetworkGnsRoom::release(PeerIndex slot) {
     if (local_slot() != 0 || slot == 0 || slot >= max_match_seats) return core::Result<void>::failure(error(room_capability, "Only the host releases a seat"));
@@ -327,5 +386,8 @@ core::Result<void> NetworkGnsRoom::kick(PeerIndex slot) {
 core::Result<void> NetworkGnsRoom::lock() {
     if (local_slot() != 0) return core::Result<void>::failure(error(room_capability, "Only the host starts the match"));
     return impl_->queue(message(Kind::room_lock));
+}
+std::pair<std::uint64_t, std::string> NetworkGnsRoom::renewal_failure() const {
+    std::lock_guard lock(impl_->mutex); return impl_->renewal_failure;
 }
 } // namespace eawr::net

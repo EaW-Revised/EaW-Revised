@@ -197,6 +197,73 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
             }
         }
     }
+    // #3957: a campaign battle's reserves (and what they carry) reinforce after tick zero for either
+    // side, from any type in the roster: no station menu need offer it, and there may be more than
+    // purchase_slots_per_type of one type. Size the slots from that roster, once, at prepare time.
+    // The roster is concurrent demand on top of the slots made above (launches, replacements, menus):
+    // a unit bought while the reserves still stand needs its own slot. A skirmish has no roster and
+    // is unchanged.
+    if (setup_ && setup_->campaign && !start_->units.empty()) {
+        constexpr std::size_t max_carried_depth = 32;
+        std::map<std::pair<tactical::PlayerId, std::string>, std::size_t> roster;
+        // A squadron draws as its craft, never as its container: it counts its craft unless `expand`
+        // is off (the carried object lists its craft itself, which are counted one by one).
+        const auto want = [&](const tactical::PlayerId owner, const tactical::TypeId type, const bool expand) {
+            const auto* hero = economy_.hero(type);
+            const auto deployed = hero ? hero->deployed : type;
+            const auto named = std::find_if(tables_->units.begin(), tables_->units.end(),
+                [&](const units::UnitType& entry) { return skirmish::type_id(entry.id) == deployed; });
+            if (named == tables_->units.end()) return;
+            if (named->members.empty()) ++roster[{owner, named->id}];
+            else if (expand) for (const units::SquadronMember& member : named->members) ++roster[{owner, member.craft}];
+        };
+        const auto carried = [&](auto&& self, const tactical::PlayerId owner, const tactical::CarriedObject& object,
+                                 const std::size_t depth) -> void {
+            if (depth > max_carried_depth) return;
+            want(owner, object.type_id, object.members.empty());
+            for (const tactical::CarriedObject& member : object.members) self(self, owner, member, depth + 1);
+        };
+        // A station's spawner lists (ships as well as squadrons, every tech tier) bring units in after
+        // tick zero. Units a spawner entry names stand at most that many at once. The reserve lists are
+        // not read: SK-36 keeps them unused, so nothing is spawned from them.
+        for (const skirmish::StartUnit& station : start_->units) {
+            const auto* type = tables_->find(station.type);
+            if (type == nullptr || !type->spawner) continue;
+            std::map<std::string, std::int32_t> entries;
+            const auto note = [&](const std::vector<units::SpawnEntry>& list) {
+                for (const units::SpawnEntry& entry : list) {
+                    auto& most = entries[entry.squadron];
+                    most = std::max(most, entry.count);
+                }
+            };
+            note(type->spawner->starting);
+            for (const auto& tier : type->spawner->campaign_starting) note(tier);
+            for (const auto& [name, count] : entries) {
+                const auto* spawned = tables_->find(name);
+                if (spawned == nullptr || count <= 0) continue;
+                for (std::int32_t index = 0; index < count; ++index) {
+                    if (spawned->members.empty()) ++roster[{station.state.owner, spawned->id}];
+                    for (const units::SquadronMember& member : spawned->members) ++roster[{station.state.owner, member.craft}];
+                }
+            }
+        }
+        for (const tactical::CampaignReserve& reserve : setup_->campaign->reserves) {
+            if (reserve.restricted) continue; // WR-09: a restricted row cannot reinforce, so it never arrives
+            want(reserve.owner, reserve.type, true); // the pool type is what reinforces; purchase_type is only its population
+            for (const tactical::CarriedObject& object : reserve.contained) carried(carried, reserve.owner, object, 1);
+        }
+        for (const auto& [key, wanted] : roster) {
+            const auto owner = std::find_if(start_->players.begin(), start_->players.end(),
+                [&](const skirmish::StartPlayer& player) { return player.player.player_id == key.first; });
+            auto anchor = start_->units.front();
+            const auto near = std::find_if(start_->units.begin(), start_->units.end(),
+                [&](const skirmish::StartUnit& unit) { return unit.state.owner == key.first; });
+            if (near != start_->units.end()) anchor = *near;
+            anchor.state.owner = key.first; // a side that fields only reserves still owns its slots
+            const auto colour = owner != start_->players.end() ? owner->colour : std::optional<skirmish::LobbyColour>{};
+            for (std::size_t index = 0; index < wanted; ++index) add_slot(key.second, anchor, colour);
+        }
+    }
     // WAB-71/75: ability-created units already reach the snapshot. Reserve reusable visual
     // owners too, including proxy-only models, so their ordinary fog/pose/emitter path runs.
     std::set<std::string> ability_objects;
@@ -301,6 +368,9 @@ std::optional<std::size_t> LiveSessionView::ship_of(const sim::EntityId entity, 
         if (slot.clone) death_clones_.emplace(entity, launch_clones_[*slot.clone]);
         return slot.ship;
     }
+    // #3957: never silent. A live unit with no slot is simulated but not drawn; note each such entity
+    // once by owner and type (allocates on its first sighting only, not per call or frame) for the report.
+    slotless_hits_[{owner, type}].insert(entity);
     return std::nullopt;
 }
 

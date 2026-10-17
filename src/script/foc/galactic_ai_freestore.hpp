@@ -1,6 +1,7 @@
 #pragma once
 
 #include "galactic_ai_execution.hpp"
+#include "eawr/core/record_digest.hpp"
 #include "galactic_ai_selection_content.hpp"
 
 #include <set>
@@ -49,14 +50,17 @@ public:
     void release_object(gc::PlayerId, sim::EntityId, std::uint64_t plan);
     [[nodiscard]] FreestoreAssignment assign(gc::PlayerId, sim::EntityId, std::uint64_t plan);
     [[nodiscard]] core::Result<std::shared_ptr<const FreestorePool>> publish(const sim::PartitionExecutor&) const;
+    [[nodiscard]] core::Result<std::shared_ptr<const FreestorePool>> publish(gc::PlayerId, const sim::PartitionExecutor&) const;
     [[nodiscard]] std::span<const sim::EntityId> additions(gc::PlayerId) const noexcept;
     [[nodiscard]] core::Result<void> consume_additions(gc::PlayerId, std::size_t count);
     [[nodiscard]] const FreestoreFacts* facts(sim::EntityId) const noexcept;
     [[nodiscard]] const std::map<sim::EntityId, FreestoreFacts>& inventory() const noexcept { return facts_; }
     [[nodiscard]] const std::map<sim::EntityId, std::uint64_t>* reservations(gc::PlayerId player) const noexcept {
-        const auto found = stores_.find(player); return found == stores_.end() ? nullptr : &found->second.reservations;
+        const auto found = stores_.find(player); return found == stores_.end() ? nullptr : &found->second->reservations;
     }
     [[nodiscard]] std::vector<std::uint8_t> encode() const;
+    [[nodiscard]] std::string record_sync_hash(bool cold = false) const;
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept { return records_.byte_size() + 1024; }
     [[nodiscard]] core::Result<void> restore(std::span<const std::uint8_t>, sim::EntityId next_id,
         std::span<const gc::GalacticPlayer> players);
 private:
@@ -64,12 +68,30 @@ private:
         std::set<sim::EntityId> members;
         std::map<sim::EntityId, std::uint64_t> reservations;
         std::vector<sim::EntityId> additions;
-        bool operator==(const Store&) const = default;
+        mutable std::shared_ptr<const FreestorePool> published{};
+        bool operator==(const Store& other) const {
+            return members == other.members && reservations == other.reservations && additions == other.additions;
+        }
     };
+    void update_fact_record(sim::EntityId);
+    void update_store_record(gc::PlayerId);
+    [[nodiscard]] core::RecordDigest rebuild_records() const;
+    core::RecordDigest records_;
     void changed() { published_.reset(); if (changed_) changed_(); }
+    void changed(gc::PlayerId player) {
+        published_.reset();
+        if (stores_.contains(player)) write_store(player).published.reset();
+        if (changed_) changed_();
+    }
+    [[nodiscard]] Store& write_store(gc::PlayerId player) {
+        auto& store = stores_.at(player);
+        if (store.use_count() != 1) store = std::make_shared<Store>(*store);
+        return *store;
+    }
     void remove(gc::PlayerId, sim::EntityId);
     std::map<sim::EntityId, FreestoreFacts> facts_;
-    std::map<gc::PlayerId, Store> stores_;
+    // Native membership, reservations and callback order detach only for the writing player.
+    std::map<gc::PlayerId, std::shared_ptr<Store>> stores_;
     std::set<sim::EntityId> lost_; // WGA-436: identities never reused, so a handle to one is a removed object
     Changed changed_;
     mutable std::shared_ptr<const FreestorePool> published_; // derived, reused until an explicit write

@@ -41,8 +41,9 @@ struct Family final {
     std::string_view pass_name;
     bool opaque{};
     bool transparent{};
-    // False when the selected pass reads no engine light input. Such a pass
-    // has no shadow-receiving form, so the renderer keeps its unshaded source
+    // Whether ordinary scene shadows modulate this material. Lit adapters
+    // and the fixed-colour missing-effect placeholder receive them. A pass
+    // that excludes shadows has no shadow-receiving form, so the renderer keeps its unshaded source
     // even when a lighting state requests shadows; that is not a variant
     // failure.
     bool receives_shadows{};

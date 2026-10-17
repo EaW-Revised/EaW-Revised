@@ -9,9 +9,12 @@
 #include "tactical_ai_internal.hpp"
 #include "mode_time.hpp"
 #include "galactic_ai_execution.hpp"
+#include "galactic_ai_goal_state.hpp"
 #include "eawr/core/ascii.hpp"
 #include "eawr/script/numeric/q24_boundary.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "eawr/skirmish/ai.hpp"
+#include <algorithm>
 #include <filesystem>
 #include <cstdlib>
 
@@ -26,6 +29,8 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <iostream>
+#include <fstream>
+#include <chrono>
 #include <array>
 #include <map>
 #include <optional>
@@ -36,6 +41,7 @@
 #include <cfenv>
 #include <clocale>
 #include <limits>
+#include <tuple>
 #include <cstdlib>
 #include <filesystem>
 
@@ -48,6 +54,22 @@ inline std::shared_ptr<Host> make_tactical_host() {
 }
 
 struct EngineContractAccess {
+    static PlayerAi& add_player(Engine& engine, tactical::PlayerId id) {
+        PlayerAi row; row.player = id; engine.players_.push_back(std::move(row));
+
+        return engine.players_.back();
+    }
+    static PlayerAi& fixture_owner(Engine& engine, tactical::PlayerId id = 2) {
+        if (auto* owner = engine.player_ai(id)) return *owner;
+        return add_player(engine, id);
+    }
+    static const PlayerAi& fixture_owner(const Engine& engine, tactical::PlayerId id = 2) {
+        const auto* owner = engine.player_ai(id);
+        if (!owner) throw std::runtime_error("synthetic owner missing");
+        return *owner;
+    }
+
+    static ThreatGrid& grid(Engine& engine) { return engine.grid_; }
     static void prepare_inputs(Engine& engine, const sim::PartitionExecutor& executor) {
         engine.prepare_producers(&executor); engine.prepare_pad_inputs(&executor);
     }
@@ -88,11 +110,13 @@ struct EngineContractAccess {
         plan.id = plan.instance = plan.goal = 1;
         plan.player = 2;
         plan.taskforces = {1};
-        engine.running_.emplace(1, plan);
-        engine.plan_of_instance_[1] = 1;
+        fixture_owner(engine).running.emplace(1, plan);
+        fixture_owner(engine).plan_of_instance[1] = 1;
         TaskForce force;
         force.id = force.plan = 1;
-        engine.taskforces_.emplace(1, force);
+        fixture_owner(engine).taskforces.emplace(1, force);
+
+        engine.rebuild_runtime_index();
         return engine.players_.back();
     }
     static const PlayerAi* player(const Engine& engine, tactical::PlayerId id) { return engine.player_ai(id); }
@@ -109,10 +133,19 @@ struct EngineContractAccess {
     }
     static void order_fixture(Engine& engine, std::vector<sim::EntityId> members) {
         collect_fixture(engine);
-        engine.taskforces_.at(1).units = std::move(members);
+        fixture_owner(engine).taskforces.at(1).units = std::move(members);
         target_fixture(engine, 1, 11);
         target_fixture(engine, 2, 0);
         target_fixture(engine, 3, 999);
+    }
+    static void proposal_fixture(Engine& engine) {
+        order_fixture(engine, {10, 11, 12});
+        Plan plan; plan.id = plan.instance = plan.goal = 2; plan.player = 2; plan.taskforces = {2};
+        fixture_owner(engine).running.emplace(2, plan); fixture_owner(engine).plan_of_instance[2] = 2;
+        TaskForce force; force.id = force.plan = 2; force.units = {10};
+        fixture_owner(engine).taskforces.emplace(2, force);
+
+        engine.rebuild_runtime_index();
     }
     static void add_find_target(Engine& engine, std::uint64_t id, sim::EntityId object) {
         target_fixture(engine, id, object); engine.players_.back().targets.push_back(id);
@@ -125,6 +158,7 @@ struct EngineContractAccess {
     static std::uint32_t evaluated(const Engine& engine) { return engine.work_.goals_evaluated; }
     static void goals(Engine& engine, PlayerAi& player) { engine.service_goals(player); }
     static std::uint32_t maintenances(const Engine& engine) { return engine.work_.maintenances; }
+    static std::int64_t admission_budget(const Engine& engine) { return engine.proposal_budget(100000); }
     static void maintain(Engine& engine, PlayerAi& player) { engine.maintain(player); }
     static PlayerAi& active_desire_fixture(Engine& engine, const GoalType& goal,
         const GoalType& competitor, bool removable, bool proposals) {
@@ -141,18 +175,297 @@ struct EngineContractAccess {
         engine.players_.push_back(std::move(player));
         Plan plan; plan.id = plan.instance = plan.goal = 1; plan.player = 2;
         plan.removable = removable;
-        engine.running_.emplace(1, plan); engine.plan_of_instance_[1] = 1;
+        fixture_owner(engine).running.emplace(1, plan); fixture_owner(engine).plan_of_instance[1] = 1;
+
+        engine.rebuild_runtime_index();
         return engine.players_.back();
+    }
+    static void contrast_fixture(Engine& engine, PlayerAi& player) {
+        auto& goal = player.active.front();
+        PotentialPlan selected; selected.valid = selected.reserved = selected.funded = true;
+        selected.units = {1}; selected.freestore = {10}; selected.sources = {0};
+        selected.producers = {0}; selected.pool_tokens = {0};
+        selected.taskforce_of_unit = selected.team_of_unit = selected.contrast_indices = {0};
+        goal.potential = selected;
+        fixture_owner(engine).running.at(1).taskforces = {1};
+        TaskForce force; force.id = force.plan = 1; force.units = {10};
+        fixture_owner(engine).taskforces.emplace(1, force);
+        player.assigned[10] = 1; player.reserved[10] = goal.id;
+
+        engine.rebuild_runtime_index();
+    }
+    static bool contrast(Engine& engine, PlayerAi& player) {
+        return engine.test_target_contrast(player, player.active.front());
+    }
+    static void retain_pad(Engine& engine, std::uint64_t pad) { fixture_owner(engine).running.at(1).reserved_pads = {pad}; }
+    static void release_retained_pad(Engine& engine) { fixture_owner(engine).running.at(1).reserved_pads.clear(); }
+    static bool completed_pad_contrast(Engine& engine, PlayerAi& player) {
+        Goal goal; goal.id = goal.plan = 1; goal.potential.emplace();
+        auto& selection = *goal.potential; selection.valid = selection.reserved = selection.funded = true;
+        selection.units = {30}; selection.freestore = {0}; selection.sources = {2};
+        selection.producers = {1}; selection.pool_tokens = {0}; selection.contrast_indices = {0};
+        return engine.test_target_contrast(player, goal);
     }
     static bool selection(Engine& engine, PlayerAi& player, PotentialPlan& potential, std::uint32_t seed,
         std::uint64_t goal_id = 1) {
-        engine.sync_.set_seed(seed);
+        player.sync.set_seed(seed);
         Goal goal;
         goal.id = goal_id;
         return engine.select_units(player, goal, potential);
     }
-    static std::uint32_t selection_seed(const Engine& engine) { return engine.sync_.seed(); }
-    static void set_selection_seed(Engine& engine, std::uint32_t seed) { engine.sync_.set_seed(seed); }
+    static const PlayerAi& checked_player(const Engine& engine, tactical::PlayerId id) {
+        const auto* player = engine.player_ai(id);
+        if (!player) throw std::runtime_error("synthetic AI player missing");
+        return *player;
+    }
+    static PlayerAi& checked_player(Engine& engine, tactical::PlayerId id) {
+        auto* player = engine.player_ai(id);
+        if (!player) throw std::runtime_error("synthetic AI player missing");
+        return *player;
+    }
+    static std::uint32_t selection_seed(const Engine& engine, tactical::PlayerId player) { return checked_player(engine, player).sync.seed(); }
+    static void set_selection_seed(Engine& engine, tactical::PlayerId player, std::uint32_t seed) { checked_player(engine, player).sync.set_seed(seed); }
+    static std::uint32_t engine_seed(const Engine& engine) { return engine.sync_.seed(); }
+    static std::uint32_t draw(Engine& engine, tactical::PlayerId player) { return engine.stream(checked_player(engine, player)).next(); }
+    static void retain_plan_without_instance(Engine& engine, tactical::PlayerId id, bool exited) {
+        auto& player = checked_player(engine, id);
+        Goal goal; goal.id = 1; goal.plan = 1;
+        player.active = {goal}; player.next_goal_id = 2;
+        Plan plan; plan.id = plan.goal = 1; plan.player = id;
+        plan.instance = first_plan_instance; plan.exited = exited;
+        player.running[1] = plan; player.plan_of_instance[plan.instance] = 1;
+        engine.next_plan_id_ = 2; engine.next_instance_ = first_plan_instance + 1;
+        player.positioning[10] = {plan.instance, engine.frame_ + 75, 11};
+
+        engine.rebuild_runtime_index();
+    }
+    static void ownership_fixture(Engine& engine, authoritative::ScriptScheduler& scripts) {
+        add_player(engine, 7); add_player(engine, 9);
+        engine.scripts_ = &scripts; engine.event_tick_ = 1;
+        for (const std::uint64_t id : {3U, 1U, 2U}) {
+            auto& owner = checked_player(engine, id == 2 ? 7 : 9);
+            Plan plan; plan.id = id; plan.instance = 100 + id; plan.player = owner.player;
+            plan.taskforces = {id}; owner.running.emplace(id, plan);
+            owner.plan_of_instance.emplace(plan.instance, id);
+            TaskForce force; force.id = force.plan = id; force.name = "MainForce";
+            force.units = {999}; owner.taskforces.emplace(id, std::move(force));
+        }
+        auto& owner = checked_player(engine, 9);
+        Block active; active.id = 1101; active.instance = 101; active.taskforce = 1;
+        owner.blocks.emplace(active.id, active);
+        Block alias = active; alias.id = 1100; alias.waiting_on = active.id;
+        owner.blocks.emplace(alias.id, alias);
+        engine.rebuild_runtime_index();
+    }
+    static void foreign_task(Engine& engine) {
+        BuildTask task; task.taskforce = 2; task.source = 1; task.type = 1; task.pool_token = 77;
+        auto& owner = checked_player(engine, 9); owner.tasks.push_back(task); engine.service_execution(owner);
+    }
+    static void restore_foreign_units(Engine& engine) { checked_player(engine, 7).taskforces.at(2).units = {999}; }
+    // ---- S-T3b: player effects. The reference engine writes directly; the other runs the same turns staged. ----
+    template<class Body> static void turn(Engine& engine, tactical::PlayerId id, Body&& body) {
+        auto& player = checked_player(engine, id);
+        const Engine::TurnScope scope(engine, player);
+        body(player);
+    }
+    static core::Result<void> commit(Engine& engine, authoritative::ScriptScheduler& scripts) { return engine.commit_effects(scripts); }
+    static bool staging(const Engine& engine) { return engine.staged() != nullptr; }
+    static const EffectCounts& totals(const Engine& engine) { return engine.effect_totals_; }
+    static const PlayerEffects& effects_of(const Engine& engine, tactical::PlayerId id) { return checked_player(engine, id).effects; }
+    static void emit(Engine& engine, tactical::PlayerId owner, std::uint64_t plan_id, std::uint64_t force_id, std::string_view event) {
+        auto& player = checked_player(engine, owner);
+        engine.emit_call(player.running.at(plan_id), player.taskforces.at(force_id), event, {});
+    }
+    static void signal(Engine& engine, tactical::PlayerId owner, std::uint64_t plan_id, std::uint64_t force_id, std::string_view event) {
+        auto& player = checked_player(engine, owner);
+        player.taskforces.at(force_id).thread = 0;
+        engine.emit_thread_event(player.running.at(plan_id), player.taskforces.at(force_id), event, {});
+    }
+    static void move(Engine& engine, tactical::PlayerId owner, std::uint64_t plan_id, const ViewUnit& unit) {
+        engine.issue_move(checked_player(engine, owner).running.at(plan_id), unit, math::Vec3{});
+    }
+    static void note(Engine& engine, tactical::PlayerId owner, std::uint64_t plan_id, std::string text) {
+        engine.record(&checked_player(engine, owner).running.at(plan_id), owner, "effects", std::move(text));
+    }
+    static void wallet(Engine& engine, tactical::PlayerId player, Real amount) { engine.change_wallet(player, amount); }
+    static std::int64_t stacked(const Engine& engine, tactical::PlayerId player) { return engine.stacked_credits(player).raw(); }
+    static std::int64_t host_stack(const Engine& engine, tactical::PlayerId player) { return engine.host_->uncommitted_credits(player); }
+    static void claim_pad(Engine& engine, sim::EntityId pad, tactical::PlayerId player, std::uint64_t goal) {
+        engine.set_pad_claim(pad, PadReservation{player, goal, 30});
+    }
+    static std::optional<PadReservation> claim(const Engine& engine, sim::EntityId pad) {
+        const auto* held = engine.pad_claim(pad);
+        return held ? std::optional<PadReservation>(*held) : std::nullopt;
+    }
+    static void free_pads(Engine& engine, tactical::PlayerId player, std::uint64_t goal) { engine.release_pad_claims(player, goal); }
+    static void free_pad(Engine& engine, sim::EntityId pad) { engine.release_pad_claim(pad); }
+    static void wait_for_attach(Engine& engine, PlayerAi& player, std::uint64_t goal_id) {
+        Goal goal; goal.id = goal_id; engine.queue_attach(player, goal);
+    }
+    static void reindex(Engine& engine) { engine.rebuild_runtime_index(); }
+    static void backlog(Engine& engine, tactical::PlayerId player, std::uint64_t goal) { engine.pending_attach_.push_back({player, goal}); }
+    static void finish(Engine& engine, tactical::PlayerId owner, std::uint64_t plan_id, authoritative::ScriptScheduler& scripts) {
+        engine.finish_plan(checked_player(engine, owner), plan_id, scripts, true);
+    }
+    static void execute(Engine& engine, tactical::PlayerId owner) { engine.service_execution(checked_player(engine, owner)); }
+    static void pool_task(Engine& engine, tactical::PlayerId owner, std::uint64_t force, std::uint64_t token) {
+        BuildTask task; task.taskforce = force; task.source = 1; task.type = 1; task.pool_token = token;
+        checked_player(engine, owner).tasks.push_back(task);
+    }
+    // A goal the player's active list holds; an attachable one carries a potential plan of the first PlanDef.
+    static void active_goal(Engine& engine, tactical::PlayerId id, std::uint64_t goal_id, bool attachable) {
+        Goal goal; goal.id = goal_id;
+        if (attachable) goal.potential = PotentialPlan{};
+        checked_player(engine, id).active.push_back(std::move(goal));
+    }
+    // Inside a turn: a scheduler event (submitted at the commit) of the given tick, and an engine order.
+    static void stage_event(Engine& engine, std::uint64_t tick) {
+        authoritative::ScriptEvent event;
+        event.key = {tick, producer_foc_engine, 1, 0};
+        event.target = 1;
+        event.kind = authoritative::ScriptEvent::Kind::pump;
+        engine.staged()->scheduler.push_back(PlayerEffects::SchedulerEvent{std::move(event), true});
+    }
+    static void stage_order(Engine& engine) { engine.queue_order(authoritative::ScriptCommand{}); }
+    static void bare_players(Engine& engine, authoritative::ScriptScheduler& scripts) {
+        for (const tactical::PlayerId id : {7U, 9U}) {
+            add_player(engine, id).functions.push_back(GoalFunctionEntry{nullptr, "ATTACH_GOAL", nullptr, "Attach"});
+        }
+        engine.scripts_ = &scripts; engine.event_tick_ = 1;
+    }
+    static core::Result<void> drain(Engine& engine, authoritative::ScriptScheduler& scripts) {
+        std::uint64_t sequence = 0;
+        return engine.drain_attaches(scripts, sequence);
+    }
+    static std::string goal_plans(const Engine& engine) {
+        std::ostringstream out;
+        for (const auto& player : engine.players_) for (const auto& goal : player.active)
+            out << 'G' << player.player << ',' << goal.id << ':' << goal.plan << ';';
+        return out.str();
+    }
+    static bool attach_throws(Engine& engine, PlayerAi& player, authoritative::ScriptScheduler& scripts) {
+        Goal goal; std::uint64_t sequence = 0;
+        try { static_cast<void>(engine.attach_plan(player, goal, scripts, sequence)); } catch (const std::logic_error&) { return true; }
+        return false;
+    }
+    static std::size_t waiting_events(const Engine& engine) { return engine.events_.size(); }
+    static std::size_t waiting_orders(const Engine& engine) { return engine.orders_.size(); }
+    static std::size_t waiting_attaches(const Engine& engine) { return engine.pending_attach_.size(); }
+    static std::size_t forced_units(const Engine& engine, std::uint64_t force) {
+        const auto* row = engine.taskforce(force); return row ? row->pooled.size() : 0;
+    }
+    static std::vector<std::uint64_t> pooled_tokens(const Engine& engine, std::uint64_t force) {
+        std::vector<std::uint64_t> tokens;
+        if (const auto* row = engine.taskforce(force)) for (const auto& purchase : row->pooled) tokens.push_back(purchase.token);
+        return tokens;
+    }
+    static void arm_native_records(Engine& engine, bool on) { engine.native_records_enabled_ = on; }
+    static void hold_native_scope(std::optional<Engine::NativeRecordWrite>& slot, Engine& engine) { slot.emplace(engine); }
+    static std::size_t committed_claims(const Engine& engine) { return engine.pad_reservations_.size(); }
+    static std::size_t committed_orders(const Engine& engine) { return engine.orders_.size(); }
+    static std::size_t staged_effects(const Engine& engine) {
+        std::size_t staged = 0;
+        for (const auto& player : engine.players_) staged += player.effects.empty() ? 0 : 1;
+        return staged;
+    }
+    static std::size_t committed_wallets(const Engine& engine) { return engine.host_->credit_changes.size(); }
+    static void native_changes(Engine& engine, std::uint32_t owner) {
+        const auto write = engine.native_record_scope();
+        engine.native_records_changed(owner, {1, 13});
+        engine.native_record_changed(owner, 2, 5 + owner);
+        engine.mark_native_state_changed();
+        engine.mark_native_state_changed();
+    }
+    static void native_shared_change(Engine& engine) {
+        engine.native_records_changed(Engine::native_all_players, {32});
+        engine.native_record_changed(0, 20, 9);
+        engine.mark_native_state_changed();
+    }
+    static std::size_t native_depth(const Engine& engine) { return engine.native_record_depth_; }
+    static std::string native_snapshot(const Engine& engine) {
+        std::ostringstream out;
+        for (const auto& [owner, bits] : engine.native_record_dirty_groups_) out << 'G' << owner << ':' << bits << ';';
+        for (const auto& key : engine.native_record_dirty_keys_) out << 'K' << std::get<0>(key) << ',' << std::get<1>(key) << ',' << std::get<2>(key).size() << ';';
+        out << "R" << engine.native_revision_ << ',' << engine.native_record_header_dirty_ << ',' << engine.native_record_depth_;
+        return out.str();
+    }
+    static std::string snapshot(Engine& engine, authoritative::ScriptScheduler& scripts) {
+        std::ostringstream out;
+        for (const auto& event : engine.events_) {
+            out << 'E' << event.key.tick << ',' << event.key.producer << ',' << event.key.entity << ',' << event.key.sequence << ','
+                << static_cast<int>(event.kind) << ',' << event.name << ',' << event.target << ',' << event.thread << ','
+                << event.arguments.size() << ';';
+        }
+        for (const auto& order : engine.orders_)
+            out << 'O' << order.tick << ',' << order.issuer << ',' << order.sequence << ',' << order.verb << ',' << order.arguments.size() << ';';
+        for (const auto& [player, change] : engine.host_->credit_changes) out << 'C' << player << ',' << change.raw() << ';';
+        for (const auto& [pad, held] : engine.pad_reservations_)
+            out << 'P' << pad << ',' << held.player << ',' << held.goal << ',' << held.type << ',' << held.consumed << ',' << held.issued << ';';
+        for (const auto& wait : engine.pending_attach_) out << 'A' << wait.player << ',' << wait.goal << ';';
+        for (const auto& line : engine.records_)
+            out << 'R' << line.tick << ',' << line.player << ',' << line.plan << ',' << line.goal << ',' << line.target << ',' << line.event << ',' << line.detail << ';';
+        if (const auto& journal = engine.host_->setup.journal) {
+            for (const auto& row : journal->plans)
+                out << 'J' << row.tick << ',' << row.player << ',' << row.plan << ',' << row.goal << ',' << row.target << ',' << row.event << ',' << row.detail << ';';
+            for (const auto& row : journal->services)
+                out << 'V' << row.frame << ',' << row.player << ',' << row.goals << row.planning << row.execution << ';';
+        }
+        out << 'S' << engine.sequence_ << ',' << engine.order_sequence_ << ',' << engine.native_revision_ << ','
+            << engine.work_.goals_evaluated << ',' << engine.work_.maintenances << ',' << engine.work_.plans_pumped << ','
+            << engine.producer_work_.candidates << ',' << engine.records_dropped_ << ';';
+        for (const auto& [id, owner] : engine.runtime_index_.plans) out << "Ip" << id << ',' << owner << ';';
+        for (const auto& [id, owner] : engine.runtime_index_.taskforces) out << "It" << id << ',' << owner << ';';
+        for (const auto& [id, owner] : engine.runtime_index_.blocks) out << "Ib" << id << ',' << owner << ';';
+        for (const auto& [id, owner] : engine.runtime_index_.instances) out << "Ii" << id << ',' << owner << ';';
+        for (const auto instance : scripts.instances()) out << "Si" << instance << ';';
+        return out.str();
+    }
+    static void orphan_blocks_fixture(Engine& engine) {
+        auto& owner = fixture_owner(engine);
+        for (const auto kind : {Block::Kind::produce, Block::Kind::reinforce, Block::Kind::ambush, Block::Kind::move}) {
+            Block row; row.id = static_cast<std::uint64_t>(kind) + 1; row.taskforce = 999; row.kind = kind;
+            row.ready = true; owner.blocks.emplace(row.id, row);
+        }
+        engine.rebuild_runtime_index();
+    }
+    static void interleaved_native_fixture(Engine& engine) {
+        for (const std::uint64_t id : {3U, 1U, 2U}) {
+            auto& owner = checked_player(engine, id == 2 ? 7 : 9);
+            Goal goal; goal.id = id == 3 ? 2 : 1; goal.plan = id; owner.active.push_back(goal);
+            owner.next_goal_id = std::max(owner.next_goal_id, goal.id + 1);
+            Plan plan; plan.id = id; plan.goal = goal.id; plan.instance = first_plan_instance + id - 1;
+            plan.player = owner.player; plan.exited = true; plan.taskforces = {id}; owner.running.emplace(id, plan);
+            owner.plan_of_instance.emplace(plan.instance, id);
+            TaskForce force; force.id = force.plan = id; force.name = "MainForce"; owner.taskforces.emplace(id, force);
+            Block row; row.id = block_id(plan.instance, 17); row.instance = plan.instance; row.taskforce = id;
+            owner.blocks.emplace(row.id, row);
+        }
+        engine.next_plan_id_ = engine.next_taskforce_id_ = 4;
+        engine.next_instance_ = first_plan_instance + 3;
+        checked_player(engine, 9).positioning[10] = {first_plan_instance, engine.frame_ + 1, 0};
+        checked_player(engine, 7).positioning[12] = {first_plan_instance + 1, engine.frame_ + 1, 0};
+        engine.rebuild_runtime_index();
+    }
+    static void stage_movement_queries(Engine& engine) {
+        auto& first = checked_player(engine, 9).blocks.at(1100);
+        auto& second = checked_player(engine, 9).blocks.at(1101);
+        first.galactic_request = 200; second.galactic_request = 100;
+        Block row; row.id = 1099; row.galactic_request = 300;
+        checked_player(engine, 7).blocks.emplace(row.id, row);
+        engine.rebuild_runtime_index();
+    }
+    static void clear_movement_queries(Engine& engine) {
+        checked_player(engine, 9).blocks.at(1100).galactic_request = 0;
+        checked_player(engine, 9).blocks.at(1101).galactic_request = 0;
+        checked_player(engine, 7).blocks.erase(1099);
+        engine.rebuild_runtime_index();
+    }
+    static void depart_positioning_plan(Engine& engine, tactical::PlayerId id) {
+        auto& owner = checked_player(engine, id);
+        owner.running.clear(); owner.plan_of_instance.clear(); owner.active.clear();
+
+        engine.rebuild_runtime_index();
+    }
     static core::Result<void> attach(Engine& engine, PlayerAi& player, Goal& goal,
         authoritative::ScriptScheduler& scripts, std::uint64_t& sequence) {
         engine.event_tick_ = 1;
@@ -162,6 +475,9 @@ struct EngineContractAccess {
     }
     static const std::vector<authoritative::ScriptEvent>& attachment_events(const Engine& engine) {
         return engine.events_;
+    }
+    static std::vector<authoritative::ScriptEvent> take_attachment_events(Engine& engine) {
+        auto events = std::move(engine.events_); engine.events_.clear(); return events;
     }
     static void defer_event(Engine& engine, authoritative::ScriptEvent event) {
         engine.events_.push_back(std::move(event));
@@ -181,13 +497,15 @@ struct EngineContractAccess {
         plan.id = plan.instance = 1;
         plan.player = 1;
         plan.taskforces = {1};
-        engine.running_.emplace(1, plan);
+        fixture_owner(engine, 1).running.emplace(1, plan);
         TaskForce force;
         force.id = force.plan = 1;
         force.name = "MainForce";
         force.units = {7};
-        engine.taskforces_.emplace(1, force);
+        fixture_owner(engine, 1).taskforces.emplace(1, force);
         engine.service_taskforce_events();
+
+        engine.rebuild_runtime_index();
         return engine.events_;
     }
     static void event_force(Engine& engine, authoritative::ScriptScheduler& scripts, std::vector<sim::EntityId> members) {
@@ -198,12 +516,14 @@ struct EngineContractAccess {
         plan.id = plan.instance = 1;
         plan.player = 1;
         plan.taskforces = {1};
-        engine.running_.emplace(1, plan);
+        fixture_owner(engine, 1).running.emplace(1, plan);
         TaskForce force;
         force.id = force.plan = 1;
         force.name = "MainForce";
         force.units = std::move(members);
-        engine.taskforces_.emplace(1, force);
+        fixture_owner(engine, 1).taskforces.emplace(1, force);
+
+        engine.rebuild_runtime_index();
     }
     static std::vector<authoritative::ScriptEvent> run_events(Engine& engine) {
         engine.events_.clear();
@@ -217,14 +537,14 @@ struct EngineContractAccess {
         plan.player = player.player;
         plan.taskforces = {1};
         plan.reserved_pads = {1};
-        engine.running_.emplace(1, plan);
+        player.running.emplace(1, plan);
         TaskForce force;
         force.id = force.plan = 1;
-        engine.taskforces_.emplace(1, force);
+        player.taskforces.emplace(1, force);
         Block block;
         block.id = block.taskforce = 1;
         block.kind = Block::Kind::produce;
-        engine.blocks_.emplace(1, block);
+        player.blocks.emplace(1, block);
         BuildTask task;
         task.taskforce = task.block = 1;
         task.type = 30;
@@ -233,6 +553,8 @@ struct EngineContractAccess {
         player.tasks.push_back(task);
         player.reserved_credits[1] = real(100);
         engine.pad_reservations_[1] = {player.player, 1, 30};
+
+        engine.rebuild_runtime_index();
     }
     static void service(Engine& engine, PlayerAi& player, std::int64_t frame) {
         engine.frame_ = frame;
@@ -242,14 +564,49 @@ struct EngineContractAccess {
     static PlayerAi& rejected_station_fixture(Engine& engine) {
         auto& player = collect_fixture(engine);
         Block block; block.id = block.taskforce = 1; block.kind = Block::Kind::produce;
-        engine.blocks_.emplace(1, block);
+        fixture_owner(engine).blocks.emplace(1, block);
         BuildTask task; task.taskforce = task.block = 1; task.type = 50; task.source = 2;
         task.issued = 1; task.finished = task.failed = true;
         player.tasks.push_back(task);
+
+        engine.rebuild_runtime_index();
         return player;
     }
     static void direct_pad_service(Engine& engine, PlayerAi& player) { engine.service_execution(player, true); }
     static void reserve(Engine& engine, PlayerAi& player, Goal& goal) { engine.reserve(player, goal); }
+    static Goal& pool_goal(Engine& engine, PlayerAi& player, std::vector<std::uint64_t> tokens, bool active, bool non_pool = false) {
+        Goal goal; goal.id = player.next_goal_id++; goal.active = active; goal.potential.emplace();
+        auto& selection = *goal.potential; selection.valid = true;
+        selection.units.assign(tokens.size(), 1); selection.sources.assign(tokens.size(), 1);
+        selection.freestore.assign(tokens.size(), 0); selection.producers.assign(tokens.size(), 0);
+        selection.taskforce_of_unit.assign(tokens.size(), 0); selection.team_of_unit.assign(tokens.size(), 0);
+        selection.contrast_indices.assign(tokens.size(), 0); selection.pool_tokens = std::move(tokens);
+        if (non_pool) {
+            // Ignored token metadata on new production must not release a pool
+            // reservation of another type, even when the numeric token matches.
+            selection.units.insert(selection.units.begin(), 2); selection.sources.insert(selection.sources.begin(), 2);
+            selection.freestore.insert(selection.freestore.begin(), 0); selection.producers.insert(selection.producers.begin(), 0);
+            selection.taskforce_of_unit.insert(selection.taskforce_of_unit.begin(), 0);
+            selection.team_of_unit.insert(selection.team_of_unit.begin(), 0);
+            selection.contrast_indices.insert(selection.contrast_indices.begin(), 0);
+            selection.pool_tokens.insert(selection.pool_tokens.begin(), 78);
+        }
+        auto& retained = (active ? player.active : player.proposed).emplace_back(std::move(goal));
+        engine.reserve(player, retained);
+        return retained;
+    }
+    static void retire_pool_goal(Engine& engine, PlayerAi& player, authoritative::ScriptScheduler& scripts, bool abandoned) {
+        engine.finish_plan(player, player.active.front().plan, scripts, abandoned);
+        player.active.clear();
+    }
+    static void await_pool_arrival(Engine& engine, PlayerAi& player, std::uint64_t plan_id) {
+        const auto& plan = player.running.at(plan_id);
+        Block block; block.kind = Block::Kind::reinforce; block.instance = plan.instance;
+        block.id = block_id(plan.instance, 19); block.taskforce = plan.taskforces.front();
+        block.reinforcing = 1; block.pool_token = 77;
+        player.blocks.emplace(block.id, block);
+        engine.rebuild_runtime_index();
+    }
     static void bind_scripts(Engine& engine, authoritative::ScriptScheduler& scripts, std::uint64_t& sequence) {
         engine.scripts_ = &scripts; engine.sequence_ = sequence; engine.event_tick_ = scripts.completed_tick() + 1;
     }
@@ -278,28 +635,32 @@ struct EngineContractAccess {
         tactical::TypeId type, sim::EntityId producer) {
         Plan plan; plan.id = plan.instance = plan.goal = goal.id; plan.player = player.player;
         if (engine.host_->world->pads().contains(producer)) plan.reserved_pads = {producer};
-        plan.taskforces = {goal.id}; engine.running_[goal.id] = plan;
-        TaskForce force; force.id = force.plan = goal.id; engine.taskforces_[goal.id] = force;
+        plan.taskforces = {goal.id}; player.running[goal.id] = plan;
+        TaskForce force; force.id = force.plan = goal.id; player.taskforces[goal.id] = force;
         Block block; block.id = block.taskforce = goal.id; block.kind = Block::Kind::produce;
-        engine.blocks_[goal.id] = block;
+        player.blocks[goal.id] = block;
         BuildTask task; task.taskforce = task.block = goal.id; task.type = type;
         task.producer = producer; task.source = 2; player.tasks.push_back(task);
+
+        engine.rebuild_runtime_index();
     }
     static void abandon_goal(Engine& engine, PlayerAi& player, std::uint64_t id, authoritative::ScriptScheduler& scripts) {
         engine.finish_plan(player, id, scripts, true);
     }
     static PlayerAi& direct_pad_fixture(Engine& engine, tactical::TypeId type, sim::EntityId pad) {
-        PlayerAi player; player.player = 2; engine.players_.push_back(std::move(player));
-        Goal goal; goal.id = 1; purchase(engine, engine.players_.back(), goal, type, pad);
-        engine.players_.back().tasks.clear();
-        engine.plan_of_instance_[1] = 1; engine.running_.at(1).reserved_pads = {pad};
-        auto& force = engine.taskforces_.at(1); force.types = {type}; force.sources = {2}; force.producers = {pad};
+        auto& owner = fixture_owner(engine);
+        Goal goal; goal.id = 1; purchase(engine, owner, goal, type, pad);
+        owner.tasks.clear();
+        owner.plan_of_instance[1] = 1; owner.running.at(1).reserved_pads = {pad};
+        auto& force = owner.taskforces.at(1); force.types = {type}; force.sources = {2}; force.producers = {pad};
         engine.frame_ = static_cast<std::int64_t>(engine.host_->world->completed_tick());
-        return engine.players_.back();
+
+        engine.rebuild_runtime_index();
+        return owner;
     }
     static void seed_purchases(Engine& engine, PlayerAi& player, authoritative::ScriptScheduler& scripts) {
         seed(engine, player, scripts);
-        engine.running_.at(1).reserved_pads.clear();
+        player.running.at(1).reserved_pads.clear();
         player.tasks.front().type = 50;
         auto later = player.tasks.front();
         later.type = 51;
@@ -312,20 +673,22 @@ struct EngineContractAccess {
             plan.id = plan.instance = id;
             plan.player = player.player;
             plan.taskforces = {id};
-            engine.running_.emplace(id, plan);
+            player.running.emplace(id, plan);
             TaskForce force;
             force.id = force.plan = id;
             force.pooled = {{1, id * 2 - 1}, {1, id * 2}};
-            engine.taskforces_.emplace(id, force);
+            player.taskforces.emplace(id, force);
             Block block;
             block.id = large_block ? block_id(first_plan_instance + id, 17) : id;
             block.taskforce = id;
             block.kind = Block::Kind::reinforce;
-            engine.blocks_.emplace(block.id, block);
+            player.blocks.emplace(block.id, block);
             player.reserved_pool[1] += 2;
             player.reserved_pool_tokens[id * 2 - 1] = id;
             player.reserved_pool_tokens[id * 2] = id;
         }
+
+        engine.rebuild_runtime_index();
     }
     static const std::vector<authoritative::ScriptCommand>& reinforce_service(
         Engine& engine, PlayerAi& player, const std::int64_t frame) {
@@ -342,9 +705,11 @@ struct EngineContractAccess {
         PlayerAi player;
         player.player = 1;
         seed_reinforcements(engine, player, 1);
-        engine.blocks_.clear();
-        engine.plan_of_instance_[1] = 1;
+        player.blocks.clear();
+        player.plan_of_instance[1] = 1;
         engine.players_.push_back(std::move(player));
+
+        engine.rebuild_runtime_index();
         return engine.players_.back();
     }
     static PlayerAi& concurrent_fixture(Engine& engine) {
@@ -352,6 +717,8 @@ struct EngineContractAccess {
         player.player = 1;
         seed_reinforcements(engine, player, 2);
         engine.players_.push_back(std::move(player));
+
+        engine.rebuild_runtime_index();
         return engine.players_.back();
     }
     static bool in_freestore(const Engine& engine, const ViewUnit& unit) {
@@ -365,7 +732,7 @@ struct EngineContractAccess {
         return engine.test_valid(player, goal);
     }
     static void reinforce_at(Engine& engine, const math::Vec3& position) {
-        engine.blocks_.at(block_id(first_plan_instance + 1, 17)).destination = position;
+        fixture_owner(engine, 1).blocks.at(block_id(first_plan_instance + 1, 17)).destination = position;
     }
     static void movement_fixture(Engine& engine, authoritative::ScriptScheduler& scripts,
         std::uint64_t& sequence) {
@@ -376,12 +743,12 @@ struct EngineContractAccess {
         plan.id = plan.instance = 1;
         plan.player = 1;
         plan.taskforces = {1};
-        engine.running_.emplace(1, plan);
+        fixture_owner(engine, 1).running.emplace(1, plan);
         TaskForce force;
         force.id = force.plan = 1;
         force.name = "MainForce";
         force.units = {10};
-        engine.taskforces_.emplace(1, force);
+        fixture_owner(engine, 1).taskforces.emplace(1, force);
         for (const auto kind : {Block::Kind::move, Block::Kind::ambush}) {
             Block block;
             block.id = kind == Block::Kind::move ? 1 : 2;
@@ -390,8 +757,10 @@ struct EngineContractAccess {
             block.destination_object = kind == Block::Kind::ambush ? 20 : 0;
             block.movers = {10};
             block.ordered_tick[10] = 0;
-            engine.blocks_.emplace(block.id, std::move(block));
+            fixture_owner(engine, 1).blocks.emplace(block.id, std::move(block));
         }
+
+        engine.rebuild_runtime_index();
     }
     static void movement_service(Engine& engine, std::int64_t frame) {
         engine.frame_ = frame;
@@ -399,23 +768,23 @@ struct EngineContractAccess {
     }
     static std::uint64_t event_sequence(const Engine& engine) { return engine.sequence_; }
     static bool movement_finished(const Engine& engine, std::uint64_t id) {
-        return engine.blocks_.at(id).finished;
+        return fixture_owner(engine, 1).blocks.at(id).finished;
     }
     static void guard_fixture(Engine& engine, authoritative::ScriptScheduler& scripts, std::uint64_t& sequence) {
         movement_fixture(engine, scripts, sequence);
-        auto& guard = engine.blocks_.at(1);
+        auto& guard = fixture_owner(engine, 1).blocks.at(1);
         guard.order = Block::Order::guard;
         guard.destination_object = 20;
-        auto& move = engine.blocks_.at(2);
+        auto& move = fixture_owner(engine, 1).blocks.at(2);
         move.kind = Block::Kind::move;
         move.order = Block::Order::move;
     }
-    static void empty_guard_force(Engine& engine) { engine.taskforces_.at(1).units.clear(); }
+    static void empty_guard_force(Engine& engine) { fixture_owner(engine, 1).taskforces.at(1).units.clear(); }
     // EX-31 (#3087): one attack block of player 1's force {10} on `target`, ordered at frame 0.
     static const Block& attack_fixture(Engine& engine, authoritative::ScriptScheduler& scripts,
         std::uint64_t& sequence, sim::EntityId target) {
         movement_fixture(engine, scripts, sequence);
-        engine.blocks_.clear();
+        fixture_owner(engine, 1).blocks.clear();
         engine.frame_ = 0;
         Block block;
         block.id = 1;
@@ -424,8 +793,10 @@ struct EngineContractAccess {
         block.order = Block::Order::attack;
         block.attack = true;
         block.destination_object = target;
-        engine.order_block(block, engine.taskforces_.at(1), engine.running_.at(1));
-        return engine.blocks_.emplace(1, std::move(block)).first->second;
+        engine.order_block(block, fixture_owner(engine, 1).taskforces.at(1), fixture_owner(engine, 1).running.at(1));
+
+        engine.rebuild_runtime_index();
+        return fixture_owner(engine, 1).blocks.emplace(1, std::move(block)).first->second;
     }
     static std::size_t order_count(const Engine& engine) { return engine.orders_.size(); }
     static void point_defence(Engine& engine, std::int64_t frame) {
@@ -454,16 +825,18 @@ struct EngineContractAccess {
         plan.instance = first_plan_instance;
         plan.player = 2;
         plan.taskforces = {1};
-        engine.running_.emplace(1, plan);
-        engine.plan_of_instance_.emplace(first_plan_instance, 1);
+        fixture_owner(engine).running.emplace(1, plan);
+        fixture_owner(engine).plan_of_instance.emplace(first_plan_instance, 1);
         TaskForce force;
         force.id = force.plan = 1;
         force.name = "MainForce";
         force.units = {30};
-        engine.taskforces_.emplace(1, force);
+        fixture_owner(engine).taskforces.emplace(1, force);
         const AiBounds bounds{real(-4000), real(4000), real(4000), real(-4000)};
         engine.grid_.partition(bounds, 20, 20, Constants{});
         engine.grid_.service(*engine.host_->view, *engine.host_, 0);
+
+        engine.rebuild_runtime_index();
     }
     // The plan script's Enable_Attack_Positioning request, as after_service takes it.
     static void enable_positioning(Engine& engine, std::int64_t frame, bool on) {
@@ -485,7 +858,7 @@ struct EngineContractAccess {
         Block block;
         block.order = Block::Order::attack_move;
         block.destination = point;
-        engine.order_block(block, engine.taskforces_.at(1), engine.running_.at(1));
+        engine.order_block(block, fixture_owner(engine).taskforces.at(1), fixture_owner(engine).running.at(1));
     }
     static void positioning_script_point_order(Engine& engine, const math::Vec3& point) {
         authoritative::ServiceReport report;
@@ -499,7 +872,7 @@ struct EngineContractAccess {
         report.commands.push_back(std::move(command));
         static_cast<void>(engine.after_service(report));
     }
-    static bool positioning_on(const Engine& engine, sim::EntityId unit) { return engine.positioning_.contains(unit); }
+    static bool positioning_on(const Engine& engine, sim::EntityId unit) { return fixture_owner(engine).positioning.contains(unit); }
     static void threat(Engine& engine, sim::EntityId victim, sim::EntityId attacker, std::int64_t amount) {
         engine.threats_[victim][attacker] = Real(static_cast<int>(amount));
     }
@@ -511,6 +884,7 @@ namespace {
 namespace ai = eawr::script::foc::ai;
 namespace auth = eawr::script::authoritative;
 namespace foc = eawr::script::foc;
+namespace skirmish = eawr::skirmish;
 namespace sim = eawr::sim;
 namespace tactical = eawr::sim::tactical;
 using ai::Real;
@@ -550,6 +924,27 @@ std::optional<Real> evaluate(std::string_view body) {
 }
 
 void equations() {
+    {
+        auto host = std::make_shared<foc::detail::Host>();
+        host->setup.xml["data/xml/enum/aigoalcategorytype.xml"] =
+            "<AIGoalCategoryType><Offensive>0</Offensive><Defensive>1</Defensive>"
+            "<Information>2</Information><Infrastructure>3</Infrastructure>"
+            "<MajorItem>11</MajorItem></AIGoalCategoryType>";
+        const auto categories = foc::tactical_ai_detail::converters(host);
+        for (const auto& [name, value] : std::map<std::string, int>{{"Offensive", 0}, {"Defensive", 1},
+                {"Information", 2}, {"Infrastructure", 3}, {"MajorItem", 11}})
+            expect(categories("AIGoalCategoryType", name) == std::optional<ai::Real>{ai::real(value)},
+                "PE-01: goal categories use the authored enum ordinals");
+        expect(!categories("AIGoalCategoryType", "Unknown"), "PE-01: an unknown goal category stays invalid");
+        host->setup.xml["data/xml/enum/aigoalcategorytype.xml"] =
+            "<EnumDefinition><Offensive>23</Offensive><ModCategory>37</ModCategory></EnumDefinition>";
+        const auto mod = foc::tactical_ai_detail::converters(host);
+        expect(mod("aigoalcategorytype", " offensive ") == std::optional<ai::Real>{ai::real(23)}
+            && mod("AIGoalCategoryType", "ModCategory") == std::optional<ai::Real>{ai::real(37)},
+            "PE-01: enum overrides and additional mod names are data driven");
+        const auto parsed = ai::parse_equation("budget", "AIGoalCategoryType[Offensive]", mod);
+        expect(static_cast<bool>(parsed), "PE-01: a goal-category budget equation compiles without a startup refusal");
+    }
     expect(evaluate("1 + 2 * 3") == ai::real(7), "PE-03: * binds tighter than +");
     expect(evaluate("(1 + 2) * 3") == ai::real(9), "PE-03: parentheses");
     expect(evaluate("2 > 1") == ai::real(1) && evaluate("2 < 1") == ai::real(0), "PE-04: comparisons give 1 or 0");
@@ -613,11 +1008,387 @@ struct World {
     }
 };
 
+// Interleaved plan IDs must retain global event order across disjoint player owners.
+void player_runtime_ownership() {
+    {
+        World world; ai::Engine engine(world.host, {}, {});
+        ai::EngineContractAccess::orphan_blocks_fixture(engine);
+        ai::EngineContractAccess::movement_service(engine, 2);
+        const auto& owner = ai::EngineContractAccess::checked_player(engine, 2);
+        const auto& produce = owner.blocks.at(static_cast<std::uint64_t>(ai::Block::Kind::produce) + 1);
+        const auto& reinforce = owner.blocks.at(static_cast<std::uint64_t>(ai::Block::Kind::reinforce) + 1);
+        const auto& ambush = owner.blocks.at(static_cast<std::uint64_t>(ai::Block::Kind::ambush) + 1);
+        const auto& move = owner.blocks.at(static_cast<std::uint64_t>(ai::Block::Kind::move) + 1);
+        expect(!produce.finished && !reinforce.finished && ambush.finished && !ambush.ready && move.finished,
+            "missing TaskForce keeps produce/reinforce untouched and uses each tactical branch's original failure result");
+    }
+    std::optional<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        World world;
+        ai::PlanDef definition; definition.name = "OWNED";
+        ai::Engine engine(world.host, {}, {definition});
+        auth::ModuleManifest modules;
+        expect(modules.add("OWNED.LUA", "Count = 0\nfunction MainForce_Unit_Destroyed(tf) Count = Count + 1 end\n"
+            "function MainForce_No_Units_Remaining(tf) Count = Count + 1 end\n").has_value(), "ownership event module loads");
+        auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+        if (!scripts) { expect(false, "ownership scheduler creates"); return; }
+        for (const auto id : {101U, 102U, 103U})
+            expect(scripts.value().create_instance(id, "OWNED.LUA").has_value(), "ownership instances create");
+        ai::EngineContractAccess::ownership_fixture(engine, scripts.value());
+        ai::EngineContractAccess::stage_movement_queries(engine);
+        auto& alias = ai::EngineContractAccess::checked_player(engine, 9).blocks.at(1100);
+        alias.waiting_on = 1099;
+        expect(engine.block(1100) && engine.block(1100)->id == 1099, "block aliases retain global foreign-owner resolution");
+        alias.waiting_on = 1101;
+        expect(engine.galactic_movement_requests() == std::vector<std::uint64_t>{300, 200, 100},
+            "movement requests retain ascending block order across player owners");
+        ai::EngineContractAccess::clear_movement_queries(engine);
+        expect(engine.plan(1) && engine.plan(1)->player == 9 && engine.plan(2) && engine.plan(2)->player == 7
+            && engine.plan_of_instance(103) == engine.plan(3) && engine.taskforce(2)->plan == 2
+            && engine.block(1100) == engine.block(1101), "serial binding index routes interleaved IDs and aliases to their owners");
+        auth::ServiceReport foreign;
+        auth::ScriptCommand release; release.issuer = 101; release.verb = std::string(ai::verb_ai);
+        release.arguments = {auth::Value::text("release_all"), auth::Value{auth::Handle{ai::handle_taskforce, 2}}};
+        foreign.commands.push_back(std::move(release));
+        expect(engine.after_service(foreign).has_value() && engine.taskforce(2)->units.empty()
+            && engine.taskforce(1)->units == std::vector<eawr::sim::EntityId>{999},
+            "after_service preserves a script's foreign TaskForce handle without redirecting it to the issuer");
+        ai::EngineContractAccess::restore_foreign_units(engine);
+        ai::EngineContractAccess::foreign_task(engine);
+        expect(engine.taskforce(2)->pooled.size() == 1 && engine.taskforce(2)->pooled.front().token == 77,
+            "execution tasks preserve the original global TaskForce lookup");
+        auto events = ai::EngineContractAccess::run_events(engine);
+        expect(events.size() == 6, "each owned force emits death and empty events");
+        for (std::size_t i = 0; i < events.size(); ++i) {
+            expect(events[i].target == 101 + i / 2 && events[i].key.sequence == i,
+                "global ascending plan order retains event targets and sequence numbers across players");
+            expect(scripts.value().submit_event(std::move(events[i])).has_value(), "owned event submits");
+        }
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(scripts.value().service(executor).has_value(), "owned callbacks execute across worker counts");
+        const auto hash = scripts.value().state_hash();
+        expect(hash.has_value(), "owned callback state hashes");
+        if (hash) { if (!reference) reference = hash.value(); else expect(*reference == hash.value(), "owned callbacks agree on 1/2/4/8 workers"); }
+        auto& owner = ai::EngineContractAccess::checked_player(engine, 9);
+        ai::EngineContractAccess::abandon_goal(engine, owner, 1, scripts.value());
+        expect(!engine.plan(1) && !engine.plan_of_instance(101) && !engine.taskforce(1) && !engine.block(1100)
+            && engine.plan(2) && engine.plan(3), "retirement removes all owned lookup rows and preserves other running plans");
+    }
+}
+
+// S-T3b: what a player's turn writes to engine-wide state stages in its PlayerEffects and commits in ascending
+// player order. Two engines run the same turns of the same two players: one writes directly (the sequential
+// reference), the other stages. They must end byte-equal, and the staged one must show that a later turn read the
+// earlier turn's staged credits and pad claims.
+std::string effects_turns(const bool staged, ai::EffectCounts* counts) {
+    World world;
+    world.host->setup.journal = std::make_shared<foc::AiJournal>();
+    ai::PlanDef definition; definition.name = "OWNED";
+    ai::Engine engine(world.host, {}, {definition});
+    world.host->engine = &engine;
+    auth::ModuleManifest modules;
+    expect(modules.add("OWNED.LUA", "Count = 0\nfunction MainForce_Unit_Destroyed(tf) Count = Count + 1 end\n"
+        "function MainForce_Unit_Damaged(tf) Count = Count + 1 end\n").has_value(), "effects event module loads");
+    auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+    if (!scripts) { expect(false, "effects scheduler creates"); return {}; }
+    for (const auto id : {101U, 102U, 103U})
+        expect(scripts.value().create_instance(id, "OWNED.LUA").has_value(), "effects instances create");
+    ai::EngineContractAccess::ownership_fixture(engine, scripts.value());
+    ai::EngineContractAccess::backlog(engine, 9, 1);
+    const auto& unit = world.view->units.front();
+    const auto in_turn = [&](const tactical::PlayerId id, const auto& body) {
+        if (staged) ai::EngineContractAccess::turn(engine, id, [&](ai::PlayerAi&) { body(); }); else body();
+    };
+    in_turn(7, [&] {
+        expect(ai::EngineContractAccess::staging(engine) == staged, "a staged turn binds its effects to the running thread");
+        ai::EngineContractAccess::emit(engine, 7, 2, 2, "Unit_Destroyed");
+        ai::EngineContractAccess::move(engine, 7, 2, unit);
+        ai::EngineContractAccess::note(engine, 7, 2, "first");
+        ai::EngineContractAccess::wallet(engine, 7, ai::real(-5));
+        ai::EngineContractAccess::claim_pad(engine, 50, 7, 4);
+        ai::EngineContractAccess::wait_for_attach(engine, ai::EngineContractAccess::checked_player(engine, 7), 4);
+        ai::EngineContractAccess::wait_for_attach(engine, ai::EngineContractAccess::checked_player(engine, 7), 4);
+    });
+    if (staged) {
+        expect(ai::EngineContractAccess::waiting_events(engine) == 0 && ai::EngineContractAccess::waiting_orders(engine) == 0
+            && ai::EngineContractAccess::waiting_attaches(engine) == 1 && ai::EngineContractAccess::committed_claims(engine) == 0
+            && ai::EngineContractAccess::committed_wallets(engine) == 0,
+            "a staged turn leaves the engine's queues, wallet and pad claims untouched until the commit");
+    }
+    in_turn(9, [&] {
+        // Stacked reads: the committed state under the earlier turn's staged effects.
+        const auto debit = eawr::script::numeric::to_fixed(ai::real(-5)).value().raw();
+        expect(ai::EngineContractAccess::stacked(engine, 7) == debit
+            && ai::EngineContractAccess::host_stack(engine, 7) == (staged ? debit : 0),
+            "credits stack the staged deltas of earlier turns");
+        const auto held = ai::EngineContractAccess::claim(engine, 50);
+        expect(held && held->player == 7 && held->goal == 4, "a pad claim reads the earlier turn's staged claim");
+        ai::EngineContractAccess::free_pads(engine, 7, 4);
+        expect(!ai::EngineContractAccess::claim(engine, 50), "a release by predicate sees the staged claim and frees it");
+        ai::EngineContractAccess::claim_pad(engine, 51, 9, 6);
+        ai::EngineContractAccess::emit(engine, 9, 1, 1, "Unit_Destroyed");
+        ai::EngineContractAccess::signal(engine, 9, 1, 1, "Unit_Damaged");
+        ai::EngineContractAccess::move(engine, 9, 1, unit);
+        ai::EngineContractAccess::wallet(engine, 9, ai::real(3));
+        ai::EngineContractAccess::note(engine, 9, 1, "second");
+        auto& player = ai::EngineContractAccess::checked_player(engine, 9);
+        ai::EngineContractAccess::wait_for_attach(engine, player, 1); // already in the committed backlog
+        ai::EngineContractAccess::wait_for_attach(engine, player, 2);
+        ai::EngineContractAccess::finish(engine, 9, 3, scripts.value());
+    });
+    if (staged) {
+        const auto committed = ai::EngineContractAccess::commit(engine, scripts.value());
+        expect(committed.has_value(), "the ordered commit applies");
+        if (counts) *counts = ai::EngineContractAccess::totals(engine);
+    }
+    return ai::EngineContractAccess::snapshot(engine, scripts.value());
+}
+
+void player_effects() {
+    ai::EffectCounts counts;
+    const auto reference = effects_turns(false, nullptr);
+    const auto staged = effects_turns(true, &counts);
+    expect(!reference.empty() && reference == staged,
+        "staged turns commit to exactly the state of the sequential writes: events, orders, wallet, pads, attaches, records, journal, index");
+    expect(counts.turns == 2 && counts.orders == 4 && counts.credit_deltas == 2 && counts.attach_intents == 2
+        && counts.events == 3 && counts.removals == 1 && counts.index_effects == 3 && counts.pad_effects == 3,
+        "the commit counts the effects each turn staged");
+    expect(counts.reads.credits == 2 && counts.reads.pads == 2,
+        "later turns count the earlier turn's overlay they read: credits, and pad claims by a lookup and by a release");
+    {
+        // A plan attachment is a serial boundary: inside a turn it is a logic error, and nothing was allocated.
+        World world; ai::PlanDef definition; definition.name = "OWNED";
+        ai::Engine engine(world.host, {}, {definition});
+        auth::ModuleManifest modules;
+        auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+        if (!scripts) { expect(false, "tripwire scheduler creates"); return; }
+        ai::EngineContractAccess::ownership_fixture(engine, scripts.value());
+        bool threw = false;
+        ai::EngineContractAccess::turn(engine, 7, [&](ai::PlayerAi& player) {
+            threw = ai::EngineContractAccess::attach_throws(engine, player, scripts.value());
+        });
+        expect(threw, "plan attachment inside a player turn is a logic error");
+        expect(ai::EngineContractAccess::commit(engine, scripts.value()).has_value(), "the tripwire turn commits nothing");
+    }
+    {
+        // Typed operations on another player's TaskForce: the turns are sequential, so an operation applies in place at
+        // once, in ascending acting-player order, and the owner's later turn sees it. An acting player below the owner
+        // is the case a commit-time application would reorder.
+        for (const bool acting_below_owner : {false, true}) {
+            std::vector<std::vector<std::uint64_t>> tokens;
+            ai::EffectCounts operations;
+            for (const bool staged_turns : {false, true}) {
+                World world;
+                ai::PlanDef definition; definition.name = "OWNED";
+                ai::Engine engine(world.host, {}, {definition});
+                auth::ModuleManifest modules;
+                auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+                if (!scripts) { expect(false, "operation scheduler creates"); return; }
+                if (acting_below_owner) ai::EngineContractAccess::add_player(engine, 5);
+                ai::EngineContractAccess::ownership_fixture(engine, scripts.value());
+                ai::EngineContractAccess::add_player(engine, 11);
+                ai::EngineContractAccess::reindex(engine);
+                // Players run 5 (or 9), 7 (the owner of TaskForce 2), then 9 and 11 (or 11).
+                const tactical::PlayerId first = acting_below_owner ? 5 : 9;
+                ai::EngineContractAccess::pool_task(engine, first, 2, 77);
+                ai::EngineContractAccess::pool_task(engine, 7, 2, 78);
+                ai::EngineContractAccess::pool_task(engine, 11, 2, 79);
+                const auto run = [&](const tactical::PlayerId id) {
+                    if (staged_turns) ai::EngineContractAccess::turn(engine, id, [&](ai::PlayerAi&) { ai::EngineContractAccess::execute(engine, id); });
+                    else ai::EngineContractAccess::execute(engine, id);
+                };
+                const auto order = acting_below_owner ? std::vector<tactical::PlayerId>{5, 7, 9, 11}
+                                                      : std::vector<tactical::PlayerId>{7, 9, 11};
+                for (const auto id : order) {
+                    run(id);
+                    if (id == first) expect(ai::EngineContractAccess::forced_units(engine, 2) >= 1,
+                        "a typed operation on another player's TaskForce is visible to the next reader at once");
+                }
+                if (staged_turns) {
+                    expect(ai::EngineContractAccess::commit(engine, scripts.value()).has_value(), "operation commit applies");
+                    operations = ai::EngineContractAccess::totals(engine);
+                }
+                tokens.push_back(ai::EngineContractAccess::pooled_tokens(engine, 2));
+            }
+            const std::vector<std::uint64_t> expected = acting_below_owner ? std::vector<std::uint64_t>{77, 78, 79}
+                                                                           : std::vector<std::uint64_t>{78, 77, 79};
+            expect(tokens.size() == 2 && tokens[0] == tokens[1] && tokens[0] == expected,
+                acting_below_owner ? "an acting player below the owner pools before the owner's own turn, as the sequential pass did"
+                                   : "an acting player above the owner pools after the owner's own turn, as the sequential pass did");
+            expect(operations.operations == 2U && operations.reads.handles >= 2,
+                "the commit counts the operations and the foreign handles resolved");
+        }
+    }
+    {
+        // NativeRecordWrite invalidations and revision bumps stage and publish at the commit; the scope never publishes in a turn.
+        std::vector<std::string> published;
+        for (const bool staged_turns : {false, true}) {
+            World world;
+            ai::PlanDef definition; definition.name = "OWNED";
+            ai::Engine engine(world.host, {}, {definition});
+            auth::ModuleManifest modules;
+            auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+            if (!scripts) { expect(false, "invalidation scheduler creates"); return; }
+            ai::EngineContractAccess::ownership_fixture(engine, scripts.value());
+            ai::EngineContractAccess::arm_native_records(engine, true);
+            std::optional<ai::Engine::NativeRecordWrite> outer; // the barrier's own scope: nothing refreshes below it
+            ai::EngineContractAccess::hold_native_scope(outer, engine);
+            const auto run = [&](const tactical::PlayerId id, const auto& body) {
+                if (staged_turns) ai::EngineContractAccess::turn(engine, id, [&](ai::PlayerAi&) { body(); }); else body();
+            };
+            const auto before = ai::EngineContractAccess::native_snapshot(engine);
+            run(7, [&] { ai::EngineContractAccess::native_changes(engine, 7); });
+            run(9, [&] { ai::EngineContractAccess::native_changes(engine, 9); ai::EngineContractAccess::native_shared_change(engine); });
+            if (staged_turns) {
+                expect(ai::EngineContractAccess::native_snapshot(engine) == before,
+                    "a staged turn publishes no invalidation, revision or scope depth before the commit");
+                expect(ai::EngineContractAccess::commit(engine, scripts.value()).has_value(), "invalidation commit applies");
+            }
+            published.push_back(ai::EngineContractAccess::native_snapshot(engine));
+            expect(ai::EngineContractAccess::native_depth(engine) == 1, "turn scopes leave the barrier's scope depth alone");
+            ai::EngineContractAccess::arm_native_records(engine, false); // the outer scope must not refresh a codec-less fixture
+            outer.reset();
+        }
+        expect(published.size() == 2 && published[0] == published[1],
+            "staged invalidations publish exactly the dirty groups, keys, header and revision of the direct calls");
+    }
+    {
+        // Attachment intents keep the queue order and the budget: ascending players, then identities from the serial drain.
+        std::vector<std::string> outcomes;
+        for (const bool staged_turns : {false, true}) {
+            World world;
+            world.host->setup.schedule.attach_per_tick = 2;
+            ai::PlanDef definition; definition.name = "OWNED"; definition.module = "OWNED.LUA";
+            ai::Engine engine(world.host, {}, {definition});
+            auth::ModuleManifest modules;
+            expect(modules.add("OWNED.LUA", "Count = 0\n").has_value(), "attach module loads");
+            auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+            if (!scripts) { expect(false, "attach scheduler creates"); return; }
+            ai::EngineContractAccess::bare_players(engine, scripts.value());
+            ai::EngineContractAccess::active_goal(engine, 7, 4, true);
+            ai::EngineContractAccess::active_goal(engine, 9, 1, false); // dropped by the drain, not charged to the budget
+            for (const std::uint64_t goal : {2U, 3U}) ai::EngineContractAccess::active_goal(engine, 9, goal, true);
+            const auto run = [&](const tactical::PlayerId id, const auto& body) {
+                if (staged_turns) ai::EngineContractAccess::turn(engine, id, [&](ai::PlayerAi&) { body(); }); else body();
+            };
+            run(7, [&] { ai::EngineContractAccess::wait_for_attach(engine, ai::EngineContractAccess::checked_player(engine, 7), 4); });
+            run(9, [&] {
+                for (const std::uint64_t goal : {1U, 2U, 3U})
+                    ai::EngineContractAccess::wait_for_attach(engine, ai::EngineContractAccess::checked_player(engine, 9), goal);
+            });
+            if (staged_turns) {
+                expect(ai::EngineContractAccess::waiting_attaches(engine) == 0, "attachment intents wait for the commit");
+                expect(ai::EngineContractAccess::commit(engine, scripts.value()).has_value(), "attach commit applies");
+            }
+            expect(ai::EngineContractAccess::waiting_attaches(engine) == 4, "the committed queue holds every intent in player order");
+            expect(ai::EngineContractAccess::drain(engine, scripts.value()).has_value(), "the serial drain runs");
+            expect(ai::EngineContractAccess::waiting_attaches(engine) == 1, "the budget attaches two goals and leaves the rest queued");
+            outcomes.push_back(ai::EngineContractAccess::goal_plans(engine) + ai::EngineContractAccess::snapshot(engine, scripts.value()));
+        }
+        expect(outcomes.size() == 2 && outcomes[0] == outcomes[1],
+            "staged attachment intents drain to the same plan identities, events and queue as the sequential writes");
+    }
+    {
+        // Outside a turn every write is immediate (the serial phases between barriers); a turn's scope ends with the turn.
+        World world;
+        ai::PlanDef definition; definition.name = "OWNED";
+        ai::Engine engine(world.host, {}, {definition});
+        auth::ModuleManifest modules;
+        auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+        if (!scripts) { expect(false, "serial scheduler creates"); return; }
+        ai::EngineContractAccess::ownership_fixture(engine, scripts.value());
+        ai::EngineContractAccess::turn(engine, 7, [&](ai::PlayerAi&) {
+            ai::EngineContractAccess::claim_pad(engine, 50, 7, 4);
+            ai::EngineContractAccess::wallet(engine, 7, ai::real(-5));
+        });
+        expect(!ai::EngineContractAccess::staging(engine), "a turn's scope ends with the turn");
+        expect(ai::EngineContractAccess::committed_claims(engine) == 0 && ai::EngineContractAccess::committed_wallets(engine) == 0
+            && ai::EngineContractAccess::committed_orders(engine) == 0 && ai::EngineContractAccess::staged_effects(engine) == 1,
+            "the turn's effects wait for the commit");
+        ai::EngineContractAccess::claim_pad(engine, 51, 9, 6);
+        ai::EngineContractAccess::wallet(engine, 9, ai::real(3));
+        expect(ai::EngineContractAccess::committed_claims(engine) == 1 && ai::EngineContractAccess::committed_wallets(engine) == 1
+            && ai::EngineContractAccess::committed_orders(engine) == 1,
+            "a serial write between turns lands at once, ahead of the staged ones");
+        expect(ai::EngineContractAccess::claim(engine, 50) && ai::EngineContractAccess::claim(engine, 51)
+            && ai::EngineContractAccess::stacked(engine, 7) == eawr::script::numeric::to_fixed(ai::real(-5)).value().raw(),
+            "serial reads see the committed state under the staged effects");
+        expect(ai::EngineContractAccess::commit(engine, scripts.value()).has_value() && ai::EngineContractAccess::staged_effects(engine) == 0
+            && ai::EngineContractAccess::committed_claims(engine) == 2 && ai::EngineContractAccess::committed_wallets(engine) == 2,
+            "the commit applies the turn's effects after the serial ones and empties the overlay");
+    }
+}
+
+// A competing claimant on a shared pad: the second player's producer lookup sees the first turn's staged claim, a
+// release by the first turn frees it again, and the answers are those of the sequential writes.
+void shared_pad_competition() {
+    namespace t = eawr::sim::tactical;
+    namespace m = eawr::sim::math;
+    const auto q = [](std::int64_t value) { return m::Fixed::from_integer(value).value(); };
+    std::vector<std::vector<int>> answers;
+    ai::EffectCounts counts;
+    for (const bool staged_turns : {false, true}) {
+        t::TacticalSetup start;
+        start.players = {{1, 1, 100, 1}, {2, 1, 200, 1}, {3, 3, 300, 0}};
+        start.units = {{1, 20, 2}};
+        t::EconomyRules rules;
+        rules.players = {{1, q(1000), 20, true}, {2, q(1000), 20}, {3, q(1000), 20}};
+        rules.menus = {{20, 100, {{30, t::BuildKind::structure, t::BuildQueue::units, q(100), 30, 30, 0, true}}, 0, false},
+            {20, 200, {{31, t::BuildKind::structure, t::BuildQueue::units, q(900), 30, 30, 0, true}}, 0, false}};
+        rules.pads.neutral = 3;
+        rules.pads.capture = {{20, q(100), q(1), {100, 200}, false, true, true}};
+        rules.pads.construction = {{30, 40, q(100), 1, 1}, {31, 41, q(100), 1, 1}};
+        rules.pads.influence = {{20, false}, {30, false}, {40, false}};
+        t::DurabilityTable health;
+        for (const t::TypeId type : {20U, 30U, 31U, 40U, 41U}) {
+            t::DurabilityProfile profile; profile.type_id = type; profile.max_hull = q(300);
+            health.profiles.push_back(profile);
+        }
+        auto made = t::TacticalSession::create(start, {}, health, {}, {}, {}, {}, {}, rules);
+        expect(static_cast<bool>(made), "shared pad fixture starts");
+        if (!made) return;
+        auto host = ai::make_tactical_host();
+        host->world = &made.value(); host->snapshot = made.value().snapshot();
+        host->view = foc::detail::build_view(made.value(), *host->snapshot);
+        ai::Engine engine(host, {}, {ai::PlanDef{}});
+        ai::EngineContractAccess::add_player(engine, 1);
+        ai::EngineContractAccess::add_player(engine, 2);
+        auth::ModuleManifest modules;
+        auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+        if (!scripts) { expect(false, "shared pad scheduler creates"); return; }
+        std::vector<int> seen;
+        const auto producer = [&] { seen.push_back(engine.producer(1, 30) == 1 ? 1 : 0); };
+        const auto in_turn = [&](const tactical::PlayerId id, const auto& body) {
+            if (staged_turns) ai::EngineContractAccess::turn(engine, id, [&](ai::PlayerAi&) { body(); }); else body();
+        };
+        producer(); // outside any turn: the pad is free
+        in_turn(2, [&] { ai::EngineContractAccess::claim_pad(engine, 1, 2, 7); });
+        in_turn(1, [&] { producer(); }); // the second claimant is refused while the first holds it
+        if (staged_turns) expect(ai::EngineContractAccess::commit(engine, scripts.value()).has_value(), "pad commit applies");
+        producer(); // the committed claim still refuses it
+        in_turn(2, [&] { ai::EngineContractAccess::free_pad(engine, 1); });
+        in_turn(1, [&] { producer(); }); // released earlier in the barrier: free again
+        if (staged_turns) {
+            expect(ai::EngineContractAccess::commit(engine, scripts.value()).has_value(), "pad release commit applies");
+            counts = ai::EngineContractAccess::totals(engine);
+        }
+        answers.push_back(seen);
+    }
+    expect(answers.size() == 2 && answers[0] == answers[1] && answers[0] == std::vector<int>{1, 0, 0, 1},
+        "a shared pad refuses the second claimant, in the committed and the staged view alike, and frees on release");
+    expect(counts.reads.pads == 2, "each later turn's pad lookup counts the earlier turn's staged claim or release");
+}
+
+
 // This host has no tactical session or snapshot. It supplies a different goal
 // domain, target set and equation lookup while the shared engine owns the goals.
 class ModeWorld final : public ai::World {
 public:
     bool friendly_planet_fixture{};
+    bool provide_account{};
+    tactical::EconomyView reservation_account;
+    std::vector<tactical::Player> reservation_players;
+    std::map<eawr::sim::EntityId, tactical::PadState> reservation_pads;
     std::shared_ptr<const ai::WorldView> world_view = std::make_shared<ai::WorldView>();
     std::shared_ptr<const ai::WorldView> view() const override { return world_view; }
     mutable std::uint32_t contexts{};
@@ -655,11 +1426,11 @@ public:
         ai::Target target; target.object = 700; target.name = "PLANET";
         return {target};
     }
-    std::span<const tactical::Player> players() const noexcept override { return {}; }
+    std::span<const tactical::Player> players() const noexcept override { return reservation_players; }
     const tactical::EconomyRules& economy() const noexcept override { static const tactical::EconomyRules empty; return empty; }
-    const tactical::EconomyView* account(tactical::PlayerId) const override { return nullptr; }
+    const tactical::EconomyView* account(tactical::PlayerId) const override { return provide_account ? &reservation_account : nullptr; }
     const std::map<eawr::sim::EntityId, tactical::PadState>& pads() const noexcept override {
-        static const std::map<eawr::sim::EntityId, tactical::PadState> empty; return empty;
+        return reservation_pads;
     }
     bool arriving(eawr::sim::EntityId) const override { return false; }
     bool build_allowed(tactical::PlayerId, eawr::sim::EntityId, tactical::TypeId) const override { return false; }
@@ -676,6 +1447,216 @@ public:
 // WTA-01/02 (legacy #3048): on a space execution frame the freestore's service tests run inside the
 // execution service, after the player's goal service and planning, with one live event counter.
 // FD-71/72: scoring owns the early gate; the ordinary scheduler owns late writes.
+void player_ai_admission_contract() {
+    {
+        foc::AiSetup setup;
+        const auto baseline = foc::tactical_ai_detail::native_configuration(setup);
+        setup.player_ai_start_ticks[2] = 0;
+        const auto immediate = foc::tactical_ai_detail::native_configuration(setup);
+        setup.player_ai_start_ticks[2] = 5;
+        const auto delayed = foc::tactical_ai_detail::native_configuration(setup);
+        setup.player_ai_start_ticks[2] = 6;
+        const auto other = foc::tactical_ai_detail::native_configuration(setup);
+        expect(baseline && immediate && delayed && other
+            && baseline.value() == immediate.value() && baseline.value() != delayed.value()
+            && delayed.value() != other.value(),
+            "AI admission: native continuation identity covers positive boundaries and preserves default/zero");
+        ai::Host unbound;
+        unbound.setup.player_ai_start_ticks[2] = 0;
+        expect(unbound.ai_admitted(2), "AI admission: explicit zero is immediate even before a view is bound");
+    }
+    {
+        const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+        tactical::EconomyRules rules;
+        rules.players = {{2, q(100), 5, true}};
+        rules.players[0].credit_multiplier = q(2);
+        rules.player_ai_start_ticks[2] = 5;
+        rules.max_queue = 1;
+        const auto human = rules.player_at(2, 4), admitted = rules.player_at(2, 5);
+        expect(human && admitted && !human->ai && admitted->ai && !rules.player_at(3, 5),
+            "AI admission: economic policy changes at the boundary, preserving absent-player lookup");
+        if (!human || !admitted) return;
+        tactical::PlayerEconomy ledger; ledger.player = 2;
+        expect(tactical::change_credits(ledger, *human, q(10)) && ledger.credits == q(10),
+            "AI admission: held income/refunds use human credit changes");
+        ledger.credits = {};
+        expect(tactical::change_credits(ledger, *admitted, q(10)) && ledger.credits == q(20),
+            "AI admission: admitted positive credit changes use the authored AI multiplier");
+        const tactical::BuildOption option{10, tactical::BuildKind::unit, tactical::BuildQueue::units, q(1), 30, 3, 0, true};
+        ledger.credits = q(100);
+        expect(tactical::queue_build(ledger, *human, rules, option, 20, 4) == tactical::RejectReason::none
+            && ledger.queues[0].front().frames == 30
+            && tactical::queue_build(ledger, *human, rules, option, 20, 4) == tactical::RejectReason::queue_full,
+            "AI admission: held purchases use human build time and queue limit");
+        ledger.queues = {};
+        expect(tactical::queue_build(ledger, *admitted, rules, option, 20, 5) == tactical::RejectReason::none
+            && ledger.queues[0].front().frames == 3
+            && tactical::queue_build(ledger, *admitted, rules, option, 20, 5) == tactical::RejectReason::none,
+            "AI admission: admitted purchases use AI build time and unbounded queue policy");
+        rules.income = {{10, q(1), {}}};
+        std::vector<std::string> golden;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup setup;
+            setup.players = {{2, 2, 200, tactical::player_flag_commandable}};
+            setup.units = {{20, 10, 2}};
+            auto world = tactical::TacticalSession::create(setup, {}, {}, {}, {}, {}, {}, {}, rules);
+            expect(world.has_value(), "AI admission: income boundary world creates");
+            if (!world) return;
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned frame = 1; frame <= 8; ++frame) {
+                auto tick = world.value().step(executor);
+                // A world step services the interval beginning at completed_tick,
+                // then publishes the next completed tick to the AI host.
+                const auto expected = q(100 + frame + (frame <= 5 ? 0 : frame - 5));
+                expect(tick && world.value().ledgers()[0].credits == expected,
+                    "AI admission: income uses the pre-step completed tick at the control boundary; frame="
+                    + std::to_string(frame) + " actual=" + std::to_string(world.value().ledgers()[0].credits.raw())
+                    + " expected=" + std::to_string(expected.raw()));
+                if (!tick) return;
+                hashes.push_back(tick.value().state_sha256);
+            }
+            if (golden.empty()) golden = hashes;
+            else expect(golden == hashes, "AI admission: economic boundary hashes agree on 1/2/4/8 workers");
+        }
+    }
+    for (const auto schedule : {foc::AiSchedule::Mode::faithful, foc::AiSchedule::Mode::staggered}) {
+        std::vector<std::string> default_hashes;
+        // Absent and explicit-zero admission must preserve the default hashes.
+        for (const unsigned admission : {0U, 1U, 5U}) {
+            std::vector<std::string> worker_hashes;
+            for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+                tactical::TacticalSetup setup;
+                setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+                foc::AiSetup ai_setup;
+                ai_setup.players = {{1, "SYNTHETIC", false, true, ""}, {2, "SYNTHETIC", false, true, ""}};
+                ai_setup.schedule.mode = schedule;
+                if (admission) ai_setup.player_ai_start_ticks[2] = admission == 1 ? 0 : admission;
+                ai_setup.freestore_module = "AdmissionProbe.lua";
+                const std::map<std::string, std::string> modules{
+                    {"AdmissionProbe.lua", "function Base_Definitions() ServiceRate=0; UnitServiceRate=0; pumps=0 end\n"
+                        "function main() while true do pumps=pumps+1; coroutine.yield(true) end end"},
+                    {"data/scripts/library/PGAICommands.lua", "function Base_Definitions() EnemyContrastTypes={}; FriendlyContrastTypes={} end"}};
+                auto world = tactical::TacticalSession::create(setup);
+                auto session = foc::create_session(std::move(world).value(), ai_setup, modules);
+                expect(session.has_value(), "AI admission: independent player fixture creates");
+                if (!session) return;
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                std::vector<std::string> hashes;
+                for (unsigned frame = 1; frame <= 8; ++frame) {
+                    auto tick = session.value().step(executor);
+                    expect(tick.has_value(), "AI admission: fixture steps");
+                    if (!tick) return;
+                    hashes.push_back(tick.value().state_sha256);
+                    auto saved = session.value().save_scripts();
+                    auto inspector = foc::prepare_session(ai_setup, modules);
+                    expect(saved && inspector && inspector.value().scripts.load(saved.value().scheduler), "AI admission: freestore state inspects");
+                    if (!saved || !inspector) return;
+                    for (unsigned id = 1; id <= 2; ++id) {
+                        auto count = inspector.value().scripts.read_global(foc::freestore_instance(id), "pumps");
+                        const unsigned first = id == 2 && admission > 1 ? admission : 2;
+                        const unsigned expected = frame < first ? 0 : frame - first + 1;
+                        expect(count && count.value() && std::get<Real>(count.value()->data) == ai::real(expected),
+                            "AI admission: holding one player preserves the other's work and releases at its boundary");
+                    }
+                    if (admission > 1 && (frame == 3 || frame == 6)) {
+                        auto checkpoint = session.value().world().save_checkpoint_state();
+                        auto rebuilt_world = tactical::TacticalSession::create(setup);
+                        auto rebuilt_ai = foc::prepare_session(ai_setup, modules);
+                        expect(saved.value().native && checkpoint && rebuilt_world && rebuilt_ai
+                            && rebuilt_world.value().load_checkpoint_state(checkpoint.value()),
+                            "AI admission: native continuation exists before and after handoff");
+                        if (!saved.value().native || !checkpoint || !rebuilt_world || !rebuilt_ai) return;
+                        auto rebuilt = auth::ScriptedTacticalSession::restore(std::move(rebuilt_world).value(),
+                            std::move(rebuilt_ai.value().scripts), saved.value());
+                        expect(rebuilt && rebuilt_ai.value().bind(rebuilt.value()), "AI admission: same-map native continuation binds");
+                        if (!rebuilt) return;
+                        expect(rebuilt.value().save_scripts().value().native == saved.value().native,
+                            "AI admission: same-map native bytes round trip");
+                        auto wrong_setup = ai_setup; wrong_setup.player_ai_start_ticks[2] = 6;
+                        auto wrong_world = tactical::TacticalSession::create(setup);
+                        auto wrong_ai = foc::prepare_session(wrong_setup, modules);
+                        expect(wrong_world && wrong_ai && wrong_world.value().load_checkpoint_state(checkpoint.value()),
+                            "AI admission: changed-map refusal fixture rebuilds");
+                        if (!wrong_world || !wrong_ai) return;
+                        auto wrong = auth::ScriptedTacticalSession::restore(std::move(wrong_world).value(),
+                            std::move(wrong_ai.value().scripts), saved.value());
+                        expect(wrong && !wrong_ai.value().bind(wrong.value()), "AI admission: changed-map native continuation is refused");
+                        // Continue the reconstructed side against an uninterrupted next tick.
+                        auto direct = session.value().step(executor);
+                        auto resumed = rebuilt.value().step(executor);
+                        expect(direct && resumed && direct.value().state_sha256 == resumed.value().state_sha256,
+                            "AI admission: restored same-map continuation is hash-identical");
+                        if (!resumed) return;
+                        session = std::move(rebuilt);
+                        ++frame;
+                        hashes.push_back(resumed.value().state_sha256);
+                    }
+                }
+                if (worker_hashes.empty()) worker_hashes = hashes;
+                else expect(worker_hashes == hashes, "AI admission: handoff hashes agree on 1/2/4/8 workers");
+            }
+            if (!admission) default_hashes = worker_hashes;
+            else if (admission == 1) expect(default_hashes == worker_hashes, "AI admission: explicit zero preserves empty-map behavior");
+        }
+    }
+    auto host = std::make_shared<ai::Host>();
+    auto mode = std::make_shared<ModeWorld>(); mode->mode = "SPACE";
+    host->ai_world = mode; host->view = mode->view();
+    host->setup.schedule.mode = foc::AiSchedule::Mode::faithful;
+    host->setup.journal = std::make_shared<foc::AiJournal>();
+    host->setup.players = {{1, "SYNTHETIC", false, true, "OPENING"}, {2, "SYNTHETIC", false, true, "OPENING"}};
+    for (const auto& entry : host->setup.players) host->players.emplace(entry.player, &entry);
+    host->setup.player_ai_start_ticks[2] = 5;
+    const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+    ai::AiData data;
+    data.equations = std::move(ai::EquationSet::parse({{"Opening.xml", "<Root><Positive>2</Positive></Root>"}}, converters)).value();
+    ai::PlayerType player; player.name = "OPENING"; player.function_sets = {"OPENING"}; data.players["OPENING"] = player;
+    ai::GoalType goal; goal.mode = "SPACE"; goal.application = {"GLOBAL"};
+    data.goals["OPENING"] = goal; data.function_sets["OPENING"] = {{"OPENING", "Positive"}};
+    auto native_owner = std::make_shared<ai::Engine>(host, std::move(data), std::vector<ai::PlanDef>{});
+    auto& engine = *native_owner;
+    std::optional<ai::GoalStateContributor> native_records;
+    auto scripts = auth::ScriptScheduler::create({}, {});
+    std::uint64_t sequence{};
+    const eawr::sim::InlineExecutor native_executor;
+    for (mode->frame = 1; mode->frame <= 8; ++mode->frame) {
+        auto view = std::make_shared<ai::WorldView>(); view->tick = mode->frame;
+        mode->world_view = std::move(view);
+        host->ai_suspended = mode->frame >= 4 && mode->frame <= 6;
+        expect(engine.before_service(*mode, scripts.value(), sequence).has_value(), "AI admission: native services step");
+        expect(scripts.value().service(native_executor).has_value(), "AI admission: native fixture advances its scheduler barrier");
+        // Seed the record oracle after this tactical fixture lazily creates
+        // its players; subsequent frames exercise incremental admission writes.
+        if (!native_records) native_records.emplace(native_owner, std::string(64, 'a'));
+        const auto warm = native_records->record_sync_hash();
+        const auto cold = native_records->record_sync_hash(true);
+        expect(warm && cold && warm.value() == cold.value(),
+            "AI admission: pending refresh and suspension retain equal incremental and cold native records");
+        expect(ai::EngineContractAccess::admission_budget(engine) == (mode->frame < 5 ? 20 : 10),
+            "AI admission: proposal sharing counts the held side as human until handoff");
+        if (mode->frame == 3 || mode->frame == 7) {
+            const bool pending = mode->frame < 5;
+            expect(ai::EngineContractAccess::player(engine, 2)->admission_pending == pending,
+                "AI admission: missed boundary refresh stays pending until the first enabled service");
+            const std::string identity(64, 'a');
+            auto state = engine.save_tactical_native(identity, scripts.value());
+            expect(state && engine.restore_tactical_native(state.value(), identity, scripts.value())
+                && ai::EngineContractAccess::player(engine, 2)->admission_pending == pending,
+                "AI admission: pending native refresh survives restore across the boundary");
+        }
+    }
+    bool early_active = false, admitted = false;
+    for (const auto& service : host->setup.journal->services) {
+        if (service.player == 1 && service.frame < 5) early_active = true;
+        if (service.player == 2) {
+            expect(service.frame >= 7, "AI admission: missed boundary admits at the first enabled turn");
+            admitted = true;
+        }
+    }
+    expect(early_active && admitted, "AI admission: existing AI runs before the other side is admitted");
+}
+
 void scoring_startup_contract() {
     using Scoring = eawr::platform::BattleScoring;
     const auto scorer = [](std::string definitions, std::string service) {
@@ -989,6 +1970,311 @@ void scoring_startup_contract() {
     }
 }
 
+// GFS-A24: tactical players use the same per-player stream mechanism as galactic players,
+// including the native continuation. IDs and player service order remain unchanged.
+void tactical_player_streams() {
+    std::vector<std::uint8_t> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto host = std::make_shared<ai::Host>();
+        auto mode = std::make_shared<ModeWorld>(); mode->mode = "SPACE"; mode->frame = 1;
+        host->ai_world = mode; host->view = mode->view(); host->setup.seed = 12345;
+        // Human and noncontiguous AI IDs exercise seeding by ID rather than dense AI index.
+        host->setup.players = {{1, "SYNTHETIC", false, false, ""},
+            {9, "SYNTHETIC", false, true, "OPENING"}, {7, "SYNTHETIC", false, true, "OPENING"}};
+        for (const auto& p : host->setup.players) host->players.emplace(p.player, &p);
+        const auto make_engine = [&]() {
+            ai::AiData data; ai::PlayerType type; type.name = "OPENING";
+            const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+            auto equations = ai::EquationSet::parse({{"retained.xml", "<Root><Retained>0</Retained></Root>"}}, converters);
+            if (!equations) throw std::runtime_error("retained-plan fixture equations failed");
+            data.equations = std::move(equations).value();
+            ai::GoalType goal; goal.name = "RETAINED"; goal.mode = "SPACE";
+            data.goals.emplace(goal.name, goal);
+            data.function_sets["OPENING"] = {{"RETAINED", "Retained"}};
+            type.function_sets = {"OPENING"};
+            data.players.emplace(type.name, type);
+            ai::PlanDef plan; plan.name = "RETAINED"; plan.goals = {"RETAINED"}; plan.taskforces.emplace_back();
+            return std::make_unique<ai::Engine>(host, std::move(data), std::vector<ai::PlanDef>{plan});
+        };
+        auto engine = make_engine();
+        auth::ModuleManifest modules;
+        expect(modules.add("RETAINED.LUA", "Retained = true").has_value(), "GFS-A24: retained-plan module loads");
+        auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+        std::uint64_t sequence{};
+        expect(scripts && engine->before_service(*mode, scripts.value(), sequence, &executor),
+            "GFS-A24: tactical players initialize through the real barrier");
+        if (!scripts) return;
+        for (const unsigned id : {7U, 9U}) {
+            const auto* player = ai::EngineContractAccess::player(*engine, id);
+            expect(player && player->sync.seed() == ai::galactic_stream_seed(12345, id),
+                "GFS-A24: tactical stream seed mixes battle seed and player ID");
+        }
+        ai::AiRandom first, second;
+        first.set_seed(ai::galactic_stream_seed(12345, 7));
+        second.set_seed(ai::galactic_stream_seed(12345, 9));
+        for (unsigned i = 0; i < 7; ++i) {
+            expect(ai::EngineContractAccess::draw(*engine, 7) == first.next(), "GFS-A24: first player's stream continues independently");
+            if (i % 2 == 0) expect(ai::EngineContractAccess::draw(*engine, 9) == second.next(),
+                "GFS-A24: another player's intervening draws do not alter the sequence");
+        }
+        expect(ai::EngineContractAccess::engine_seed(*engine) == 12345,
+            "GFS-A24: player draws leave the engine-wide stream untouched");
+        auto report = scripts.value().service(executor);
+        expect(report && engine->after_service(report.value()), "GFS-A24: tactical stream barrier completes");
+        const std::string identity(64, 'a');
+        auto saved = engine->save_tactical_native(identity, scripts.value());
+        expect(saved.has_value(), "GFS-A24: advanced tactical streams save");
+        if (!saved) { std::cerr << saved.error().message << '\n'; return; }
+        if (reference.empty()) reference = saved.value();
+        else expect(reference == saved.value(), "GFS-A24: native bytes equal on 1/2/4/8 workers");
+        auto restored = make_engine();
+        const auto loaded = restored->restore_tactical_native(saved.value(), identity, scripts.value());
+        expect(loaded.has_value(), "GFS-A24: fresh tactical engine restores streams");
+        if (!loaded) return;
+        expect(restored->save_tactical_native(identity, scripts.value()).value() == saved.value(),
+            "GFS-A24: advanced stream states round-trip canonically");
+        for (unsigned i = 0; i < 8; ++i) for (const unsigned id : {9U, 7U})
+            expect(ai::EngineContractAccess::draw(*engine, id) == ai::EngineContractAccess::draw(*restored, id),
+                "GFS-A24: every restored player continues at its own next draw");
+        auto interleaved = make_engine();
+        expect(interleaved->restore_tactical_native(saved.value(), identity, scripts.value()).has_value(), "interleaved codec owner initializes");
+        ai::EngineContractAccess::interleaved_native_fixture(*interleaved);
+        const auto interleaved_bytes = interleaved->save_tactical_native(identity, scripts.value());
+        auto interleaved_restore = make_engine();
+        expect(interleaved_bytes && interleaved_restore->restore_tactical_native(interleaved_bytes.value(), identity, scripts.value()),
+            "interleaved plans, forces, blocks and instances restore across multiple player owners");
+        if (!interleaved_bytes) return;
+        expect(interleaved_restore->plan(1) && interleaved_restore->plan(1)->player == 9
+            && interleaved_restore->plan(2) && interleaved_restore->plan(2)->player == 7
+            && interleaved_restore->taskforce(3) && interleaved_restore->block(ai::block_id(ai::first_plan_instance + 2, 17))
+            && interleaved_restore->save_tactical_native(identity, scripts.value()).value() == interleaved_bytes.value(),
+            "globally interleaved codec bytes are independent of the decoded positioning shard");
+        ai::EngineContractAccess::retain_plan_without_instance(*engine, 7, true);
+        const auto exited = engine->save_tactical_native(identity, scripts.value());
+        if (!exited) { expect(false, exited.error().message); return; }
+        auto completed = make_engine();
+        expect(exited && completed->restore_tactical_native(exited.value(), identity, scripts.value()),
+            "GFS-A24: exited plan restores after its Lua instance was removed, before owner cleanup");
+        expect(exited && completed->save_tactical_native(identity, scripts.value()).value() == exited.value(),
+            "GFS-A24: pending exited-plan cleanup and positioning issuer/deadline/target round-trip exactly");
+        if (workers == 1) {
+            // v9 ends in count + ordered (unit, instance, deadline, target) words.
+            // Mutate well-formed bytes to exercise decoding, independently of the writer.
+            const auto word = [](std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint64_t value) {
+                for (std::size_t index = 0; index < 8; ++index)
+                    bytes.at(offset + index) = static_cast<std::uint8_t>(value >> (index * 8));
+            };
+            const auto trailer = exited.value().size() - 40;
+            const auto refused = [&](const std::vector<std::uint8_t>& bytes, const std::string& name) {
+                auto destination = make_engine();
+                const auto before = destination->save_tactical_native(identity, scripts.value());
+                expect(!destination->restore_tactical_native(bytes, identity, scripts.value()),
+                    "GFS-A24: positioning decode refuses " + name);
+                const auto after = destination->save_tactical_native(identity, scripts.value());
+                expect(before && after && before.value() == after.value(),
+                    "GFS-A24: invalid positioning leaves owner unpublished: " + name);
+            };
+            const std::array<std::tuple<std::size_t, std::uint64_t, std::string_view>, 8> malformed{{
+                {8, 0, "zero unit"}, {8, 701, "unissued unit"}, {32, 701, "unissued target"},
+                {16, ai::first_plan_instance - 1, "low instance"},
+                {16, ai::first_plan_instance + 1, "unissued instance"},
+                {24, std::numeric_limits<std::uint64_t>::max(), "negative deadline"},
+                {24, 152, "deadline beyond current frame plus150"},
+                {24, std::numeric_limits<std::int64_t>::max(), "extreme deadline"}}};
+            for (const auto& [offset, value, name] : malformed) {
+                auto bytes = exited.value(); word(bytes, trailer + offset, value);
+                refused(bytes, std::string(name));
+            }
+            for (const auto key : {9U, 10U}) {
+                auto bytes = exited.value();
+                const std::vector<std::uint8_t> row(bytes.end() - 32, bytes.end());
+                word(bytes, trailer, 2);
+                const auto second_row_offset = bytes.size(); bytes.insert(bytes.end(), row.begin(), row.end());
+                word(bytes, second_row_offset, key);
+                refused(bytes, key == 9 ? "descending unit keys" : "duplicate unit keys");
+            }
+        }
+        // Save between positioning deadlines, then exercise the exact future
+        // deadline and its next150-frame cycle against the uninterrupted owner.
+        auto view = std::make_shared<ai::WorldView>();
+        view->players = {{7, 7, 0}, {9, 9, 1}};
+        foc::AiType type; type.type_id = 1; type.name = "POSITIONING_SHIP";
+        type.locomotor = true; type.max_attack_distance = ai::real(1000);
+        type.bounds_half_x = type.bounds_half_y = ai::real(50);
+        host->setup.content.types = {type}; host->types[1] = &host->setup.content.types.front();
+        ai::ViewUnit actor; actor.id = 10; actor.type = 1; actor.owner = 7;
+        actor.position = {eawr::sim::math::Fixed::from_raw(-3000 * eawr::sim::math::Fixed::scale), {}, {}};
+        actor.order = tactical::OrderKind::attack_move;
+        ai::ViewUnit target; target.id = 11; target.type = 1; target.owner = 9;
+        view->units = {actor, target}; mode->world_view = view; host->view = view;
+        const auto advance_scripts = [&](std::uint64_t frame) {
+            while (scripts.value().completed_tick() < frame)
+                if (!scripts.value().service(executor)) return false;
+            mode->frame = frame; view->tick = frame;
+            return true;
+        };
+        if (!advance_scripts(50)) { expect(false, "positioning scheduler reaches midpoint"); return; }
+        ai::EngineContractAccess::positioning_service(*engine, 50);
+        // The row survives real plan removal and a transfer to another AI owner.
+        ai::EngineContractAccess::depart_positioning_plan(*engine, 7);
+        view->units[0].owner = 9; view->units[1].owner = 7;
+        const auto midpoint = engine->save_tactical_native(identity, scripts.value());
+        auto resumed = make_engine();
+        expect(midpoint && resumed->restore_tactical_native(midpoint.value(), identity, scripts.value()),
+            "GFS-A24: positioning restores mid-cycle with a departed issuing plan");
+        expect(ai::EngineContractAccess::checked_player(*engine, 7).positioning.contains(10)
+            && ai::EngineContractAccess::checked_player(*resumed, 9).positioning.contains(10),
+            "positioning shard may follow changed ownership without changing continuation bytes");
+        std::size_t expected_orders{};
+        for (const auto frame : {75U, 76U, 225U, 226U}) {
+            if (!advance_scripts(frame)) { expect(false, "positioning scheduler advances"); return; }
+            ai::EngineContractAccess::positioning_service(*engine, frame);
+            ai::EngineContractAccess::positioning_service(*resumed, frame);
+            if (frame == 76 || frame == 226) ++expected_orders;
+            expect(ai::EngineContractAccess::point_defence_orders(*engine) == expected_orders
+                && ai::EngineContractAccess::point_defence_orders(*resumed) == expected_orders,
+                "GFS-A24: restored positioning preserves exact mid-cycle and repeat deadlines");
+            const auto left = engine->save_tactical_native(identity, scripts.value());
+            const auto right = resumed->save_tactical_native(identity, scripts.value());
+            expect(left && right && left.value() == right.value(),
+                "GFS-A24: positioning continuation emits identical orders and native bytes");
+        }
+        view->units[0].owner = 1;
+        const auto transferred = engine->save_tactical_native(identity, scripts.value());
+        auto fallback = make_engine();
+        const auto fallback_loaded = transferred
+            ? fallback->restore_tactical_native(transferred.value(), identity, scripts.value())
+            : eawr::core::Result<void>::failure(transferred.error());
+        expect(fallback_loaded && ai::EngineContractAccess::checked_player(*fallback, 7).positioning.contains(10)
+            && fallback->save_tactical_native(identity, scripts.value()).value() == transferred.value(),
+            "departed positioning issuer transferred to a human uses the lowest AI shard and retains exact bytes");
+        ai::EngineContractAccess::retain_plan_without_instance(*engine, 7, false);
+        const auto live_missing = engine->save_tactical_native(identity, scripts.value());
+        auto invalid = make_engine();
+        expect(live_missing && !invalid->restore_tactical_native(live_missing.value(), identity, scripts.value()),
+            "GFS-A24: live plan still refuses a missing Lua instance");
+        expect(scripts.value().create_instance(ai::first_plan_instance, "RETAINED.LUA").has_value(),
+            "GFS-A24: retained plan attaches a real Lua instance");
+        const auto live_present = engine->save_tactical_native(identity, scripts.value());
+        auto live = make_engine();
+        expect(live_present && live->restore_tactical_native(live_present.value(), identity, scripts.value()),
+            "GFS-A24: live plan accepts its present Lua instance");
+        ai::EngineContractAccess::retain_plan_without_instance(*engine, 7, true);
+        const auto exited_present = engine->save_tactical_native(identity, scripts.value());
+        auto departed = make_engine();
+        expect(exited_present && !departed->restore_tactical_native(exited_present.value(), identity, scripts.value()),
+            "GFS-A24: exited plan refuses a still-present Lua instance");
+    }
+}
+
+// The error path. A failing turn ends the player loop where the sequential pass would, the effects staged so far commit
+// outside any turn, and nothing leaks into the next barrier. The faithful schedule writes directly and is the reference;
+// the staggered schedule gives each player its own phase, so the run steps frames until the failing player's turn.
+struct HookRun {
+    bool ok{};
+    std::string message;
+    std::vector<tactical::PlayerId> calls;
+    std::uint64_t consumed{};
+    std::size_t staged{};
+    bool bound{};
+};
+
+HookRun effects_hook_run(const foc::AiSchedule::Mode mode, const tactical::PlayerId failing) {
+    auto host = std::make_shared<ai::Host>();
+    auto world = std::make_shared<ModeWorld>();
+    world->mode = "SPACE";
+    host->ai_world = world;
+    host->view = std::make_shared<ai::WorldView>();
+    host->setup.schedule.mode = mode;
+    host->setup.players = {foc::AiPlayer{2, "EMPIRE", false, true, "MODE"}, foc::AiPlayer{3, "REBEL", false, true, "MODE"},
+        foc::AiPlayer{4, "UNDERWORLD", false, true, "MODE"}};
+    const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+    auto parsed = ai::EquationSet::parse({{"mode.xml", "<Root><Count>2</Count></Root>"}}, converters);
+    HookRun run;
+    expect(parsed.has_value(), "error path equations parse");
+    if (!parsed) return run;
+    ai::AiData data; data.equations = std::move(parsed).value();
+    ai::PlayerType player; player.function_sets = {"MODE"}; data.players["MODE"] = player;
+    ai::GoalType space; space.mode = "SPACE";
+    data.goals["SPACE"] = space;
+    data.function_sets["MODE"] = {{"SPACE", "Count"}};
+    ai::Engine engine(host, std::move(data), {});
+    auth::ModuleManifest manifest;
+    expect(manifest.add("HOOK.LUA", "LastService = 0").has_value(), "error path module loads");
+    auto scripts = auth::ScriptScheduler::create({}, std::move(manifest));
+    if (!scripts) { expect(false, "error path scheduler creates"); return run; }
+    expect(scripts.value().create_instance(1, "HOOK.LUA").has_value(), "error path instance creates");
+    constexpr std::uint64_t first_sequence = 17;
+    std::uint64_t sequence = first_sequence;
+    const ai::Engine::ExecutionHook hook = [&](tactical::PlayerId id, ai::Engine::ExecutionEffects& effects) -> eawr::core::Result<void> {
+        run.calls.push_back(id);
+        for (int copy = 0; copy < 2; ++copy) {
+            auth::ScriptEvent event;
+            event.key = {world->frame + 1, foc::producer_foc_engine, 1, effects.sequence++};
+            event.target = 1;
+            event.kind = auth::ScriptEvent::Kind::pump;
+            event.name = "LastService";
+            if (auto submitted = effects.submit(std::move(event)); !submitted) return submitted;
+        }
+        if (id == failing)
+            return eawr::core::Result<void>::failure(foc::detail::make_error(auth::codes::invalid_request, "turn failure"));
+        return eawr::core::Result<void>::success();
+    };
+    const eawr::platform::ThreadWorkerAdapter executor(2);
+    for (int frame = 0; frame < 120 && !run.ok && run.message.empty(); ++frame, ++world->frame) {
+        const auto serviced = engine.before_service(*world, scripts.value(), sequence, &executor, hook);
+        if (!serviced) run.message = serviced.error().message;
+    }
+    run.ok = run.message.empty();
+    run.consumed = ai::EngineContractAccess::event_sequence(engine) - first_sequence;
+    run.staged = ai::EngineContractAccess::staged_effects(engine);
+    run.bound = ai::EngineContractAccess::staging(engine);
+    return run;
+}
+
+void effects_error_path() {
+    // A failing turn: the barrier fails with the turn's error, the player loop stops there, every hook allocation up to
+    // and including the failing turn's is consumed, and nothing stays staged or bound.
+    for (const auto mode : {foc::AiSchedule::Mode::faithful, foc::AiSchedule::Mode::staggered}) {
+        const auto run = effects_hook_run(mode, 3);
+        expect(!run.ok && run.message == "turn failure", "a failing turn fails the barrier with its own error");
+        expect(!run.calls.empty() && run.calls.back() == 3 && run.consumed == 2 * run.calls.size(),
+            "the loop stops at the failing turn and its hook allocations are consumed");
+        expect(run.staged == 0 && !run.bound, "a failed barrier leaves no staged effects and no bound turn");
+    }
+    // A staged submit the scheduler refuses fails at the commit. The sequential pass stopped there: nothing of the failing
+    // turn after the refused event and nothing of a later player applies, and the refused event's number is consumed.
+    World world;
+    ai::PlanDef definition; definition.name = "OWNED";
+    ai::Engine engine(world.host, {}, {definition});
+    auth::ModuleManifest modules;
+    auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+    if (!scripts) { expect(false, "commit failure scheduler creates"); return; }
+    ai::EngineContractAccess::bare_players(engine, scripts.value());
+    ai::EngineContractAccess::add_player(engine, 11);
+    const auto before = ai::EngineContractAccess::event_sequence(engine);
+    ai::EngineContractAccess::turn(engine, 7, [&](ai::PlayerAi&) {
+        ai::EngineContractAccess::stage_event(engine, 1); ai::EngineContractAccess::stage_event(engine, 1);
+        ai::EngineContractAccess::stage_order(engine);
+    });
+    ai::EngineContractAccess::turn(engine, 9, [&](ai::PlayerAi&) {
+        ai::EngineContractAccess::stage_event(engine, 0); // at or before the completed tick: refused
+        ai::EngineContractAccess::stage_event(engine, 1);
+        ai::EngineContractAccess::stage_order(engine);
+    });
+    ai::EngineContractAccess::turn(engine, 11, [&](ai::PlayerAi&) {
+        ai::EngineContractAccess::stage_event(engine, 1);
+        ai::EngineContractAccess::stage_order(engine);
+    });
+    const auto committed = ai::EngineContractAccess::commit(engine, scripts.value());
+    expect(!committed && committed.error().message.find("future tick") != std::string::npos,
+        "a refused staged submit fails the commit with the scheduler's error");
+    expect(ai::EngineContractAccess::event_sequence(engine) - before == 3 && ai::EngineContractAccess::committed_orders(engine) == 1,
+        "the commit stops at the refused event: later events, orders and players do not apply");
+    expect(ai::EngineContractAccess::staged_effects(engine) == 0, "a failed commit leaves no staged effects");
+}
+
 void freestore_execution_hook_order() {
   for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
     auto host = std::make_shared<ai::Host>();
@@ -1024,7 +2310,7 @@ void freestore_execution_hook_order() {
     ai::EngineContractAccess::defer_event(engine, std::move(deferred));
     std::vector<auth::EventKey> keys;
     std::vector<std::pair<tactical::PlayerId, bool>> calls;
-    const ai::Engine::ExecutionHook hook = [&](tactical::PlayerId id, std::uint64_t& live_sequence) -> eawr::core::Result<void> {
+    const ai::Engine::ExecutionHook hook = [&](tactical::PlayerId id, ai::Engine::ExecutionEffects& effects) -> eawr::core::Result<void> {
         if (calls.empty()) {
             for (const auto& event : ai::EngineContractAccess::attachment_events(engine)) keys.push_back(event.key);
         }
@@ -1034,13 +2320,13 @@ void freestore_execution_hook_order() {
         // A due freestore test submits its pump and LastService assignment in this frame.
         for (const auto kind : {auth::ScriptEvent::Kind::pump, auth::ScriptEvent::Kind::assign}) {
             auth::ScriptEvent event;
-            event.key = {1, foc::producer_foc_engine, 1, live_sequence++};
+            event.key = {1, foc::producer_foc_engine, 1, effects.sequence++};
             event.target = 1;
             event.kind = kind;
             event.name = "LastService";
             event.parameter = auth::Value{ai::real(1)};
             keys.push_back(event.key);
-            if (auto submitted = scripts.value().submit_event(std::move(event)); !submitted) return submitted;
+            if (auto submitted = effects.submit(std::move(event)); !submitted) return submitted;
         }
         return eawr::core::Result<void>::success();
     };
@@ -1994,6 +3280,259 @@ void special_weapon_attachment() {
         "WSW-34/37: re-enable online event reaches the retained source's plan");
 }
 
+// GS-22/31: running allocations are revalidated at the existing maintenance branch.
+void running_target_contrast() {
+    for (const bool removable : {false, true}) for (const bool proposals : {false, true})
+        for (const bool competing : {false, true}) for (int change = 0; change != 13; ++change) {
+            World world;
+            world.view->units.front().health = ai::real(1);
+            auto enemy = world.view->units.front(); enemy.id = 11; enemy.owner = 1;
+            world.view->units.push_back(enemy);
+            if (change == 12) {
+                auto stronger = world.host->setup.content.types.front(); stronger.type_id = 2;
+                stronger.name = "STRONGER"; stronger.combat_power = ai::real(2000);
+                world.host->setup.content.types.push_back(stronger);
+                world.host->types.clear(); world.host->types_by_name.clear();
+                for (const auto& type : world.host->setup.content.types) {
+                    world.host->types.emplace(type.type_id, &type);
+                    world.host->types_by_name.emplace(type.name, &type);
+                }
+                world.view->units.back().type = 2;
+            }
+            const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+            auto equations = ai::EquationSet::parse({{"contrast.xml", "<Root><Desire>50</Desire><Positive>1</Positive></Root>"}}, converters);
+            expect(static_cast<bool>(equations), "GS-22: maintenance equations load");
+            if (!equations) return;
+            ai::AiData data; data.equations = std::move(equations).value();
+            ai::PlanDef definition; definition.name = "HELD";
+            definition.min_contrast = definition.max_contrast = ai::real(1);
+            definition.ignore_target = change == 4;
+            definition.magic = change == 8;
+            ai::Engine engine(world.host, std::move(data), {definition});
+            ai::EngineContractAccess::target_fixture(engine, 1, 11);
+            ai::GoalType goal; goal.application = {"ENEMY_UNIT"}; goal.category = "HIGH";
+            ai::GoalType competitor; competitor.application = {"GLOBAL"}; competitor.category = "HIGH";
+            auto& player = ai::EngineContractAccess::active_desire_fixture(engine, goal, competitor, removable, proposals);
+            player.difficulty.space_contrast_multiplier = ai::real(1);
+            ai::EngineContractAccess::contrast_fixture(engine, player);
+            if (proposals && competing) {
+                player.proposed.front().desire = ai::real(200);
+                for (std::size_t index = 2; index <= 3; ++index) {
+                    auto function = player.functions[1]; function.goal_name += std::to_string(index);
+                    player.functions.push_back(std::move(function));
+                    ai::Goal candidate; candidate.id = index + 1; candidate.function = index;
+                    candidate.desire = ai::real(202 - static_cast<std::int64_t>(index));
+                    player.proposed.push_back(candidate);
+                }
+            }
+            auto& selected = *player.active.front().potential;
+            selected.target_contrast = {{0, ai::real(1000)}};
+            selected.current_contrast = {{0, ai::real(0)}};
+            if (change == 1 || change == 4 || change == 5 || change == 6 || change == 8)
+                world.view->units.front().health = (ai::real(1) / ai::real(4));
+            if (change == 2) player.difficulty.space_contrast_multiplier = ai::real(2);
+            if (change == 3) player.reserved[10] = 99;
+            if (change == 5) selected.target_contrast_disabled = true;
+            if (change == 6) {
+                auto spare = world.view->units.front(); spare.id = 12; spare.health = ai::real(1);
+                world.view->units.push_back(spare);
+            }
+            if (change == 7) world.view->units.erase(world.view->units.begin());
+            if (change == 9 || change == 10) {
+                world.host->contrast_order = {2};
+                world.host->contrast[2] = {{2, {}, (ai::real(1) / ai::real(change == 9 ? 1 : 2))}};
+                selected.contrast_indices = {1};
+            }
+            if (change == 11) world.view->units.pop_back();
+            auth::ModuleManifest modules;
+            expect(modules.add("HELD.LUA", "function Hold() Sleep(120) end\n").has_value(), "GS-22: held module loads");
+            auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+            if (!scripts) { expect(false, "GS-22: scheduler starts"); return; }
+            expect(scripts.value().create_instance(1, "HELD.LUA").has_value(), "GS-22: held instance starts");
+            std::uint64_t sequence = 0;
+            ai::EngineContractAccess::bind_scripts(engine, scripts.value(), sequence);
+            ai::EngineContractAccess::set_selection_seed(engine, 2, 12345);
+            const bool valid = change == 0 || change == 4 || change == 5 || change == 7 || change == 8 || change == 9;
+            if (change != 8) {
+                expect(ai::EngineContractAccess::contrast(engine, player) == valid,
+                    "GS-22: live health, difficulty and reservations revalidate the retained allocation");
+                expect(selected.units == std::vector<tactical::TypeId>{1}
+                    && selected.freestore == std::vector<eawr::sim::EntityId>{10}
+                    && ai::EngineContractAccess::selection_seed(engine, 2) == 12345,
+                    "GS-22: recheck neither borrows a spare unit nor draws random numbers");
+                // A direct failed test is sticky; reset only to exercise the pass's call.
+                selected.valid = true;
+            }
+            ai::EngineContractAccess::maintain(engine, player);
+            const bool replaced = proposals && competing && removable && valid && change != 8;
+            const bool tested_magic = proposals && competing && removable && change == 8;
+            const bool retained = valid && !replaced && !tested_magic;
+            expect((engine.plan(1) != nullptr) == retained && (engine.taskforce(1) != nullptr) == retained,
+                "GS-22/31: failed contrast removes a running force even when protected or without proposals");
+            expect(static_cast<bool>(scripts.value().thread_slots(1)) == retained,
+                "GS-22: abandonment removes the associated script");
+            if (!retained) {
+                const auto& records = engine.records();
+                expect(std::any_of(records.begin(), records.end(), [&](const auto& row) {
+                    return row.plan == "HELD" && row.event == "maintenance_end"
+                        && row.detail == (replaced ? "replacement" : "target_contrast");
+                }), "GS-22/31: cullable failure and replacement have distinct end reasons");
+                expect(std::any_of(records.begin(), records.end(), [](const auto& row) {
+                    return row.plan == "HELD" && row.event == "abandoned";
+                }), "GS-22: maintenance drops report abandonment");
+            }
+            if (!retained) expect(!player.assigned.contains(10) && (!player.reserved.contains(10) || player.reserved.at(10) == 99),
+                "GS-22: abandoned goal releases its units and reservations");
+        }
+}
+
+void running_reservation_contrast() {
+    for (const bool pooled : {false, true}) for (int ownership = 0; ownership != 3; ++ownership) {
+        World world; world.view->units.front().health = ai::real(1);
+        auto mode = std::make_shared<ModeWorld>(); mode->mode = "SPACE";
+        mode->provide_account = true; mode->reservation_account.pool_tokens = {77};
+        mode->reservation_pads.emplace(88, tactical::PadState{});
+        world.host->ai_world = mode;
+        ai::PlanDef definition; definition.name = "HELD"; definition.ignore_target = true;
+        ai::Engine engine(world.host, {}, {definition});
+        ai::GoalType goal; goal.category = "HIGH";
+        auto& player = ai::EngineContractAccess::active_desire_fixture(engine, goal, goal, true, false);
+        ai::EngineContractAccess::contrast_fixture(engine, player);
+        auto& allocation = *player.active.front().potential;
+        allocation.freestore = {0}; allocation.sources = {static_cast<std::uint8_t>(pooled ? 1 : 2)};
+        allocation.pool_tokens = {77}; allocation.producers = {88};
+        if (pooled) {
+            if (ownership != 0) player.reserved_pool_tokens[77] = ownership == 1 ? 1 : 99;
+        } else {
+            ai::EngineContractAccess::retain_pad(engine, 88);
+            if (ownership != 0) ai::EngineContractAccess::reserve_pad(engine, 88, ownership == 1 ? 2 : 1, 1);
+        }
+        expect(ai::EngineContractAccess::contrast(engine, player) == (ownership == 1),
+            "GS-22: live pool and pad allocations require their own reservation even with ignored contrast");
+        allocation.valid = true;
+        if (pooled) mode->reservation_account.pool_tokens.clear();
+        else ai::EngineContractAccess::release_retained_pad(engine);
+        expect(ai::EngineContractAccess::contrast(engine, player),
+            "GS-22: consumed pool tokens and released pad allocations are no longer tested");
+    }
+}
+
+// Selection reserves reinforcements before Lua necessarily calls Produce_Force.
+// Every retirement stage must leave the pool usable and native state restorable.
+void retiring_pool_reservations() {
+    std::map<std::pair<unsigned, bool>, std::vector<std::uint8_t>> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) for (unsigned stage = 0; stage < 6; ++stage)
+        for (const bool abandoned : {false, true}) {
+            std::cout << "POOL-RETIREMENT workers=" << workers << " stage=" << stage << " abandoned=" << abandoned << '\n';
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto host = std::make_shared<ai::Host>();
+            auto mode = std::make_shared<ModeWorld>(); mode->mode = "SPACE"; mode->frame = 1;
+            mode->provide_account = true;
+            mode->reservation_account.pool = {1, 1, 1}; mode->reservation_account.pool_tokens = {77, 78, 88};
+            tactical::Player account_owner; account_owner.player_id = 2;
+            mode->reservation_players.push_back(account_owner);
+            host->ai_world = mode; host->view = mode->view();
+            host->setup.players = {{2, "SYNTHETIC", false, true, "POOL"}};
+            host->players.emplace(2, &host->setup.players.front());
+            foc::AiType unit; unit.type_id = 1; unit.name = "POOL_UNIT";
+            auto production = unit; production.type_id = 2; production.name = "PRODUCTION_UNIT";
+            host->setup.content.types = {unit, production};
+            for (const auto& type : host->setup.content.types) host->types.emplace(type.type_id, &type);
+            const auto make_engine = [&]() {
+                ai::AiData data;
+                const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+                auto equations = ai::EquationSet::parse({{"pool.xml", "<Root><Zero>0</Zero></Root>"}}, converters);
+                if (!equations) throw std::runtime_error("pool retirement fixture equations failed");
+                data.equations = std::move(equations).value();
+                ai::GoalType goal; goal.name = "POOL"; goal.mode = "SPACE"; goal.application = {"GLOBAL"};
+                data.goals.emplace(goal.name, goal); data.function_sets["POOL"] = {{"POOL", "Zero"}};
+                ai::PlayerType type; type.name = "POOL"; type.function_sets = {"POOL"}; data.players.emplace(type.name, type);
+                ai::PlanDef plan; plan.name = "POOL"; plan.module = "POOL.LUA"; plan.goals = {"POOL"};
+                plan.taskforces.push_back({"Main", {{1, 3, 0, false, {1, 2}}}, false, true, {}, 1});
+                return std::make_unique<ai::Engine>(host, std::move(data), std::vector<ai::PlanDef>{plan});
+            };
+            auth::ModuleManifest modules;
+            expect(modules.add("POOL.LUA", stage == 3 ? "function Base_Definitions() end"
+                : "function Base_Definitions() end function Main_Thread() coroutine.yield(true) end").has_value(),
+                "pool retirement fixture module loads");
+            auto scripts = auth::ScriptScheduler::create({}, std::move(modules));
+            auto engine = make_engine(); std::uint64_t sequence{};
+            expect(scripts && engine->before_service(*mode, scripts.value(), sequence, &executor), "pool retirement owner initializes");
+            if (!scripts) return;
+            auto& player = ai::EngineContractAccess::checked_player(*engine, 2);
+            const auto tokens = stage == 5 ? std::vector<std::uint64_t>{77} : std::vector<std::uint64_t>{77, 78};
+            auto& goal = ai::EngineContractAccess::pool_goal(*engine, player, tokens, true, stage == 4);
+            const auto attached = ai::EngineContractAccess::attach(*engine, player, goal, scripts.value(), sequence);
+            expect(attached.has_value(), "selected pool goal attaches through production");
+            if (!attached) return;
+            const auto* plan = engine->plan(goal.plan);
+            expect(plan && plan->taskforces.size() == (stage == 3 ? 0U : 1U), "missing thread drops its selected TaskForce");
+            const auto other_goal = ai::EngineContractAccess::pool_goal(*engine, player, {88}, false).id;
+            player.reserved_pool[2] = 9;
+            if (stage == 4) player.reserved_pool_tokens.at(77) = other_goal;
+            if (stage == 1 || stage == 2 || stage == 5) {
+                auth::ServiceReport report; report.tick = 1;
+                auth::ScriptCommand command; command.issuer = plan->instance; command.sequence = 7;
+                command.verb = std::string(ai::verb_ai);
+                command.arguments = {auth::Value::text("produce"), auth::Value{auth::Handle{ai::handle_taskforce, plan->taskforces.front()}}};
+                report.commands.push_back(std::move(command));
+                expect(engine->after_service(report).has_value() && player.tasks.size() == tokens.size(),
+                    "Produce_Force transfers selected tokens to pending build tasks");
+                if (stage != 1) {
+                    ai::EngineContractAccess::service(*engine, player, 1);
+                    expect(engine->taskforce(plan->taskforces.front())->pooled.size() == tokens.size(),
+                        "execution transfers pending tokens to the TaskForce pool");
+                }
+            }
+            if (stage == 5) {
+                auto view = std::make_shared<ai::WorldView>();
+                ai::ViewUnit arrived; arrived.id = 10; arrived.type = 1; arrived.owner = 2;
+                arrived.purchase_token = 77; arrived.purchase_type = 1; view->units.push_back(arrived);
+                mode->world_view = view; host->view = view;
+                mode->reservation_account.pool = {1}; mode->reservation_account.pool_tokens = {88};
+                ai::EngineContractAccess::await_pool_arrival(*engine, player, goal.plan);
+                ai::EngineContractAccess::reinforce_service(*engine, player, 1);
+                expect(!player.reserved_pool_tokens.contains(77) && player.reserved_pool.at(1) == 1
+                    && engine->taskforce(plan->taskforces.front())->units == std::vector<eawr::sim::EntityId>{10},
+                    "reinforcement arrival consumes and releases its token before retirement");
+            }
+            for (auto event : ai::EngineContractAccess::take_attachment_events(*engine))
+                expect(scripts.value().submit_event(std::move(event)).has_value(), "pool retirement attachment events publish");
+            auto barrier = scripts.value().service(executor);
+            expect(barrier.has_value(), "pool retirement reaches a completed script barrier");
+            if (barrier) expect(engine->after_service(barrier.value()).has_value(), "pool retirement script results commit");
+            const std::string identity(64, 'a');
+            const auto reserved = engine->save_tactical_native(identity, scripts.value());
+            expect(reserved.has_value(), "reserved live goal has valid native state");
+            if (!reserved) { std::cerr << reserved.error().message << '\n'; continue; }
+            auto resumed = make_engine();
+            const auto loaded = resumed->restore_tactical_native(reserved.value(), identity, scripts.value());
+            expect(loaded.has_value(), "reserved goal restores before retirement");
+            if (!loaded) { std::cerr << loaded.error().message << '\n'; continue; }
+            const auto checkpoint = resumed->save_tactical_native(identity, scripts.value());
+            expect(checkpoint && checkpoint.value() == reserved.value(), "reserved goal round-trips before retirement");
+            auto& retiring = ai::EngineContractAccess::checked_player(*resumed, 2);
+            ai::EngineContractAccess::retire_pool_goal(*resumed, retiring, scripts.value(), abandoned);
+            const bool transferred = stage == 4;
+            expect(retiring.reserved_pool_tokens.size() == (transferred ? 2U : 1U)
+                && retiring.reserved_pool_tokens.at(88) == other_goal && retiring.reserved_pool.at(1) == (transferred ? 2U : 1U)
+                && (!transferred || retiring.reserved_pool_tokens.at(77) == other_goal),
+                "retirement releases every owned token once and preserves a reassigned token's new owner");
+            expect(retiring.reserved_pool.at(2) == 9, "new production does not release a pool reservation of its type");
+            expect(retiring.tasks.empty(), "retirement removes pending and completed build tasks");
+            const auto saved = resumed->save_tactical_native(identity, scripts.value());
+            expect(saved.has_value(), "retired goal leaves no orphan pool reservation in native state");
+            if (!saved) { std::cerr << saved.error().message << '\n'; continue; }
+            auto restored = make_engine();
+            expect(restored->restore_tactical_native(saved.value(), identity, scripts.value()).has_value(), "pool retirement state restores");
+            const auto roundtrip = restored->save_tactical_native(identity, scripts.value());
+            expect(roundtrip && roundtrip.value() == saved.value(), "pool retirement native bytes round-trip canonically");
+            auto& baseline = reference[{stage, abandoned}];
+            if (baseline.empty()) baseline = saved.value();
+            else expect(baseline == saved.value(), "pool retirement native bytes agree on 1/2/4/8 workers");
+        }
+}
+
 void active_tactical_desire() {
     for (const bool positive : {false, true}) for (const bool removable : {false, true})
         for (const bool proposals : {false, true}) {
@@ -2158,12 +3697,12 @@ void selection_team_starts() {
     expect(ai::EngineContractAccess::selection(singleton, player, potential, 12345),
         "PL-22: types with a single eligible team select both available objects");
     expect(potential.taskforce_of_unit == std::vector<std::size_t>{0, 1}
-        && ai::EngineContractAccess::selection_seed(singleton) == 12345,
+        && player.sync.seed() == 12345,
         "PL-22: distinct single-team types consume no synchronized draw");
     world.view->units.clear();
     ai::Engine empty(world.host, {}, {plan});
     expect(!ai::EngineContractAccess::selection(empty, player, potential, 12345)
-        && ai::EngineContractAccess::selection_seed(empty) == 12345,
+        && player.sync.seed() == 12345,
         "PL-22: a multi-team plan without proposals consumes no synchronized draw");
     world.view->units = {unit};
     world.view->units.front().id = 10;
@@ -2174,8 +3713,15 @@ void selection_team_starts() {
     expect(ai::EngineContractAccess::selection(independent, player, potential, 12345),
         "PL-22: types with multiple eligible teams select both available objects");
     expect(potential.taskforce_of_unit == std::vector<std::size_t>{0, 3}
-        && ai::EngineContractAccess::selection_seed(independent) == 0xa4451d33U,
+        && player.sync.seed() == 0xa4451d33U && ai::EngineContractAccess::engine_seed(independent) == 0,
         "PL-22: each type draws independently among its own teams before allocation");
+    plan.taskforces = {force(1), force(2)};
+    plan.ignore_target = true;
+    potential = {};
+    ai::Engine untargeted(world.host, {}, {plan});
+    expect(ai::EngineContractAccess::selection(untargeted, player, potential, 12345)
+        && player.sync.seed() != 12345 && ai::EngineContractAccess::engine_seed(untargeted) == 0,
+        "GFS-A24: ignore-target contrast weights advance only the selecting player's stream");
 }
 
 void station_barrier_expiry() {
@@ -2221,7 +3767,7 @@ void station_barrier_expiry() {
             world.host->snapshot = session.value().snapshot();
             world.host->view = foc::detail::build_view(session.value(), *world.host->snapshot, &executor);
             unsigned calls = 0;
-            const ai::Engine::ExecutionHook hook = [&](tactical::PlayerId player, std::uint64_t&) {
+            const ai::Engine::ExecutionHook hook = [&](tactical::PlayerId player, ai::Engine::ExecutionEffects&) {
                 ++calls;
                 expect(player == 1 && ai::EngineContractAccess::has_prepared_station_levels(engine),
                     "station expiry: real service retains prepared levels inside the barrier");
@@ -2694,7 +4240,7 @@ void production_lifecycle() {
         expect(pad_engine.build_option(1, 30, 1) != nullptr && pad_engine.build_option(1, 31, 1) == nullptr,
             "SAE-03: allied pad preserves buyer-faction menu exception");
         expect(pad_engine.producer(1, 30) == 1, "SAE-03: indexed allied pad is initially available");
-        ai::PlayerAi player; player.player = 1;
+        auto& player = ai::EngineContractAccess::add_player(pad_engine, 1);
         ai::EngineContractAccess::seed(pad_engine, player, scripts.value());
         expect(pad_engine.producer(1, 30) == 0, "SAE-03: a reservation made after indexing blocks the next ordered lookup");
         ai::EngineContractAccess::service(pad_engine, player, 1);
@@ -2727,6 +4273,8 @@ void production_lifecycle() {
             "SAE-03: pad outcome completes the production block with the correct result");
         expect(pad_engine.plan(1)->reserved_pads.empty() && player.reserved_credits.at(1) == Real{},
             "SAE-03: completed or failed pad task releases pad and credit reservations");
+        if (scenario == 4) expect(ai::EngineContractAccess::completed_pad_contrast(pad_engine, player),
+            "GS-22: real completed pad build remains valid after execution releases its reservation");
     }
 }
 
@@ -2951,7 +4499,7 @@ void spending_pad_refunds() {
         auto parsed = ai::EquationSet::parse({{"pad.xml", "<Root><Resource>Variable_Self.TacticalBuiltStructureCount{Parameter_Type=\"UC\"}</Resource></Root>"}}, converters);
         expect(static_cast<bool>(parsed), "WAS-10: refund fixture resource equation parses"); if (!parsed) continue;
         ai::AiData data; data.equations = std::move(parsed).value();
-        ai::Engine engine(host, std::move(data), {ai::PlanDef{}}); ai::PlayerAi player; player.player = 2;
+        ai::Engine engine(host, std::move(data), {ai::PlanDef{}}); auto& player = ai::EngineContractAccess::add_player(engine, 2);
         auth::SessionConfig callback_config; callback_config.tick_duration = {1, 30};
         auto callbacks = auth::ScriptScheduler::create(callback_config, auth::ModuleManifest{});
         expect(static_cast<bool>(callbacks), "WBP-47/48: execution callback scheduler starts"); if (!callbacks) continue;
@@ -2973,7 +4521,7 @@ void spending_pad_refunds() {
         expect(engine.evaluate("Resource", 2, nullptr) == ai::real(1), "WAS-10: pad reservation enables the resource gate");
         if (scenario == 3 || scenario == 4) {
             host->engine = &engine;
-            auto& installed = ai::EngineContractAccess::direct_pad_fixture(engine, 30, 1); installed = player;
+            auto& installed = ai::EngineContractAccess::direct_pad_fixture(engine, 30, 1);
             auth::ModuleManifest manifest;
             expect(manifest.add("PAD.LUA", "refused = 0\nfunction Default_No_Units_Remaining(tf) refused = refused + 1 end\n"
                 "function Request(tf,pad) tf.Build(\"UC\",pad) rest = tf.Build_All() end\n")
@@ -3032,7 +4580,7 @@ void spending_pad_refunds() {
             const auto rest = scripts.value().read_global(1, "rest");
             expect(rest && rest.value() && engine.block(std::get<auth::Handle>(rest.value()->data).id)->finished,
                 "WBP-47: Build_All with no remaining allocation returns a completed block");
-            player = installed; ai::EngineContractAccess::return_orders(engine, report.value());
+            ai::EngineContractAccess::return_orders(engine, report.value());
             ai::EngineContractAccess::bind_scripts(engine, callbacks.value(), sequence);
         } else {
             ai::EngineContractAccess::purchase(engine, player, goal, 30, 1);
@@ -3144,7 +4692,7 @@ void spending_wallet_reservations() {
             }
             expect(world.step(executor).has_value(), "WAS-25/26: accounting command commits"); refresh();
         };
-        ai::PlayerAi player; player.player = 2;
+        auto& player = ai::EngineContractAccess::add_player(engine, 2);
         ai::Goal goal; goal.id = 1; goal.potential = ai::PotentialPlan{}; goal.potential->valid = true; goal.potential->cost = ai::real(300);
         ai::Goal competing = goal; competing.id = 2; competing.potential->cost = ai::real(100);
         wallet(1000);
@@ -3370,7 +4918,7 @@ void completed_purchases_are_available() {
     auto scripts = auth::ScriptScheduler::create(std::move(config), auth::ModuleManifest{});
     expect(static_cast<bool>(scripts), "SAE-03: shared production scheduler starts");
     if (!scripts) return;
-    ai::PlayerAi player; player.player = 1;
+    auto& player = ai::EngineContractAccess::add_player(engine, 1);
     ai::EngineContractAccess::seed_purchases(engine, player, scripts.value());
     ai::EngineContractAccess::service(engine, player, 1);
     expect(ai::EngineContractAccess::orders(engine) == 2, "SAE-03: both build tasks issue purchases");
@@ -3759,8 +5307,7 @@ void reinforcement_gravity_well() {
             host->snapshot = world.snapshot();
             host->view = foc::detail::build_view(world, *host->snapshot);
             ai::Engine engine(host, {}, {});
-            ai::PlayerAi player;
-            player.player = 1;
+            auto& player = ai::EngineContractAccess::add_player(engine, 1);
             ai::EngineContractAccess::seed_reinforcements(engine, player, 1, true);
             ai::EngineContractAccess::reinforce_at(engine, requested);
             const auto block_token = ai::block_id(ai::first_plan_instance + 1, 17);
@@ -4318,6 +5865,8 @@ void shared_view_formation_join() {
         expect(duplicate && duplicate->squadron == 10 && duplicate->formation_target == 0 && duplicate->formation_moving,
             "formation join: duplicate member keeps the first container instead of its attacking neighbour");
         const auto* damaged = view->find(11);
+        expect(view->find(10)->can_move && !view->find(11)->can_move && !view->find(1000)->can_move,
+            "EX-57: admitted formation containers move independently, their craft and stationary types do not");
         expect(damaged && damaged->hull == q(75) && damaged->max_hull == q(100)
             && damaged->health == ai::real(3) / ai::real(4),
             "formation join: non-default durability row survives the independent snapshot identity join");
@@ -4635,6 +6184,424 @@ end
     expect(std::none_of(notes.begin(), notes.end(), [](const auto& note) {
         return note.starts_with("ai_plan_expansiongeneric_generatemagiccashdrop:");
     }), "L-03a: the cash plan has no module-resolution diagnostic");
+    const std::set<std::string> unrelated{"ANOTHER_SPACE_GOAL"};
+    notes.clear();
+    const auto filtered = foc::tactical_ai_detail::load_plans(world.host, modules, notes, &unrelated);
+    expect(filtered && filtered.value().empty() && notes.size() == 1
+        && notes.front() == "AI selected space plan definitions loaded=0, outside selection=1",
+        "AI-16: unselected definition categories are counted before force validation");
+}
+
+void mounted_ai_discovery() {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() / ("eawr-ai-discovery-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{root};
+    const auto write = [&](const std::string& layer, const std::string& path, const std::string& text) {
+        const auto file = root / layer / path;
+        fs::create_directories(file.parent_path());
+        std::ofstream out(file, std::ios::binary); out << text;
+        if (!out) throw std::runtime_error("cannot write AI discovery fixture");
+    };
+    write("parent", "xml/ai/players/controller.xml", "<AIPlayerType><Name>Parent</Name></AIPlayerType>");
+    write("leaf", "xml/ai/players/controller.xml", R"XML(<AIPlayerType><Name>Custom</Name>
+        <SpaceFreeStoreScript>CustomFree</SpaceFreeStoreScript><GoalSetExtensionSize>7</GoalSetExtensionSize>
+        <GoalProposalFunctionSets>CustomSet</GoalProposalFunctionSets>
+        <Templates><Space>CustomTemplate</Space></Templates></AIPlayerType>)XML");
+    write("parent", "xml/ai/players/another.xml", R"XML(<AIPlayerType><Name>Other</Name>
+        <SpaceFreeStoreScript>OtherFree</SpaceFreeStoreScript></AIPlayerType>)XML");
+    write("leaf", "xml/ai/templates/custom.xml", "<AITemplates><CustomTemplate><Budget><Offensive>Score</Offensive></Budget></CustomTemplate></AITemplates>");
+    write("leaf", "xml/ai/goalfunctions/customset.xml", "<GoalFunctions><Entry><Goal>CustomGoal</Goal><Function>Score</Function></Entry></GoalFunctions>");
+    write("leaf", "xml/ai/goals/custom.xml", "<Goals><CustomGoal><GameMode>Space</GameMode><Category>Offensive</Category></CustomGoal></Goals>");
+    write("leaf", "xml/ai/perceptualequations/custom.xml", "<Equations><Score>1</Score></Equations>");
+    write("leaf", "xml/difficultyadjustments.xml", "<Root/>");
+    write("leaf", "xml/gameconstants.xml", "<Root/>");
+    write("leaf", "xml/enum/aigoalcategorytype.xml", "<EnumDefinition><Offensive>1</Offensive></EnumDefinition>");
+    for (const auto name : {"PGCommands", "PGBaseDefinitions", "PGBase", "PGDebug", "PGEvents", "PGTaskForce"})
+        write("leaf", std::string("scripts/library/") + name + ".lua", "");
+    write("leaf", "scripts/library/PGAICommands.lua", "function Base_Definitions() EnemyContrastTypes = {} FriendlyContrastTypes = {} end");
+    write("leaf", "scripts/freestore/CustomFree.lua", "require('LeafHelper')\nrequire('Build-Evaluation/Nested')\nselected = leaf_value + parent_value\n");
+    write("parent", "scripts/freestore/OtherFree.lua", "selected = 99\n");
+    write("parent", "scripts/library/LeafHelper.lua", "error('shadowed module must not execute')");
+    write("leaf", "scripts/library/LeafHelper.lua", "require('ParentHelper') leaf_value = 7");
+    write("parent", "scripts/library/ParentHelper.lua", "parent_value = 11");
+    write("leaf", "scripts/ai/spacemode/Build-Evaluation/Nested.lua", "nested_value = 19");
+    write("leaf", "scripts/ai/spacemode/customplan.lua", R"LUA(function Base_Definitions()
+        Category = 'CustomGoal'; TaskForce = {{'CustomForce', 'MinimumTotalSize = 0'}}
+        MagicPlan = true
+    end)LUA");
+    const std::array mounts{eawr::vfs::MountSpec{"leaf", root / "leaf", "data", {}}, eawr::vfs::MountSpec{"parent", root / "parent", "data", {}}};
+    auto files = eawr::vfs::Vfs::mount(mounts);
+    expect(files.has_value(), "AI-16: layered AI fixture mounts");
+    if (!files) return;
+    foc::AiSetup setup;
+    setup.players = {{1, "FIRST", false, true, "Custom"}, {2, "SECOND", false, true, "Other"}};
+    expect(eawr::skirmish::enable_goal_system(files.value(), setup).has_value(), "AI-16: mounted AI directories load");
+    const auto data = ai::load_ai_data(setup.xml, {});
+    expect(data && data.value().players.contains("CUSTOM") && data.value().players.contains("OTHER")
+        && !data.value().players.contains("PARENT") && data.value().templates.contains("CUSTOMTEMPLATE")
+        && data.value().function_sets.contains("CUSTOMSET") && data.value().goals.contains("CUSTOMGOAL")
+        && data.value().equations.find("Score"), "AI-16: VFS winner and every authored AI category enter the parser");
+    expect(data && data.value().players.at("CUSTOM").goal_set_extension == 7
+        && data.value().players.at("OTHER").goal_set_extension == 2,
+        "GS-30: authored goal extension overrides the omitted-tag engine default");
+    expect(foc::freestore_module(setup, setup.players[0]) == "Data/Scripts/FreeStore/CustomFree.lua"
+        && foc::freestore_module(setup, setup.players[1]) == "Data/Scripts/FreeStore/OtherFree.lua",
+        "AI-16: each controller selects its own authored freestore");
+    auto modules = eawr::skirmish::ai_modules(files.value(), setup, true);
+    expect(modules.has_value(), "ML-34: selected roots and mounted dependencies enter the bounded manifest");
+    if (!modules) return;
+    const auto plans = foc::selected_plans(modules.value());
+    expect(plans == std::vector<std::string>{"data/scripts/ai/spacemode/customplan.lua"},
+        "PL-02: a new plan is discovered while a nested helper stays a dependency");
+    auto selected = eawr::skirmish::select_ai_modules(modules.value(), setup, true);
+    expect(selected && selected.value() == modules.value(), "ML-34: cached sessions preserve the frozen dependency inventory");
+    auto aliases = modules.value();
+    aliases["DATA/SCRIPTS/LIBRARY/LEAFHELPER.LUA"] = aliases.at("data/scripts/library/leafhelper.lua");
+    const auto same_bytes = eawr::skirmish::select_ai_modules(aliases, setup, true);
+    expect(same_bytes && same_bytes.value().size() == modules.value().size(),
+        "ML-34: cached optional-root additions collapse identical logical aliases");
+    aliases["DATA/SCRIPTS/LIBRARY/LEAFHELPER.LUA"] = "error('conflicting bytes')";
+    expect(!eawr::skirmish::select_ai_modules(aliases, setup, true),
+        "ML-34: conflicting cached aliases are rejected instead of overriding the mounted winner");
+    auto prepared = foc::prepare_session(setup, modules.value());
+    expect(prepared.has_value(), "ML-34: new library and space-directory dependencies execute through production setup");
+    if (prepared) {
+        const auto first = prepared.value().scripts.read_global(foc::freestore_instance(1), "selected");
+        const auto second = prepared.value().scripts.read_global(foc::freestore_instance(2), "selected");
+        const auto nested = prepared.value().scripts.read_global(foc::freestore_instance(1), "nested_value");
+        expect(first && first.value() && std::get<Real>(first.value()->data) == ai::real(18)
+            && second && second.value() && std::get<Real>(second.value()->data) == ai::real(99)
+            && nested && nested.value() && std::get<Real>(nested.value()->data) == ai::real(19),
+            "AI-16 / ML-34: isolated freestores use leaf, parent and space-directory modules");
+    }
+    write("leaf", "scripts/library/ParentHelper.lua", "this is invalid lua !");
+    auto invalid = eawr::vfs::Vfs::mount(mounts);
+    auto invalid_modules = invalid ? eawr::skirmish::ai_modules(invalid.value(), setup) : decltype(modules)::failure(invalid.error());
+    expect(invalid_modules && !foc::prepare_session(setup, invalid_modules.value()),
+        "L-03a: a syntax error in the VFS winner cannot fall through to a valid parent");
+}
+
+void authored_goal_extension() {
+    for (const auto extension : {0, 2, 7}) {
+        World world;
+        ai::Engine engine(world.host, {}, {});
+        ai::PlayerType controller; controller.goal_set_extension = extension;
+        ai::PlayerAi player; player.player = 2; player.type = &controller;
+        ai::GoalType kind; kind.category = "HIGH"; kind.application = {"GLOBAL"};
+        for (std::size_t index = 0; index < 8; ++index) {
+            const auto name = "GOAL_" + std::to_string(index);
+            player.functions.push_back({&kind, name, nullptr, {}});
+            ai::Goal goal; goal.id = index + 1; goal.function = index; goal.desire = ai::real(1);
+            player.proposed.push_back(goal);
+        }
+        ai::EngineContractAccess::maintain(engine, player);
+        expect(player.active.size() == static_cast<std::size_t>(extension),
+            "GS-30: actual proposal culling and retention honor the authored extension");
+    }
+}
+
+void unit_concentration() {
+    const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    const foc::AiBounds bounds{ai::real(-1000), ai::real(1000), ai::real(1000), ai::real(-1000)};
+    const ai::Rect all{ai::real(-1000), ai::real(-1000), ai::real(2000), ai::real(2000)};
+    std::vector<Real> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        World world;
+        world.host->setup.content.types.front().weapons = {{0, ai::real(500), ai::real(500), true, true},
+            {1, ai::real(500), ai::real(500), true, true}};
+        auto small = world.host->setup.content.types.front(); small.type_id = 2; small.name = "SMALL";
+        small.combat_power = ai::real(500); small.weapons.clear();
+        world.host->setup.content.types.push_back(small);
+        world.host->types.clear(); world.host->types_by_name.clear();
+        for (const auto& type : world.host->setup.content.types) {
+            world.host->types.emplace(type.type_id, &type); world.host->types_by_name.emplace(type.name, &type);
+        }
+        auto friendly = world.view->units.front(); friendly.id = 20; friendly.type = 2; friendly.owner = 1;
+        friendly.position = {q(600), q(600), {}}; friendly.health = ai::real(1) / ai::real(2);
+        world.view->units.push_back(friendly);
+        const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+        auto equations = ai::EquationSet::parse({{"concentration.xml", R"xml(<Root>
+          <FriendlyRaw>Variable_Target.FriendlyUnitConcentrationUnnormalized</FriendlyRaw>
+          <EnemyRaw>Variable_Target.EnemyUnitConcentrationUnnormalized</EnemyRaw>
+          <Friendly>Variable_Target.FriendlyUnitConcentration</Friendly>
+          <Enemy>Variable_Target.EnemyUnitConcentration</Enemy>
+          <FriendlyNbtd>Variable_Target.FriendlyUnitConcentrationNBTD</FriendlyNbtd>
+          <EnemyNbtd>Variable_Target.EnemyUnitConcentrationNBTD</EnemyNbtd>
+          <Attenuated>Variable_Target.FriendlyUnitConcentration {Parameter_Attenuator=1}</Attenuated>
+          <ObjectLocation>Variable_Target.Location.EnemyUnitConcentrationUnnormalized</ObjectLocation>
+        </Root>)xml"}}, converters);
+        expect(equations.has_value(), "PE-28: concentration token equations parse"); if (!equations) return;
+        ai::AiData data; data.equations = std::move(equations).value();
+        ai::Engine engine(world.host, std::move(data), {});
+        auto& grid = ai::EngineContractAccess::grid(engine);
+        grid.partition(bounds, 5, 5, ai::Constants{}); grid.service(*world.view, *world.host, 0);
+        ai::Target region; region.region = all;
+        const auto values = [&] {
+            std::vector<Real> result;
+            for (const auto* name : {"FriendlyRaw", "EnemyRaw", "Friendly", "Enemy", "FriendlyNbtd", "EnemyNbtd", "Attenuated"}) {
+                const auto value = engine.evaluate(name, 1, &region);
+                expect(value.has_value(), "PE-28: selected concentration token is hosted");
+                result.push_back(value.value_or(Real{}));
+            }
+            return result;
+        };
+        const auto cold = values();
+        expect(cold == std::vector<Real>{ai::real(500), ai::real(2000), ai::real(1) / ai::real(3), ai::real(1),
+            ai::real(1), ai::real(1), ai::real(2) / ai::real(5)},
+            "PG-09/PE-28: full company power per base entry; game/side normalizers clamp, and only the denominator attenuates");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        {
+            const auto preparation = grid.prepare(&executor, *world.host, *world.view);
+            expect(values() == cold, "PE-28: cold prepared queries match the const Lua path");
+            grid.prepare_contributions();
+            expect(values() == cold, "PE-28: warmed force normalizers preserve concentration answers");
+        }
+        if (reference.empty()) reference = cold;
+        else expect(reference == cold, "PE-28: all token bits agree across 1/2/4/8 workers");
+        const ai::Rect spread_only{ai::real(400), ai::real(-100), ai::real(100), ai::real(100)};
+        expect(grid.concentration(*world.host, *world.view, spread_only, 2, 1, false) == Real{}
+            && grid.force(*world.host, *world.view, spread_only, 2, 1, false, Real{}, 0) > Real{},
+            "PG-09: spread threat cells do not also count as the entry's base cell");
+        const ai::Rect base_cell{ai::real(200), ai::real(-400), ai::real(10), ai::real(10)};
+        expect(grid.concentration(*world.host, *world.view, base_cell, 2, 1, false) == ai::real(2000),
+            "PG-09: base-cell coordinates round after adding one half, rather than truncate the object position");
+        expect(grid.concentration(*world.host, *world.view, all, 1, 1, false) == Real{}, "PG-09: category mask filters entries");
+        ai::Target object; object.object = 10;
+        expect(engine.evaluate("ObjectLocation", 1, &object) == ai::real(2000), "PE-28: an object-location concentration includes the object itself");
+        world.host->setup.players.push_back(foc::AiPlayer{3, "ALLY", false, true, ""});
+        world.host->setup.players.push_back(foc::AiPlayer{4, "NEUTRAL", true, false, ""});
+        world.host->players.clear();
+        for (const auto& player : world.host->setup.players) world.host->players.emplace(player.player, &player);
+        world.view->players.push_back({3, 1, 2}); world.view->players.push_back({4, 4, 3});
+        friendly.id = 21; friendly.owner = 3; world.view->units.push_back(friendly);
+        friendly.id = 22; friendly.owner = 4; world.view->units.push_back(friendly);
+        grid.service(*world.view, *world.host, 1);
+        expect(grid.concentration(*world.host, *world.view, all, 2, 1, true) == ai::real(1000)
+            && grid.concentration(*world.host, *world.view, all, 2, 1, false) == ai::real(2000), "PG-09: allies count, neutral owners do not");
+        world.view->units.front().position.x = q(400); grid.service(*world.view, *world.host, 2);
+        expect(grid.concentration(*world.host, *world.view, base_cell, 2, 1, false) == ai::real(2000), "PG-09: base cell retains the existing grid service cadence");
+        grid.service(*world.view, *world.host, 300);
+        expect(grid.concentration(*world.host, *world.view, base_cell, 2, 1, false) == Real{}, "PG-09: due movement refresh moves concentration to its new base cell");
+        for (auto& weapon : world.host->setup.content.types.front().weapons) weapon.range = ai::real(2000);
+        auto edge_constants = ai::Constants{}; edge_constants.threat_range_cap = ai::real(2000);
+        world.view->units.front().position = {q(999), {}, {}};
+        grid.partition(bounds, 5, 5, edge_constants); grid.service(*world.view, *world.host, 0);
+        const ai::Rect wrapped_cell{ai::real(-1000), ai::real(-1000), ai::real(10), ai::real(10)};
+        const ai::Rect right_cell{ai::real(990), ai::real(-10), ai::real(10), ai::real(10)};
+        expect(grid.concentration(*world.host, *world.view, wrapped_cell, 2, 1, false) == ai::real(2000)
+            && grid.concentration(*world.host, *world.view, right_cell, 2, 1, false) == Real{},
+            "PG-09: the retail right-edge rounded coordinate wraps into the next row when its zone covers that cell");
+        world.view->units.front().position = {{}, q(-999), {}};
+        grid.partition(bounds, 5, 5, edge_constants); grid.service(*world.view, *world.host, 0);
+        expect(grid.concentration(*world.host, *world.view, all, 2, 1, false) == Real{},
+            "PG-09: bottom-edge flattened overflow is safely unmatched, never used as a memory index");
+    }
+}
+
+void coroutine_module_loading() {
+    auth::ModuleManifest modules;
+    expect(modules.add("Root.lua", R"LUA(
+        function Lazy()
+            local outer = require('Outer')
+            value = outer.answer
+            cached = require('Outer') == outer
+            restored_name = _REQUIREDNAME == nil
+            coroutine.yield(true)
+            local ok, message = pcall(require, 'Broken')
+            syntax_failed = not ok and string.find(message, 'BROKEN.LUA') ~= nil
+            ok, message = pcall(require, 'RuntimeBad')
+            runtime_failed = not ok and string.find(message, 'lazy sentinel') ~= nil
+            continued = true
+        end
+    )LUA").has_value(), "L-03a: lazy coroutine root enters manifest");
+    expect(modules.add("Outer.lua", "local inner = require('Inner'); outer_name = _REQUIREDNAME == 'Outer'; return {answer = inner.value + 1}").has_value()
+        && modules.add("Inner.lua", "inner_name = _REQUIREDNAME == 'Inner'; inner_runs = (inner_runs or 0) + 1; return {value = 41}").has_value()
+        && modules.add("Broken.lua", "local = broken").has_value()
+        && modules.add("RuntimeBad.lua", "error('lazy sentinel')").has_value(), "L-03a: nested and failing lazy modules enter manifest");
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto made = auth::ScriptScheduler::create({}, modules);
+        expect(made.has_value(), "L-03a: lazy module scheduler creates"); if (!made) return;
+        auto scripts = std::move(made).value();
+        expect(scripts.create_instance(1, "Root.lua").has_value(), "L-03a: lazy root loads without loading its dependencies");
+        auth::ScriptEvent start; start.key = {1, foc::producer_foc_engine, 1, 0}; start.target = 1;
+        start.kind = auth::ScriptEvent::Kind::start_thread; start.name = "Lazy";
+        expect(scripts.submit_event(start).has_value(), "L-03a: lazy coroutine starts");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto first = scripts.service(executor);
+        expect(first && first.value().diagnostics.empty(), "L-03a: first coroutine require uses its own stack and yields");
+        const auto saved = scripts.save(executor);
+        auto restored = auth::ScriptScheduler::create({}, modules);
+        expect(saved && restored && restored.value().load(saved.value()).has_value(), "L-03a: loaded modules and suspended coroutine restore");
+        if (!saved || !restored) return;
+        auto direct = scripts.service(executor);
+        auto resumed = restored.value().service(executor);
+        expect(direct && resumed && direct.value().diagnostics.empty() && resumed.value().diagnostics.empty(),
+            "L-03a: syntax and runtime require failures reach pcall on the calling coroutine");
+        for (const auto* name : {"cached", "restored_name", "outer_name", "inner_name", "syntax_failed", "runtime_failed", "continued"}) {
+            const auto value = scripts.read_global(1, name);
+            expect(value && value.value() && std::get<bool>(value.value()->data), "L-03a: nested names, cache and failure controls succeed");
+        }
+        for (const auto& [name, expected] : {std::pair{"value", 42}, {"inner_runs", 1}}) {
+            const auto value = scripts.read_global(1, name);
+            expect(value && value.value() && std::get<Real>(value.value()->data) == ai::real(expected),
+                "L-03a: coroutine receives the returned table and executes a cached dependency once");
+        }
+        const auto digest = scripts.state_hash(executor), resumed_digest = restored.value().state_hash(executor);
+        expect(digest && resumed_digest && digest.value() == resumed_digest.value(), "L-03a: resumed lazy module graph has the uninterrupted bit identity");
+        if (!digest) return;
+        if (reference.empty()) reference = digest.value();
+        else expect(reference == digest.value(), "L-03a: lazy module digest agrees across 1/2/4/8 workers");
+    }
+}
+
+void movement_query_projection() {
+    namespace t = eawr::sim::tactical;
+    const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    t::TacticalSetup start;
+    start.players = {{1, 1, 100, t::player_flag_commandable}};
+    start.units = {{1, 100, 1}, {2, 101, 1}};
+    t::MotionTable motion;
+    motion.rules = {q(30), q(100)};
+    motion.profiles = {{100, q(1), q(1), q(1), q(1), q(1)}};
+    t::AbilityProfile shield;
+    shield.kind = t::AbilityKind::missile_shield; shield.disable_movement = true; shield.effective_radius = q(750);
+    auto made = t::TacticalSession::create(start, {}, {}, motion, std::nullopt, {}, {},
+        t::AbilityTable{{{100, {shield}}}, {1}});
+    expect(made.has_value(), "EX-57: mobile ship and stationary type fixture creates");
+    if (!made) { std::cerr << made.error().message << '\n'; return; }
+    auto& world = made.value();
+    const eawr::sim::InlineExecutor executor;
+    for (std::uint64_t tick = 0; tick < 3; ++tick) {
+        if (tick != 0) expect(world.submit({{tick - 1, 1, tick}, {1}, t::AbilityPayload{
+            t::AbilityKind::missile_shield, tick == 1 ? t::AbilityAction::activate : t::AbilityAction::deactivate}}).has_value(),
+            "EX-57: deployment toggle submits");
+        if (tick != 0) expect(world.step(executor).has_value(), "EX-57: deployment toggle commits");
+        const auto view = foc::detail::build_view(world, *world.snapshot());
+        expect(view->find(1)->can_move == (tick != 1) && !view->find(2)->can_move,
+            "EX-57: native ship admission respects active deployment and release while stationary type stays excluded");
+    }
+}
+
+void mod_ai_calls() {
+    World world;
+    world.view->players.push_back({3, 2, 2});
+    world.host->setup.players.push_back(foc::AiPlayer{3, "ALLY", false, true, ""});
+    world.host->players.clear();
+    for (const auto& player : world.host->setup.players) world.host->players.emplace(player.player, &player);
+    world.host->setup.content.types.front().combat_power = ai::real(16777216);
+    world.host->setup.content.types.front().property_bits = 2;
+    world.host->setup.content.properties = {{"FIRST", 1}, {"SECOND", 2}};
+    auto small = world.host->setup.content.types.front(); small.type_id = 2; small.name = "SMALL"; small.combat_power = ai::real(1);
+    world.host->setup.content.types.push_back(small);
+    world.host->types.clear(); world.host->types_by_name.clear();
+    for (const auto& type : world.host->setup.content.types) {
+        world.host->types.emplace(type.type_id, &type); world.host->types_by_name.emplace(type.name, &type);
+    }
+    auto extra = world.view->units.front(); extra.id = 11; extra.type = 2;
+    world.view->units.push_back(extra); extra.id = 12; world.view->units.push_back(extra);
+    extra.id = 13; extra.owner = 1; world.view->units.push_back(extra);
+    ai::Engine engine(world.host, {}, {});
+    ai::EngineContractAccess::proposal_fixture(engine); world.host->engine = &engine;
+    auth::ModuleManifest manifest;
+    expect(manifest.add("CALLS.LUA", R"LUA(
+        function Block(tf) tf.Block_Goal_Proposal() end
+        function Unblock(tf) tf.Unblock_Goal_Proposal() end
+        function SkippedOverride(object)
+            skipped_no_result = object.Set_Targeting_Priorities('Custom_Set') == nil
+            continued = true
+        end
+        function SkippedMethods(tf, object)
+            skipped_tf_priorities = tf.Set_Targeting_Priorities('Custom_Set') == nil
+            skipped_tf_lock = tf.Lock_Current_Orders(true) == nil
+            skipped_object_lock = object.Lock_Current_Orders(true) == nil
+            methods_continued = true
+        end
+        function Query(tf, object)
+            threat = tf.Get_Self_Threat_Sum()
+            online = object.Are_Engines_Online()
+            mobile = object.Can_Move()
+            ally_self = object.Get_Owner().Is_Ally(object.Get_Owner())
+            ally_team = object.Get_Owner().Is_Ally(Find_Player('ALLY'))
+            ally_enemy = object.Get_Owner().Is_Ally(Find_Player('REBEL'))
+            own_count = table.getn(Find_All_Objects_Of_Type(object.Get_Owner(), 'CORVETTE'))
+            total_count = table.getn(Find_All_Objects_Of_Type('CORVETTE'))
+            category_union = object.Is_Category('Fighter | Corvette')
+            category_absent = object.Is_Category('Fighter')
+            property_union = object.Has_Property('First | Second')
+        end
+    )LUA").has_value(), "EX-53/54/55: call fixture enters manifest");
+    auto scripts = auth::ScriptScheduler::create({}, std::move(manifest));
+    expect(scripts.has_value(), "EX-53/54/55: call scheduler starts"); if (!scripts) return;
+    std::vector<eawr::core::Diagnostic> errors;
+    foc::tactical_ai_detail::register_globals(scripts.value(), world.host, errors);
+    foc::tactical_ai_detail::register_methods(scripts.value(), world.host, errors);
+    expect(errors.empty(), "EX-53/54/55: production Lua methods register");
+    expect(scripts.value().create_instance(1, "CALLS.LUA").has_value()
+        && scripts.value().create_instance(2, "CALLS.LUA").has_value(), "EX-55: two independent plan callers");
+    const eawr::sim::InlineExecutor executor;
+    std::uint64_t sequence{};
+    const auto invoke = [&](std::uint64_t instance, const std::string& name, auth::ValueList arguments, std::size_t diagnostics = 0) {
+        auth::ScriptEvent event; event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, instance, sequence++};
+        event.target = instance; event.kind = auth::ScriptEvent::Kind::call; event.name = name; event.arguments = std::move(arguments);
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "EX-55: call event queues");
+        auto report = scripts.value().service(executor);
+        expect(report && report.value().diagnostics.size() == diagnostics, "EX-53/54/55: sourced calls report the expected diagnostics");
+        if (report && diagnostics != 0)
+            expect(std::all_of(report.value().diagnostics.begin(), report.value().diagnostics.end(),
+                [](const auto& diagnostic) { return diagnostic.code == auth::codes::unsupported_api; }),
+                "EX-59: every skipped override or order lock is explicitly unsupported");
+        if (report) expect(engine.after_service(report.value()).has_value(), "EX-55: ordered proposal effect commits");
+    };
+    const auto force = [](std::uint64_t id) { return auth::Value{auth::Handle{ai::handle_taskforce, id}}; };
+    invoke(1, "Block", {force(1)}); invoke(1, "Block", {force(1)}); invoke(2, "Block", {force(2)});
+    expect(ai::EngineContractAccess::player(engine, 2)->proposal_blocks == 3, "EX-55: repeated and independent holders are counted");
+    invoke(1, "Unblock", {force(1)});
+    const auto* player = ai::EngineContractAccess::player(engine, 2);
+    expect(player->proposal_blocks == 1 && player->proposal_blockers == std::map<std::uint64_t, std::uint32_t>{{2, 1}},
+        "EX-55: unblock removes all of the caller's holders and retains another goal's holder");
+    invoke(1, "Unblock", {force(1)});
+    expect(player->proposal_blocks == 1, "EX-55: repeated unblock cannot release another goal or underflow");
+    invoke(2, "Unblock", {force(2)});
+    expect(player->proposal_blocks == 0 && player->proposal_blockers.empty(), "EX-55: final owner releases proposals");
+    world.view->units.front().engines_online = false;
+    world.view->units.front().can_move = true;
+    invoke(1, "Query", {force(1), auth::Value{auth::Handle{foc::handle_game_object, 10}}});
+    const auto threat = scripts.value().read_global(1, "threat");
+    const auto online = scripts.value().read_global(1, "online");
+    const auto own = scripts.value().read_global(1, "own_count");
+    const auto total = scripts.value().read_global(1, "total_count");
+    const auto category_union = scripts.value().read_global(1, "category_union");
+    const auto category_absent = scripts.value().read_global(1, "category_absent");
+    const auto property_union = scripts.value().read_global(1, "property_union");
+    expect(threat && threat.value() && std::get<Real>(threat.value()->data) == ai::real(16777216),
+        "EX-54: threat sum rounds after every member, rather than once after an exact sum");
+    expect(online && online.value() && !std::get<bool>(online.value()->data), "EX-53: disabled engines report false independently of combat power");
+    for (const auto& [name, expected] : {std::pair{"mobile", true}, {"ally_self", true}, {"ally_team", true}, {"ally_enemy", false}}) {
+        const auto value = scripts.value().read_global(1, name);
+        expect(value && value.value() && std::get<bool>(value.value()->data) == expected,
+            "EX-57/58: completed movement eligibility and player alliances retain independent meanings");
+    }
+    expect(own && own.value() && std::get<Real>(own.value()->data) == ai::real(3)
+        && total && total.value() && std::get<Real>(total.value()->data) == ai::real(4),
+        "AI-16: player-first object lookup preserves ownership and category matching");
+    expect(category_union && category_union.value() && std::get<bool>(category_union.value()->data)
+        && category_absent && category_absent.value() && !std::get<bool>(category_absent.value()->data)
+        && property_union && property_union.value() && std::get<bool>(property_union.value()->data),
+        "EX-56: authored category and property unions test any matching bit");
+    invoke(1, "SkippedOverride", {auth::Value{auth::Handle{foc::handle_game_object, 10}}}, 1);
+    for (const auto* name : {"continued", "skipped_no_result"}) {
+        const auto value = scripts.value().read_global(1, name);
+        expect(value && value.value() && std::get<bool>(value.value()->data),
+            "EX-59: counted unsupported setter returns no result and allows the caller to continue");
+    }
+    invoke(1, "SkippedMethods", {force(1), auth::Value{auth::Handle{foc::handle_game_object, 10}}}, 3);
+    for (const auto* name : {"skipped_tf_priorities", "skipped_tf_lock", "skipped_object_lock", "methods_continued"}) {
+        const auto value = scripts.value().read_global(1, name);
+        expect(value && value.value() && std::get_if<bool>(&value.value()->data) && std::get<bool>(value.value()->data),
+            "EX-59: TaskForce targeting and object/TaskForce locks diagnose each skip, return no result and continue");
+    }
 }
 
 void taskforce_definitions() {
@@ -4720,6 +6687,66 @@ void named_team_authored_order() {
     const ai::TaskForceDef& tf = plan.value().taskforces.front();
     expect(tf.teams.size() == 1 && tf.teams.front().types == std::vector<eawr::sim::tactical::TypeId>{9, 7, 5},
         "PL-20: a named type list keeps the authored order, not the id order");
+}
+
+// PL-20 (#3717): a category team lists the type table in load order, filtered; ids (name hashes)
+// decide nothing. The engine reads content.types as the table; ai_setup builds it from the tables'
+// table_order, so a type-id sort of either reverses the list here.
+void category_team_table_order() {
+    World world;
+    world.host->setup.content.types.clear();
+    world.host->setup.content.categories = {{"FIGHTER", 1}, {"CORVETTE", 2}};
+    // Ids ascend against the table (the first listed type has the highest id).
+    const std::vector<std::pair<eawr::sim::tactical::TypeId, const char*>> table{{90, "UC_FIRST"}, {70, "UC_SECOND"}, {50, "UC_OTHER"}, {30, "UC_THIRD"}};
+    for (const auto& [id, name] : table) {
+        foc::AiType type;
+        type.type_id = id;
+        type.name = name;
+        type.category_bits = std::string_view(name) == "UC_OTHER" ? 2 : 1;
+        world.host->setup.content.types.push_back(type);
+    }
+    world.host->types.clear();
+    world.host->types_by_name.clear();
+    for (const foc::AiType& entry : world.host->setup.content.types) {
+        world.host->types.emplace(entry.type_id, &entry);
+        world.host->types_by_name.emplace(entry.name, &entry);
+    }
+    auth::ValueList globals;
+    globals.push_back(auth::Value::text("Hide"));
+    std::vector<auth::Value> taskforce{auth::Value::text("MainForce"), auth::Value::text("Fighter = 1, 2")};
+    std::vector<auth::Value> list{auth::Value{taskforce}};
+    globals.push_back(auth::Value{list});
+    for (int index = 0; index < 8; ++index) globals.push_back(auth::Value{});
+    std::vector<std::string> notes;
+    auto plan = ai::build_plan(*world.host, "category", "category.lua", globals, notes);
+    expect(static_cast<bool>(plan), "PL-20: the category plan builds");
+    if (!plan) return;
+    expect(plan.value().taskforces.front().teams.front().types == std::vector<eawr::sim::tactical::TypeId>{90, 70, 30},
+        "PL-20: a category team keeps the type-table order, not the id order");
+
+    // ai_setup: the table order of the loaded tables decides content.types, whatever the ids are.
+    const std::vector<std::string> names{"Uc_Alpha", "Uc_Bravo", "Uc_Charlie", "Uc_Delta", "Uc_Echo"};
+    std::vector<std::string> by_id = names;
+    std::sort(by_id.begin(), by_id.end(), [](const auto& a, const auto& b) { return skirmish::type_id(a) < skirmish::type_id(b); });
+    eawr::units::UnitTables tables;
+    std::uint64_t order = 100;
+    for (auto name = by_id.rbegin(); name != by_id.rend(); ++name) { // table order = descending id
+        eawr::units::UnitType unit;
+        unit.id = *name;
+        unit.table_order = order++;
+        tables.units.push_back(std::move(unit));
+    }
+    std::reverse(tables.units.begin(), tables.units.end()); // roster order must not matter either
+    const auto setup = skirmish::ai_setup(skirmish::SkirmishStart{}, skirmish::StartInputs{}, tables);
+    std::vector<std::string> listed;
+    for (const auto& type : setup.content.types) listed.push_back(type.name);
+    std::vector<std::string> expected;
+    for (auto name = by_id.rbegin(); name != by_id.rend(); ++name) {
+        std::string upper = *name;
+        for (char& character : upper) character = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
+        expected.push_back(std::move(upper));
+    }
+    expect(listed == expected, "PL-20: ai_setup lists the types in table order, not type-id order");
 }
 
 void required_category_unions() {
@@ -4831,7 +6858,7 @@ void taskforce_team_order() {
     auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
     expect(scripts.has_value(), "PL-40: team ordering scheduler starts");
     if (!scripts) return;
-    ai::PlayerAi player; player.player = 1;
+    auto& player = ai::EngineContractAccess::add_player(engine, 1);
     ai::Goal goal; goal.id = 1; goal.potential.emplace();
     goal.potential->units = {50, 99, 51, 52};
     goal.potential->freestore = {0, 0, 0, 10};
@@ -4886,8 +6913,7 @@ void optional_taskforce_startup() {
                     context.issue_command("probe", args);
                     return eawr::core::Result<auth::ValueList>::success({});
                 }).has_value(), "PL-40: startup observer registers");
-                ai::PlayerAi player;
-                player.player = 1;
+                auto& player = ai::EngineContractAccess::add_player(engine, 1);
                 ai::Goal goal;
                 goal.id = 1;
                 goal.potential.emplace();
@@ -5223,9 +7249,9 @@ void corrupt_systems_stand_in() {
             view->units.push_back(enemy);
         }
         ai::AiRandom draws;
-        draws.set_seed(ai::EngineContractAccess::selection_seed(engine));
+        draws.set_seed(ai::EngineContractAccess::selection_seed(engine, 2));
         for (unsigned draw = 0; draw < 4; ++draw) static_cast<void>(draws.next());
-        expect(service(91) == 3 && ai::EngineContractAccess::selection_seed(engine) == draws.seed(),
+        expect(service(91) == 3 && ai::EngineContractAccess::selection_seed(engine, 2) == draws.seed(),
             "WHE-68: five candidates use exactly two random planar cluster centers");
     }
 }
@@ -5289,7 +7315,7 @@ void corrupt_systems_cluster_coordinates() {
         host->view = view;
         ai::Engine engine(host, {}, {});
         ai::EngineContractAccess::collect_fixture(engine);
-        ai::EngineContractAccess::set_selection_seed(engine, 0);
+        ai::EngineContractAccess::set_selection_seed(engine, 2, 0);
         ai::EngineContractAccess::corrupt_systems(engine, 1);
         const auto* command = ai::EngineContractAccess::last_order(engine);
         expect(command && command->arguments.size() == 7, "WHE-68: asymmetric cluster issues a point request");
@@ -5297,7 +7323,7 @@ void corrupt_systems_cluster_coordinates() {
         expect(std::get<Real>(command->arguments[4].data) == Real(150)
             && std::get<Real>(command->arguments[5].data) == Real(50),
             "WHE-68: seed zero draws Y before X and selects the in-range point (150,50)");
-        expect(ai::EngineContractAccess::selection_seed(engine) == 2919708916U,
+        expect(ai::EngineContractAccess::selection_seed(engine, 2) == 2919708916U,
             "WHE-68: the asymmetric two-center search consumes exactly four synchronized draws");
         const auto order = foc::tactical_ai_detail::translate_order(*command);
         expect(order.has_value(), "WHE-68: asymmetric point request translates");
@@ -5912,7 +7938,8 @@ void reachable_target_contract() {
         const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> {
             return std::nullopt;
         };
-        auto equations = ai::EquationSet::parse({{"query.xml", "<Root><Positive>1</Positive><Zero>0</Zero></Root>"}}, converters);
+        auto equations = ai::EquationSet::parse({{"query.xml", "<Root><Positive>1</Positive><Zero>0</Zero>"
+            "<Unavailable>Variable_Target.Unavailable_Query</Unavailable></Root>"}}, converters);
         expect(equations.has_value(), "FT-02: query equations parse");
         if (!equations) return;
         ai::AiData data;
@@ -5941,8 +7968,15 @@ void reachable_target_contract() {
             " region_valid = region.Is_Valid()\n"
             " region_object = region.Get_Game_Object()\n"
             " plain_region = FindTarget(tf, 'Positive', 'Tactical_Location', 1)\n"
+            " distance_object = object.Get_Distance(converted)\n"
+            " distance_wrapped = object.Get_Distance(returned)\n"
+            " distance_region = converted.Get_Distance(region)\n"
+            " distance_force = converted.Get_Distance(tf)\n"
+            " distance_position = object.Get_Distance(converted.Get_Position())\n"
             " empty = FindTarget.Reachable_Target(player, 'Positive', 'Enemy_Unit', 'Any', 1)\n"
             " zero = FindTarget.Reachable_Target(player, 'Zero', 'Friendly_Unit', 'Any', 1)\n"
+            " unavailable = FindTarget.Reachable_Target(player, 'Unavailable', 'Friendly_Unit', 'Any', 1)\n"
+            " continued = true\n"
             "end\n").has_value(), "FT-02: query module loads");
         auth::SessionConfig config;
         config.tick_duration = {1, 30};
@@ -5960,7 +7994,10 @@ void reachable_target_contract() {
         expect(scripts.value().submit_event(std::move(event)).has_value(), "FT-02: query queues");
         const eawr::platform::ThreadWorkerAdapter executor(workers);
         const auto report = scripts.value().service(executor);
-        expect(report && report.value().diagnostics.empty(), "FT-02: unconverted target consumers have no Lua faults");
+        expect(report && report.value().diagnostics.size() == 1
+            && report.value().diagnostics.front().code == auth::codes::unsupported_api
+            && report.value().diagnostics.front().message.find("skipped 1 candidates") != std::string::npos,
+            "FT-02/PE-28: an unavailable selected perception emits one counted diagnostic without aborting consumers");
         const auto check_handle = [&](const char* name, std::uint32_t kind, std::uint64_t id) {
             const auto value = scripts.value().read_global(1, name);
             const auto* handle = value && value.value() ? std::get_if<auth::Handle>(&value.value()->data) : nullptr;
@@ -5972,16 +8009,24 @@ void reachable_target_contract() {
         check_handle("plain", foc::handle_game_object, 11);
         check_handle("region", ai::handle_ai_target, 2);
         check_handle("plain_region", ai::handle_ai_target, 2);
+        for (const char* name : {"distance_object", "distance_wrapped", "distance_region", "distance_force", "distance_position"}) {
+            const auto value = scripts.value().read_global(1, name);
+            expect(value && value.value() && std::get_if<Real>(&value.value()->data)
+                && std::get<Real>(value.value()->data) == ai::real(25),
+                "EX-51: unit distance extracts live objects, wrapped objects, region centres, TaskForces and positions");
+        }
         for (const char* name : {"valid", "region_valid"}) {
             const auto value = scripts.value().read_global(1, name);
             expect(value && value.value() && std::get_if<bool>(&value.value()->data)
                 && std::get<bool>(value.value()->data), "FT-02: reachable targets support validity tests");
         }
-        for (const char* name : {"empty", "zero", "region_object"}) {
+        for (const char* name : {"empty", "zero", "region_object", "unavailable"}) {
             const auto value = scripts.value().read_global(1, name);
             expect(value && value.value() && std::holds_alternative<std::monostate>(value.value()->data),
                 "FT-02/03: empty, zero-score and region conversion answer nil");
         }
+        const auto continued = scripts.value().read_global(1, "continued");
+        expect(continued && continued.value() && std::get<bool>(continued.value()->data), "PE-28: unavailable query leaves the caller running");
         expect(report && report.value().commands.size() == 3, "FT-02: object move, force move and force production stage");
         if (report && report.value().commands.size() == 3) {
             const auto& move = report.value().commands[0];
@@ -7642,6 +9687,349 @@ void native_object_script_ownership() {
     }
 }
 
+// SOS-42: production provider, independent partition order and a rebuilt host.
+class ReverseObjectTurns final : public sim::PartitionExecutor {
+public:
+    std::size_t worker_count() const noexcept override { return 8; }
+    eawr::core::Result<void> execute(std::size_t count, const std::function<void(std::size_t)>& run) const override {
+        for (std::size_t at = count; at != 0; --at) run(at - 1);
+        return eawr::core::Result<void>::success();
+    }
+};
+
+// A test-only reference keeps the previous barrier admission, clock and draw key.
+// It reuses the original host helper rather than estimating authored Lua cadence.
+class LegacyObjectTurnReference final : public auth::ScriptEngine {
+public:
+    explicit LegacyObjectTurnReference(std::shared_ptr<foc::detail::Host> host) : host_(std::move(host)) {}
+    eawr::core::Result<void> initialize_fresh(const tactical::TacticalSession& world, auth::ScriptScheduler& scripts) override {
+        const sim::InlineExecutor executor;
+        return prepare(executor,world,scripts);
+    }
+    eawr::core::Result<auth::ServiceOptions> before_service(const tactical::TacticalSession& world,
+        const tactical::TacticalTick&, auth::ScriptScheduler& scripts) override {
+        const sim::InlineExecutor executor;
+        return options(executor,world,scripts);
+    }
+    eawr::core::Result<auth::ServiceOptions> before_service(const sim::PartitionExecutor& executor,
+        const tactical::TacticalSession& world, const tactical::TacticalTick&, auth::ScriptScheduler& scripts) override {
+        return options(executor,world,scripts);
+    }
+private:
+    eawr::core::Result<void> prepare(const sim::PartitionExecutor& executor,
+        const tactical::TacticalSession& world, auth::ScriptScheduler& scripts) {
+        host_->world=&world; host_->snapshot=world.snapshot();
+        host_->view=foc::detail::build_view(world,*host_->snapshot,&executor);
+        std::uint64_t sequence{};
+        std::uint32_t active{},pumps{};
+        std::vector<auth::ScriptDiagnostic> diagnostics;
+        auto result=foc::tactical_ai_detail::service_objects(executor,host_,scripts,sequence,diagnostics,active,pumps);
+        if (!result) return result;
+        if (!diagnostics.empty()) return eawr::core::Result<void>::failure(foc::detail::make_error(diagnostics.front().code,diagnostics.front().message));
+        return eawr::core::Result<void>::success();
+    }
+    eawr::core::Result<auth::ServiceOptions> options(const sim::PartitionExecutor& executor,
+        const tactical::TacticalSession& world, auth::ScriptScheduler& scripts) {
+        if (auto result=prepare(executor,world,scripts);!result) return eawr::core::Result<auth::ServiceOptions>::failure(result.error());
+        auth::ServiceOptions result;
+        result.host_paced=[](std::uint64_t) { return true; };
+        return eawr::core::Result<auth::ServiceOptions>::success(std::move(result));
+    }
+    std::shared_ptr<foc::detail::Host> host_;
+};
+
+void object_turn_cadence_pins() {
+    struct Pin { const char* rule; sim::EntityId object; std::vector<std::uint64_t> before,after; };
+    const std::vector<Pin> pins{
+        {"SOS-15",10,{1,2,62,122,183},{1,14,75,136,197}},
+        {"SOS-19",20,{1,2,62,122,183},{1,15,75,136,197}},
+        {"SOS-16",30,{1,25,85,146,206},{1,47,107,167}},
+        {"SOS-17",40,{1,4,64,124,185},{1,56,117,178}},
+        {"SOS-11",50,{1,5,65,125,186},{1,40,100,161}}};
+    const std::map<std::string,std::string> modules{
+        {"Data/Scripts/GameObject/PHASE_PROBE.lua",
+            "function Base_Definitions() ServiceRate=2; calls=0 end\n"
+            "function main() sample=GameRandom.Get_Float(); while true do calls=calls+1; Object.Move_To({calls,0,0}); coroutine.yield(true) end end"},
+        {"Data/Scripts/Library/PGAICommands.lua","function Base_Definitions() EnemyContrastTypes={}; FriendlyContrastTypes={} end"}};
+    const sim::InlineExecutor executor;
+    const eawr::platform::ThreadWorkerAdapter checkpoint_workers(4);
+    for (const auto& pin : pins) {
+        tactical::TacticalSetup initial;
+        initial.seed=5678; initial.players={{1,1,1,tactical::player_flag_commandable}};
+        initial.units={{pin.object,100,1}};
+        foc::AiSetup config;
+        config.seed=initial.seed;config.players={{1,"REBEL",false,false,""}};
+        foc::AiType type;type.type_id=100;type.lua_script="PHASE_PROBE";config.content.types={type};
+        for (const bool legacy : {true,false}) {
+            auto world=tactical::TacticalSession::create(initial);
+            auto session=[&]() -> eawr::core::Result<auth::ScriptedTacticalSession> {
+                if (!legacy) return foc::create_session(std::move(world).value(),config,modules);
+                auto host=std::make_shared<foc::detail::Host>();host->setup=config;
+                for (const auto& entry : host->setup.content.types) host->types.emplace(entry.type_id,&entry);
+                for (const auto& player : host->setup.players) host->players.emplace(player.player,&player);
+                auth::ModuleManifest manifest;
+                for (const auto& [path,bytes] : modules) expect(bool(manifest.add(path,bytes)),"SOS cadence manifest");
+                auth::SessionConfig setup;setup.seed=config.seed;setup.tick_duration={1,30};
+                setup.script_directories={"Data/Scripts/Library/","Data/Scripts/GameObject/"};
+                auto scripts=auth::ScriptScheduler::create(setup,std::move(manifest));
+                std::vector<eawr::core::Diagnostic> errors;
+                foc::tactical_ai_detail::register_globals(scripts.value(),host,errors);
+                foc::tactical_ai_detail::register_methods(scripts.value(),host,errors);
+                expect(errors.empty(),"SOS cadence production bindings");
+                auto result=auth::ScriptedTacticalSession::create(std::move(world).value(),std::move(scripts).value());
+                expect(bool(result.value().register_verb(foc::verb_move,foc::tactical_ai_detail::translate_order)),"SOS cadence move translator");
+                expect(bool(result.value().set_engine(std::make_shared<LegacyObjectTurnReference>(host))),"SOS cadence legacy owner");
+                return result;
+            }();
+            expect(bool(session),"SOS cadence session creates");if (!session) return;
+            std::vector<std::uint64_t> actual;
+            std::optional<auth::ScriptedTacticalSession> uninterrupted;
+            for (std::uint64_t frame=0;frame<220;++frame) {
+                auto tick=session.value().step(uninterrupted
+                    ? static_cast<const sim::PartitionExecutor&>(checkpoint_workers) : executor);
+                expect(bool(tick),"SOS cadence step");if (!tick) return;
+                expect(tick.value().scripts.diagnostics.empty(),"SOS cadence has no binding fault");
+                if (uninterrupted) {
+                    auto control_tick=uninterrupted->step(executor);
+                    expect(control_tick && control_tick.value().state_sha256==tick.value().state_sha256,
+                        "SOS-43: nonzero-rate checkpoint preserves every later hash across worker counts");
+                }
+                if (!legacy && frame==8) {
+                    const auto saved=session.value().save_scripts();
+                    const auto checkpoint=session.value().world().save_checkpoint_state();
+                    auto prepared=foc::prepare_session(config,modules);
+                    auto rebuilt_world=tactical::TacticalSession::from_replay(session.value().record());
+                    expect(saved && checkpoint && prepared && rebuilt_world,"SOS-43: checkpoint between nonzero-rate pumps captures");
+                    if (!saved || !checkpoint || !prepared || !rebuilt_world) return;
+                    auto loaded=rebuilt_world.value().load_checkpoint_state(checkpoint.value());
+                    expect(bool(loaded),"SOS-43: between-pump world checkpoint restores");if (!loaded) return;
+                    auto rebuilt=auth::ScriptedTacticalSession::restore(std::move(rebuilt_world).value(),std::move(prepared.value().scripts),saved.value());
+                    expect(rebuilt && prepared.value().bind(rebuilt.value()),"SOS-43: between-pump Lua clock and due admission restore");
+                    if (!rebuilt) { std::cerr<<rebuilt.error().message<<'\n'; return; }
+                    expect(rebuilt.value().save_scripts().value().scheduler==saved.value().scheduler,
+                        "SOS-43: between-pump rebind preserves canonical Lua bytes");
+                    uninterrupted.emplace(std::move(session).value());session=std::move(rebuilt);
+                }
+                if (!legacy && frame==1) {
+                    auto saved=session.value().save_scripts();
+                    auto inspect=foc::prepare_session(config,modules);
+                    expect(saved && inspect && inspect.value().scripts.load(saved.value().scheduler),"SOS cadence state inspection");
+                    if (saved && inspect) {
+                        const auto id=foc::first_object_instance+pin.object;
+                        const auto last=inspect.value().scripts.read_global(id,"LastService");
+                        const auto sample=inspect.value().scripts.read_global(id,"sample");
+                        auto phase=foc::tactical_ai_detail::object_phase_random(config.seed,1,id);
+                        auth::RandomStream vm(config.seed,2|auth::turn_random_domain,id);
+                        const auto offset=phase.next_unit();
+                        const auto draw=Real(vm.next_below(std::uint64_t{1}<<15))/Real(32767);
+                        expect(last && sample && last.value() && sample.value()
+                            && std::get<Real>(last.value()->data)==Real(0)-offset*Real(2)
+                            && std::get<Real>(sample.value()->data)==draw
+                            && auth::random_word(config.seed,1|auth::object_phase_random_domain,id,0)
+                                != auth::random_word(config.seed,1|auth::turn_random_domain,id,0),
+                            "SOS-42: host phase and VM draw use independent per-instance keys");
+                    }
+                }
+                for (const auto& command : tick.value().scripts.commands)
+                    if (command.issuer==foc::first_object_instance+pin.object) actual.push_back(frame);
+            }
+            expect(actual==(legacy?pin.before:pin.after),std::string(pin.rule)+": literal old/new phased pump ticks");
+            std::cout<<"SOS-CADENCE,"<<pin.rule<<','<<(legacy?"before":"after");
+            for (const auto frame : actual) std::cout<<','<<frame;
+            std::cout<<'\n';
+        }
+    }
+}
+
+void production_object_turns() {
+    const std::string source = R"LUA(
+root_ran=0
+function Root() assert(Object.Is_Valid()); root_ran=root_ran+1 end
+Create_Thread('Root')
+function Base_Definitions() assert(Object==nil); ServiceRate=0; LastService=0; calls=0 end
+function main()
+    while true do
+        calls=calls+1
+        Object.Activate_Ability('INVULNERABILITY', true)
+        Object.Move_To({calls, 0, 0})
+        coroutine.yield(true)
+    end
+end
+)LUA";
+    tactical::TacticalSetup setup;
+    setup.seed = 5678;
+    setup.players = {{1,1,1,tactical::player_flag_commandable}, {2,2,2,tactical::player_flag_commandable}};
+    setup.units = {{10,100,1}, {20,101,2}};
+    tactical::AbilityProfile invulnerable;
+    invulnerable.kind = tactical::AbilityKind::invulnerability;
+    invulnerable.expiration_frames = 1;
+    invulnerable.recharge_frames = 1;
+    tactical::AbilityTable abilities;
+    abilities.profiles = {{100, {invulnerable}, false}};
+    foc::AiSetup config;
+    config.seed = setup.seed;
+    config.players = {{1,"REBEL",false,false,""}, {2,"EMPIRE",false,false,""}};
+    foc::AiType type; type.type_id=100; type.lua_script="RENAMED_TURN_PROBE";
+    config.content.types = {type};
+    const std::map<std::string,std::string> modules{
+        {"Data/Scripts/GameObject/RENAMED_TURN_PROBE.lua", source},
+        {"Data/Scripts/Library/PGAICommands.lua", "function Base_Definitions() EnemyContrastTypes={}; FriendlyContrastTypes={} end"}};
+    const auto fresh_world = [&] { return tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, abilities); };
+    std::vector<std::string> reference;
+    const ReverseObjectTurns reverse;
+    for (const unsigned workers : {1U,2U,4U,8U,0U}) {
+        const eawr::platform::ThreadWorkerAdapter pool(workers == 0 ? 1U : workers);
+        const sim::PartitionExecutor& executor = workers == 0 ? static_cast<const sim::PartitionExecutor&>(reverse) : pool;
+        auto session = foc::create_session(std::move(fresh_world()).value(), config, modules);
+        expect(session.has_value(), "SOS-42: production turn provider installs");
+        if (!session) return;
+        std::vector<std::string> hashes, world_hashes;
+        std::optional<auth::ScriptedTacticalSession> uninterrupted;
+        const eawr::platform::ThreadWorkerAdapter continuation(workers == 8 ? 2U : 8U);
+        for (unsigned frame=0; frame<9; ++frame) {
+            auto tick = session.value().step(frame > 4 ? static_cast<const sim::PartitionExecutor&>(continuation) : executor);
+            expect(tick.has_value(), "SOS-42: production object turn completes");
+            if (!tick) { std::cerr << tick.error().message << '\n'; return; }
+            if (uninterrupted) {
+                auto control_tick=uninterrupted->step(executor);
+                expect(control_tick && control_tick.value().world.state_sha256==tick.value().world.state_sha256,
+                    "SOS-43: restored world effects equal uninterrupted continuation on another worker count");
+                expect(control_tick && control_tick.value().state_sha256==tick.value().state_sha256,
+                    "SOS-43: restored script state equals uninterrupted continuation on another worker count");
+            }
+            expect(tick.value().scripts.diagnostics.empty(), "SOS-42: production bindings have no stale-read fault");
+            hashes.push_back(tick.value().state_sha256);
+            world_hashes.push_back(tick.value().world.state_sha256);
+            if (frame == 0) expect(tick.value().world.object_turn.empty(), "SOS-30: initial barrier creates threads without pumping");
+            if (frame == 1) {
+                expect(tick.value().world.object_turn.size() == 1 && tick.value().world.object_turn[0].reason == tactical::RejectReason::none,
+                    "SOS-15: first activation lands at tick 1, one tick before the previous bridge route");
+                expect(tick.value().script_input.empty() && session.value().pending_script_commands() == 1,
+                    "SOS-42: ability uses commit now while Move_To waits for the next tick");
+            }
+            if (frame == 4) {
+                auto saved = session.value().save_scripts();
+                auto checkpoint = session.value().world().save_checkpoint_state();
+                auto world = tactical::TacticalSession::from_replay(session.value().record(), {}, {}, {}, std::nullopt, {}, {}, abilities);
+                auto prepared = foc::prepare_session(config, modules);
+                expect(saved && checkpoint && world && prepared, "SOS-43: turn barrier checkpoint captures both owners");
+                if (!saved || !checkpoint || !world || !prepared) return;
+                auto loaded = world.value().load_checkpoint_state(checkpoint.value());
+                expect(loaded.has_value(), "SOS-43: turn world restores");
+                if (!loaded) { std::cerr << loaded.error().message << '\n'; return; }
+                auto rebuilt = auth::ScriptedTacticalSession::restore(std::move(world).value(), std::move(prepared.value().scripts), saved.value());
+                if (!rebuilt) { expect(false,"SOS-43: bridge restore"); return; }
+                const auto before_bind=rebuilt.value().save_scripts();
+                const auto compare_restore=[](std::string_view stage,const std::string& before,const std::string& after) {
+                    if (before==after) return;
+                    std::size_t offset{};
+                    while (offset<std::min(before.size(),after.size()) && before[offset]==after[offset]) ++offset;
+                    std::cout<<"SOS-RESTORE-DELTA,"<<stage<<','<<before.size()<<','<<after.size()<<','<<offset;
+                    for (std::size_t index=offset;index<std::min(offset+24,std::min(before.size(),after.size()));++index)
+                        std::cout<<','<<static_cast<unsigned>(static_cast<unsigned char>(before[index]))
+                            <<':'<<static_cast<unsigned>(static_cast<unsigned char>(after[index]));
+                    std::cout<<'\n';
+                };
+                expect(before_bind.has_value(),"SOS-43: restored scheduler saves before bind");
+                if (!before_bind) return;
+                compare_restore("load",saved.value().scheduler,before_bind.value().scheduler);
+                expect(bool(prepared.value().bind(rebuilt.value())), "SOS-43: fresh host derives due set from restored Lua");
+                const auto after_bind=rebuilt.value().save_scripts();
+                expect(after_bind.has_value(),"SOS-43: rebound scheduler saves");
+                if (!after_bind) return;
+                compare_restore("bind",before_bind.value().scheduler,after_bind.value().scheduler);
+                expect(after_bind.value().scheduler == saved.value().scheduler, "SOS-43: rebuild never initializes twice");
+                uninterrupted.emplace(std::move(session).value());
+                session = std::move(rebuilt);
+            }
+        }
+        auto recording = session.value().record();
+        expect(recording.object_turns.size() >= 3 && recording.object_turns.front().tick == 1,
+            "SOS-15/42: object-turn activations are retained in the world replay");
+        auto replayed = tactical::TacticalSession::from_replay(recording, {}, {}, {}, std::nullopt, {}, {}, abilities);
+        expect(replayed.has_value(), "SOS-42: world-only replay loads without a provider");
+        if (!replayed) return;
+        for (std::size_t frame=0; frame<world_hashes.size(); ++frame) {
+            auto tick = replayed.value().step(executor);
+            expect(tick && tick.value().state_sha256 == world_hashes[frame], "SOS-42: record reproduces every same-turn world effect");
+        }
+        if (reference.empty()) reference=hashes;
+        else expect(reference == hashes, "SOS-42/43: 1/2/4/8 and reverse partitions produce equal turn states");
+    }
+    {
+        foc::detail::Host host;
+        auto world=fresh_world();host.world=&world.value();host.snapshot=world.value().snapshot();
+        host.view=foc::detail::build_view(world.value(),*host.snapshot);
+        foc::ai::TacticalWorld capabilities(host);host.in_object_turn=true;
+        const std::vector<std::function<void()>> reads{
+            [&] { static_cast<void>(host.economy(1)); },
+            [&] { static_cast<void>(capabilities.account(1)); },
+            [&] { static_cast<void>(capabilities.pads()); },
+            [&] { static_cast<void>(capabilities.arriving(10)); },
+            [&] { static_cast<void>(capabilities.build_allowed(1,10,100)); },
+            [&] { static_cast<void>(capabilities.build_option(1,10,100)); },
+            [&] { static_cast<void>(capabilities.production_counts(1,100)); },
+            [&] { static_cast<void>(capabilities.construction_allowed(1,10)); },
+            [&] { static_cast<void>(capabilities.constructing_for(10,1)); },
+            [&] { static_cast<void>(capabilities.next_entity_id()); },
+            [&] { static_cast<void>(capabilities.reinforcement_search_result(1,1)); },
+            [&] { static_cast<void>(capabilities.events()); },
+            [&] { static_cast<void>(capabilities.combat_events()); }};
+        for (const auto& read : reads) {
+            host.rejected_turn_read.store(false);read();
+            expect(host.rejected_turn_read.load(),"SOS-42: dynamic capability rejects stale reads independently of the Lua API name");
+        }
+        host.rejected_turn_read.store(false);
+        static_cast<void>(capabilities.view());static_cast<void>(capabilities.players());
+        static_cast<void>(capabilities.economy());static_cast<void>(capabilities.completed_tick());
+        expect(!host.rejected_turn_read.load(),"SOS-42: immutable rules and staged rows stay readable");
+    }
+    // Dynamic completed-world queries must diagnose rather than silently read t-1.
+    const sim::InlineExecutor executor;
+    for (const auto* query : {"Object.Get_Owner().Get_Credits()", "Find_Nearest(Object,Object.Get_Owner(),false)"}) {
+        auto guarded_modules = modules;
+        guarded_modules["Data/Scripts/GameObject/RENAMED_TURN_PROBE.lua"] =
+            std::string("function Base_Definitions() ServiceRate=0 end\n")
+            + "function main() Object.Activate_Ability('INVULNERABILITY',true); " + query + " end";
+        auto guarded = foc::create_session(std::move(fresh_world()).value(), config, guarded_modules);
+        expect(guarded && guarded.value().step(executor), "SOS-42: tripwire instance initializes");
+        if (!guarded) return;
+        auto tick = guarded.value().step(executor);
+        expect(tick && !tick.value().scripts.diagnostics.empty() && guarded.value().record().object_turns.empty(),
+            "SOS-42: stale-read tripwire faults the instance and drops its entire turn output");
+    }
+    {
+        auto host=std::make_shared<foc::detail::Host>();
+        auto view=std::make_shared<foc::detail::WorldView>();
+        foc::AiType held;held.type_id=100;held.lua_script="UNADMITTED_TURN";
+        host->setup.content.types={held};host->types.emplace(100,&host->setup.content.types.front());
+        foc::detail::ViewUnit object;object.id=10;object.type=100;object.owner=1;
+        tactical::AbilityStatus ability;ability.kind=tactical::AbilityKind::buzz_droids;ability.ready=true;
+        object.abilities={ability};view->units={object};host->view=view;
+        auth::ModuleManifest manifest;
+        expect(bool(manifest.add("Data/Scripts/GameObject/UNADMITTED_TURN.lua",
+            "function Base_Definitions() ServiceRate=0 end\nfunction main() Object.Activate_Ability('BUZZ_DROIDS',{0,0,0}) end")),
+            "SOS-45: arbitrary module for an unadmitted turn handler");
+        auth::SessionConfig script_config;script_config.tick_duration={1,30};script_config.script_directories={"Data/Scripts/GameObject/"};
+        auto scripts=auth::ScriptScheduler::create(script_config,std::move(manifest));
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::tactical_ai_detail::register_globals(scripts.value(),host,errors);
+        foc::tactical_ai_detail::register_methods(scripts.value(),host,errors);
+        std::uint64_t sequence{};std::uint32_t active{},pumps{};std::vector<auth::ScriptDiagnostic> diagnostics;
+        expect(errors.empty() && foc::tactical_ai_detail::service_objects(executor,host,scripts.value(),sequence,diagnostics,active,pumps),
+            "SOS-45: arbitrary turn module attaches");
+        expect(bool(scripts.value().service(executor)),"SOS-45: arbitrary turn module initializes");
+        host->in_object_turn=true;view->tick=1;sequence=0;
+        expect(bool(foc::tactical_ai_detail::service_objects(executor,host,scripts.value(),sequence,diagnostics,active,pumps)),
+            "SOS-45: arbitrary turn module becomes due");
+        auto report=scripts.value().service_turn(executor,{foc::first_object_instance+10});
+        expect(report && report.value().commands.empty() && std::any_of(report.value().diagnostics.begin(),report.value().diagnostics.end(),
+            [](const auto& diagnostic) { return diagnostic.code==auth::codes::unsupported_api; }),
+            "SOS-45: unadmitted ability handler is exposed for every module instead of silently dropping a ready use");
+    }
+
+}
+
 void object_script_contracts() {
     const auto fixed = [](int n) { return sim::math::Fixed::from_integer(n).value(); };
     const std::string falcon = R"LUA(
@@ -7848,6 +10236,8 @@ int main(int argc, char** argv) {
         return failures == 0 ? 0 : 1;
     }
     if (argc > 1 && std::string_view(argv[1]) == "--object-scripts") {
+        object_turn_cadence_pins();
+        production_object_turns();
         object_script_contracts();
         native_object_script_ownership();
         slave_i_contracts();
@@ -7900,15 +10290,26 @@ int main(int argc, char** argv) {
         else if (mode == "--spending-pad-refunds") spending_pad_refunds();
         else if (mode == "--reachable-target") { reachable_target_contract(); find_target_reach_contract(); }
         else if (mode == "--installed-galactic-freestore") installed_galactic_freestore();
+        else if (mode == "--player-streams") tactical_player_streams();
+        else if (mode == "--pool-retirement") retiring_pool_reservations();
         else return 2;
         return failures == 0 ? 0 : 1;
     }
     mode_world_contract();
+    player_ai_admission_contract();
     scoring_startup_contract();
+    tactical_player_streams();
+    player_runtime_ownership();
+    player_effects();
+    shared_pad_competition();
+    effects_error_path();
     freestore_execution_hook_order();
     equations();
     random_and_hash();
     game_random_forms();
+    running_target_contrast();
+    running_reservation_contrast();
+    retiring_pool_reservations();
     active_tactical_desire();
     active_tactical_preference();
     initial_goal_budget();
@@ -7930,8 +10331,15 @@ int main(int argc, char** argv) {
     shared_input_prepasses();
     threat_preparation();
     plan_definition_paths();
+    mounted_ai_discovery();
+    authored_goal_extension();
+    unit_concentration();
+    coroutine_module_loading();
+    movement_query_projection();
+    mod_ai_calls();
     taskforce_definitions();
     named_team_authored_order();
+    category_team_table_order();
     required_category_unions();
     scheduler_reads();
     optional_taskforce_startup();

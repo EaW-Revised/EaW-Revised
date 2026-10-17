@@ -4,15 +4,16 @@
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 795 | 795 |
-| partial | 255 | 255 |
-| todo | 501 | 501 |
-| presentation-later | 0 | 455 |
-| foc-ignores | 94 | 94 |
+| applied | 831 | 831 |
+| partial | 263 | 263 |
+| todo | 464 | 464 |
+| presentation-later | 0 | 453 |
+| foc-ignores | 95 | 95 |
 | deferred | 45 | 45 |
+| by-design | 8 | 8 |
 | land-or-galactic | 0 | 990 |
 | multiplayer | 0 | 0 |
-| **Total** | **1690** | **3135** |
+| **Total** | **1706** | **3149** |
 
 Tables group the exact object class families listed together in the registry. Object kinds
 are station, ship, squadron or craft when specified; an empty kind list means the whole
@@ -65,6 +66,14 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Music_Event_Battle_Load_Screen | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-26 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
+
+## Campaign
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Description_Text | applied | whole class (apps/viewer/src/campaign_setup_screen.cpp) | WGP-29 | — | apps/viewer/src/campaign_setup_screen.cpp | basis: reviewed |
+| Is_Listed | applied | whole class (apps/viewer/src/campaign_setup_screen.cpp) | WGP-65 | — | apps/viewer/src/campaign_setup_screen.cpp | basis: reviewed |
+| Sort_Order | applied | whole class (src/presentation/ui/campaign_setup.cpp) | WGP-66 | — | src/presentation/ui/campaign_setup.cpp | basis: reviewed |
 
 ## CIN_GroundInfantry
 
@@ -777,7 +786,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | SFXEvent_Hack_Success | todo | application not recorded | — | 653 | — | — |
 | SFXEvent_HUD_Advisor_Hint | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
 | SFXEvent_HUD_Advisor_Message | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
-| SFXEvent_HUD_Advisor_Urgent | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
+| SFXEvent_HUD_Advisor_Urgent | partial | galactic approach advisor (apps/viewer/src/galactic/galactic_audio.cpp); missing: other advisor producers and full shared popup presentation | WGUI-114, WGUI-66 | 2004 | apps/viewer/src/galactic/galactic_audio.cpp | The minimal galactic approach advisor consumes this field; shared advisor graphics, history and other producers remain separate.; basis: reviewed |
 | SFXEvent_HUD_Base_Shield_Offline | todo | application not recorded | — | 653 | — | — |
 | SFXEvent_HUD_Base_Shield_Online | todo | application not recorded | — | 653 | — | — |
 | SFXEvent_HUD_Base_Shield_Penetrated | todo | application not recorded | — | 653 | — | — |
@@ -832,16 +841,16 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Space_Advisor_Hints | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
 | Space_Lose_Image | partial | campaign space summary (apps/viewer/src/galactic/galactic_battle_dialog.cpp); campaign score screen (src/platform/galactic/campaign_end_inputs.cpp); missing: standalone tactical result pictures | WGP-34; WGP-37, WGP-38 | 653 | apps/viewer/src/galactic/galactic_battle_dialog.cpp; src/platform/galactic/campaign_end_inputs.cpp | Campaign space summaries and the campaign score screen use the local faction picture; standalone tactical pictures remain pending.; basis: reviewed |
 | Space_Mode_Selection_Blob_Material_Name | applied | whole class (apps/viewer/src/world_ui_prepare.cpp) | WU-01 | — | apps/viewer/src/world_ui_prepare.cpp | basis: auto |
-| Space_Retreat_Begin_SFXEvent | todo | application not recorded | — | 653 | — | — |
-| Space_Retreat_Cancel_SFXEvent | todo | application not recorded | — | 653 | — | — |
-| Space_Retreat_Countdown_Color_RGBA | todo | application not recorded | — | 653 | — | — |
-| Space_Retreat_Countdown_Text_ID | todo | application not recorded | — | 653 | — | — |
-| Space_Retreat_Enemy_Begin_SFXEvent | todo | application not recorded | — | 653 | — | — |
-| Space_Retreat_Not_Allowed_Reason_1_SFXEvent | todo | application not recorded | — | 653 | — | — |
-| Space_Retreat_Not_Allowed_Reason_2_SFXEvent | todo | application not recorded | — | 653 | — | — |
-| Space_Retreat_Not_Allowed_Reason_3_SFXEvent | todo | application not recorded | — | 653 | — | — |
-| Space_Retreat_Not_Allowed_SFXEvent | todo | application not recorded | — | 653 | — | — |
-| Space_Surrender_SFXEvent | todo | application not recorded | — | 653 | — | — |
+| Space_Retreat_Begin_SFXEvent | applied | whole class (apps/viewer/src/battle_audio_events.cpp); whole class (apps/viewer/src/battle_audio_prepare.cpp) | RP-02, RP-03; RP-01 | — | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/battle_audio_prepare.cpp | Read per faction through the catalog layers; the local type cue takes precedence (WR-44).; basis: reviewed |
+| Space_Retreat_Cancel_SFXEvent | applied | whole class (apps/viewer/src/battle_audio_events.cpp); whole class (apps/viewer/src/battle_audio_prepare.cpp) | RP-02, RP-03; RP-01 | — | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/battle_audio_prepare.cpp | Read per faction through the catalog layers; the local type cue takes precedence (WR-44).; basis: reviewed |
+| Space_Retreat_Countdown_Color_RGBA | applied | whole class (apps/viewer/src/battle_audio_prepare.cpp); whole class (apps/viewer/src/map_mode.cpp) | RP-08; RP-08 | — | apps/viewer/src/battle_audio_prepare.cpp; apps/viewer/src/map_mode.cpp | The retreating faction's line text and colour.; basis: reviewed |
+| Space_Retreat_Countdown_Text_ID | applied | whole class (apps/viewer/src/battle_audio_prepare.cpp); whole class (apps/viewer/src/map_mode.cpp) | RP-07; RP-07 | — | apps/viewer/src/battle_audio_prepare.cpp; apps/viewer/src/map_mode.cpp | The retreating faction's line text and colour.; basis: reviewed |
+| Space_Retreat_Enemy_Begin_SFXEvent | applied | whole class (apps/viewer/src/battle_audio_events.cpp); whole class (apps/viewer/src/battle_audio_prepare.cpp) | RP-02, RP-03; RP-01 | — | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/battle_audio_prepare.cpp | Read per faction through the catalog layers; the local type cue takes precedence (WR-44).; basis: reviewed |
+| Space_Retreat_Not_Allowed_Reason_1_SFXEvent | partial | cue name read from the faction (apps/viewer/src/battle_audio_prepare.cpp); missing: gravity-well refusal cue (RP-05 reason 1): the retreat refusals have no gravity-well source yet | RP-01 | 4000 | apps/viewer/src/battle_audio_prepare.cpp | Read per faction through the catalog layers, but never played: no refusal maps to reason 1.; basis: reviewed |
+| Space_Retreat_Not_Allowed_Reason_2_SFXEvent | applied | whole class (apps/viewer/src/battle_audio_events.cpp); whole class (apps/viewer/src/battle_audio_prepare.cpp) | RP-02, RP-05; RP-01 | — | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/battle_audio_prepare.cpp | Read per faction through the catalog layers; the local type cue takes precedence (WR-44).; basis: reviewed |
+| Space_Retreat_Not_Allowed_Reason_3_SFXEvent | applied | whole class (apps/viewer/src/battle_audio_events.cpp); whole class (apps/viewer/src/battle_audio_prepare.cpp) | RP-02, RP-05; RP-01 | — | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/battle_audio_prepare.cpp | Read per faction through the catalog layers; the local type cue takes precedence (WR-44).; basis: reviewed |
+| Space_Retreat_Not_Allowed_SFXEvent | applied | whole class (apps/viewer/src/battle_audio_events.cpp); whole class (apps/viewer/src/battle_audio_prepare.cpp) | RP-02, RP-05; RP-01 | — | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/battle_audio_prepare.cpp | Read per faction through the catalog layers; the local type cue takes precedence (WR-44).; basis: reviewed |
+| Space_Surrender_SFXEvent | foc-ignores | application not recorded | — | — | — | debug build: the tag-table row has no accessor or reader (RP-10) |
 | Space_Win_Image | partial | campaign space summary (apps/viewer/src/galactic/galactic_battle_dialog.cpp); campaign score screen (src/platform/galactic/campaign_end_inputs.cpp); missing: standalone tactical result pictures | WGP-34; WGP-37, WGP-38 | 653 | apps/viewer/src/galactic/galactic_battle_dialog.cpp; src/platform/galactic/campaign_end_inputs.cpp | Campaign space summaries and the campaign score screen use the local faction picture; standalone tactical pictures remain pending.; basis: reviewed |
 | SpeechEvent_Super_Weapon_Enemy_Moved_Into_Range | deferred | application not recorded | — | 1505 | — | BA-56: no playable M2 space tactical-superweapon stage; approach warnings are speech, power-up cues are unattached SFX. |
 | SpeechEvent_Super_Weapon_Enemy_Moving_Into_Range | deferred | application not recorded | — | 1505 | — | BA-56: no playable M2 space tactical-superweapon stage; approach warnings are speech, power-up cues are unattached SFX. |
@@ -882,7 +891,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Activated_Hack_Super_Weapon_Ability_Names | partial | live galactic hack ability routing (src/campaign/live_setup.cpp); missing: faction hack-success sound and attached particle consumers | WGCH-139, WGCH-180, WGCH-57 | 653 | src/campaign/live_setup.cpp | Routes named activated hack abilities into the live prepared host; presentation consumers remain seams.; basis: reviewed |
 | Activated_Neutralize_Hero_Ability_Names | todo | application not recorded | — | 653 | — | — |
 | Activated_System_Spy_Ability_Names | todo | application not recorded | — | 653 | — | — |
-| Advisor_Hint_Duration | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
+| Advisor_Hint_Duration | partial | galactic approach advisor (apps/viewer/src/galactic/galactic_hud.cpp); missing: other advisor producers and full shared popup presentation | WGUI-68 | 2004 | apps/viewer/src/galactic/galactic_hud.cpp | The minimal galactic approach advisor consumes this field; shared advisor graphics, history and other producers remain separate.; basis: reviewed |
 | Advisor_Hint_Interval | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
 | Animate_During_Galactic_Mode_Pause | applied | whole class (apps/viewer/src/galactic/galactic_layers.cpp) | WGP-03 | — | apps/viewer/src/galactic/galactic_layers.cpp | basis: reviewed |
 | Battle_Load_Planet_Ambient | applied | Independent loading preview (apps/viewer/src/loading_planet.cpp) | WGP-32, WGP-51 | — | apps/viewer/src/loading_planet.cpp | basis: reviewed |
@@ -905,7 +914,14 @@ and are plain numbers. Code locations are repository paths without identifier an
 | CB_Movie_Offset | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
 | Command_Bar_Default_Font_Name | todo | application not recorded | — | 653 | — | — |
 | Command_Bar_Default_Font_Size | presentation-later | application not recorded | — | 828 | — | debug build: read only by the default font size of UI text components |
+| Corruption_Line_Grow_Seconds | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/corruption_particles.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-20, WGP-21, WGP-49; WGP-20, WGP-21, WGP-49 | — | apps/viewer/src/galactic/corruption_particles.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
+| Corruption_Line_Radius | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/corruption_particles.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-20, WGP-21, WGP-49; WGP-20, WGP-21, WGP-49 | — | apps/viewer/src/galactic/corruption_particles.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
+| Corruption_Line_Start_End_Offset | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/corruption_particles.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-20, WGP-21, WGP-49; WGP-20, WGP-21, WGP-49 | — | apps/viewer/src/galactic/corruption_particles.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
+| Corruption_Particle_Line_Name | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/corruption_particles.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-20, WGP-21, WGP-49; WGP-20, WGP-21, WGP-49 | — | apps/viewer/src/galactic/corruption_particles.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
 | Corruption_Particle_Name | applied | whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-19 | — | apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
+| Corruption_Path_Color | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/galactic_scene.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-20, WGP-21, WGP-48; WGP-20, WGP-21, WGP-48 | — | apps/viewer/src/galactic/galactic_scene.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
+| Corruption_Path_Offset | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/galactic_scene.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-20, WGP-21, WGP-48; WGP-20, WGP-21, WGP-48 | — | apps/viewer/src/galactic/galactic_scene.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
+| Corruption_Path_Width | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/galactic_scene.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-20, WGP-21, WGP-48; WGP-20, WGP-21, WGP-48 | — | apps/viewer/src/galactic/galactic_scene.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
 | Countdowns_Font_Name | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Credits_Bottom_Color | applied | whole class (src/presentation/godot/ui/credits_view.cpp) | CRD-02 | — | src/presentation/godot/ui/credits_view.cpp | basis: reviewed |
 | Credits_Font | applied | whole class (src/presentation/godot/ui/credits_view.cpp) | CRD-02 | — | src/presentation/godot/ui/credits_view.cpp | basis: reviewed |
@@ -960,7 +976,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Evil_Side_Leader_Name | todo | application not recorded | — | 653 | — | — |
 | Evil_Side_Name | todo | application not recorded | — | 653 | — | — |
 | First_Strike_Particle | todo | application not recorded | — | 653 | — | — |
-| Fleet_Hyperspace_Band_Texture_Name | applied | whole class (apps/viewer/src/galactic/galactic_routes.cpp) | WGP-18 | — | apps/viewer/src/galactic/galactic_routes.cpp | Authored band texture is applied to each route hop during native fleet dragging and to the bounded empty-world pointer guide; preview and release share the movement planner.; basis: reviewed |
+| Fleet_Hyperspace_Band_Texture_Name | applied | whole class (apps/viewer/src/galactic/galactic_routes.cpp); additive galactic corruption paths (apps/viewer/src/galactic/galactic_scene.cpp) | WGP-18; WGP-48 | — | apps/viewer/src/galactic/galactic_routes.cpp; apps/viewer/src/galactic/galactic_scene.cpp | Authored band texture is applied to each route hop during native fleet dragging and to the bounded empty-world pointer guide; preview and release share the movement planner. Galactic corruption paths also use the band texture with authored width and RGB modulation.; basis: reviewed |
 | Fleet_Movement_Line_Texture_Name | applied | whole class (apps/viewer/src/galactic/galactic_routes.cpp) | WGP-17 | — | apps/viewer/src/galactic/galactic_routes.cpp | WGP-17 texture and geometry are applied; locally visible is a presentation adapter pending the live observer visibility input (legacy &#35;1114).; basis: reviewed |
 | Galactic_Map_Score_Name | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Galactic_Right_Button_Scroll_Speed_Factor | applied | whole class (apps/viewer/src/galactic/galactic_scene.cpp) | WGUI-59, WGUI-78 | — | apps/viewer/src/galactic/galactic_scene.cpp | basis: reviewed |
@@ -1016,18 +1032,18 @@ and are plain numbers. Code locations are repository paths without identifier an
 | GUI_Strategic_Countdown_Timers_Screen_X | todo | application not recorded | — | 653 | — | — |
 | GUI_Strategic_Countdown_Timers_Screen_Y | todo | application not recorded | — | 653 | — | — |
 | GUI_Tactical_Countdown_Timers_Screen_Spacing | todo | application not recorded | — | 653 | — | — |
-| GUI_Tactical_Countdown_Timers_Screen_X | todo | application not recorded | — | 653 | — | — |
-| GUI_Tactical_Countdown_Timers_Screen_Y | todo | application not recorded | — | 653 | — | — |
+| GUI_Tactical_Countdown_Timers_Screen_X | applied | whole class (src/presentation/ui/battle_messages.cpp) | RP-06 | — | src/presentation/ui/battle_messages.cpp | basis: reviewed |
+| GUI_Tactical_Countdown_Timers_Screen_Y | applied | whole class (src/presentation/ui/battle_messages.cpp) | RP-06 | — | src/presentation/ui/battle_messages.cpp | basis: reviewed |
 | Hack_Super_Weapon_Particle_Effect | todo | application not recorded | — | 653 | — | — |
 | HardPoint_Target_Reticle_Enemy_Screen_Size | applied | whole class (apps/viewer/src/world_ui_bars.cpp) | WU-31 | — | apps/viewer/src/world_ui_bars.cpp | basis: reviewed |
-| HardPoint_Target_Reticle_Enemy_Texture | todo | application not recorded | — | 653 | — | — |
-| HardPoint_Target_Reticle_Enemy_Tracked_Texture | todo | application not recorded | — | 653 | — | — |
-| HardPoint_Target_Reticle_Friendly_Disabled_Texture | todo | application not recorded | — | 653 | — | — |
-| HardPoint_Target_Reticle_Friendly_Disabled_Tracked_Texture | todo | application not recorded | — | 653 | — | — |
-| HardPoint_Target_Reticle_Friendly_Repairing_Texture | todo | application not recorded | — | 653 | — | — |
+| HardPoint_Target_Reticle_Enemy_Texture | applied | whole class (src/presentation/ui/world_ui.cpp) | WU-32 | — | src/presentation/ui/world_ui.cpp | basis: reviewed |
+| HardPoint_Target_Reticle_Enemy_Tracked_Texture | applied | whole class (src/presentation/ui/world_ui.cpp) | WU-32 | — | src/presentation/ui/world_ui.cpp | basis: reviewed |
+| HardPoint_Target_Reticle_Friendly_Disabled_Texture | applied | whole class (src/presentation/ui/world_ui.cpp) | WU-32 | — | src/presentation/ui/world_ui.cpp | basis: reviewed |
+| HardPoint_Target_Reticle_Friendly_Disabled_Tracked_Texture | applied | whole class (src/presentation/ui/world_ui.cpp) | WU-32 | — | src/presentation/ui/world_ui.cpp | basis: reviewed |
+| HardPoint_Target_Reticle_Friendly_Repairing_Texture | applied | whole class (src/presentation/ui/world_ui.cpp) | WU-32 | — | src/presentation/ui/world_ui.cpp | basis: reviewed |
 | HardPoint_Target_Reticle_Friendly_Screen_Size | applied | whole class (apps/viewer/src/world_ui_bars.cpp) | WU-31 | — | apps/viewer/src/world_ui_bars.cpp | basis: reviewed |
-| HardPoint_Target_Reticle_Friendly_Texture | todo | application not recorded | — | 653 | — | — |
-| HardPoint_Target_Reticle_Friendly_Tracked_Texture | todo | application not recorded | — | 653 | — | — |
+| HardPoint_Target_Reticle_Friendly_Texture | applied | whole class (src/presentation/ui/world_ui.cpp) | WU-32 | — | src/presentation/ui/world_ui.cpp | basis: reviewed |
+| HardPoint_Target_Reticle_Friendly_Tracked_Texture | applied | whole class (src/presentation/ui/world_ui.cpp) | WU-32 | — | src/presentation/ui/world_ui.cpp | basis: reviewed |
 | Health_Bar_Scale | todo | application not recorded | — | 653 | — | — |
 | Health_Bar_Spacing | presentation-later | application not recorded | — | 828 | — | debug build: read only by the command bar bracket layout; the viewer draws the spacing from a literal (include/eawr/presentation/ui/world_ui.hpp), not from this tag |
 | Hint_Text_Color | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
@@ -1064,6 +1080,9 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Num_Structures_For_Large_Planet_Name | applied | whole class (apps/viewer/src/galactic/galactic_hud.cpp) | WGUI-38 | — | apps/viewer/src/galactic/galactic_hud.cpp | basis: reviewed |
 | Num_Structures_For_Medium_Planet_Name | applied | whole class (apps/viewer/src/galactic/galactic_hud.cpp) | WGUI-38 | — | apps/viewer/src/galactic/galactic_hud.cpp | basis: reviewed |
 | Object_Visual_Status_Particle_Attach_Bone_Names | todo | application not recorded | — | 653 | — | — |
+| Particle_Brightness_Per_Corruption_Level | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/galactic_scene.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-47; WGP-47 | — | apps/viewer/src/galactic/galactic_scene.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
+| Particle_Energy_Per_Corruption_Level | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/galactic_scene.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-47; WGP-47 | — | apps/viewer/src/galactic/galactic_scene.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
+| Particle_Scale_Per_Corruption_Level | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/galactic_scene.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-47; WGP-47 | — | apps/viewer/src/galactic/galactic_scene.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
 | Player_Color | todo | application not recorded | — | 653 | — | — |
 | PlayModeSwitchMovies | todo | application not recorded | — | 653 | — | — |
 | Radar_Colorize_Multiplayer_Enemy | todo | application not recorded | — | 653 | — | — |
@@ -1979,20 +1998,20 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Color_End | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
-| Color_Start | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
-| Fadeout_Time_Max | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
-| Fadeout_Time_Min | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
-| Replace_Faded | todo | application not recorded | — | 653 | — | — |
-| Texture_Repeat | todo | application not recorded | — | 653 | — | — |
-| Texture_Scroll | todo | application not recorded | — | 653 | — | — |
+| Color_End | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Color_Start | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Fadeout_Time_Max | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Fadeout_Time_Min | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Replace_Faded | partial | tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | TBF-06, TBF-07, TBF-08 | 653 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Texture_Repeat | partial | tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | TBF-06, TBF-07, TBF-08 | 653 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor/leech zero-valued defaults are supported; nonzero repeat/scroll remain limited by the shared clamped sampler.; basis: reviewed |
+| Texture_Scroll | partial | tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | TBF-06, TBF-07, TBF-08 | 653 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor/leech zero-valued defaults are supported; nonzero repeat/scroll remain limited by the shared clamped sampler.; basis: reviewed |
 
 ## LightningEffect, Material
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | @Name | todo | application not recorded | — | 653 | — | — |
-| Texture_Name | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
+| Texture_Name | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
 
 ## LightSource
 
@@ -2042,7 +2061,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Select_Box_Z_Adjust | todo | application not recorded | — | 653 | — | Mixed ground/space, space carriers on HeroUnit: Boba_Fett, Boba_Fett_NoStealth, Bossk, Chewbacca, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo (+12 more). Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Arc_Hammer, Biggs_XWing, Eclipse_Super_Star_Destroyer, Escort_TIE_Fighter, Executor_Super_Star_Destroyer (+50 more). Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Arc_Hammer, Biggs_XWing, Eclipse_Super_Star_Destroyer, Escort_TIE_Fighter, Executor_Super_Star_Destroyer (+50 more). |
+| Select_Box_Z_Adjust | by-design | application not recorded | — | — | — | WSU-66 |
 
 ## Marker, SecondaryStructure, SpaceBuildable, SpecialStructure, StarBase
 
@@ -2228,6 +2247,8 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Explosion_Jitter_Factor | todo | application not recorded | — | 653 | — | Mixed ground/space, space carriers on Particle: Empire_Bombing_Run_Explosion_Land, Ewok_Suicide_Bomb_Explosion, Friggin_Huge_Explosion_Space, Friggin_Huge_Explosion_Space_Empire, Harmonic_Bomb_Explosion_Slave_I, Huge_Explosion_Land, Huge_Explosion_Space, Huge_Explosion_Space_Empire (+18 more). Mixed ground/space, space carriers on Particle: Empire_Bombing_Run_Explosion_Land, Ewok_Suicide_Bomb_Explosion, Friggin_Huge_Explosion_Space, Friggin_Huge_Explosion_Space_Empire, Harmonic_Bomb_Explosion_Slave_I, Huge_Explosion_Land, Huge_Explosion_Space, Huge_Explosion_Space_Empire (+18 more). |
 | Explosion_Scorch_Mark | todo | application not recorded | — | 653 | — | Mixed ground/space, space carriers on Particle: Empire_Bombing_Run_Explosion_Land, Ewok_Suicide_Bomb_Explosion, Friggin_Huge_Explosion_Space, Huge_Explosion_Land, Huge_Explosion_Space, Large_Damage_Land, Large_Explosion_Land, Large_Explosion_Space (+20 more). Mixed ground/space, space carriers on Particle: Empire_Bombing_Run_Explosion_Land, Ewok_Suicide_Bomb_Explosion, Friggin_Huge_Explosion_Space, Huge_Explosion_Land, Huge_Explosion_Space, Large_Damage_Land, Large_Explosion_Land, Large_Explosion_Space (+20 more). |
 | Galactic_Model_Name | partial | Corruption particle (apps/viewer/src/galactic/scene_content.cpp); missing: Other galactic action particles await admitted producers and U-06 placement. | WGP-19 | 2003 | apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
+| In_Midforeground | partial | galactic corruption attachments and line particles (apps/viewer/src/galactic/scene_content.cpp); missing: other particle producers | WGP-01b, WGP-19, WGP-21 | 650 | apps/viewer/src/galactic/scene_content.cpp | Effective authored flags route galactic corruption attachments and lines; other producers remain separate.; basis: reviewed |
+| In_Midground | partial | galactic corruption attachments and line particles (apps/viewer/src/galactic/scene_content.cpp); missing: other particle producers | WGP-01b, WGP-19, WGP-21 | 650 | apps/viewer/src/galactic/scene_content.cpp | Effective authored flags route galactic corruption attachments and lines; other producers remain separate.; basis: reviewed |
 | Model_Visible_To_Enemy | todo | application not recorded | — | 653 | — | Mixed ground/space, space carriers on Projectile: Proj_Special_Space_FOW_Reveal_Ping_Blast. Mixed ground/space, space carriers on Projectile: Proj_Special_Space_FOW_Reveal_Ping_Blast. |
 | Particle_Attach_To_Collision | partial | Damage_Hit_Particles and Shield_Hit_Particles entries (apps/viewer/src/battle_effects_impacts.cpp); projectile shield-hit facing (apps/viewer/src/battle_effects_impacts.cpp); missing: Other collision-attached particle hosts retain their existing ownership gap | BP-63, PS-02, PS-03, PS-04; BP-18 | 1481 | apps/viewer/src/battle_effects_impacts.cpp | basis: reviewed |
 | Particle_Lifetime_Frames | applied | whole class (apps/viewer/src/battle_effects_prepare.cpp) | BP-16, BP-33 | — | apps/viewer/src/battle_effects_prepare.cpp | basis: auto |
@@ -2833,7 +2854,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Leech_Shields_Ability/@Name | applied | Kedalbe_Battleship (src/sim/tactical/session_abilities.cpp) | WLS-01 | — | src/sim/tactical/session_abilities.cpp | — |
 | Abilities/Leech_Shields_Ability/Beam_Bone_Name | applied | Kedalbe_Battleship (apps/viewer/src/battle_effects_projectiles.cpp) | WLS-05 | — | apps/viewer/src/battle_effects_projectiles.cpp | — |
 | Abilities/Leech_Shields_Ability/Beam_Color | applied | Kedalbe_Battleship (apps/viewer/src/battle_effects_projectiles.cpp) | WLS-05 | — | apps/viewer/src/battle_effects_projectiles.cpp | — |
-| Abilities/Leech_Shields_Ability/Beam_Effect_Name | todo | application not recorded | — | 760 | — | Parsed lightning effect identity; the shared lightning renderer remains a presentation follow-up. |
+| Abilities/Leech_Shields_Ability/Beam_Effect_Name | applied | whole class (apps/viewer/src/battle_effects_prepare.cpp) | TBF-06 | — | apps/viewer/src/battle_effects_prepare.cpp | Resolves the authored shield-leech lightning definition.; basis: reviewed |
 | Abilities/Leech_Shields_Ability/Beam_Texture_Name | applied | Kedalbe_Battleship (apps/viewer/src/battle_effects_projectiles.cpp) | WLS-05 | — | apps/viewer/src/battle_effects_projectiles.cpp | — |
 | Abilities/Leech_Shields_Ability/Leech_Effect | applied | Kedalbe_Battleship (apps/viewer/src/battle_effects_projectiles.cpp) | WLS-05 | — | apps/viewer/src/battle_effects_projectiles.cpp | — |
 | Abilities/Redirect_Blaster_Ability/SFXEvent_Activate | applied | whole class (apps/viewer/src/battle_audio_events.cpp) | WRB-12 | — | apps/viewer/src/battle_audio_events.cpp | basis: reviewed |
@@ -2890,7 +2911,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Multisample_FOW_Check | applied | craft, ship, squadron, station (src/sim/tactical/session_state.cpp) | V-21 | — | src/sim/tactical/session_state.cpp | basis: reviewed |
 | SFXEvent_Attack_Hardpoint | applied | whole class (apps/viewer/src/battle_audio_events.cpp) | BA-25 | — | apps/viewer/src/battle_audio_events.cpp | basis: reviewed |
-| SFXEvent_Hardpoint_Destroyed | todo | application not recorded | — | 653 | — | — |
+| SFXEvent_Hardpoint_Destroyed | applied | whole class (apps/viewer/src/battle_audio_prepare.cpp) | BA-64 | — | apps/viewer/src/battle_audio_prepare.cpp | basis: reviewed |
 
 ## SpaceUnit, TransportUnit, UniqueUnit
 
@@ -3000,9 +3021,8 @@ and are plain numbers. Code locations are repository paths without identifier an
 | GUI_X_Rot | todo | application not recorded | — | 653 | — | — |
 | Is_Community_Property | applied | whole class (apps/viewer/src/battle_input.cpp) | WSU-16 | — | apps/viewer/src/battle_input.cpp | basis: reviewed |
 | Radar_Rotate_Icon | applied | space station (src/presentation/godot/ui/minimap_view.cpp) | MM-06 | — | src/presentation/godot/ui/minimap_view.cpp | The minimap carries the station flag into the blip and turns its texture a quarter turn while swapping its half extents. The quarter-turn direction remains unverified.; basis: reviewed |
-| Retreat_Self_Destruct_Explosion | todo | application not recorded | — | 653 | — | — |
-| SFXEvent_Hardpoint_All_Weapons_Destroyed | todo | application not recorded | — | 653 | — | — |
-| Visible_To_Enemies_When_Empty | todo | application not recorded | — | 653 | — | — |
+| SFXEvent_Hardpoint_All_Weapons_Destroyed | applied | whole class (apps/viewer/src/battle_audio_prepare.cpp) | BA-64 | — | apps/viewer/src/battle_audio_prepare.cpp | basis: reviewed |
+| Visible_To_Enemies_When_Empty | applied | whole class (apps/viewer/src/live_session_economy.cpp) | WBP-35 | — | apps/viewer/src/live_session_economy.cpp | basis: reviewed |
 
 ## StarWars3DTextScroll
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "galaxy_view.hpp"
+#include "corruption_visuals.hpp"
 #include "eawr/data/galactic/galactic_data.hpp"
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/lighting/lighting.hpp"
@@ -42,6 +43,8 @@ struct ProductionArt final {
     std::string text_id;
     // Tactical_Health: ranks the best ship of a fleet stack icon (GHUDL-16).
     std::optional<float> max_health;
+    // WGUI-72..74: what the fleet panels need to type an enemy group (hero masking); ordinary ships are not heroes.
+    bool hero{}, named_hero{}, force_sensitive{};
     // The shared content's population (negative usage), for the fleet
     // encyclopedia header total (WGUI-166).
     std::int32_t population{};
@@ -70,6 +73,7 @@ struct SceneContent final {
     std::map<ObjectId, PlanetArt> art;
     std::map<PlayerId, Affiliation> factions;
     std::map<PlayerId, std::string> home_types;
+    std::map<PlayerId, std::string> leader_types{}; // authored Faction_Leader, WGUI-49
     std::map<ObjectId, std::string> route_styles;
     presentation::ui::SideNames side_names; // GameConstants Good/Evil/Corrupt_Side_Name (emblem entries 0..2)
     std::string fleet_model;
@@ -80,6 +84,9 @@ struct SceneContent final {
     bool animate_during_pause{};
     std::string corruption_particle;
     std::optional<presentation::particles::SystemDefinition> corruption_system;
+    CorruptionParameters corruption_parameters;
+    CorruptionStyle corruption_style;
+    std::optional<presentation::particles::SystemDefinition> corruption_line_system;
     std::vector<std::string> diagnostics;
 };
 
@@ -88,12 +95,17 @@ struct SceneContent final {
 [[nodiscard]] const Affiliation* affiliation_for_owner(const SceneContent& content, std::optional<PlayerId> owner);
 // WGP-42: first authored home, then first matching resident object; no owner fallback.
 [[nodiscard]] const StubPlanet* initial_home(const SceneContent& content, PlayerId player);
+[[nodiscard]] sim::galactic::TypeId home_leader_type(const SceneContent&, PlayerId,
+    const std::map<sim::galactic::TypeId, std::string>& type_names);
 
 // Uses validated tables for locations/positions, effective catalog layers for
 // object presentation, and the validated document loader for constants.
 [[nodiscard]] core::Result<SceneContent> load_scene_content(
     const vfs::Vfs& filesystem, const data::Catalog& catalog,
     const data::galactic::GalacticData& tables, std::string_view campaign);
+[[nodiscard]] std::optional<presentation::particles::SystemDefinition> load_galactic_particle(
+    const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string_view type);
+[[nodiscard]] SceneLayer galactic_particle_layer(const data::Catalog& catalog, std::string_view type);
 [[nodiscard]] presentation::lighting::Environment galaxy_lighting(Vec3 angles);
 [[nodiscard]] double animation_elapsed(double elapsed, bool paused, bool animate_during_pause) noexcept;
 

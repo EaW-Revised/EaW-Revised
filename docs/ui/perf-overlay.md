@@ -7,7 +7,8 @@ the same tick hashes as a run without it.
 
 ## Use
 
-- **Key: F3** toggles it in any map run (space or land, live session or not). Modifier chords do not.
+- **Key: F3** toggles it in the tactical views (space or land, live session or not) and in the galactic view
+  (`--eawr-galactic`: the galaxy map and the planet views). Modifier chords do not.
 - **`--eawr-perf-overlay on|off`** (default `off`) starts a run with it shown, for captures. The key
   still toggles it afterwards.
 - It costs nothing while hidden: no timer runs and the font cache is only read the first time it is
@@ -25,6 +26,7 @@ keymap has not been checked key by key ("unverified"); the key is one constant
 | FPS, frame ms | Frames of the last second; the last frame's wall-clock time. Green at 55 FPS or more. |
 | avg, worst / 5 s | The average and the slowest frame of the last five seconds. |
 | frame graph | One bar per 1/150 of the last five seconds, each the worst frame in it, so a hitch is a spike. Lines at 16.7 and 33.3 ms; the scale steps up when a frame exceeds it. |
+| TICKS/S | Simulation ticks completed per real second, measured: the ticks of the last second over that second. Colour: green within 10% of the rate the speed setting asks for, amber down to 60%, red below. In the galactic view the right side shows the clock in effect, `speed x4.00 = 120/s` (the factor of the displayed snapshot over the 30 Hz base), or `paused`. A speed setting that is not delivered shows here as a measured rate under the asked one; the Sim tick row says whether the tick cost explains it. |
 | Sim tick | What the newest tick cost the simulation thread (`step` plus the `fog` copy for the world), its average and worst over five seconds, and a second graph. Lines at 16.7 and 33.3 ms (the 30 Hz tick period). |
 | phases | The newest tick's named parts. |
 | draw calls, units | The renderer's draw calls in the last frame, and the units the local player sees. |
@@ -38,7 +40,8 @@ face from the font cache (the engine font without one).
 
 `platform::LiveSession` times each tick on the simulation thread (`LiveTickCost`: a total and named
 `LivePhaseCost` parts) and keeps the newest 4096 ticks; `tick_costs_after(tick)` hands them out under the
-session's existing lock. The overlay takes whatever phases a tick carries, so another sim phase timing
+session's existing lock. `platform::LiveGameSession` (the galactic view) does the same for each parent step, with
+the phases `command-source` (the callback that runs the GC AI) and `session-step`. The overlay takes whatever phases a tick carries, so another sim phase timing
 (for example the order tick's path-search work) appears by appending a `LivePhaseCost` to the tick it
 belongs to; nothing in the overlay names a phase. The timers sit beside `TacticalSession::step`, never
 inside it.
@@ -47,7 +50,21 @@ inside it.
 
 Every map report has a `perf_overlay` object (`shown: false` while it was never shown). When shown it adds
 `fps`, `frame_ms`, `frame_ms_avg`, `frame_ms_worst`, `tick_source` (`live_session` or `none`), `ticks`,
-`tick_ms`, `tick_ms_avg`, `tick_ms_worst`, `tick_phases`, `draw_calls`, `visible_units`, `toggles`,
+`ticks_per_second`, `clock` (`null` outside the galactic view, else `speed_factor`,
+`nominal_ticks_per_second` and `paused`), `tick_ms`, `tick_ms_avg`, `tick_ms_worst`, `tick_phases`, `draw_calls`, `visible_units`, `toggles`,
 `font`, `font_size`, `rect` and `own_cost_ms` (`samples`, `avg`, `max`).
 `tests/presentation/renderer/test_live_session.py` checks them and the key on a GPU host;
 `tests/ui/perf_stats_tests.cpp` covers the model (`include/eawr/presentation/ui/perf_stats.hpp`).
+`tests/presentation/renderer/test_viewer_galactic_command_bar_runtime.py` runs the live galaxy at 1x and with
+fast forward and prints the measured TICKS/S and tick cost (an observation, not a gate); the gate is the schedule
+arithmetic on injected time in `tests/galactic/live_game_session_tests.cpp`, and `tests/ui/perf_stats_tests.cpp`
+covers the rate arithmetic.
+
+## Fast forward and the live pacer
+
+The galactic live pacer (`LiveGameSession`, ADR-013) runs one parent step per interval of
+`1 / (30 x speed)` s on a fixed-rate schedule (`LivePaceSchedule`): step n after a rebase is due at
+`start + n x interval`, so wake-up latency and the step's own cost do not add to every period. A resume,
+pause or speed change starts a fresh schedule; a backlog beyond `max_catch_up` (5, the tactical pacer's value)
+is dropped, so a world whose ticks cost more than the interval is bound by its tick cost and never spirals.
+The factor itself is data: WGM-210 (4x), `galactic::fast_forward_factor_raw`.

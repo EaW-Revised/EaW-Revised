@@ -27,6 +27,7 @@
 #include <utility>
 
 #include "battle_audio_internal.hpp"
+#include "eawr/presentation/audio/hardpoint_loss.hpp"
 
 namespace eawr::presentation::godot_backend {
 void BattleAudio::loading_complete() {
@@ -1045,6 +1046,62 @@ void BattleAudio::voice_ability(const LiveSessionView::AbilityClick& click, cons
     }
 }
 
+void BattleAudio::retreat_refused(const tactical::RetreatRefusal refusal) {
+    // RP-05: the local faction's reason cue, else its generic not-allowed cue.
+    const auto name = ui::retreat_refusal_cue(refusal, retreat_faction(local_faction_));
+    play(event(name, "retreat refused"), std::nullopt, false, "retreat_not_allowed");
+}
+
+const ui::RetreatFactionPresentation& BattleAudio::retreat_faction(const std::string& faction) {
+    const auto cached = retreat_factions_.find(faction);
+    if (cached != retreat_factions_.end()) return cached->second;
+    return retreat_factions_.emplace(faction, battle_audio_detail::read_retreat_faction(*catalog_, faction)).first->second;
+}
+
+const BattleAudio::TypeSounds* BattleAudio::retreat_roster_type(const tactical::TacticalSnapshot& snapshot,
+    const tactical::RetreatState& state, const bool first_with_start_cue) const {
+    // RP-02: the start cue is the first roster member with one; RP-03: the cancel cue is the first member only.
+    const auto instances = snapshot.instances();
+    for (const auto id : state.actors) {
+        const auto found = std::lower_bound(instances.begin(), instances.end(), id,
+            [](const tactical::TacticalInstance& instance, const sim::EntityId entity) { return instance.entity_id < entity; });
+        const auto type = found != instances.end() && found->entity_id == id ? types_.find(found->type_id) : types_.end();
+        if (!first_with_start_cue) return type == types_.end() ? nullptr : &type->second;
+        if (type != types_.end() && type->second.retreat_start) return &type->second;
+    }
+    return nullptr;
+}
+
+void BattleAudio::retreat_cues(const tactical::TacticalSnapshot& snapshot, const LiveSessionView& live) {
+    const auto views = snapshot.retreat_views();
+    if (views.empty()) return;
+    if (retreat_cue_seen_ && snapshot.completed_tick() <= retreat_cue_tick_) return;
+    retreat_cue_seen_ = true;
+    retreat_cue_tick_ = snapshot.completed_tick();
+    const auto& state = views.front().state;
+    const auto previous = std::move(retreat_seen_);
+    retreat_seen_ = state;
+    using tactical::RetreatPhase;
+    const sim::tactical::PlayerId local = live.local_player();
+    // RP-01: an accepted player retreat start; the forced retreat has its own path and no cue.
+    if (previous.phase == RetreatPhase::idle && state.phase == RetreatPhase::countdown && !state.forced) {
+        const bool own = state.player == local;
+        const bool enemy = !own && tactical::players_hostile(snapshot.players(), local, state.player);
+        const auto* typed = own ? retreat_roster_type(snapshot, state, true) : nullptr;
+        const auto name = ui::retreat_start_cue(own, enemy, retreat_faction(live.player_faction(local)),
+            typed ? typed->retreat_start->name : std::string_view{});
+        play(event(name, "retreat start"), std::nullopt, false, own ? "retreat_begin" : "retreat_enemy_begin");
+    }
+    // RP-03: a countdown that ended without escaping.
+    if (previous.phase == RetreatPhase::countdown && state.phase == RetreatPhase::idle && !previous.forced) {
+        const bool own = previous.player == local;
+        const auto* typed = own ? retreat_roster_type(snapshot, previous, false) : nullptr;
+        const auto name = ui::retreat_cancel_cue(own, retreat_faction(live.player_faction(previous.player)),
+            typed && typed->retreat_cancel ? typed->retreat_cancel->name : std::string_view{});
+        play(event(name, "retreat cancel"), std::nullopt, false, "retreat_cancel");
+    }
+}
+
 void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
                         std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, const double delta,
                         std::vector<LiveSessionView::ReinforcementFeedback> reinforcement_feedback,
@@ -1084,6 +1141,9 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
     if (!recovery_quiet) {
         for (const auto& reached : battle.reached) beacon_cues(live.snapshot_at(reached.tick));
         beacon_cues(battle.latest);
+        for (const auto& reached : battle.reached)
+            if (const auto snapshot = live.snapshot_at(reached.tick)) retreat_cues(*snapshot, live);
+        if (battle.latest) retreat_cues(*battle.latest, live);
     }
     if (!outcome_shown_ && live.battle_end()) {
         outcome_shown_ = true;
@@ -1513,6 +1573,14 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
             if (const auto type = types_.find(seen->second.type); type != types_.end()) {
                 play(type->second.asteroid_damage, audio::Vec3{seen->second.position[0], seen->second.position[1], seen->second.position[2]}, false, "asteroid");
             }
+        }
+        for (const auto& loss : record.hardpoint_losses) {
+            const auto type = types_.find(loss.type);
+            if (type == types_.end()) continue;
+            const auto& sounds = type->second;
+            play(audio::hardpoint_loss_cue(loss.owner == local, loss.weapon, loss.weapons_remaining,
+                loss.hardpoint, loss.standing, sounds.hardpoint_types, sounds.hardpoint_loss,
+                sounds.all_weapons_lost), std::nullopt, false, "hardpoint_lost");
         }
         for (const tactical::Event& event : record.events) {
             if (event.kind == tactical::EventKind::special_weapon_fired || event.kind == tactical::EventKind::special_weapon_ready) {

@@ -323,6 +323,8 @@ public:
     // RGBA is multiplied by it when it is set up for rendering. 1 (the default) leaves the
     // streams untouched; a negative or non-finite value is a diagnostic.
     [[nodiscard]] core::Result<void> set_brightness(EffectHandle handle, float brightness);
+    [[nodiscard]] core::Result<void> set_dynamic(EffectHandle handle, float size, float energy);
+    [[nodiscard]] core::Result<void> set_pinched_cylinder(EffectHandle handle, float radius, float height, float fraction);
     [[nodiscard]] core::Result<EffectFrameStats> advance(
         EffectHandle handle, float delta_seconds, const CameraFrame& camera);
     // A drawn frame between advances (#433): the particles that live in their emitter's frame
@@ -375,6 +377,8 @@ public:
     [[nodiscard]] core::Result<void> stop_emission(EffectHandle handle);
 
     [[nodiscard]] const std::vector<EmitterRenderPlan>* plans(EffectHandle handle) const;
+    // Actual CPU slot reservation after normalization and emitter admission; zero for a dead handle.
+    [[nodiscard]] std::size_t reserved_particles(EffectHandle handle) const;
     [[nodiscard]] std::size_t live_effects() const noexcept;
     [[nodiscard]] std::size_t live_backend_resources() const noexcept;
     [[nodiscard]] std::span<const core::Diagnostic> diagnostics() const noexcept;

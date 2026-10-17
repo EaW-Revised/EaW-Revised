@@ -100,6 +100,15 @@ const EconomyPlayer* EconomyRules::player(const PlayerId id) const noexcept {
     return found != players.end() && found->player == id ? &*found : nullptr;
 }
 
+std::optional<EconomyPlayer> EconomyRules::player_at(const PlayerId id, const std::uint64_t tick) const noexcept {
+    const auto* authored = player(id);
+    if (!authored) return std::nullopt;
+    auto effective = *authored;
+    const auto start = player_ai_start_ticks.find(id);
+    if (start != player_ai_start_ticks.end() && tick < start->second) effective.ai = false;
+    return effective;
+}
+
 const StationMenu* EconomyRules::menu(const TypeId station, const FactionId faction) const noexcept {
     const auto found = std::lower_bound(menus.begin(), menus.end(), std::pair{station, faction},
         [](const StationMenu& entry, const std::pair<TypeId, FactionId>& value) {

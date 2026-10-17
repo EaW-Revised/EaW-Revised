@@ -72,6 +72,7 @@ set(EAWR_SCRIPT_FOC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_estimates.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_selection.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_selector_runtime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_assembly.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_selection_content.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_plan_materialization.cpp"
     # WGA-25/38/42: stock plan definition and pacing data.
@@ -102,6 +103,7 @@ set(EAWR_SCRIPT_FOC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_freestore.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_execution_state.cpp"
     # WGA-06/62/65/80 and FT-05/08: copied campaign perception providers.
+    "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_reader.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_world.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_economy.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_perception.cpp"

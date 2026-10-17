@@ -28,9 +28,70 @@ inline void check(bool value, std::string_view message) {
 }
 struct PlayerProgress {
     std::uint64_t builds_started{}, builds_completed{}, expansions{}, attacks{}, defences{}, heroes{};
+    std::uint64_t movements{};
     std::int64_t maximum_tech{};
     std::uint64_t first_tech3_frame{};
 };
+// Read the retained action rows only when reporting progress; this is not a
+// gameplay observation or part of the continuation/digest comparison.
+inline void sample_movements(std::map<gc::PlayerId, PlayerProgress>& players,
+    const ga::NativeActions& actions) {
+    for (auto& [id, player] : players) {
+        static_cast<void>(id); player.movements = 0;
+    }
+    for (const auto& [request, movement] : actions.movements()) {
+        static_cast<void>(request);
+        const auto player = players.find(movement.player);
+        if (player != players.end()) ++player->second.movements;
+    }
+}
+inline void json_string(std::ostream& output, std::string_view value);
+inline void sample_targeted_plans(const cp::GalacticAiRuntimeView& view,
+    const cp::GalacticAiRuntimeSetup& setup, std::uint64_t frame, std::ostream& output,
+    std::set<gc::PlayerId>& witnessed) {
+    const auto engine = view.engine.lock(); const auto world = view.world.lock();
+    if (!engine || !world) return;
+    for (const auto& selected : setup.lifecycle.players) {
+        if (witnessed.contains(selected.player)) continue;
+        for (const auto& goal : engine->galactic_goals(selected.player)) {
+            if (!goal.target || !goal.running_plan) continue;
+            const auto definition = std::find_if(engine->plans().begin(), engine->plans().end(),
+                [&](const auto& plan) { return plan.name == goal.definition; });
+            if (definition == engine->plans().end() || definition->magic || definition->ignore_target
+                || !definition->galactic_contrast_qualified || definition->galactic_contrast_order.empty()) continue;
+            const auto* target = engine->target(goal.target); if (!target) continue;
+            // Read already-published classified perception rows. Calling the
+            // ordinary force getter here could refresh gameplay-owned caches.
+            const auto perception = world->state();
+            std::vector<std::pair<const eawr::script::foc::ai::GalacticCachedValue*, std::uint64_t>> facts;
+            for (const auto& cached : perception.cache) {
+                if (cached.key.player != selected.player || cached.key.planet != target->object
+                    || cached.key.tokens.size() != 3 || cached.key.tokens[0] != "VARIABLE_TARGET"
+                    || cached.key.tokens[1] != "ENEMYFORCE"
+                    || (cached.key.tokens[2] != "GROUNDTOTALUNNORMALIZED" && cached.key.tokens[2] != "SPACETOTALUNNORMALIZED")) continue;
+                for (const auto& binding : cached.key.bindings) if (const auto* value = std::get_if<eawr::script::foc::ai::Real>(&binding.value);
+                    value && binding.parameter == "PARAMETER_CATEGORY"
+                    && std::any_of(definition->galactic_contrast_order.begin(), definition->galactic_contrast_order.end(),
+                        [&](auto category) { return *value == eawr::script::foc::ai::Real(category); })) {
+                    facts.emplace_back(&cached, value->repr); break;
+                }
+            }
+            if (facts.empty()) continue;
+            output << "{\"galactic_frame\":" << frame << ",\"player\":" << selected.player
+                << ",\"goal\":" << goal.goal << ",\"target\":" << target->object << ",\"plan\":";
+            json_string(output, definition->name);
+            output << ",\"running_plan\":" << goal.running_plan << ",\"cached_classified_force\":[";
+            bool first = true;
+            for (const auto& [fact, category] : facts) {
+                if (!first) { output << ','; }
+                first = false;
+                output << "{\"space\":" << (fact->key.tokens[2] == "SPACETOTALUNNORMALIZED" ? "true" : "false")
+                    << ",\"category_bits\":" << category << ",\"force_bits\":" << fact->value.repr << ",\"cache_frame\":" << fact->frame << '}';
+            }
+            output << "]}" << std::endl; witnessed.insert(selected.player); break;
+        }
+    }
+}
 struct Observations {
     std::vector<cp::GalacticAiRuntimeView> runtimes;
     std::map<gc::PlayerId, PlayerProgress> players;
@@ -234,6 +295,7 @@ struct Report {
             first = false;
             output << "{\"id\":" << id << ",\"builds_started\":" << player.builds_started << ",\"builds_completed\":" << player.builds_completed
                 << ",\"expansions\":" << player.expansions << ",\"attacks\":" << player.attacks << ",\"defences\":" << player.defences
+                << ",\"movements\":" << player.movements
                 << ",\"heroes_observed\":" << player.heroes << ",\"maximum_tech\":" << player.maximum_tech
                 << ",\"first_tech3_frame\":" << player.first_tech3_frame << '}';
         }
@@ -282,6 +344,9 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
     // interrupted two-hour run still shows how far it got and how fast.
     std::ofstream pace(directory / "progress.ndjson", std::ios::trunc);
     check(static_cast<bool>(pace), "campaign progress output unavailable");
+    std::ofstream targeted(directory / "targeted-plan-witnesses.ndjson", std::ios::trunc);
+    check(static_cast<bool>(targeted), "campaign targeted-plan output unavailable");
+    std::set<gc::PlayerId> targeted_players;
     const auto started = std::chrono::steady_clock::now();
     check(!observed->runtimes.empty(), "campaign factory did not publish real native runtime owners");
     const auto view = observed->runtimes.front();
@@ -346,6 +411,8 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
             }
             if (report.galactic_frames % (10U * gc::galactic_frames_per_second) == 0 && last_progress_frame != report.galactic_frames) {
                 last_progress_frame = report.galactic_frames;
+                sample_movements(observed->players, *actions);
+                sample_targeted_plans(view, setup, report.galactic_frames, targeted, targeted_players);
                 pace << "{\"galactic_frame\":" << report.galactic_frames << ",\"branches\":" << branches.size() << ",\"wall_seconds\":"
                     << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count()
                     << ",\"battles\":" << observed->conflicts.size() << ",\"returns\":" << observed->returned.size()
@@ -357,6 +424,7 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
                     pace << "{\"id\":" << id << ",\"builds_started\":" << player.builds_started
                         << ",\"builds_completed\":" << player.builds_completed << ",\"expansions\":" << player.expansions
                         << ",\"attacks\":" << player.attacks << ",\"defences\":" << player.defences
+                        << ",\"movements\":" << player.movements
                         << ",\"maximum_tech\":" << player.maximum_tech << ",\"first_tech3_frame\":" << player.first_tech3_frame << '}';
                 }
                 pace << "]}" << std::endl;
@@ -440,6 +508,7 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
         if (report.stop_reason.empty()) report.stop_reason = "galactic_game_time_budget";
     } catch (const std::exception& error) { report.failure = error.what(); report.stop_reason = "runtime_refusal_or_continuation_failure"; }
     report.players = observed->players; report.battles = observed->conflicts.size(); report.returns = observed->returned.size();
+    if (const auto actions = view.actions.lock()) sample_movements(report.players, *actions);
     report.boundaries = retired;
     for (const auto& branch : branches) report.boundaries[branch.boundary][branch.workers] = branch.compared_frames;
     report.progression = !report.players.empty() && std::all_of(report.players.begin(), report.players.end(), [](const auto& row) {

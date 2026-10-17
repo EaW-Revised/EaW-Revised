@@ -527,6 +527,12 @@ void installed() {
     }
     expect(content->registered_types == registered && registered.size() == content->types.size(),
         "installed catalog winner order survives bound type lookup");
+    std::vector<gc::TypeId> category_order;
+    for (const auto& type : content->ai.types) category_order.push_back(type.type_id);
+    expect(category_order.size() > 2 && !std::is_sorted(registered.begin(), registered.end()),
+        "PL-20: the installed fixture distinguishes registration order from binding-id order");
+    expect(category_order == registered,
+        "PL-20: prepare_ai_selection_content enumerates category candidates in type-table order");
     std::vector<gc::TypeId> perception_order;
     for (const auto& type : prepared->economy_types) perception_order.push_back(type.type);
     expect(perception_order == registered, "installed perception carries complete registration order");

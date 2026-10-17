@@ -37,6 +37,7 @@
 #include <godot_cpp/variant/string.hpp>
 
 #include <string_view>
+#include <functional>
 
 namespace eawr::presentation::godot_backend {
 
@@ -105,12 +106,21 @@ private:
 // change, so the text under the root would keep the previous scale's level until the next change.
 void refresh_text_oversampling(godot::CanvasItem& root);
 
+struct LetterboxLayout {
+    float scale{};
+    godot::Vector2 offset;
+};
+// Uniformly fit a reference canvas, centre this control at whole pixels, and refresh
+// its text only when the scale changes. A smaller control keeps the reference scale.
+[[nodiscard]] LetterboxLayout fit_letterbox_canvas(godot::Control& canvas, const godot::Vector2& viewport,
+                                                  const godot::Vector2& reference);
+
 // Draws a small frame (Small_Frame_*) inside `rect` on `control`'s canvas item.
 void draw_small_frame(godot::Control& control, const godot::Rect2& rect, bool background);
 
 // Push button: Button_Left/Middle/Right in the normal, mouse-over, pressed and
-// disabled sets, caption in the Push_Button role. The pieces keep their
-// texture height from the top of the rect, as retail draws them.
+// disabled sets, caption in the Push_Button role. By default the pieces retain
+// their texture height; bounded dialogs opt into fitting the authored rectangle.
 class EawrUiButton final : public godot::BaseButton {
     GDCLASS(EawrUiButton, godot::BaseButton)
 
@@ -119,6 +129,8 @@ public:
     void set_text(const godot::String& text);
     [[nodiscard]] godot::String get_text() const { return text_; }
     void set_forced_state(KitState state);
+    // Bounded dialogs fit the loaded skin and caption inside an authored rectangle.
+    void set_fit_to_rect(bool enabled);
     [[nodiscard]] KitState state() const;
     void _draw() override;
     [[nodiscard]] godot::Vector2 _get_minimum_size() const override;
@@ -129,6 +141,7 @@ protected:
 private:
     godot::String text_;
     KitState forced_{KitState::automatic};
+    bool fit_to_rect_{};
     KitText caption_;
 };
 
@@ -193,6 +206,7 @@ class EawrUiSlider final : public godot::Range {
 public:
     EawrUiSlider();
     void set_forced_states(KitState minus, KitState plus);
+    void set_dialog_sound(std::function<void(std::string_view)> sound) { dialog_sound_ = std::move(sound); }
     [[nodiscard]] std::uint64_t edit_revision() const noexcept { return edit_revision_; }
     void _draw() override;
     void _gui_input(const godot::Ref<godot::InputEvent>& event) override;
@@ -212,6 +226,7 @@ private:
 
     KitState forced_minus_{KitState::automatic};
     KitState forced_plus_{KitState::automatic};
+    std::function<void(std::string_view)> dialog_sound_;
     Part hovered_{Part::none};
     Part held_{Part::none};
     std::uint64_t edit_revision_{}; // actual GUI gestures, including unchanged endpoints

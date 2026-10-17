@@ -94,6 +94,8 @@ struct FreestorePool {
     std::set<gc::PlayerId> qualified_players;
     std::vector<FreestoreSurface> surfaces; // WGA-410: cached live transport counts
     std::vector<sim::EntityId> removed; // ascending: lost, dead or deleting actors (WGA-436 null wrapper)
+    // Derived player publications. The flat rows above retain the ordered Lua/object facade.
+    std::map<gc::PlayerId, std::shared_ptr<const FreestorePool>> players{};
 };
 [[nodiscard]] bool freestore_eligible(const FreestoreObject&, gc::PlayerId) noexcept;
 enum class FreestoreAssignment { failed, waiting, assigned };

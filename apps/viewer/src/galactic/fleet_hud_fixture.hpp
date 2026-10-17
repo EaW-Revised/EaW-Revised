@@ -28,6 +28,12 @@ inline void configure_fleet_hud_fixture(sim::galactic::GalacticSetup& setup,
         {602,observer_player,101,{{7004,1000}},1}, {603,enemy,101,{{7005,1000},{7006,1001},{7007,1000},{7008,1003}},2},
         {604,enemy,101,{{7009,1002}},0}};
     if (fixture == "fleet-drag-enemy") setup.fleets[3].orbit = 102;
+    // WGUI-175: another owner's aware fleet at the focused planet puts its orbit panels in the enemy layout
+    // (enemy panel 1, local slots 0 and 2 together in panel 3). The drag fixtures drive the friendly layout of the
+    // local slots, so their other-owner fleets wait at planet 103 (undiscovered in these fixtures, so invisible);
+    // fleet-slot keeps the enemy layout covered.
+    if ((fixture.starts_with("fleet-drag") && fixture != "fleet-drag-enemy") || fixture.starts_with("fleet-route-"))
+        setup.fleets[2].orbit = setup.fleets[3].orbit = 103;
     if (fixture.starts_with("destruction-")) setup.fleets[0].members = {{7001,1000}};
     // WGUI-17: an attached superweapon (either side's) grants counts under a
     // presence-only mask; the plain variant drops both Death Stars so presence stays bare.
@@ -38,7 +44,8 @@ inline void configure_fleet_hud_fixture(sim::galactic::GalacticSetup& setup,
     // WGEP-40: a purchased orbit unit is a fleet of its own at slot 0, never
     // merged into the slot's existing fleet. 7010 shares a type with fleet 601's
     // first group; 7011 is a type only this fleet holds.
-    if (fixture == "fleet-slot") setup.fleets.push_back({605,observer_player,101,{{7010,1000},{7011,1002}},0});
+    // fleet-drag-slot is the same orbit with the other owner away: the friendly layout the drag cases drive.
+    if (fixture == "fleet-slot" || fixture == "fleet-drag-slot") setup.fleets.push_back({605,observer_player,101,{{7010,1000},{7011,1002}},0});
     // A singleton before a count-two stack lets the drag test free an earlier
     // cell, then split the stack without giving its remainder an explicit index.
     if (fixture == "fleet-drag-split")

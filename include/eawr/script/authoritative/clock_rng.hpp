@@ -24,10 +24,13 @@ struct TickDuration {
 
 inline constexpr std::uint64_t max_script_tick = std::uint64_t{1} << 40;
 
-// Random-key domain of an object turn (#3702): the turn draws from the stream keyed
-// `tick | turn_random_domain`, disjoint from the barrier service's key `tick` because
-// every script tick is below max_script_tick.
+// Random-key domains: bit 62 is VM object-turn service, bit 61 is the host's
+// initial object service phase, and the untagged key is barrier service.
+// All script ticks are below 2^40, so neither host nor VM shares a key.
 inline constexpr std::uint64_t turn_random_domain = std::uint64_t{1} << 62;
+inline constexpr std::uint64_t object_phase_random_domain = std::uint64_t{1} << 61;
+static_assert((turn_random_domain & object_phase_random_domain) == 0);
+static_assert(turn_random_domain > max_script_tick && object_phase_random_domain > max_script_tick);
 
 [[nodiscard]] bool valid_tick_duration(TickDuration duration) noexcept;
 

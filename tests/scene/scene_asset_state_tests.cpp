@@ -2,8 +2,36 @@
 
 namespace eawr::tests::scene_tests {
 
+namespace {
+void missing_material_effect_contracts() {
+    using eawr::scene::missing_material_effect;
+    Assets assets;
+    const auto access = assets.access();
+    expect(!missing_material_effect(access, "MeshGloss.fx"), "a compiled effect prevents the missing-file route");
+    expect(!missing_material_effect(access, "EawrUnlisted.fx"), "an existing unsupported effect is not missing");
+    expect(missing_material_effect(access, "InventedMissing.fx"), "absence of both files selects the built-in material");
+    expect(missing_material_effect(access, "MeshAdditive.fx"), "a known adapter cannot replace a missing file");
+    expect(!missing_material_effect({}, "InventedMissing.fx"), "no existence provider is not evidence of absence");
+    assets.files.insert("data/art/shaders/inventedmissing.fx");
+    expect(!missing_material_effect(access, "INVENTEDMISSING.FXO"), "source presence also prevents the missing-file route");
+    assets.files.insert("effects/with.dots/present.fxo");
+    expect(!missing_material_effect(access, "Effects\\With.Dots\\Present.fx"), "lookup preserves directory dots");
+    auto fixture = model({"MeshGloss.fx", "InventedAbsent.fx", "EawrUnlisted.fx"}, "absent_texture.dds", {});
+    assets.models.emplace("data/art/models/missing_effect.alo", std::move(fixture));
+    const auto surfaces = eawr::scene::construction_surfaces(access, "data/art/models/missing_effect.alo");
+    expect(surfaces.size() == 3, "missing effects retain surface provenance");
+    if (surfaces.size() != 3) return;
+    expect(surfaces[0].supported && !surfaces[0].effect_missing, "an existing admitted material stays drawable");
+    expect(surfaces[1].supported && surfaces[1].effect_missing && surfaces[1].textures.empty()
+               && eawr::scene::material_selector(surfaces[1]) == &eawr::scene::missing_effect_selector(),
+        "a missing effect selects the built-in material without unused texture inputs");
+    expect(!surfaces[2].supported && !surfaces[2].effect_missing && !surfaces[2].textures.empty(),
+        "an existing unsupported effect retains its unsupported status and texture evidence");
+}
+} // namespace
+
 void selector_contracts() {
-    expect(eawr::scene::legacy_selectors().size() == 15, "the selector table matches the accepted legacy list");
+    expect(eawr::scene::legacy_selectors().size() == 22, "the selector table matches the accepted legacy list");
     const auto* alpha = eawr::scene::find_legacy_selector("MeshAlpha.fx");
     expect(alpha != nullptr && alpha->transparent && alpha->technique == "sph_t1",
            "MeshAlpha is the fixed transparent-phase pass");
@@ -22,6 +50,29 @@ void selector_contracts() {
     const auto* additive = eawr::scene::find_legacy_selector("MeshAdditive.fx");
     expect(additive != nullptr && additive->transparent && additive->technique == "t0",
            "MeshAdditive is scene-admitted as its t0 transparent pass");
+    const auto* glow = eawr::scene::find_legacy_selector("meshbumpspecglowcolorize.FX");
+    expect(glow != nullptr && !glow->transparent && glow->technique == "sph_t2"
+               && glow->pass == "sph_t2_p0" && glow->stored_values
+               && eawr::scene::colorizes("MeshBumpSpecGlowColorize.fx"),
+           "specular/glow colorize uses the stored-value opaque DX9 scene route");
+    const auto* skin_additive = eawr::scene::find_legacy_selector("rskinadditive.FX");
+    const auto* skin_alpha = eawr::scene::find_legacy_selector("RSkinAlpha.fx");
+    expect(skin_additive != nullptr && skin_additive->transparent && skin_additive->technique == "t0"
+               && skin_additive->pass == "t0_p0", "skinned additive selects its transparent programmable pass");
+    expect(skin_alpha != nullptr && skin_alpha->transparent && skin_alpha->technique == "sph_t0"
+               && skin_alpha->pass == "sph_t0_p0" && skin_alpha->stored_values,
+           "skinned alpha selects its stored-value programmable transparent pass");
+    const auto* shield = eawr::scene::find_legacy_selector("meshshield.FXO");
+    const auto* farseer = eawr::scene::find_legacy_selector("MeshShieldFarseer.fxo");
+    expect(shield != nullptr && shield->transparent && shield->technique == "t0"
+               && farseer != nullptr && farseer->transparent && farseer->technique == "sph_t3",
+           "qualified compiled shields select their own additive passes");
+    expect(eawr::scene::find_legacy_selector("MeshShield.fx") == nullptr
+               && eawr::scene::find_legacy_selector("MeshShieldFarseer.fx") == nullptr,
+           "generic compiled shield admission does not change existing uncompiled selectors");
+    const auto* deathstar = eawr::scene::find_legacy_selector("planet_deathstar.FX");
+    expect(deathstar != nullptr && !deathstar->transparent && deathstar->stored_values
+               && deathstar->technique == "sph_t3", "Death Star is the stored-value opaque highest-detail family");
     const auto* vertex_additive = eawr::scene::find_legacy_selector("MeshAdditiveVColor.fx");
     expect(vertex_additive != nullptr && vertex_additive->transparent && vertex_additive->technique == "t0"
                && vertex_additive->pass == "t0_p0",
@@ -62,6 +113,26 @@ void selector_contracts() {
            "linear adapters and unknown programs keep the linear binding");
     const auto* gloss = eawr::scene::find_legacy_selector("meshgloss.FX");
     expect(gloss != nullptr && gloss->technique == "sph_t0", "selector lookup folds case");
+    for (const std::string_view alias : {"MeshGloss.fxo", "meshgloss.FXO"}) {
+        expect(eawr::scene::find_legacy_selector(alias) == gloss,
+               "compiled gloss uses the existing canonical selector and pass");
+    }
+    for (const std::string_view alias : {"MeshAdditive.fxo", "meshadditive.FXO"}) {
+        expect(eawr::scene::find_legacy_selector(alias) == additive,
+               "compiled additive uses the existing canonical selector and pass");
+    }
+    const auto* doubled = eawr::scene::find_legacy_selector("MeshAdditive2x.fx");
+    expect(doubled != nullptr && doubled->transparent && doubled->technique == "t0"
+               && doubled->pass == "t0_p0", "doubled additive has its own transparent selector");
+    for (const std::string_view alias : {"MeshAdditive2x.fxo", "meshadditive2x.FXO"}) {
+        expect(eawr::scene::find_legacy_selector(alias) == doubled,
+               "compiled doubled additive selects the qualified family");
+    }
+    for (const std::string_view unsupported : {"MeshGloss.fxoo", "MeshAdditive.fxo.extra",
+             "MeshGlossForStarfields.fxo", "MeshAdditive2x.fxoo"}) {
+        expect(eawr::scene::find_legacy_selector(unsupported) == nullptr,
+               "unqualified generic selectors are not admitted by suffix or environment support");
+    }
     expect(eawr::scene::find_legacy_selector("TerrainRenderBump.fx") == nullptr, "terrain stays outside the legacy list");
     std::set<std::string_view> names;
     for (const Cause cause : eawr::scene::all_causes()) names.insert(eawr::scene::to_string(cause));
@@ -69,6 +140,7 @@ void selector_contracts() {
 }
 
 void static_mesh_state_contracts() {
+    missing_material_effect_contracts();
     {
         eawr::assets::Model attached;
         attached.proxies = {{"Glow", 2, true, false}, {"Glow_ALT12", 3, true, false},

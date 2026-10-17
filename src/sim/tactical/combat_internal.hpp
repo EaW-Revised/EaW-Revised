@@ -189,7 +189,13 @@ struct FormationAttackContext {
     bool allows_divert{};
     bool unbounded{};
     const CombatUnit* leader{};
+    EntityId base_attack_target{invalid_entity_id};
+    std::uint32_t base_attack_hardpoint{no_hardpoint};
 };
+// WCC-25: ordinary ship-level type admission. A non-team object needs its effective living-projectile
+// collision and Is_Valid_Target; a team container bypasses both. Scans, adoption and a team's share
+// to its members all read it (retail's member service adopts a formation target only through it).
+[[nodiscard]] bool target_type_admissible(const CombatWorld& world, const CombatUnit& target) noexcept;
 [[nodiscard]] core::Result<bool> formation_can_attack(const CombatWorld& world, const CombatUnit& target,
     math::Fixed divert, math::Vec3 anchor, const FormationAttackContext& formation);
 // WDF-02/14: finish a member's service after the formation's diversion decision.

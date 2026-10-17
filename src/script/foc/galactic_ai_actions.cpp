@@ -2,6 +2,7 @@
 #include "galactic_ai_economic_replay.hpp"
 #include "ai_engine.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/script/foc/galactic_ai_state.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -16,11 +17,28 @@ constexpr std::string_view component = "galactic-production";
 void word(std::vector<std::uint8_t>& bytes, std::uint64_t value) {
     for (unsigned i = 0; i < 8; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (i * 8)));
 }
+template<class Row> void write_purchase(std::vector<std::uint8_t>& bytes, std::uint64_t id, const Row& row) {
+    word(bytes, id); word(bytes, row.player); word(bytes, row.goal);
+    word(bytes, static_cast<std::uint64_t>(row.price.raw())); word(bytes, static_cast<std::uint64_t>(row.billed.raw()));
+    word(bytes, static_cast<std::uint64_t>(row.marked.raw())); word(bytes, static_cast<std::uint64_t>(row.remaining.raw())); word(bytes, row.orphan);
+    word(bytes, row.completed); word(bytes, row.failed); word(bytes, row.object);
+    word(bytes, row.producer); word(bytes, row.requested_type); word(bytes, static_cast<std::uint64_t>(row.channel));
+    word(bytes, row.task_finished); word(bytes, row.salvage);
+}
+template<class Row> void write_movement(std::vector<std::uint8_t>& bytes, std::uint64_t id, const Row& row) {
+    word(bytes, id); word(bytes, row.player); word(bytes, row.actor); word(bytes, row.destination);
+    word(bytes, row.conflict_location); word(bytes, static_cast<std::uint64_t>(row.reach));
+    word(bytes, row.taskforce); word(bytes, row.finished); word(bytes, row.advance_requested);
+    word(bytes, row.observed_tick); word(bytes, row.event_cursor);
+    word(bytes, row.plan_id); word(bytes, row.taskforce_id); word(bytes, row.block_id); word(bytes, row.registered);
+    word(bytes, row.freestore_actor);
+}
+
 }
 NativeActions::NativeActions(gc::GalacticSession& world, std::shared_ptr<ai::GalacticFunding> funding,
     Placement placement, std::map<gc::PlayerId, sim::math::Fixed> multipliers, GoalResolver resolver, const sim::PartitionExecutor* executor, BaseCost base_cost)
     : world_(world), funding_(std::move(funding)), placement_(std::move(placement)), multipliers_(std::move(multipliers)), goal_resolver_(std::move(resolver)), base_cost_(std::move(base_cost)), executor_(executor), lifetime_(std::make_shared<NativeActions*>(this)),
-      freestore_(std::make_shared<QualifiedFreestore>([lifetime = lifetime_] { if (*lifetime) (*lifetime)->mark_state_changed(); })) {}
+      freestore_(std::make_shared<QualifiedFreestore>([lifetime = lifetime_] { if (*lifetime) (*lifetime)->mark_state_changed(); })) { update_metadata_record(); }
 NativeActions::~NativeActions() {
     // A retired provider cannot clear a newer restore's handlers. Old closures
     // fail closed and never retain/dereference its destroyed native owner.
@@ -40,7 +58,7 @@ void NativeActions::bind_handlers() {
         (*lifetime)->mark_build_state_changed();
         found->second.completed = input.completed;
         found->second.failed = !input.completed;
-        found->second.object = input.object;
+        found->second.object = input.object; (*lifetime)->update_record(1, input.build);
     });
     world_.set_native_production_handler([lifetime = lifetime_](const auto& input) {
         return *lifetime ? (*lifetime)->notice(input) : invalid<gc::GalacticSession::NativeProductionPayment>("native producer owner must be rebound before service");
@@ -69,6 +87,7 @@ core::Result<gc::GalacticSession::NativeProductionPayment> NativeActions::notice
     return result;
 }
 core::Result<gc::GalacticSession::NativeProductionPayment> NativeActions::notice_unrecorded(const gc::GalacticSession::NativeProductionNotice& input) {
+    RecordWrite record_write{*this, 1, input.build};
     using Payment = gc::GalacticSession::NativeProductionPayment;
     using Result = core::Result<Payment>;
     if (!funding_) return invalid<Payment>("native billing requires the funding owner");
@@ -135,6 +154,7 @@ core::Result<gc::GalacticSession::NativeProductionPayment> NativeActions::notice
     return Result::success({true, payer, charge});
 }
 core::Result<void> NativeActions::finish_task(sim::EntityId build, bool salvage) {
+    RecordWrite record_write{*this, 1, build};
     const auto at = purchases_.find(build);
     if (at == purchases_.end()) return invalid<void>("finished task requires its accepted build mapping");
     auto recipient = at->second.player;
@@ -245,7 +265,9 @@ core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
             const auto& traits = snapshot->fleet_control()->types;
             const auto trait = std::find_if(traits.begin(), traits.end(), [&](const auto& row) { return row.type == landed->type; });
             if (landed->owner != request.player || trait == traits.end() || !trait->transport) continue;
-            auto launched = world_.launch_native_transport(request.player, member, target, admission_pending_());
+            // WGA-486: each member launches at its own parent; the retained
+            // result is not a target for another member's local launch.
+            auto launched = world_.launch_native_transport(request.player, member, 0, admission_pending_());
             if (!launched) return Result::failure(launched.error());
             // WGA-227: a later blockade/refusal keeps earlier actual launches.
             if (!launched.value().admitted) return Result::success({false, 0});
@@ -341,6 +363,75 @@ std::optional<gc::FleetId> NativeActions::containing_fleet(gc::PlayerId player, 
     }
     return {};
 }
+std::optional<NativeActions::AssemblyLocation> NativeActions::assembly_location(gc::PlayerId player, sim::EntityId actor) const {
+    const auto snapshot = world_.snapshot();
+    for (const auto& fleet : snapshot->fleets()) if (fleet.owner == player
+        && (fleet.id == actor || std::any_of(fleet.members.begin(), fleet.members.end(), [&](const auto& member) { return member.id == actor; })))
+        return AssemblyLocation{fleet.orbit, fleet.id, false, fleet.motion.transit.has_value()};
+    if (snapshot->control()) for (const auto& planet : snapshot->control()->planets)
+        for (const auto& member : planet.landed) if (member.id == actor && member.owner == player)
+            return AssemblyLocation{planet.planet, 0, true, false};
+    return {};
+}
+core::Result<ActionReceipt> NativeActions::prepare_assembly_actor(gc::PlayerId player, sim::EntityId actor, bool separate) {
+    using Result = core::Result<ActionReceipt>;
+    if (!admission_pending_) return invalid<ActionReceipt>("assembly requires its native admission owner");
+    auto at = assembly_location(player, actor);
+    if (!at || at->transit || !at->planet) return Result::success({false, 0});
+    if (at->landed) {
+        auto launched = world_.launch_native_transport(player, actor, 0, admission_pending_());
+        if (!launched) return Result::failure(launched.error());
+        if (!launched.value().admitted) return Result::success({false, 0});
+        at = assembly_location(player, actor);
+    }
+    if (!at || !at->fleet) return Result::success({false, 0});
+    const auto snapshot = world_.snapshot();
+    const auto fleet = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& row) { return row.id == at->fleet; });
+    if (fleet == snapshot->fleets().end()) return Result::success({false, 0});
+    if (separate && actor != fleet->id && fleet->members.size() > 1) {
+        // Each ordinary existing actor leaves a multi-member fleet before its
+        // common join/pathing route. Earlier real effects survive later refusal.
+        auto removed = world_.admit_native_fleet(player, gc::RemoveFleetMembers{fleet->id, {actor}}, admission_pending_());
+        if (!removed) return Result::failure(removed.error());
+        if (!removed.value().admitted) return Result::success({false, 0});
+        auto created = world_.admit_native_fleet(player, gc::CreateFleet{at->planet, {actor}, 0}, admission_pending_());
+        if (!created) return Result::failure(created.error());
+        if (!created.value().admitted) return Result::success({false, 0});
+        at = assembly_location(player, actor);
+    }
+    if (!at || !at->fleet) return Result::success({false, 0});
+    if (auto refreshed = refresh_freestore_movement(actor, at->fleet, false); !refreshed) return Result::failure(refreshed.error());
+    return Result::success({true, at->fleet});
+}
+core::Result<void> NativeActions::land_assembly_arrival(gc::PlayerId player, sim::EntityId actor) {
+    const auto at = assembly_location(player, actor);
+    if (!at || !at->fleet || at->transit || !at->planet) return core::Result<void>::success();
+    const auto snapshot = world_.snapshot();
+    if (!snapshot->fleet_control()) return invalid<void>("assembly arrival requires real transport traits");
+    const auto fleet = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& row) { return row.id == at->fleet; });
+    if (fleet == snapshot->fleets().end()) return core::Result<void>::success();
+    const auto member = std::find_if(fleet->members.begin(), fleet->members.end(), [&](const auto& row) { return row.id == actor; });
+    if (member == fleet->members.end()) return core::Result<void>::success();
+    const auto& traits = snapshot->fleet_control()->types;
+    const auto type = std::find_if(traits.begin(), traits.end(), [&](const auto& row) { return row.type == member->type; });
+    if (type == traits.end()) return invalid<void>("assembly arrival transport type is unavailable");
+    if (!type->transport) return core::Result<void>::success();
+    if (!snapshot->control() || !admission_pending_) return invalid<void>("assembly landing requires its control/admission owners");
+    const auto planet = std::find_if(snapshot->planets().begin(), snapshot->planets().end(), [&](const auto& row) { return row.id == at->planet; });
+    const auto& relations = snapshot->control()->relations;
+    const bool allied = planet != snapshot->planets().end() && (planet->owner == player || std::any_of(relations.begin(), relations.end(),
+        [&](const auto& row) { return row.player == player && row.other == planet->owner && row.allied; }));
+    if (!allied) return core::Result<void>::success();
+    const auto available = world_.native_transport_landing_available(player, at->planet);
+    if (!available) return core::Result<void>::failure(available.error());
+    if (available.value() != gc::GalacticSession::NativeTransportLandingGate::admitted) return core::Result<void>::success();
+    auto removed = world_.admit_native_fleet(player, gc::RemoveFleetMembers{at->fleet, {actor}}, admission_pending_());
+    if (!removed) return core::Result<void>::failure(removed.error());
+    if (!removed.value().admitted) return core::Result<void>::success();
+    auto landed = world_.land_native_transport(player, actor, at->planet, admission_pending_());
+    if (!landed) return core::Result<void>::failure(landed.error());
+    return core::Result<void>::success();
+}
 void NativeActions::bind_movement(MovementProvider provider, ConflictPending pending, NoHop no_hop, BribeHop bribe) {
     movement_provider_ = std::move(provider); conflict_pending_ = std::move(pending);
     no_hop_ = std::move(no_hop); bribe_hop_ = std::move(bribe);
@@ -362,7 +453,7 @@ void NativeActions::bind_movement_listener() {
             if (event.kind == gc::GalacticEventKind::movement_canceled) {
                 movement.finished = true; if (!movement.freestore_actor) movement.advance_requested = false;
             }
-            if (movement != previous) (*token)->mark_state_changed();
+            if (movement != previous) { (*token)->mark_state_changed(); (*token)->update_record(2, id); }
         }
     });
 }
@@ -387,6 +478,9 @@ core::Result<void> NativeActions::advance_movement(Movement& movement, bool task
         || at->orbit == movement.destination) {
         movement.finished = true; return no_hop();
     }
+    // GFD-A05/A07: path predicates read this player's preceding native effects.
+    // Reuse the already materialized layer; no new world snapshot is requested.
+    if (movement_frontier_) if (auto bound = movement_frontier_(movement.player, snapshot); !bound) return bound;
     auto copied = movement_provider_(movement.player, *snapshot);
     if (!copied) return core::Result<void>::failure(copied.error());
     if (!world_.graph()) return invalid<void>("movement has no ordinary world graph");
@@ -409,7 +503,9 @@ core::Result<void> NativeActions::advance_movement(Movement& movement, bool task
     if (occupant == input.orbital_occupants.end()) return invalid<void>("movement requires a complete orbital-occupant table");
     if (occupant->second && occupant->second != movement.player) {
         if (next != movement.destination && input.benefits_from_corruption) {
-            if (!bribe_hop_) return invalid<void>("corruption movement requires its AI bribe flag owner");
+            // Known deviation (#3981): the AI bribe request and its billing have no world owner yet, so the move
+            // ends before the occupied hop instead of faulting the simulation.
+            if (!bribe_hop_) { movement.finished = true; return no_hop(); }
             if (auto bribe = bribe_hop_(movement.player, movement.actor, next); !bribe) return bribe;
         } else if (movement.reach == MovementReach::friendly_only || movement.reach == MovementReach::friendly_ignore_threat) {
             movement.finished = true; return no_hop();
@@ -474,10 +570,11 @@ core::Result<ActionReceipt> NativeActions::admit_movement(const ActionRequest& r
     movement.observed_tick = snapshot->completed_tick(); movement.event_cursor = snapshot->events().size();
     if (auto advanced = advance_movement(movement); !advanced) return core::Result<ActionReceipt>::failure(advanced.error());
     mark_state_changed();
-    const auto id = next_movement_++; movements_.emplace(id, movement);
+    const auto id = next_movement_++; movements_.emplace(id, movement); update_record(2, id); update_metadata_record();
     return core::Result<ActionReceipt>::success({true, id});
 }
 core::Result<NativeActions::Movement> NativeActions::poll_movement(std::uint64_t request, bool taskforce_has_members) {
+    RecordWrite record_write{*this, 2, request};
     const auto found = movements_.find(request);
     if (found == movements_.end() || !found->second.registered) return invalid<Movement>("movement poll has no registered request identity");
     auto& movement = found->second;
@@ -507,6 +604,7 @@ core::Result<NativeActions::Movement> NativeActions::poll_movement(std::uint64_t
     return core::Result<Movement>::success(movement);
 }
 core::Result<void> NativeActions::movement_conflict(std::uint64_t request, gc::PlanetId location, bool begin) {
+    RecordWrite record_write{*this, 2, request};
     const auto found = movements_.find(request);
     if (found == movements_.end() || !found->second.registered)
         return invalid<void>("movement conflict requires its registered request");
@@ -528,11 +626,15 @@ core::Result<void> NativeActions::movement_conflict(std::uint64_t request, gc::P
         movement.conflict_location = 0;
         for (const auto& fleet : world_.snapshot()->fleets())
             if (fleet.id == movement.actor && fleet.orbit == location) movement.advance_requested = true;
+        // WGA-231: a retreat/delete return no longer owns a resumable actor at
+        // the conflict location. Do not let its travel finish restart this block.
+        if (!movement.advance_requested) { movement.finished = true; movement.actor = 0; }
     }
     if (movement != previous) mark_state_changed();
     return core::Result<void>::success();
 }
 core::Result<void> NativeActions::invalidate_freestore_actor(std::uint64_t request, gc::FleetId subject) {
+    RecordWrite record_write{*this, 2, request};
     const auto found = movements_.find(request);
     if (found == movements_.end() || !found->second.registered || !found->second.freestore_actor
         || !subject || found->second.actor != subject)
@@ -543,6 +645,7 @@ core::Result<void> NativeActions::invalidate_freestore_actor(std::uint64_t reque
     return core::Result<void>::success();
 }
 core::Result<void> NativeActions::retire_movement(std::uint64_t request) {
+    RecordWrite record_write{*this, 2, request};
     const auto found = movements_.find(request);
     if (found == movements_.end()) return invalid<void>("movement retirement has no retained request");
     if (found->second.registered) {
@@ -656,7 +759,7 @@ core::Result<bool> NativeActions::admit_freestore_move(gc::PlayerId player, sim:
     // WGA-385: advance before insertion; a known unsafe/no-hop first advance
     // still returns a successfully created block.
     if (auto advanced = advance_freestore_movement(movement); !advanced) return core::Result<bool>::failure(advanced.error());
-    mark_state_changed(); const auto request = next_movement_++; movements_.emplace(request, movement);
+    mark_state_changed(); const auto request = next_movement_++; movements_.emplace(request, movement); update_record(2, request); update_metadata_record();
     freestore_requests_.emplace(actor, request);
     if (auto refreshed = refresh_freestore_movement(actor, *fleet, true); !refreshed)
         return core::Result<bool>::failure(refreshed.error());
@@ -743,28 +846,40 @@ core::Result<void> NativeActions::service_freestore_landing(gc::PlayerId player,
     }
     return core::Result<void>::success();
 }
+void NativeActions::update_metadata_record() {
+    std::vector<std::uint8_t> bytes; word(bytes, next_movement_); word(bytes, freestore_move_refusals_); records_.set(0, 0, 0, bytes);
+}
+void NativeActions::update_record(std::uint32_t kind, std::uint64_t id) {
+    std::vector<std::uint8_t> bytes;
+    if (kind == 1) {
+        const auto row = purchases_.find(id); if (row == purchases_.end()) return;
+        write_purchase(bytes, id, row->second); records_.set(row->second.player, kind, id, bytes);
+    } else {
+        const auto row = movements_.find(id); if (row == movements_.end()) return;
+        write_movement(bytes, id, row->second); records_.set(row->second.player, kind, id, bytes);
+    }
+}
+core::RecordDigest NativeActions::rebuild_records() const {
+    core::RecordDigest rebuilt;
+    std::vector<std::uint8_t> bytes; word(bytes, next_movement_); word(bytes, freestore_move_refusals_); rebuilt.set(0, 0, 0, bytes);
+    for (const auto& [id, row] : purchases_) { bytes.clear(); write_purchase(bytes, id, row); rebuilt.set(row.player, 1, id, bytes); }
+    for (const auto& [id, row] : movements_) { bytes.clear(); write_movement(bytes, id, row); rebuilt.set(row.player, 2, id, bytes); }
+    return rebuilt;
+}
+core::Result<std::string> NativeActions::record_sync_hash(bool cold) const {
+    if (pending_) return invalid<std::string>("production digest requires the completed admission barrier");
+    const auto records = cold ? rebuild_records().digest(component) : records_.digest(component);
+    return core::Result<std::string>::success(compose_native_sync_digests({{"records", records}, {"freestore", freestore_->record_sync_hash(cold)}}));
+}
 core::Result<NativeState> NativeActions::capture() const {
+    if (auto verified = verify_record_sync_hash(); !verified) return core::Result<NativeState>::failure(verified.error());
     if (pending_) return invalid<NativeState>("production state requires the completed admission barrier");
     NativeState out; auto& bytes = out.components[std::string(component)];
     word(bytes, component.size()); bytes.insert(bytes.end(), component.begin(), component.end()); word(bytes, 10);
     word(bytes, purchases_.size());
-    for (const auto& [id, row] : purchases_) {
-        word(bytes, id); word(bytes, row.player); word(bytes, row.goal);
-        word(bytes, static_cast<std::uint64_t>(row.price.raw())); word(bytes, static_cast<std::uint64_t>(row.billed.raw()));
-        word(bytes, static_cast<std::uint64_t>(row.marked.raw())); word(bytes, static_cast<std::uint64_t>(row.remaining.raw())); word(bytes, row.orphan);
-        word(bytes, row.completed); word(bytes, row.failed); word(bytes, row.object);
-        word(bytes, row.producer); word(bytes, row.requested_type); word(bytes, static_cast<std::uint64_t>(row.channel));
-        word(bytes, row.task_finished); word(bytes, row.salvage);
-    }
+    for (const auto& [id, row] : purchases_) write_purchase(bytes, id, row);
     word(bytes, next_movement_); word(bytes, movements_.size());
-    for (const auto& [id, row] : movements_) {
-        word(bytes, id); word(bytes, row.player); word(bytes, row.actor); word(bytes, row.destination);
-        word(bytes, row.conflict_location); word(bytes, static_cast<std::uint64_t>(row.reach));
-        word(bytes, row.taskforce); word(bytes, row.finished); word(bytes, row.advance_requested);
-        word(bytes, row.observed_tick); word(bytes, row.event_cursor);
-        word(bytes, row.plan_id); word(bytes, row.taskforce_id); word(bytes, row.block_id); word(bytes, row.registered);
-        word(bytes, row.freestore_actor);
-    }
+    for (const auto& [id, row] : movements_) write_movement(bytes, id, row);
     word(bytes, freestore_move_refusals_);
     const auto freestore = freestore_->encode(); word(bytes, freestore.size()); bytes.insert(bytes.end(), freestore.begin(), freestore.end());
     return core::Result<NativeState>::success(std::move(out));
@@ -886,7 +1001,7 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
     purchases_ = std::move(staged);
     movements_ = std::move(moves); next_movement_ = next_movement;
     freestore_requests_ = std::move(tracked_actors);
-    freestore_move_refusals_ = freestore_refusals;
+    freestore_move_refusals_ = freestore_refusals; records_ = rebuild_records();
     return core::Result<void>::success();
 }
 core::Result<std::string> NativeActions::state_hash() const {
@@ -1107,7 +1222,7 @@ struct NativeActions::ImmediateHost final : authoritative::ImmediateEffectHost {
             : owner->world_.commit_native_actions(native->world, prepared);
         if (committed) {
             if (native->freestore_refusals) {
-                owner->freestore_move_refusals_ += native->freestore_refusals; owner->mark_state_changed();
+                owner->freestore_move_refusals_ += native->freestore_refusals; owner->mark_state_changed(); owner->update_metadata_record();
             }
             if (native->freestore) owner->freestore_->replace(*native->freestore);
             owner->immediate_work_ = native->world.work();

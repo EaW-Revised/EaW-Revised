@@ -143,6 +143,7 @@ def objects_xml() -> str:
 def write_fixture_root(root: pathlib.Path) -> pathlib.Path:
     base.write_fixture_root(root)
     data = root / "GameData" / "Data"
+    base.write_effect_presence(data, ["Tree.fx", "Grass.fx"])
     (data / "Art" / "Maps" / "EAWR_SCENE_SYNTHETIC.TED").write_bytes(ted_bytes())
     models = data / "Art" / "Models"
     (models / OBJECTS["EAWR_FOLIAGE_TREE"]).write_bytes(

@@ -112,10 +112,10 @@ indicators, including radar or ownership rings, remain an open research item.
 | WGP-26 | Battle-pending and battle-load music share one event: faction `Music_Event_Tactical_Space_Battle_Pending` / `_Land_Battle_Pending` and audio `Music_Event_Battle_Load_Screen` all name `Tactical_Battle_Loading_Loop_Event` (volume 55, looping, `MSS_Internal_Loop` yes so the stream keeps looping while loading starves the music service). The pending sounds are faction `SFX_Event_Tactical_Space_Battle_Pending` / `_Land_` (stock `RHD_` / `EHD_Battle_Pending`). The local player's battle alert selects the pending SFX and music by land/space and starts both when present. Activating the battle-load screen selects the audio load event; normal activation keeps pending/load streams alive but kills other active music first. Starting the already active event leaves that stream and its mode unchanged (SND-53), including the stock pending-to-load transition. The low-memory path suppresses load music, and a tutorial player clears active music before starting it. | XML EGP-15; debug build battle alert and load-screen activation trace |
 | WGP-27 | Galactic 3D audio uses `Audio_Galactic_3D_Saturation_Distance_Mod` **1.0**, `_Rolloff_Distance_Mod` **1.0** and `_Listener_Z_Pullback_Dist` **0.0**; mode end restores the rolloff (WGS-67). The normal listener uses the same camera-to-plane projection and height clamp as SND-12 with the galactic pullback plane; orientation is flattened camera forward with downward up. Cinematics use the camera position. A missing camera falls back to position zero, forward up and up along source Y. The galactic event sounds are faction data emitted by the movement, economy and corruption rules: planet gained/lost control, planet corrupted (`GUI_Corruption`), enemy fleet approaching, planet revealed (audio `GUI_Planet_Mouse_Over`, WGUI-05), capture bonus (`Unit_Light_Saber_On`), population cap, credit cap, mission added, new construction, starbase upgraded, blockade. This walk owns only the data-to-sound mapping. | XML EGP-15; debug build galactic listener and camera projection/orientation trace; interfaces WGM/WGEP/WGCH |
 | WGP-181 | The galactic fleet move acknowledgement follows the local player's move order after the interface has queued it. Orders the interface refuses first are silent: a fleet that needs an ability to move, an access-restricted destination, or a raid-only fleet aimed away from its raid target. A short or same-planet drag cancels; that cancel plays the negative-feedback cue only when the cursor is more than about 141 px from the start planet. The acknowledgement is skipped while the galaxy is paused, though the order still goes out. One object speaks: the best-ranked selected object under BA-20's ranking and its quirk, where a fleet stands for its best-ranked member, including transported and flagship contents. Its type's `SFXEvent_Fleet_Move` plays, or its ordinary move event when that tag is absent. Galactic moves have no group, asteroid/nebula or assist-chain variants. **Ours:** the cue follows the session's accepted movement of a local-seat fleet, ranking the fleet's members; a later simulation refusal stays silent. The cue is unattached and transported contents are not searched. Squadron containers resolve their ranking and move response through the first authored `Squadron_Units` craft (BA-24); build responses remain on the container. Non-hero-ability substitutions of the ordinary move event are not applied. | debug build GC3075-E01..E10; BA-24; effective squadron/craft XML |
-| WGP-182 | Galactic command-bar buttons each play only their own component's sounds; there is no global default. `Click_SFX` plays on a real left release unless the button is disabled, hidden or dragging. `Right_Click_SFX` needs a right-click handler. `Mouse_Over_SFX` plays once per hover entry, and only from the normal state, so disabled or selected buttons are silent. The objectives rebuild with announce plays the objective icon's click SFX, and the teletype text plays its component's mouse-over SFX on each reveal step. **Ours:** component-authored click and mouse-over on command-bar, fleet/ground, radar, black-market, hero/weapon/corruption menus, reference-page opener and pending-battle buttons; right-only queue cancellation uses `Right_Click_SFX` instead of `Click_SFX`. Hidden and disabled buttons are silent, with no shared default cue. RC dialog sounds and the objectives rebuild/teletype producers remain open. | debug build GC3075-E14..E18 |
+| WGP-182 | Galactic command-bar buttons each play only their own component's sounds; there is no global default. `Click_SFX` plays on a real left release unless the button is disabled, hidden or dragging. `Right_Click_SFX` needs a right-click handler. `Mouse_Over_SFX` plays once per hover entry, and only from the normal state, so disabled or selected buttons are silent. The objectives rebuild with announce plays the objective icon's click SFX, and the teletype text plays its component's mouse-over SFX on each reveal step. **Ours:** component-authored click and mouse-over on command-bar, fleet/ground, radar, black-market, hero/weapon/corruption menus, reference-page opener and pending-battle buttons; right-only queue cancellation uses `Right_Click_SFX` instead of `Click_SFX`. Hidden and disabled buttons are silent, with no shared default cue. Named `GalacticAudio::objectives_rebuilt` and `teletype_revealed` seams read the objective icon click and tutorial-text mouse-over fields, with synthetic qualification. Live story/objective publication remains open in the story-notification publication work (legacy EAWR-2042); callers own reveal cadence and GFC-40 suppression. | debug build GC3075-E14..E18 |
 | WGP-183 | Galactic production speech and fallback SFX follow WGEP-96/97 and WGP-63 for the **local** builder only. Underway plays on the admitted build-button submission, before the request; completion and cancellation play on the session's completed/cancelled notification when the entry's recorded builder is local. Stock types mostly author only the SFX (for example `RHD_Build_Vehicle`, `Unit_Complete_Nebulon`, `RHD_Unit_Canceled`). Non-local speech admission (WGEP-96) is not played: the observer may not hear another player's production. The strategic completion planet ping is not part of this cue. | WGEP-96/97, WGP-63; effective XML |
 | WGP-187 | Presentation notifications and the frame already drawn can differ. Our sound adapter obtains the latest session frame after reading its event batch, so a move following same-slot fleet merges ranks the current combined members. Explicit queue cancellation identifies its local supplying player directly; retained build identity still qualifies completion and automatic cancellation. Reports distinguish requested events, decoded playback starts and allocation failures. | Project adapter policy; WGP-181, WGEP-96; native live-campaign and production audio GPU cases |
-| WGP-184 | Dialog gadgets use fixed event names, not command-bar data: `GUI_Common_Dialog_Button_Press` on an active press, `GUI_Common_Dialog_Button_Hilight` on cursor entry over the button part, and `GUI_Common_Dialog_Listbox_Entry_Select`. Galactic fleet icon drags play `GUI_Drag_Fleet` once the held icon moves more than 12 px, and a same-owner fleet merge drop plays `GUI_Drop_Fleet`. **Ours:** the dialog gadget names are not yet applied (follow-up); the fleet drag plays `GUI_Drag_Fleet` when the GUI drag activates (its activation distance, not the 12 px threshold, is the WGUI-U04 seam) and `GUI_Drop_Fleet` on a merge drop. | debug build GC3075-E11..E13, E19..E20 |
+| WGP-184 | Dialog gadgets use fixed event names, not command-bar data: `GUI_Common_Dialog_Button_Press` on an active press, `GUI_Common_Dialog_Button_Hilight` on cursor entry over the button part, and `GUI_Common_Dialog_Listbox_Entry_Select`. Galactic fleet icon drags play `GUI_Drag_Fleet` once the held icon moves more than 12 px, and a same-owner fleet merge drop plays `GUI_Drop_Fleet`. **Ours:** GC battle, reference and save/load dialogs opt into the existing UI sound router for active button/check/radio presses and hover, list/combo selection, and slider minus/plus presses and hover (track/thumb and programmatic slider updates stay silent); the fleet drag plays `GUI_Drag_Fleet` when the GUI drag activates (its activation distance, not the 12 px threshold, is the WGUI-U04 seam) and `GUI_Drop_Fleet` on a merge drop. | debug build GC3075-E11..E13, E19..E20 |
 
 ## Front end
 
@@ -199,13 +199,31 @@ observer has a discovered record and the published observer predicate says it is
 corrupted. This is a conservative project admission policy, not a newly sourced
 retail visibility rule. It loads `Corruption_Particle_Name` and that type's
 `Galactic_Model_Name` from effective data and draws the authored emitter unchanged
-in the midground (WGP-19). U-06's level/type, brightness, scale and energy mapping
-remains unverified. The explicit `CorruptionPublication` seam carries admitted
-transitions and sequenced sabotage, destruction and hack effects; until the action
-owners supply those facts and U-06 supplies geometry/placement, connection and
-one-shot lifecycles are contract-tested without speculative rendering. The
-synthetic `corruption` and `corruption-clean` fixtures qualify only the drawn
-attachment and are never campaign state.
+in its authored layer (stock midground, WGP-19). Committed observer-admitted
+transition facts supply WGP-47 brightness/size/energy interpolation. WGP-20/21
+retain one reciprocal line identity and clear it on removal; WGP-48 paths use
+authored endpoints, RGB, width and band texture, while WGP-49 line particles
+receive the local pinched-cylinder volume and logical-frame growth. Render
+frames between logical updates retain the last submitted growth. Restore clears
+presentation resources and reconstructs them from the restored publication.
+Degenerate or negative-height line geometry fails closed pending U-06 capture.
+Each occupied layer and the line owner independently has a project safety budget
+of 262144 reserved particle slots, with at most 4096 per effect. Admission charges
+the actual CPU reservation after spawn, so small effects can exceed 64 instances
+per owner; exhaustion is visible in the report's `refused_effects` and
+`line_refused_effects` counters. These are project limits, not retail limits.
+Connection admission compares route endpoints once per update and rebuilds cached
+adjacency only when that list changes. It visits at most two neighbor records per
+route, with logarithmic identity lookups and retained per-frame lookup buffers.
+The native contract checks those work counts at two galaxy sizes; committed
+transition admission and rendered endpoints likewise use indexed identities.
+The dynamic size/energy API is opt-in; existing tactical consumers retain their
+prior scheduling and random stream. Synthetic `corruption-spread` fixtures
+exercise drawing, completion, type replacement and cleanup and are never
+campaign state. The explicit `CorruptionPublication` seam still carries sequenced
+sabotage, destruction and hack descriptors, but their production/rendering remains
+separate work. U-06 keeps actual bone transforms, degenerate geometry and retail
+pause/load continuity qualified.
 
 M3 needs a playable galaxy, so it needs WGP-01..07 (scene, planets, colours),
 WGP-10..17 (route lines and fleet lines), WGP-23..24 (galactic music), the
@@ -235,16 +253,19 @@ and layer before selection can retire that record; delayed presentation uses an
 exclusive cursor rather than polling current conflict state.
 
 Named producer seams remain for campaign outcome (WGP-25 needs a sourced loser
-identity, which `victory_matured` does not carry), capture reward delivery
-(WGM-76 exposes first-capture effects but has no live credit-award owner),
-corruption completion, enemy fleet warning, population/credit limit notices,
-mission addition, construction-option changes, starbase upgrades and blockade
+identity, which `victory_matured` does not carry), enemy fleet warning,
+population/credit limit notices, mission addition, independent slicer/black-market
+construction-option changes, starbase upgrades and blockade
 feedback. Their WGP-27 sound mappings exist; state changes or admission failures
 do not substitute for an authoritative notification rule.
 
 The main-branch audio audit also finds live local fleet-move acknowledgements,
 production completion/cancellation feedback and battle-summary ambient restoration
-(WGP-181/185/187). These existing consumers are not missing WGP-27 producers.
+(WGP-181/185/187). Qualified technology-setter construction unlocks also publish
+their local recipient through the retained feed (SND-68/WGEP-130).
+These existing consumers are not missing WGP-27 producers. Production/fleet and
+command-bar sounds were implemented by the advisor-feedback work (legacy EAWR-3091);
+the later dialog/objective presenter work (legacy EAWR-3801) adds separate UI sounds.
 WGP-46's load selector now keeps current music when the authored load event is
 absent, before any stream stop or mode reset. The engine-free selector covers
 pending/load reuse and tutorial/low-memory stop decisions; the viewer uses the
@@ -257,10 +278,20 @@ winner and its faction, but no authoritative loser. A targeted debug-build check
 confirms that both participants are required and the winner's exact player ID
 selects win versus lose; faction equality cannot replace that gate. The checked
 selector has no direct code caller references, so indirect/script delivery is a
-research lead, not a sourced campaign loser provider. Corruption lifecycle
-completion has an internal campaign callback, and first-capture reward has a
-control effect, but neither supplies a credited/recipient-qualified notification
-in the retained live galactic event feed. No sound is synthesized from snapshot
+research lead, not a sourced campaign loser provider. A bounded follow-up checked
+the pending-result consumers, campaign-end dispatch and score activation: these
+do not establish an eliminated-player or other-opponent selection for the missing
+argument. Do not substitute the last tactical loser for a campaign outcome.
+First-capture reward has a
+committed credit-award owner. Due corruption completion now publishes one retained
+local owner-or-beneficiary notice after type/visibility/story refresh and before
+entitlement rewards (WGP-54/WGCH-75), selecting corrupted versus removed from the
+resulting type. Startup installation and ruins cleanup do not use that timed
+feedback branch. First-capture feedback follows the actual credited award and
+recorded first-capture history (WGP-53/WGM-76), including an award clamped by the
+credit cap; it is not a notification for every windfall. The exclusive live
+cursor retains each qualified recipient once through skipped presentation frames.
+No sound is synthesized from snapshot
 differences, generic ability settlement, credit clamps or construction rejection.
 
 Evidence EGP-15 holds the per-file tag tally and the registry comparison
@@ -1152,3 +1183,49 @@ custom startup credits/current/max/hero values. Main-menu restore reconstructs
 that startup before validating and loading the saved campaign identity; it does
 not recompute current research state from the initial option. This is native
 save composition, not a claim of retail byte-format compatibility.
+
+### Approach, population and story notice integration
+
+WGUI-122's accepted departure assigns the final enroute destination with its
+notification flag enabled; the bounded debug-build caller read confirms this
+input. Clearing enroute passes false. The native movement owner now publishes
+WGUI-114 feedback after that committed assignment, with the actual local
+recipient and destination. It reads current political allegiance, explicit
+enemy relations from the live creation inputs, current combat-skip facts and
+local orbital presence. Missing authoritative inputs stay silent. Ordinary
+arrival, rejected redirection and changed snapshot membership do not synthesize
+another approach notification.
+
+The existing runtime feedback sink stages this value until successful
+publication. A per-player runtime wall clock applies the 5000 ms guard before
+retention, stamps only admitted warnings and remains outside simulation,
+checkpoint and replay state. A new live runtime starts with a zero clock
+baseline; this is a project lifetime boundary, not a promise of retail popup
+continuity across loading. The exclusive cursor retains the qualified notice
+when presentation skips frames. Missing or refused sound never retries the
+semantic notice. Local presentation requests the authored faction approach cue
+separately from urgent advisor feedback. The minimal advisor adapter localizes
+the planet text, prepends urgent entries, uses the sourced green text and
+authored per-character duration, and advances its fade in outer updates during
+strategic pause (WGUI-66..70/113/114; GFC-29). Full shared advisor graphics,
+history, story-summary suppression and load continuity remain the shared popup
+provider seam; this adapter does not claim their visual qualification.
+Missing or invalid `Advisor_Hint_Duration` leaves the HUD usable and disables
+only this text adapter as a named unsourced-default seam. It does not substitute
+a stock duration or suppress the independently delivered faction approach cue.
+
+`galactic_population_warning` implements only WGP-55/59's qualified local
+strategic predicate. Its caller must supply current usage including queued
+production (`used + reserved`, with checked arithmetic) and store that current
+usage after every admitted observation, including absent/refused SFX. The frame
+programme still owns baseline initialization, reset, load and admitted service
+sequence; no HUD polling or fresh snapshot delta is connected to this API.
+
+WGP-56 mission delivery awaits the story output publication owner (legacy EAWR-2042).
+Its API must consume actual `Goals::dialog` `PresentationEvent` values
+with the exact owner and `SoundRequest`, retain them after successful triggered
+event delivery through the campaign/live observer boundary and expose an
+exclusive cursor to audio. The caller supplies the real summary-open state,
+dialog popup/SFX flags and local faction mission event. An open-summary refresh,
+popup, generic objective insertion, icon announce or teletype reveal cannot
+substitute for that request. No synthetic mission notice is published here.

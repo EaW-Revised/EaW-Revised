@@ -236,5 +236,83 @@ func _process(_delta):
         self.assertEqual(data["map_input"]["selection_invalidations"], 0)
 
 
+    def live_tick_rate(self, hit_points, fast, ai):
+        """#4031: run the live galaxy unpaused for a few seconds (F3 overlay on) and return the report."""
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-tick-rate-"))
+        report, driver = directory / "report.json", directory / "rate.gd"
+        point = hit_points["b_fast_forward"]
+        driver.write_text('''extends SceneTree
+var frame = 0
+var started = 0
+func _initialize():
+    call_deferred("_start")
+func _start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func click(down):
+    var position = Vector2(''' + repr(point[0]) + ", " + repr(point[1]) + ''')
+    var motion = InputEventMouseMotion.new()
+    motion.position = position
+    motion.global_position = position
+    Input.parse_input_event(motion)
+    var event = InputEventMouseButton.new()
+    event.button_index = MOUSE_BUTTON_LEFT
+    event.pressed = down
+    event.position = position
+    event.global_position = position
+    Input.parse_input_event(event)
+func f3():
+    for down in [true, false]:
+        var event = InputEventKey.new()
+        event.keycode = KEY_F3
+        event.pressed = down
+        Input.parse_input_event(event)
+func _process(_delta):
+    frame += 1
+    if frame == 10: f3()
+    if frame == 30 and ''' + ("true" if fast else "false") + ''': click(true)
+    if frame == 31 and ''' + ("true" if fast else "false") + ''': click(false)
+    if frame == 31: started = Time.get_ticks_msec()
+    if started > 0 and Time.get_ticks_msec() - started > 5000:
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''', encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "Sandbox_Equal_Footing_Underworld", "--eawr-galactic-seat", "1",
+            "--eawr-galactic-ai", "on" if ai else "off", "--eawr-game-root", GAME_ROOT,
+            "--eawr-report", str(report)], cwd=ROOT, capture_output=True, text=True, timeout=600, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertTrue(report.is_file(), result.stdout + result.stderr)
+        data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
+        return data
+
+    def test_fast_forward_applies_its_factor_to_the_tick_rate(self):
+        # #4031: the applied factor in a real live run, observed through the F3 overlay's TICKS/S.
+        initial, _ = self.capture(1, campaign="Sandbox_Equal_Footing_Underworld")
+        controls = {control["name"]: control for control in initial["command_bar"]["controls"]}
+        # The capture is paused, where the button is disabled; only its place is used here.
+        hit_points = {name: [control["hit_rect"][0] + control["hit_rect"][2] / 2,
+            control["hit_rect"][1] + control["hit_rect"][3] / 2] for name, control in controls.items()}
+        for ai in (False, True):
+            with self.subTest(ai=ai):
+                normal = self.live_tick_rate(hit_points, False, ai)["perf_overlay"]
+                fast_report = self.live_tick_rate(hit_points, True, ai)
+                fast = fast_report["perf_overlay"]
+                self.assertTrue(normal["shown"] and fast["shown"])
+                self.assertEqual(normal["tick_source"], "live_session")
+                self.assertEqual(normal["clock"]["speed_factor"], 1.0)
+                self.assertEqual(fast["clock"]["speed_factor"], 4.0)
+                self.assertEqual(fast_report["live_session"]["strategic_speed_raw"], 4 * (1 << 24))
+                print("tick rate ai=%s: 1x %.1f/s (tick %.2f ms), fast forward %.1f/s (tick %.2f ms)" % (
+                    ai, normal["ticks_per_second"], normal["tick_ms_avg"], fast["ticks_per_second"], fast["tick_ms_avg"]))
+                # Observation: the rates above are numbers for the PR, not a gate (loaded hosts). The gate is the
+                # injected-clock schedule test in galactic_live_game_session_tests.
+                self.assertGreater(fast["ticks"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

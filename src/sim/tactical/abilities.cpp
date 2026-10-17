@@ -448,8 +448,9 @@ core::Result<void> validate_abilities(const AbilityTable& table) {
                 if (ability.kind == AbilityKind::cluster_bomb
                     && (spawn.ring_count == 0 || spawn.ring_count > 65536 || spawn.countdown_frames == 0 || spawn.speed.raw() <= 0))
                     return invalid("invalid cluster ring or countdown (WCB-03)" + type);
-                if (ability.kind == AbilityKind::fow_reveal_ping && (!spawn.reveal_range || spawn.ring_count != 0))
-                    return invalid("reveal ping needs its object's REVEAL behaviour (WFP-01)" + type);
+                // WFP-02: this creates the authored object; REVEAL is that object's independent behaviour.
+                if (ability.kind == AbilityKind::fow_reveal_ping && spawn.ring_count != 0)
+                    return invalid("reveal ping cannot use a cluster ring (WFP-02)" + type);
                 const auto& weaken = ability.spawned->weaken;
                 if (weaken.on_detonation && (weaken.radius.raw() <= 0 || weaken.radius.raw() > 65536 * one_raw
                     || weaken.duration_frames == 0 || weaken.duration_frames > max_ability_frames || weaken.categories == 0
@@ -469,8 +470,7 @@ core::Result<void> validate_abilities(const AbilityTable& table) {
                     ? SpecialAbilityKind::energy_weapon : ability.kind == AbilityKind::leech_shields
                         ? SpecialAbilityKind::leech_shields : SpecialAbilityKind::tractor_beam;
                 const auto handler = std::find_if(profile.special.begin(), profile.special.end(), [&](const auto& special) {
-                    return special.name == ability.gui_activated_ability_name && special.kind == expected
-                        && special.style == SpecialActivationStyle::user_input;
+                    return special.name == ability.gui_activated_ability_name && special.kind == expected;
                 });
                 if (handler == profile.special.end() || handler->beam_min_range.raw() < 0
                     || handler->beam_max_range.raw() < 0 || handler->beam_max_range.raw() > 65536 * one_raw
@@ -487,13 +487,11 @@ core::Result<void> validate_abilities(const AbilityTable& table) {
             if (ability.kind == AbilityKind::concentrate_fire) {
                 const auto handler = std::find_if(profile.special.begin(), profile.special.end(), [&](const auto& special) {
                     return special.name == ability.gui_activated_ability_name
-                        && special.kind == SpecialAbilityKind::concentrate_fire
-                        && special.style == SpecialActivationStyle::user_input;
+                        && special.kind == SpecialAbilityKind::concentrate_fire;
                 });
                 if (ability.effective_radius.raw() < 0 || handler == profile.special.end()
                     || handler->target_damage_increase.raw() < 0 || handler->target_damage_increase.raw() > 4 * one_raw
-                    || handler->target_speed_decrease.raw() != 0) {
-                    // Stock Home One authors zero speed change; nonzero policies remain U-07.
+                    || handler->target_speed_decrease.raw() < 0 || handler->target_speed_decrease.raw() > one_raw) {
                     return invalid("invalid concentrate-fire radius, handler or target modifiers" + type);
                 }
             }

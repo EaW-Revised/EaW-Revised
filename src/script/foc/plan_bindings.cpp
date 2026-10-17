@@ -217,6 +217,10 @@ Binding taskforce_produce(HostPtr host) {
 
 void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors) {
     const auto method = [&](std::string_view name, Binding binding) {
+        if (name == "Withdraw_Units") binding = [host, call = std::move(binding)](BindingContext& context, const ValueList& arguments) {
+            if (host->in_object_turn) return fail("object turn dynamic-read tripwire: Withdraw_Units");
+            return call(context, arguments);
+        };
         if (auto added = scripts.register_method(ai::handle_taskforce, name, std::move(binding)); !added) errors.push_back(added.error());
     };
     // EX-10 Produce_Force: a block over one build task per selected unit.
@@ -349,6 +353,18 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
         }
         return one(number(top));
     });
+    // EX-54: preserve the single-precision fold in force membership order.
+    method("Get_Self_Threat_Sum", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
+        if (taskforce == nullptr) return none();
+        Real total{};
+        for (const sim::EntityId member : taskforce->units) {
+            const auto* unit = host->view->find(member);
+            const auto* type = unit == nullptr ? nullptr : host->type(unit->type);
+            if (type != nullptr) total = ai::to_single(total + type->combat_power);
+        }
+        return one(number(total));
+    });
     method("Get_Force_Count", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
         auto immediate = galactic_immediate_query(context, *host, "galactic.taskforce_units", {arguments[0]});
@@ -437,6 +453,11 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
         stage(context, "block_proposal", {});
         return none();
     });
+    // EX-55: remove the calling goal's holders, leaving other goals blocked.
+    method("Unblock_Goal_Proposal", [](BindingContext& context, const ValueList&) -> core::Result<ValueList> {
+        stage(context, "unblock_proposal", {});
+        return none();
+    });
     method("Are_All_Units_On_Free_Store", [host](BindingContext&, const ValueList& arguments) {
         const auto* taskforce = taskforce_of(*host, arguments[0]);
         const auto* plan = taskforce != nullptr && host->engine != nullptr ? host->engine->plan(taskforce->plan) : nullptr;
@@ -488,9 +509,12 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
         stage(context, "attack_positioning", {handle(ai::handle_taskforce, taskforce->id), boolean(on)});
         return none();
     });
-    // No targeting priority sets or order locks in the M2 simulation.
+    // EX-59: unhosted targeting overrides and order locks must remain visible.
     for (const char* name : {"Set_Targeting_Priorities", "Lock_Current_Orders"}) {
-        method(name, [](BindingContext&, const ValueList&) { return none(); });
+        method(name, [name = std::string(name)](BindingContext& context, const ValueList&) {
+            context.report(authoritative::codes::unsupported_api, "TaskForce." + name + " skipped: per-unit targeting sets and order locks are not hosted");
+            return none();
+        });
     }
 }
 
@@ -781,6 +805,7 @@ core::Result<ValueList> find_target(const Host& host, BindingContext& context, c
     };
     std::vector<const ai::Target*> candidates;
     std::vector<Real> scores;
+    std::size_t unavailable{};
     for (const auto id : *targets) {
         const ai::Target* target = engine->target(id);
         if (!engine->target_matches(player, flags, target)) continue;
@@ -792,10 +817,13 @@ core::Result<ValueList> find_target(const Host& host, BindingContext& context, c
         // the reachable form's source-radius test after perception evaluation.
         if (!reachable && !in_radius(*target)) continue;
         const auto score = engine->evaluate(*function, player, target);
-        if (!score || (reachable && !in_radius(*target))) continue;
+        if (!score) { ++unavailable; continue; }
+        if (reachable && !in_radius(*target)) continue;
         candidates.push_back(target);
         scores.push_back(*score);
     }
+    if (unavailable != 0) context.report(authoritative::codes::unsupported_api,
+        "FindTarget(" + *function + ") skipped " + std::to_string(unavailable) + " candidates: perception unavailable");
     const auto chosen = ai::choose_target(scores, ratio, [&context] {
         return ai::real(static_cast<std::int64_t>(context.random().next_below(std::uint64_t{1} << 24))) /
             ai::real(std::int64_t{1} << 24);
@@ -840,6 +868,12 @@ std::uint64_t names_to_bits(const Host& host, const std::string& text, bool& ok)
 
 void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors) {
     const auto add = [&](std::string_view name, Binding binding) {
+        if (name == "FindTarget" || name == "FindTarget.Reachable_Target") {
+            binding = [host, name = std::string(name), call = std::move(binding)](BindingContext& context, const ValueList& arguments) {
+                if (host->in_object_turn) return fail("object turn dynamic-read tripwire: " + name);
+                return call(context, arguments);
+            };
+        }
         if (auto added = scripts.register_binding(name, std::move(binding)); !added) errors.push_back(added.error());
     };
     add("FindDeadlyEnemy", [host](BindingContext& context, const ValueList& arguments) {

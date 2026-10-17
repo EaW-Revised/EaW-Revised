@@ -128,8 +128,9 @@ std::vector<std::tuple<gc::FleetId, gc::PlayerId, gc::PlanetId, unsigned, std::v
 
 void wire_format() {
     expect(gc::galactic_opcodes::launch_from_surface == 18 && gc::galactic_opcodes::sell_object == 19
-        && gc::galactic_opcodes::transfer_fleet_members == 20 && gc::galactic_opcodes::recheck_orbit == 21 && gc::galactic_opcodes::first_reserved == 22,
-        "launch, sale and transfer occupy 18/19/20 before orbit recheck 21 and the held opcode 22");
+        && gc::galactic_opcodes::transfer_fleet_members == 20 && gc::galactic_opcodes::recheck_orbit == 21
+        && gc::galactic_opcodes::launch_fleet == 22 && gc::galactic_opcodes::first_reserved == 23,
+        "launch continuation occupies 22 after orbit recheck 21");
     const gc::CommandPayload typed = gc::LaunchFromSurface{{30, 31}, 0, 2};
     expect(gc::layer_of(typed) == gc::CommandLayer::galactic && gc::opcode_of(typed) == 18, "launch is a galactic-layer opcode 18");
     const auto bytes = gc::encode_payload(typed);
@@ -269,6 +270,237 @@ void native_owner_equality() {
         "the native owner still refuses a blockaded launch after the shared extraction");
 }
 
+void combined_launch_wire_and_admission() {
+    const gc::CommandPayload typed = gc::LaunchFleet{{30, 31}, {1, 2}, std::nullopt};
+    const auto bytes = gc::encode_payload(typed);
+    expect(gc::opcode_of(typed) == 22 && gc::layer_of(typed) == gc::CommandLayer::galactic,
+        "combined launch has its own typed galactic opcode");
+    expect(gc::decode_payload(gc::CommandLayer::galactic, 22, bytes) == std::optional<gc::CommandPayload>{typed},
+        "combined launch wire round trip");
+    for (std::size_t n = 0; n < bytes.size(); ++n)
+        expect(!gc::decode_payload(gc::CommandLayer::galactic, 22,
+            std::vector<std::uint8_t>(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(n))),
+            "every truncated launch body is refused");
+    auto trailing = bytes; trailing.push_back(0);
+    expect(!gc::decode_payload(gc::CommandLayer::galactic, 22, trailing), "trailing launch bytes refused");
+    gc::LaunchFleet oversized{{}, {1, 2}, {}};
+    for (EntityId id = 1; id <= 8200; ++id) oversized.units.push_back(id);
+    expect(!gc::decode_payload(gc::CommandLayer::galactic, 22, gc::encode_payload(oversized)),
+        "live commands obey the replay payload bound too");
+    for (const auto& invalid : std::vector<gc::LaunchFleet>{
+        {{}, {1, 2}, {}}, {{30, 30}, {1, 2}, {}}, {{0}, {1, 2}, {}},
+        {{30}, {}, {}}, {{30}, {1}, {}}, {{30}, {1, 0}, {}}, {{30}, {1, 1}, {}}, {{30}, {1, 2}, std::uint8_t{3}}})
+        expect(!gc::decode_payload(gc::CommandLayer::galactic, 22, gc::encode_payload(invalid)), "noncanonical combined launch refused");
+    const gc::CommandPayload slot = gc::LaunchFleet{{30}, {1, 2}, std::uint8_t{1}};
+    expect(gc::decode_payload(gc::CommandLayer::galactic, 22, gc::encode_payload(slot)) == std::optional{slot},
+        "explicit destination slot survives codec");
+    for (unsigned mode = 0; mode < 4; ++mode) {
+        auto setup = fixture();
+        if (mode == 2) for (auto& row : setup.movement->access)
+            if (row.player == 1 && row.planet == 1) row.potential_conflict = true;
+        eawr::platform::ThreadWorkerAdapter pool(1);
+        auto game = take(gc::GalacticSession::create(setup));
+        const gc::LaunchFleet order{mode == 3 ? std::vector<EntityId>{40} : std::vector<EntityId>{30, 31},
+            mode == 1 ? std::vector<gc::PlanetId>{1, 4} : std::vector<gc::PlanetId>{1, 2}, {}};
+        done(game.submit({{0, gc::SeatId{1}, 1}, order}));
+        const auto snapshot = take(game.step(pool)).snapshot;
+        const auto* fleet = fleet_of(*snapshot, 30);
+        if (mode == 3) {
+            expect(!fleet && surface_unit(*snapshot, 40), "unauthorized launch creates no fleet or movement");
+        } else {
+            expect(fleet && fleet == fleet_of(*snapshot, 31) && !surface_unit(*snapshot, 30), "launch preserves identities in one fleet");
+            if (mode == 0) expect(fleet && fleet->motion.transit && fleet->motion.transit->path == order.path,
+                "combined launch starts movement with its generated fleet");
+            else expect(fleet && fleet->orbit == 1 && !fleet->motion.transit,
+                "launch remains in source orbit when movement refuses or conflicts");
+            if (mode == 1) expect(event_of(*snapshot, gc::GalacticEventKind::command_rejected, 1)
+                && event_of(*snapshot, gc::GalacticEventKind::command_rejected, 1)->reason == gc::GalacticRejectReason::invalid_path,
+                "ordinary movement owns the invalid-hop refusal");
+            if (mode == 2) expect(event_of(*snapshot, gc::GalacticEventKind::movement_conflict, 0)
+                && !event_of(*snapshot, gc::GalacticEventKind::movement_begin, 1), "source conflict suppresses departure");
+        }
+    }
+}
+
+void combined_source_refusals() {
+    for (unsigned mode = 0; mode < 2; ++mode) {
+        eawr::platform::ThreadWorkerAdapter pool(1);
+        auto game = take(gc::GalacticSession::create(fixture()));
+        const auto before_surface = surface_of(*game.snapshot());
+        const auto before_fleets = fleets_of(*game.snapshot());
+        const gc::LaunchFleet order{mode == 0 ? std::vector<EntityId>{30, 31} : std::vector<EntityId>{30, 51},
+            mode == 0 ? std::vector<gc::PlanetId>{2, 3} : std::vector<gc::PlanetId>{1, 2}, {}};
+        done(game.submit({{0, gc::SeatId{1}, 1}, order}));
+        const auto snapshot = take(game.step(pool)).snapshot;
+        const auto* rejected = event_of(*snapshot, gc::GalacticEventKind::command_rejected, 1);
+        expect(rejected && rejected->reason == (mode == 0 ? gc::GalacticRejectReason::invalid_path
+            : gc::GalacticRejectReason::incompatible_location), "combined launch rejects wrong path source or mixed source planets");
+        expect(!event_of(*snapshot, gc::GalacticEventKind::command_executed, 1), "source refusal precedes fleet creation");
+        expect(surface_of(*snapshot) == before_surface && fleets_of(*snapshot) == before_fleets
+            && snapshot->fleet_control()->detached_units.empty(), "source refusal leaves all memberships unchanged");
+        expect(observed_on_surface(*snapshot, 30) && observed_on_surface(*snapshot, 31) && observed_on_surface(*snapshot, 51),
+            "source refusal leaves the observer links intact");
+        auto baseline = take(gc::GalacticSession::create(fixture()));
+        (void)take(baseline.step(pool));
+        done(game.submit(launch(1, 2, {30})));
+        done(baseline.submit(launch(1, 2, {30})));
+        (void)take(game.step(pool)); (void)take(baseline.step(pool));
+        const auto* after_refusal = fleet_of(*game.snapshot(), 30);
+        const auto* untouched = fleet_of(*baseline.snapshot(), 30);
+        expect(after_refusal && untouched && after_refusal->id == untouched->id,
+            "source refusal consumes no generated fleet identity");
+    }
+    auto setup = fixture(); setup.movement.reset();
+    eawr::platform::ThreadWorkerAdapter pool(1);
+    auto game = take(gc::GalacticSession::create(setup));
+    done(game.submit({{0, gc::SeatId{1}, 1}, gc::LaunchFleet{{30}, {1, 2}, {}}}));
+    const auto snapshot = take(game.step(pool)).snapshot;
+    const auto* cancelled = event_of(*snapshot, gc::GalacticEventKind::movement_canceled, 1);
+    expect(fleet_of(*snapshot, 30) && cancelled && cancelled->reason == gc::GalacticRejectReason::unknown_value,
+        "missing movement owner cancels only the committed launch's continuation");
+    expect(event_of(*snapshot, gc::GalacticEventKind::command_executed, 1)
+        && !event_of(*snapshot, gc::GalacticEventKind::command_rejected, 1), "recheck failure does not reject an already executed launch");
+}
+
+void combined_entry_admission() {
+    for (unsigned mode = 0; mode < 5; ++mode) {
+        auto setup = fixture();
+        const bool allowed = mode == 1, nonhuman = mode == 2, conflict = mode == 3;
+        for (auto& row : setup.movement->access)
+            if (row.player == 1 && row.planet == 2) row.accessible = allowed;
+        if (nonhuman) { setup.seats[0].kind = gc::SeatKind::ai; setup.seats[0].human_side_id = 0; }
+        if (conflict) for (auto& row : setup.movement->access)
+            if (row.player == 1 && row.planet == 1) row.potential_conflict = true;
+        if (mode == 4) setup.control->planets[0].surface_accessible = false;
+        eawr::platform::ThreadWorkerAdapter pool(1);
+        auto game = take(gc::GalacticSession::create(setup));
+        const auto before_fleets = fleets_of(*game.snapshot());
+        done(game.submit({{0, gc::SeatId{1}, 1}, gc::LaunchFleet{{31, 30}, {1, 2}, {}}}));
+        const auto snapshot = take(game.step(pool)).snapshot;
+        if (allowed || nonhuman) {
+            const auto* fleet = fleet_of(*snapshot, 30);
+            expect(fleet && fleet == fleet_of(*snapshot, 31) && fleet->motion.transit
+                && !surface_unit(*snapshot, 30), "qualified admission or nonhuman owner continues ordinary movement");
+        } else if (conflict) {
+            expect(fleet_of(*snapshot, 30) && !surface_unit(*snapshot, 30)
+                && event_of(*snapshot, gc::GalacticEventKind::movement_conflict, 0)
+                && !event_of(*snapshot, gc::GalacticEventKind::movement_canceled, 1), "source conflict suppresses the destination entry check");
+        } else {
+            const auto* cancelled = event_of(*snapshot, gc::GalacticEventKind::movement_canceled, 1);
+            expect(cancelled && cancelled->reason == gc::GalacticRejectReason::movement_blocked
+                && !event_of(*snapshot, gc::GalacticEventKind::movement_begin, 1), "denied entry cancels departure");
+            expect(fleets_of(*snapshot) == before_fleets && snapshot->fleet_control()->detached_units.empty(),
+                "denied entry destroys only its temporary fleet and retires every detached link");
+            const auto* a = surface_unit(*snapshot, 30); const auto* b = surface_unit(*snapshot, 31);
+            expect(a && b && a->type == 2 && b->type == 2 && a->owner == 1 && b->owner == 1,
+                "re-landing preserves transport identities, types and owners");
+            const auto& landed = snapshot->control()->planets[0].landed;
+            expect(landed.size() == 3 && landed[0].id == 32 && landed[1].id == 31 && landed[2].id == 30,
+                "leading unit and followers append after the untouched surface roster in command order");
+            expect(observed_on_surface(*snapshot, 30) && observed_on_surface(*snapshot, 31), "re-landing republishes the live observer links");
+            const auto* created = event_of(*snapshot, gc::GalacticEventKind::fleet_created, 1);
+            const auto* destroyed = event_of(*snapshot, gc::GalacticEventKind::fleet_destroyed, 1);
+            expect(created && destroyed && created->subject == destroyed->subject, "the same generated fleet is created and destroyed");
+            expect(std::count_if(snapshot->events().begin(), snapshot->events().end(), [](const auto& event) {
+                return event.sequence == 1 && event.kind == gc::GalacticEventKind::command_executed;
+            }) == 1, "rollback preserves one launch-executed event");
+        }
+    }
+}
+
+// #4039: a denied destination entry creates the generated fleet and destroys it inside one command. The
+// native actor-change batch then names an actor the delivered snapshot no longer holds; the AI's qualified
+// fact reader refuses such a name, ending the whole galactic session. Delivered batches must only name
+// actors the snapshot holds (a loss may name any retired actor).
+void denied_entry_batches_name_only_live_actors() {
+    auto setup = fixture();
+    for (auto& row : setup.movement->access) if (row.player == 1 && row.planet == 2) row.accessible = false;
+    // The generated fleet's shell record needs a census, which needs the production, fiscal and economy tables.
+    setup.player_economy.emplace(); setup.fiscal.emplace(); setup.production.emplace(); setup.census.emplace();
+    setup.production->maximum_human_queue = 1;
+    setup.census->types = {{1, {}}, {2, {}}};
+    for (const auto& player : setup.players) {
+        const bool human = player.player_id == 1;
+        gc::GalacticPlayerEconomy economy; economy.player = player.player_id;
+        setup.player_economy->players.push_back(economy);
+        setup.fiscal->players.push_back({player.player_id, false, f(1)});
+        setup.production->players.push_back({player.player_id, human, !human, human, {}, {}, {}, {}, {}});
+        setup.census->players.push_back({player.player_id, 0, false, {}});
+    }
+    for (const auto& planet : setup.planets) {
+        setup.fiscal->planets.push_back({planet.id, {}});
+        gc::PlanetProduction row; row.planet = planet.id; setup.production->planets.push_back(row);
+    }
+    for (const auto id : {20ULL, 24ULL, 25ULL, 30ULL, 31ULL, 32ULL, 40ULL, 50ULL, 51ULL}) {
+        const gc::TypeId type = id == 20 || id == 24 || id == 25 || id == 32 ? 1 : 2;
+        const gc::PlayerId owner = id == 24 || id == 40 ? 2 : 1;
+        const gc::PlanetId planet = id == 20 || id == 30 || id == 31 || id == 32 ? 1 : id == 25 || id == 51 ? 2 : id == 40 ? 4 : 3;
+        gc::CensusObject object{id, type, owner, planet, planet, false, false, type};
+        object.combat_role = gc::ActorCombatRole::ordinary; // the movement checks read each member's role
+        setup.census->objects.push_back(object);
+    }
+    eawr::platform::ThreadWorkerAdapter pool(1);
+    auto game = take(gc::GalacticSession::create(setup));
+    std::vector<std::string> stale;
+    std::size_t batches = 0;
+    game.set_native_actor_changes_handler([&](const gc::GalacticSnapshot& snapshot, auto changes) {
+        ++batches;
+        for (const auto& change : changes) {
+            if (change.kind == gc::GalacticSession::NativeActorChange::Kind::lost) continue;
+            const auto records = snapshot.actor_records();
+            const auto at = std::find_if(records.begin(), records.end(), [&](const auto& row) { return row.id == change.actor; });
+            if (at == records.end()) stale.push_back(std::to_string(change.actor));
+        }
+        return eawr::core::Result<void>::success();
+    });
+    done(game.submit({{0, gc::SeatId{1}, 1}, gc::LaunchFleet{{31, 30}, {1, 2}, {}}}));
+    const auto snapshot = take(game.step(pool)).snapshot;
+    expect(event_of(*snapshot, gc::GalacticEventKind::movement_canceled, 1) && surface_unit(*snapshot, 30) && surface_unit(*snapshot, 31),
+        "the denied entry re-landed the launched units");
+    expect(batches > 0, "the launch delivered actor changes");
+    expect(stale.empty(), "no delivered change names an actor the snapshot no longer holds (the generated fleet was created and lost)");
+}
+
+void nonhuman_unknown_destination_cancels_travel() {
+    auto setup = fixture(); setup.seats[0].kind = gc::SeatKind::ai; setup.seats[0].human_side_id = 0;
+    auto incomplete = setup;
+    std::erase_if(incomplete.movement->access, [](const auto& row) { return row.player == 1 && row.planet == 2; });
+    expect(!gc::GalacticSession::create(incomplete), "known destinations require complete access rows even for nonhuman owners");
+    const gc::GalacticReplay replay{setup, 3, {
+        {{0, gc::SeatId{1}, 1}, gc::LaunchFleet{{31, 30}, {1, 999}, {}}},
+    }};
+    const auto encoded = take(gc::write_replay(replay));
+    const auto decoded = take(gc::parse_replay(encoded));
+    expect(take(gc::write_replay(decoded)) == encoded, "unknown-destination AI launch round trips without inventing an access row");
+    std::vector<std::string> reference;
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto game = take(eawr::campaign::GameSession::from_replay(decoded));
+        std::vector<std::string> hashes{take(game.step(pool)).state_hash.get()};
+        const auto snapshot = game.galaxy().snapshot();
+        const auto* fleet = fleet_of(*snapshot, 30);
+        const auto* cancelled = event_of(*snapshot, gc::GalacticEventKind::movement_canceled, 1);
+        expect(fleet && fleet == fleet_of(*snapshot, 31) && fleet->orbit == 1 && !fleet->motion.transit
+            && !surface_unit(*snapshot, 30), "unknown destination keeps the committed AI launch in source orbit");
+        expect(cancelled && cancelled->reason == gc::GalacticRejectReason::unknown_value
+            && event_of(*snapshot, gc::GalacticEventKind::command_executed, 1)
+            && !event_of(*snapshot, gc::GalacticEventKind::command_rejected, 1)
+            && !event_of(*snapshot, gc::GalacticEventKind::movement_begin, 1),
+            "missing AI destination row cancels travel rather than rejecting an executed launch");
+        const auto identities = cp::game_identities(setup);
+        const auto saved = take(cp::save_game_checkpoint(game, identities));
+        auto restored = take(cp::load_game_checkpoint(saved, identities, {}, pool));
+        for (std::uint64_t tick = 1; tick < replay.final_tick_count; ++tick) {
+            hashes.push_back(take(game.step(pool)).state_hash.get());
+            expect(take(restored.session.step(pool)).state_hash.get() == hashes.back(), "AI cancellation restores its committed launch exactly");
+        }
+        expect(take(cp::save_game_checkpoint(game, identities)) == take(cp::save_game_checkpoint(restored.session, identities)),
+            "AI cancellation checkpoint continuation re-saves identically");
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "AI unknown-destination cancellation is equal on 1/2/4/8 workers");
+    }
+}
+
 void checkpoint_replay_and_workers() {
     const gc::GalacticReplay replay{fixture(), 6, {
         launch(0, 1, {30, 31}, 0, 1),     // creates a fleet in slot 1
@@ -303,6 +535,67 @@ void checkpoint_replay_and_workers() {
         else expect(reference == hashes, "launch hashes are equal on 1/2/4/8 workers");
     }
 }
+
+void combined_checkpoint_replay_and_workers() {
+    const gc::GalacticReplay replay{fixture(), 6, {
+        {{0, gc::SeatId{1}, 1}, gc::LaunchFleet{{30, 31}, {1, 2}, {}}},
+        {{1, gc::SeatId{1}, 2}, gc::LaunchFleet{{51}, {2, 4}, {}}}, // launch succeeds, travel refuses
+        {{2, gc::SeatId{1}, 3}, gc::LaunchFleet{{40}, {4, 3}, {}}}, // enemy actor refuses
+    }};
+    const auto parsed = take(gc::parse_replay(take(gc::write_replay(replay))));
+    expect(parsed == replay, "combined commands survive a canonical replay");
+    std::vector<std::string> reference;
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto game = take(eawr::campaign::GameSession::from_replay(parsed));
+        const auto identities = cp::game_identities(parsed.setup);
+        std::vector<std::string> hashes;
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        const auto saved = take(cp::save_game_checkpoint(game, identities));
+        for (std::uint64_t i = 1; i < parsed.final_tick_count; ++i) hashes.push_back(take(game.step(pool)).state_hash.get());
+        auto restored = take(cp::load_game_checkpoint(saved, identities, {}, pool));
+        for (std::uint64_t i = 1; i < parsed.final_tick_count; ++i)
+            expect(take(restored.session.step(pool)).state_hash.get() == hashes[static_cast<std::size_t>(i)],
+                "combined launch checkpoint retains moving fleet and queued continuations");
+        expect(take(cp::save_game_checkpoint(restored.session, identities)) == take(cp::save_game_checkpoint(game, identities)),
+            "combined launch continuation re-saves identical checkpoint");
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "combined launch replay hashes equal on 1/2/4/8 workers");
+    }
+}
+
+void restricted_checkpoint_replay_and_workers() {
+    auto setup = fixture();
+    for (auto& row : setup.movement->access) if (row.player == 1 && row.planet == 2) row.accessible = false;
+    const gc::GalacticReplay replay{setup, 6, {
+        {{0, gc::SeatId{1}, 1}, gc::LaunchFleet{{31, 30}, {1, 2}, {}}},
+        {{1, gc::SeatId{1}, 2}, gc::LaunchFleet{{30, 51}, {1, 2}, {}}},
+        {{2, gc::SeatId{1}, 3}, gc::LaunchFleet{{31, 30}, {2, 3}, {}}},
+        {{3, gc::SeatId{1}, 4}, gc::LaunchFleet{{30, 31}, {1, 2}, {}}},
+    }};
+    const auto parsed = take(gc::parse_replay(take(gc::write_replay(replay))));
+    expect(parsed == replay, "replay retains the prequalified per-player entry result");
+    std::vector<std::string> reference;
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto game = take(eawr::campaign::GameSession::from_replay(parsed));
+        const auto identities = cp::game_identities(parsed.setup);
+        std::vector<std::string> hashes;
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(surface_unit(*game.galaxy().snapshot(), 30) && observed_on_surface(*game.galaxy().snapshot(), 31)
+            && !fleet_of(*game.galaxy().snapshot(), 30), "denied replay launch has already re-landed before checkpoint");
+        const auto saved = take(cp::save_game_checkpoint(game, identities));
+        for (std::uint64_t i = 1; i < parsed.final_tick_count; ++i) hashes.push_back(take(game.step(pool)).state_hash.get());
+        auto restored = take(cp::load_game_checkpoint(saved, identities, {}, pool));
+        for (std::uint64_t i = 1; i < parsed.final_tick_count; ++i)
+            expect(take(restored.session.step(pool)).state_hash.get() == hashes[static_cast<std::size_t>(i)],
+                "restricted launch checkpoint continuation matches the uninterrupted run");
+        expect(take(cp::save_game_checkpoint(restored.session, identities)) == take(cp::save_game_checkpoint(game, identities)),
+            "restricted launch checkpoint re-saves identical bytes");
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "restricted launch replay hashes equal on 1/2/4/8 workers");
+    }
+}
 } // namespace
 
 int main() {
@@ -312,7 +605,14 @@ int main() {
         refusals_leave_the_surface_intact();
         movement_created_fleet_adds_no_shell_record();
         native_owner_equality();
+        combined_launch_wire_and_admission();
+        combined_source_refusals();
+        combined_entry_admission();
+        denied_entry_batches_name_only_live_actors();
+        nonhuman_unknown_destination_cancels_travel();
         checkpoint_replay_and_workers();
+        combined_checkpoint_replay_and_workers();
+        restricted_checkpoint_replay_and_workers();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

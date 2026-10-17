@@ -231,7 +231,7 @@ core::Result<AutoResolveRoster> collect_live_auto_resolve_roster(const ConflictR
     if (snapshot.production()) for (const auto& production : snapshot.production()->planets) if (production.planet == conflict.planet) {
         if (conflict.layer == BattleLayer::space && production.starbase_type) {
             const auto* base = bound(plan, types, production.starbase_type); if (!base) return fail<AutoResolveRoster>("unbound starbase type"); out.planet.base_type = base->name;
-            out.planet.owner = production.starbase_owner;
+            out.planet.owner = station_side(conflict);
         }
         // WAR-14: ordinary galactic ground specials retain their own actor identity.
         for (const auto& object : production.objects) if (object.domain == gc::ProductionDomain::ground && object.kind == gc::ProductionKind::structure) {
@@ -249,7 +249,7 @@ core::Result<AutoResolveRoster> collect_live_auto_resolve_roster(const ConflictR
         }
     }
     if (conflict.layer == BattleLayer::space && out.planet.base_type.empty() && conflict.station_type) {
-        const auto* base = bound(plan, types, conflict.station_type); if (!base) return fail<AutoResolveRoster>("unbound conflict base"); out.planet.base_type = base->name; out.planet.owner = conflict.defender;
+        const auto* base = bound(plan, types, conflict.station_type); if (!base) return fail<AutoResolveRoster>("unbound conflict base"); out.planet.base_type = base->name; out.planet.owner = station_side(conflict);
     }
     if (conflict.raid) for (const auto& force : conflict.forces) if (force.owner == conflict.invader) out.raid_entries.push_back(force.id);
     for (auto& [id, object] : objects) { (void)id; out.objects.push_back(std::move(object)); }
@@ -514,6 +514,8 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         gc::ControlBattleReturn returned; returned.planet = a.planet; returned.invader = a.invader; returned.defender = a.defender;
         returned.winner = a.result.winner; returned.land = a.land; returned.station_level = a.result.station_level; returned.destroyed = a.destroyed;
         const auto snapshot = galaxy.snapshot();
+        // WGM-202: the station stands for the planet's own starbase, whoever fought as the defender.
+        if (const auto* surface = control_planet(*snapshot, a.planet); surface && surface->starbase.level) returned.station_owner = surface->starbase.owner;
         for (const auto id : a.land_invaders) {
             std::optional<gc::SurfaceForce> force;
             if (const auto* planet = control_planet(*snapshot, a.planet)) for (const auto& row : planet->landed) if (row.id == id) force = row;
@@ -587,6 +589,7 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         if (first_free == std::numeric_limits<sim::EntityId>::max()) return fail<std::optional<RecordedAdmission>>("conflict allocator exhausted");
         ConflictRecord record; record.id = first_free; record.layer = land ? BattleLayer::land : BattleLayer::space; record.planet = event.value;
         record.invader = presence.value().invader; record.defender = presence.value().defender; record.station_level = presence.value().starbase_level;
+        record.station_owner = presence.value().starbase_level ? presence.value().starbase_owner : 0; // WGM-202: the real starbase owner
         record.tactical.first_free_entity_id = first_free + 1;
         record.tactical.content_identity = p->plan.galaxy().content_identity;
         record.forces = live_conflict_force_manifest(record, presence.value());

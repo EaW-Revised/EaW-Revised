@@ -120,12 +120,12 @@ void GalacticMode::State::update_fleet_route_preview() {
         fleet_preview_path.clear(); fleet_preview_publication.reset();
         fleet_preview_source = fleet_preview_destination = 0;
     };
-    if (!dragged_fleet || !fleet_drag_receiver || !displayed_snapshot || !galaxy || tactical || loading
+    if (!dragged_fleet || !fleet_drag_receiver || !published_snapshot || !galaxy || tactical || loading
         || !map_input.gates.galactic || !map_input.gates.hud_enabled || !map_input.gates.world_allowed()
         || map_input.gates.tutorial_locked || map_input.gates.action_menu || map_input.gates.selection_locked
         || retreat_dialog_open || (battle_dialog && battle_dialog->visible())
-        || displayed_snapshot->clock().pause_depth) { clear(); return; }
-    const auto fleets = displayed_snapshot->fleets();
+        || published_snapshot->clock().pause_depth) { clear(); return; }
+    const auto fleets = published_snapshot->fleets();
     const auto source = std::find_if(fleets.begin(), fleets.end(), [this](const auto& row) { return row.id == dragged_fleet; });
     if (source == fleets.end() || source->owner != galaxy->local.player || !source->orbit || source->motion.transit) {
         clear(); return;
@@ -160,9 +160,9 @@ void GalacticMode::State::update_fleet_route_preview() {
         if (destination == source->orbit || !fleet_drop(dragged_fleet, cursor, false)) { clear(); return; }
         bool same_inputs = fleet_preview_publication && fleet_preview_source == source->orbit
             && fleet_preview_destination == destination;
-        if (same_inputs && fleet_preview_publication != displayed_snapshot) {
+        if (same_inputs && fleet_preview_publication != published_snapshot) {
             const auto& old = *fleet_preview_publication;
-            const auto& now = *displayed_snapshot;
+            const auto& now = *published_snapshot;
             same_inputs = old.maximum_movement_distance() == now.maximum_movement_distance()
                 && std::equal(old.planets().begin(), old.planets().end(), now.planets().begin(), now.planets().end())
                 && std::equal(old.routes().begin(), old.routes().end(), now.routes().begin(), now.routes().end())
@@ -182,13 +182,13 @@ void GalacticMode::State::update_fleet_route_preview() {
         if (!same_inputs) {
             ++fleet_preview_searches;
             const auto planets = input_planets();
-            const auto intent = galactic_view::fleet_destination_intent(*displayed_snapshot,
+            const auto intent = galactic_view::fleet_destination_intent(*published_snapshot,
                 galaxy->local.player, dragged_fleet, destination, planets);
             fleet_preview_path = intent && intent->kind == galactic_view::DropKind::move
                 ? intent->path : std::vector<sim::galactic::PlanetId>{};
         }
         fleet_preview_source = source->orbit; fleet_preview_destination = destination;
-        fleet_preview_publication = displayed_snapshot;
+        fleet_preview_publication = published_snapshot;
         return;
     }
     clear();

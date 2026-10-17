@@ -30,7 +30,17 @@ bool LanReconnectCredentials::delivered() const noexcept {
         && std::all_of(acknowledged_.begin(), acknowledged_.end(), [](bool acknowledged) { return acknowledged; });
 }
 core::Result<ReconnectTokens> LanReconnectCredentials::provide(const SetupOffer& offer, MessageTransport& transport) {
-    if (!offer.recovery.reconnect || offer.seats.size() != transport.peer_count() || transport.peer_count() < 2
+    if (!offer.recovery.reconnect)
+        return fail<ReconnectTokens>("EAWR-NET-1020", "Reconnect credential policy or roster differs.");
+    return provide_for_offer(offer, transport);
+}
+core::Result<ReconnectTokens> LanReconnectCredentials::provide_mesh_repair(const SetupOffer& offer, MessageTransport& transport) {
+    if (transport.peer_count() < 3)
+        return fail<ReconnectTokens>("EAWR-NET-1020", "Pair repair requires an online room mesh.");
+    return provide_for_offer(offer, transport);
+}
+core::Result<ReconnectTokens> LanReconnectCredentials::provide_for_offer(const SetupOffer& offer, MessageTransport& transport) {
+    if (offer.seats.size() != transport.peer_count() || transport.peer_count() < 2
         || transport.peer_count() > max_match_seats || transport.self() >= transport.peer_count())
         return fail<ReconnectTokens>("EAWR-NET-1020", "Reconnect credential policy or roster differs.");
     auto envelope = encode_setup_offer(offer);

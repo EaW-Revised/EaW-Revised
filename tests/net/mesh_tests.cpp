@@ -357,7 +357,9 @@ void early_peer_hash() {
         if (from == 1 && to == 2 && frame.front() == net::desync_combined_kind && sessions.size() == 3
             && sessions[2].phase() == net::SetupPhase::awaiting_offer) early = true;
     };
-    auto selected = offer(); selected.seats.push_back({2, sim::SeatId{15}, 2});
+    auto selected = offer();
+    selected.setup = require(net::encode_skirmish_setup(human_setup(3)));
+    selected.seats.push_back({2, sim::SeatId{15}, 3});
     for (net::PeerIndex peer = 0; peer < 3; ++peer) {
         transports.push_back(std::make_unique<eawr::testing::FakeTransport>(network, peer));
         monitors.push_back(std::make_unique<net::DesyncMonitor>(*transports.back()));
@@ -383,13 +385,23 @@ std::vector<std::string> battle(std::uint32_t count, std::size_t configuration, 
     std::vector<std::unique_ptr<net::DesyncMonitor>> monitors;
     std::vector<net::SetupSession> setup_sessions;
     auto selected = offer(); selected.seats.clear(); selected.final_tick_count = 50;
-    auto initial = setup();
-    if (coop) initial.skirmish->slots[1].human = false;
+    auto initial = human_setup(count);
     const auto sides = count == 9 && !coop ? 3U : 2U;
-    if (sides == 3) initial.skirmish->slots[2].human = true;
+    for (net::PeerIndex peer = 0; peer < count; ++peer) {
+        const auto team = coop ? 1U : peer % sides + 1;
+        initial.players[peer].team_id = team;
+        initial.players[peer].faction_id = team;
+        selected.seats.push_back({peer, sim::SeatId{peer + 1}, peer + 1});
+    }
+    if (coop) {
+        const auto owner = count + 1;
+        initial.players.push_back({owner, 2, 2, tactical::player_flag_commandable});
+        auto unit = setup().units.back(); unit.entity_id = owner; unit.owner = owner;
+        unit.position = {units(owner * 1000), units(2000), {}};
+        initial.units.push_back(unit);
+        initial.skirmish->slots.push_back({owner, false, owner - 1, {}});
+    }
     selected.setup = require(net::encode_skirmish_setup(initial));
-    for (net::PeerIndex peer = 0; peer < count; ++peer)
-        selected.seats.push_back({peer, sim::SeatId{peer + 1}, coop ? 1U : peer % sides + 1});
     net::SetupOptions options; options.session.final_tick_count = selected.final_tick_count;
     for (net::PeerIndex peer = 0; peer < count; ++peer) {
         executors.push_back(std::make_unique<eawr::platform::ThreadWorkerAdapter>(workers[(configuration + peer) % workers.size()]));
@@ -437,7 +449,7 @@ std::vector<std::string> battle(std::uint32_t count, std::size_t configuration, 
         }
         return complete;
     });
-    mesh.peers.back()->cancel(); // One controller departs; its owner still has another seat.
+    mesh.peers.back()->cancel(); // One owner departs; its allies keep their own seats.
     until([&] {
         ++now; bool complete = true;
         for (net::PeerIndex peer = 0; peer + 1 < count; ++peer) {
@@ -452,8 +464,8 @@ std::vector<std::string> battle(std::uint32_t count, std::size_t configuration, 
         expect(departures[peer] == 1, "survivors agree one seat departure exactly once");
         expect(hashes[peer].size() == 50 && hashes[peer] == hashes[0], "all survivor hashes agree at every tick");
         auto& adapter = dynamic_cast<net::TacticalSessionAdapter&>(sessions[peer].adapter());
-        expect(adapter.simulation().record().commands.size() == count, "shared-owner departure preserves the faction's command stream");
-        expect(adapter.simulation().departure_controls().empty(), "remaining controller keeps the faction in the battle");
+        expect(adapter.simulation().record().commands.size() == count + 1, "all owner commands and the departed owner quit remain in the stream");
+        expect(adapter.simulation().departure_controls().empty(), "an owner quit without takeover policy creates no departure controls");
     }
     return hashes[0];
 }
@@ -630,7 +642,8 @@ void occupied_repair_listener() {
 void pairwise_host_repair_isolation() {
     Mesh mesh(3);
     auto agreed = offer(); agreed.recovery.reconnect = true;
-    agreed.seats.push_back({2, sim::SeatId{12}, 1});
+    agreed.setup = require(net::encode_skirmish_setup(human_setup(3)));
+    agreed.seats.push_back({2, sim::SeatId{12}, 3});
     std::array<net::LanReconnectCredentials, 3> providers;
     std::array<net::ReconnectTokens, 3> keys;
     keys[0] = require(providers[0].provide(agreed, *mesh.peers[0]));

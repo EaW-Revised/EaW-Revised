@@ -42,6 +42,15 @@ public:
     virtual core::Result<void> release(PeerIndex slot) = 0;
     virtual core::Result<void> kick(PeerIndex slot) = 0;
     virtual core::Result<void> lock() = 0;
+    // Nonblocking repair attachment: call with a new nonzero epoch to request
+    // Reattach, then the same epoch to poll. True means that attachment's fresh
+    // TURN response is installed (including an explicit no-TURN response).
+    // Existing data connections are unaffected. Unsupported endpoints fail closed.
+    virtual core::Result<bool> repair_attachment(std::uint64_t) {
+        core::Diagnostic error;
+        error.code = "EAWR-NET-1791"; error.message = "Room attachment repair is unavailable";
+        return core::Result<bool>::failure(std::move(error));
+    }
 };
 
 // One room, no sockets/authentication/TURN issuance. Explicit slot attachment

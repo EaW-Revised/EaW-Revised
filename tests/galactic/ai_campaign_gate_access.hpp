@@ -72,6 +72,10 @@ struct EngineContractAccess {
     static galactic_learning_gate::Snapshot learning_snapshot(const Engine& engine) {
         using namespace galactic_learning_gate;
         Snapshot result; result.frame = engine.frame_; result.random = engine.sync_.seed(); result.next_plan = engine.next_plan_id_;
+        // S9-early: the draws and plan identities live in each galactic player's own stream and range.
+        for (const auto& galactic : engine.players_) if (galactic.galactic) {
+            result.random = result.random * 0x9e3779b1U ^ galactic.sync.seed(); result.next_plan += galactic.next_plan_local;
+        }
         for (const auto& player : engine.players_) {
             if (!player.galactic) continue;
             Player tables; tables.plans = player.plan_success; tables.goals = player.goal_success;

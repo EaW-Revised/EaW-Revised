@@ -188,7 +188,8 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 // #394: the live units' own emitters (engines, destroyed hardpoints' damage), which
                 // the static attached plan cannot run on moving units.
                 if (state.options.map_effects) {
-                    state.unit_emitters = std::make_unique<UnitEmitters>(host, *state.filesystem);
+                    state.unit_emitters = std::make_unique<UnitEmitters>(host, *state.filesystem,
+                        state.live_session->durability()->profiles);
                     state.unit_emitters->collect_axis_diagnostics(!state.options.report_path.empty());
                     state.unit_emitters->set_workers(state.particle_workers.get());
                     if (auto detail = state.unit_emitters->set_particle_detail(state.live_options.particle_detail); !detail)
@@ -219,10 +220,11 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                           return state.sync_space_attached(*host, population);
                       })
                     : std::function<bool(SpacePopulation&)>{},
-                // BLD-10: the scene stage of the loading screen's bar is the placements composed.
+                // BLD-10: placements, then one final emitter-asset preparation batch.
                 .progress = live ? std::function<void(std::size_t, std::size_t)>(
                                        [&state](const std::size_t done, const std::size_t total) {
-                                           state.load_report(presentation::ui::load_stage_scene, done, total);
+                                           state.load_report(presentation::ui::load_stage_scene, done,
+                                                             state.unit_emitters ? total + 1 : total);
                                        })
                                  : std::function<void(std::size_t, std::size_t)>{},
             });
@@ -304,6 +306,11 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                         population->release(context.renderer);
                         return core::Result<SpacePopulateResult>::failure({.code = "EAWR-VIEWER-SPACE-POPULATE",
                                                                             .message = failure});
+                    }
+                    if (emitters) {
+                        core::load_profile::Scope prepare_emitters(core::load_profile::Phase::particles);
+                        emitters->prepare_assets(*population);
+                        map_state->load_report(presentation::ui::load_stage_scene, 1, 1);
                     }
                     SpacePopulateResult result;
                     result.instances = population->instances();
@@ -442,7 +449,10 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                             particle_since(particle_start);
                             // #429: the clones that left this frame go once the emitters ran the
                             // samples they still stood in.
-                            live_session->retire_clones(*population, renderer);
+                            {
+                                FrameTimer retirement(emitters ? emitters->clone_retire_timer() : nullptr);
+                                live_session->retire_clones(*population, renderer);
+                            }
                             emitter_timer.finish();
                             if (!effects) return update;
                             // #80: the frame's shots, hits and explosions, from the snapshots only.

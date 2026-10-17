@@ -220,6 +220,28 @@ void fragment() {
 }
 )GODOT";
 
+// Skydome.fx on a space sky object (Sky_Bespin_00 is the stock one): the sky's
+// BaseTexture drawn unlit from inside the dome. The authored cloud layer
+// (CloudTexture, CloudScale, CloudScrollRate) is not drawn: each surface that
+// carries one is listed in the environment's not_rendered report. Same
+// stored-value policy as the MeshAdditive adapter.
+constexpr std::string_view skydome_sky_shader = R"GODOT(
+shader_type spatial;
+render_mode unshaded, fog_disabled, cull_disabled, depth_draw_never;
+uniform sampler2D eawr_diffuse : filter_linear_mipmap, repeat_enable;
+
+// ALBEDO under the stored-value output (docs/rendering.md, colour policy);
+// the Compatibility fallback compiles compatibility_albedo_writer instead.
+vec3 eawr_stored_albedo(vec3 stored_rgb) {
+    return stored_rgb;
+}
+
+void fragment() {
+    ALBEDO = eawr_stored_albedo(texture(eawr_diffuse, UV).rgb);
+}
+)GODOT";
+
+
 // `meshadditive-synthetic` is a labelled control, never the shipped sky: it
 // passes space::meshadditive_material_routes() so an exact MeshAdditive.fx
 // non-billboard surface can be planned and drawn. Tokens after the name are

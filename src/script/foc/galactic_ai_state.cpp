@@ -161,16 +161,45 @@ std::string compose_native_digests(const NativeDigests& digests) {
     return core::sha256_hex(out.bytes);
 }
 std::string compose_native_sync_digests(const NativeDigests& digests) {
-    Writer out; out.text("eawr-galactic-ai-sync-digest-v1");
-    out.word(native_state_version, 4); out.word(digests.size());
+    Writer out; out.text("eawr-galactic-ai-sync-digest");
+    out.word(native_sync_digest_version, 4); out.word(native_state_version, 4); out.word(digests.size());
     for (const auto& [name, digest] : digests) { out.text(name); out.text(digest); }
     return core::sha256_hex(out.bytes);
 }
-core::Result<std::string> native_sync_state_hash(const NativeState& state) {
-    if (auto valid = encode_native_state(state); !valid) return core::Result<std::string>::failure(valid.error());
-    NativeDigests digests;
-    for (const auto& [name, bytes] : state.components) digests.emplace(name, core::sync_state_digest(bytes));
-    return core::Result<std::string>::success(compose_native_sync_digests(digests));
+void update_funding_metadata(core::RecordDigest& records, const FundingState& state) {
+    Writer out; out.amount(state.constructor_income); out.word(static_cast<std::uint32_t>(state.timeline), 4);
+    records.set(0, 0, 0, out.bytes);
+}
+void update_funding_records(core::RecordDigest& records, gc::PlayerId player, const f::Ledger* before, const f::Ledger* after) {
+    const f::Ledger empty;
+    const auto& old = before ? *before : empty;
+    const auto& next = after ? *after : empty;
+    const auto update = [&](const auto& previous, const auto& current, std::uint32_t kind, auto write) {
+        for (const auto& [id, row] : previous) { static_cast<void>(row); if (!current.contains(id)) records.erase(player, kind, id); }
+        for (const auto& [id, row] : current) {
+            const auto at = previous.find(id); if (at != previous.end() && at->second == row) continue;
+            Writer out; out.word(player, 4); out.word(id); write(out, row); records.set(player, kind, id, out.bytes);
+        }
+    };
+    update(old.categories, next.categories, 1, [](Writer& out, const f::Category& row) { category(out, row); });
+    update(old.goals, next.goals, 2, [](Writer& out, const f::Goal& row) {
+        out.word(row.category, 4);
+        for (auto value : {row.cost, row.marked, row.capital, row.accumulated, row.reserved_income, row.remaining, row.unallocated}) out.amount(value);
+        out.word(row.reassessed, 1);
+    });
+    update(old.dead_goals, next.dead_goals, 3, [](Writer& out, const f::Obligation& row) {
+        out.word(row.category, 4); out.amount(row.marked); out.amount(row.capital); out.amount(row.accumulated);
+    });
+    if (!after) { records.erase(player, 4, 0); return; }
+    Writer out; out.word(player, 4); out.amount(next.dead_budget); out.amount(next.last_interval);
+    out.amount(next.last_service_income); out.word(next.equations_changed, 1); out.word(next.tactical.switched, 1);
+    out.amount(next.tactical.saved); out.amount(next.tactical.extra_released);
+    records.set(player, 4, 0, out.bytes);
+}
+core::RecordDigest funding_records(const FundingState& state) {
+    core::RecordDigest records; update_funding_metadata(records, state);
+    for (const auto& [player, ledger] : state) update_funding_records(records, player, nullptr, &ledger);
+    return records;
 }
 core::Result<Bytes> encode_funding_state(const FundingState& state) {
     if (state.size() > gc::galactic_max_players) return fail<Bytes>("funding player count exceeded");

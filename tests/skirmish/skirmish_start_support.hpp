@@ -61,6 +61,7 @@ eawr::units::UnitTables synthetic_tables();
 skirmish::Fixture synthetic_fixture();
 skirmish::StartInputs synthetic_inputs(const eawr::units::UnitTables& tables);
 void synthetic_special_sources();
+void synthetic_tactical_super_weapon();
 void synthetic_placement();
 void synthetic_failures();
 void replay_round_trip();
@@ -69,7 +70,7 @@ void synthetic_heights();
 void foc_pad_capture_build(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs,
                            const eawr::units::UnitTables& tables);
 void foc_start(const std::filesystem::path& fixtures);
-void setup_contract();
+void setup_contract(const std::filesystem::path& fixtures);
 
 
 } // namespace skirmish_start_test_support

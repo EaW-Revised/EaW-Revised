@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ai_engine.hpp"
+#include "eawr/core/record_digest.hpp"
 #include <compare>
 #include <mutex>
 
@@ -41,6 +42,8 @@ public:
     [[nodiscard]] GalacticMarkupState state() const;
     [[nodiscard]] std::shared_ptr<const GalacticMarkupState> snapshot() const;
     [[nodiscard]] std::uint64_t revision() const noexcept;
+    [[nodiscard]] std::string record_sync_hash(bool cold = false) const;
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept;
     [[nodiscard]] bool is_ai_player(tactical::PlayerId player) const { return ai_players_.contains(player); }
     [[nodiscard]] core::Result<void> validate(const GalacticMarkupState&) const;
     void replace(GalacticMarkupState);
@@ -55,6 +58,9 @@ public:
 private:
     [[nodiscard]] bool alive(const GalacticMarkupKey&) const;
     void subtract_contribution(GalacticMarkupState&, const GalacticMarkupHandle&) const;
+    [[nodiscard]] core::RecordDigest rebuild_records() const;
+    void update_records(const GalacticMarkupState* before);
+    core::RecordDigest record_digest_;
     mutable std::mutex mutex_;
     GalacticMarkupState state_;
     mutable std::shared_ptr<const GalacticMarkupState> snapshot_;

@@ -67,7 +67,8 @@ inline constexpr std::uint16_t launch_from_surface = 18; // coordinator-reserved
 inline constexpr std::uint16_t sell_object = 19; // GHUD-S84: coordinator-reserved identity sale
 inline constexpr std::uint16_t transfer_fleet_members = 20; // GHUD-S86
 inline constexpr std::uint16_t recheck_orbit = 21; // WGM-154, script request at an existing orbit
-inline constexpr std::uint16_t first_reserved = 22; // coordinator-held #2263 launch follow-up
+inline constexpr std::uint16_t launch_fleet = 22; // WGM-199
+inline constexpr std::uint16_t first_reserved = 23;
 inline constexpr std::uint16_t last_reserved = 127;
 } // namespace galactic_opcodes
 
@@ -112,6 +113,10 @@ struct PostLoadFixup {
 // only until the speed capture (WGM-U02) shows a per-tick effect: it changes no rule and no state
 // hash. Any active human seat. The factor is in (0, 16]; the original's settings are unverified.
 inline constexpr std::int64_t max_speed_factor_raw = std::int64_t{16} << 24;
+// The fast-forward button's strategic factor (WGM-210): the debug build's fast forward replaces the
+// target with 120 ticks a second against the nominal 30 (TM-03), so 4x. Pacing only. With more than
+// one active human seat the sim refuses this factor (TM-04).
+inline constexpr std::int64_t fast_forward_factor_raw = std::int64_t{4} << 24;
 struct SetSpeed {
     bool tactical{};
     math::Fixed factor{};
@@ -267,12 +272,20 @@ struct LaunchFromSurface {
     std::uint8_t slot{}; // creation slot (0..2); canonically zero when a target fleet is named
     friend bool operator==(const LaunchFromSurface&, const LaunchFromSurface&) = default;
 };
+// WGM-199: the sim resolves the new fleet identity. Launch remains committed
+// when movement refuses; source-orbit conflict suppresses movement.
+struct LaunchFleet {
+    std::vector<EntityId> units;
+    std::vector<PlanetId> path;
+    std::optional<std::uint8_t> destination_slot;
+    friend bool operator==(const LaunchFleet&, const LaunchFleet&) = default;
+};
 using CommandPayload =
     std::variant<PauseGalaxy, ResumeGalaxy, SetSpeed, DebugSetPlanetOwner, DebugSetFleetOrbit, TacticalLayerCommand,
         SaveRequest, PostLoadFixup, CreateFleet, AddFleetMembers, RemoveFleetMembers, MergeFleets, SetFleetOrbitSlot,
         ProductionCommand, SellObject, SeatLeave, SeatRejoin, AssignBattleTeamRole, RecheckOrbit, MoveFleet, LandFleet, BattleChoice, AutoResolveWithdraw, ObserverCommand,
         PrepareBlackMarket, BuyBlackMarket, PrepareGalacticAbility, ExecutePreparedAbility, CancelGalacticAbility,
-        LaunchFromSurface, TransferFleetMembers>;
+        LaunchFromSurface, LaunchFleet, TransferFleetMembers>;
 
 struct CommandOrderKey {
     std::uint64_t tick{};

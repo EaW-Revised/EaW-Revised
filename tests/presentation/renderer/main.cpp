@@ -6,6 +6,7 @@
 #include "submission_plan.hpp"
 #include "particle_texture.hpp"
 #include "particle_prewarm.hpp"
+#include "particle_spawn_trace.hpp"
 #include "particle_upload.hpp"
 #include "resource_lease_ledger.hpp"
 #include "shader_adapter.hpp"
@@ -115,6 +116,64 @@ void particle_upload_contracts() {
         "retained storage has at most 50 percent spare capacity at its peak demand");
 }
 
+void particle_program_prewarm_contracts() {
+    using namespace eawr::presentation::godot_backend::detail;
+    ParticleProgramWarmBudget budget;
+    for (std::size_t index = 0; index < ParticleProgramWarmBudget::max_programs; ++index) {
+        const std::string program = "mod-program-" + std::to_string(index);
+        check(budget.admits(program) && budget.admits(program), "program admission is repeatable");
+        check(budget.size() == index && !budget.contains(program), "admission does not retain a program");
+        budget.commit(program);
+        check(budget.size() == index + 1, "successful program acquisition commits exactly once");
+    }
+    check(budget.full() && !budget.admits("one-more-program"), "the thirty-third distinct program is refused");
+    check(budget.admits("mod-program-0"), "an existing program is admissible at the cap");
+    budget.commit("mod-program-0");
+    check(budget.size() == ParticleProgramWarmBudget::max_programs, "duplicate commit adds no program hold");
+    budget.clear();
+    check(budget.size() == 0 && !budget.full() && budget.admits("another-mod-program"),
+        "release restores program capacity");
+}
+
+void particle_spawn_journal_contracts() {
+    using namespace eawr::presentation::godot_backend::detail;
+    std::string output;
+    const auto sink = [&](const std::string_view text) { output.append(text); };
+    {
+        ParticleSpawnJournal disabled(false, sink);
+        ParticleSpawnRecord record;
+        disabled.append(std::move(record));
+        check(!disabled.enabled() && disabled.records() == 0 && output.empty(),
+            "disabled diagnostics retain and output nothing");
+    }
+    {
+        ParticleSpawnJournal journal(true, sink);
+        {
+            const std::string effect = "mod-only-effect";
+            const std::string texture = "mod-only-texture";
+            ParticleSpawnTrace trace(&journal, effect, 77, texture, 3);
+            trace.resource = 17;
+            trace.shader_cold = true;
+        }
+        check(journal.records() == 1 && output.empty(), "spawn diagnostics buffer without output in create");
+        journal.flush();
+        check(journal.records() == 0 && output.find("mod-only-effect") != std::string::npos
+            && output.find("\"records\":1") != std::string::npos,
+            "teardown output owns its strings after the spawn caller is gone");
+    }
+    output.clear();
+    {
+        ParticleSpawnJournal journal(true, sink);
+        ParticleSpawnRecord oversized;
+        oversized.texture.assign(ParticleSpawnJournal::max_text_bytes + 1, 'x');
+        journal.append(std::move(oversized));
+        check(journal.records() == 0 && journal.dropped() == 1 && output.empty(),
+            "diagnostic text bound rejects an oversized record without frame output");
+        journal.flush();
+        check(output.find("\"dropped\":1") != std::string::npos, "diagnostic truncation is explicit");
+    }
+}
+
 void particle_prewarm_contracts(){
     using namespace eawr::presentation::godot_backend::detail;
     ParticleWarmBudget budget;
@@ -150,6 +209,8 @@ int main() {
     using namespace eawr_renderer_test;
     particle_texture_contracts();
     particle_prewarm_contracts();
+    particle_program_prewarm_contracts();
+    particle_spawn_journal_contracts();
     particle_upload_contracts();
     derived_fog_variant_contracts();
     upload_identity_contracts();

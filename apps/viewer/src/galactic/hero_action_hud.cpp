@@ -196,7 +196,9 @@ void GalacticMode::State::update_hero_action_hud() {
             position(surface.close,surface.close_name); surface.close->set_hit_rect({{},surface.close->get_size()});
             text(surface.close_name,battle_text("TEXT_BUTTON_CLOSE")); surface.close->set_disabled(!enabled);
         }
-        if (!facts || kind != active) continue;
+        // A shared publication may contain only another ability's menu (e.g. destruction).
+        // Its absent theft/neutralization list is not an empty vector to dereference.
+        if (!facts || kind != active || !supplied) continue;
         text(kind == 0 ? "bm_title" : "h_title", battle_text(kind == 0 ? "TEXT_SLICE_DIALOG_TITLE" : "TEXT_NEUTRALIZE_HERO_DIALOG_TITLE"));
         if (kind == 0) {
             text("bm_title01",battle_text("TEXT_SLICE_DIALOG_DESCRIPTION"));

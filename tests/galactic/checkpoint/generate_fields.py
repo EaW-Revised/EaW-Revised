@@ -30,6 +30,9 @@ OWNER_EXCLUSIONS = {
         "runtime callbacks rebound by the caller": "ability_consumption_handler conflict_tail control_handler corruption_completion_handler corruption_mission_handler corruption_result_handler credit_notification_handler hasher movement_access_provider native_actor_changes_handler native_movement_listener native_production_handler native_production_outcome_handler native_replayers planet_ruins_story_handler technology_notice_handler timeline_service",
         "derived service inputs and indexes rebuilt on load": "ability_input_generation ability_work conflict_requests_enabled conflict_tail_outer_timer control_stealth_generation control_stealth_inputs economy_input_generation gathered_income_inputs graph income_control_generation income_edges income_forecast_cache income_gather_generation income_input_generation income_modifier_generation income_modifiers income_source_candidates movement_access_generation native_invasion_transport_count native_invasions_enabled observer_input_generation observer_neighbours observer_projection observer_projection_generation published_ability_results published_actor_records published_black_market_menus published_corruption_menu published_economy_input_generation published_hero_action_menus published_production_originals published_sale_types snapshot technology_price_expiry victory_tail_deferred black_market_publication_key",
         "derived hash caches and host diagnostics": "cached_hash cached_hash_present digests dirty discovery_records discovery_targets income_forecast_rebuilds income_modifier_rebuilds income_sources_gathered observer_projection_records population_objects population_producers production_entries production_producers verify_cached_hash",
+        "immutable native setup schemas supplied with the session setup": "native_fiscal_schema native_income_schema native_population_schema",
+        "native AI barrier publication state rebuilt after load": "corruption_publication_key native_barrier_active native_commit_publication native_commit_publications published_corruption_transitions",
+        "runtime callbacks rebound by the caller (feedback)": "feedback_notice_handler",
         "unhealthy or in-flight state cannot reach a save barrier": "failed native_applying",
     },
     "eawr::campaign::GameSession::Impl": {
@@ -37,6 +40,7 @@ OWNER_EXCLUSIONS = {
         "runtime callbacks rebound by the caller": "applier auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech configure conflict_gate conflict_service content_resolver control_observer corruption_mission_service decorator entry_resolver hasher hero_placement hero_resolver hero_structures native_conflict_service outcome_services pending_alert script_factory story_handler vote_progress",
         "immutable content lookup tables rebound on load": "story_factions story_planets",
         "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index story_notices",
+        "host-side diagnostic oracle trace session id": "native_oracle_session",
         "unhealthy or reconstruction-only state cannot reach a save barrier": "failure reconstructing_native_notices restoring_child",
     },
     "eawr::campaign::GameSession::Impl::TimelinePublication": {

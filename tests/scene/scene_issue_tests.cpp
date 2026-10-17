@@ -123,6 +123,23 @@ void scene_issue_contracts(const TempTree& tree, const eawr::data::Catalog& cata
     expect(scene.resolved_count() == 4, "four placements fully resolve");
     expect(scene.drawable_count() == 5, "five placements are drawable");
     expect(scene.count(Cause::shader_unsupported) == 1, "per-cause counts count placements");
+    {
+        // ALDEFAULT-01: the same material reference changes classification
+        // when its effective effect disappears, without changing any model.
+        auto missing_input = input;
+        const auto exists = input.access.exists;
+        missing_input.access.exists = [exists](const std::string_view path) {
+            return path != "data/art/shaders/eawrunlisted.fxo" && exists(path);
+        };
+        const auto missing_scene = eawr::scene::build(missing_input);
+        expect(missing_scene.count(Cause::shader_unsupported) == 0,
+               "an absent effect is a built-in material rather than an unsupported shader");
+        expect(missing_scene.placements[7].surfaces[1].effect_missing
+                   && missing_scene.placements[7].surfaces[1].textures.empty(),
+               "the fallback surface preserves its identity without unused texture diagnostics");
+        expect(missing_scene.scene_sha256 != scene.scene_sha256,
+               "scene evidence distinguishes absent effects from unsupported present effects");
+    }
     const auto groups = eawr::scene::issue_groups(scene);
     const auto unsupported = std::find_if(groups.begin(), groups.end(), [](const eawr::scene::IssueGroup& group) {
         return group.cause == Cause::shader_unsupported && group.detail == "EawrUnlisted.fx";

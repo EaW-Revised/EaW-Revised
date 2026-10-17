@@ -11,6 +11,7 @@ struct GalacticSelectionContentType {
     GalacticSelectionType value;
     std::shared_ptr<const units::GalacticType> original;
     std::string name, movement_class, lua_script, survival_type;
+    bool member_script{}; // WGA-489: a company whose own object has no script but one of its member units authors one
     Real hyperspace_speed{};
     std::uint64_t garrison_categories{};
     bool named_hero{}, special_weapon{}, company{}, team{}, transport{}, craft{}, ground_base{}, starbase{};
@@ -18,6 +19,7 @@ struct GalacticSelectionContentType {
     std::vector<std::string> required_planets;
     std::vector<sim::galactic::TypeId> required_orbiting;
     std::vector<std::string> space_escorts; // WGA-443: Space_Escort_Unit_Types, authored order
+    sim::galactic::TypeId next_base{}; // WGA-481: resolved authored link, prepared once
 };
 struct GalacticSelectionContentPlanet {
     std::string terrain;
@@ -34,6 +36,7 @@ struct GalacticSelectionContent {
     std::map<std::string, std::map<std::string, Real, std::less<>>, std::less<>> terrain;
     std::optional<Real> technology_weight;
     std::optional<bool> population_check;
+    std::map<tactical::PlayerId, sim::galactic::TypeId> initial_starbase_types; // WGA-481 sourced first-base lookup
 };
 struct GalacticHeroSelection {
     Real target_weight{}, escort_weight{}, minimum_cost{}, maximum_cost{};
@@ -58,8 +61,14 @@ using GalacticFreestoreSelectionProvider = std::function<core::Result<std::vecto
 // each space escort once. This describes power, never creates actors.
 [[nodiscard]] core::Result<std::vector<GalacticSelectionGarrison>> galactic_proposal_garrisons(
     const GalacticSelectionContent&, sim::galactic::TypeId, std::uint32_t tech, sim::galactic::PlanetId target);
+// WGA-481: a null next-base lookup preserves the authored proposal.
+[[nodiscard]] core::Result<sim::galactic::TypeId> galactic_starbase_proposal(
+    const GalacticSelectionContent&, const sim::galactic::PlanetProduction*, sim::galactic::TypeId);
 // The callback receives the completed retained parent snapshot. Reachability
 // and routes remain B/E's distinct copied relations; missing relations refuse.
+// WGA-489: a hero candidate takes the hero stage when it is a named hero, a special weapon or authors an object script
+// (its own, or for a company one of its member units'); a generic hero without one is an ordinary unit.
+[[nodiscard]] bool galactic_hero_stage_applies(bool authored_hero, bool named_hero, bool special_weapon, bool authors_script) noexcept;
 [[nodiscard]] GalacticSelectionProvider stock_selection_provider(
     std::shared_ptr<const GalacticSelectionContent>, std::shared_ptr<const galactic_goals::MaterializedPlanCatalog>,
     std::shared_ptr<const GalacticWorld>, std::shared_ptr<const Engine>,

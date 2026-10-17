@@ -14,6 +14,7 @@ struct GalacticSelectionGarrison {
     galactic_goals::ProductionChannel channel{};
     Real power{}, terrain_effectiveness{real(1)};
     bool all_main_domains{}; // WGA-444: native proposal garrisons match both main domains
+    Real population{};
 };
 
 // WGA-58..60/66: target-local, immutable facts supplied by the world/content
@@ -33,6 +34,8 @@ struct GalacticSelectionType {
     std::string survival_type;
     // Qualified proposal expansion; repeated entries preserve spawned count/order.
     std::vector<GalacticSelectionGarrison> garrisons;
+    std::optional<galactic_goals::ProductionChannel> contrast_fallback_channel;
+    bool base{}; // WGA-58/481: target-bound base work does not consume special-structure slots
 };
 struct GalacticSelectionObject {
     sim::EntityId object{};
@@ -52,6 +55,7 @@ struct GalacticSelectionInput {
     std::vector<GalacticSelectionObject> freestore;
     std::map<sim::galactic::TypeId, GalacticSelectionType> types;
     std::vector<GalacticSelectionContrast> contrast;
+    bool unscaled_domain_totals{}; // WGA-442: production totals bypass classified scaling
     std::vector<std::string> missing_facts; // named qualifications required before this plan can select
     std::uint32_t player_tech{};
     bool complete{}, reachable{}, population_check{};
@@ -62,6 +66,7 @@ struct GalacticSelectionInput {
     std::vector<sim::galactic::PlanetId> force_stages; // WGA-226/254, authored force order
     // Authored force attachment gates, in the original taskforce order.
     std::vector<std::pair<bool, bool>> attachment_allowed; // hero, special weapon
+    std::map<sim::galactic::TypeId, sim::galactic::TypeId> proposal_substitutions; // WGA-481, before dedup/team binding
 };
 using GalacticSelectionProvider = std::function<core::Result<std::shared_ptr<const GalacticSelectionInput>>(
     sim::galactic::PlayerId, sim::galactic::PlanetId, const GoalType&, const PlanDef&)>;

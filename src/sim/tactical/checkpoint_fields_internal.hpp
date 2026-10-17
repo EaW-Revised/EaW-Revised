@@ -389,9 +389,15 @@ template <> struct Fields<SpawnEntryState> {
     }
 };
 
+template <> struct Fields<SpawnedShip> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.id, v.entry);
+    }
+};
+
 template <> struct Fields<SpawnerState> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.next_service_frame, v.next_spawn_frame, v.ready, v.entries);
+        a(v.next_service_frame, v.next_spawn_frame, v.ready, v.entries, v.ships);
     }
 };
 

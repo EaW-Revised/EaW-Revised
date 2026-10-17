@@ -76,7 +76,9 @@ ai::GalacticPerceptionSetup fixture_setup() {
     return setup;
 }
 std::shared_ptr<const gc::GalacticSnapshot> fixture(std::uint64_t frame, std::int64_t ground_level,
-    std::int64_t space_level = 2, bool enroute = false) {
+    std::int64_t space_level = 2, bool enroute = false,
+    std::optional<gc::ObserverSetup> observer = {}, std::optional<gc::EconomyCorruptionState> corruption = {},
+    std::vector<gc::Fleet> more_fleets = {}, std::vector<gc::LiveCorruptionTransition> transitions = {}) {
     gc::GalacticClock clock; clock.session_tick = clock.galactic_frame = frame;
     gc::PlayerEconomySetup accounts; accounts.players = {{1, whole(123), whole(9999), 3, 5}, {2, whole(456), whole(9999), 2, 5}, {3, {}, whole(9999), 1, 5}};
     gc::ProductionSetup production;
@@ -89,11 +91,175 @@ std::shared_ptr<const gc::GalacticSnapshot> fixture(std::uint64_t frame, std::in
     production.planets.push_back(first);
     gc::Fleet fleet; fleet.id = 50; fleet.owner = 1; fleet.orbit = 10; fleet.members = {{51, 100}};
     if (enroute) fleet.motion.transit.emplace();
+    std::vector<gc::Fleet> fleets{fleet}; fleets.insert(fleets.end(), more_fleets.begin(), more_fleets.end());
     auto movement = std::make_shared<gc::MovementSetup>(); movement->contents = {{51, {{52, 200}}}};
     std::vector<gc::Planet> planets{{10, {}, 1}, {20, {whole(100), {}, {}}, 2}, {30, {whole(200), {}, {}}, 3}};
     return std::make_shared<gc::GalacticSnapshot>(frame, clock, std::vector<gc::GalacticPlayer>{{1, 1, 0}, {2, 2, 0}, {3, 3, 0}},
-        planets, std::vector<gc::Route>{{40, 10, 20, whole(1)}, {41, 20, 30, whole(1)}}, std::vector<gc::Fleet>{fleet},
-        std::vector<gc::GalacticEvent>{}, std::nullopt, std::nullopt, movement, std::nullopt, std::vector<gc::Seat>{}, accounts, production);
+        planets, std::vector<gc::Route>{{40, 10, 20, whole(1)}, {41, 20, 30, whole(1)}}, fleets,
+        std::vector<gc::GalacticEvent>{}, std::nullopt, std::nullopt, movement, std::nullopt, std::vector<gc::Seat>{}, accounts, production,
+        std::nullopt, std::vector<gc::PoliticalControlEffect>{}, std::vector<gc::PopulationTotal>{}, observer,
+        std::nullopt, std::nullopt, std::vector<gc::ObservedProductionOffer>{},
+        std::shared_ptr<const std::vector<gc::ObservedPlanet>>{}, std::nullopt,
+        std::shared_ptr<const std::vector<gc::CensusObject>>{}, std::nullopt, std::nullopt, corruption, nullptr, 0, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, std::make_shared<const std::vector<gc::LiveCorruptionTransition>>(std::move(transitions)));
+}
+
+std::string supplemental_reader_contracts(unsigned workers) {
+    auto setup = fixture_setup(); setup.uses_fog = false;
+    auto data = equations({{"readers.xml", R"(<Equations>
+<Income>Variable_Target.BaseIncomeNBTP</Income>
+<Siphon>Variable_Target.HasCreditSiphon</Siphon>
+<Corrupted>Variable_Target.IsCorrupted</Corrupted>
+<ActiveMissingParameter>Variable_Self.ActiveGoals</ActiveMissingParameter>
+<Active>Variable_Self.ActiveGoals {Parameter_Category=17}</Active>
+</Equations>)"}});
+    QueryHost host(setup, std::move(data));
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    gc::ObserverSetup observer; observer.planets = {{10, 1, 2}, {20, 2, 2}, {30, 3, 1}};
+    gc::EconomyCorruptionState corruption;
+    gc::CorruptionEconomyPlanet first; first.planet = 10;
+    first.siphon = {true, 2, {}, 0}; // assigned siphon remains active despite zero fraction/end.
+    gc::CorruptionEconomyPlanet second; second.planet = 20;
+    second.corruption = gc::corruption_fixture::Type::piracy;
+    gc::CorruptionEconomyPlanet third; third.planet = 30;
+    corruption.planets = {first, second, third};
+    expect(static_cast<bool>(host.world->bind(fixture(1, 3, 2, false, observer, corruption), {}, executor, 1, 1000)), "supplemental readers bind actual owning facts");
+    host.initialize(executor);
+    auto economy = std::make_shared<ai::GalacticEconomyRuntime>(); economy->completed_tick = 1;
+    economy->base_credits = {{10, 1}, {20, 3}, {30, 99}};
+    expect(static_cast<bool>(host.world->bind_economy_runtime(economy)), "integer credit publication binds");
+    const auto ratio = real(1) / real(3);
+    expect(host.query("Income", 10) == ratio && ratio != ai::to_single(ratio), "NBTP uses evaluated controller rather than political owner and preserves binary64 ratio");
+    expect(host.query("Income", 20) == real(1), "NBTP same-controller maximum is one");
+    expect(host.query("Siphon", 10) == real(1) && host.query("Siphon", 20) == real(0), "siphon predicate reads assignment independently of fraction/deadline");
+    expect(host.query("Corrupted", 10) == real(0) && host.query("Corrupted", 20) == real(1), "committed corruption distinguishes valid false from unavailable");
+    expect(!host.query("ActiveMissingParameter") && host.query("Active") == real(0), "active goal category parameter is required and absent bucket is valid zero");
+    economy = std::make_shared<ai::GalacticEconomyRuntime>(*economy);
+    economy->base_credits = {{10, -4}, {20, -2}};
+    expect(static_cast<bool>(host.world->bind_economy_runtime(economy)), "changed owning credits bind");
+    expect(host.query("Income", 10) == real(0), "NBTP zero maximum returns zero and ignores unrelated-controller credit absence");
+    economy = std::make_shared<ai::GalacticEconomyRuntime>(*economy);
+    economy->base_credits.erase(20);
+    expect(static_cast<bool>(host.world->bind_economy_runtime(economy)), "incomplete credit publication binds for explicit reader refusal");
+    expect(!host.query("Income", 10), "NBTP missing matching-owner credit is unavailable");
+    expect(static_cast<bool>(host.world->bind(fixture(2, 3), {}, executor, 2, 1000)), "missing owning corruption state binds");
+    expect(!host.query("Siphon") && !host.query("Corrupted") && !host.query("Income"), "missing owning state and stale credit publication remain unavailable");
+    return std::to_string(ratio.repr);
+}
+// WGA-473..476: the readers behind the stock offensive desire equations.
+std::string offensive_reader_contracts(unsigned workers) {
+    auto setup = fixture_setup(); setup.uses_fog = false;
+    setup.maximum_fleet_distance = real(150); setup.maximum_political_control = real(5);
+    const auto equation_text = R"(<Equations>
+<Connected>Variable_Target.IsConnectedToCorruption</Connected>
+<Threat>Variable_Self.AnyCurrentThreats</Threat>
+<Political>Variable_Target.TargetPoliticalControl</Political>
+<Island>Variable_Self.WorstIslandFractionOfLargest</Island>
+<CorruptedShare>Game.PlanetsCorrupted</CorruptedShare>
+<CorruptedCount>Game.PlanetsCorruptedUnnormalized</CorruptedCount>
+</Equations>)";
+    QueryHost host(setup, equations({{"offense.xml", equation_text}}));
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    gc::ObserverSetup observer; observer.planets = {{10, 1, 2}, {20, 2, 2}, {30, 3, 1}};
+    observer.planets[0].political_control = whole(3); observer.planets[1].political_control = whole(4);
+    gc::EconomyCorruptionState corruption;
+    gc::CorruptionEconomyPlanet first; first.planet = 10;
+    gc::CorruptionEconomyPlanet second; second.planet = 20;
+    gc::CorruptionEconomyPlanet third; third.planet = 30; third.corruption = gc::corruption_fixture::Type::piracy;
+    corruption.planets = {first, second, third};
+    gc::Fleet human_fleet; human_fleet.id = 60; human_fleet.owner = 2; human_fleet.orbit = 20; human_fleet.members = {{61, 100}};
+    ai::GalacticConnectivity connectivity; connectivity.island_sizes = {{1, 6, 3}, {2, 5, 5}};
+    expect(static_cast<bool>(host.world->bind(fixture(1, 3, 2, false, observer, corruption, {human_fleet}), connectivity, executor, 1, 1000)),
+        "offensive readers bind actual owning facts");
+    host.initialize(executor);
+    // Planet 30 is the only corrupted planet. Its neighbourhood is {20, 30}; planet 10 sees {10, 20} only (WGA-192 radius 150).
+    expect(host.query("Connected", 10) == real(0), "IsConnectedToCorruption excludes a corrupted planet outside the neighbourhood radius");
+    expect(host.query("Connected", 20) == real(1), "IsConnectedToCorruption sees a corrupted neighbour");
+    expect(host.query("Connected", 30) == real(1), "IsConnectedToCorruption includes the planet itself");
+    // Planet 20 is human-owned (player 2) and holds a human fleet; planet 10 (player 1) neighbours it.
+    expect(host.query("Threat", 10, 1) == real(1), "AnyCurrentThreats: AI owns a neighbour of a human planet with a human fleet");
+    expect(host.query("Threat", 10, 2) == real(0), "AnyCurrentThreats: a human evaluator is never threatened");
+    expect(host.query("Threat", 10, 3) == real(1), "AnyCurrentThreats: any non-human evaluated player that owns a neighbour counts, here planet 30");
+    // WGA-475: sign by target player, magnitude truncated and divided by the authored maximum.
+    expect(host.query("Political", 10, 1) == real(-3) / real(5), "TargetPoliticalControl is negative when the target player is another player");
+    expect(host.query("Political", 10, 2) == real(3) / real(5), "TargetPoliticalControl is positive for the target player");
+    expect(host.query("Political", 30, 3) == real(0), "TargetPoliticalControl of zero control is zero");
+    // WGA-476: second over largest, own manager only.
+    expect(host.query("Island", 10, 1) == real(3) / real(6), "WorstIslandFractionOfLargest divides the second by the largest size");
+    expect(host.query("Island", 10, 2) == real(1), "equal components give one");
+    // The manager context is the evaluated player, so no foreign-evaluator case exists through the public query; unpublished state refuses.
+    ai::GalacticConnectivity empty;
+    expect(static_cast<bool>(host.world->bind(fixture(2, 3, 2, false, observer, corruption, {human_fleet}), empty, executor, 2, 1000)),
+        "connectivity without published island sizes binds");
+    expect(!host.query("Island", 10, 1), "missing island size publication stays unavailable");
+    empty.island_sizes = {{1, -1, -1}};
+    expect(static_cast<bool>(host.world->bind(fixture(3, 3, 2, false, observer, corruption, {human_fleet}), empty, executor, 3, 1000)),
+        "reset island sizes bind");
+    expect(host.query("Island", 10, 1) == real(0), "the -1 reset sentinel (fewer than two components) yields zero");
+    // WGA-487: Game.PlanetsCorrupted counts corrupted planets of any owner; the share divides by the galaxy planet count.
+    expect(host.query("CorruptedCount", 10, 1) == real(1) && host.query("CorruptedCount", 10, 2) == real(1), "PlanetsCorruptedUnnormalized counts the one corrupted planet for any evaluator");
+    expect(host.query("CorruptedShare", 10, 1) == real(1) / real(3) && real(1) / real(3) != ai::to_single(real(1) / real(3)),
+        "PlanetsCorrupted divides by the galaxy planet count without single rounding");
+    // Fleet in transit is not attached; missing constants and states stay unavailable.
+    auto moving = human_fleet; moving.motion.transit.emplace();
+    expect(static_cast<bool>(host.world->bind(fixture(4, 3, 2, false, observer, corruption, {moving}), connectivity, executor, 4, 1000)),
+        "transit fleet fixture binds");
+    expect(host.query("Threat", 10, 1) == real(0), "a human fleet in transit is not attached to the planet");
+    expect(static_cast<bool>(host.world->bind(fixture(5, 3), connectivity, executor, 5, 1000)), "missing corruption and observer state binds");
+    expect(!host.query("Connected", 10) && !host.query("Political", 10, 1), "missing owning state stays unavailable");
+    expect(!host.query("CorruptedShare") && !host.query("CorruptedCount"), "missing corruption state leaves PlanetsCorrupted unavailable");
+    return std::to_string(host.query("Island", 10, 1) ? host.query("Island", 10, 1)->repr : 0);
+}
+// WGA-488: the Underworld corruption readers (black market, residual influence).
+std::string underworld_corruption_readers(unsigned workers) {
+    auto setup = fixture_setup(); setup.uses_fog = false;
+    QueryHost host(setup, equations({{"underworld.xml", R"(<Equations>
+<Retains>Variable_Target.RetainsResidualInfluence</Retains>
+<Modifier>Variable_Target.BlackMarketPriceModifier</Modifier>
+<Available>Variable_Target.BlackMarketAbilitiesAvailable {Parameter_Faction="Rebel"}</Available>
+<Minimum>Variable_Target.BlackMarketMinimumAbilityPrice {Parameter_Faction="Rebel"}</Minimum>
+<Quiet>Variable_Target.IsCorruptionTransitionActive</Quiet>
+<Since>Variable_Target.TimeSinceCorruptionChange</Since>
+</Equations>)"}}));
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    gc::ObserverSetup observer; observer.planets = {{10, 1, 2}, {20, 2, 2}, {30, 3, 1}};
+    gc::EconomyCorruptionState corruption;
+    gc::CorruptionEconomyPlanet first; first.planet = 10; first.corruption = gc::corruption_fixture::Type::black_market;
+    first.market_modifier = whole(7);
+    gc::CorruptionEconomyPlanet second; second.planet = 20;
+    gc::CorruptionEconomyPlanet third; third.planet = 30;
+    corruption.planets = {first, second, third};
+    gc::CorruptionEconomyPlayer empire; empire.player = 1; empire.faction = 11;
+    gc::CorruptionEconomyPlayer rebel; rebel.player = 2; rebel.faction = 12;
+    corruption.players = {empire, rebel};
+    gc::corruption_fixture::MarketItem cheap; cheap.id = 1; cheap.faction = 11; cheap.tech = 2; cheap.base_cost = whole(100);
+    gc::corruption_fixture::MarketItem expensive; expensive.id = 2; expensive.faction = 11; expensive.tech = 5; expensive.base_cost = whole(50);
+    expensive.uncommon_multiplier = whole(3);
+    gc::corruption_fixture::MarketItem foreign; foreign.id = 3; foreign.faction = 12; foreign.tech = 1; foreign.base_cost = whole(1);
+    corruption.items = {cheap, expensive, foreign};
+    expect(static_cast<bool>(host.world->bind(fixture(1, 3, 2, false, observer, corruption), {}, executor, 1, 1000)), "underworld readers bind actual owning facts");
+    host.initialize(executor);
+    expect(host.query("Retains", 10) == real(1), "RetainsResidualInfluence defaults true from the planet type");
+    expect(host.query("Modifier", 10) == real(7), "BlackMarketPriceModifier is the planet's own modifier");
+    expect(host.query("Available", 10) == real(1) && host.query("Available", 20) == real(0), "abilities are available only on a black-market planet with a locked owner-faction item");
+    // Empire tech is 3: the tech-2 item keeps its price, the tech-5 item costs 50 * 3 = 150; the cheapest locked owner item (100) plus the modifier.
+    expect(host.query("Minimum", 10) == real(107), "BlackMarketMinimumAbilityPrice adds the modifier to the cheapest owner-faction price");
+    expect(host.query("Quiet", 10) == real(0), "a planet without a live transition is not changing corruption");
+    // WGA-488: seconds are frames over the logical rate, converted at single precision (here 30 frames per second).
+    const auto seconds = [](std::int64_t frames) { return ai::to_single(real(frames) * ai::to_single(real(1) / real(30))); };
+    expect(host.query("Since", 10) == seconds(1), "a planet that never changed counts its time from frame zero");
+    gc::corruption_fixture::Transition rising; rising.increasing = true; rising.last_change = 40;
+    gc::corruption_fixture::Transition settled; settled.last_change = 70;
+    expect(static_cast<bool>(host.world->bind(fixture(100, 3, 2, false, observer, corruption, {}, {{10, rising}, {20, settled}}), {}, executor, 100, 1000)),
+        "committed corruption transitions bind");
+    expect(host.query("Quiet", 10) == real(1) && host.query("Quiet", 20) == real(0) && host.query("Quiet", 30) == real(0),
+        "an increasing transition is active; a settled or absent transition is not");
+    expect(host.query("Since", 10) == seconds(60) && host.query("Since", 20) == seconds(30) && host.query("Since", 30) == seconds(100),
+        "TimeSinceCorruptionChange is (frame - last change) / rate at single precision; never changed counts from frame zero");
+    corruption.players[1].unlocks = {1, 2};
+    expect(static_cast<bool>(host.world->bind(fixture(101, 3, 2, false, observer, corruption), {}, executor, 101, 1000)), "unlocked abilities bind");
+    expect(host.query("Available", 10) == real(0), "no ability remains once every owner-faction item is unlocked");
+    return std::to_string(host.query("Minimum", 10) ? host.query("Minimum", 10)->repr : 0);
 }
 ai::AiData fixture_data() {
     return equations({{"fixture.xml", R"(<Equations>
@@ -534,6 +700,8 @@ std::string binding_lifetime_contracts(unsigned workers) {
     // Many bit spellings of the same numeric-zero signature must not become
     // unbounded derived history when one visible interval-zero record refreshes.
     host.world->visibility_changed(1, 10, true);
+    expect(host.world->record_sync_hash().value() == host.world->record_sync_hash(true).value(),
+        "binding-spelling fixture starts with warm record tracking");
     for (unsigned spelling = 0; spelling < 513; ++spelling) {
         std::string body = "Variable_Target.StarbaseLevelUnnormalized {";
         for (unsigned bit = 0; bit < 10; ++bit) {
@@ -548,7 +716,74 @@ std::string binding_lifetime_contracts(unsigned workers) {
     host.world->finish_perception_queries();
     expect(host.world->binding_storage().first == 1 && host.world->state_hash().value() == before,
         "ordered reclamation keeps only referenced spelling and exactly the same archive bytes");
+    expect(host.world->record_sync_hash().value() == host.world->record_sync_hash(true).value(),
+        "same-frame signed-zero spelling changes retain the exact canonical record sums");
     return before;
+}
+
+std::string unchanged_record_contracts(unsigned workers) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    QueryHost host(fixture_setup(), equations({{"records.xml", R"(<Equations>
+<Repeated>Variable_Target.StarbaseLevelUnnormalized</Repeated>
+</Equations>)"}}));
+    expect(static_cast<bool>(host.world->bind(fixture(1, 4), {}, executor, 1, 100)), "unchanged-record fixture binds");
+    host.initialize(executor); host.world->visibility_changed(1, 10, true);
+    static_cast<void>(host.world->record_sync_hash().value());
+    expect(host.query("Repeated") == real(2), "interval-zero query publishes its initial cache row");
+    const auto full = host.world->state_hash().value();
+    const auto sync = host.world->record_sync_hash().value();
+    const auto work = host.world->native_record_encodes();
+    for (unsigned i = 0; i < 100; ++i)
+        expect(host.query("Repeated") == real(2), "repeated interval-zero getter still evaluates the owning value");
+    expect(host.world->native_record_encodes() == work, "100 same-frame reads encode no identical cache or visibility records");
+    expect(host.world->state_hash().value() == full && host.world->record_sync_hash().value() == sync
+        && host.world->record_sync_hash(true).value() == sync, "unchanged reads preserve full canonical bytes and warm/cold sums");
+    const auto next_work = host.world->native_record_encodes();
+    host.world->set_synchronized_frame(2);
+    expect(host.query("Repeated") == real(2), "next-frame query retains the same owning value");
+    expect(host.world->native_record_encodes() == next_work + 2, "next-frame read encodes exactly its changed cache and visibility rows");
+    expect(host.world->record_sync_hash().value() == host.world->record_sync_hash(true).value(), "changed observation frames retain warm/cold equality");
+    return host.world->state_hash().value();
+}
+
+std::string connectivity_record_contracts(unsigned workers) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    auto setup = fixture_setup(); setup.cache_intervals["ISCONNECTEDTO"] = real(1);
+    QueryHost host(setup, fixture_data());
+    ai::GalacticConnectivity connectivity; connectivity.revision = 1;
+    const auto snapshot = fixture(1, 4);
+    expect(static_cast<bool>(host.world->bind(snapshot, connectivity, executor, 1, 100)), "record compaction fixture binds");
+    auto state = host.world->state();
+    for (unsigned i = 0; i < 256; ++i) {
+        const bool route = i == 0 || i == 127 || i == 255;
+        ai::GalacticCacheKey key;
+        key.player = i % 2 + 1; key.planet = 10;
+        key.tokens = {"VARIABLE_TARGET", route ? "ISCONNECTEDTO" : "STRUCTURECOUNT"};
+        key.bindings = {{"PARAMETER_UNUSED", real(i)}};
+        state.cache.push_back({std::move(key), real(i), route ? real(1) : real(-1), 1});
+    }
+    expect(static_cast<bool>(host.world->restore(state)), "mixed-player cache and connectivity rows restore");
+    const auto work = host.world->native_record_encodes();
+    ++connectivity.revision;
+    expect(static_cast<bool>(host.world->bind(snapshot, connectivity, executor, 1, 100)), "changed connectivity compacts retained cache rows");
+    expect(host.world->native_record_encodes() == work, "connectivity invalidation encodes no unrelated retained records");
+    const auto remaining = host.world->state();
+    expect(remaining.cache.size() == 253 && std::none_of(remaining.cache.begin(), remaining.cache.end(), [](const auto& row) {
+        return row.key.tokens.back() == "ISCONNECTEDTO";
+    }), "only connectivity rows are removed at prefix, middle and suffix positions");
+    expect(host.world->record_sync_hash().value() == host.world->record_sync_hash(true).value(),
+        "compacted storage hashes equal independent full cold reconstruction");
+    std::erase_if(state.cache, [](const auto& row) { return row.key.tokens.back() == "ISCONNECTEDTO"; });
+    QueryHost expected(setup, fixture_data());
+    expect(static_cast<bool>(expected.world->bind(snapshot, connectivity, executor, 1, 100))
+        && static_cast<bool>(expected.world->restore(state)), "independent survivor state restores");
+    expect(host.world->state_hash().value() == expected.world->state_hash().value(),
+        "compaction preserves all unrelated canonical keys, values and owner identities");
+    const auto unchanged_work = host.world->native_record_encodes();
+    ++connectivity.revision;
+    expect(static_cast<bool>(host.world->bind(snapshot, connectivity, executor, 1, 100)), "another connectivity generation with no matching cache rows binds");
+    expect(host.world->native_record_encodes() == unchanged_work, "unrelated cache rows stay unencoded on later connectivity revisions");
+    return host.world->state_hash().value();
 }
 
 std::string contracts(unsigned workers) {
@@ -1129,9 +1364,9 @@ int main(int argc, char**) {
         else {
             std::string reference;
             for (const auto workers : {1U, 2U, 4U, 8U}) {
-                const auto trace = owner_scope_contracts(workers) + binding_lifetime_contracts(workers) + interned_contracts(workers) + contracts(workers) + force_contracts(workers)
+                const auto trace = owner_scope_contracts(workers) + binding_lifetime_contracts(workers) + interned_contracts(workers) + unchanged_record_contracts(workers) + connectivity_record_contracts(workers) + contracts(workers) + force_contracts(workers)
                     + story_campaign_contracts(workers) + difficulty_seat_contracts(workers)
-                    + producer_preparation_contracts(workers);
+                    + producer_preparation_contracts(workers) + supplemental_reader_contracts(workers) + offensive_reader_contracts(workers) + underworld_corruption_readers(workers);
                 const auto target_trace = target_contrast_contracts(workers);
                 if (workers == 1) reference = trace + target_trace; else expect(trace + target_trace == reference, "perception cache/context/route contracts equal on 1/2/4/8 workers");
             }

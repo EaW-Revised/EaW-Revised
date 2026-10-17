@@ -234,19 +234,25 @@ void test_phase_timings_preserve_hashes(const std::filesystem::path& fixtures) {
             expect(costs.size() == ticks, "phase timing retains one cost per tick");
             for (const auto& cost : costs) {
                 double partitions = 0.0, total = 0.0, serial = 0.0, fog = 0.0, named_serial = 0.0;
+                double callback_maxima = 0.0;
                 bool detailed = false;
                 bool serial_detailed = false;
+                bool partition_detailed = false;
                 for (const auto& phase : cost.phases) {
                     expect(phase.ms >= 0.0, "diagnostic elapsed times are nonnegative");
                     if (phase.name.starts_with("worker.")) { detailed = true; partitions += phase.ms; }
                     if (phase.name.starts_with("serial.")) { serial_detailed = true; named_serial += phase.ms; }
+                    if (phase.name.starts_with("partition-max.")) { partition_detailed = true; callback_maxima += phase.ms; }
                     if (phase.name == "worker-total") total = phase.ms;
                     if (phase.name == "serial-remainder") serial = phase.ms;
                     if (phase.name == "fog") fog = phase.ms;
                 }
                 expect(detailed == measure, "named barrier costs are opt-in");
                 expect(serial_detailed == measure, "serial stage costs are opt-in");
+                expect(partition_detailed == measure, "partition callback costs are opt-in");
                 if (measure) {
+                    expect(callback_maxima <= partitions + 0.000001,
+                        "callback maxima fit inside their worker barriers");
                     expect(partitions == total, "barrier sum counts each measured phase once");
                     expect(named_serial <= serial + 0.000001,
                         "exclusive serial stages do not double count barriers");
@@ -558,6 +564,59 @@ void test_event_log_keeps_base_attack_metadata() {
     bounded.record(tactical::TacticalSnapshot(1, {}, {target, shooter}, {}, {shot}), {}, bases);
     expect(bounded.bytes() == 0 && bounded.after(0, 1).lost_through == 1,
         "SND-40: oversized base notification reports a gap without unbounded retention");
+}
+
+void test_event_log_keeps_hardpoint_loss() {
+    using eawr::platform::LiveEventLog;
+    tactical::TacticalInstance parent;
+    parent.entity_id = 1; parent.type_id = 9; parent.owner = 1;
+    parent.durability.emplace();
+    parent.durability->hull = units(100);
+    tactical::HardpointStatus point;
+    point.role = tactical::HardpointRole::weapon;
+    point.state = tactical::HardpointState::destroyed;
+    parent.durability->hardpoints = {point, point, point};
+    parent.durability->hardpoints[2].state = tactical::HardpointState::intact;
+    tactical::Event loss;
+    loss.kind = tactical::EventKind::hardpoint_destroyed; loss.unit = 1; loss.player = 1;
+    auto second = loss; second.hardpoint = 1;
+    LiveEventLog log({.ticks = 100, .bytes = 4096});
+    log.record(tactical::TacticalSnapshot(1, {}, {parent}, {loss, second}));
+    for (std::uint64_t tick = 2; tick <= 70; ++tick) log.record(tactical::TacticalSnapshot(tick, {}, {}, {}));
+    const auto held = log.after(0, 70);
+    expect(held.ticks.size() == 1 && held.ticks.front().hardpoint_losses.size() == 2,
+        "BA-64: hardpoint warning inputs survive snapshot eviction");
+    if (held.ticks.empty() || held.ticks.front().hardpoint_losses.size() != 2) return;
+    const auto& losses = held.ticks.front().hardpoint_losses;
+    expect(losses[0].standing == std::vector<std::uint32_t>{1, 2}
+        && losses[1].standing == std::vector<std::uint32_t>{2},
+        "BA-64: same-tick losses retain notification order for last-of-class selection");
+    expect(losses[1].unit == 1 && losses[1].type == 9 && losses[1].owner == 1
+        && losses[1].weapon && losses[1].weapons_remaining, "BA-64: immutable loss identity and weapon eligibility");
+    expect(log.after(1, 70).ticks.empty(), "BA-64: advancing the journal cursor consumes warnings once");
+    const auto bytes = sizeof(eawr::platform::LiveTickEvents) + 2 * sizeof(tactical::Event)
+        + 2 * sizeof(eawr::platform::LiveHardpointLoss) + 3 * sizeof(std::uint32_t);
+    expect(log.bytes() == bytes, "BA-64: nested warning metadata counts against journal byte bound");
+    LiveEventLog bounded({.ticks = 100, .bytes = bytes - 1});
+    bounded.record(tactical::TacticalSnapshot(1, {}, {parent}, {loss, second}));
+    expect(bounded.bytes() == 0 && bounded.after(0, 1).lost_through == 1,
+        "BA-64: oversized warning record reports a gap");
+    parent.durability->hull = units(0);
+    LiveEventLog dead({.ticks = 100, .bytes = 4096});
+    dead.record(tactical::TacticalSnapshot(1, {}, {parent}, {loss}));
+    expect(dead.after(0, 1).ticks.front().hardpoint_losses.empty(), "BA-64: dying parent/self-destruct stays silent");
+    // WSD-04: the self-destruct service publishes unit destruction after removing
+    // the parent. Its standing hardpoints explode only in the presentation consumer.
+    tactical::Event death = loss;
+    death.kind = tactical::EventKind::unit_destroyed;
+    LiveEventLog self_destruct({.ticks = 100, .bytes = 4096});
+    self_destruct.record(tactical::TacticalSnapshot(1, {}, {}, {death}));
+    expect(self_destruct.after(0, 1).ticks.front().hardpoint_losses.empty(),
+        "BA-64/WSD-04: self-destruct's unit-only notification never creates a warning");
+    LiveEventLog loss_then_self_destruct({.ticks = 100, .bytes = 4096});
+    loss_then_self_destruct.record(tactical::TacticalSnapshot(1, {}, {}, {loss, death}));
+    expect(loss_then_self_destruct.after(0, 1).ticks.front().hardpoint_losses.empty(),
+        "BA-64/WSD-04: removed self-destructing parent excludes an earlier same-tick hardpoint loss");
 }
 
 void test_event_log_keeps_sparse_ability_frames() {
@@ -1402,6 +1461,7 @@ int main(const int argc, const char* const argv[]) {
             {
                 const profile::Pause barrier;
                 const profile::Scope inline_callback("serial.worker-callback");
+                const profile::JobScope unrecorded_job("job.unrecorded", 17);
                 const profile::Pause nested_barrier;
                 const profile::Scope nested_callback("serial.nested-worker-callback");
             }
@@ -1410,6 +1470,19 @@ int main(const int argc, const char* const argv[]) {
         expect(recording.costs.size() == 2 && recording.costs[0].name == "serial.restored"
             && recording.costs[1].name == "serial.outer",
             "inline worker callbacks do not become serial rows and nested pauses restore recording");
+    }
+    {
+        namespace profile = eawr::core::tick_profile;
+        profile::Recording recording;
+        recording.costs.reserve(1);
+        const profile::JobCapture capture(recording);
+        {
+            const profile::JobScope job("job.instance", 73);
+            const profile::Scope nested("serial.nested");
+        }
+        expect(recording.costs.size() == 1 && recording.costs[0].identity == 73
+            && recording.costs[0].name == "job.instance",
+            "job diagnostics retain identity independently of serial scope recording");
     }
     if (argc != 2) {
         std::cerr << "usage: tactical_live_session_tests <fixture directory>\n";
@@ -1432,6 +1505,7 @@ int main(const int argc, const char* const argv[]) {
     test_event_log_bounds_a_high_event_rate();
     test_event_log_keeps_pad_audio_events();
     test_event_log_keeps_base_attack_metadata();
+    test_event_log_keeps_hardpoint_loss();
     test_event_log_keeps_sparse_ability_frames();
     test_event_log_gap_stays_in_the_asked_range();
     test_real_time_records_its_replay(argv[1]);

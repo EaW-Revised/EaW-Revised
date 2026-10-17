@@ -3,6 +3,7 @@
 #include "eawr/net/gns_room.hpp"
 #include "eawr/net/gns_signalling.hpp"
 #include "eawr/net/online_lobby.hpp"
+#include <utility>
 
 namespace eawr::net {
 struct NetworkIntroductionOptions {
@@ -37,7 +38,7 @@ class NetworkOnlineLobby final : public OnlineLobbyService {
 public:
     explicit NetworkOnlineLobby(NetworkIntroductionOptions, std::string resume_principal = {});
     ~NetworkOnlineLobby() override;
-    std::string principal() const;
+    std::string principal() const override;
     core::Result<OnlineRoomPage> list(std::string after = {}, std::uint32_t limit = 50) override;
     core::Result<OnlineRoomPublication> publish(OnlineRoomMetadata, std::string password = {}) override;
     core::Result<OnlineRoomPublication> publish_bridge(OnlineRoomMetadata, std::string password, std::string invitation, std::string ownership = {}) override;
@@ -117,6 +118,9 @@ public:
     core::Result<void> release(PeerIndex slot) override;
     core::Result<void> kick(PeerIndex slot) override;
     core::Result<void> lock() override;
+    // Diagnostic snapshot only: count and latest EAWR-NET-1732/1733 renewal refusal, never credentials.
+    std::pair<std::uint64_t, std::string> renewal_failure() const;
+    core::Result<bool> repair_attachment(std::uint64_t epoch) override;
 private:
     struct Impl;
     explicit NetworkGnsRoom(std::unique_ptr<Impl> impl);

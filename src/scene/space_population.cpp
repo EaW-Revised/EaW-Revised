@@ -231,7 +231,7 @@ std::vector<SpacePlacementDecision> classify_space_placements(
             };
             for (std::size_t index = 0; index < placement.surfaces.size(); ++index) {
                 const Surface& surface = placement.surfaces[index];
-                if (!surface.supported || find_legacy_selector(surface.shader) == nullptr) continue;
+                if (!surface.supported || material_selector(surface) == nullptr) continue;
                 if (const std::size_t hardpoint = decal(surface.mesh_name); hardpoint < decision.hardpoints.size()) {
                     ++decision.damage_decal_surfaces;
                     decision.damage_decals.push_back({index, hardpoint});

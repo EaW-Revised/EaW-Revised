@@ -96,7 +96,8 @@ void ReferencePages::service(GalacticMode::State& state) {
             const auto theme = presentation::ui::build_theme_model(sources,
                 presentation::ui::reference_space({static_cast<std::uint32_t>(size.x), static_cast<std::uint32_t>(size.y)}));
             data::ui::TextLookup lookup(*text);
-            auto built = build_dialog(*definition, theme, &lookup, presentation::ui::Placement::centre);
+            auto built = build_dialog(*definition, theme, &lookup, presentation::ui::Placement::centre, false,
+                [&state](std::string_view cue) { if (state.audio) state.audio->ui_sound(cue); });
             built.frame->set_theme(build_theme(theme, *textures, *state.hud_fonts));
             return built;
         };

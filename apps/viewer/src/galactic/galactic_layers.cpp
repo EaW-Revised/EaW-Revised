@@ -96,6 +96,7 @@ void fragment() {
             GodotRenderer::LightingState state;
             state.sph = lighting::source_to_render(lighting::sph_light_all(content->lighting)).rgb;
             state.sph_fill = lighting::source_to_render(lighting::sph_light_fill(content->lighting)).rgb;
+            state.ambient = {content->lighting.ambient.r * content->lighting.ambient.a, content->lighting.ambient.g * content->lighting.ambient.a, content->lighting.ambient.b * content->lighting.ambient.a};
             state.sun_diffuse = lighting::sun_diffuse(content->lighting);
             const auto direction = lighting::source_to_render(content->lighting.lights[0].direction);
             state.toward_light = {-direction.x, -direction.y, -direction.z};
@@ -116,6 +117,15 @@ bool GalacticMode::State::advance_animation(const double elapsed) {
     if (!service_corruption(step)) return false;
     if (step == 0.0 && animation_updates != 0) return true;
     animation_time += step;
+    // AVC-05: advance each shared material once, on the same held/live clock
+    // as skeletal idles. Static materials need no per-frame renderer writes.
+    for (const auto& model : models) {
+        GodotRenderer& target = model.layer == 0 ? *renderer : *scenes[model.layer].renderer;
+        for (const auto asset : model.effect_clock_assets) {
+            auto clock = target.set_material_scalar(asset, "eawr_effect_time", static_cast<float>(animation_time));
+            if (!clock) { failure = core::format_diagnostic(clock.error()); return false; }
+        }
+    }
     for (const auto& planet : render_objects()) {
         const auto chosen = planet_models.at(planet.id);
         if (!chosen) continue;
@@ -125,10 +135,6 @@ bool GalacticMode::State::advance_animation(const double elapsed) {
             if (art != content->art.end()) loop = art->second.loop_idle;
         }
         for (auto& surface : models[*chosen].surfaces) {
-            if (surface.status == "drawn" && surface.route == "planet") {
-                auto clock = planet_renderer(planet.id).set_material_scalar(surface.asset, "eawr_effect_time", static_cast<float>(animation_time));
-                if (!clock) { failure = core::format_diagnostic(clock.error()); return false; }
-            }
             if (!surface.idle) continue;
             // WGP-09: the cursor's clip starts when it is added.
             const double clock = planet.id == selection_cursor_id ? animation_time - selection_cursor.started : animation_time;

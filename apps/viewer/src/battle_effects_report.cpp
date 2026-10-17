@@ -45,6 +45,7 @@ void BattleEffects::release() {
         return std::find(move_particles_.begin(), move_particles_.end(), effect.particle) != move_particles_.end();
     }));
     released_ = true;
+    backend_->set_emitter_reuse(false);
     for (auto& [name, look] : healing_lightning_) {
         static_cast<void>(name);
         if (look.batch.resource != 0) backend_->destroy_emitter(look.batch.resource);
@@ -57,6 +58,9 @@ void BattleEffects::release() {
     weaken_effects_.clear();
     spawned_projectile_types_.clear();
     for (auto& look : hero_beams_) {
+        if (look.lightning.batch.resource != 0) backend_->destroy_emitter(look.lightning.batch.resource);
+        look.lightning.batch.resource = 0;
+        look.lightning.active_at_release = look.lightning.sources.size(); look.lightning.sources.clear();
         if (look.batch.resource != 0) backend_->destroy_emitter(look.batch.resource);
         look.batch.resource = 0;
         if (look.sparks.resource != 0) backend_->destroy_emitter(look.sparks.resource);
@@ -70,6 +74,9 @@ void BattleEffects::release() {
     }
     for (auto& [type, look] : leech_beams_) {
         static_cast<void>(type);
+        if (look.lightning.batch.resource != 0) backend_->destroy_emitter(look.lightning.batch.resource);
+        look.lightning.batch.resource = 0;
+        look.lightning.active_at_release = look.lightning.sources.size(); look.lightning.sources.clear();
         if (look.batch.resource != 0) backend_->destroy_emitter(look.batch.resource);
         if (look.sparks.resource != 0) backend_->destroy_emitter(look.sparks.resource);
         look.batch.resource = 0; look.sparks.resource = 0;
@@ -80,16 +87,32 @@ void BattleEffects::release() {
         if (target->resource != 0) backend_->destroy_emitter(target->resource);
         target->resource = 0;
     }
+    backend_->release_prewarm();
 }
 
 void BattleEffects::write_report(std::ostream& output) const {
+    const auto reuse = backend_->reuse_work();
     output << "  \"battle_effects\": {\"frames\": " << frames_ << ", \"projectiles_drawn\": " << projectiles_drawn_
            << ", \"projectiles_hidden\": " << projectiles_hidden_ << ", \"max_kites\": " << max_kites_
            << ", \"kites_head_leading\": " << kites_head_leading_ << ", \"kites_head_trailing\": " << kites_head_trailing_
            << ", \"kite_axis\": {\"samples\": " << kite_axis_samples_ << ", \"max_sine_error\": "
            << kite_axis_max_sine_ << ", \"reversed\": " << kite_axis_reversed_ << "}"
            << ", \"max_beams\": " << max_beams_ << ", \"projectile_models_drawn\": " << models_drawn_ << ", \"live_effects\": " << effects_.size()
-           << ", \"max_live_effects\": " << max_live_effects_ << ", \"effects_dropped\": " << effects_dropped_;
+           << ", \"max_live_effects\": " << max_live_effects_ << ", \"effects_dropped\": " << effects_dropped_
+           << ", \"backend_reuse\": {\"retained_emitters\": " << reuse.retained_emitters
+           << ", \"retained_bytes\": " << reuse.retained_bytes << ", \"peak_emitters\": " << reuse.peak_emitters
+           << ", \"peak_bytes\": " << reuse.peak_bytes << ", \"hits\": " << reuse.hits
+           << ", \"misses\": " << reuse.misses << ", \"refusals\": " << reuse.refusals
+           << ", \"live_rids\": " << reuse.live_rids << '}';
+    const auto warm = backend_->program_prewarm_work();
+    output << ", \"prewarm\": {\"programs\":" << warm.programs
+           << ",\"program_limit\":" << GodotParticleBackend::prewarm_program_limit()
+           << ",\"references\":" << warm.references << ",\"skipped_references\":" << warm.skipped_references
+           << ",\"requested\":" << warm.requested << ",\"duplicate_requests\":" << warm.duplicate_requests
+           << ",\"refused\":" << warm.refused << ",\"decoded_systems\":" << warm.decoded_systems
+           << ",\"prepare_ms\":" << warm.prepare_ms << ",\"lookup_ms\":" << warm.lookup_ms
+           << ",\"prepared_shaders\":" << warm.prepared_shaders << ",\"live_shaders\":" << warm.live_shaders
+           << ",\"backend_live_rids\":" << backend_->live_rids() << "}";
     output << ", \"healing_pulses\": " << healing_pulses_ << ", \"healing_particles\": " << healing_particles_
            << ", \"healing_bolt_samples\": " << healing_bolt_samples_;
     output << ", \"laser_z_scales\": [" << laser_scales_.beam << ',' << laser_scales_.kite << ']'
@@ -107,6 +130,16 @@ void BattleEffects::write_report(std::ostream& output) const {
     output << ", \"shield_leech_beams_drawn\": " << leech_beams_drawn_;
     output << ", \"energy_beams_drawn\": " << energy_beams_drawn_ << ", \"tractor_beams_drawn\": " << tractor_beams_drawn_
            << ", \"defence_beams_drawn\": " << defence_beams_drawn_;
+    // TBF-01/05: preserve float mesh coordinates when a contract measures the
+    // reported width or socket position far from the world origin.
+    const auto beam_precision = output.precision(std::numeric_limits<float>::max_digits10);
+    const auto lightning_report = [&](const auto& lightning) {
+        output << ",\"lightning\":{\"name\":" << json(lightning.name) << ",\"texture\":" << json(lightning.texture)
+            << ",\"bolts_created\":" << lightning.bolts_created << ",\"segments_drawn\":" << lightning.segments_drawn
+            << ",\"active_sources\":" << (released_ ? lightning.active_at_release : lightning.sources.size())
+            << ",\"last_start\":[" << lightning.last_start[0] << ',' << lightning.last_start[1] << ',' << lightning.last_start[2]
+            << "],\"last_end\":[" << lightning.last_end[0] << ',' << lightning.last_end[1] << ',' << lightning.last_end[2] << "]}";
+    };
     output << ", \"hero_beam_looks\": [";
     for (std::size_t index = 0; index < hero_beams_.size(); ++index) {
         const auto& look = hero_beams_[index];
@@ -125,7 +158,7 @@ void BattleEffects::write_report(std::ostream& output) const {
             output << (vertex ? "," : "") << "[" << point.position.x << ',' << point.position.y << ',' << point.position.z
                 << ',' << point.u << ',' << point.v << ']';
         }
-        output << "]}";
+        output << ']'; lightning_report(look.lightning); output << '}';
     }
     output << ']';
     output << ", \"leech_beam_looks\": [";
@@ -141,10 +174,11 @@ void BattleEffects::write_report(std::ostream& output) const {
             const auto& point = look.last_quad[vertex].position;
             output << (vertex ? "," : "") << '[' << point.x << ',' << point.y << ',' << point.z << ']';
         }
-        output << "]}";
+        output << ']'; lightning_report(look.lightning); output << '}';
         first_leech = false;
     }
     output << ']';
+    output.precision(beam_precision);
     const auto move_active = released_ ? move_feedback_at_release_
         : static_cast<std::uint64_t>(std::count_if(effects_.begin(), effects_.end(), [this](const auto& effect) {
         return std::find(move_particles_.begin(), move_particles_.end(), effect.particle) != move_particles_.end();

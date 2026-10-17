@@ -28,7 +28,7 @@ namespace tactical = sim::tactical;
 using Clock = std::chrono::steady_clock;
 
 // Preserve the executor's dispatch policy and partition callbacks. Only the caller
-// records each completed barrier's elapsed time; workers never write this vector.
+// records completed barrier rows; workers write only their fixed callback/job slots.
 class MeasuredExecutor final : public sim::PartitionExecutor {
 public:
     explicit MeasuredExecutor(const sim::PartitionExecutor& executor) : executor_(executor) {}
@@ -46,17 +46,66 @@ public:
         if (std::this_thread::get_id() != owner_ || measuring_) return run();
         struct Reset final { bool& flag; ~Reset() { flag = false; } } reset{measuring_};
         measuring_ = true;
+        // Each callback owns its partition slot. These wall samples distinguish
+        // a long callback from the surrounding dispatch/join interval; they are
+        // separate diagnostic rows, never additional worker barrier cost.
+        std::vector<double> partition_ms(count);
+        const bool sample_jobs = name == "plan-searches" || name == "script-instances";
+        std::vector<core::tick_profile::Recording> job_recordings(sample_jobs ? count : 0);
+        const auto job_count = core::tick_profile::active
+            ? std::exchange(core::tick_profile::active->pending_jobs, std::size_t{}) : 0;
+        for (std::size_t index = 0; index < job_recordings.size(); ++index) {
+            job_recordings[index].costs.reserve((index + 1) * job_count / count - index * job_count / count);
+            if (name == "script-instances") job_recordings[index].auxiliary_costs = {{"memory-settle", 0.0}};
+        }
         const auto started = Clock::now();
         auto result = [&] {
             const core::tick_profile::Pause pause;
-            return run();
+            const auto sampled = [&](const std::size_t index) {
+                const auto began = Clock::now();
+                if (sample_jobs) {
+                    // Job capture is independent of serial scopes; its vector
+                    // was reserved on the caller thread before dispatch.
+                    core::tick_profile::JobCapture capture(job_recordings[index]);
+                    partition(index);
+                } else partition(index);
+                partition_ms[index] = std::chrono::duration<double, std::milli>(Clock::now() - began).count();
+            };
+            return name.empty() ? executor_.execute(count, sampled) : executor_.execute_phase(name, count, sampled);
         }();
         const double elapsed = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
         if (core::tick_profile::active) core::tick_profile::active->barriers_ms += elapsed;
-        phases.push_back({"worker." + (name.empty() ? std::string("unnamed") : std::string(name)), elapsed});
+        const std::string label = name.empty() ? std::string("unnamed") : std::string(name);
+        const auto phase_index = phases.size();
+        phases.push_back({"worker." + label, elapsed});
+        double maximum = 0.0, sum = 0.0;
+        for (const auto sample : partition_ms) { maximum = std::max(maximum, sample); sum += sample; }
+        partition_costs.push_back({"partition-max." + label, maximum});
+        partition_costs.push_back({"partition-sum." + label, sum});
+        for (std::size_t index = 0; index < job_recordings.size(); ++index) {
+            partition_costs.push_back({"partition-callback." + label + "." + std::to_string(phase_index)
+                + "." + std::to_string(index), partition_ms[index]});
+            for (const auto& job : job_recordings[index].costs) {
+                if (!job.name.starts_with("job.")) continue;
+                std::string job_label = "partition-job." + label + "." + std::to_string(phase_index)
+                    + "." + std::to_string(index)
+                    + "." + std::string(job.name.substr(4)) + "." + std::to_string(job.identity);
+                // Fixed suffix: has-work, before, after, deadline, limit,
+                // children, queries, leaves, narrow. Non-search jobs use zeros.
+                job_label += job.work.deadline != 0 ? ".1" : ".0";
+                for (const auto value : {job.work.before, job.work.after, job.work.deadline, job.work.limit,
+                        job.work.children, job.work.queries, job.work.leaves, job.work.narrow})
+                    job_label += "." + std::to_string(value);
+                partition_costs.push_back({std::move(job_label), job.ms});
+            }
+            for (const auto& auxiliary : job_recordings[index].auxiliary_costs)
+                partition_costs.push_back({"partition-aux." + label + "." + std::to_string(phase_index)
+                    + "." + std::to_string(index) + "." + std::string(auxiliary.name), auxiliary.ms});
+        }
         return result;
     }
     mutable std::vector<LivePhaseCost> phases;
+    mutable std::vector<LivePhaseCost> partition_costs;
 private:
     const sim::PartitionExecutor& executor_;
     const std::thread::id owner_{std::this_thread::get_id()};
@@ -98,20 +147,56 @@ bool LiveEventLog::presented(const tactical::CombatEvent& event) noexcept {
 }
 
 std::size_t LiveEventLog::record_bytes(const LiveTickEvents& record) noexcept {
-    return sizeof(LiveTickEvents) + record.events.size() * sizeof(tactical::Event)
+    std::size_t bytes = sizeof(LiveTickEvents) + record.events.size() * sizeof(tactical::Event)
         + record.combat_events.size() * sizeof(tactical::CombatEvent)
         + record.asteroid_impacts.size() * sizeof(tactical::AsteroidImpact)
-        + record.base_attacks.size() * sizeof(LiveBaseAttack);
+        + record.base_attacks.size() * sizeof(LiveBaseAttack)
+        + record.hardpoint_losses.size() * sizeof(LiveHardpointLoss);
+    for (const auto& loss : record.hardpoint_losses) bytes += loss.standing.size() * sizeof(std::uint32_t);
+    return bytes;
 }
 
 void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std::span<const tactical::AsteroidImpact> asteroid_impacts,
     const std::span<const tactical::TypeId> base_types) {
-    LiveTickEvents kept{snapshot.completed_tick(), {}, {}, {asteroid_impacts.begin(), asteroid_impacts.end()}, {}};
+    LiveTickEvents kept{snapshot.completed_tick(), {}, {}, {asteroid_impacts.begin(), asteroid_impacts.end()}, {}, {}};
     bool ability_input = false;
     for (const tactical::Event& event : snapshot.events()) {
         if (presented(event)) kept.events.push_back(event);
         ability_input = ability_input || (event.kind == tactical::EventKind::order_accepted
             && event.order == tactical::OrderKind::ability);
+    }
+    // BA-64: retain the warning inputs before history eviction. Later losses in this
+    // tick were still standing for an earlier notification; disabled is not destroyed.
+    const auto destruction_events = snapshot.events();
+    for (std::size_t at = 0; at < destruction_events.size(); ++at) {
+        const auto& event = destruction_events[at];
+        if (event.kind != tactical::EventKind::hardpoint_destroyed) continue;
+        const auto instances = snapshot.instances();
+        const auto parent = std::lower_bound(instances.begin(), instances.end(), event.unit,
+            [](const auto& instance, const sim::EntityId id) { return instance.entity_id < id; });
+        // WSD-04: self-destruct emits unit destruction and removes its parent before
+        // publication. Missing parents therefore cannot produce hardpoint warnings.
+        if (parent == instances.end() || parent->entity_id != event.unit || !parent->durability
+            || parent->durability->hull <= sim::math::Fixed{}) continue;
+        const auto& points = parent->durability->hardpoints;
+        if (event.hardpoint >= points.size()) continue;
+        LiveHardpointLoss loss;
+        loss.unit = event.unit; loss.type = parent->type_id; loss.owner = parent->owner;
+        loss.hardpoint = event.hardpoint;
+        loss.weapon = points[event.hardpoint].role == tactical::HardpointRole::weapon;
+        for (std::size_t index = 0; index < points.size(); ++index) {
+            if (index == event.hardpoint) continue;
+            const bool later_loss = std::any_of(destruction_events.begin() + static_cast<std::ptrdiff_t>(at + 1),
+                destruction_events.end(), [&](const auto& later) {
+                    return later.kind == tactical::EventKind::hardpoint_destroyed && later.unit == event.unit
+                        && later.hardpoint == index;
+                });
+            if (points[index].state == tactical::HardpointState::destroyed && !later_loss) continue;
+            loss.standing.push_back(static_cast<std::uint32_t>(index));
+            loss.weapons_remaining = loss.weapons_remaining || points[index].role == tactical::HardpointRole::weapon;
+        }
+        loss.standing.shrink_to_fit();
+        kept.hardpoint_losses.push_back(std::move(loss));
     }
     for (const tactical::CombatEvent& event : snapshot.combat_events()) {
         if (presented(event)) kept.combat_events.push_back(event);
@@ -151,6 +236,7 @@ void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std:
             kept.combat_events.shrink_to_fit();
             kept.asteroid_impacts.shrink_to_fit();
             kept.base_attacks.shrink_to_fit();
+            kept.hardpoint_losses.shrink_to_fit();
             bytes_ += record_bytes(kept);
             records_.push_back(std::move(kept));
         }
@@ -356,7 +442,8 @@ public:
     }
 
     std::vector<std::string> tick_hashes() const {
-        const std::lock_guard lock(session_mutex_);
+        std::unique_lock lock(session_mutex_, std::defer_lock);
+        { core::tick_profile::Scope wait("ui.lock.tick-hashes"); lock.lock(); }
         std::vector<std::string> hashes;
         hashes.reserve(hashes_.size());
         for (const auto& hash : hashes_) hashes.push_back(hash.get());
@@ -364,12 +451,14 @@ public:
     }
 
     tactical::TacticalReplay record() const {
-        const std::lock_guard lock(session_mutex_);
+        std::unique_lock lock(session_mutex_, std::defer_lock);
+        { core::tick_profile::Scope wait("ui.lock.record"); lock.lock(); }
         return scripted_ ? scripted_->record() : session_->record();
     }
 
     LiveSession::ProductionView production_view(const tactical::PlayerId player, const tactical::TypeId type) const {
-        const std::lock_guard lock(session_mutex_);
+        std::unique_lock lock(session_mutex_, std::defer_lock);
+        { core::tick_profile::Scope wait("ui.lock.production-view"); lock.lock(); }
         return {world().production_counts(player, type), world().snapshot()};
     }
 
@@ -382,12 +471,14 @@ public:
     }
 
     tactical::TacticalReplay failure_record() const {
-        const std::lock_guard lock(session_mutex_);
+        std::unique_lock lock(session_mutex_, std::defer_lock);
+        { core::tick_profile::Scope wait("ui.lock.failure-record"); lock.lock(); }
         return world().record_through_next_tick();
     }
 
     LiveScriptReport script_report() const {
-        const std::lock_guard lock(session_mutex_);
+        std::unique_lock lock(session_mutex_, std::defer_lock);
+        { core::tick_profile::Scope wait("ui.lock.script-report"); lock.lock(); }
         return script_report_;
     }
 
@@ -482,6 +573,7 @@ private:
             }
             // Orders for a tick that already ran are refused now; the rest wait for their tick.
             submit_due(world().completed_tick(), false);
+            pacing_lag_ms_ = dropped_wall_ms_ = 0.0;
             if (held) {
                 if (options_.step_driver && !step(executor, false)) return;
                 continue;
@@ -497,7 +589,14 @@ private:
                 const auto due_ticks = static_cast<std::uint64_t>(elapsed / interval);
                 const std::uint64_t behind = clock_tick + due_ticks > world().completed_tick()
                     ? clock_tick + due_ticks - world().completed_tick() : 0U;
+                if (options_.measure_phases && behind > 0U) {
+                    const auto deadline = clock_start + interval * static_cast<std::int64_t>(
+                        world().completed_tick() + 1U - clock_tick);
+                    pacing_lag_ms_ = std::max(0.0,
+                        std::chrono::duration<double, std::milli>(now - deadline).count());
+                }
                 if (behind > options_.max_catch_up) {
+                    if (options_.measure_phases) dropped_wall_ms_ = pacing_lag_ms_;
                     // Too slow for real time: drop the missed time rather than spiral.
                     clock_start = now - interval;
                     clock_tick = world().completed_tick();
@@ -644,7 +743,8 @@ private:
                         auto replay = scripted_ ? scripted_->record() : session_->record();
                         const auto completed = world().completed_tick();
                         std::erase_if(replay.commands, [completed](const auto& command) { return command.key.tick + 1 != completed; });
-                        if (replay.commands.empty()) return core::Result<std::vector<std::uint8_t>>::success({});
+                        std::erase_if(replay.object_turns, [completed](const auto& command) { return command.tick + 1 != completed; });
+                        if (replay.commands.empty() && replay.object_turns.empty()) return core::Result<std::vector<std::uint8_t>>::success({});
                         return tactical::write_replay(replay);
                     }, [this](std::uint32_t rate) { set_target_rate(rate); }};
                 context.rebuild = [this, &executor, &driver_lock] {
@@ -709,6 +809,10 @@ private:
                         {"fog", fog_ms}};
                 }
                 if (options_.measure_phases) {
+                    // Pacing lateness/discarded wall time are observations, not
+                    // additional work and never inputs to the clock policy.
+                    cost.phases.push_back({"pacing-lag", pacing_lag_ms_});
+                    cost.phases.push_back({"pacing-discarded-wall", dropped_wall_ms_});
                     // Outside total_ms: lock admission and publication happen before/after
                     // the measured world/script step and fog capture, respectively.
                     cost.phases.push_back({"session-lock", session_lock_ms});
@@ -720,6 +824,7 @@ private:
                     cost.phases.push_back({"serial-remainder", std::max(0.0, step_ms - partition_ms)});
                     if (scripted_) cost.phases.push_back({"world", world_ms_});
                     cost.phases.insert(cost.phases.end(), measured.phases.begin(), measured.phases.end());
+                    cost.phases.insert(cost.phases.end(), measured.partition_costs.begin(), measured.partition_costs.end());
                     for (const auto& phase : serial.costs) cost.phases.push_back({std::string(phase.name), phase.ms});
                 }
                 costs_.push_back(std::move(cost));
@@ -892,6 +997,7 @@ private:
     std::function<core::Result<tactical::TacticalSession>()> rebuild_world_;
     // #558: the newest ticks' cost, oldest first.
     std::deque<LiveTickCost> costs_;
+    double pacing_lag_ms_{}, dropped_wall_ms_{}; // simulation-thread diagnostics only
     std::thread thread_;
 };
 

@@ -223,6 +223,9 @@ void ThreatGrid::partition(const AiBounds& bounds, std::int32_t x_cells, std::in
     constants_ = constants;
     cells_.assign(static_cast<std::size_t>(x_cells_) * static_cast<std::size_t>(y_cells_), {});
     tracked_.clear();
+    fog_watch_.clear();
+    setup_scanned_ = false;
+    setup_limit_ = 0;
 }
 
 // PG-02: an object's entries are its targetable weapon hardpoints, or the object itself when it
@@ -306,9 +309,14 @@ void ThreatGrid::remove(sim::EntityId object, Tracked& tracked) {
 void ThreatGrid::service(const WorldView& view, const Host& host, std::int64_t frame) {
     clear_queries();
     if (!ready()) return;
+    if (!setup_scanned_) {
+        setup_scanned_ = true;
+        setup_limit_ = host.ai_world ? host.ai_world->next_entity_id() : sim::EntityId{};
+    }
     const auto admitted = [&](const ViewUnit& unit) {
         const AiType* type = host.type(unit.type);
-        return !unit.planetary_weapon && type != nullptr && type->unit_ai;
+        // PG-03: a station created with the battle never joins the grid; its upgrades do.
+        return !unit.planetary_weapon && type != nullptr && type->unit_ai && !(type->star_base && unit.id < setup_limit_);
     };
     for (auto iterator = tracked_.begin(); iterator != tracked_.end();) {
         const ViewUnit* current = view.find(iterator->first);
@@ -335,6 +343,85 @@ void ThreatGrid::service(const WorldView& view, const Host& host, std::int64_t f
             tracked.has_position = true;
         }
     }
+}
+
+// PE-25: a threat cell is stamped when one of its fog cells reaches 0 (fully fogged). The cell is
+// found from the fog cell's index, (row / k) * XCells + column / k with k fog cells per threat cell,
+// as the original does, not from its position: the grid's cells are bounds / XCells wide, so on an
+// extent that is not a multiple of k fog cells the two differ for the outer columns and rows. The
+// sweep compares each session player's rows with the previous sweep, so only rows that changed cost.
+void ThreatGrid::sweep_fog(const Host& host, const std::int64_t frame, const bool stamp) {
+    if (!ready() || host.world == nullptr) return;
+    const tactical::FogCells* fog = host.world->fog_cells();
+    if (fog == nullptr) return;
+    const auto players = host.world->players();
+    const std::size_t per = static_cast<std::size_t>(std::max<std::int64_t>(1, constants_.fog_cells_per_threat_cell));
+    if (fog_watch_.size() != players.size()) fog_watch_.resize(players.size());
+    for (std::size_t player = 0; player < players.size(); ++player) {
+        FogWatch& watch = fog_watch_[player];
+        if (watch.last_seen.size() != cells_.size()) watch.last_seen.assign(cells_.size(), 0);
+        auto rows = fog->value_rows(player);
+        if (stamp && watch.rows.size() == rows.size()) {
+            for (std::size_t row = 0; row < rows.size(); ++row) {
+                if (rows[row] == watch.rows[row] || !rows[row] || !watch.rows[row]) continue;
+                const auto& now = *rows[row];
+                const auto& before = *watch.rows[row];
+                const std::size_t columns = std::min(now.size(), before.size());
+                for (std::size_t column = 0; column < columns; ++column) {
+                    if (before[column] == 0 || now[column] != 0) continue;
+                    const std::size_t threat_row = row / per;
+                    const std::size_t threat_column = column / per;
+                    if (threat_row >= static_cast<std::size_t>(y_cells_) || threat_column >= static_cast<std::size_t>(x_cells_)) continue;
+                    watch.last_seen[threat_row * static_cast<std::size_t>(x_cells_) + threat_column] = frame;
+                }
+            }
+        }
+        watch.rows = std::move(rows);
+    }
+}
+
+void ThreatGrid::observe_fog(const Host& host, const std::int64_t frame) { sweep_fog(host, frame, true); }
+
+void ThreatGrid::baseline_fog(const Host& host) { sweep_fog(host, 0, false); }
+
+// PE-25: over the threat cells the rectangle touches, each cell whose centre is fogged for the
+// player adds the ticks since its last fully-fogged stamp; the total is averaged over every touched
+// cell and converted to seconds. A never-seen fogged cell counts the whole game age; an unfogged
+// cell counts 0. The fog is the session's real fog grid for every player, an AI player included;
+// the AIUsesFogOfWarSpace setting (False in stock) is not read, so True is not modelled.
+Real ThreatGrid::time_since_seen(const Host& host, const Rect& rect, const tactical::PlayerId player,
+    const std::int64_t frame) const {
+    if (!ready() || host.world == nullptr) return Real{};
+    const tactical::FogCells* fog = host.world->fog_cells();
+    if (fog == nullptr) return Real{};
+    const auto players = host.world->players();
+    std::size_t index = players.size();
+    for (std::size_t i = 0; i < players.size(); ++i) {
+        if (players[i].player_id == player) { index = i; break; }
+    }
+    if (index >= players.size() || index >= fog_watch_.size() || fog_watch_[index].last_seen.size() != cells_.size()) return Real{};
+    const std::vector<std::int64_t>& last_seen = fog_watch_[index].last_seen;
+    const std::int64_t x0 = std::max<std::int64_t>(truncate(single((rect.x - left_) / cell_width_)), 0);
+    const std::int64_t x1 = std::min<std::int64_t>(truncate(single((rect.x - left_ + rect.width) / cell_width_)), x_cells_ - 1);
+    const std::int64_t y0 = std::max<std::int64_t>(truncate(single((top_ - (rect.y + rect.height)) / cell_height_)), 0);
+    const std::int64_t y1 = std::min<std::int64_t>(truncate(single((top_ - rect.y) / cell_height_)), y_cells_ - 1);
+    std::int64_t cells = 0;
+    std::int64_t total = 0;
+    for (std::int64_t row = y0; row <= y1; ++row) {
+        for (std::int64_t column = x0; column <= x1; ++column) {
+            ++cells;
+            const Real centre_x = single(left_ + single(single(real(column) + real(1) / real(2)) * cell_width_));
+            const Real centre_y = single(top_ - single(single(real(row) + real(1) / real(2)) * cell_height_));
+            const auto x = numeric::to_fixed(centre_x);
+            const auto y = numeric::to_fixed(centre_y);
+            // A centre outside the fixed-point range is outside the fog grid: fogged.
+            if (x && y && fog->revealed(index, math::Vec3{x.value(), y.value(), math::Fixed{}})) continue;
+            total += frame - last_seen[static_cast<std::size_t>(row * x_cells_ + column)];
+        }
+    }
+    if (cells == 0 || total <= 0) return Real{};
+    const Real fps = real(static_cast<std::int64_t>(tactical::logical_frames_per_second));
+    return single(real(total) / single(real(cells) * fps));
 }
 
 std::vector<sim::EntityId> ThreatGrid::objects() const {
@@ -401,6 +488,43 @@ Real ThreatGrid::force(const Host& host, const WorldView& view, const Rect& rect
     const Real result = single(total * constants_.area_threat_scale);
     if (preparation) force_queries_.emplace(key, result);
     return result;
+}
+
+// PG-09: unlike spread threat, concentration counts full company power for
+// each entry in its rounded base cell. It has no health/area attenuation and
+// does not exclude the queried object. Existing cells supply the broad phase;
+// this const path adds no population sweep, cache mutation or saved state.
+Real ThreatGrid::concentration(const Host& host, const WorldView& view, const Rect& rect,
+    const std::uint64_t category, const tactical::PlayerId player, const bool friendly) const {
+    if (!ready()) return Real{};
+    const auto x0 = std::max<std::int64_t>(truncate(single((rect.x - left_) / cell_width_)), 0);
+    const auto x1 = std::min<std::int64_t>(truncate(single((rect.x - left_ + rect.width) / cell_width_)), x_cells_ - 1);
+    const auto y0 = std::max<std::int64_t>(truncate(single((top_ - (rect.y + rect.height)) / cell_height_)), 0);
+    const auto y1 = std::min<std::int64_t>(truncate(single((top_ - rect.y) / cell_height_)), y_cells_ - 1);
+    Real total{};
+    for (auto row = y0; row <= y1; ++row) {
+        for (auto column = x0; column <= x1; ++column) {
+            const auto cell_index = row * x_cells_ + column;
+            Real cell{};
+            for (const auto& [object, index] : cells_[static_cast<std::size_t>(cell_index)]) {
+                const auto tracked = tracked_.find(object);
+                if (tracked == tracked_.end() || index >= tracked->second.entries.size()) continue;
+                const auto& entry = tracked->second.entries[index];
+                const auto base = truncate(single(single(entry.y / cell_height_) + real(1) / real(2))) * x_cells_
+                    + truncate(single(single(entry.x / cell_width_) + real(1) / real(2)));
+                // PG-09: compare only; the unclamped flattened value never indexes memory.
+                if (base != cell_index) continue;
+                const auto* unit = view.find(object);
+                if (!unit || unit->owner == 0 || host.neutral(unit->owner)
+                    || host.allied(unit->owner, player) != friendly || fogged_for(host, view, *unit, player)) continue;
+                const auto* company = company_type(host, *unit);
+                if (company && (company->category_bits & category) != 0)
+                    cell = single(cell + power_metric(company));
+            }
+            total = single(total + cell);
+        }
+    }
+    return total;
 }
 
 // PG-06.
@@ -561,10 +685,7 @@ void Engine::prepare_pad_inputs(const sim::PartitionExecutor* executor) {
 
 std::optional<Real> Engine::pad_count(const tactical::PlayerId player,
     const std::vector<std::string>& names, const bool open) const {
-    if (player_inputs_active_) {
-        ++input_counts_.pad_queries;
-        if (open) pad_open_requested_.insert(player);
-    }
+    if (player_inputs_active_) note_pad_query(player, open); // staged in a player turn (S-T3b)
     std::vector<tactical::TypeId> types;
     for (const auto& name : names) {
         const auto found = host_->types_by_name.find(name);
@@ -572,10 +693,8 @@ std::optional<Real> Engine::pad_count(const tactical::PlayerId player,
             // WAS-10: an unknown built-count type contributes nothing; the
             // remaining filters still count. Open-pad validation is separate.
             if (open) return std::nullopt;
-            if (host_->setup.journal) {
-                host_->setup.journal->plans.push_back(PlanEvent{static_cast<std::uint64_t>(frame_),
-                    player, {}, {}, {}, "error", "TacticalBuiltStructureCount: unknown type " + name});
-            }
+            journal_plan(PlanEvent{static_cast<std::uint64_t>(frame_),
+                player, {}, {}, {}, "error", "TacticalBuiltStructureCount: unknown type " + name});
             continue;
         }
         types.push_back(found->second->type_id);
@@ -595,12 +714,12 @@ std::optional<Real> Engine::pad_count(const tactical::PlayerId player,
         const auto buyer = std::find_if(row.buyers.begin(), row.buyers.end(),
             [player](const auto& entry) { return entry.player == player; });
         if (buyer == row.buyers.end() || !buyer->allied) return std::int64_t{};
-        const auto reserved = pad_reservations_.find(row.object);
-        const bool pending_or_live = reserved != pad_reservations_.end()
-            && (!reserved->second.consumed || view.tick <= reserved->second.issued
+        const auto* reserved = pad_claim(row.object); // stacked: earlier turns' staged claims count (S-T3b)
+        const bool pending_or_live = reserved != nullptr
+            && (!reserved->consumed || view.tick <= reserved->issued
                 || row.children[1] != nullptr || row.children[0] != nullptr);
-        const auto reservation = pending_or_live && host_->allied(player, reserved->second.player)
-            ? reserved->second.type : tactical::TypeId{};
+        const auto reservation = pending_or_live && host_->allied(player, reserved->player)
+            ? reserved->type : tactical::TypeId{};
         std::int64_t count = 0;
         if (open) {
             if (reservation != 0 || !buyer->can_build) return count;
@@ -909,8 +1028,26 @@ struct TacticalWorld::Evaluator final : LookupResolver {
         if (token == "ENEMYFORCE") return normalised(force(false), game_force());
         if (token == "FRIENDLYFORCENBTD") return normalised(force(true), player_force(true));
         if (token == "ENEMYFORCENBTD") return normalised(force(false), player_force(false));
-        // PE-25: the AI sees every cell (AI fog off), so no cell has gone unseen.
-        if (token == "TIMELASTSEEN" || token == "TIMELASTSEENUNNORMALIZED") return Real{};
+        const auto concentration = [&](bool friendly) {
+            return engine.grid_.concentration(host(), view(), rect, parameters.category, context.player, friendly);
+        };
+        if (token == "FRIENDLYUNITCONCENTRATIONUNNORMALIZED") return concentration(true);
+        if (token == "ENEMYUNITCONCENTRATIONUNNORMALIZED") return concentration(false);
+        if (token == "FRIENDLYUNITCONCENTRATION") return normalised(concentration(true), game_force());
+        if (token == "ENEMYUNITCONCENTRATION") return normalised(concentration(false), game_force());
+        if (token == "FRIENDLYUNITCONCENTRATIONNBTD") return normalised(concentration(true), player_force(true));
+        if (token == "ENEMYUNITCONCENTRATIONNBTD") return normalised(concentration(false), player_force(false));
+        // PE-25: the mean time since the fogged threat cells of the rectangle were last seen (raw
+        // fog, also for an AI player); the plain token is that time over the game age.
+        if (token == "TIMELASTSEENUNNORMALIZED") {
+            return engine.grid_.time_since_seen(host(), rect, context.player, engine.frame_);
+        }
+        if (token == "TIMELASTSEEN") {
+            const Real seconds = engine.grid_.time_since_seen(host(), rect, context.player, engine.frame_);
+            if (engine.frame_ <= 0) return Real{};
+            return to_single(to_single(seconds * real(static_cast<std::int64_t>(tactical::logical_frames_per_second)))
+                / real(engine.frame_));
+        }
         // PE-26: no attacker-entry or defender marker in the fixture.
         if (token == "ISENEMYSTARTLOCATION" || token == "ISFRIENDLYSTARTLOCATION") return Real{};
         // PE-27b: a location measures in XY from its object, or a region's centre.
@@ -1037,6 +1174,10 @@ Context Engine::context_of(const PlayerAi& player, const Target* target) const {
 // Every object whose type has Has_Space_Evaluator, in object order, then a region per
 // AI_SpaceEvaluatorRegionSize square over the map, columns outer and rows inner.
 void Engine::build_targets(PlayerAi& player) {
+    // S9a: the target table is a frozen shared memo, written only by the serial barrier prologue.
+    if (staged()) throw std::logic_error("AI targets are frozen during a player turn");
+    const auto native_record_write = native_record_scope();
+    native_records_changed(player.player, {1});
     mark_native_state_changed();
     for (auto candidate : host_->ai_world->targets(*this, player)) {
         const Target* existing = candidate.object != 0 ? target_of_object(candidate.object) : nullptr;
@@ -1045,8 +1186,12 @@ void Engine::build_targets(PlayerAi& player) {
             if (target.object == 0 && target.name == candidate.name) existing = &target;
         }
         if (existing) { player.targets.push_back(existing->id); continue; }
-        candidate.id = next_target_id_++;
+        // S9-early: a galactic target takes its identity from the player whose list first names it.
+        const auto id = allocate_target_id(player);
+        if (!id) { record(nullptr, player.player, "failed", "galactic target identity range exhausted"); continue; }
+        candidate.id = *id;
         player.targets.push_back(candidate.id);
+        native_record_changed(0, 20, candidate.id);
         targets_.emplace(candidate.id, std::move(candidate));
     }
 }
@@ -1086,6 +1231,8 @@ namespace eawr::script::foc::ai {
 // GS-10: an object created with Has_Space_Evaluator joins the end of every list; a dead one
 // leaves them (its record stays for the plans that name it).
 void Engine::update_targets() {
+    if (staged()) throw std::logic_error("AI targets are frozen during a player turn");
+    const auto native_record_write = native_record_scope();
     mark_native_state_changed();
     std::vector<std::uint64_t> fresh;
     auto candidates = [&] {
@@ -1093,12 +1240,18 @@ void Engine::update_targets() {
         return host_->ai_world->new_targets(*this);
     }();
     core::tick_profile::Scope commit("serial.ai.target-commit");
+    // S9-early: a target that appears later is shared by every list; a galactic engine allocates it from
+    // the lowest-ID player's range (players_ is ascending), a tactical one from the engine counter.
     for (auto target : candidates) {
-        target.id = next_target_id_++;
+        const auto id = players_.empty() ? std::optional<std::uint64_t>{next_target_id_++} : allocate_target_id(players_.front());
+        if (!id) { record(nullptr, players_.front().player, "failed", "galactic target identity range exhausted"); continue; }
+        target.id = *id;
         fresh.push_back(target.id);
+        native_record_changed(0, 20, target.id);
         targets_.emplace(target.id, std::move(target));
     }
     for (PlayerAi& player : players_) {
+        native_records_changed(player.player, {1});
         std::erase_if(player.targets, [&](std::uint64_t id) {
             const Target* target = this->target(id);
             return target == nullptr || !host_->ai_world->target_alive(*target);

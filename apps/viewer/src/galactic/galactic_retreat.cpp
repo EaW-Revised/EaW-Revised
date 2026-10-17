@@ -41,6 +41,7 @@ bool GalacticMode::State::build_retreat_controls() {
                 request_retreat(sim::tactical::RetreatAction::start);
             else retreat_dialog_open = !retreat_dialog_open;
         }
+        else if (tactical) tactical->retreat_refused(retreat_view->refusal); // RP-05
         service_retreat_controls();
     });
     for (auto& gadget : retreat_dialog->gadgets) if (auto* button = Object::cast_to<BaseButton>(gadget.control)) {
@@ -81,6 +82,7 @@ void GalacticMode::State::service_retreat_controls() {
     const auto observed = platform::campaign_tactical_view_for_observer(frame, sim::SeatId{galaxy->local.seat});
     if (!observed || !frame.battle || !frame.conflict || frame.conflict->id != conflict) {
         retreat_view.reset(); retreat_snapshot.reset(); retreat_dialog_open = false;
+        if (tactical) tactical->update_retreat_countdown({}, 0, false);
         retreat_dialog->frame->hide(); if (retreat_hud) retreat_hud->set_retreat({});
         retreat_root->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         return;
@@ -89,6 +91,7 @@ void GalacticMode::State::service_retreat_controls() {
         [&](const auto& seat) { return seat.seat == sim::SeatId{galaxy->local.seat}; });
     if (binding == frame.conflict->seats.end()) {
         retreat_view.reset(); retreat_snapshot.reset(); retreat_dialog_open = false;
+        if (tactical) tactical->update_retreat_countdown({}, 0, false);
         retreat_dialog->frame->hide(); if (retreat_hud) retreat_hud->set_retreat({});
         retreat_root->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         return;
@@ -117,6 +120,8 @@ void GalacticMode::State::service_retreat_controls() {
             retreat_completion_sent = true;
         }
     }
+    if (tactical && retreat_view)
+        tactical->update_retreat_countdown(retreat_view->state, frame.battle->completed_tick(), retreat_view->state.playback_playing);
     if (retreat_hud) retreat_hud->set_retreat(presentation::ui::retreat_button_view(
         retreat_view, frame.battle->completed_tick(), frame.battle->outcome().has_value()));
     retreat_dialog->frame->set_visible(retreat_dialog_open);

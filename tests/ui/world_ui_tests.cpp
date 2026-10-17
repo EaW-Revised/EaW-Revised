@@ -467,12 +467,7 @@ void reticles() {
     expect(ui::hardpoint_reticle_tint(0.5F, false) == ui::Rgb{255, 255, 32}, "a damaged one is yellow");
     expect(ui::hardpoint_reticle_tint(0.2F, false) == ui::Rgb{255, 32, 32}, "a badly damaged one is red");
     expect(ui::hardpoint_reticle_tint(1.0F, true) == ui::Rgb{128, 128, 128}, "a disabled one is grey");
-    expect(ui::hardpoint_reticle_texture("HARD_POINT_WEAPON_LASER") == "i_hard_point_reticle_weapons", "a laser's art");
-    expect(ui::hardpoint_reticle_texture("HARD_POINT_ENGINE") == "i_hard_point_reticle_engines", "an engine's art");
-    expect(ui::hardpoint_reticle_texture("HARD_POINT_FIGHTER_BAY") == "i_hard_point_reticle_docking_bay", "a bay's art");
-    expect(ui::hardpoint_reticle_texture("HARD_POINT_SHIELD_GENERATOR") == "i_hard_point_reticle_shield_gen",
-           "a shield generator's art");
-    expect(ui::hardpoint_reticle_texture("NOT_A_TYPE").empty(), "an unknown type has no reticle");
+
 }
 
 // A pinhole camera on the -X side of the origin looking along +X (screen right is +Y, screen down
@@ -536,6 +531,64 @@ void reticle_anchor() {
            "the ship's +Y goes where the model's rotation sends it");
 }
 
+void reticle_art_xml() {
+    test::ui::TempTree tree("reticle-art");
+    const auto base = tree.root / "base";
+    const auto mod = tree.root / "mod";
+    test::ui::write_text(base / "XML/GameConstants.xml", "<GameConstants>"
+        "<HardPoint_Target_Reticle_Enemy_Screen_Size>0.03</HardPoint_Target_Reticle_Enemy_Screen_Size>"
+        "<HardPoint_Target_Reticle_Friendly_Screen_Size>0.03</HardPoint_Target_Reticle_Friendly_Screen_Size>"
+        "<HardPoint_Target_Reticle_Enemy_Texture>HARD_POINT_WEAPON_LASER, i_hard_point_reticle_weapons</HardPoint_Target_Reticle_Enemy_Texture>"
+        "</GameConstants>");
+    const std::array base_mounts{vfs::MountSpec{"base", base, "data", {}}};
+    auto stock = vfs::Vfs::mount(base_mounts);
+    expect(stock && ui::hardpoint_reticle_art(stock.value()).at("HARD_POINT_WEAPON_LASER").enemy
+        == std::vector<std::string>{"i_hard_point_reticle_weapons"}, "stock requests the same art as before");
+    test::ui::write_text(mod / "XML/GameConstants.xml", "<GameConstants>"
+        "<HardPoint_Target_Reticle_Enemy_Screen_Size>0.022</HardPoint_Target_Reticle_Enemy_Screen_Size>"
+        "<HardPoint_Target_Reticle_Friendly_Screen_Size>0.04</HardPoint_Target_Reticle_Friendly_Screen_Size>"
+        "<HardPoint_Target_Reticle_Enemy_Texture>hard_point_weapon_laser, low_icon, middle_icon, new_icon</HardPoint_Target_Reticle_Enemy_Texture>"
+        "<HardPoint_Target_Reticle_Enemy_Tracked_Texture>HARD_POINT_WEAPON_LASER, unrelated_hover</HardPoint_Target_Reticle_Enemy_Tracked_Texture>"
+        "<HardPoint_Target_Reticle_Friendly_Texture>HARD_POINT_WEAPON_LASER, friendly</HardPoint_Target_Reticle_Friendly_Texture>"
+        "<HardPoint_Target_Reticle_Friendly_Tracked_Texture>HARD_POINT_WEAPON_LASER, friendly_hover</HardPoint_Target_Reticle_Friendly_Tracked_Texture>"
+        "<HardPoint_Target_Reticle_Friendly_Repairing_Texture>HARD_POINT_WEAPON_LASER, repair</HardPoint_Target_Reticle_Friendly_Repairing_Texture>"
+        "<HardPoint_Target_Reticle_Friendly_Disabled_Texture>HARD_POINT_WEAPON_LASER, disabled</HardPoint_Target_Reticle_Friendly_Disabled_Texture>"
+        "<HardPoint_Target_Reticle_Friendly_Disabled_Tracked_Texture>HARD_POINT_WEAPON_LASER, disabled_hover</HardPoint_Target_Reticle_Friendly_Disabled_Tracked_Texture>"
+        "<HardPoint_Target_Reticle_Enemy_Texture>FUTURE_TYPE, another_icon</HardPoint_Target_Reticle_Enemy_Texture>"
+        "<HardPoint_Target_Reticle_Enemy_Texture>broken row</HardPoint_Target_Reticle_Enemy_Texture>"
+        "<HardPoint_Target_Reticle_Enemy_Texture>, bad</HardPoint_Target_Reticle_Enemy_Texture>"
+        "</GameConstants>");
+    const std::array mounts{vfs::MountSpec{"mod", mod, "data", {}}, vfs::MountSpec{"base", base, "data", {}}};
+    auto mounted = vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(mounted), "reticle overlay mounts");
+    if (!mounted) return;
+    const auto table = ui::hardpoint_reticle_art(mounted.value());
+    const auto& art = table.at("HARD_POINT_WEAPON_LASER");
+    expect(art.enemy == std::vector<std::string>{"low_icon", "middle_icon", "new_icon"} && art.enemy_tracked == std::vector<std::string>{"unrelated_hover"}
+        && art.friendly == std::vector<std::string>{"friendly"} && art.friendly_tracked == std::vector<std::string>{"friendly_hover"}
+        && art.repairing == std::vector<std::string>{"repair"} && art.disabled == std::vector<std::string>{"disabled"} && art.disabled_tracked == std::vector<std::string>{"disabled_hover"},
+        "all seven XML states retain independent names through a synthetic mod overlay");
+    expect(table.size() == 2 && table.at("FUTURE_TYPE").enemy == std::vector<std::string>{"another_icon"}
+        && table.at("FUTURE_TYPE").enemy_tracked.empty(), "no stock type list or tracked suffix fallback");
+    expect(ui::hardpoint_reticle_texture(art, 0.0F, true, false, false, false) == "low_icon"
+        && ui::hardpoint_reticle_texture(art, 0.5F, true, false, false, false) == "middle_icon"
+        && ui::hardpoint_reticle_texture(art, 1.0F, true, false, false, false) == "new_icon",
+        "authored health sequences cover low, middle and capped full health");
+    expect(ui::hardpoint_reticle_texture(art, 1.0F, true, true, false, false) == "unrelated_hover"
+        && ui::hardpoint_reticle_texture(art, 1.0F, false, true, false, false) == "friendly_hover"
+        && ui::hardpoint_reticle_texture(art, 0.5F, false, true, false, false) == "disabled_hover"
+        && ui::hardpoint_reticle_texture(art, 0.5F, false, true, true, true) == "friendly_hover"
+        && ui::hardpoint_reticle_texture(art, 0.5F, false, false, true, false) == "disabled"
+        && ui::hardpoint_reticle_texture(art, 0.5F, false, false, true, true) == "repair"
+        && ui::hardpoint_reticle_texture(art, 0.5F, false, false, false, true, false) == "friendly",
+        "authored enemy, hover, damaged friendly, disabled and repairing states select independent art");
+    expect(ui::hardpoint_reticle_texture({}, 1.0F, true, false, false, false).empty(),
+        "missing art has no stock fallback");
+    const auto sizes = ui::hardpoint_reticle_sizes(mounted.value());
+    expect(sizes && close_to(sizes->enemy, 0.022F) && close_to(sizes->friendly, 0.04F),
+        "the same mod override changes both icon and size");
+}
+
 void reticle_xml() {
     test::ui::TempTree tree("reticle-constants");
     const std::array mounts{vfs::MountSpec{"base", tree.root, "data", {}}};
@@ -596,6 +649,7 @@ int main() {
     reticles();
     reticle_size();
     reticle_xml();
+    reticle_art_xml();
     reticle_anchor();
     if (test::ui::failures() != 0) {
         std::cerr << test::ui::failures() << " world UI contract(s) failed\n";

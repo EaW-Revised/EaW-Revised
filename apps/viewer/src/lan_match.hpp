@@ -1,11 +1,13 @@
 #pragma once
 #include "eawr/net/gns_signalling.hpp"
+#include "eawr/net/gns_transport.hpp"
 #include "eawr/net/tactical_input.hpp"
 #include "eawr/net/match_options.hpp"
 #include "eawr/net/port_mapping.hpp"
 #include "eawr/net/transport.hpp"
 #include "eawr/net/setup.hpp"
 #include "eawr/net/lobby_session.hpp"
+#include "eawr/net/online_lobby.hpp"
 #include "eawr/presentation/ui/lan_lobby.hpp"
 
 #include "eawr/platform/live_session.hpp"
@@ -18,10 +20,15 @@
 #include <string_view>
 #include <limits>
 #include <algorithm>
+#include <deque>
+#include <utility>
 
 namespace eawr::presentation::godot_backend {
 enum class LanPhase { idle, connecting, handshake, setup, barrier, running, reconnecting, resyncing, ended };
 enum class LanReason { none, version, build, identity, refused, timeout, desync, peer_left, cancelled };
+[[nodiscard]] inline bool lan_connection_loss(std::string_view code) {
+    return code == net::session_errors::stalled || code == net::session_errors::link_closed || code == net::departure_errors::timeout;
+}
 enum class LanRecovery { none, waiting, held, catching_up, proving, rejoin_failed, desync, resyncing, recovered, failed };
 struct LanView {
     LanPhase phase{LanPhase::idle};
@@ -60,12 +67,70 @@ struct LanView {
     std::string reconnect_warning;
     // Curated, secret-free warnings about the online service session and the match length (EAWR-NET-1730..1738).
     std::string service_notice;
+    // Online: the least direct route among this seat's open room pairs (relayed beats direct beats unknown), sampled about once
+    // a second. Carries no address.
+    net::GnsRoute online_route{net::GnsRoute::unknown};
+    // Room mesh (online, three or more seats): "<name> left: their connection to <name> failed." for every seat the single-decider
+    // agreement removed, oldest first, bounded to eight lines and a short display lifetime.
+    std::string mesh_notice;
+    // Curated local pair observations, in stable room-slot order. The setup I/O owner publishes these; the screen never
+    // reads a transport or an introduction identity. Vacant slots remain visible until a newcomer fills them.
+    std::vector<std::string> online_connections;
+    std::uint32_t online_capacity{}, online_connected{};
     std::string diagnostic_save_notice, input_feedback;
     std::uint64_t active_adapter_publications{};
 };
+// The I/O owner's monotonic clock bounds a departure banner independently of simulation progress. Keeping a notice on
+// several consecutive frames makes it readable; expired notices cannot be republished from the incident history.
+class LanDepartureNotices final {
+public:
+    static constexpr std::uint64_t display_ms = 10000;
+    void push(std::string message, std::uint64_t now_ms) {
+        if (lines_.size() == net::max_match_seats - 1) lines_.pop_front();
+        lines_.emplace_back(now_ms, std::move(message));
+    }
+    std::string text(std::uint64_t now_ms) {
+        while (!lines_.empty() && now_ms >= lines_.front().first && now_ms - lines_.front().first >= display_ms) lines_.pop_front();
+        std::string result;
+        for (const auto& line : lines_) result += (result.empty() ? "" : "\n") + line.second;
+        return result;
+    }
+    void clear() { lines_.clear(); }
+private:
+    std::deque<std::pair<std::uint64_t, std::string>> lines_;
+};
+// The player a refused newcomer could not reach, by the transport slot the mesh reports, from the roster it last saw.
+[[nodiscard]] inline std::string online_refusal_name(const std::vector<net::LobbySeat>& seats, net::PeerIndex other) {
+    for (const auto& seat : seats) if (seat.peer == other && !seat.selection.name.empty()) return seat.selection.name;
+    return "another player in this room";
+}
+// The text a refused newcomer sees. `queued` are the frames still waiting on the host stream when the refusal arrived: the
+// host's own closed notice wins, then the roster of an admission snapshot among them, then the roster the newcomer already
+// holds. The refusal can overtake the admission snapshot, so the newcomer may have no roster of its own yet.
+[[nodiscard]] inline std::string online_refusal_text(const std::vector<net::Received>& queued, std::vector<net::LobbySeat> seats,
+        net::PeerIndex other, bool relay_configured) {
+    for (const auto& raw : queued) {
+        if (raw.from != 0) continue;
+        auto decoded = net::decode_lobby_frame(raw.frame);
+        if (!decoded) continue;
+        // The host removes the newcomer with a closed notice (LobbySession::refuse_unreachable); a rejection carries the same text.
+        const net::LobbyNotice* notice{};
+        if (const auto* closed = std::get_if<net::LobbyClosed>(&decoded.value())) notice = closed;
+        else if (const auto* refused = std::get_if<net::LobbyRejected>(&decoded.value())) notice = refused;
+        if (notice && notice->reason == net::LobbyReason::pair_unreachable && !notice->message.empty()) return notice->message;
+        if (const auto* snapshot = std::get_if<net::LobbySnapshot>(&decoded.value())) seats = snapshot->seats;
+    }
+    return net::mesh_newcomer_refusal_text(online_refusal_name(seats, other), relay_configured);
+}
 [[nodiscard]] inline bool lan_gameplay_enabled(const LanView& view) {
     return view.phase == LanPhase::running && (view.recovery == LanRecovery::none
         || view.recovery == LanRecovery::waiting || view.recovery == LanRecovery::recovered);
+}
+// Pair refusals are already broadcast as one host-sequenced chat line. The host's retained notice must not add a second copy.
+[[nodiscard]] inline bool lan_notice_in_chat(const net::LobbyNotice& notice, const std::deque<net::LobbyChat>& chat) {
+    if (notice.reason != net::LobbyReason::pair_unreachable) return false;
+    const auto suffix = " " + net::lobby_diagnostic(notice.reason, "").code;
+    return std::any_of(chat.begin(), chat.end(), [&](const auto& line) { return notice.message == line.text + suffix; });
 }
 [[nodiscard]] inline bool lan_recovery_audio_suppressed(const LanView& view) {
     if (view.phase == LanPhase::ended) return false;
@@ -91,6 +156,12 @@ private:
     std::optional<std::uint64_t> incident_;
 };
 [[nodiscard]] std::string lan_incident_message(const LanView& view);
+[[nodiscard]] std::string online_pair_message(const net::GnsPairDiagnostic& pair);
+[[nodiscard]] std::string online_mesh_failure_text(std::string_view code);
+// Start failures always reach lobby feedback; only OS entropy failure closes the room.
+void handle_online_start_failure(const core::Diagnostic& error,
+    const std::function<void(const core::Diagnostic&)>& feedback,
+    const std::function<void(const core::Diagnostic&)>& end_room);
 // Online notices use curated text only; service diagnostics may contain implementation details.
 [[nodiscard]] inline std::string online_lease_notice(const std::optional<net::GnsSessionLease>& lease,
         std::chrono::steady_clock::time_point now, std::string_view failure = {}) {
@@ -171,6 +242,8 @@ struct LanLobbyState {
     net::LobbySnapshot snapshot;
     std::deque<net::LobbyChat> chat;
     std::optional<net::LobbyNotice> notice;
+    std::string ready_reason, start_reason;
+    bool connections_pending{};
     bool preparing{}, local_ready{}, ready_enabled{}, start_enabled{}, identity_pending{};
 };
 // Setup calls belong to the Godot main thread. driver() transfers transport ownership
@@ -181,6 +254,8 @@ using LanCredentialProvider = std::function<core::Result<net::ReconnectTokens>(c
 class LanMatch {
 public:
     virtual ~LanMatch() = default;
+    // Set before Host/Join; invoked on the current I/O owner, including the live worker.
+    virtual void set_diagnostic_logger(std::function<void(std::string_view)>) {}
     // Names from the mounted catalog, used to resolve offered faction IDs.
     virtual void configure_factions(std::vector<std::string>) {}
     // Opt-in for the staging screen. The legacy setup screen keeps its existing path.
@@ -211,6 +286,9 @@ public:
     // Set before online host(): password rooms must never mint a public alias.
     virtual void set_public_invitation(bool) {}
     virtual void join(std::string endpoint) = 0;
+    // Online: the directory admission (reserved slot and member capability) of a room whose signalling scope is open.
+    // The room source's directory connection must stay alive until the match attaches. Other matches join by room name.
+    virtual void join_admitted(net::OnlineRoomAdmission admission) { join(std::move(admission.room)); }
     virtual void cancel() = 0;
     // Reserve an abort atomically against runtime admission. Release resources only
     // after the driver has been joined; terminal diagnostics survive that release.
@@ -222,10 +300,6 @@ public:
     virtual std::optional<skirmish::FixtureOptions> take_start() = 0;
     virtual std::optional<skirmish::FixtureOptions> offered_setup() const = 0;
     virtual LanView view() const = 0;
-    // Setup-owner access only. The private publication capability is for the room
-    // service; it must never reach a view, chat or diagnostic record.
-    virtual std::string bridge_invitation() const { return {}; }
-    virtual std::string bridge_ownership() const { return {}; }
     virtual sim::tactical::PlayerId local_player() const = 0;
     virtual platform::LiveStepDriver driver(const sim::tactical::TacticalSetup& setup) = 0;
     // MP-06 requests wait for canonical future-tick admission. MP-33 pause is refused.

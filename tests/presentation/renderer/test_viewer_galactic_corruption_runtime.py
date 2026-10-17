@@ -1,4 +1,4 @@
-"""WGP-19: one lit GPU case for the admitted midground corruption particle."""
+"""WGP-19..21: lit particles, spreading paths, replacement and teardown."""
 import json
 import os
 import pathlib
@@ -12,14 +12,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),
                      "requires the GPU route and installed FoC data")
 class GalacticCorruptionRuntime(unittest.TestCase):
-    def test_admitted_particle_draws_in_midground(self):
-        from PIL import Image, ImageChops, ImageStat
+    def capture_fixture(self, fixture):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-corruption-"))
-        images = []
-        for fixture in ("corruption-clean", "corruption"):
-            report, capture = directory / (fixture + ".json"), directory / (fixture + ".png")
-            driver = directory / (fixture + ".gd")
-            driver.write_text('''extends SceneTree
+        report, capture = directory / (fixture + ".json"), directory / (fixture + ".png")
+        driver = directory / (fixture + ".gd")
+        driver.write_text('''extends SceneTree
 var started: int = 0
 var captured: bool = false
 func _initialize() -> void:
@@ -41,27 +38,36 @@ func _close_preview() -> void:
     current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
     quit()
 '''.replace("CAPTURE", json.dumps(capture.as_posix())), encoding="utf-8")
-            result = subprocess.run([
-                os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720", "--path",
-                str(ROOT / "apps/viewer/project"), "--script", str(driver), "--", "--eawr-galactic", "synthetic",
-                "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
-                "--eawr-galactic-hud-fixture", fixture, "--eawr-galactic-paused", "no",
-                "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
-                "--eawr-hud", "off", "--eawr-lighting", "sh", "--eawr-environment", "map",
-                "--eawr-shadows", "on", "--eawr-report", str(report)],
-                cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
-            log = result.stdout + result.stderr
-            (directory / (fixture + ".log")).write_text(log, encoding="utf-8")
-            self.assertEqual(result.returncode, 0, log)
-            data = json.loads(report.read_text(encoding="utf-8"))
-            self.assertEqual(data["status"], "closed", data.get("failure"))
+        result = subprocess.run([
+            os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720", "--path",
+            str(ROOT / "apps/viewer/project"), "--script", str(driver), "--", "--eawr-galactic", "synthetic",
+            "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+            "--eawr-galactic-hud-fixture", fixture, "--eawr-galactic-paused", "no",
+            *([] if fixture.startswith("corruption-spread") else ["--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750"]),
+            "--eawr-hud", "off", "--eawr-lighting", "sh", "--eawr-environment", "map",
+            "--eawr-shadows", "on", "--eawr-report", str(report)],
+            cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
+        log = result.stdout + result.stderr
+        (directory / (fixture + ".log")).write_text(log, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, log)
+        data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(data["status"], "closed", data.get("failure"))
+        self.assertNotIn("ERROR:", log)
+        return data, capture
+
+    def test_admitted_particle_draws_in_midground(self):
+        from PIL import Image, ImageChops, ImageStat
+        images = []
+        for fixture in ("corruption-clean", "corruption"):
+            data, capture = self.capture_fixture(fixture)
             facts = data["corruption"]
+            self.assertEqual(facts["refused_effects"], 0)
+            self.assertEqual(facts["line_refused_effects"], 0)
             self.assertEqual(facts["attachments"], int(fixture == "corruption"))
             self.assertEqual(facts["effects"], int(fixture == "corruption"))
             if fixture == "corruption":
                 self.assertGreater(facts["resources"], 0)
                 self.assertGreater(facts["particles"], 0)
-            self.assertNotIn("ERROR:", log)
             images.append(Image.open(capture).convert("RGB"))
         self.assertIsNotNone(ImageChops.difference(*images).getbbox(), "particle must change the drawn image")
         # This sky patch excludes the planet's animated surface and the HUD.
@@ -75,6 +81,36 @@ func _close_preview() -> void:
         self.assertGreater(delta[2], 1.0, "hue sample must contain drawn haze")
         self.assertGreater(delta[0] / delta[2], 1.8, "authored haze must retain warm red/blue ratio")
         self.assertGreater(delta[1] / delta[2], 1.6, "authored haze must retain warm green/blue ratio")
+
+
+    def test_spreading_lines_paths_type_replacement_and_cleanup(self):
+        from PIL import Image, ImageChops
+        captures = {}
+        for fixture in ("corruption-spread", "corruption-spread-settled", "corruption-spread-replaced", "corruption-spread-removed"):
+            data, capture = self.capture_fixture(fixture)
+            facts = data["corruption"]
+            self.assertEqual(facts["refused_effects"], 0)
+            self.assertEqual(facts["line_refused_effects"], 0)
+            captures[fixture] = Image.open(capture).convert("RGB")
+            if fixture.endswith("removed"):
+                for key in ("attachments", "connections", "effects", "resources", "particles", "line_effects", "line_resources", "line_particles", "path_quads"):
+                    self.assertEqual(facts[key], 0, (fixture, key))
+                continue
+            self.assertEqual(facts["attachments"], 3)
+            self.assertEqual(facts["effects"], 3, "type replacement must release the old effect")
+            self.assertGreater(facts["line_particles"], 0)
+            self.assertGreater(facts["line_resources"], 0)
+            self.assertEqual(facts["line_effects"], 2 if fixture.endswith("settled") else 1)
+            self.assertEqual(facts["path_quads"], 0 if fixture.endswith("settled") else 1)
+            if fixture == "corruption-spread":
+                planet = next(row for row in facts["parameters"] if row["planet"] == 102)
+                self.assertGreater(planet["fraction"], 0)
+                self.assertLess(planet["fraction"], 1)
+                self.assertAlmostEqual(planet["brightness"], 0.3+0.7*planet["fraction"], places=4)
+                self.assertEqual(planet["size"], 1)
+                self.assertEqual(planet["energy"], 1)
+        self.assertIsNotNone(ImageChops.difference(captures["corruption-spread"], captures["corruption-spread-removed"]).getbbox(),
+                             "spreading corruption must draw visible output")
 
 
 

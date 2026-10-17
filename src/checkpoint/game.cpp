@@ -221,7 +221,7 @@ core::Result<Bytes> encode_conflict(const campaign::ConflictRecord& record) {
     }
     out.u32(static_cast<std::uint32_t>(record.seats.size()));
     for (const auto& row : record.seats) { out.u32(row.seat.value); out.u32(row.player); }
-    out.u64(record.station); out.u64(record.superweapon); out.u64(record.station_type);
+    out.u64(record.station); out.u64(record.superweapon); out.u32(record.station_owner); out.u64(record.station_type);
     out.u32(record.station_level); out.u32(record.terrain_index);
     text(out, record.map_identity); text(out, record.story_plot); blob(out, record.linked_mission_options);
     out.u32(static_cast<std::uint32_t>(record.structure_markers.size()));
@@ -259,7 +259,7 @@ core::Result<campaign::ConflictRecord> decode_conflict(std::span<const std::uint
     }
     const auto seats = count(gc::galactic_max_seats, 8);
     for (std::uint32_t i = 0; i < seats; ++i) { campaign::BattleSeat row; row.seat = sim::SeatId{in.u32()}; row.player = in.u32(); record.seats.push_back(row); }
-    record.station = in.u64(); record.superweapon = in.u64(); record.station_type = in.u64();
+    record.station = in.u64(); record.superweapon = in.u64(); record.station_owner = in.u32(); record.station_type = in.u64();
     record.station_level = in.u32(); record.terrain_index = in.u32();
     record.map_identity = text(in); record.story_plot = text(in);
     const auto options = blob(in); record.linked_mission_options.assign(options.begin(), options.end());

@@ -43,6 +43,7 @@ namespace eawr::presentation::godot_backend {
 //                                            wait:<condition>[@<seconds>]  (game:<name> players:<n>
 //                                              staging joined:<n> chat:<text> page:<name>)
 //                                            online_chat:<name>|<text>  (a line the online window receives)
+//                                            resize:<width>x<height> (real window resize)
 //                                            sleep:<frames>  snapshot  shot:<file stem>
 //   --eawr-ui-rules aspect|retail          the layout rules, as the UI gallery's
 //   --eawr-capture <png>, --eawr-report <json>

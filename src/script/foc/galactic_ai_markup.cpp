@@ -14,7 +14,7 @@ GalacticMarkup::GalacticMarkup(std::map<tactical::PlayerId, GalacticMarkupHints>
     std::set<tactical::PlayerId> players, std::set<tactical::PlayerId> ai_players,
     std::set<sim::galactic::PlanetId> planets)
     : players_(std::move(players)), ai_players_(std::move(ai_players)), planets_(std::move(planets)) {
-    state_.hints = std::move(hints);
+    state_.hints = std::move(hints); update_records(nullptr);
 }
 bool GalacticMarkup::alive(const GalacticMarkupKey& key) const {
     return players_.contains(key.observer) && (key.player_target
@@ -80,7 +80,7 @@ core::Result<void> GalacticMarkup::validate(const GalacticMarkupState& input) co
 void GalacticMarkup::replace(GalacticMarkupState state) {
     std::scoped_lock lock(mutex_);
     // A restore/write preserves the numeric payload bits, including signed zero.
-    state_ = std::move(state); snapshot_.reset(); ++revision_;
+    auto previous = std::move(state_); state_ = std::move(state); update_records(&previous); snapshot_.reset(); ++revision_;
 }
 void GalacticMarkup::subtract_contribution(GalacticMarkupState& state, const GalacticMarkupHandle& handle) const {
     for (const auto& key : handle.targets) if (alive(key)) state.values[key] = state.values[key] - handle.value;
@@ -120,11 +120,13 @@ void GalacticMarkup::retain_planets(std::span<const sim::galactic::Planet> rows)
     for (const auto& row : rows) live.insert(row.id);
     std::scoped_lock lock(mutex_);
     if (live == planets_) return;
+    const auto previous = state_;
     planets_ = std::move(live);
     std::erase_if(state_.values, [&](const auto& row) { return !alive(row.first); });
     for (auto& [id, handle] : state_.handles) {
         static_cast<void>(id); std::erase_if(handle.targets, [&](const auto& key) { return !alive(key); });
     }
+    update_records(&previous);
     ++revision_;
     snapshot_.reset();
 }

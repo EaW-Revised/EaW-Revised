@@ -37,7 +37,9 @@ The world no-hop helper updates orbit entry order and requests conflict through
 the ordinary tail when the live movement-access/combat predicate qualifies.
 Gathering nearby inbound fleets before insertion remains an explicit owner
 seam. Corruption-benefiting intermediate traversal requires the separate
-AI-bribe flag hook; without that provider, that advance refuses. Raid
+AI-bribe flag hook. Known deviation (legacy EAWR-3981): that request and its billing have no world owner yet, so
+without the hook the move ends at the previous planet, as a block does, instead of faulting the simulation;
+WGA-230 still describes the retail behaviour. Raid
 destination/raid admission remain unavailable until their qualified world
 owner exists. Ordinary moves currently have no raid destination to clear.
 

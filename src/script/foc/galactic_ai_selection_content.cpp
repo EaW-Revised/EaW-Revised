@@ -17,6 +17,36 @@ Real distance(const galactic_ai::TargetInput& a, const galactic_ai::TargetInput&
     return to_single(square_root(to_single(to_single(x * x) + to_single(y * y) + to_single(z * z))));
 }
 }
+core::Result<gc::TypeId> galactic_starbase_proposal(const GalacticSelectionContent& content,
+    const gc::PlanetProduction* target, gc::TypeId authored) {
+    using Result = core::Result<gc::TypeId>;
+    const auto marker = content.types.find(authored);
+    if (marker == content.types.end()) return Result::failure(unavailable("base proposal original type missing"));
+    if (!marker->second.starbase || !target) return Result::success(authored);
+    gc::TypeId next{};
+    if (target->starbase_type) {
+        const auto current = content.types.find(target->starbase_type);
+        if (current == content.types.end() || !current->second.original)
+            return Result::failure(unavailable("current base original type missing"));
+        next = current->second.next_base;
+    } else if (const auto first = content.initial_starbase_types.find(target->target_owner);
+        first != content.initial_starbase_types.end()) next = first->second;
+    if (!next) return Result::success(authored);
+    const auto type = content.types.find(next);
+    if (type == content.types.end() || !type->second.original)
+        return Result::failure(unavailable("next base proposal facts missing"));
+    // WGEP-51/481: queued station work and the live cap govern the next-level
+    // query, independently of later faction/tech/blockade production admission.
+    auto level = target->target_owner && target->space_level < 5
+        ? target->starbase_owner ? target->space_level + 1 : std::int64_t{1} : std::int64_t{};
+    level = std::min(level, std::min(target->maximum_space_level, std::int64_t{5}));
+    for (const auto& queue : target->queues) for (const auto& entry : queue) {
+        const auto queued = content.types.find(entry.type);
+        if (queued == content.types.end()) return Result::failure(unavailable("queued base type facts missing"));
+        if (queued->second.starbase) level = 0;
+    }
+    return Result::success(type->second.original->base_level.value_or(0) <= level ? next : authored);
+}
 core::Result<std::vector<gc::PlanetId>> galactic_force_stages(const PlanDef& plan,
     std::span<const galactic_goals::GalacticForceConstraints> constraints, gc::PlanetId target,
     std::string_view reachability, std::span<const gc::PlanetId> sites) {
@@ -96,7 +126,8 @@ core::Result<std::vector<GalacticSelectionGarrison>> galactic_proposal_garrisons
             if (const auto environment = content.terrain.find(planet->second.terrain); environment != content.terrain.end())
                 if (const auto movement = environment->second.find(unit->second.movement_class); movement != environment->second.end()) terrain = movement->second;
         }
-        out.push_back({unit->first, unit->second.value.channel, to_single(traits->combat_power), terrain, true});
+        const auto fallback = unit->second.company || unit->second.ground_base ? gc::ProductionDomain::ground : gc::ProductionDomain::space;
+        out.push_back({unit->first, fallback, to_single(traits->combat_power), terrain, true, unit->second.value.population});
         return core::Result<void>::success();
     };
     for (const auto& spawn : spawned) {
@@ -110,6 +141,9 @@ core::Result<std::vector<GalacticSelectionGarrison>> galactic_proposal_garrisons
     for (const auto& escort : source->second.space_escorts)
         if (const auto added = append(escort); !added) return Result::failure(added.error());
     return Result::success(std::move(out));
+}
+bool galactic_hero_stage_applies(bool authored_hero, bool named_hero, bool special_weapon, bool authors_script) noexcept {
+    return authored_hero && (named_hero || special_weapon || authors_script);
 }
 GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const GalacticSelectionContent> content,
     std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> plans, std::shared_ptr<const GalacticWorld> world,
@@ -130,7 +164,8 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
         if (authored->second.additional_cost.value_or(Real{}) != Real{})
             out->missing_facts.push_back("stock nonzero AdditionalCost retained roster and paid-cost initialization");
         if (plan.magic) out->missing_facts.push_back("stock magic live lock, unlock, disable and named space hero admission");
-        if (target && !plan.ignore_target) out->missing_facts.push_back("stock remembered target contrast and proposal garrison expansion");
+        if (target && !plan.ignore_target && !plan.galactic_contrast_qualified)
+            out->missing_facts.push_back("stock plan-authored target contrast lists");
         if (plan.allow_free_store && !plan.magic) {
             if (!freestore) out->missing_facts.push_back("stock freestore membership, AI usability, loss state and path producer");
             else {
@@ -140,6 +175,13 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
             }
         }
         if (!out->missing_facts.empty()) return Result::success(std::move(out));
+        if (target && !plan.ignore_target) {
+            PlayerAi selected; selected.player = player;
+            const auto context = world->goal_context(selected, manager->target_of_object(target));
+            const auto contrast = galactic_target_contrast(*world, context, plan.galactic_contrast_order, real(1));
+            if (!contrast) return Result::failure(contrast.error());
+            out->contrast = contrast.value(); out->unscaled_domain_totals = true;
+        }
         out->minimum_cost = authored->second.minimum_cost.value_or(Real{}); out->maximum_cost = Real{}; // No authored maximum-plan-cost global is applied.
         for (const auto& force : authored->second.forces)
             out->attachment_allowed.emplace_back(!force.deny_heroes, !force.deny_special_weapons && plan.allow_special_weapons);
@@ -167,9 +209,15 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
         const auto stages = galactic_force_stages(plan, authored->second.forces, target, goal.reachability, out->production_sites);
         if (!stages) { return Result::failure(stages.error()); }
         out->force_stages = stages.value();
+        const gc::PlanetProduction* location{};
+        for (const auto& row : state->production()->planets) if (row.planet == target) location = &row;
         std::set<gc::TypeId> proposals;
-        for (const auto& force : plan.taskforces) for (const auto& team : force.teams)
-            proposals.insert(team.types.begin(), team.types.end());
+        for (const auto& force : plan.taskforces) for (const auto& team : force.teams) for (const auto type : team.types) {
+            const auto resolved = galactic_starbase_proposal(*content, location, type);
+            if (!resolved) return Result::failure(resolved.error());
+            if (resolved.value() != type) out->proposal_substitutions.emplace(type, resolved.value());
+            proposals.insert(resolved.value());
+        }
         const std::vector<gc::TypeId> requested(proposals.begin(), proposals.end());
         auto producers = requested.empty() ? core::Result<std::vector<galactic_ai::ProducerInput>>::success({})
             : input->producers.read(player, 0, requested);
@@ -192,8 +240,6 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
             producer.technology_weight = content->technology_weight.value_or(Real{});
             out->producers.push_back(producer);
         }
-        const gc::PlanetProduction* location{};
-        for (const auto& row : state->production()->planets) if (row.planet == target) location = &row;
         if (location) {
             for (std::size_t channel = 0; channel < 2; ++channel) {
                 const auto occupied = std::count_if(location->objects.begin(), location->objects.end(), [&](const auto& object) {
@@ -209,6 +255,18 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
             if (original == content->types.end()) return Result::failure(unavailable("stock proposal original type missing"));
             const auto& source = original->second;
             auto facts = source.value; facts.survival_type = source.survival_type;
+            // WGA-489: a generic hero candidate whose type authors no object script is an ordinary unit (no hero stage,
+            // no hero gates). Named heroes keep the hero stage whatever they author.
+            facts.hero = galactic_hero_stage_applies(facts.hero, source.named_hero, source.special_weapon, !source.lua_script.empty() || source.member_script);
+            // WGA-482: both base kinds use target admission/quotes, without
+            // the special-structure instance and slot checks.
+            facts.base = source.starbase || source.ground_base;
+            facts.contrast_fallback_channel = source.company || source.ground_base ? gc::ProductionDomain::ground : gc::ProductionDomain::space;
+            if (target && !plan.ignore_target) {
+                const auto garrisons = galactic_proposal_garrisons(*content, id, out->player_tech, target);
+                if (!garrisons) return Result::failure(garrisons.error());
+                facts.garrisons = garrisons.value();
+            }
             facts.terrain_allowed = true; facts.terrain_effectiveness = real(1);
             const auto type = std::find_if(content->ai.types.begin(), content->ai.types.end(), [&](const auto& row) { return row.type_id == id; });
             if (type == content->ai.types.end()) return Result::failure(unavailable("stock original AI type missing"));
@@ -227,13 +285,13 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
                     facts.instance_remaining = offer.planet_limit < 0 ? std::numeric_limits<std::uint32_t>::max()
                         : static_cast<std::uint32_t>(std::max<std::int64_t>(offer.planet_limit - count, 0));
                 }
-                for (const auto& producer : out->producers)
-                    if (producer.type == id && producer.planet == target && producer.admission == gc::ProductionAdmission::allowed) {
-                        facts.target_cost = numeric::from_fixed(producer.cost);
-                        facts.target_build_seconds = numeric::from_fixed(producer.build_seconds);
-                        break;
-                    }
             }
+            if (facts.structure || facts.base) for (const auto& producer : out->producers)
+                if (producer.type == id && producer.planet == target && producer.admission == gc::ProductionAdmission::allowed) {
+                    facts.target_cost = numeric::from_fixed(producer.cost);
+                    facts.target_build_seconds = numeric::from_fixed(producer.build_seconds);
+                    break;
+                }
             if (facts.hero && heroes) {
                 const auto weights = heroes(player, target, id, plan); if (!weights) return Result::failure(weights.error());
                 facts.hero_weight = weights.value().target_weight; facts.escort_weight = weights.value().escort_weight;

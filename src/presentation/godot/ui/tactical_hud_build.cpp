@@ -115,6 +115,7 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         const Ref<Texture2D> normal = texture("normal", look.normal);
         state.options_button->setup_art({.normal = normal, .hover = texture("mouse_over", look.mouse_over),
             .pressed = texture("pressed", look.pressed), .disabled = texture("disabled", look.disabled)});
+        state.options_button->set_action([&state] { if (state.options_handler) state.options_handler(); });
         setup.options_quad = quad(look, normal);
         setup.options_hit = look.rect;
     }

@@ -1,3 +1,4 @@
+#include "eawr/core/gc_profile.hpp"
 #include "ai_engine_internal.hpp"
 #include "galactic_ai_funding.hpp"
 #include "galactic_ai_actions.hpp"
@@ -36,9 +37,9 @@ gg::ProductionEstimate estimate(const GalacticSelectionInput& input, const Poten
         const auto found = input.types.find(potential.units[i]);
         if (found == input.types.end()) return {false, gg::rejected_estimate(), {}, 0};
         const auto& type = found->second;
-        requests.push_back({potential.units[i], type.channel, type.structure,
-            targeted && type.instance_allowed && type.target_build_seconds.has_value(),
-            targeted && type.structure ? type.target_build_seconds.value_or(Real{}) : type.build_seconds});
+        requests.push_back({potential.units[i], type.channel, type.structure || type.base,
+            targeted && (type.base || type.instance_allowed) && type.target_build_seconds.has_value(),
+            targeted && (type.structure || type.base) ? type.target_build_seconds.value_or(Real{}) : type.build_seconds});
         seconds = to_single(seconds + to_single(type.build_seconds * multiplier));
     }
     if (linear) return {true, seconds, {}, 0};
@@ -83,15 +84,8 @@ gc::funding::GoalRequest Engine::galactic_funding_request(const PlayerAi& player
             out.cost = held.cost; out.estimated_seconds = held.remaining; out.unallocated_resources = held.unallocated;
         } else throw std::runtime_error("running galactic goal requires its retained funding budget");
     }
-    if (!goal.plan && player.galactic_funding) {
-        const auto ledger = player.galactic_funding->ledger(player.player);
-        if (ledger && ledger->categories.contains(out.category)) {
-            const auto& category_budget = ledger->categories.at(out.category);
-            const auto seconds = out.time_limit ? std::min(out.estimated_seconds, *out.time_limit) : out.estimated_seconds;
-            out.proposal_budget = std::max(required(math::add(category_budget.available_cash,
-                required(math::multiply(category_budget.available_income, seconds)))), math::Fixed{});
-        }
-    }
+    // WGA-21/345: selection supplies the unattached goal's paid-roster budget.
+    if (!goal.plan) out.proposal_budget = out.cost;
     return out;
 }
 bool Engine::galactic_fundable(const PlayerAi& player, const Goal& goal, bool activation) const {
@@ -112,6 +106,7 @@ void Engine::begin_galactic_maintenance(PlayerAi& player) {
         std::optional<math::Fixed> weight;
         if (!setting.value.empty()) {
             const auto value = evaluate(setting.value, player.player, nullptr);
+            if (!value) player.count_refusal(GalacticRefusal::budget, category->second);
             // WGA-421: a present failed equation preserves its caller's current
             // share. An absent equation remains distinct and resets to zero.
             weight = required(funding_equation_weight(current.get(), category->second, value));
@@ -125,11 +120,27 @@ void Engine::begin_galactic_maintenance(PlayerAi& player) {
 // order. Each scoring pass partitions immutable candidate contributions; the
 // ordered selected roster determines the next pass's counts and queue estimate.
 bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, PotentialPlan& potential) {
+    gc_profile::Scope profile_scope(gc_profile::Phase::selection);
+    const auto native_record_write = native_record_scope();
+    native_record_changed(player.player, 2, goal.id); native_record_changed(player.player, 3, goal.id);
     mark_native_state_changed();
     const auto& plan = plans_.at(potential.plan);
     const auto input = galactic_selection(player, goal, plan);
     potential.valid = false;
     if (!input || !input->complete || !input->reachable || plan.taskforces.empty()) return false;
+    const auto contrast_factor = [&](const AiType& type, std::uint64_t category) {
+        if (!plan.galactic_contrast_qualified) return average_contrast(*host_, type, category);
+        const auto found = plan.galactic_contrast.find(category);
+        if (found == plan.galactic_contrast.end()) return Real{};
+        Real sum{}; std::uint32_t count{}; bool matched{};
+        for (const auto& entry : found->second) {
+            if (entry.type) { if (*entry.type == type.type_id) return entry.weight; continue; }
+            if (!(entry.category_bits & type.category_bits)) continue;
+            matched = true;
+            if (entry.weight != real(1)) { sum += entry.weight; ++count; }
+        }
+        return count ? sum / real(count) : matched ? real(1) : Real{};
+    };
     potential.units.clear(); potential.freestore.clear(); potential.sources.clear();
     potential.producers.clear(); potential.pool_tokens.clear(); potential.taskforce_of_unit.clear(); potential.team_of_unit.clear();
     potential.cost = {};
@@ -139,25 +150,38 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
     const auto maximum = to_single(plan.max_contrast + adjustment);
     const auto minimum = to_single(plan.min_contrast + adjustment);
     potential.threshold = goal.target && !plan.ignore_target && Real{} < maximum ? to_single(real(1) - minimum / maximum) : Real{};
-    if (goal.target && !plan.ignore_target) for (const auto& row : input->contrast) potential.target_contrast.push_back({row.category,
-        to_single(row.force * to_single(maximum * player.difficulty.galactic_contrast_multiplier))});
+    if (goal.target && !plan.ignore_target) for (const auto& row : input->contrast) {
+        const auto force = input->unscaled_domain_totals
+            ? row.category ? row.force * ((plan.max_contrast + adjustment) * player.difficulty.galactic_contrast_multiplier) : row.force
+            : to_single(row.force * to_single(maximum * player.difficulty.galactic_contrast_multiplier));
+        potential.target_contrast.push_back({row.category, force});
+    }
     potential.current_contrast = potential.target_contrast;
     struct Slot { std::size_t force{}, team{}; std::int32_t count{}; Real cost{}; };
     std::vector<Slot> slots;
+    std::vector<std::vector<gc::TypeId>> slot_types;
     std::vector<gc::TypeId> proposals;
+    const auto proposal_type = [&](gc::TypeId type) {
+        const auto found = input->proposal_substitutions.find(type);
+        return found == input->proposal_substitutions.end() ? type : found->second;
+    };
     for (std::size_t f = 0; f < plan.taskforces.size(); ++f) for (std::size_t t = 0; t < plan.taskforces[f].teams.size(); ++t) {
         slots.push_back({f, t, 0});
-        for (auto type : plan.taskforces[f].teams[t].types)
+        auto& types = slot_types.emplace_back();
+        for (const auto authored : plan.taskforces[f].teams[t].types) {
+            const auto type = proposal_type(authored);
+            types.push_back(type);
             if (input->types.contains(type) && std::find(proposals.begin(), proposals.end(), type) == proposals.end()) proposals.push_back(type);
+        }
     }
     std::vector<std::vector<std::size_t>> teams(proposals.size());
     std::vector<std::size_t> starts(proposals.size());
     for (std::size_t i = 0; i < proposals.size(); ++i) {
         for (std::size_t s = 0; s < slots.size(); ++s) {
-            const auto& types = plan.taskforces[slots[s].force].teams[slots[s].team].types;
+            const auto& types = slot_types[s];
             if (std::find(types.begin(), types.end(), proposals[i]) != types.end()) teams[i].push_back(s);
         }
-        if (teams[i].size() > 1) starts[i] = static_cast<std::size_t>(sync_.range(0, static_cast<std::int32_t>(teams[i].size()) - 1));
+        if (teams[i].size() > 1) starts[i] = static_cast<std::size_t>(stream(player).range(0, static_cast<std::int32_t>(teams[i].size()) - 1));
     }
     std::vector<std::int32_t> force_size(plan.taskforces.size());
     std::vector<Real> force_power(plan.taskforces.size());
@@ -212,7 +236,36 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
     Real current_budget = resources(Real{});
     Real current_seconds{};
     Real max_path{};
-    for (const auto& row : input->freestore) max_path = std::max(max_path, row.path_cost);
+    struct FreeCursor {
+        std::vector<const GalacticSelectionObject*> rows;
+        std::size_t next{};
+    };
+    std::map<gc::TypeId, FreeCursor> free_by_type;
+    for (const auto& row : input->freestore) {
+        max_path = std::max(max_path, row.path_cost);
+        if (!plan.allow_free_store) continue;
+        const auto* unit = host_->view->find(row.object);
+        if (!unit || unit->owner != player.player || player.assigned.contains(row.object)) continue;
+        const auto held = player.reserved.find(row.object);
+        if (held != player.reserved.end() && held->second != goal.id) continue;
+        // WGA-312: proposals match the retained original pool type.
+        free_by_type[row.type].rows.push_back(&row);
+    }
+    for (auto& [type, cursor] : free_by_type) {
+        static_cast<void>(type);
+        // WGA-60: equal costs keep the publication's ascending identity order.
+        std::stable_sort(cursor.rows.begin(), cursor.rows.end(), [](const auto* a, const auto* b) {
+            return a->path_cost < b->path_cost;
+        });
+    }
+    std::vector<gg::ProductionRequest> production_requests;
+    std::map<gc::TypeId, std::uint32_t> selected_counts;
+    const auto production_request = [&](gc::TypeId type) {
+        const auto& facts = input->types.at(type);
+        return gg::ProductionRequest{type, facts.channel, facts.structure || facts.base,
+            goal.target && (facts.base || facts.instance_allowed) && facts.target_build_seconds.has_value(),
+            goal.target && (facts.structure || facts.base) ? facts.target_build_seconds.value_or(Real{}) : facts.build_seconds};
+    };
     std::vector<std::vector<std::size_t>> garrison_rows(proposals.size());
     for (std::size_t i = 0; i < proposals.size(); ++i) garrison_rows[i].resize(input->types.at(proposals[i]).garrisons.size());
     for (;;) {
@@ -223,7 +276,7 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
         std::vector<std::size_t> production_rows;
         for (std::size_t i = 0; i < proposals.size(); ++i) {
             auto& candidate = candidates[i]; candidate.type = proposals[i];
-            candidate.selected_count = static_cast<std::uint32_t>(std::count(potential.units.begin(), potential.units.end(), proposals[i]));
+            candidate.selected_count = selected_counts[proposals[i]];
             auto stage = [&](gg::SelectionStage which, Real weight, bool permanent = false) {
                 candidate.stages[static_cast<std::size_t>(which)] = {weight, permanent};
             };
@@ -232,12 +285,10 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
             const auto* info = host_->type(proposals[i]);
             if (!info) { stage(gg::SelectionStage::freestore, gg::rejected_estimate(), true); continue; }
             const GalacticSelectionObject* best{};
-            if (plan.allow_free_store) for (const auto& object : input->freestore) {
-                const auto* unit = host_->view->find(object.object);
-                if (!unit || unit->type != proposals[i] || unit->owner != player.player || used.contains(object.object) || player.assigned.contains(object.object)) continue;
-                const auto held = player.reserved.find(object.object);
-                if (held != player.reserved.end() && held->second != goal.id) continue;
-                if (!best || object.path_cost < best->path_cost) best = &object;
+            if (const auto found = free_by_type.find(proposals[i]); found != free_by_type.end()) {
+                auto& cursor = found->second;
+                while (cursor.next < cursor.rows.size() && used.contains(cursor.rows[cursor.next]->object)) ++cursor.next;
+                if (cursor.next < cursor.rows.size()) best = cursor.rows[cursor.next];
             }
             if (best) {
                 objects[i] = best->object;
@@ -246,17 +297,17 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
             // WGA-60: no tactical reserve pool. Ordinary production uses C's
             // feasibility resources; activation uses available resources later.
             if (!best && !plan.magic) {
-                if (facts.structure && goal.target && (!facts.target_cost || !facts.target_build_seconds)) {
+                if ((facts.structure || facts.base) && goal.target && (!facts.target_cost || !facts.target_build_seconds)) {
                     stage(gg::SelectionStage::budget, gg::rejected_estimate(), true); continue;
                 }
                 Real available = current_budget;
                 if (current_seconds == Real{}) {
-                    Real horizon = facts.structure && goal.target ? *facts.target_build_seconds
+                    Real horizon = (facts.structure || facts.base) && goal.target ? *facts.target_build_seconds
                         : to_single(facts.build_seconds / real(2));
                     if (!(time_limit < Real{})) horizon = std::min(horizon, time_limit);
                     available = to_single(available + to_single(income * horizon));
                 }
-                const auto candidate_cost = facts.structure && goal.target ? *facts.target_cost : facts.cost;
+                const auto candidate_cost = (facts.structure || facts.base) && goal.target ? *facts.target_cost : facts.cost;
                 if (available < to_single(potential.cost + candidate_cost)) stage(gg::SelectionStage::budget, gg::rejected_estimate());
             }
             if (candidate.stages[static_cast<std::size_t>(gg::SelectionStage::budget)].weight == gg::rejected_estimate()) continue;
@@ -289,16 +340,21 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
                     || !structure_slots[static_cast<std::size_t>(facts.channel)])) || (plan.magic && !facts.magic_allowed)
                 || (!plan.magic && input->population_check && remaining < facts.population))
                 stage(gg::SelectionStage::production, gg::rejected_estimate(), true);
-            else if (plan.magic) stage(gg::SelectionStage::production, sync_.uniform(Real{}, real(1)));
+            else if (plan.magic) stage(gg::SelectionStage::production, stream(player).uniform(Real{}, real(1)));
             else {
-                auto prospective = potential; prospective.units.push_back(proposals[i]); prospective.sources.push_back(2);
-                const auto production = estimate(*input, prospective, plan.magic, goal.target != 0,
-                    player.difficulty.galactic_build_time_multiplier, false, executor(perception_executor_), player.player);
+                production_requests.push_back(production_request(proposals[i]));
+                const auto production = required(gg::estimate_production(input->producers, player.player,
+                    production_requests, input->reachable, executor(perception_executor_)));
+                production_requests.pop_back();
                 if (!production.feasible) stage(gg::SelectionStage::production, gg::rejected_estimate(), true);
                 else {
-                    factories[i] = facts.structure ? target(goal.target)->object : production.producers.back();
-                    const auto mean = required(gg::estimate_single_type(input->producers, player.player, proposals[i], facts.channel, executor(nullptr)));
-                    excess.push_back(facts.structure ? facts.build_seconds : to_single(mean - facts.build_seconds)); production_rows.push_back(i);
+                    factories[i] = facts.structure || facts.base ? target(goal.target)->object : production.producers.back();
+                    const auto mean = facts.structure || facts.base ? facts.build_seconds
+                        : required(gg::estimate_single_type(input->producers, player.player, proposals[i], facts.channel, executor(nullptr)));
+                    // WGA-482: admitted base production starts at zero excess,
+                    // then subtracts the type's raw build time before normalization.
+                    excess.push_back(facts.base ? -facts.build_seconds : facts.structure ? facts.build_seconds
+                        : to_single(mean - facts.build_seconds)); production_rows.push_back(i);
                 }
             }
             if (candidate.stages[static_cast<std::size_t>(gg::SelectionStage::production)].weight == gg::rejected_estimate()) continue;
@@ -311,7 +367,7 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
             stage(gg::SelectionStage::terrain, facts.terrain_allowed ? facts.terrain_effectiveness : gg::rejected_estimate(), !facts.terrain_allowed);
             if (!facts.terrain_allowed) continue;
             Real contrast_weight{};
-            if (!facts.hero && plan.ignore_target) contrast_weight = sync_.uniform(Real{}, to_single(info->combat_power / real(500)));
+            if (!facts.hero && plan.ignore_target) contrast_weight = stream(player).uniform(Real{}, to_single(info->combat_power / real(500)));
             else if (!facts.hero) {
                 const auto* unit = best ? host_->view->find(best->object) : nullptr;
                 const Real power = to_single(info->combat_power * (unit ? unit->health : real(1)));
@@ -320,7 +376,7 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
                         || input->contrast[row].escort != plan.taskforces[slots[allocations[i]].force].escort) continue;
                     const Real deficit = potential.current_contrast[row].force;
                     if (!(Real{} < deficit) || (!best && !(potential.target_contrast[row].force * potential.threshold < deficit))) continue;
-                    const auto effectiveness = average_contrast(*host_, *info, input->contrast[row].category);
+                    const auto effectiveness = contrast_factor(*info, input->contrast[row].category);
                     const auto applied = to_single(power * effectiveness);
                     if (!(Real{} < effectiveness) || !(Real{} < applied)) continue;
                     if (!best && input->population_check && Real{} < facts.population
@@ -338,12 +394,19 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
                     Real preference{};
                     garrison_rows[i][garrison] = input->contrast.size();
                     for (std::size_t row = 0; row < input->contrast.size(); ++row) {
-                        if (input->contrast[row].escort || input->contrast[row].channel != spawned.channel) continue;
-                        const auto deficit = potential.current_contrast[row].force;
-                        if (!(Real{} < deficit) || (!best && !(potential.target_contrast[row].force * potential.threshold < deficit))) continue;
-                        const auto effectiveness = average_contrast(*host_, *spawned_type, input->contrast[row].category);
+                        if (input->contrast[row].escort || (spawned.all_main_domains
+                            ? !input->contrast[row].category : input->contrast[row].channel != spawned.channel)) continue;
+                        const auto deficit = spawned.all_main_domains ? to_single(potential.current_contrast[row].force) : potential.current_contrast[row].force;
+                        const auto limit = spawned.all_main_domains ? to_single(to_single(potential.target_contrast[row].force) * potential.threshold)
+                            : potential.target_contrast[row].force * potential.threshold;
+                        if (!(Real{} < deficit) || (!best && !(limit < deficit))) continue;
+                        const auto average = contrast_factor(*spawned_type, input->contrast[row].category);
+                        const auto effectiveness = spawned.all_main_domains
+                            ? to_single(to_single(average) * to_single(spawned.terrain_effectiveness)) : average;
                         const auto applied = to_single(spawned.power * effectiveness);
                         if (!(Real{} < effectiveness) || !(Real{} < applied)) continue;
+                        if (spawned.all_main_domains && !best && input->population_check && Real{} < spawned.population
+                            && limit < to_single(deficit - to_single(applied * real(truncate(remaining / spawned.population))))) continue;
                         const auto ratio = to_single(std::max(to_single(deficit - applied), Real{}) / std::max(deficit, applied));
                         const auto weight = to_single(std::max(to_single(real(1) - to_single(ratio * ratio)), Real{}) * effectiveness);
                         if (preference < weight) { preference = weight; garrison_rows[i][garrison] = row; }
@@ -383,6 +446,8 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
         if (allocations[chosen] == slots.size()) break;
         auto& slot = slots[allocations[chosen]]; ++slot.count; slot.cost = to_single(slot.cost + facts.cost);
         current_cost = to_single(current_cost + facts.cost);
+        ++selected_counts[type];
+        if (!objects[chosen] && !plan.magic) production_requests.push_back(production_request(type));
         potential.units.push_back(type); potential.freestore.push_back(objects[chosen]);
         potential.sources.push_back(objects[chosen] ? 0 : 2); potential.producers.push_back(factories[chosen]); potential.pool_tokens.push_back(0);
         potential.taskforce_of_unit.push_back(slot.force); potential.team_of_unit.push_back(slot.team);
@@ -396,8 +461,8 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
             ++selected_structures[type];
             --structure_slots[static_cast<std::size_t>(facts.channel)];
         }
-        const auto production = estimate(*input, potential, plan.magic, goal.target != 0,
-            player.difficulty.galactic_build_time_multiplier, false, executor(perception_executor_), player.player);
+        const auto production = required(gg::estimate_production(input->producers, player.player,
+            production_requests, input->reachable, executor(perception_executor_)));
         if (production.feasible) {
             current_seconds = production.seconds;
             if (Real{} < current_seconds) current_budget = resources(current_seconds);
@@ -405,24 +470,48 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
         if (contrast_rows[chosen] < input->contrast.size()) {
             const auto row = contrast_rows[chosen];
             const auto applied = input->contrast[row].category == 0 ? power
-                : to_single(to_single(power * average_contrast(*host_, *info, input->contrast[row].category))
-                    * (facts.channel == gc::ProductionDomain::ground ? facts.terrain_effectiveness : real(1)));
-            potential.current_contrast[row].force = to_single(potential.current_contrast[row].force - applied);
+                : input->unscaled_domain_totals
+                    ? to_single(power * to_single(to_single(contrast_factor(*info, input->contrast[row].category))
+                        * (input->contrast[row].channel == gc::ProductionDomain::ground ? to_single(facts.terrain_effectiveness) : real(1))))
+                    : to_single(to_single(power * contrast_factor(*info, input->contrast[row].category))
+                        * (facts.channel == gc::ProductionDomain::ground ? facts.terrain_effectiveness : real(1)));
+            const auto residual = potential.current_contrast[row].force - applied;
+            potential.current_contrast[row].force = input->unscaled_domain_totals ? residual : to_single(residual);
             if (input->contrast[row].category != 0) for (std::size_t total = 0; total < input->contrast.size(); ++total)
                 if (!input->contrast[total].category && input->contrast[total].channel == facts.channel
                     && input->contrast[total].escort == input->contrast[row].escort)
-                    potential.current_contrast[total].force = to_single(potential.current_contrast[total].force - power);
+                    potential.current_contrast[total].force = input->unscaled_domain_totals
+                        ? potential.current_contrast[total].force - power : to_single(potential.current_contrast[total].force - power);
+        } else if (input->unscaled_domain_totals) {
+            for (std::size_t row = 0; row < input->contrast.size(); ++row)
+                if (!input->contrast[row].category && !input->contrast[row].escort
+                    && input->contrast[row].channel == facts.contrast_fallback_channel.value_or(facts.channel)) {
+                    potential.current_contrast[row].force -= power; break;
+                }
         }
         for (std::size_t garrison = 0; garrison < facts.garrisons.size(); ++garrison) {
-            const auto row = garrison_rows[chosen][garrison]; if (row >= input->contrast.size()) continue;
             const auto& spawned = facts.garrisons[garrison]; const auto* spawned_type = host_->type(spawned.type);
+            const auto row = garrison_rows[chosen][garrison];
+            if (row >= input->contrast.size()) {
+                if (spawned.all_main_domains) for (std::size_t total = 0; total < input->contrast.size(); ++total)
+                    if (!input->contrast[total].category && !input->contrast[total].escort && input->contrast[total].channel == spawned.channel) {
+                        potential.current_contrast[total].force -= spawned.power; break;
+                    }
+                continue;
+            }
             const auto applied = !input->contrast[row].category ? spawned.power
-                : to_single(to_single(spawned.power * average_contrast(*host_, *spawned_type, input->contrast[row].category))
-                    * (spawned.channel == gc::ProductionDomain::ground ? spawned.terrain_effectiveness : real(1)));
-            potential.current_contrast[row].force = to_single(potential.current_contrast[row].force - applied);
+                : spawned.all_main_domains
+                    ? to_single(spawned.power * to_single(to_single(contrast_factor(*spawned_type, input->contrast[row].category))
+                        * (input->contrast[row].channel == gc::ProductionDomain::ground ? to_single(spawned.terrain_effectiveness) : real(1))))
+                    : to_single(to_single(spawned.power * contrast_factor(*spawned_type, input->contrast[row].category))
+                        * (spawned.channel == gc::ProductionDomain::ground ? spawned.terrain_effectiveness : real(1)));
+            const auto residual = potential.current_contrast[row].force - applied;
+            potential.current_contrast[row].force = spawned.all_main_domains ? residual : to_single(residual);
             if (input->contrast[row].category) for (std::size_t total = 0; total < input->contrast.size(); ++total)
-                if (!input->contrast[total].category && !input->contrast[total].escort && input->contrast[total].channel == spawned.channel)
-                    potential.current_contrast[total].force = to_single(potential.current_contrast[total].force - spawned.power);
+                if (!input->contrast[total].category && !input->contrast[total].escort
+                    && input->contrast[total].channel == (spawned.all_main_domains ? input->contrast[row].channel : spawned.channel))
+                    potential.current_contrast[total].force = spawned.all_main_domains
+                        ? potential.current_contrast[total].force - spawned.power : to_single(potential.current_contrast[total].force - spawned.power);
         }
     }
     potential.valid = !needs() && (plan.ignore_target || !deficits())
@@ -432,14 +521,22 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
 }
 
 void Engine::service_galactic_execution(PlayerAi& player) {
+    auto taskforces_ = all_taskforces();
+    auto blocks_ = all_blocks();
+    const auto native_record_write = native_record_scope();
+    native_records_changed(player.player, {4, 13, 14, 15, 16, 17, 21, 22, 23, 32});
     mark_native_state_changed();
     std::set<std::uint64_t> touched;
     for (auto& task : player.tasks) {
         touched.insert(task.block);
         if (task.finished) continue;
         auto force = taskforces_.find(task.taskforce);
-        const auto* running = force == taskforces_.end() ? nullptr : plan(force->second.plan);
-        if (!running || !galactic_goal(player.player, running->goal)) { task.finished = task.failed = true; continue; }
+        const auto* running = force == taskforces_.end() ? nullptr : this->plan(force->second.plan);
+        if (!running || !galactic_goal(player.player, running->goal)) {
+            // Assembly has a registered request/phase to terminate as well.
+            if (task.galactic_assembly == BuildTask::GalacticAssembly::none) task.finished = task.failed = true;
+            continue;
+        }
         if (task.source == 2) {
             if (task.completion == 0) {
                 galactic_ai::ActionRequest request;
@@ -478,6 +575,7 @@ void Engine::service_galactic_execution(PlayerAi& player) {
                 }
             }
         } else if (task.source == 0) {
+            if (task.galactic_assembly != BuildTask::GalacticAssembly::none) continue;
             const auto* goal = find_goal(player, running->goal);
             const auto input = goal ? galactic_selection(player, *goal, plans_[running->definition]) : nullptr;
             if (!input) throw std::runtime_error("galactic assignment facts unavailable");
@@ -487,16 +585,23 @@ void Engine::service_galactic_execution(PlayerAi& player) {
                 const auto reservation = player.reserved.find(row.object);
                 if (row.in_transit && row.type == task.type && !player.assigned.contains(row.object)
                     && (reservation == player.reserved.end() || reservation->second == running->goal)) {
-                    waiting = true; continue;
+                    waiting |= reservation != player.reserved.end() && reservation->second == running->goal;
+                    continue;
                 }
                 const auto* unit = host_->view->find(row.object);
-                if (!unit || unit->owner != player.player || unit->type != task.type || player.assigned.contains(row.object)) continue;
+                if (!unit && row.type == task.type && !player.assigned.contains(row.object)
+                    && reservation != player.reserved.end() && reservation->second == running->goal) {
+                    waiting = true; continue; // WGA-164/307: retained identity awaits its live view.
+                }
+                if (!unit || unit->owner != player.player || row.type != task.type || player.assigned.contains(row.object)) continue; // WGA-312
                 const auto reserved = player.reserved.find(row.object);
                 if (reserved != player.reserved.end() && reserved->second == running->goal) { task.object = row.object; break; }
                 if (!fallback && reserved == player.reserved.end()) fallback = row.object;
             }
+            // WGA-164/305/307: a refused unreserved association cannot exhaust
+            // this task while its reserved actor awaits transit or view publication.
+            if (!task.object && waiting) continue;
             if (!task.object) task.object = fallback;
-            if (!task.object && waiting) continue; // WGA-77: retained transit is still pending
             auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
             if (task.object && actions && actions->qualified_freestore_available()) {
                 const auto assigned = actions->qualified_freestore().assign(player.player, task.object, goal && goal->potential ? goal->potential->id : 0);
@@ -504,8 +609,21 @@ void Engine::service_galactic_execution(PlayerAi& player) {
                 if (assigned == galactic_ai::FreestoreAssignment::failed) task.object = 0;
             }
             task.finished = true; task.failed = task.object == 0;
+            if (task.object && task.staging) {
+                if (!actions) throw std::runtime_error("staged freestore assignment requires its native assembly owner");
+                if (!task.synchronized_staging)
+                    task.failed = !required(actions->prepare_assembly_actor(player.player, task.object)).admitted;
+                task.finished = task.failed;
+                task.galactic_assembly = task.failed ? BuildTask::GalacticAssembly::failed
+                    : task.synchronized_staging ? BuildTask::GalacticAssembly::waiting : BuildTask::GalacticAssembly::assigned;
+                // Reserve the association while synchronized actors await departure.
+                if (!task.failed) player.assigned[task.object] = task.taskforce;
+                task.state_entered = static_cast<std::uint64_t>(frame_);
+                mark_native_state_changed();
+                mark_galactic_tasks_changed();
+            }
         } else { task.finished = task.failed = true; }
-        if (task.finished && !task.failed && task.object) {
+        if ((task.finished || task.galactic_assembly == BuildTask::GalacticAssembly::assigned) && !task.failed && task.object) {
             if (player.assigned.contains(task.object) && player.assigned.at(task.object) != task.taskforce)
                 throw std::runtime_error("galactic completion object belongs to another taskforce");
             if (std::find(force->second.units.begin(), force->second.units.end(), task.object) == force->second.units.end()) force->second.units.push_back(task.object);
@@ -514,11 +632,22 @@ void Engine::service_galactic_execution(PlayerAi& player) {
             task.joined = true;
         }
     }
+    service_galactic_assembly(player);
     for (auto id : touched) {
         const auto block = blocks_.find(id); if (block == blocks_.end()) continue;
         bool done = true, failed = false;
         for (const auto& task : player.tasks) if (task.block == id) { done = done && task.finished; failed = failed || task.failed; }
-        if (done) { block->second.finished = true; block->second.result = !failed; }
+        if (done) {
+            const bool newly_failed = failed && !block->second.finished;
+            block->second.finished = true; block->second.result = !failed;
+            if (newly_failed) for (const auto& task : player.tasks) if (task.block == id
+                && task.galactic_assembly == BuildTask::GalacticAssembly::failed) {
+                const auto* force = taskforce(task.taskforce);
+                const auto* running = force ? plan(force->plan) : nullptr;
+                if (running) emit_call(*running, *force, "Production_Failed", {Value{authoritative::Handle{handle_type, task.type}}});
+                break;
+            }
+        }
     }
 }
 
@@ -607,9 +736,14 @@ core::Result<Engine::GalacticBuildPublication> Engine::galactic_build_budgets(
     const galactic_ai::NativeActions& actions, const GalacticFunding& funding) const {
     using Result = core::Result<GalacticBuildPublication>;
     const auto funding_revision = funding.state_revision(); const auto actions_revision = actions.build_state_revision();
-    const std::array key{galactic_tasks_revision_, funding_revision, actions_revision};
-    if (galactic_build_cache_ && galactic_build_cache_key_ == key)
-        return Result::success(galactic_build_cache_);
+    // S9a: inside a player turn the revision stacks the committed counter and the staged changes of every
+    // turn so far (the pass is still sequential), and the memo is the turn's own.
+    auto* turn = staged();
+    const std::uint64_t task_revision = galactic_build_tasks_revision();
+    const std::array key{task_revision, funding_revision, actions_revision};
+    auto& memo = turn ? turn->build_cache : galactic_build_cache_;
+    auto& memo_key = turn ? turn->build_cache_key : galactic_build_cache_key_;
+    if (memo && memo_key == key) return Result::success(memo);
     std::vector<GalacticBudgetBuild> rows;
     std::set<sim::EntityId> associated;
     for (const auto& player : players_) {
@@ -644,9 +778,9 @@ core::Result<Engine::GalacticBuildPublication> Engine::galactic_build_budgets(
             rows.push_back(row);
         }
     }
-    galactic_build_cache_ = std::make_shared<const std::vector<GalacticBudgetBuild>>(std::move(rows));
-    galactic_build_cache_key_ = key;
-    return Result::success(galactic_build_cache_);
+    memo = std::make_shared<const std::vector<GalacticBudgetBuild>>(std::move(rows));
+    memo_key = key;
+    return Result::success(memo);
 }
 
 core::Result<math::Fixed> Engine::galactic_build_remaining_cost(tactical::PlayerId id, const BuildTask& task) const {
@@ -661,6 +795,8 @@ core::Result<math::Fixed> Engine::galactic_build_remaining_cost(tactical::Player
 }
 
 void Engine::salvage_galactic_goal(PlayerAi& player, std::uint64_t goal_id) {
+    const auto native_record_write = native_record_scope();
+    native_records_changed(player.player, {4, 13, 14, 15, 16, 17});
     auto* funding = dynamic_cast<GalacticFunding*>(player.galactic_funding.get());
     auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
     if (!funding) throw std::runtime_error("goal salvage requires the retained funding owner");

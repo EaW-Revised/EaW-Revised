@@ -277,6 +277,11 @@ void encode(Encoder& out, const UnitType& unit) {
         out.each(unit.death_projectiles, [&](const std::string& projectile) { out.text(projectile); });
         out.each(unit.death_projectile_indices, [&](const std::uint32_t index) { out.u32(index); });
     }
+    if (!unit.retreat_self_destruct.empty()) {
+        out.text("retreat-self-destruct-v1");
+        out.text(unit.retreat_self_destruct);
+        out.u32(unit.retreat_self_destruct_index);
+    }
     out.each(unit.target_bones, [&](const BonePoint& point) { encode(out, point); });
     if (!unit.muzzle_bones.empty()) {
         out.text("muzzle-bones-v1");
@@ -850,6 +855,17 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             out.u64(unit.planetary_weapon->valid_targets);
         }
     }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return unit.tactical_super_weapon.has_value(); })) {
+        out.text("tactical-super-weapons-v1");
+        for (const auto& unit : tables.units) {
+            if (!unit.tactical_super_weapon) continue;
+            out.text(unit.id);
+            out.fixed(unit.tactical_super_weapon->start_distance);
+            out.fixed(unit.tactical_super_weapon->attack_distance);
+            out.fixed(unit.tactical_super_weapon->z_adjust);
+            out.flag(unit.tactical_super_weapon->start_pos_match_target_z);
+        }
+    }
     if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
         return !unit.special_unlocks.empty() || unit.consume_after_special_fire;
     })) {
@@ -896,12 +912,12 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
                 out.each(row.factions, [&](const auto& faction) { out.text(faction); });
             });
         });
-        out.text("campaign-space-scene-v1");
+        out.text("campaign-space-scene-v2");
         out.each(tables.campaign_ability_locks, [&](const CampaignAbilityLock& lock) {
             out.u32(lock.player); out.text(lock.type); out.text(lock.name); out.flag(lock.enabled);
         });
         out.each(tables.units, [&](const UnitType& unit) {
-            out.text(unit.id); out.text(unit.campaign_ship_class);
+            out.text(unit.id); out.text(unit.campaign_ship_class); out.flag(unit.campaign_hyperspace);
             out.each(unit.production.battlefield_bonuses, [&](const BattlefieldBonus& bonus) {
                 out.text(bonus.name); out.u32(bonus.category); out.fixed(bonus.defence); out.fixed(bonus.reveal_delta);
                 out.flag(bonus.all_allies); out.flag(bonus.enabled);

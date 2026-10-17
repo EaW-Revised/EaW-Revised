@@ -1,5 +1,7 @@
 #include "combat_algorithms.hpp"
 
+#include <cassert>
+
 namespace eawr::sim::tactical {
 using detail::combat_detail::one_raw;
 
@@ -329,6 +331,14 @@ std::vector<EntityId> CombatWorld::candidates(const math::Vec3& centre, const ma
 }
 
 
+bool target_type_admissible(const CombatWorld& world, const CombatUnit& target) noexcept {
+    if (target.profile == nullptr) return false;
+    const auto team = std::lower_bound(world.teams.begin(), world.teams.end(), target.id,
+        [](const auto& entry, const EntityId id) { return entry.first < id; });
+    if (team != world.teams.end() && team->first == target.id) return true;
+    return target.profile->living_projectile_collision && target.profile->valid_target;
+}
+
 core::Result<bool> formation_can_attack(const CombatWorld& world, const CombatUnit& target,
     const math::Fixed divert, const math::Vec3 anchor, const FormationAttackContext& formation) {
     if (!formation.present || !formation.allows_divert) return core::Result<bool>::success(false);
@@ -378,9 +388,39 @@ CombatState UnitCombat::target_state(const math::Fixed divert, const EntityId fo
     scan_divert_ = formation == nullptr || (formation->present && formation->allows_divert) ? divert : math::Fixed{};
     diversion_anchor_ = diversion_anchor;
     formation_target_ = formation_target;
-    // WSQ-41 reads the base formation destination; WSQ-45/46 use its active override.
-    // The caller already shares a player attack. An autonomous override over an idle/guard
-    // base is not a base attack and must not be promoted to player-direct here.
+    // WSQ-41 reads the eligible hostile base before autonomous targeting. Native escort
+    // destinations are excluded; the model's object attack-move also uses escort mode,
+    // distinguished by its retained diversion kind. Scan priority does not veto adoption.
+    if (!state_.direct && formation != nullptr && formation->present && profile_.max_attack_distance) {
+        const auto* base = world_.find(formation->base_attack_target);
+        if (base != nullptr && base->profile != nullptr && hostile(*base) && !base->in_limbo
+            && (!base->durability || base->durability->hull.raw() > 0)
+            && (!base->profile->special_weapon || base->profile->star_base)) {
+            if (target_type_admissible(world_, *base)) {
+                // WSQ-41/AT-10: adoption uses the centre and facing hard extent unless
+                // the base destination actually names a standing hardpoint. Choosing a
+                // nearer firing hardpoint here can admit an out-of-range destination.
+                const auto* hardpoint = standing_hardpoint(*base, formation->base_attack_hardpoint);
+                const auto point = hardpoint != nullptr
+                    ? ordered_aim_point(world_.table, &profile_, *base, unit_.position, hardpoint->hardpoint)
+                    : base->position;
+                const auto reach = take(target_attack_distance(world_.motion, *base, unit_.position,
+                    *profile_.max_attack_distance, hardpoint != nullptr));
+                // Invalid arithmetic asserts in debug; release keeps the input state without scanning.
+                if (error_) {
+                    assert(!error_ && "formation adoption range arithmetic failed");
+                    return *unit_.combat;
+                }
+                const bool too_close = profile_.min_attack_distance.raw() > 0 && within_range(unit_.position,
+                    point, math::Fixed::from_raw(profile_.min_attack_distance.raw() - 1), RangeMetric::planar);
+                if (!too_close && within_range(unit_.position, point, reach, RangeMetric::planar)) {
+                    state_.attack_target = base->id;
+                    state_.attack_hardpoint = formation->base_attack_hardpoint;
+                    state_.direct = true;
+                }
+            }
+        }
+    }
     ship_target();
     return std::move(state_);
 }
@@ -425,11 +465,7 @@ void UnitCombat::point_object_turret_target() {
         Suitability result;
         if (target.profile == nullptr || !hostile(target) || !visible_to_me(target)) return result;
         // WCC-25: the held team object bypasses type admission; its members do not.
-        // Use the immutable team index rather than resolving or allocating an aim candidate.
-        const auto team = std::lower_bound(world_.teams.begin(), world_.teams.end(), target.id,
-            [](const auto& entry, const EntityId id) { return entry.first < id; });
-        const bool container = team != world_.teams.end() && team->first == target.id;
-        if ((!container && (!target.profile->living_projectile_collision || !target.profile->valid_target))
+        if (!target_type_admissible(world_, target)
             || target.in_limbo || (target.durability && target.durability->hull.raw() <= 0)
             || (target.profile->special_weapon && !target.profile->star_base)) return result;
         bool armed = false;

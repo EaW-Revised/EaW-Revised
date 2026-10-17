@@ -33,7 +33,7 @@ ALLOWED_TOKENS = {
     # Ours (tests, the rig's PowerShell), Godot's, Python's and the Windows API's.
     "InputClass", "PixelClass", "WeightClass", "GraphicalWrapper", "GDExtensionClassLibraryPtr",
     "setUpClass", "tearDownClass", "PriorityClass", "GetPriorityClass", "SetPriorityClass",
-    "SchedulingClass", "RegisterClassW", "pcPriClassBase", "PriClass",
+    "SchedulingClass", "RegisterClassW", "GetClassNameW", "pcPriClassBase", "PriClass",
     # Shader asset names the game's models reference (alDefault.fx, alMissingShader).
     "alDefault", "alMissingShader",
     # Lua receiver types the game's own scripts spell (GameScoring.lua, GalacticFreeStore.lua).

@@ -323,6 +323,9 @@ struct MapResolution final {
 
 [[nodiscard]] std::uint32_t object_type_crc(std::string_view logical_name) noexcept;
 [[nodiscard]] ObjectTypeCatalog object_type_catalog(const data::Catalog& catalog);
+// Reads only the special root metadata. Body structure is checked by load_map
+// after eligibility; an accepted header alone never admits a map to a setup list.
+[[nodiscard]] core::Result<Map> load_map_header(std::span<const std::byte> bytes, Source source);
 [[nodiscard]] core::Result<Map> load_map(
     std::span<const std::byte> bytes, Source source, const ObjectTypeCatalog& catalog = {});
 [[nodiscard]] core::Result<Map> load_map(

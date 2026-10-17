@@ -291,6 +291,16 @@ core::Result<void> session_detail::Tick::targets() {
                 const auto* container = live_unit(moving, own->second);
                 if (state.formation) {
                     const auto& held = *state.formation;
+                    // WSQ-41/FO-03: read the retained base kind, including after a face.
+                    // Object attack-move uses escort mode in this model, but its diversion
+                    // kind distinguishes the native attack-on-path destination from guard.
+                    const bool attack_move_base = state.diversion == SquadronDiversion::attack_move;
+                    if (state.diversion != SquadronDiversion::guard
+                        && (state.mode != SquadronMode::escort || attack_move_base)) {
+                        output.formation.base_attack_target = held.base_target;
+                        if (!attack_move_base && held.attack_target == held.base_target)
+                            output.formation.base_attack_hardpoint = held.attack_hardpoint;
+                    }
                     output.anchor = held.base_position;
                     if (const auto* destination = view.find(held.base_target)) output.anchor = destination->position;
                     const bool escort = state.mode == SquadronMode::escort;
@@ -312,6 +322,25 @@ core::Result<void> session_detail::Tick::targets() {
                     player_attack = (order_parent != invalid_entity_id ? order_parent : order_target) == state.target;
                 }
                 auto input = output.before;
+                const auto* previous = view.find(input.attack_target);
+                if (input.direct && output.formation.present
+                    && input.attack_target != output.formation.base_attack_target
+                    && previous != nullptr && (!previous->durability || previous->durability->hull.raw() > 0)) {
+                    // FO-03/05: a replacement base must not re-share its predecessor's
+                    // adopted direct target. Clear in each member's private input even
+                    // when this order admits no scan. Dead holders retain FS-09's turn.
+                    input.attack_target = invalid_entity_id;
+                    input.attack_hardpoint = no_hardpoint;
+                    input.direct = false;
+                }
+                // WCC-25: the team holds any valid-type object, but a member takes it only through the
+                // ship-level type admission (a pad without living-projectile contact stays the team's,
+                // #3922). This gate is the only defence: a prepared member fires whatever it holds. A
+                // target missing from the view is left to the existing dead-target handling.
+                if (player_attack) {
+                    const auto* shared = view.find(state.target);
+                    player_attack = shared == nullptr || detail::target_type_admissible(view, *shared);
+                }
                 if (player_attack) {
                     input.attack_target = state.target;
                     input.attack_hardpoint = state.target_hardpoint;

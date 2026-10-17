@@ -468,6 +468,9 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
     // remains separate. Health, visibility and selection belong to the carrier.
     std::set<sim::EntityId> carried_heads;
     for (const ui::BattleUnit& unit : *frame.units) {
+        // WU-47: squadron pick volumes share the team's identity above, including
+        // any hidden hero carried by that team. Their craft positions are not carriers.
+        if (unit.part != sim::invalid_entity_id || frame.live->squadron_members().contains(unit.entity)) continue;
         if (!carried_heads.insert(unit.entity).second) continue;
         const auto* instance = instance_of(snapshot.get(), unit.entity);
         if (instance == nullptr || instance->contained.empty()) continue;

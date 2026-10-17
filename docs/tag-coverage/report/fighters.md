@@ -10,6 +10,7 @@
 | presentation-later | 0 | 2 |
 | foc-ignores | 12 | 12 |
 | deferred | 4 | 4 |
+| by-design | 0 | 0 |
 | land-or-galactic | 0 | 26 |
 | multiplayer | 0 | 0 |
 | **Total** | **61** | **89** |
@@ -143,7 +144,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Space_Escort_Unit_Types | partial | prepared campaign space entry (src/campaign/space_entry.cpp); missing: Unsupported scene and qualification boundaries in docs/behaviour/galactic-space-entry.md | WGT-17 | 2006 | src/campaign/space_entry.cpp |  Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
+| Space_Escort_Unit_Types | partial | prepared campaign space entry (src/campaign/space_entry.cpp); ordinary galactic targeted-plan proposals (src/script/foc/galactic_ai_selector_runtime.cpp); missing: Unsupported scene and qualification boundaries in docs/behaviour/galactic-space-entry.md | WGT-17; WGA-443, WGA-444 | 2006 | src/campaign/space_entry.cpp; src/script/foc/galactic_ai_selector_runtime.cpp |  Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md. Authored escorts also contribute to ordinary galactic targeted-plan proposal contrast.; basis: reviewed |
 
 ## SpaceUnit, SpecialStructure, StarBase, UniqueUnit
 

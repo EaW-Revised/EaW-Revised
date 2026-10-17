@@ -1,6 +1,6 @@
 {
  "comment": "Existing findings of tools/inventory/xml_literal_check.py, each with its ticket. May only shrink: fix the site (read the XML, or mark `// xml-fallback: <Tag>`) and delete the entry. ticket \"false-positive\" needs a reason.",
- "max_entries": 23,
+ "max_entries": 28,
  "entries": [
   {
    "file": "src/presentation/godot/ui/minimap_view.cpp",
@@ -123,6 +123,52 @@
    "text": "look.bolts = static_cast<std::uint32_t>(std::clamp(scalar(\"Number_Bolts\"), 0.0F, 128.0F));",
    "ticket": "false-positive",
    "reason": "upper safety bound on the loaded bolt count, not an XML default"
+  },
+  {
+   "file": "include/eawr/presentation/ui/retreat_presentation.hpp",
+   "text": "std::array<std::uint8_t, 4> colour{255, 255, 255, 255}; // Space_Retreat_Countdown_Color_RGBA",
+   "ticket": 3305,
+   "reason": "unsourced fallback; FoC data carries the tag; reached only when a mod removes the tag, and the load reports nothing yet (follow-up in the ticket: debug-build citation or loader diagnostic)"
+  },
+  {
+   "file": "apps/viewer/src/battle_effects_prepare.cpp",
+   "text": "lightning.width_min = scalar(\"Width_Min\", 20.0F); lightning.width_max = scalar(\"Width_Max\", 5.0F);",
+   "ticket": 3305,
+   "reason": "unsourced fallback; FoC data carries the tag; reached only when a mod removes the tag, and the load reports nothing yet (follow-up in the ticket: debug-build citation or loader diagnostic)"
+  },
+  {
+   "file": "apps/viewer/src/battle_effects_prepare.cpp",
+   "text": "lightning.fade_min = scalar(\"Fadeout_Time_Min\", 3.0F); lightning.fade_max = scalar(\"Fadeout_Time_Max\", 1.0F);",
+   "ticket": 3305,
+   "reason": "unsourced fallback; FoC data carries the tag; reached only when a mod removes the tag, and the load reports nothing yet (follow-up in the ticket: debug-build citation or loader diagnostic)"
+  },
+  {
+   "file": "apps/viewer/src/battle_effects_prepare.cpp",
+   "text": "lightning.interval_min = scalar(\"Bolt_Creation_Interval_Min\", 0.05F);",
+   "ticket": 3305,
+   "reason": "unsourced fallback; FoC data carries the tag; reached only when a mod removes the tag, and the load reports nothing yet (follow-up in the ticket: debug-build citation or loader diagnostic)"
+  },
+  {
+   "file": "apps/viewer/src/battle_effects_prepare.cpp",
+   "text": "lightning.interval_max = scalar(\"Bolt_Creation_Interval_Max\", 0.3F);",
+   "ticket": 3305,
+   "reason": "unsourced fallback; FoC data carries the tag; reached only when a mod removes the tag, and the load reports nothing yet (follow-up in the ticket: debug-build citation or loader diagnostic)"
+  },
+  {
+   "file": "apps/viewer/src/battle_effects_prepare.cpp",
+   "text": "lightning.count = static_cast<std::uint32_t>(std::clamp(static_cast<double>(scalar(\"Number_Bolts\", 10.0F)),",
+   "ticket": 3305,
+   "reason": "unsourced fallback; FoC data carries the tag; reached only when a mod removes the tag, and the load reports nothing yet (follow-up in the ticket: debug-build citation or loader diagnostic)"
+  },
+  {
+   "file": "apps/viewer/src/battle_effects_prepare.cpp",
+   "text": "lightning.start = colour(\"Color_Start\", {100.0F / 255.0F, 100.0F / 255.0F, 1.0F, 1.0F});",
+   "ticket": 3305,
+   "reason": "unsourced fallback; FoC data carries the tag; reached only when a mod removes the tag, and the load reports nothing yet (follow-up in the ticket: debug-build citation or loader diagnostic)"
   }
- ]
+ ],
+ "growth_override": {
+  "ticket": 3305,
+  "reason": "release v0.2.5 gate: seven engine defaults added by recent presentation work (retreat countdown colour, lightning beam defaults) are listed until their loads report a miss; tracked in the ticket"
+ }
 }

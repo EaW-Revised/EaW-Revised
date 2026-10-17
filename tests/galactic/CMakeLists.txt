@@ -43,8 +43,18 @@ add_test(NAME galactic_s2_loop COMMAND galactic_s2_loop_tests)
 set_tests_properties(galactic_s2_loop PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_test(NAME galactic_purchase_ground_roster COMMAND galactic_s2_loop_tests --purchase-only)
 set_tests_properties(galactic_purchase_ground_roster PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
+add_executable(galactic_live_battle_ai_tests live_battle_ai_tests.cpp)
+target_include_directories(galactic_live_battle_ai_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+target_link_libraries(galactic_live_battle_ai_tests PRIVATE eawr::campaign eawr::platform eawr::presentation)
+target_compile_features(galactic_live_battle_ai_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_live_battle_ai_tests)
+eawr_add_game_data_test(NAME galactic_live_battle_ai_native_off COMMAND galactic_live_battle_ai_tests)
+set_tests_properties(galactic_live_battle_ai_native_off PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
+eawr_add_game_data_test(NAME galactic_live_battle_ai_native_on COMMAND galactic_live_battle_ai_tests --galactic-ai-on)
+set_tests_properties(galactic_live_battle_ai_native_on PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_executable(galactic_live_campaign_setup_tests live_campaign_setup_tests.cpp)
 target_link_libraries(galactic_live_campaign_setup_tests PRIVATE eawr::campaign eawr::checkpoint eawr::platform eawr::ui_model)
+target_include_directories(galactic_live_campaign_setup_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
 target_compile_features(galactic_live_campaign_setup_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(galactic_live_campaign_setup_tests)
 add_test(NAME galactic_live_campaign_setup_contracts COMMAND galactic_live_campaign_setup_tests)
@@ -54,6 +64,10 @@ add_test(NAME galactic_starting_tech_stock COMMAND galactic_live_campaign_setup_
 set_tests_properties(galactic_starting_tech_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_test(NAME galactic_accepted_starting_tech_stock COMMAND galactic_live_campaign_setup_tests --accepted-starting-tech)
 set_tests_properties(galactic_accepted_starting_tech_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
+eawr_add_game_data_test(NAME galactic_origin_starbase_stock COMMAND galactic_live_campaign_setup_tests --origin-starbases)
+set_tests_properties(galactic_origin_starbase_stock PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
+eawr_add_game_data_test(NAME galactic_unscouted_intel_stock COMMAND galactic_live_campaign_setup_tests --unscouted-intel)
+set_tests_properties(galactic_unscouted_intel_stock PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_executable(galactic_income_tests income_tests.cpp)
 target_link_libraries(galactic_income_tests PRIVATE eawr::campaign eawr::checkpoint eawr::platform)
 target_compile_features(galactic_income_tests PRIVATE cxx_std_20)
@@ -173,6 +187,7 @@ add_executable(galactic_viewer_view_tests
     galactic_viewer_view_tests.cpp
     "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/galaxy_view.cpp"
     "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/galaxy_snapshot_stub.cpp"
+    "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/planet_hud.cpp"
 )
 target_include_directories(galactic_viewer_view_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/include"
@@ -558,12 +573,22 @@ target_link_libraries(galactic_live_battle_dialog_tests PRIVATE eawr::campaign e
 target_compile_features(galactic_live_battle_dialog_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(galactic_live_battle_dialog_tests)
 add_test(NAME galactic_live_battle_dialog COMMAND galactic_live_battle_dialog_tests)
+# GC #4030: installed live campaign with the native AI; the local seat's battle dialog opens only for its own conflicts.
+add_executable(galactic_uninvolved_conflict_ui_tests uninvolved_conflict_ui_stock_tests.cpp)
+target_include_directories(galactic_uninvolved_conflict_ui_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+target_link_libraries(galactic_uninvolved_conflict_ui_tests PRIVATE eawr::campaign eawr::platform eawr::presentation)
+target_compile_features(galactic_uninvolved_conflict_ui_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_uninvolved_conflict_ui_tests)
+eawr_add_game_data_test(NAME galactic_uninvolved_conflict_ui_stock COMMAND galactic_uninvolved_conflict_ui_tests 12500)
+set_tests_properties(galactic_uninvolved_conflict_ui_stock PROPERTIES LABELS game-data TIMEOUT 7200 RUN_SERIAL TRUE
+    ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
 
 add_executable(galactic_invasion_publication_tests invasion_publication_tests.cpp)
 target_link_libraries(galactic_invasion_publication_tests PRIVATE eawr::campaign eawr::platform)
 target_compile_features(galactic_invasion_publication_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(galactic_invasion_publication_tests)
 add_test(NAME galactic_invasion_publication COMMAND galactic_invasion_publication_tests)
+eawr_add_python_contract(python_presentation_renderer_live_launch_slot_roster tests.presentation.renderer.test_live_launch_slot_roster)
 eawr_add_python_contract(python_presentation_renderer_gc_space_cycle tests.presentation.renderer.test_viewer_gc_space_cycle)
 set_tests_properties(python_presentation_renderer_gc_space_cycle PROPERTIES LABELS gpu)
 add_executable(galactic_space_entry_tests space_entry_tests.cpp)
@@ -578,6 +603,8 @@ add_test(NAME galactic_space_population_stock COMMAND galactic_space_entry_tests
 set_tests_properties(galactic_space_population_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 set_tests_properties(galactic_space_entry_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_test(NAME galactic_space_garrison_stock COMMAND galactic_space_entry_tests --installed-garrison)
+add_test(NAME galactic_space_superweapon_stock COMMAND galactic_space_entry_tests --installed-superweapon)
+set_tests_properties(galactic_space_superweapon_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 set_tests_properties(galactic_space_garrison_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_executable(galactic_space_rules_tests space_rules_tests.cpp)
 target_link_libraries(galactic_space_rules_tests PRIVATE eawr::campaign eawr::platform eawr::checkpoint)
@@ -697,12 +724,28 @@ eawr_add_game_data_test(NAME galactic_ai_digest_benchmark_stock COMMAND galactic
 set_tests_properties(galactic_ai_digest_benchmark_stock PROPERTIES LABELS game-data ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
 
 # WGA-01..05/GFD-A04: lane A shared copied-input and capability contract.
-add_executable(galactic_ai_selector_runtime_tests ai_selector_runtime_tests.cpp)
+add_executable(galactic_ai_selector_runtime_tests ai_selector_runtime_tests.cpp ai_synchronized_staging_tests.cpp)
 target_include_directories(galactic_ai_selector_runtime_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
 target_link_libraries(galactic_ai_selector_runtime_tests PRIVATE eawr::script_foc eawr::platform)
 target_compile_features(galactic_ai_selector_runtime_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(galactic_ai_selector_runtime_tests)
 add_test(NAME galactic_ai_selector_runtime_contracts COMMAND galactic_ai_selector_runtime_tests)
+
+add_executable(galactic_ai_frontier_runtime_tests ai_frontier_runtime_tests.cpp)
+target_include_directories(galactic_ai_frontier_runtime_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
+target_link_libraries(galactic_ai_frontier_runtime_tests PRIVATE eawr::checkpoint eawr::platform)
+target_compile_features(galactic_ai_frontier_runtime_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_ai_frontier_runtime_tests)
+eawr_add_game_data_test(NAME galactic_ai_frontier_stock COMMAND galactic_ai_frontier_runtime_tests)
+set_tests_properties(galactic_ai_frontier_stock PROPERTIES LABELS game-data ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0" TIMEOUT 3600)
+
+# #3903: single-record perception encoders equal the whole-state encoder and allocate nothing warm.
+add_executable(galactic_ai_perception_encoding_tests ai_perception_encoding_tests.cpp)
+target_include_directories(galactic_ai_perception_encoding_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
+target_link_libraries(galactic_ai_perception_encoding_tests PRIVATE eawr::script_foc eawr::platform)
+target_compile_features(galactic_ai_perception_encoding_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_ai_perception_encoding_tests)
+add_test(NAME galactic_ai_perception_encoding_contracts COMMAND galactic_ai_perception_encoding_tests)
 
 add_executable(galactic_ai_selector_stock_tests ai_selector_stock_tests.cpp)
 target_include_directories(galactic_ai_selector_stock_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
@@ -746,6 +789,16 @@ add_test(NAME galactic_ai_lifecycle_contracts COMMAND galactic_ai_lifecycle_test
 eawr_add_game_data_test(NAME galactic_ai_lifecycle_loading_stock COMMAND galactic_ai_lifecycle_tests --installed)
 set_tests_properties(galactic_ai_lifecycle_loading_stock PROPERTIES LABELS game-data)
 add_test(NAME galactic_ai_lifecycle_state_contracts COMMAND galactic_ai_lifecycle_tests --state)
+foreach(workers IN ITEMS 1 2 4 8)
+    add_test(NAME galactic_ai_bounded_diagnostics_${workers} COMMAND galactic_ai_lifecycle_tests --bounded ${workers})
+endforeach()
+# Shared immutable per-player policy snapshots: zero copies while unchanged, one per write/restore.
+add_executable(galactic_ai_policy_snapshot_tests ai_policy_snapshot_tests.cpp)
+target_include_directories(galactic_ai_policy_snapshot_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
+target_link_libraries(galactic_ai_policy_snapshot_tests PRIVATE eawr::script_foc eawr::script_galactic eawr::platform)
+target_compile_features(galactic_ai_policy_snapshot_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_ai_policy_snapshot_tests)
+add_test(NAME galactic_ai_policy_snapshot_contracts COMMAND galactic_ai_policy_snapshot_tests)
 # WGA-27..32/61/77/78: execution route publication and stock freestore admission.
 add_executable(galactic_ai_execution_tests ai_execution_stock_tests.cpp)
 target_include_directories(galactic_ai_execution_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
@@ -868,3 +921,58 @@ target_compile_features(galactic_ai_access_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(galactic_ai_access_tests)
 add_test(NAME galactic_ai_access_contracts COMMAND galactic_ai_access_tests)
 set_tests_properties(galactic_ai_access_contracts PROPERTIES ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=1")
+
+# S9-early (GC AI redesign): per-player galactic random streams and identity ranges, and the
+# partition-order tripwire over the galactic AI barrier. Synthetic fixtures, no game data.
+foreach(s9_test IN ITEMS ai_stream_ids ai_partition_order ai_player_state ai_perception_shards)
+    add_executable(galactic_${s9_test}_tests ${s9_test}_tests.cpp)
+    target_include_directories(galactic_${s9_test}_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
+    target_link_libraries(galactic_${s9_test}_tests PRIVATE eawr::script_foc eawr::platform)
+    target_compile_features(galactic_${s9_test}_tests PRIVATE cxx_std_20)
+    eawr_target_project_warnings(galactic_${s9_test}_tests)
+    add_test(NAME galactic_${s9_test}_contracts COMMAND galactic_${s9_test}_tests)
+endforeach()
+
+# Retail-cadence 600-frame campaign on the installed game: per-tick hashes and committed events equal on
+# 1/2/4/8 workers, and a save at the window midpoint restored on a different worker count continues equal.
+eawr_add_game_data_test(NAME galactic_ai_s9_retail600_stock COMMAND galactic_ai_campaign_tests --live-cadence
+    "${CMAKE_CURRENT_BINARY_DIR}/s9-retail600" 600)
+set_tests_properties(galactic_ai_s9_retail600_stock PROPERTIES LABELS game-data TIMEOUT 7200 RUN_SERIAL TRUE
+    ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
+
+# GC AI S3a: the world reader's structural index, fog bits and double-buffered view (synthetic, 1/2/4/8 workers).
+add_executable(galactic_ai_world_reader_tests ai_world_reader_tests.cpp)
+target_include_directories(galactic_ai_world_reader_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
+target_link_libraries(galactic_ai_world_reader_tests PRIVATE eawr::script_foc eawr::campaign eawr::platform)
+target_compile_features(galactic_ai_world_reader_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_ai_world_reader_tests)
+add_test(NAME galactic_ai_world_reader_contracts COMMAND galactic_ai_world_reader_tests)
+
+# WGA-485: bounded stock observation, matching the seed-1 idle-human day gate.
+add_executable(galactic_ai_synchronized_day_tests ai_synchronized_day_tests.cpp)
+target_include_directories(galactic_ai_synchronized_day_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
+target_link_libraries(galactic_ai_synchronized_day_tests PRIVATE eawr::checkpoint eawr::platform)
+target_compile_features(galactic_ai_synchronized_day_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_ai_synchronized_day_tests)
+eawr_add_game_data_test(NAME galactic_ai_synchronized_day_stock COMMAND galactic_ai_synchronized_day_tests)
+set_tests_properties(galactic_ai_synchronized_day_stock PROPERTIES LABELS "game-data;observation" TIMEOUT 3600 RUN_SERIAL TRUE
+    ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
+
+# #3944: seeded idle-human day run of the stock Underworld AI (Underworld is an AI seat in Sandbox_Equal_Footing_Empire).
+add_executable(galactic_ai_underworld_day_tests ai_underworld_day_tests.cpp)
+target_include_directories(galactic_ai_underworld_day_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
+target_link_libraries(galactic_ai_underworld_day_tests PRIVATE eawr::checkpoint eawr::platform)
+target_compile_features(galactic_ai_underworld_day_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_ai_underworld_day_tests)
+eawr_add_game_data_test(NAME galactic_ai_underworld_day_stock COMMAND galactic_ai_underworld_day_tests 5400)
+eawr_add_game_data_test(NAME galactic_ai_underworld_day_workers COMMAND galactic_ai_underworld_day_tests --equality 1800)
+set_tests_properties(galactic_ai_underworld_day_stock galactic_ai_underworld_day_workers PROPERTIES LABELS "game-data;observation"
+    TIMEOUT 14400 RUN_SERIAL TRUE ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
+
+add_executable(galactic_notice_text_tests notice_text_tests.cpp)
+target_include_directories(galactic_notice_text_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src" "${PROJECT_SOURCE_DIR}/tests/ui")
+target_link_libraries(galactic_notice_text_tests PRIVATE eawr::ui_data)
+target_compile_features(galactic_notice_text_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_notice_text_tests)
+add_test(NAME galactic_notice_text COMMAND galactic_notice_text_tests)
+set_tests_properties(galactic_notice_text PROPERTIES LABELS "game-data" SKIP_REGULAR_EXPRESSION "corpus: skipped")

@@ -205,6 +205,14 @@ void append_spawner(std::vector<std::uint8_t>& bytes, const EntityId id, const S
         sim::detail::append_i64(bytes, entry.alive);
         sim::detail::append_i64(bytes, entry.remaining);
     }
+    // WSL-16: station-only sessions without ship entries keep their exact encoding.
+    if (!state.ships.empty()) {
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(state.ships.size()));
+        for (const auto& ship : state.ships) {
+            sim::detail::append_u64(bytes, ship.id);
+            sim::detail::append_u32(bytes, ship.entry);
+        }
+    }
 }
 
 // Canonical motion record (docs/replay-format.md): kind, zero, start tick, start position, start
@@ -273,6 +281,26 @@ TacticalSnapshot::TacticalSnapshot(
     ability_spawns_ = std::move(ability_spawns);
     garrison_timers_ = std::move(garrison_timers);
     beacons_ = std::move(beacons);
+    // WST-13: publish the same team visibility as combat and command admission. This folds
+    // completed member flags only, including initial/restored snapshots; no ability is serviced here.
+    const auto find = [&](const EntityId id) {
+        return std::lower_bound(instances_.begin(), instances_.end(), id,
+            [](const TacticalInstance& instance, const EntityId value) { return instance.entity_id < value; });
+    };
+    for (const auto& squadron : squadrons_) {
+        const auto container = find(squadron.container);
+        if (container == instances_.end() || container->entity_id != squadron.container) continue;
+        bool any = false, on = true, hidden = true;
+        for (const auto member : squadron.members) {
+            const auto craft = find(member);
+            if (craft == instances_.end() || craft->entity_id != member) continue;
+            any = true;
+            on = on && craft->stealth_on;
+            hidden = hidden && craft->stealth_invisible;
+        }
+        container->stealth_on = any && on;
+        container->stealth_invisible = any && hidden;
+    }
 }
 
 std::vector<BeaconState> TacticalSnapshot::visible_beacons(const PlayerId observer) const {

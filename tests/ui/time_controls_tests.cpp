@@ -85,17 +85,19 @@ void test_battle_messages() {
     root.name = "GameConstants";
     root.children = {tag("Win_Message_Color", "223, 243, 255, 255"), tag("Lose_Message_Color", " 255, 244, 223, 255 "),
                      tag("Win_Lose_Message_Font", "EmpireAtWar-Bold"), tag("Win_Lose_Message_Font_Size", " 36 "),
-                     tag("Win_Lose_Message_Font_Size", " 24 "), tag("Battle_Pending_Message_Color", "255, 32, 32, 240")};
+                     tag("Win_Lose_Message_Font_Size", " 24 "), tag("Battle_Pending_Message_Color", "255, 32, 32, 240"),
+                     tag("GUI_Tactical_Countdown_Timers_Screen_X", " 0.005 "), tag("GUI_Tactical_Countdown_Timers_Screen_Y", "0.25")};
     const ui::BattleMessageLooks looks = ui::battle_message_looks(root);
     expect(looks.diagnostics.empty(), "the FoC constants parse without warnings");
     expect(looks.point_size == 24, "the last Win_Lose_Message_Font_Size wins");
     expect(looks.win == data::ui::Rgba8{223, 243, 255, 255} && looks.lose == data::ui::Rgba8{255, 244, 223, 255}
                && looks.pending == data::ui::Rgba8{255, 32, 32, 240} && looks.font == "EmpireAtWar-Bold",
            "BE-03 and TM-09 looks");
+    expect(looks.countdown_x == 0.005 && looks.countdown_y == 0.25, "RP-06: the tactical countdown line position comes from GameConstants");
     data::XmlNode broken;
     broken.children = {tag("Win_Message_Color", "223, 243, 255"), tag("Win_Lose_Message_Font_Size", "big")};
     const ui::BattleMessageLooks fallback = ui::battle_message_looks(broken);
-    expect(fallback.win == data::ui::Rgba8{223, 243, 255, 255} && fallback.point_size == 24 && fallback.diagnostics.size() == 5,
+    expect(fallback.win == data::ui::Rgba8{223, 243, 255, 255} && fallback.point_size == 24 && fallback.diagnostics.size() == 7,
            "missing or malformed constants keep the FoC values, one warning each");
     expect(ui::battle_message_key(ui::BattleResult::victory) == "TEXT_WIN_TACTICAL"
                && ui::battle_message_key(ui::BattleResult::defeat) == "TEXT_LOSE_TACTICAL",

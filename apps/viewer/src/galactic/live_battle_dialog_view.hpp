@@ -9,6 +9,9 @@ struct LiveBattleDialogNames {
     std::function<BattleDialogSide(sim::galactic::PlayerId)> side;
     std::function<std::string(sim::galactic::TypeId)> force;
     std::function<std::string(sim::galactic::TypeId)> original_type;
+    // WGUI-176: Icon_Name and Tactical_Health of a force's type, for the pending shell's centre graphs.
+    std::function<std::string(sim::galactic::TypeId)> force_icon;
+    std::function<std::optional<float>(sim::galactic::TypeId)> force_health;
     std::function<std::string(sim::tactical::TypeId)> tactical_type;
     std::function<CampaignResultType(std::string_view)> type;
     std::function<std::string(sim::galactic::PlayerId, bool)> space_picture;
@@ -95,6 +98,7 @@ private:
     }
     const auto describe = [&](std::uint64_t planet, sim::galactic::PlayerId defender, sim::galactic::PlayerId invader) {
         view.involved = local == defender || local == invader;
+        view.local_invader = local == invader;
         const bool progress_observer = !view.involved && frame.auto_resolve_progress
             && admission && frame.auto_resolve_progress->conflict == admission->id;
         if (!progress_observer) view.planet = names.planet(planet);
@@ -105,12 +109,16 @@ private:
         const auto& entry = pending.conflict;
         // WGM-178: only the space initializer has the multiplayer bypass.
         // Read the pinned campaign mode; a live human-seat count is not that mode.
+        const bool multiplayer = frame.latest && frame.latest->victory() && frame.latest->victory()->context.multiplayer;
         if (entry.layer == campaign::BattleLayer::space && frame.auto_resolve_progress
-            && frame.auto_resolve_progress->conflict == entry.id && frame.latest && frame.latest->victory()
-            && frame.latest->victory()->context.multiplayer) return {};
+            && frame.auto_resolve_progress->conflict == entry.id && multiplayer) return {};
+        // WAR-02/WGM-173: a solo conflict the local player is not part of resolves instantly and bypasses the
+        // pending alert and the progress dialog; nothing opens for it. (Whether a multiplayer
+        // uninvolved seat gets the alert stays unverified, WGM-BP-U02, and keeps its earlier projection.)
+        if (!multiplayer && local != entry.defender && local != entry.invader) return {};
         view.conflict = entry.id;
         view.pending_land = entry.layer == campaign::BattleLayer::land;
-        view.pending_multiplayer = frame.latest && frame.latest->victory() && frame.latest->victory()->context.multiplayer;
+        view.pending_multiplayer = multiplayer;
         describe(entry.planet, entry.defender, entry.invader);
         view.phase = BattleDialogPhase::choice;
         view.choice_ready = pending.choice_ready;
@@ -137,8 +145,21 @@ private:
         // H073/H074 remain WGM-BP-U01 seams; no extra modal or pending retreat.
         if (pending.arbitration.forced_tactical && !tactical_available && view.refusal.empty())
             view.refusal = "This conflict requires a tactical battle.";
-        if (view.involved && !frame.auto_resolve_progress) for (const auto& force : entry.forces)
-            view.sides[force.owner == entry.defender ? 0 : 1].combatants.push_back(names.force(force.type));
+        if (view.involved && !frame.auto_resolve_progress) {
+            // WGUI-176: per side, the unit count and the best ship (greatest Tactical_Health, first on a tie).
+            std::array<std::optional<float>, 2> best_health;
+            for (const auto& force : entry.forces) {
+                const auto index = force.owner == entry.defender ? 0U : 1U;
+                view.sides[index].combatants.push_back(names.force(force.type));
+                ++view.sides[index].units;
+                const auto icon = names.force_icon ? names.force_icon(force.type) : std::string{};
+                if (icon.empty()) continue;
+                const auto health = names.force_health ? names.force_health(force.type) : std::nullopt;
+                const bool better = view.sides[index].best_icon.empty()
+                    || (health && (!best_health[index] || *health > *best_health[index]));
+                if (better) { view.sides[index].best_icon = icon; if (health) best_health[index] = health; }
+            }
+        }
         if (frame.auto_resolve_progress && frame.auto_resolve_progress->conflict == entry.id) {
             const auto& progress = *frame.auto_resolve_progress;
             view.phase = BattleDialogPhase::progress;

@@ -41,6 +41,7 @@
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -443,6 +444,10 @@ public:
     [[nodiscard]] const ui::BattleResults& results() const noexcept { return results_; }
     // WBF-43/48: active Quit records an intentional departure; results Exit returns to staging.
     void quit();
+    // The in-game menu's confirmed Quit Game: the same intentional departure as the HUD's quit, but the
+    // battle's end goes straight to the owner (no result screen). False when the battle cannot be left
+    // yet (still loading).
+    [[nodiscard]] bool leave();
     // The units the last frame drew for the local player (#82 selection and orders).
     [[nodiscard]] const std::vector<VisibleUnit>& visible_units() const noexcept { return visible_; }
     struct RadarMemory final {
@@ -511,6 +516,7 @@ public:
     void save_failure_replay();
     // The report's "live_session" member, followed by ",\n".
     void write_report(std::ostream& output) const;
+    [[nodiscard]] std::string slotless_report_rows() const;
 
     // What the battle effects (#80) read after each frame(): the two snapshots the poses
     // interpolate, the blend, the events of the ticks newly reached by this frame (oldest first,
@@ -710,6 +716,8 @@ private:
     std::optional<std::uint64_t> preview_checked_tick_;
     std::vector<std::string> preview_rows_;
     std::size_t slots_released_{};  // slots freed by a unit leaving the snapshot (report: slots_released)
+    // #3957: the live units of (owner, type) that found no launch slot, so were simulated but not drawn (report: slotless).
+    std::map<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>, std::set<sim::EntityId>> slotless_hits_;
     std::map<sim::EntityId, std::size_t> launched_ship_of_entity_;
     std::map<sim::EntityId, sim::tactical::PlayerId> owner_of_entity_;
     std::map<sim::EntityId, sim::EntityId> squadron_of_;
@@ -835,6 +843,8 @@ private:
     // #453.
     std::optional<BattleEnd> battle_end_;
     bool quit_{};
+    // leave() is waiting for the departure to end the battle; the result screen is skipped.
+    bool leave_on_end_{};
     Phase phase_{Phase::loading};
     std::optional<std::uint64_t> ready_tick_;
     std::optional<std::uint64_t> begin_tick_;

@@ -1,4 +1,5 @@
 #include "galactic_support.hpp"
+#include "eawr/campaign/conflict.hpp"
 #include "eawr/campaign/conflict_policy.hpp"
 
 namespace {
@@ -179,6 +180,113 @@ void defended_landing() {
             && campaign::admits_land_conflict(presence.value()), "land admission retains transport identity and separate ground-base defense");
     }
 }
+void counterattack_space_defender() {
+    namespace gc = sim::galactic;
+    // #3958: player 1 owns the planet; player 2 holds its orbit; a player 1 fleet arrives. Retail never reads the planet
+    // owner for the space defender: it is the first non-stealth orbiting fleet owner that differs from the invader.
+    const auto presence_for = [](gc::PlayerId planet_owner, std::vector<gc::Fleet> fleets, gc::PlayerId starbase_owner, std::uint32_t starbase_level, bool hostile_stealth = false,
+        std::vector<std::pair<gc::FleetId, std::uint32_t>> arrivals = {}) {
+        gc::GalacticSetup s; s.players = {{1, 1, 0}, {2, 2, 0}, {3, 3, 0}};
+        s.seats = {{{1}, 1, gc::SeatKind::human, 0, true, 1}};
+        s.planets = {{1, {}, planet_owner}}; s.fleets = std::move(fleets);
+        s.rules.maximum_fleet_movement_distance = f(1);
+        // Arrivals: those fleets start at planet 2 and are ordered into planet 1's orbit one tick apart, so the orbit-entry
+        // order differs from the snapshot's id order. The session numbers orbit entries only with movement inputs.
+        const bool ordered_arrivals = !arrivals.empty();
+        s.debug_commands = ordered_arrivals;
+        if (ordered_arrivals) {
+            s.planets.push_back({2, {f(12), {}, {}}, planet_owner});
+            s.seats = {{{1}, 1, gc::SeatKind::human, 0, true, 1}, {{2}, 2, gc::SeatKind::human, 1, true, 2}, {{3}, 3, gc::SeatKind::human, 2, true, 2}};
+            s.fleet_control.emplace(); s.fleet_control->types = {{1, true, true, true}};
+            s.movement.emplace(); auto& m = *s.movement;
+            m.mode_modifier = f(1); m.types = {{1, f(1), f(1), 0, true, false, false, false}}; m.planets = {{1, f(1), false}, {2, f(1), false}};
+            for (const auto& p : s.players) for (const auto& q : s.planets) {
+                if (q.id == 1) m.players.push_back({p.player_id, f(1), f(1), false});
+                m.access.push_back({p.player_id, q.id, true, false});
+            }
+        }
+        s.control.emplace(); auto& c = *s.control;
+        c.change_seconds = f(1); c.max_ground_forces = 10;
+        c.players = {{1, false, true, 1}, {2, false, true, 2}, {3, true, false, 3}};
+        for (const auto& a : c.players) for (const auto& b : c.players)
+            c.relations.push_back({a.player, b.player, a.player == b.player});
+        c.types = {{1, 0, false, true}};
+        gc::ControlPlanet surface; surface.planet = 1; surface.type = 30; surface.surface_accessible = true;
+        surface.starbase = {starbase_owner, starbase_level}; surface.ground_base = {planet_owner, 1}; c.planets = {surface};
+        if (ordered_arrivals) { auto other = surface; other.planet = 2; other.type = 31; other.starbase = {}; c.planets.push_back(other); }
+        gc::PlanetControl state; state.planet = 1; state.initialized = true; // the planet owner is carried by its political state
+        state.current_player = state.target_player = planet_owner; state.current = state.target = f(1); c.state = {state};
+        if (ordered_arrivals) { auto other = state; other.planet = 2; c.state.push_back(other); }
+        auto created = gc::GalacticSession::create(s);
+        expect(bool(created), "counterattack fixture validates");
+        if (!created) { std::cerr << created.error().message << '\n'; return campaign::LayerPresence{}; }
+        auto world = std::move(created).value();
+        expect(world.snapshot()->planets().front().owner == planet_owner, "the fixture keeps the declared planet owner");
+        const sim::InlineExecutor executor;
+        std::uint64_t sequence = 0;
+        for (const auto& [fleet_id, seat] : arrivals) {
+            const auto ordered = world.submit(galactic_test::orbit(world.snapshot()->completed_tick(), gc::SeatId{seat}, ++sequence, fleet_id, 1));
+            expect(bool(ordered), "the fixture submits an arrival into planet 1's orbit");
+            if (!ordered) { std::cerr << ordered.error().message << '\n'; continue; }
+            const auto stepped = world.step(executor);
+            expect(bool(stepped), "the fixture steps an arrival into planet 1's orbit");
+            if (!stepped) std::cerr << stepped.error().message << '\n';
+        }
+        gc::GalacticEvent request; request.kind = gc::GalacticEventKind::movement_conflict;
+        request.subject = 10; request.value = 1;
+        return campaign::collect_conflict_presence(*world.snapshot(), request,
+            [hostile_stealth](const gc::FleetMember& member, gc::PlayerId owner, sim::EntityId parent) {
+                auto row = force(member.id, owner, member.type); row.force.parent = parent;
+                row.skips_combat = hostile_stealth && owner != 1 && owner != 2;
+                return core::Result<campaign::AdmissionForce>::success(row);
+            }, [](const auto&) { return core::Result<campaign::OuterFleetFacts>::success({false, true, true, false}); }).value();
+    };
+    const auto shown = [](const campaign::LayerPresence& p) {
+        return " [invader " + std::to_string(p.invader) + " defender " + std::to_string(p.defender) + " admits " + std::to_string(campaign::admits_space_conflict(p)) + "]";
+    };
+    auto presence = presence_for(1, {{10, 1, 1, {{20, 1}}}, {11, 2, 1, {{21, 1}}}}, 0, 0);
+    expect(presence.invader == 1 && presence.defender == 2, std::string("#3958 hostile orbit holder defends the planet owner's own orbit") + shown(presence));
+    expect(campaign::admits_space_conflict(presence), std::string("#3958 planet owner's counterattack into a hostile orbit admits a space conflict") + shown(presence));
+    presence = presence_for(2, {{10, 1, 1, {{20, 1}}}, {11, 2, 1, {{21, 1}}}}, 0, 0);
+    expect(presence.defender == 2 && campaign::admits_space_conflict(presence), std::string("ordinary attack on an enemy planet is unchanged") + shown(presence));
+    // The AI submits the same arrival, so its counterattack into its own blockaded planet resolves identically.
+    presence = presence_for(2, {{10, 2, 1, {{20, 1}}}, {11, 1, 1, {{21, 1}}}}, 0, 0);
+    expect(presence.invader == 2 && presence.defender == 1 && campaign::admits_space_conflict(presence),
+        std::string("#3958 an AI planet owner's counterattack into a human-held orbit admits a space conflict") + shown(presence));
+    presence = presence_for(1, {{10, 1, 1, {{20, 1}}}, {11, 1, 1, {{22, 1}}}, {12, 3, 1, {{21, 1}}}, {13, 2, 1, {{23, 1}}}}, 0, 0);
+    expect(presence.defender == 3, std::string("defender is the first hostile orbit fleet in orbit order, not the planet owner") + shown(presence));
+    presence = presence_for(1, {{10, 1, 1, {{20, 1}}}}, 2, 1);
+    expect(presence.defender == 2 && campaign::admits_space_conflict(presence), std::string("a hostile starbase defends when no hostile fleet is in orbit") + shown(presence));
+    presence = presence_for(1, {{10, 1, 1, {{20, 1}}}, {11, 3, 1, {{21, 1}}}}, 0, 0, true);
+    expect(presence.defender == 0 && !campaign::admits_space_conflict(presence), std::string("a stealth-only hostile orbit supplies no defender") + shown(presence));
+    presence = presence_for(1, {{10, 1, 1, {{20, 1}}}, {11, 3, 1, {{21, 1}}}, {13, 2, 1, {{23, 1}}}}, 0, 0, true);
+    expect(presence.defender == 2 && campaign::admits_space_conflict(presence), std::string("a stealth fleet is skipped for the next hostile orbit fleet") + shown(presence));
+    presence = presence_for(2, {{10, 1, 1, {{20, 1}}}}, 1, 1);
+    expect(presence.defender == 0 && !campaign::admits_space_conflict(presence), std::string("planet owner alone, with the invader's own starbase, has no defender") + shown(presence));
+    presence = presence_for(2, {{10, 1, 1, {{20, 1}}}}, 2, 1);
+    expect(presence.defender == 2 && campaign::admits_space_conflict(presence), std::string("an enemy planet owner defends with only its starbase and no orbit fleet") + shown(presence));
+    // The orbit list is ordered by orbit entry, not by the snapshot's id order: fleet 13 (owner 3) enters the orbit before
+    // fleet 12 (owner 2), so without the sort the id-ordered scan would pick owner 2.
+    presence = presence_for(1, {{10, 1, 1, {{20, 1}}}, {12, 2, 2, {{22, 1}}}, {13, 3, 2, {{23, 1}}}}, 0, 0, false, {{13, 3}, {12, 2}});
+    expect(presence.defender == 3, std::string("the defender is the orbit-entry winner, not the first fleet by id") + shown(presence));
+    presence = presence_for(1, {{10, 1, 1, {{20, 1}}}, {12, 2, 2, {{22, 1}}}, {13, 3, 2, {{23, 1}}}}, 0, 0, false, {{12, 2}, {13, 3}});
+    expect(presence.defender == 2, std::string("the orbit-entry order moves the defender with it") + shown(presence));
+    // The tactical station follows the starbase owner when that owner is a battle side, otherwise it joins the defender.
+    const auto station_owner_for = [&](const campaign::LayerPresence& p) {
+        campaign::ConflictRecord record; record.invader = p.invader; record.defender = p.defender;
+        record.station_owner = p.starbase_level ? p.starbase_owner : 0;
+        return std::pair(record.station_owner, campaign::station_side(record));
+    };
+    presence = presence_for(1, {{10, 1, 1, {{20, 1}}}, {11, 2, 1, {{21, 1}}}}, 1, 1);
+    expect(presence.defender == 2 && campaign::admits_space_conflict(presence) && station_owner_for(presence) == std::pair<gc::PlayerId, gc::PlayerId>(1, 1),
+        std::string("counterattack: the planet owner's own starbase keeps fighting for it, not for the orbit holder") + shown(presence));
+    presence = presence_for(2, {{10, 1, 1, {{20, 1}}}, {11, 2, 1, {{21, 1}}}}, 2, 1);
+    expect(presence.defender == 2 && station_owner_for(presence) == std::pair<gc::PlayerId, gc::PlayerId>(2, 2),
+        std::string("ordinary attack: the defender's own starbase stays with the defender") + shown(presence));
+    presence = presence_for(2, {{10, 1, 1, {{20, 1}}}, {12, 3, 1, {{23, 1}}}}, 2, 1);
+    expect(presence.defender == 3 && station_owner_for(presence) == std::pair<gc::PlayerId, gc::PlayerId>(2, 3),
+        std::string("3-player attack: a third party's starbase reduces its own owner's base but fights on the defender's side") + shown(presence));
+}
 void pending_alert() {
     campaign::ConflictRecord conflict; conflict.invader = 1; conflict.defender = 2;
     campaign::PendingBattleAlertInputs inputs;
@@ -214,5 +322,43 @@ void pending_alert() {
         "local nonparticipation blanks graphs; owner admission controls actions independently of alert visibility");
 }
 
+void mixed_defender_selection() {
+    namespace gc = sim::galactic;
+    gc::GalacticSetup s; s.players = {{1, 1, 0}, {2, 2, 0}, {3, 3, 0}};
+    s.seats = {{{1}, 1, gc::SeatKind::human, 0, true, 1}};
+    s.planets = {{1, {}, 2}}; s.fleets = {{10, 1, 1, {{20, 1}}}};
+    s.rules.maximum_fleet_movement_distance = f(1);
+    s.control.emplace(); auto& c = *s.control;
+    c.change_seconds = f(1); c.max_ground_forces = 10;
+    c.players = {{1, false, true, 1}, {2, false, true, 2}, {3, true, false, 3}};
+    for (const auto& a : c.players) for (const auto& b : c.players)
+        c.relations.push_back({a.player, b.player, a.player == b.player});
+    c.types = {{1, 0, false, true}};
+    gc::ControlPlanet surface; surface.planet = 1; surface.type = 30; surface.surface_accessible = true;
+    surface.landed = {{30, 1, 1}, {31, 1, 2}, {32, 1, 3}}; c.planets = {surface};
+    gc::PlanetControl state; state.planet = 1; state.initialized = true;
+    state.current_player = 2; state.current = state.target = f(1); c.state = {state};
+    for (const auto target : {0U, 1U, 2U, 3U, 4U}) {
+        c.state[0].target_player = target == 4 ? 2 : target;
+        c.planets[0].ground_base = target == 4 ? gc::ControlBase{3, 1} : gc::ControlBase{};
+        auto world = gc::GalacticSession::create(s).value();
+        gc::GalacticEvent request; request.kind = gc::GalacticEventKind::land_conflict_requested;
+        request.subject = 10; request.value = 1;
+        auto presence = campaign::collect_conflict_presence(*world.snapshot(), request,
+            [](const gc::FleetMember& member, gc::PlayerId owner, sim::EntityId parent) {
+                auto row = force(member.id, owner, member.type); row.force.parent = parent;
+                row.transport = row.ground_capable = true;
+                return core::Result<campaign::AdmissionForce>::success(row);
+            }, [](const auto&) { return core::Result<campaign::OuterFleetFacts>::success({false, true, true, false}); }).value();
+        expect(presence.defender == (target == 4 ? 3U : target == 0 || target == 3 ? 1U : target),
+            "WGS-186 collected defender uses base, then nonneutral target, then first linked owner");
+        expect(presence.landed.size() == 3 && presence.landed[0].force.owner == 1
+            && presence.landed[1].force.owner == 2 && presence.landed[2].force.owner == 3,
+            "mixed conflict roster preserves all three original owners");
+    }
+    c.state[0].target_player = 99;
+    expect(!gc::GalacticSession::create(s), "unknown target identities refuse before collected defender selection");
 }
-int main() { pending_alert(); admission(); arbitration(); selection(); defended_landing(); return galactic_test::failures ? 1 : 0; }
+
+}
+int main() { counterattack_space_defender(); mixed_defender_selection(); pending_alert(); admission(); arbitration(); selection(); defended_landing(); return galactic_test::failures ? 1 : 0; }

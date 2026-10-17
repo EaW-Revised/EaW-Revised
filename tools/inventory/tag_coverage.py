@@ -385,7 +385,7 @@ def scene_report(rows: dict[str, Row], registry: dict[str, Any], problems: list[
                 detail = f" for {consumer}" if consumer else ""
                 failures.append(f"{spelled[key]} is {row['status']} in the registry, "
                                 f"but no loader of the {scene_name} scene reads it{detail}")
-        if consumed and row["status"] in ("foc-ignores", "land-or-galactic", "multiplayer", "presentation-later"):
+        if consumed and row["status"] in ("foc-ignores", "land-or-galactic", "multiplayer", "presentation-later", "by-design"):
             read_but.append(f"{spelled[key]} ({row['status']})")
     value = {
         "consumed": sum(1 for consumed in scene.values() if consumed),

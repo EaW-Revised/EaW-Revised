@@ -108,6 +108,10 @@ public:
     // canonical order. Host traversal: charges nothing and never raises.
     [[nodiscard]] bool push_canonical_keys(int index);
 
+    // Raw host inspection: pushes a global without executing Lua or charging
+    // the temporary lookup key to the script's logical allocation quota.
+    void push_global(::std::string_view name);
+
     // Pushes the interned userdata of a handle onto `thread` (the state or one
     // of its coroutines), or reads one from its stack.
     void push_handle(lua_State* thread, HostHandle handle);

@@ -168,8 +168,12 @@ core::Result<SealedBatch> decode_batch(std::span<const std::uint8_t> frame) {
 LockstepSession::LockstepSession(SessionAdapter& adapter, MessageTransport& transport,
     std::vector<PeerSeat> seats, SessionOptions options, SessionMonitor* monitor)
     : adapter_(&adapter), transport_(&transport), seats_(std::move(seats)), options_(options), self_(transport.self()),
-      received_through_(seats_.size()), command_cursors_(seats_.size()), accepted_(seats_.size()), monitor_(monitor), departed_(seats_.size()), quit_in_batch_(seats_.size()), recovery_(seats_.size()),
-      next_policy_tick_(64 * std::max<std::uint64_t>(1, options.input_delay / 2)), initial_input_delay_(options.input_delay) {}
+      received_through_(seats_.size()), command_cursors_(seats_.size()), accepted_(seats_.size()), monitor_(monitor), departed_(seats_.size()), quit_in_batch_(seats_.size()), quit_seen_(seats_.size()), recovery_(seats_.size()),
+      next_policy_tick_(64 * std::max<std::uint64_t>(1, options.input_delay / 2)), initial_input_delay_(options.input_delay) {
+    last_sent_batch_.resize(seats_.size());
+    if (options_.mesh)
+        mesh_ = std::make_unique<MeshIncident>(transport, static_cast<MeshSeats>((1U << seats_.size()) - 1U), *options_.mesh);
+}
 
 core::Result<LockstepSession> LockstepSession::create(SessionAdapter& adapter, MessageTransport& transport,
     std::vector<PeerSeat> seats, SessionOptions options, SessionMonitor* monitor) {
@@ -184,6 +188,13 @@ core::Result<LockstepSession> LockstepSession::create(SessionAdapter& adapter, M
     for (const auto& seat : seats)
         if (seat.seat.value == 0 || !unique.insert(seat.seat).second)
             return refused<LockstepSession>(session_errors::options, "unbound or repeated seat");
+    if (options.mesh) {
+        const auto& mesh = *options.mesh;
+        if (mesh.host != 0 || count < 2 || mesh.repair_grace.count() < 0 || mesh.repair_grace > std::chrono::minutes(10)
+            || mesh.report_interval.count() <= 0 || mesh.report_interval > std::chrono::seconds(10) || mesh.report_freshness.count() <= 0
+            || (options.adaptive_timing && options.adaptive_timing->host != mesh.host))
+            return refused<LockstepSession>(mesh_errors::options, "invalid room mesh roster or incident options");
+    }
     if (options.reconnect) {
         const auto& reconnect = *options.reconnect;
         const auto nonzero = [](const auto& bytes) { return std::any_of(bytes.begin(), bytes.end(), [](auto byte) { return byte != 0; }); };
@@ -206,6 +217,12 @@ core::Result<LockstepSession> LockstepSession::create(SessionAdapter& adapter, M
         || options.resync->timeout_ms == 0 || options.resync->timeout_ms > max_recovery_timeout_ms
         || (options.reconnect->replay_control && !options.resync->replay_control)))
         return refused<LockstepSession>(resync_errors::options, "resync requires a monitor, retained setup/log and staging factory/control replay");
+    if (monitor && options.mesh) {
+        if (auto enabled = monitor->on_link_repair(transport.self(), [count](PeerIndex peer) {
+            return count >= 3 && peer < count;
+        }); !enabled)
+            return core::Result<LockstepSession>::failure(enabled.error());
+    }
     return core::Result<LockstepSession>::success(LockstepSession(adapter, transport, std::move(seats), options, monitor));
 }
 
@@ -274,7 +291,36 @@ core::Result<void> LockstepSession::replay_timing_control(std::span<const std::u
 }
 
 bool LockstepSession::timing_voter(PeerIndex peer) const noexcept {
-    return !departed_[peer] && !agreed_departures_.contains(peer);
+    return !departed_[peer] && !agreed_departures_.contains(peer) && !mesh_excluded(peer);
+}
+
+MeshSeats LockstepSession::mesh_voters() const noexcept {
+    MeshSeats voters{};
+    for (PeerIndex peer = 0; peer < seats_.size(); ++peer)
+        if (timing_voter(peer)) voters = static_cast<MeshSeats>(voters | mesh_seat(peer));
+    return voters;
+}
+
+MeshSeats LockstepSession::mesh_active() const noexcept {
+    MeshSeats active{};
+    for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
+        if (!timing_voter(peer)) continue;
+        // A seat never leaves its own set; the exclusions below are reported to the others in every link report.
+        if (peer != self_) {
+            if (quit_seen_[peer]) continue;
+            if (agreement_ && agreement_->target == peer && !agreement_->pair_loss) continue;
+            if (held_ && held_->target == peer) continue;
+        }
+        active = static_cast<MeshSeats>(active | mesh_seat(peer));
+    }
+    return active;
+}
+
+bool LockstepSession::timing_frozen() const noexcept {
+    if (!options_.adaptive_timing) return false;
+    const auto host = options_.adaptive_timing->host;
+    const auto link = host == self_ ? LinkState::open : transport_->link(host);
+    return mesh_timing_frozen(mesh_voters(), link) || (mesh_ && mesh_->running());
 }
 
 bool LockstepSession::can_replay_control(std::span<const std::uint8_t> bytes) const noexcept {
@@ -306,7 +352,7 @@ core::Result<void> LockstepSession::restore_future_timing(std::span<const std::u
 core::Result<void> LockstepSession::broadcast_timing(const Bytes& frame) {
     for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
         if (peer == self_ || !timing_voter(peer)) continue;
-        if (auto sent = transport_->send(peer, frame); !sent) return sent;
+        if (auto sent = send_mesh_control(peer, frame); !sent) return sent;
     }
     return core::Result<void>::success();
 }
@@ -370,6 +416,8 @@ core::Result<void> LockstepSession::advance_timing() {
                 return refused<void>(timing_errors::agreement, "timing voter stream closed");
             ready = ready && timing_->ready[peer];
         }
+        if (!ready && mesh_ && mesh_->running() && mesh_->state() != MeshLossState::settling)
+            timing_->since_ms = last_now_.value_or(0);
         if (!ready && last_now_.value_or(0) - timing_->since_ms >= options_.completeness_timeout_ms)
             return refused<void>(timing_errors::timeout, "timing agreement expired");
         if (ready && !timing_->retained) {
@@ -405,17 +453,26 @@ core::Result<void> LockstepSession::advance_timing() {
     }
     next_policy_tick_ = tick + cadence;
     std::uint64_t worst{};
-    for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
-        if (peer == self_ || !timing_voter(peer)) continue;
-        std::optional<std::uint64_t> sample;
-        if (options_.adaptive_timing->rtt_ms) sample = options_.adaptive_timing->rtt_ms(peer);
-        else if (const auto stats = transport_->link_stats(peer);
-            stats && stats->sample_count != 0 && stats->smoothed_rtt.count() >= 0) {
-            const auto micros = static_cast<std::uint64_t>(stats->smoothed_rtt.count());
-            sample = micros / 1000 + (micros % 1000 != 0 ? 1U : 0U);
+    if (mesh_) {
+        // The host measures only its own pairs: for the others it takes the smaller of the two ends' reports, then the
+        // largest over pairs, so one liar can only lower its own pairs (docs/net-online-npeer.md, section 3).
+        if (timing_frozen()) return notify_timing();
+        const auto rtt = mesh_rtt_ms(mesh_voters(), mesh_->rtt_reports(std::chrono::milliseconds(last_now_.value_or(0))));
+        if (!rtt || *rtt >= mesh_rtt_unmeasured) return notify_timing();
+        worst = *rtt;
+    } else {
+        for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
+            if (peer == self_ || !timing_voter(peer)) continue;
+            std::optional<std::uint64_t> sample;
+            if (options_.adaptive_timing->rtt_ms) sample = options_.adaptive_timing->rtt_ms(peer);
+            else if (const auto stats = transport_->link_stats(peer);
+                stats && stats->sample_count != 0 && stats->smoothed_rtt.count() >= 0) {
+                const auto micros = static_cast<std::uint64_t>(stats->smoothed_rtt.count());
+                sample = micros / 1000 + (micros % 1000 != 0 ? 1U : 0U);
+            }
+            if (!sample) return notify_timing();
+            worst = std::max(worst, *sample);
         }
-        if (!sample) return notify_timing();
-        worst = std::max(worst, *sample);
     }
     const auto delay = adaptive_input_delay(worst, options_.adaptive_timing->broadband);
     if (delay == options_.input_delay) return notify_timing();
@@ -448,16 +505,37 @@ core::Result<void> LockstepSession::seal() {
         auto frame = encode_batch(batch);
         if (!frame) return core::Result<void>::failure(frame.error());
         for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
-            if (peer == self_ || departed_[peer] || agreed_departures_.contains(peer)
+            if (peer == self_ || departed_[peer] || agreed_departures_.contains(peer) || mesh_excluded(peer)
                 || (agreement_ && agreement_->target == peer) || (held_ && held_->target == peer)
                 || transport_->link(peer) == LinkState::closed) continue;
+            if (mesh_) {
+                const auto replay = mesh_replay_.find(peer);
+                if (replay != mesh_replay_.end() && (replay->second.cursor < next_seal_ || !replay->second.controls.empty())) continue;
+            }
             auto sent = transport_->send(peer, frame.value());
+            if (sent) last_sent_batch_[peer] = next_seal_;
+            if (sent && mesh_) {
+                const auto replay = mesh_replay_.find(peer);
+                if (replay != mesh_replay_.end()) replay->second.cursor = next_seal_ + 1;
+            }
             // A stream can close during send. Already received complete ticks remain usable;
             // a missing batch from this peer is diagnosed by completeness below.
-            if (!sent && transport_->link(peer) != LinkState::closed) return sent;
+            if (!sent && transport_->link(peer) != LinkState::closed && !(mesh_ && mesh_->owns_closed_link(peer))) return sent;
         }
         if (stage_observer_) for (const auto& input : batch.commands)
             stage_observer_("seal", input, adapter_->completed_tick());
+        if (mesh_ && !mesh_tail_unavailable_) {
+            constexpr std::size_t tail_limit = 8 * max_batch_bytes;
+            if (frame.value().size() > tail_limit - mesh_tail_bytes_) {
+                mesh_tail_unavailable_ = true; recovery_[self_].clear(); mesh_tail_bytes_ = 0;
+                for (auto& [peer, replay] : mesh_replay_) {
+                    if (replay.cursor >= next_seal_ && replay.controls.empty()) continue;
+                    transport_->fail_repair(peer, 1794); replay.controls.clear(); replay.bytes = 0;
+                }
+            } else {
+                recovery_[self_].emplace(next_seal_, batch); mesh_tail_bytes_ += frame.value().size();
+            }
+        }
         ready_[next_seal_].emplace(self_, std::move(batch));
         const auto& sealed = ready_[next_seal_].at(self_);
         if (!sealed.commands.empty()) command_cursors_[self_] = sealed.commands.back().key.sequence;
@@ -476,6 +554,10 @@ core::Result<void> LockstepSession::receive(Received received) {
         || received.frame.size() > max_batch_bytes + 5)
         return refused<void>(session_errors::malformed, "frame has invalid transport sender or size");
     const auto kind = received.frame.front();
+    if (kind >= mesh_report_kind && kind <= mesh_confirm_kind) {
+        if (!mesh_) return refused<void>(mesh_errors::malformed, "pair-loss control without a room mesh");
+        return mesh_->receive(received, std::chrono::milliseconds(last_now_.value_or(0)));
+    }
     if (kind >= resync_vote_kind && kind <= resync_abort_kind) return receive_resync(received);
     if (options_.reconnect && !options_.reconnect->allow_rejoin && kind >= rejoin_hello_kind && kind <= rejoin_expire_kind)
         return receive_reconnect(received);
@@ -491,8 +573,12 @@ core::Result<void> LockstepSession::receive(Received received) {
         reconnect_notice(reconnect_errors::stale, "ignored delayed gameplay from a held seat");
         return core::Result<void>::success();
     }
-    if (kind >= departure_proposal_kind && kind <= 55)
+    if (kind >= departure_proposal_kind && kind <= 55) {
+        bool queued{};
+        if (auto early = queue_mesh_departure(received, queued); !early) return early;
+        if (queued) return core::Result<void>::success();
         return receive_departure(received);
+    }
     if (kind != sealed_batch_kind) {
         // The old monitor window ends at the independently proved rejoin barrier.
         // Its in-flight exchanges cannot gate headless advancement to that barrier.
@@ -536,6 +622,7 @@ core::Result<void> LockstepSession::receive(Received received) {
             return refused<void>(session_errors::admission, "seat not bound to sender or command sequence does not advance");
         if (auto valid = adapter_->validate(input); !valid) return valid;
         cursor = input.key.sequence;
+        if (adapter_->is_departure(input)) quit_seen_[sender] = true;
     }
     command_cursors_[sender] = cursor;
     accepted_[sender].push_back(digest);
@@ -550,12 +637,11 @@ core::Result<void> LockstepSession::receive(Received received) {
 core::Result<void> LockstepSession::broadcast_departure(const Bytes& frame) {
     // Agreement retires a voter immediately, even while its command awaits cutoff.
     for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
-        if (peer == self_ || departed_[peer] || agreed_departures_.contains(peer) || peer == agreement_->target) continue;
+        if (peer == self_ || departed_[peer] || agreed_departures_.contains(peer) || peer == agreement_->target || mesh_excluded(peer)) continue;
         // A second loss can occur after this voter sent its first ack. Drain
         // that ordered proof before settling; never invent an absent vote.
-        if (transport_->link(peer) == LinkState::closed) continue;
-        auto sent = transport_->send(peer, frame);
-        if (!sent) return sent;
+        if (transport_->link(peer) == LinkState::closed && !(mesh_ && mesh_->owns_closed_link(peer))) continue;
+        if (auto sent = send_mesh_control(peer, frame); !sent) return sent;
     }
     return core::Result<void>::success();
 }
@@ -564,7 +650,8 @@ core::Result<void> LockstepSession::begin_departure(PeerIndex target, DepartureR
     if (resync_ || (options_.resync && monitor_ && monitor_->frozen()))
         return refused<void>(resync_errors::overlap, "departure overlaps desync recovery");
     if (!encode_departure_ || target >= seats_.size() || target == self_
-        || (reason != DepartureReason::disconnect && reason != DepartureReason::timeout))
+        || (reason != DepartureReason::disconnect && reason != DepartureReason::timeout && reason != DepartureReason::pair_loss)
+        || (reason == DepartureReason::pair_loss && !(mesh_ && mesh_->removal_confirmed(target))))
         return refused<void>(departure_errors::agreement, "invalid departing peer or unsupported mode");
     if (held_ && held_->target != target)
         return refused<void>(departure_errors::reconnect_hold, "another departure cannot replace a held-seat recovery");
@@ -586,7 +673,8 @@ core::Result<void> LockstepSession::begin_departure(PeerIndex target, DepartureR
     state.ready.resize(seats_.size());
     state.acknowledgements.resize(seats_.size());
     state.since_ms = last_now_.value_or(0);
-    state.reconnect_expired = expired || (held_ && held_->target == target && held_->expiry_sent);
+    state.pair_loss = reason == DepartureReason::pair_loss;
+    state.reconnect_expired = expired || state.pair_loss || (held_ && held_->target == target && held_->expiry_sent);
     if (options_.reconnect && options_.reconnect->allow_rejoin && !state.reconnect_expired) {
         if (reconnect_epoch_ == std::numeric_limits<std::uint64_t>::max())
             return refused<void>(reconnect_errors::epoch, "reconnect epoch exhausted");
@@ -623,11 +711,39 @@ core::Result<void> LockstepSession::receive_departure(const Received& received, 
         || target_value == self_ || target_value == received.from || departed_[received.from])
         return refused<void>(departure_errors::malformed, "invalid departure target or voter");
     const auto target = static_cast<PeerIndex>(target_value);
+    // A seat the mesh removed no longer votes; whatever it still sends over a surviving pair is not part of the roster.
+    if (mesh_excluded(received.from)) return core::Result<void>::success();
     if (agreed_departures_.contains(target)) {
         // Reliable-stream duplicates cannot change an already agreed decision.
         if (received.frame.front() == departure_ack_kind && bytes.size() == 8) {
             std::uint64_t cutoff{}; read(bytes, cutoff, 8);
             if (cutoff == agreed_departures_.at(target).key.tick) return core::Result<void>::success();
+        }
+        const auto edge = mesh_replay_.find(received.from);
+        const bool replaced = edge != mesh_replay_.end() && edge->second.initial_generation != 0
+            && transport_->edge_identity(received.from) != 0
+            && transport_->edge_identity(received.from) != edge->second.initial_generation;
+        if (mesh_ && replaced) {
+            if (received.frame.front() == departure_ready_kind && bytes.empty()) return core::Result<void>::success();
+            if (received.frame.front() == departure_proposal_kind) {
+                std::uint64_t reason{}, frontier{};
+                if (read(bytes, reason, 1) && read(bytes, frontier, 8) && bytes.empty() && reason >= 1 && reason <= 3
+                    && frontier < options_.final_tick_count
+                    && mesh_settled_votes_.contains(target)) {
+                    const auto& votes = mesh_settled_votes_.at(target);
+                    if (votes.frontiers[received.from] && *votes.frontiers[received.from] == frontier
+                        && votes.reasons[received.from] == static_cast<DepartureReason>(reason))
+                        return core::Result<void>::success();
+                }
+            }
+            if (received.frame.front() == departure_recovery_kind) {
+                auto batch = decode_batch(bytes);
+                if (batch && batch.value().sender == target) {
+                    const auto tick = batch.value().tick;
+                    if (tick < accepted_[target].size() ? accepted_[target][static_cast<std::size_t>(tick)] == core::sha256(bytes)
+                        : tick >= agreed_departures_.at(target).key.tick) return core::Result<void>::success();
+                }
+            }
         }
         return refused<void>(departure_errors::agreement, "message reopens a settled departure");
     }
@@ -655,9 +771,15 @@ core::Result<void> LockstepSession::receive_departure(const Received& received, 
     if (received.frame.front() == departure_proposal_kind) {
         std::uint64_t reason{}, frontier{};
         if (!read(bytes, reason, 1) || !read(bytes, frontier, 8) || !bytes.empty()
-            || reason < 1 || reason > 2 || frontier >= options_.final_tick_count)
+            || reason < 1 || reason > 3 || frontier >= options_.final_tick_count)
             return refused<void>(departure_errors::malformed, "invalid departure proposal");
+        // A pair-loss proposal needs the matching accepted decision; the other reasons must not join one.
+        const bool pair_loss = reason == static_cast<std::uint64_t>(DepartureReason::pair_loss);
+        if (pair_loss != (mesh_ && mesh_->removal_confirmed(target)))
+            return refused<void>(departure_errors::agreement, "departure reason disagrees with the accepted pair-loss decision");
         if (auto begun = begin_departure(target, static_cast<DepartureReason>(reason)); !begun) return begun;
+        if (agreement_ && agreement_->pair_loss != pair_loss)
+            return refused<void>(departure_errors::agreement, "voters disagree whether this is a pair-loss departure");
         auto& previous = agreement_->frontiers[received.from];
         if (previous && (*previous != frontier || agreement_->reasons[received.from] != static_cast<DepartureReason>(reason)))
             return refused<void>(departure_errors::agreement, "voter changed its departure proposal");
@@ -701,16 +823,19 @@ core::Result<void> LockstepSession::advance_departure() {
     if (resync_ || (options_.resync && monitor_ && monitor_->frozen()))
         return refused<void>(resync_errors::overlap, "departure finalization overlaps desync recovery");
     auto& state = *agreement_;
+    if (mesh_ && mesh_->running() && !state.pair_loss && mesh_->state() != MeshLossState::settling)
+        state.since_ms = last_now_.value_or(0);
     if (last_now_.value_or(0) - state.since_ms >= options_.completeness_timeout_ms)
         return refused<void>(departure_errors::timeout, "departure agreement timed out");
     std::uint64_t cutoff{};
     DepartureReason reason = DepartureReason::timeout;
     for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
-        if (peer == state.target || departed_[peer] || agreed_departures_.contains(peer)) continue;
+        if (peer == state.target || departed_[peer] || agreed_departures_.contains(peer) || mesh_excluded(peer)) continue;
         if (!state.frontiers[peer] || !state.ready[peer]) return core::Result<void>::success();
         cutoff = std::max(cutoff, *state.frontiers[peer]);
         reason = std::min(reason, state.reasons[peer]);
     }
+    if (state.pair_loss) reason = DepartureReason::pair_loss;
     std::optional<sim::SeatCommandKey> sealed_quit;
     for (const auto& [tick, batch] : recovery_[state.target]) {
         static_cast<void>(tick);
@@ -728,15 +853,21 @@ core::Result<void> LockstepSession::advance_departure() {
         Bytes ack{departure_ack_kind}; append(ack, state.target, 4); append(ack, cutoff, 8);
         if (auto sent = broadcast_departure(ack); !sent) return sent;
     }
+    bool received_survivor_vote{};
     for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
-        if (peer == state.target || departed_[peer] || agreed_departures_.contains(peer)) continue;
+        if (peer == state.target || departed_[peer] || agreed_departures_.contains(peer) || mesh_excluded(peer)) continue;
         if (!state.acknowledgements[peer]) return core::Result<void>::success();
         if (*state.acknowledgements[peer] != cutoff)
             return refused<void>(departure_errors::agreement, "departure cutoff votes disagree");
+        received_survivor_vote = received_survivor_vote || peer != self_;
+    }
+    if (mesh_) {
+        mesh_departure_ack_ = std::make_pair(state.target, cutoff);
+        mesh_settled_votes_[state.target] = {state.frontiers, state.reasons};
     }
     // An opted-in diagnosed freeze failed above; it cannot turn the same vote
     // into a locally chosen ordinary departure instead of a reconnect hold.
-    if (options_.reconnect && options_.reconnect->allow_rejoin && reconnect_available_ && !state.reconnect_expired && !sealed_quit
+    if (options_.reconnect && options_.reconnect->allow_rejoin && reconnect_available_ && !state.reconnect_expired && !state.pair_loss && !sealed_quit
         && (options_.resync || !monitor_ || !monitor_->frozen())) {
         held_ = HeldSeat{state.target, cutoff, last_now_.value_or(0), state.reconnect_epoch,
             std::vector<bool>(seats_.size()), std::vector<bool>(seats_.size()), std::vector<bool>(seats_.size()),
@@ -746,6 +877,9 @@ core::Result<void> LockstepSession::advance_departure() {
         agreement_.reset();
         return core::Result<void>::success();
     }
+    // MP-34/36 permit timeout processing; an unconfirmed loss cannot invent a winner.
+    if (!sealed_quit && !state.pair_loss && (reason == DepartureReason::timeout || !received_survivor_vote))
+        return core::Result<void>::failure(connection_loss(state.target, "Peer departure was not confirmed"));
     const auto cursor = command_cursors_[state.target];
     if (cursor && *cursor == std::numeric_limits<std::uint64_t>::max())
         return refused<void>(departure_errors::agreement, "departure sequence exhausted");
@@ -796,9 +930,16 @@ core::Result<void> LockstepSession::service_departures(bool receive_drained) {
     // Scan after settling/draining: a previously postponed local loss must
     // begin before any timing service or simulation advancement sees its voter.
     for (std::size_t pass = 0; pass < seats_.size(); ++pass) {
+        while (!agreement_ && !mesh_pending_.empty() && receive_drained) {
+            const auto target = mesh_pending_.front();
+            if (departed_[target] || agreed_departures_.contains(target)) { mesh_pending_.pop_front(); continue; }
+            if (auto begun = begin_departure(target, DepartureReason::pair_loss); !begun) return begun;
+            break;
+        }
+        // While three or more seats are active, a closed pair belongs to the mesh incident, not to a single-seat departure.
         if (encode_departure_ && receive_drained)
             for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
-                if (peer == self_ || departed_[peer] || agreed_departures_.contains(peer)
+                if (peer == self_ || departed_[peer] || agreed_departures_.contains(peer) || (mesh_ && mesh_->owns_closed_link(peer))
                     || (held_ && held_->target == peer) || transport_->link(peer) != LinkState::closed) continue;
                 if (auto begun = begin_departure(peer, options_.closed_link_reason ? options_.closed_link_reason(peer)
                     : DepartureReason::disconnect); !begun) return begun;
@@ -806,6 +947,185 @@ core::Result<void> LockstepSession::service_departures(bool receive_drained) {
         if (!agreement_) return core::Result<void>::success();
         if (auto advanced = advance_departure(); !advanced) return advanced;
         if (agreement_ || held_) return core::Result<void>::success();
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> LockstepSession::queue_mesh_departure(const Received& received, bool& queued) {
+    queued = false;
+    if (!mesh_) return core::Result<void>::success();
+    auto bytes = std::span<const std::uint8_t>(received.frame).subspan(1);
+    std::uint64_t target{}, reason{};
+    // A frame the departure handler refuses outright (no target, the receiver itself or its own sender) is not held back.
+    if (!read(bytes, target, 4) || target >= seats_.size() || target == self_ || target == received.from) return core::Result<void>::success();
+    // Settled votes are replay validation, not an early proposal for a future
+    // mesh decision. Let receive_departure compare their exact retained vote.
+    if (agreed_departures_.contains(static_cast<PeerIndex>(target))) return core::Result<void>::success();
+    const bool ordered = mesh_early_senders_.contains(received.from);
+    const bool proposal = received.frame.front() == departure_proposal_kind && read(bytes, reason, 1)
+        && reason == static_cast<std::uint64_t>(DepartureReason::pair_loss);
+    // A survivor that already holds the confirmation can start the removal before ours arrives (different streams).
+    // Its controls wait, in their arrival order, for the accepted decision; nothing else is held back.
+    if (!ordered && (!proposal || mesh_->removal_confirmed(static_cast<PeerIndex>(target))))
+        return core::Result<void>::success();
+    if (mesh_early_.size() >= departure_frame_limit(input_horizon(), seats_.size() - 1)
+        || received.frame.size() > max_batch_bytes - mesh_early_bytes_)
+        return refused<void>(session_errors::resource_limit, "queued pair-loss departure controls exceed budget");
+    if (mesh_early_.empty()) mesh_early_since_ms_ = last_now_.value_or(0);
+    mesh_early_bytes_ += received.frame.size();
+    mesh_early_.push_back(received);
+    mesh_early_senders_.insert(received.from);
+    queued = true;
+    return core::Result<void>::success();
+}
+
+core::Result<void> LockstepSession::send_mesh_control(PeerIndex peer, const Bytes& frame) {
+    if (!(mesh_ && mesh_->owns_closed_link(peer))) return transport_->send(peer, frame);
+    auto [entry, inserted] = mesh_replay_.try_emplace(peer, transport_->edge_identity(peer), next_seal_);
+    static_cast<void>(inserted);
+    auto& replay = entry->second;
+    if (replay.controls.empty() && transport_->link(peer) == LinkState::open) {
+        if (auto sent = transport_->send(peer, frame); sent) return sent;
+    }
+    if (frame.size() > max_batch_bytes - replay.bytes) {
+        transport_->fail_repair(peer, 1794); replay.controls.clear(); replay.bytes = 0;
+        return core::Result<void>::success();
+    }
+    replay.controls.push_back(frame); replay.bytes += frame.size();
+    return core::Result<void>::success();
+}
+
+core::Result<void> LockstepSession::restore_mesh_controls(PeerIndex peer) {
+    auto& replay = mesh_replay_.at(peer);
+    replay.controls.clear(); replay.bytes = 0;
+    const auto add = [&](Bytes frame) {
+        if (frame.size() > max_batch_bytes - replay.bytes) return false;
+        replay.bytes += frame.size(); replay.controls.push_back(std::move(frame)); return true;
+    };
+    const auto overflow = [&] {
+        replay.controls.clear(); replay.bytes = 0; transport_->fail_repair(peer, 1794);
+        return core::Result<void>::success();
+    };
+    // A peer can lag only the most recently completed vote: completing the
+    // next one would require its ACK. Replay that last ACK before a new vote.
+    if (mesh_departure_ack_ && mesh_departure_ack_->first != peer
+        && (!agreement_ || agreement_->target != mesh_departure_ack_->first)) {
+        Bytes ack{departure_ack_kind}; append(ack, mesh_departure_ack_->first, 4); append(ack, mesh_departure_ack_->second, 8);
+        if (!add(std::move(ack))) return overflow();
+    }
+    if (agreement_ && agreement_->target != peer) {
+        const auto& vote = *agreement_;
+        Bytes proposal{departure_proposal_kind}; append(proposal, vote.target, 4);
+        append(proposal, static_cast<std::uint8_t>(vote.reasons[self_]), 1); append(proposal, *vote.frontiers[self_], 8);
+        if (!add(std::move(proposal))) return overflow();
+        for (const auto& [tick, batch] : recovery_[vote.target]) {
+            if (tick >= *vote.frontiers[self_]) continue;
+            auto encoded = encode_batch(batch);
+            if (!encoded) return core::Result<void>::failure(encoded.error());
+            Bytes frame{departure_recovery_kind}; append(frame, vote.target, 4);
+            frame.insert(frame.end(), encoded.value().begin(), encoded.value().end());
+            if (!add(std::move(frame))) return overflow();
+        }
+        if (vote.ready[self_]) { Bytes ready{departure_ready_kind}; append(ready, vote.target, 4); if (!add(std::move(ready))) return overflow(); }
+        if (vote.acknowledgements[self_]) {
+            Bytes ack{departure_ack_kind}; append(ack, vote.target, 4); append(ack, *vote.acknowledgements[self_], 8);
+            if (!add(std::move(ack))) return overflow();
+        }
+    }
+    const auto timing_frame = [](std::uint8_t kind, const TimingEvent& event) {
+        Bytes frame{kind}; append(frame, event.tick, 8); append(frame, event.delay, 8); return frame;
+    };
+    if (options_.adaptive_timing) {
+        if (!timing_ && last_timing_ && !add(timing_frame(timing_ready_kind, *last_timing_))) return overflow();
+        if (timing_) {
+            if (self_ == options_.adaptive_timing->host && timing_->proposed
+                && !add(timing_frame(timing_proposal_kind, timing_->event))) return overflow();
+            if (timing_->ready[self_] && !add(timing_frame(timing_ready_kind, timing_->event))) return overflow();
+        }
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> LockstepSession::service_mesh(std::uint64_t now_ms, bool receive_drained) {
+    if (!mesh_) return core::Result<void>::success();
+    // Setup pumps tick zero behind its monitor gate before the committed game
+    // installs departure encoding. Pair loss there still aborts setup itself.
+    if (!encode_departure_ && adapter_->completed_tick() == 0 && monitor_ && !monitor_->may_step())
+        return core::Result<void>::success();
+    if (!encode_departure_) return refused<void>(mesh_errors::options, "room mesh pair-loss agreement requires enabled departures");
+    mesh_->set_active(mesh_active());
+    MeshSeats owned{};
+    for (PeerIndex peer = 0; peer < seats_.size(); ++peer)
+        if (mesh_->owns_closed_link(peer)) owned = static_cast<MeshSeats>(owned | mesh_seat(peer));
+    const auto ownership = [owned](PeerIndex peer) { return peer < max_match_seats && (owned & mesh_seat(peer)) != 0; };
+    if (monitor_) if (auto configured = monitor_->on_link_repair(self_, ownership); !configured) return configured;
+    // Resend only this sender's original sealed tail on a newly authenticated
+    // edge. The input horizon bounds retention; ordinary duplicate validation
+    // checks every replay against the receiver's accepted digest.
+    const bool retry_monitor = monitor_ && !monitor_->may_step() && now_ms >= mesh_monitor_retry_ms_;
+    if (retry_monitor) mesh_monitor_retry_ms_ = now_ms + 1000;
+    for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
+        if (peer == self_ || departed_[peer] || mesh_excluded(peer) || transport_->link(peer) != LinkState::open) continue;
+        const auto generation = transport_->edge_identity(peer);
+        if (generation == 0) continue;
+        auto [it, inserted] = mesh_replay_.try_emplace(peer, generation, next_seal_);
+        auto& replay = it->second;
+        if (replay.initial_generation == 0) replay.initial_generation = generation;
+        auto& known = replay.generation; auto& cursor = replay.cursor;
+        if (!inserted && known != generation) {
+            if (mesh_tail_unavailable_) { transport_->fail_repair(peer, 1794); continue; }
+            known = generation;
+            cursor = recovery_[self_].empty() ? next_seal_ : recovery_[self_].begin()->first;
+            if (auto restored = restore_mesh_controls(peer); !restored) return restored;
+        }
+        unsigned budget = 256;
+        while (!replay.controls.empty() && budget > 0) {
+            if (auto sent = transport_->send(peer, replay.controls.front()); !sent) break;
+            replay.bytes -= replay.controls.front().size(); replay.controls.pop_front(); --budget;
+        }
+        if (!replay.controls.empty() || transport_->link(peer) != LinkState::open) continue;
+        for (auto batch = recovery_[self_].lower_bound(cursor); batch != recovery_[self_].end() && budget > 0; ++batch, --budget) {
+            auto frame = encode_batch(batch->second);
+            if (!frame) return core::Result<void>::failure(frame.error());
+            if (auto sent = transport_->send(peer, frame.value()); !sent) break;
+            last_sent_batch_[peer] = batch->first;
+            cursor = batch->first + 1;
+        }
+        if (monitor_ && cursor == next_seal_ && (retry_monitor || mesh_monitor_generation_[peer] != generation)) {
+            if (auto sent = monitor_->on_link_repair(peer, ownership); sent) mesh_monitor_generation_[peer] = generation;
+        }
+    }
+
+    if (auto serviced = mesh_->service(std::chrono::milliseconds(static_cast<std::int64_t>(now_ms)), receive_drained); !serviced) return serviced;
+    while (auto result = mesh_->take_result()) {
+        if (mesh_results_.size() >= 64) mesh_results_.erase(mesh_results_.begin());
+        mesh_results_.push_back(*result);
+        if (result->kind == MeshIncidentResult::Kind::leave) return refused<void>(result->code, result->message);
+        if (result->kind == MeshIncidentResult::Kind::restored) {
+            mesh_early_.clear(); mesh_early_senders_.clear(); mesh_early_bytes_ = 0;
+            continue;
+        }
+        mesh_removed_ = result->removed;
+        for (PeerIndex seat = 0; seat < seats_.size(); ++seat)
+            if ((result->removed & mesh_seat(seat)) && !departed_[seat] && !agreed_departures_.contains(seat)) mesh_pending_.push_back(seat);
+    }
+    // Pair-loss controls that never meet an accepted decision (a forged proposal, or a decision that died with its decider)
+    // expire with the incident's own deadlines instead of waiting forever.
+    if (mesh_removed_ == 0 && !mesh_early_.empty() && !mesh_->running()
+        && now_ms - mesh_early_since_ms_ > static_cast<std::uint64_t>((options_.mesh->repair_grace + std::chrono::seconds(25)).count()))
+        return refused<void>(departure_errors::agreement, "pair-loss departure controls arrived without an accepted decision");
+    if (mesh_removed_ == 0) return core::Result<void>::success();
+    if (!mesh_early_.empty()) {
+        auto frames = std::move(mesh_early_);
+        mesh_early_.clear(); mesh_early_senders_.clear(); mesh_early_bytes_ = 0;
+        for (const auto& frame : frames)
+            if (auto handled = receive_departure(frame); !handled) return handled;
+    }
+    while (!mesh_pending_.empty() && (departed_[mesh_pending_.front()] || agreed_departures_.contains(mesh_pending_.front())))
+        mesh_pending_.pop_front();
+    if (mesh_pending_.empty() && !agreement_) {
+        mesh_removed_ = 0;
+        mesh_->settled();
     }
     return core::Result<void>::success();
 }
@@ -1529,6 +1849,7 @@ core::Result<bool> LockstepSession::service_reconnect() {
             if (const auto own = batches.find(self_); own != batches.end()) {
                 auto encoded = encode_batch(own->second); if (!encoded) return core::Result<bool>::failure(encoded.error());
                 auto resent = transport_->send(state.target, encoded.value());
+                if (resent) last_sent_batch_[state.target] = tick;
                 if (!resent) return core::Result<bool>::failure(resent.error());
             }
         }
@@ -1810,6 +2131,12 @@ core::Result<bool> LockstepSession::service_resync() {
     return core::Result<bool>::success(true);
 }
 
+core::Diagnostic LockstepSession::connection_loss(PeerIndex peer, std::string_view cause) {
+    connection_lost_peer_ = peer;
+    return diagnostic(session_errors::stalled, "Connection lost: the match could not continue. "
+        + std::string(cause) + " (peer " + std::to_string(peer) + ").");
+}
+
 core::Result<PumpResult> LockstepSession::fail(core::Diagnostic error) {
     const auto code = std::find(resync_codes.begin(), resync_codes.end(), error.code);
     if (options_.resync && (resync_ || refused_resync_epoch_ || code != resync_codes.end())) {
@@ -1845,6 +2172,7 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
         auto accepted = receive(std::move(*frame));
         if (!accepted) return fail(accepted.error());
     }
+    if (auto meshed = service_mesh(now_ms, receive_drained); !meshed) return fail(meshed.error());
     const auto tick = adapter_->completed_tick();
     // Diagnose another survivor loss before reconnect service can send to its
     // closed stream or alter the held epoch. The simulation prefix stays frozen.
@@ -1883,7 +2211,7 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
                 if (!monitor_wait_ || monitor_wait_->tick != tick) monitor_wait_ = WaitingFor{tick, {}, now_ms};
                 monitor_wait_->peers = std::move(needed);
                 if (now_ms - monitor_wait_->since_ms >= options_.completeness_timeout_ms)
-                    return fail(diagnostic(session_errors::stalled, "terminal hash agreement expired with a voter missing"));
+                    return fail(connection_loss(monitor_wait_->peers.front(), "Final hash voter timed out"));
             }
         } else monitor_wait_.reset();
         return core::Result<PumpResult>::success({});
@@ -1913,13 +2241,10 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
         else {
             if (!monitor_wait_ || monitor_wait_->tick != tick) monitor_wait_ = WaitingFor{tick, {}, now_ms};
             monitor_wait_->peers = std::move(needed);
-            if (now_ms - monitor_wait_->since_ms >= options_.completeness_timeout_ms) {
-                if (monitor_wait_->peers.size() != 1)
-                    return fail(diagnostic(departure_errors::agreement, "multiple missing hash voters require a new roster agreement"));
-                auto begun = begin_departure(monitor_wait_->peers.front(), DepartureReason::timeout);
-                if (!begun) return fail(begun.error());
-                monitor_wait_.reset();
-                return core::Result<PumpResult>::success({});
+            if (now_ms - monitor_wait_->since_ms >= options_.completeness_timeout_ms && mesh_ && mesh_->running())
+                monitor_wait_->since_ms = now_ms; // a pair-loss incident has its own deadlines
+            else if (now_ms - monitor_wait_->since_ms >= options_.completeness_timeout_ms) {
+                return fail(connection_loss(monitor_wait_->peers.front(), "Required hash voter timed out"));
             }
         }
     } else monitor_wait_.reset();
@@ -1954,6 +2279,8 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
             if (receive_drained && transport_->link(peer) == LinkState::closed) {
                 waiting_ = WaitingFor{tick, missing, now_ms};
                 if (!encode_departure_) return fail(diagnostic(session_errors::link_closed, "missing tick batch from a closed peer stream"));
+                // The lost pair may be only ours: the mesh incident decides who leaves, never this seat alone.
+                if (mesh_ && mesh_->owns_closed_link(peer)) return core::Result<PumpResult>::success({});
                 auto begun = begin_departure(peer, options_.closed_link_reason ? options_.closed_link_reason(peer) : DepartureReason::disconnect);
                 if (!begun) return fail(begun.error());
                 return core::Result<PumpResult>::success({});
@@ -1967,16 +2294,20 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
         }
         if (!waiting_ || waiting_->tick != tick) waiting_ = WaitingFor{tick, {}, now_ms};
         waiting_->peers = std::move(missing);
-        if ((!monitor_ || monitor_->may_step()) && now_ms - waiting_->since_ms >= options_.completeness_timeout_ms) {
-            if (!encode_departure_) return fail(diagnostic(session_errors::stalled, "completeness wait expired with a batch missing"));
-            if (waiting_->peers.size() != 1) return fail(diagnostic(departure_errors::agreement, "multiple silent peers require a new roster agreement"));
-            auto begun = begin_departure(waiting_->peers.front(), DepartureReason::timeout);
-            if (!begun) return fail(begun.error());
+        if ((!monitor_ || monitor_->may_step()) && now_ms - waiting_->since_ms >= options_.completeness_timeout_ms && mesh_ && mesh_->running())
+            waiting_->since_ms = now_ms; // a pair-loss incident has its own deadlines
+        else if ((!monitor_ || monitor_->may_step()) && now_ms - waiting_->since_ms >= options_.completeness_timeout_ms) {
+            return fail(connection_loss(waiting_->peers.front(), "Required input batch timed out"));
         }
         return core::Result<PumpResult>::success({});
     }
     waiting_.reset();
     if (monitor_ && !monitor_->may_step() && !held_) return core::Result<PumpResult>::success({});
+    // Repaired streams can fill the old gap before the decision arrives. Only
+    // the shared confirmation permits continuation; ordinary convergence and
+    // confirmed departures above still run while this gate holds the sim.
+    if (mesh_ && mesh_->running() && mesh_->state() != MeshLossState::settling)
+        return core::Result<PumpResult>::success({});
     std::vector<SeatInput> canonical;
     for (const auto& [peer, batch] : batches) {
         if (departed_[peer]) continue;
@@ -2029,6 +2360,12 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
         reconnect_controls_.erase(tick);
     }
     ready_.erase(tick);
+    if (mesh_ && tick > input_horizon()) {
+        for (auto row = recovery_[self_].begin(); row != recovery_[self_].lower_bound(tick - input_horizon()); ++row) {
+            const auto encoded = encode_batch(row->second);
+            if (encoded) mesh_tail_bytes_ -= encoded.value().size();
+        }
+    }
     for (auto& history : recovery_) {
         const auto window = input_horizon();
         if (tick > window) history.erase(history.begin(), history.lower_bound(tick - window));

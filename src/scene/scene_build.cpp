@@ -249,9 +249,10 @@ void resolve_object(Placement& placement, const assets::Placement& source,
     }
     const data::EffectiveObject& object = effective.value();
     const auto behavior = declared(object, "Behavior");
-    const auto land_behavior = declared(object, "LandBehavior");
+    // ML-24 (#3631): a blank or TBD variant LandBehavior inherits from its parent.
+    const auto land_behavior = object.single("LandBehavior");
     placement.capture_point = (behavior && has_behavior(behavior->text, "CAPTURE_POINT"))
-        || (land_behavior && has_behavior(land_behavior->text, "CAPTURE_POINT"));
+        || (land_behavior && has_behavior(land_behavior->value.raw_text, "CAPTURE_POINT"));
 
     if (const auto scale = declared(object, "Scale_Factor")) {
         placement.scale_declared = true;

@@ -30,6 +30,12 @@ const Color bad_colour(1.0F, 0.3F, 0.25F, 1.0F);
 const Color text_colour(0.95F, 0.95F, 0.95F, 1.0F);
 const Color dim_colour(0.7F, 0.72F, 0.75F, 1.0F);
 
+// A tick rate is on target within 10% of what the speed setting asks for, late down to 60%.
+[[nodiscard]] Color rate_colour(const double measured, const double nominal) {
+    if (nominal <= 0.0 || measured >= nominal * 0.9) return good_colour;
+    return measured >= nominal * 0.6 ? warn_colour : bad_colour;
+}
+
 [[nodiscard]] String format(const char* pattern, ...) {
     char buffer[96];
     va_list arguments;
@@ -92,6 +98,13 @@ void EawrPerfOverlay::set_shown(const bool shown) {
         cost_samples_ = 0;
         queue_redraw();
     }
+}
+
+void EawrPerfOverlay::set_clock(const double speed_factor, const double nominal_ticks_per_second, const bool paused) {
+    clock_known_ = true;
+    clock_paused_ = paused;
+    speed_factor_ = speed_factor;
+    nominal_tps_ = nominal_ticks_per_second;
 }
 
 void EawrPerfOverlay::frame(const std::vector<model::PerfTick>& ticks, const std::optional<std::size_t> visible_units,
@@ -157,7 +170,7 @@ void EawrPerfOverlay::draw_overlay() {
     const float big_row = font->get_height(big) * 1.05F;
     const float small_row = font->get_height(small) * 1.05F;
     const float height = pad * 2.0F + (big_row + small_row + graph_height + gap) * 2.0F + small_row + small_row
-        + (tick_source_ ? small_row : 0.0F);
+        + (tick_source_ ? small_row : 0.0F) + big_row;
     panel_rect_ = Rect2(margin, margin, width, height);
     draw_rect(panel_rect_, Color(0.0F, 0.0F, 0.0F, 0.62F), true);
     draw_rect(panel_rect_, Color(1.0F, 1.0F, 1.0F, 0.18F), false, 1.0F);
@@ -204,6 +217,20 @@ void EawrPerfOverlay::draw_overlay() {
     y += small_row;
     graph(stats_.frame_graph(graph_columns), nice_scale(now.frame_worst_ms, frame_scales));
     y += graph_height + gap;
+    // The simulation's tick rate against what the speed setting asks for.
+    if (tick_source_) {
+        const bool running = !clock_known_ || !clock_paused_;
+        text(format("TICKS/S %.0f", now.ticks_per_second), big,
+             running && clock_known_ ? rate_colour(now.ticks_per_second, nominal_tps_) : text_colour, HORIZONTAL_ALIGNMENT_LEFT);
+        if (clock_known_) {
+            text(clock_paused_ ? String("paused") : format("speed x%.2f = %.0f/s", speed_factor_, nominal_tps_), small, dim_colour,
+                 HORIZONTAL_ALIGNMENT_RIGHT);
+        }
+    } else {
+        text("TICKS/S", big, text_colour, HORIZONTAL_ALIGNMENT_LEFT);
+        text("no live session", small, dim_colour, HORIZONTAL_ALIGNMENT_RIGHT);
+    }
+    y += big_row;
     // The simulation's tick cost.
     text("Sim tick", big, text_colour, HORIZONTAL_ALIGNMENT_LEFT);
     if (tick_source_ && now.tick) {
@@ -248,6 +275,10 @@ std::string EawrPerfOverlay::report_json() const {
            << ", \"fps\": " << summary.fps << ", \"frame_ms\": " << summary.frame_ms
            << ", \"frame_ms_avg\": " << summary.frame_avg_ms << ", \"frame_ms_worst\": " << summary.frame_worst_ms
            << ", \"tick_source\": \"" << (tick_source_ ? "live_session" : "none") << "\""
+           << ", \"ticks_per_second\": " << summary.ticks_per_second
+           << ", \"clock\": " << (clock_known_ ? std::string("{\"speed_factor\": ") + std::to_string(speed_factor_)
+                  + ", \"nominal_ticks_per_second\": " + std::to_string(nominal_tps_)
+                  + ", \"paused\": " + (clock_paused_ ? "true" : "false") + "}" : std::string("null"))
            << ", \"ticks\": " << summary.ticks << ", \"tick_ms\": " << (summary.tick ? summary.tick->total_ms : 0.0)
            << ", \"tick_ms_avg\": " << summary.tick_avg_ms << ", \"tick_ms_worst\": " << summary.tick_worst_ms
            << ", \"tick_phases\": [";

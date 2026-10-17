@@ -50,13 +50,18 @@ public:
 bool contains(std::span<const std::uint8_t> bytes, const net::RejoinNonce& token) {
     return std::search(bytes.begin(), bytes.end(), token.begin(), token.end()) != bytes.end();
 }
-void provision(std::uint32_t count) {
-    auto agreed = offer(); agreed.recovery.reconnect = true;
+void provision(std::uint32_t count, bool mesh_repair = false) {
+    auto agreed = offer(); agreed.recovery.reconnect = !mesh_repair;
+    const auto provide = [mesh_repair](auto& owner, const auto& selected, auto& stream) {
+        return mesh_repair ? owner.provide_mesh_repair(selected, stream) : owner.provide(selected, stream);
+    };
+    agreed.setup = require(net::encode_skirmish_setup(human_setup(count)));
     agreed.seats.clear();
-    for (net::PeerIndex seat = 0; seat < count; ++seat) agreed.seats.push_back({seat, sim::SeatId{seat + 1}, seat % 2 + 1});
+    for (net::PeerIndex seat = 0; seat < count; ++seat) agreed.seats.push_back({seat, sim::SeatId{seat + 1}, seat + 1});
     Stream host; host.count = count;
     net::LanReconnectCredentials provider;
-    const auto tokens = require(provider.provide(agreed, host));
+    const auto tokens = require(provide(provider, agreed, host));
+    expect(agreed.recovery.reconnect == !mesh_repair, "pair-key delivery never changes the offered recovery policy");
     expect(net::valid_reconnect_tokens(tokens, 0, count), "CSPRNG host pair keys are distinct");
     expect(!provider.delivered(), "no completed delivery before all acknowledgements");
     std::vector<net::ReconnectTokens> rows(count); rows[0] = tokens;
@@ -76,16 +81,16 @@ void provision(std::uint32_t count) {
         expect(require(receiver.receive(delivery, join)), "delivery consumed outside simulation");
         expect(std::all_of(delivery.frame.begin(), delivery.frame.end(), [](auto byte) { return byte == 0; }), "delivery buffer erased");
         auto changed = agreed; ++changed.input_delay;
-        auto wrong = receiver.provide(changed, join);
+        auto wrong = provide(receiver, changed, join);
         expect(!wrong && wrong.error().code == "EAWR-NET-1023", "another match identity refused");
-        rows[seat] = require(receiver.provide(agreed, join));
+        rows[seat] = require(provide(receiver, agreed, join));
         expect(rows[seat].size() == count && rows[seat][0] == tokens[seat] && rows[seat][seat] == net::RejoinNonce{},
             "seat receives exactly its pair keys and no self key");
         auto ack = std::move(join.sent.front()); ack.from = seat;
         expect(require(provider.receive(ack, host)), "seat acknowledgement consumed");
         if (seat + 1 < count) expect(!provider.delivered(), "one missing acknowledgement keeps delivery incomplete");
         receiver.clear();
-        expect(!receiver.provide(agreed, join), "cleared provider cannot rejoin old match");
+        expect(!provide(receiver, agreed, join), "cleared provider cannot rejoin old match");
     }
     expect(provider.delivered(), "host delivery completes only after every acknowledgement");
     for (net::PeerIndex first = 0; first < count; ++first) for (net::PeerIndex second = first + 1; second < count; ++second) {
@@ -94,7 +99,7 @@ void provision(std::uint32_t count) {
             for (const auto& key : rows[stranger]) expect(key != rows[first][second], "another seat cannot obtain the pair key");
     }
     provider.clear();
-    const auto next = require(provider.provide(agreed, host));
+    const auto next = require(provide(provider, agreed, host));
     for (std::size_t remote = 1; remote < next.size(); ++remote)
         for (std::size_t previous = 1; previous < tokens.size(); ++previous)
             expect(next[remote] != tokens[previous], "fresh match credentials even for identical setup");
@@ -103,7 +108,8 @@ void provision(std::uint32_t count) {
 }
 void refusals() {
     auto agreed = offer(); agreed.recovery.reconnect = true;
-    agreed.seats.push_back({2, sim::SeatId{12}, 1});
+    agreed.setup = require(net::encode_skirmish_setup(human_setup(3)));
+    agreed.seats.push_back({2, sim::SeatId{12}, 3});
     Stream host, join; host.count = join.count = 3; join.index = 1;
     net::LanReconnectCredentials source;
     const auto tokens = require(source.provide(agreed, host));
@@ -168,6 +174,10 @@ void owned_destructor_erasure() {
 int main() {
     try {
         for (const auto count : {2U, 3U, 8U, 9U}) provision(count);
+        for (const auto count : {3U, 9U}) provision(count, true);
+        Stream pair;
+        net::LanReconnectCredentials pair_keys;
+        expect(!pair_keys.provide_mesh_repair(offer(), pair), "mesh repair credentials require at least three room members");
         refusals();
         owned_destructor_erasure();
         std::cout << "LAN reconnect credential contracts passed\n";

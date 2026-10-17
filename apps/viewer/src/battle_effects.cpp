@@ -28,6 +28,7 @@ BattleEffects::BattleEffects(godot::Node3D& host, const vfs::Vfs& filesystem, co
       registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {
     // #638: nothing here reads the streams' hashes, so the frames do not compute them.
     registry_->set_stream_hashes(false);
+    backend_->set_emitter_reuse(true);
 }
 
 BattleEffects::~BattleEffects() { release(); }

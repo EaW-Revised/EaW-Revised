@@ -259,11 +259,9 @@ void publication() {
     observed_names.planet = [&](auto) { ++observer_names; return std::string{}; };
     observed_names.side = [&](auto) { ++observer_names; return view::BattleDialogSide{}; };
     observed_names.type = [&](auto) { ++observer_names; return view::CampaignResultType{}; };
-    const auto progress_observer = view::live_battle_dialog_view(frame, {3}, 3, 0, observed_names);
-    expect(!progress_observer.involved && progress_observer.planet.empty() && !progress_observer.retreat_allowed
-        && progress_observer.sides[0].combatants.empty() && progress_observer.sides[1].combatants.empty()
-        && observer_names == 0 && progress_observer.elapsed_seconds == 2 && progress_observer.display_seconds == 10,
-        "WAR-66/67 observer progress retains identical clocks without name lookup, body/list or withdraw permission");
+    const auto solo_observer = view::live_battle_dialog_view(frame, {3}, 3, 0, observed_names);
+    expect(solo_observer.phase == view::BattleDialogPhase::hidden && observer_names == 0,
+        "WAR-02/WGM-173 a solo conflict the local seat is not part of opens no progress dialog");
     full_progress->withdraw_admitted = false;
     expect(!view::live_battle_dialog_view(frame, {1}, 1, 0, names).retreat_allowed,
         "first recorded withdrawal disables subsequent local admission");
@@ -281,6 +279,12 @@ void publication() {
     pending->conflict.layer = cp::BattleLayer::land;
     expect(view::live_battle_dialog_view(frame, {1}, 1, 0, names).phase == view::BattleDialogPhase::progress,
         "space multiplayer bypass does not invent a universal land-dialog bypass");
+    const auto progress_observer = view::live_battle_dialog_view(frame, {3}, 3, 0, observed_names);
+    expect(progress_observer.phase == view::BattleDialogPhase::progress && !progress_observer.involved
+        && progress_observer.planet.empty() && !progress_observer.retreat_allowed
+        && progress_observer.sides[0].combatants.empty() && progress_observer.sides[1].combatants.empty()
+        && observer_names == 0 && progress_observer.elapsed_seconds == 2 && progress_observer.display_seconds == 10,
+        "WAR-66/67 multiplayer observer progress retains identical clocks without name lookup, body/list or withdraw permission");
     pending->conflict.layer = cp::BattleLayer::space; frame.latest = solo_snapshot;
     frame.pending_conflict.reset(); frame.auto_resolve_progress.reset();
     auto outcome = std::make_shared<eawr::platform::LiveAutoResolveOutcome>();
@@ -382,9 +386,64 @@ void publication() {
         return query.first == 70 && (query.second == 1 || query.second == 2); }),
         "every later bounty query stays on the returned conflict and an involved observer");
 }
+// GC #4030: an AI-vs-AI conflict (pending announcement, resolver progress, outcome) never opens or closes any
+// battle UI for the local seat that is not part of it, and the party seats see the same publications unchanged.
+void uninvolved_conflict_lifecycle() {
+    auto session = checked(gc::GalacticSession::create(gc::synthetic_galaxy()));
+    eawr::platform::LiveGameFrame frame; frame.latest = session.snapshot();
+    auto pending = std::make_shared<cp::PendingConflictView>();
+    pending->conflict.id = 90; pending->conflict.planet = 2;
+    pending->conflict.defender = 2; pending->conflict.invader = 3;
+    pending->conflict.forces = {{40, 1000, 3, 10}, {41, 1001, 2, 11}};
+    pending->arbitration.route = cp::ConflictRoute::instant_auto;
+    view::LiveBattleDialogNames names;
+    names.planet = [](auto) { return std::string("Bestine"); };
+    names.side = [](auto owner) { view::BattleDialogSide side; side.name = std::to_string(owner); return side; };
+    names.force = [](auto type) { return std::to_string(type); };
+    names.type = [](std::string_view name) { return view::CampaignResultType{std::string(name), true, false, 2, 5}; };
+    const auto outcome = [] {
+        auto value = std::make_shared<eawr::platform::LiveAutoResolveOutcome>();
+        value->planet = 2; value->invader = 3; value->defender = 2;
+        value->result.conflict = 90; value->result.winner = 3;
+        value->record = {{"ship", 2}};
+        return value;
+    }();
+    eawr::platform::LiveAutoResolveProgress progress; progress.conflict = 90;
+    progress.elapsed_seconds = 0; progress.display_seconds = 0.01; progress.initiated = true;
+    progress.combatants = {{{3, "ship", "ship"}, {2, "ship", "ship"}}};
+    unsigned opened = 0, changes = 0;
+    auto previous = view::BattleDialogPhase::hidden;
+    const auto sample = [&](gc::PlayerId local) {
+        const auto dialog = view::live_battle_dialog_view(frame, {local}, local, 0, names, true);
+        if (dialog.phase != view::BattleDialogPhase::hidden) ++opened;
+        if (dialog.phase != previous) ++changes;
+        previous = dialog.phase;
+        return dialog.phase;
+    };
+    // Local player 1 is neither side: the conflict is announced, resolved over several publications, and returned.
+    for (unsigned step = 0; step < 4; ++step) {
+        frame.pending_conflict = pending; frame.auto_resolve_progress.reset();
+        sample(1);
+        progress.elapsed_seconds = 0.01 * step;
+        frame.auto_resolve_progress = std::make_shared<const eawr::platform::LiveAutoResolveProgress>(progress);
+        sample(1);
+    }
+    frame.pending_conflict.reset(); frame.auto_resolve_progress.reset(); frame.auto_resolve_outcome = outcome;
+    sample(1);
+    expect(opened == 0 && changes == 0, "an AI-vs-AI conflict opens no battle UI for an uninvolved local player");
+    // The same publications still reach the defender: announcement, progress, then summary.
+    frame.auto_resolve_outcome.reset(); frame.pending_conflict = pending;
+    pending->arbitration.route = cp::ConflictRoute::dialog_auto;
+    previous = view::BattleDialogPhase::hidden; opened = changes = 0;
+    expect(sample(2) == view::BattleDialogPhase::choice, "a party seat still gets its announcement");
+    frame.auto_resolve_progress = std::make_shared<const eawr::platform::LiveAutoResolveProgress>(progress);
+    expect(sample(2) == view::BattleDialogPhase::progress, "a party seat still gets the resolver progress");
+    frame.pending_conflict.reset(); frame.auto_resolve_progress.reset(); frame.auto_resolve_outcome = outcome;
+    expect(sample(2) == view::BattleDialogPhase::summary && changes == 3, "a party seat still gets one summary");
+}
 }
 int main() {
-    try { campaign_seats(); bounty_mapping(); publication(); }
+    try { campaign_seats(); bounty_mapping(); publication(); uninvolved_conflict_lifecycle(); }
     catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

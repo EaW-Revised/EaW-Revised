@@ -4,13 +4,14 @@
 #include "setup_test_support.hpp"
 
 #include <iostream>
+#include <map>
 #include <set>
 
 namespace {
 using namespace setup_test;
 using eawr::core::Result;
 net::LobbySelection selection(unsigned peer) {
-    return {"guest-" + std::to_string(peer), "mod-side-" + std::to_string(peer % 3), peer, peer % 3 + 1, peer};
+    return {"guest-" + std::to_string(peer), "mod-side-" + std::to_string(peer % 3), peer, peer % 3 + 1, peer + 1};
 }
 struct ProviderOwner {
     std::shared_ptr<eawr::platform::ThreadWorkerAdapter> executor;
@@ -25,8 +26,10 @@ struct Room {
     std::vector<net::LobbySession> sessions;
     std::vector<net::MessageTransport*> streams;
     std::vector<std::pair<net::PeerIndex, net::LobbyReason>> removed;
-    bool mismatch{}, perturb{}, invalid_start{}, fail_provider{};
-    unsigned contexts{}, builds{};
+    bool mismatch{}, perturb{}, invalid_start{}, fail_provider{}, team_rules{}, fail_credential_offer{};
+    // Online room mesh hooks (N4): the Start gate and the Lock before the commitment. Off unless `gate` is set.
+    bool gate{}, mesh_ok{true}, lock_ok{true};
+    unsigned contexts{}, builds{}, locks{};
     explicit Room(unsigned count = 2, std::size_t workers = 1, net::LobbyLimits limits = {})
         : network(count), executor(std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers)), streams(count, nullptr) {
         for (unsigned peer = 0; peer < count; ++peer) transports.push_back(std::make_unique<eawr::testing::FakeTransport>(network, peer));
@@ -34,7 +37,7 @@ struct Room {
             selection(0), 1, {"data/art/maps/test.ted", {0}}, hooks(0), limits)));
         for (unsigned peer = 1; peer < count; ++peer) sessions.push_back(require(net::LobbySession::join(*transports[peer], "test-room", 0, hooks(peer), limits)));
         for (unsigned peer = 1; peer < std::min(count, net::max_lobby_seats); ++peer)
-            require(host().admit(peer, "identity-" + std::to_string(peer), selection(peer), peer % 3 + 1, revision()));
+            require(host().admit(peer, "identity-" + std::to_string(peer), selection(peer), peer + 1, revision()));
         rounds(3);
     }
     net::LobbySession& host() { return sessions[0]; }
@@ -49,10 +52,26 @@ struct Room {
             for (const auto& seat : snapshot.seats) if (seat.selection.name.empty() || seat.selection.faction == "unavailable"
                 || seat.selection.colour > 100 || seat.selection.team > 100 || seat.selection.slot > 100)
                 return Result<void>::failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice, "synthetic loaded choice validation"));
+            if (starting && team_rules) {
+                std::map<std::uint32_t, std::string> teams;
+                for (const auto& seat : snapshot.seats) {
+                    const auto [team, inserted] = teams.emplace(seat.selection.team, seat.selection.faction);
+                    if (!inserted && team->second != seat.selection.faction)
+                        return Result<void>::failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice,
+                            "Players sharing a team must choose the same faction."));
+                }
+                if (teams.size() < 2) return Result<void>::failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice,
+                    "Choose at least two different teams."));
+            }
             return Result<void>::success();
         };
-        value.offer = [](const net::LobbySnapshot& snapshot, const std::vector<net::SetupSeat>& roster) {
-            auto initial = setup(); initial.seed += snapshot.game.options[0];
+        value.offer = [this](const net::LobbySnapshot& snapshot, const std::vector<net::SetupSeat>& roster) {
+            if (fail_credential_offer) {
+                eawr::core::Diagnostic error; error.code = "EAWR-NET-1022"; error.message = "Partial credential row delivery failed.";
+                return Result<net::SetupOffer>::failure(std::move(error));
+            }
+            auto initial = human_setup(static_cast<unsigned>(snapshot.capacity)); initial.seed += snapshot.game.options[0];
+            for (auto& player : initial.players) player.team_id = (player.player_id - 1) % 3 + 1;
             for (auto& slot : initial.skirmish->slots) slot.human = std::any_of(roster.begin(), roster.end(), [&](const auto& seat) { return seat.player == slot.player; });
             for (const auto& seat : snapshot.seats) {
                 auto& owner = initial.players[seat.player - 1]; owner.team_id = seat.selection.team;
@@ -75,6 +94,15 @@ struct Room {
             return Result<net::LobbySetupContext>::success(std::move(context));
         };
         value.remove_peer = [this](auto who, auto reason) { removed.emplace_back(who, reason); };
+        value.mesh_complete = [this] {
+            return gate && !mesh_ok ? Result<void>::failure(net::lobby_diagnostic(net::LobbyReason::mesh_incomplete, "synthetic incomplete mesh"))
+                : Result<void>::success();
+        };
+        value.lock_room = [this] {
+            if (gate) ++locks;
+            return gate && !lock_ok ? Result<void>::failure(net::lobby_diagnostic(net::LobbyReason::mesh_incomplete, "synthetic lock refusal"))
+                : Result<void>::success();
+        };
         return value;
     }
     void round(std::uint64_t delta = 1) {
@@ -286,7 +314,7 @@ void send_failures_and_envelopes() {
 
     Room start(3);
     auto coop = selection(2); coop.team = 1;
-    require(start.host().assign(2, coop, 1, start.revision())); start.rounds(3); start.all_ready();
+    require(start.host().assign(2, coop, 3, start.revision())); start.rounds(3); start.all_ready();
     start.network.fail_send = [](auto from, auto to, std::span<const std::uint8_t> bytes) {
         auto decoded = net::decode_lobby_frame(bytes);
         const auto* snapshot = decoded ? std::get_if<net::LobbySnapshot>(&decoded.value()) : nullptr;
@@ -301,7 +329,7 @@ void send_failures_and_envelopes() {
     expect(start.host().snapshot().phase == net::LobbyPhase::starting, "host can retry Start after announcement failure");
 
     Room commitment(3);
-    require(commitment.host().assign(2, coop, 1, commitment.revision())); commitment.rounds(3); commitment.propose();
+    require(commitment.host().assign(2, coop, 3, commitment.revision())); commitment.rounds(3); commitment.propose();
     unsigned commit_sends{};
     commitment.network.fail_send = [&](auto from, auto to, std::span<const std::uint8_t> bytes) {
         auto decoded = net::decode_lobby_frame(bytes);
@@ -358,12 +386,136 @@ void admission_kick_close() {
     Room lost_seat; lost_seat.network.open[1] = false; lost_seat.rounds(2);
     expect(lost_seat.host().snapshot().seats.size() == 1, "closed joiner stream frees its stable seat");
 }
+void concurrent_staging_departures() {
+    for (const auto count : {3U, 9U}) {
+        Room room(count);
+        const auto before = room.revision();
+        for (unsigned peer = 1; peer < count; ++peer) room.network.open[peer] = false;
+        require(room.host().pump(++room.network.round));
+        expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.host().snapshot().seats.size() == 1
+            && room.revision() == before + 1 && room.removed.size() == count - 1,
+            "concurrent closed guest links become one vacancy revision without a host failure");
+        for (unsigned peer = 1; peer < count; ++peer) {
+            room.network.open[peer] = true;
+            room.sessions[peer] = require(net::LobbySession::join(*room.transports[peer], "test-room", 0, room.hooks(peer)));
+            require(room.host().admit(peer, "refill-" + std::to_string(peer), selection(peer), peer + 1, room.revision()));
+        }
+        room.rounds(3);
+        room.commit();
+    }
+    Room starting(3);
+    starting.propose();
+    starting.network.open[1] = starting.network.open[2] = false;
+    require(starting.host().pump(++starting.network.round));
+    expect(starting.host().snapshot().phase == net::LobbyPhase::staging && !starting.host().setup_phase()
+        && starting.host().snapshot().seats.size() == 1, "concurrent losses during Start still abort the frozen attempt");
+}
+std::string close_inside_start_drain(unsigned count, std::size_t workers) {
+    Room room(count, workers);
+    room.propose();
+    const auto frozen = room.revision();
+    bool closed{};
+    room.network.before_poll = [&](auto peer) {
+        if (peer == 0 && !closed) { room.network.open[count - 1] = false; closed = true; }
+    };
+    require(room.host().pump(++room.network.round));
+    room.network.before_poll = {};
+    const auto& staging = room.host().snapshot();
+    expect(closed && staging.phase == net::LobbyPhase::staging && staging.revision == frozen + 1
+        && staging.frozen_revision == 0 && staging.seats.size() == count - 1 && !room.host().setup_phase(),
+        "a close observed inside the Start drain cancels to one fresh vacancy revision");
+    expect(room.removed.size() == 1 && room.removed.front() == std::pair{net::PeerIndex{count - 1}, net::LobbyReason::link_closed},
+        "the closed guest's credentials and stream are removed once");
+    ++room.network.round;
+    for (unsigned peer = 0; peer < count - 1; ++peer) {
+        expect(!staging.seats[peer].ready, "Start cancellation clears every survivor's readiness");
+        if (peer) require(room.sessions[peer].pump(room.network.round));
+        expect(room.sessions[peer].snapshot() == staging && !room.sessions[peer].setup_phase(),
+            "survivors receive the cancellation and authoritative vacancy snapshot");
+    }
+    room.network.inbox[count - 1].clear();
+    room.network.open[count - 1] = true;
+    room.sessions[count - 1] = require(net::LobbySession::join(*room.transports[count - 1], "test-room", 0, room.hooks(count - 1)));
+    require(room.host().admit(count - 1, "replacement", selection(count - 1), count, room.revision()));
+    room.rounds(3);
+    room.commit();
+    std::vector<net::LobbyResult> results;
+    for (auto& session : room.sessions) results.push_back(require(session.take_result()));
+    for (unsigned round = 0; round < 200; ++round) {
+        ++room.network.round;
+        for (auto& result : results) if (result.setup().adapter().completed_tick() < 10)
+            require(result.setup().session().pump(room.network.round));
+    }
+    const auto hash = results.front().setup().adapter().state_hash();
+    for (auto& result : results) expect(result.setup().adapter().completed_tick() == 10
+        && result.setup().adapter().state_hash() == hash, "refilled Start reaches equal tick-10 hashes");
+    return hash;
+}
+void cancel_send_failure() {
+    Room room(3); room.propose();
+    room.network.before_poll = [&](auto peer) { if (peer == 0) room.network.open[2] = false; };
+    room.network.fail_send = [](auto from, auto to, std::span<const std::uint8_t> bytes) {
+        return from == 0 && to == 1 && bytes.front() == net::lobby_cancel_kind;
+    };
+    const auto pumped = room.host().pump(++room.network.round);
+    expect(!pumped && pumped.error().code == "EAWR-TEST-FAKE-SEND",
+        "an open survivor's cancellation send failure still propagates");
+}
+void mesh_refusal_and_start_gate() {
+    // Owner decision 1 (#3669): a newcomer that cannot reach one player is refused, not the room.
+    Room room(3);
+    const auto before = room.revision();
+    expect(!room.client().refuse_unreachable(2, 1, true), "only the host refuses a newcomer");
+    require(room.host().refuse_unreachable(2, 1, true));
+    room.rounds(3);
+    expect(room.host().snapshot().seats.size() == 2 && room.host().snapshot().revision > before
+        && room.client().snapshot() == room.host().snapshot(), "everyone else sees a roster revision without the newcomer");
+    expect(room.removed.back() == std::pair{net::PeerIndex{2}, net::LobbyReason::pair_unreachable}, "the slot and stream are released with the typed reason");
+    const std::string line = "guest-2 could not connect to guest-1 and was not admitted.";
+    expect(!room.host().chat_history().empty() && room.host().chat_history().back().text == line
+        && room.host().chat_history().back().seat == sim::SeatId{1}, "the host posts one room line naming both players");
+    expect(!room.client().chat_history().empty() && room.client().chat_history().back().text == line, "the player it could not reach hears who and why");
+    expect(room.host().notice() && room.host().notice()->reason == net::LobbyReason::pair_unreachable
+        && room.host().notice()->message == line + " EAWR-NET-1762", "the host's notice carries the diagnostic ID");
+    expect(room.sessions[2].snapshot().phase == net::LobbyPhase::closed && room.sessions[2].notice()
+        && room.sessions[2].notice()->reason == net::LobbyReason::pair_unreachable
+        && room.sessions[2].notice()->message == net::mesh_newcomer_refusal_text("guest-1", true), "the newcomer gets the curated refusal text");
+    expect(net::lobby_diagnostic(net::LobbyReason::pair_unreachable, "").code == "EAWR-NET-1762"
+        && net::lobby_diagnostic(net::LobbyReason::mesh_incomplete, "").code == "EAWR-NET-1764"
+        && net::lobby_diagnostic(net::LobbyReason::recovery_unavailable, "").code == "EAWR-NET-1615", "new reasons take the 1760..1779 diagnostics");
+    require(room.host().refuse_unreachable(2, 1, true)); // already gone: only the room line is posted
+    expect(room.host().chat_history().back().text == "A player could not connect to guest-1 and was not admitted.", "a newcomer that never took a seat is still reported");
+    require(room.host().admit(2, "identity-2", selection(2), 3, room.revision()));
+    expect(room.host().snapshot().seats.size() == 3, "no ban: the freed slot takes the same identity again");
+    expect(!room.host().refuse_unreachable(0, 1, true) && !room.host().refuse_unreachable(1, 1, true), "the host and the unreachable seat itself cannot be refused");
+    Room no_relay(3);
+    require(no_relay.host().refuse_unreachable(2, 1, false)); no_relay.rounds(3);
+    expect(no_relay.sessions[2].notice() && no_relay.sessions[2].notice()->message.find("no relay is configured on this server") != std::string::npos,
+        "the text says when the server has no relay");
+    Room starting(2); starting.propose();
+    require(starting.host().refuse_unreachable(1, 0, true)); starting.rounds(3);
+    expect(starting.host().snapshot().phase == net::LobbyPhase::staging && starting.host().snapshot().seats.size() == 1,
+        "a refusal during Start cancels Start and leaves staging");
+
+    // Start is gated on completeness; the Lock comes with the commitment, so a cancelled Start leaves the room open.
+    Room gated(2); gated.gate = true; gated.mesh_ok = false; gated.all_ready();
+    const auto incomplete = gated.host().start(gated.revision());
+    expect(!incomplete && incomplete.error().code == "EAWR-NET-1764" && gated.host().snapshot().phase == net::LobbyPhase::staging && gated.locks == 0,
+        "Start is refused while the mesh is incomplete");
+    gated.mesh_ok = true; gated.commit();
+    expect(gated.locks == 1, "the room is locked exactly once, as Start commits");
+    Room unlockable(2); unlockable.gate = true; unlockable.lock_ok = false; unlockable.propose();
+    require(unlockable.client().accept_setup());
+    for (unsigned i = 0; i < 50 && unlockable.host().snapshot().phase == net::LobbyPhase::starting; ++i) unlockable.round();
+    expect(unlockable.host().snapshot().phase == net::LobbyPhase::staging && unlockable.locks == 1 && unlockable.host().notice()
+        && unlockable.host().notice()->reason == net::LobbyReason::mesh_incomplete, "a refused Lock returns the room to staging");
+}
 std::string nine_seats_three_sides(std::size_t workers) {
     Room room(9, workers);
     expect(room.host().snapshot().capacity == 9 && room.host().snapshot().seats.size() == 9, "staging supports nine seats");
     std::set<sim::tactical::PlayerId> owners;
     for (const auto& seat : room.host().snapshot().seats) owners.insert(seat.player);
-    expect(owners.size() == 3, "three independently controlled human sides in 3v3v3 roster");
+    expect(owners.size() == 9, "nine independently controlled human owners in 3v3v3 roster");
     room.commit();
     std::vector<net::LobbyResult> results;
     for (auto& session : room.sessions) {
@@ -395,7 +547,7 @@ std::string nine_seats_three_sides(std::size_t workers) {
     Room vacant(9, workers); vacant.all_ready();
     require(vacant.sessions[8].request(net::LobbyAction::leave, vacant.revision())); vacant.rounds(3);
     expect(vacant.host().snapshot().seats.size() == 8 && !vacant.host().start(vacant.revision()), "leaving ninth seat clears readiness");
-    require(vacant.host().admit(8, "replacement", selection(8), 3, vacant.revision())); vacant.rounds(3);
+    require(vacant.host().admit(8, "replacement", selection(8), 9, vacant.revision())); vacant.rounds(3);
     expect(vacant.host().snapshot().seats.size() == 9 && !vacant.host().snapshot().seats.back().ready, "vacant ninth seat admits a fresh unready controller");
     for (const bool kick : {false, true}) {
         Room race(9, workers); race.propose();
@@ -407,6 +559,42 @@ std::string nine_seats_three_sides(std::size_t workers) {
         for (const auto& seat : race.host().snapshot().seats) expect(!seat.ready, "nine-seat Start race clears every controller's readiness");
     }
     return hash;
+}
+void editable_team_rules() {
+    Room room; room.team_rules = true;
+    const auto player = room.host().snapshot().seats[1].player;
+    auto choice = room.host().snapshot().seats[1].selection;
+    const auto opposing_team = choice.team;
+    const auto shared_team = room.host().snapshot().seats.front().selection.team;
+    expect(opposing_team != shared_team && choice.faction != room.host().snapshot().seats.front().selection.faction,
+        "fixture begins with different factions on opposing teams");
+    choice.team = shared_team;
+    require(room.host().assign(1, choice, player, room.revision()));
+    room.rounds(3);
+    expect(room.host().snapshot() == room.client().snapshot() && !room.client().notice(),
+        "mixed-faction staging edits are shared without an error event");
+    choice.faction = "another-side";
+    require(room.client().request(net::LobbyAction::select, room.revision(), choice)); room.rounds(3);
+    expect(room.host().snapshot().seats[1].selection == choice && room.host().snapshot() == room.client().snapshot()
+        && !room.client().notice(), "remote faction edit is applied despite invalid teams");
+    const auto refused = room.host().request(net::LobbyAction::ready, room.revision());
+    expect(!refused && refused.error().message == "Players sharing a team must choose the same faction."
+        && !room.host().snapshot().seats.front().ready, "host Ready refuses with the team faction reason");
+    require(room.client().request(net::LobbyAction::ready, room.revision())); room.rounds(3);
+    expect(room.client().notice() && room.client().notice()->message == refused.error().message
+        && !room.host().snapshot().seats[1].ready, "authoritative host refuses remote Ready with the same reason");
+    const auto start = room.host().start(room.revision());
+    expect(!start && start.error().message == refused.error().message, "Start reports setup reason before readiness");
+    choice.faction = room.host().snapshot().seats.front().selection.faction;
+    require(room.host().assign(1, choice, player, room.revision())); room.rounds(3);
+    const auto one_team = room.host().request(net::LobbyAction::ready, room.revision());
+    expect(!one_team && one_team.error().message == "Choose at least two different teams.", "same-faction one-team setup still blocks Ready");
+    const auto one_team_start = room.host().start(room.revision());
+    expect(!one_team_start && one_team_start.error().message == one_team.error().message, "one-team setup still blocks Start");
+    choice.team = opposing_team;
+    require(room.host().assign(1, choice, player, room.revision())); room.rounds(3);
+    room.all_ready();
+    expect(room.host().snapshot() == room.client().snapshot(), "corrected teams can Ready on the shared revision");
 }
 void start_races() {
     Room room;
@@ -462,6 +650,65 @@ void start_races() {
     require(batch.client().request(net::LobbyAction::unready, batch.revision())); batch.rounds(12);
     expect(batch.host().snapshot().phase == net::LobbyPhase::staging, "full inbound batch defers setup commitment until cancellation drains");
 }
+// #3929: a guest that sees the host's commitment before its own tick-zero barrier agrees must wait locally.
+void guest_waits_for_own_barrier() {
+    Room room(3);
+    constexpr std::uint64_t delay_rounds = 40;
+    room.network.fault = [](auto from, auto to, std::span<const std::uint8_t> bytes) {
+        eawr::testing::FakeDelivery delay;
+        auto decoded = net::decode_lobby_frame(bytes);
+        if (decoded) if (const auto* frame = std::get_if<net::LobbySetupFrame>(&decoded.value()))
+            if (from == 1 && to == 2 && frame->frame.front() == net::desync_combined_kind) delay.ordered_delay = delay_rounds;
+        return delay;
+    };
+    room.propose();
+    for (unsigned peer = 1; peer < room.sessions.size(); ++peer) require(room.sessions[peer].accept_setup());
+    auto& late = room.sessions[2];
+    // The viewer's order: pump, and take the result the moment the room reads committed once the local barrier allows it.
+    const auto viewer_take = [&](net::LobbySession& session) -> std::optional<net::LobbyResult> {
+        if (session.snapshot().phase != net::LobbyPhase::committed || !session.result_ready()) return std::nullopt;
+        return require(session.take_result());
+    };
+    unsigned waited = 0;
+    for (unsigned i = 0; i < 30 && late.snapshot().phase != net::LobbyPhase::committed; ++i) room.round();
+    expect(room.host().snapshot().phase == net::LobbyPhase::committed && late.snapshot().phase == net::LobbyPhase::committed,
+        "the host commits on its own readiness while one guest's peer summary is still in flight");
+    expect(late.setup_phase() != net::SetupPhase::ready && !late.result_ready() && !viewer_take(late),
+        "the delayed guest's own barrier is still pending when it sees the commitment");
+    // The pre-fix viewer took the result here; the setup layer's refusal is the bug's NET-0301.
+    const auto premature = late.take_result();
+    expect(!premature && premature.error().code == "EAWR-NET-0301" && !late.result_ready(),
+        "taking the result before the local barrier is the NET-0301 race the viewer must not trigger");
+    expect(late.snapshot().phase == net::LobbyPhase::committed && !late.notice(),
+        "a premature transfer is refused without ending the committed room");
+    std::optional<net::LobbyResult> taken;
+    for (unsigned i = 0; i < 200 && !taken; ++i) { room.round(); ++waited; taken = viewer_take(late); }
+    expect(taken && waited > 5, "the delayed guest transfers only after its own tick-zero barrier agrees");
+    expect(taken->setup().adapter().completed_tick() == 0 && !late.notice(), "the barrier hand-off keeps tick zero and raises no notice");
+}
+// #3929 review F1: a committed guest whose own barrier never completes must end with the named setup code, not wait forever.
+void committed_guest_barrier_failure_is_typed() {
+    Room room(3);
+    room.network.fault = [](auto from, auto to, std::span<const std::uint8_t> bytes) {
+        eawr::testing::FakeDelivery delay;
+        auto decoded = net::decode_lobby_frame(bytes);
+        if (decoded) if (const auto* frame = std::get_if<net::LobbySetupFrame>(&decoded.value()))
+            if (from == 1 && to == 2 && frame->frame.front() == net::desync_combined_kind) delay.ordered_delay = 10'000'000;
+        return delay;
+    };
+    room.propose();
+    for (unsigned peer = 1; peer < room.sessions.size(); ++peer) require(room.sessions[peer].accept_setup());
+    auto& late = room.sessions[2];
+    for (unsigned i = 0; i < 30 && late.snapshot().phase != net::LobbyPhase::committed; ++i) room.round();
+    expect(late.snapshot().phase == net::LobbyPhase::committed && !late.result_ready(),
+        "the guest sees the commitment while the withheld peer summary keeps its barrier open");
+    // Pump only the starved guest past the setup timeout, as its viewer driver does; the other seats stay out of this.
+    room.network.round += 31'000;
+    const auto pumped = late.pump(room.network.round);
+    expect(!pumped && pumped.error().code == "EAWR-NET-0306", "a committed guest's barrier timeout returns the named setup code to the driver");
+    expect(!late.result_ready() && !late.take_result(), "the failed barrier never hands over a result");
+    expect(!late.pump(room.network.round + 1), "the failure repeats on every pump, so the driver cannot miss it");
+}
 std::string battle(std::size_t workers) {
     Room room(2, workers); room.commit();
     auto host = require(room.host().take_result()), client = require(room.client().take_result());
@@ -498,12 +745,41 @@ void atomic_game_configuration() {
     expect(room.host().snapshot() == committed, "invalid edit has no partial game or roster commit");
     expect(!room.host().configure_game(committed.game, committed.seats, before.revision), "stale atomic edit is refused");
 }
+void credential_delivery_retry() {
+    Room room(3); room.all_ready();
+    const auto before = room.host().snapshot();
+    room.fail_credential_offer = true;
+    const auto started = room.host().start(before.revision);
+    expect(!started && started.error().code == "EAWR-NET-1022", "partial credential delivery remains recoverable Start feedback");
+    expect(started.error().message == "Connections are not ready. Everyone must accept the setup again before Start.",
+        "the host is told that every player must accept again");
+    expect(room.host().notice() && room.host().notice()->message == started.error().message,
+        "the new feedback is retained as the host room notice");
+    auto reset = before; ++reset.revision;
+    for (auto& seat : reset.seats) seat.ready = false;
+    expect(room.host().snapshot() == reset && room.removed.empty() && room.contexts == 0,
+        "a failed key offer advances only revision/readiness, keeping the room and choices intact");
+    room.rounds(3);
+    for (const auto& session : room.sessions) expect(session.snapshot() == reset,
+        "every guest receives the new staging revision that invalidates its partial key attempt");
+    expect(!room.host().start(before.revision), "the failed credential revision cannot be reused");
+    room.fail_credential_offer = false;
+    room.commit();
+    for (const auto& session : room.sessions) expect(session.snapshot().phase == net::LobbyPhase::committed,
+        "the same room starts after every player accepts the fresh attempt");
+}
 int main() {
     try {
-        atomic_game_configuration(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
-        admission_kick_close(); start_races();
-        std::string baseline, nine_baseline;
+        credential_delivery_retry(); atomic_game_configuration(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
+        admission_kick_close(); concurrent_staging_departures(); cancel_send_failure(); editable_team_rules(); start_races(); guest_waits_for_own_barrier(); committed_guest_barrier_failure_is_typed(); mesh_refusal_and_start_gate();
+        std::string baseline, nine_baseline, close_three_baseline, close_nine_baseline;
         for (const auto workers : {1U, 2U, 4U, 8U}) {
+            const auto close_three = close_inside_start_drain(3, workers);
+            const auto close_nine = close_inside_start_drain(9, workers);
+            if (close_three_baseline.empty()) close_three_baseline = close_three;
+            if (close_nine_baseline.empty()) close_nine_baseline = close_nine;
+            expect(close_three == close_three_baseline && close_nine == close_nine_baseline,
+                "Start drain close/refill battles equal at 1/2/4/8 workers");
             const auto nine_hash = nine_seats_three_sides(workers);
             if (nine_baseline.empty()) nine_baseline = nine_hash;
             expect(nine_hash == nine_baseline, "nine-seat battles equal at 1/2/4/8 workers");

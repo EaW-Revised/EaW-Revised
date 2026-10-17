@@ -50,7 +50,11 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
     }
     output_ << "frame,frame_ms,process_ms,render_cpu_ms,render_gpu_ms,draw_calls,objects,primitives,tick,units,"
                "projectiles,effects,effect_particles,emitter_particles,particle_ms,ticks,tick_ms,submit_ms,pieces,sent,bookkeeping_ms,hud_ms,audio_ms,fog_ms,pose_ms,compose_ms,refresh_ms,opacity_ms,"
-               "ai_ms,ai_worst_ms,lua_ms,lua_worst_ms,particle_streams,particle_uploads,particle_replacements,particle_conversion_ms,particle_submission_ms,emitter_prepare_ms,projectile_prepare_ms,clone_prepare_ms,wall_frame_ms,viewer_main_ms,outside_viewer_ms,render_setup_cpu_ms,tick_wait_ms,live_frame_ms,session_tail_ms,clip_pose_ms,emitter_frame_ms,effects_frame_ms,debris_frame_ms,idle_frame_ms,idle_sample_ms,idle_upload_ms,particle_groups,particle_visible_groups,particle_prepared_groups,particle_stepped_groups,emitter_spawn_cpu_ms,emitter_spawn_backend_ms,emitter_scalar_step_ms,emitter_scalar_build_ms,emitter_batch_step_cpu_ms,emitter_batch_build_cpu_ms,emitter_executor_ms,emitter_executor_wait_dispatch_ms,emitter_commit_ms,effects_spawn_cpu_ms,effects_spawn_backend_ms,effects_scalar_step_ms,effects_scalar_build_ms,effects_batch_step_cpu_ms,effects_batch_build_cpu_ms,effects_executor_ms,effects_executor_wait_dispatch_ms,effects_commit_ms,debris_spawn_cpu_ms,debris_spawn_backend_ms,debris_scalar_step_ms,debris_scalar_build_ms,debris_batch_step_cpu_ms,debris_batch_build_cpu_ms,debris_executor_ms,debris_executor_wait_dispatch_ms,debris_commit_ms,world_ms,worker_ms,serial_ms,sim_fog_ms,worker_phases,vsync_mode,engine_max_fps,sim_lock_ms,sim_publish_ms,particle_main_emission_ms,particle_main_update_ms,particle_main_sort_ms,particle_main_stream_ms,particle_main_packing_ms,particle_worker_emission_ms,particle_worker_update_ms,particle_worker_sort_ms,particle_worker_stream_ms,particle_worker_packing_ms\n";
+               "ai_ms,ai_worst_ms,lua_ms,lua_worst_ms,particle_streams,particle_uploads,particle_replacements,particle_conversion_ms,particle_submission_ms,emitter_prepare_ms,projectile_prepare_ms,clone_prepare_ms,wall_frame_ms,viewer_main_ms,outside_viewer_ms,render_setup_cpu_ms,tick_wait_ms,live_frame_ms,session_tail_ms,clip_pose_ms,emitter_frame_ms,effects_frame_ms,debris_frame_ms,idle_frame_ms,idle_sample_ms,idle_upload_ms,particle_groups,particle_visible_groups,particle_prepared_groups,particle_stepped_groups,emitter_spawn_cpu_ms,emitter_spawn_backend_ms,emitter_scalar_step_ms,emitter_scalar_build_ms,emitter_batch_step_cpu_ms,emitter_batch_build_cpu_ms,emitter_executor_ms,emitter_executor_wait_dispatch_ms,emitter_commit_ms,effects_spawn_cpu_ms,effects_spawn_backend_ms,effects_scalar_step_ms,effects_scalar_build_ms,effects_batch_step_cpu_ms,effects_batch_build_cpu_ms,effects_executor_ms,effects_executor_wait_dispatch_ms,effects_commit_ms,debris_spawn_cpu_ms,debris_spawn_backend_ms,debris_scalar_step_ms,debris_scalar_build_ms,debris_batch_step_cpu_ms,debris_batch_build_cpu_ms,debris_executor_ms,debris_executor_wait_dispatch_ms,debris_commit_ms,world_ms,worker_ms,serial_ms,sim_fog_ms,worker_phases,vsync_mode,engine_max_fps,sim_lock_ms,sim_publish_ms,particle_main_emission_ms,particle_main_update_ms,particle_main_sort_ms,particle_main_stream_ms,particle_main_packing_ms,particle_worker_emission_ms,particle_worker_update_ms,particle_worker_sort_ms,particle_worker_stream_ms,particle_worker_packing_ms,idle_placements,idle_surfaces,skin_validations,skin_builds,skin_bindings,skin_palette_uploads,skin_billboard_uploads,skin_bone_uploads,skin_validation_ms,skin_build_ms,skin_upload_ms,skin_binding_ms,serial_phases"
+               ",emitter_owner_setup_ms,emitter_owner_fading_ms,emitter_owner_catchup_ms,emitter_owner_update_ms,emitter_owner_place_ms,emitter_owner_brightness_ms,emitter_owner_registry_ms,emitter_owner_finish_ms,clone_retire_ms"
+               ",effects_owner_setup_ms,effects_owner_lookup_ms,effects_owner_abilities_ms,effects_owner_contacts_ms,effects_owner_events_ms,effects_owner_projectiles_ms,effects_owner_advance_ms,effects_owner_finish_ms,effects_shield_cast_ms"
+               ",effects_combat_events,effects_hit_events,effects_lifecycle_events,particle_retirement_ms"
+               ",sim_completed_tick,presentation_lag_ticks,sim_pacing_lag_ms,sim_discarded_wall_ms,ui_accessor_lock_wait_ms,ui_accessor_lock_phases\n";
     return true;
 }
 
@@ -116,6 +120,23 @@ void PerfTrace::frame(const Frame& frame) {
         }
         for (const double elapsed : stages) output_ << ',' << elapsed;
     }
+    const auto& skin = frame.idle_skin_work;
+    output_ << ',' << frame.idle_placements << ',' << frame.idle_surfaces
+            << ',' << skin.validations << ',' << skin.builds << ',' << skin.bindings
+            << ',' << skin.palette_uploads << ',' << skin.billboard_uploads << ',' << skin.bone_uploads
+            << ',' << skin.validation_ms << ',' << skin.build_ms << ',' << skin.upload_ms << ',' << skin.binding_ms;
+    output_ << ",\"";
+    for (const auto& [name, elapsed] : frame.serial_phases) output_ << name << '=' << elapsed << ';';
+    output_ << '"';
+    for (const double elapsed : frame.emitter_owner_ms) output_ << ',' << elapsed;
+    for (const double elapsed : frame.effects_owner_ms) output_ << ',' << elapsed;
+    for (const auto count : frame.effects_owner_counts) output_ << ',' << count;
+    output_ << ',' << frame.particle_work.retirement_ms;
+    output_ << ',' << frame.sim_completed_tick << ',' << frame.presentation_lag_ticks
+            << ',' << frame.sim_pacing_lag_ms << ',' << frame.sim_discarded_wall_ms
+            << ',' << frame.ui_accessor_lock_wait_ms << ",\"";
+    for (const auto& [name, elapsed] : frame.ui_accessor_lock_phases) output_ << name << '=' << elapsed << ';';
+    output_ << '"';
     output_ << '\n';
     previous_report_end_ = Clock::now();
 }

@@ -39,7 +39,7 @@ sim::galactic::TypeId GalacticMode::State::focused_planet_hover_type() const {
         }
     }
     for (std::size_t slot = 0; slot < fleet_group_buttons.size(); ++slot) {
-        const auto* card = shown_fleet_cards[slot];
+        const auto* card = shown_panel_cards[slot];
         if (!card || fleet_publication != displayed_snapshot) continue;
         for (std::size_t cell = 0; cell < fleet_group_buttons[slot].size(); ++cell) {
             const auto button = fleet_buttons.find(fleet_group_buttons[slot][cell]);

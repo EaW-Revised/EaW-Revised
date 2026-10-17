@@ -31,6 +31,50 @@ template<class T> T require(eawr::core::Result<T> result) {
 }
 Fixed units(std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }
 
+void object_turn_only_command_log() {
+    std::vector<std::vector<std::uint8_t>> input_reference, log_reference;
+    std::vector<std::string> hash_reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        tactical::TacticalSetup initial;
+        initial.players = {{1,1,1,tactical::player_flag_commandable}};
+        initial.units = {{1,1,1}};
+        auto world = require(tactical::TacticalSession::create(initial));
+        // Refused uses still belong to the log. Preloaded later input must
+        // neither hide a turn-only tick nor leak into its canonical input.
+        require(world.submit_object_turn({0,{1,0,tactical::AbilityKind::invulnerability}}));
+        require(world.submit_object_turn({2,{1,1,tactical::AbilityKind::invulnerability}}));
+        require(world.submit({{2,1,0},{1},tactical::StopPayload{}}));
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        net::TacticalSessionAdapter adapter(std::move(world), executor, {});
+        std::vector<std::vector<std::uint8_t>> inputs, logs;
+        std::vector<std::string> hashes;
+        for (unsigned frame = 0; frame < 3; ++frame) {
+            require(adapter.step());
+            auto bytes = require(adapter.canonical_input());
+            if (frame == 1) expect(bytes.empty(), "old and future object uses do not leak into the empty tick log");
+            else {
+                expect(!bytes.empty(), "turn-only canonical log is retained without a player batch");
+                const auto replay = require(tactical::parse_replay(bytes));
+                expect(replay.object_turns.size() == 1 && replay.object_turns.front().tick == frame,
+                    "canonical adapter log carries only this tick's object use");
+                expect(replay.commands.size() == (frame == 2 ? 1U : 0U),
+                    "canonical adapter log carries ordinary input only on its execution tick");
+            }
+            inputs.push_back(std::move(bytes));
+            hashes.push_back(adapter.state_hash());
+            logs.push_back(require(tactical::write_replay(adapter.simulation().record())));
+        }
+        if (workers == 1) {
+            input_reference = inputs; hash_reference = hashes; log_reference = logs;
+        } else {
+            expect(inputs == input_reference, "object-turn canonical inputs are identical across 1/2/4/8 workers");
+            expect(logs == log_reference, "object-turn command logs are identical across 1/2/4/8 workers");
+            expect(hashes == hash_reference, "object-turn state hashes are identical across 1/2/4/8 workers");
+        }
+        std::cout << "object-turn input workers=" << workers << " hash=" << hashes.back() << '\n';
+    }
+}
+
 tactical::TacticalSetup setup() {
     tactical::TacticalSetup result;
     result.seed = 714;
@@ -1043,13 +1087,14 @@ private:
 };
 
 struct AdaptiveOpaque {
-    FakeNetwork network{2};
-    std::array<OpaqueAdapter, 2> adapters;
-    std::array<StatsTransport, 2> transports{{StatsTransport(network, 0), StatsTransport(network, 1)}};
+    FakeNetwork network;
+    std::vector<OpaqueAdapter> adapters;
+    std::vector<StatsTransport> transports;
     std::vector<net::LockstepSession> sessions;
     explicit AdaptiveOpaque(std::uint64_t timeout = 1000, bool override_provider = true,
         std::function<eawr::core::Result<void>(std::uint64_t, std::span<const std::uint8_t>)> retain = {},
-        std::uint64_t initial_delay = 4) {
+        std::uint64_t initial_delay = 4, unsigned peers = 2)
+        : network(peers), adapters(peers) {
         net::SessionOptions options;
         options.input_delay = initial_delay;
         options.final_tick_count = 500;
@@ -1058,9 +1103,15 @@ struct AdaptiveOpaque {
         options.completeness_timeout_ms = timeout;
         options.adaptive_timing = net::AdaptiveTiming{0, true, [](auto) { return std::optional<std::uint64_t>{330}; }};
         if (!override_provider) options.adaptive_timing->rtt_ms = {};
-        for (unsigned peer = 0; peer < 2; ++peer)
+        transports.reserve(peers);
+        std::vector<net::PeerSeat> roster;
+        for (unsigned peer = 0; peer < peers; ++peer) {
+            transports.emplace_back(network, peer);
+            roster.push_back({sim::SeatId{peer + 1}, true});
+        }
+        for (unsigned peer = 0; peer < peers; ++peer)
             sessions.push_back(require(net::LockstepSession::create(adapters[peer], transports[peer],
-                {{sim::SeatId{1}, true}, {sim::SeatId{2}, true}}, options)));
+                roster, options)));
     }
 };
 
@@ -1152,10 +1203,13 @@ void adaptive_wire_and_gate() {
             "oversized timing envelope uses reserved timing diagnostic");
     }
     for (const bool departures : {false, true}) for (const bool ready : {false, true}) {
-        AdaptiveOpaque match;
-        if (departures) match.sessions[0].enable_departures([](auto key) {
-            return eawr::core::Result<std::vector<std::uint8_t>>::success({static_cast<std::uint8_t>(key.seat.value)});
-        });
+        AdaptiveOpaque match(1000, true, {}, 4, departures && ready ? 3U : 2U);
+        if (departures) for (unsigned peer = 0; peer < match.sessions.size(); peer += 2) {
+            match.adapters[peer].recognize_departures = ready;
+            match.sessions[peer].enable_departures([ready](auto key) {
+                return eawr::core::Result<std::vector<std::uint8_t>>::success({static_cast<std::uint8_t>(ready ? 0 : key.seat.value)});
+            });
+        }
         match.network.fault = [ready](auto from, auto to, auto bytes) {
             FakeDelivery delivery;
             delivery.drop = !ready && from == 1 && to == 0 && bytes.front() == net::timing_ready_kind;
@@ -1171,8 +1225,21 @@ void adaptive_wire_and_gate() {
         match.network.round = round;
         const auto result = match.sessions[0].pump(round);
         if (departures && ready) {
-            expect(result && match.sessions[0].input_delay() == 4, "retained timing permits the agreed voter departure");
-            expect(static_cast<bool>(match.sessions[0].pump(round + 1)), "retained event survives subsequent departure pumping");
+            expect(static_cast<bool>(result), "retained timing opens a vote between two survivors");
+            std::array<bool, 3> departed{};
+            for (unsigned attempt = 0; attempt < 32 && !(departed[0] && departed[2]); ++attempt) {
+                match.network.round = ++round;
+                for (const auto peer : {0U, 2U}) {
+                    const auto pumped = require(match.sessions[peer].pump(round));
+                    for (const auto& event : pumped.departure_events)
+                        if (event.key.seat == sim::SeatId{2}) departed[peer] = true;
+                }
+            }
+            expect(departed[0] && departed[2] && match.sessions[0].input_delay() == 4
+                && match.sessions[2].input_delay() == 4, "retained timing permits the agreed voter departure");
+            match.network.round = ++round;
+            for (const auto peer : {0U, 2U})
+                expect(static_cast<bool>(match.sessions[peer].pump(round)), "retained event survives subsequent departure pumping");
             continue;
         }
         if (departures) {
@@ -1530,6 +1597,18 @@ void monitored_maximum_lead() {
         }
         expect(match.sessions[0].simulation().completed_tick() == 4, "departing sender reaches lead D+1");
         match.network.open[0] = false;
+        if (peers == 2) {
+            bool lost{};
+            for (std::uint64_t round = 6; round < 160 && !lost; ++round) {
+                match.network.round = round;
+                const auto result = match.sessions[1].pump(round);
+                if (!result) { lost = true; expect(result.error().code == net::session_errors::stalled, "maximum-lead lone survivor gets connection loss"); }
+            }
+            expect(lost && match.sessions[1].departure_outcomes().empty() && !match.sessions[1].simulation().outcome(),
+                "maximum receive frontier cannot confirm a quitter or award a lone survivor the win");
+            match.replay(1);
+            continue;
+        }
         for (std::uint64_t round = 6; round < 160; ++round) {
             match.network.round = round;
             for (unsigned peer = 1; peer < peers; ++peer) require(match.sessions[peer].pump(round));
@@ -1556,15 +1635,14 @@ void monitor_send_close_race() {
             closed = true;
         }
     };
-    for (std::uint64_t round = 0; round < 100; ++round) {
+    bool lost{};
+    for (std::uint64_t round = 0; round < 100 && !lost; ++round) {
         match.network.round = round;
-        require(match.sessions[0].pump(round));
+        const auto result = match.sessions[0].pump(round);
+        if (!result) { lost = true; expect(result.error().code == net::session_errors::stalled, "hash-send closure is connection loss"); }
     }
-    expect(closed && match.sessions[0].departure_outcomes().size() == 1
-        && match.sessions[0].departure_outcomes().front().event.reason == net::DepartureReason::disconnect,
-        "closed hash send defers to one agreed typed departure instead of surfacing transport failure");
-    expect(match.sessions[0].simulation().completed_tick() == 40 && match.monitors[0]->agreed_end(),
-        "monitor send-close race leaves a recoverable membership gate through match end");
+    expect(closed && lost && match.sessions[0].departure_outcomes().empty() && !match.sessions[0].simulation().outcome(),
+        "closed hash send cannot manufacture a departure or a winner from one local vote");
     match.replay(0);
 }
 
@@ -1576,15 +1654,16 @@ void monitored_silent_peer() {
     }
     // The link stays open (transport keepalives), but the app stops sealing input
     // and hash rows. The pending exchange must not mask its liveness deadline.
-    for (std::uint64_t round = 20; round < 200; ++round) {
+    bool lost{};
+    for (std::uint64_t round = 20; round < 200 && !lost; ++round) {
         match.network.round = round;
-        require(match.sessions[1].pump(round));
+        const auto result = match.sessions[1].pump(round);
+        if (!result) { lost = true; expect(result.error().code == net::session_errors::stalled, "silent hash voter has a bounded connection-loss deadline"); }
     }
-    const auto& outcomes = match.sessions[1].departure_outcomes();
-    expect(outcomes.size() == 1 && outcomes.front().event.reason == net::DepartureReason::timeout,
-        "silent monitor voter gets an agreed timeout departure with its link still open");
-    expect(match.sessions[1].simulation().completed_tick() == 40 && match.monitors[1]->agreed_end(),
-        "monitored silent-peer timeout releases the gate and completes without a hang");
+    expect(lost && match.network.open[0] && match.sessions[1].departure_outcomes().empty()
+        && !match.sessions[1].simulation().outcome(), "healthy keepalives cannot turn missing application input into an invented win");
+    expect(!match.monitors[1]->frozen(), "silence is not relabelled as a state-hash divergence");
+    match.replay(1);
 }
 
 void monitored_departures() {
@@ -1596,6 +1675,18 @@ void monitored_departures() {
         }
         expect(match.sessions[1].simulation().completed_tick() > 0, "concrete monitor tick-zero barrier agrees");
         match.network.open[0] = false;
+        if (peers == 2) {
+            bool lost{};
+            for (std::uint64_t round = 20; round < 160 && !lost; ++round) {
+                match.network.round = round;
+                const auto result = match.sessions[1].pump(round);
+                if (!result) { lost = true; expect(result.error().code == net::session_errors::stalled, "monitored lone-survivor disconnect is connection loss"); }
+            }
+            expect(lost && match.sessions[1].departure_outcomes().empty() && !match.sessions[1].simulation().outcome(),
+                "monitor membership cannot be retired by the only remaining local vote");
+            match.replay(1);
+            continue;
+        }
         for (std::uint64_t round = 20; round < 160; ++round) {
             match.network.round = round;
             for (unsigned peer = 1; peer < peers; ++peer) require(match.sessions[peer].pump(round));
@@ -2017,15 +2108,14 @@ void agreed_departures() {
             for (auto& session : match.sessions) require(session.pump(round));
         }
         if (!timeout) match.network.open[0] = false;
-        std::optional<net::DepartureOutcome> seen;
-        for (std::uint64_t round = 12; round < 160 && !seen; ++round) {
+        bool lost{};
+        for (std::uint64_t round = 12; round < 160 && !lost; ++round) {
             match.network.round = round;
-            const auto pumped = require(match.sessions[1].pump(round));
-            if (!pumped.departure_outcomes.empty()) seen = pumped.departure_outcomes.front();
-            if (timeout && round < 110) expect(match.sessions[1].simulation().departure_controls().empty(), "silent missing inputs are never invented before agreement");
+            const auto result = match.sessions[1].pump(round);
+            if (!result) { lost = true; expect(result.error().code == net::session_errors::stalled, "timeout and lone-survivor disconnect do not imply Quit"); }
         }
-        expect(seen && seen->event.reason == (timeout ? net::DepartureReason::timeout : net::DepartureReason::disconnect)
-            && seen->state == net::DepartureState::won_by_departure, "one survivor agrees disconnect/timeout and ends with departure result");
+        expect(lost && match.sessions[1].departure_outcomes().empty() && !match.sessions[1].simulation().outcome(),
+            "unconfirmed two-peer loss ends without a winner");
         match.replay(1);
     }
     for (const bool human_ally : {false, true}) for (const bool ai_ally : {false, true}) {
@@ -2071,6 +2161,7 @@ void agreed_departures() {
 
 int main() {
     try {
+        object_turn_only_command_log();
         chained_departures();
         target_timing_controls();
         final_tick_departure_ack();

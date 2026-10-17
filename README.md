@@ -41,10 +41,11 @@ If you enjoy the project and want to support its development, you can do so on
 
 ## Status
 
-Local space skirmish is playable: choose a map, factions, teams and match options,
-then fight AI opponents with the installed starting forces. Team games and
-free-for-all games are available where the map supports them. The project targets Forces of
-Corruption only for now.
+Release v0.2.5 is an early, playable preview. Local space skirmish is playable against the AI: choose a
+map, factions, teams and match options, then fight with the installed starting forces. Team games and
+free-for-all games are available where the map supports them. LAN multiplayer works for up to nine
+seats, and Galactic Conquest is a partly working preview. The project targets Forces of Corruption only
+for now.
 
 What works today:
 
@@ -55,28 +56,39 @@ What works today:
   earning mining income, and purchasing units from captured mercenary stations.
 - Space-map hazards, including asteroid fields, nebulae and ion storms, with their
   effects on ships and visibility.
+- A front end with single-player and multiplayer menus, profiles, settings, saved games and replays.
+- LAN lobbies and lockstep multiplayer, with desync detection and in-match reconnection, and online rooms
+  through an online service you enter in Network Options (Windows downloads; an early preview).
+- A galactic campaign preview: the campaign map, fleets, production, and space and land battle entry, with an
+  early galactic AI (on by default, `--eawr-galactic-ai off` switches it off).
 - Reading a FoC installation: MEG archives and loose files through a virtual file system,
   the XML object registry, maps, models, textures and animations.
-- A Godot viewer that renders FoC space and land maps from map and XML data.
 - A headless deterministic simulation that builds a skirmish start from game data and
   replays recorded commands with identical state hashes on every platform.
 - A Lua 5.0.2 script host and a sandboxed, deterministic Lua VM for gameplay scripts.
 
-Limits: FoC only, one local human player with AI opponents or allies; the map's
-authored start positions limit the available teams. Playable land battles, galactic
-campaigns and network multiplayer are not implemented yet. Land maps can be viewed,
-and the full interface and gameplay are still under development. Unsupported units
-are filtered from starting forces and purchasing rather than offered as complete.
-
-The AI economy now follows more of FoC's rules. Please report AI opponents that
-stop purchasing units or constructing mines.
-
-Known issues: combat balance, some abilities, fog transitions and visual effects
-still need comparison with the original game. Frame-time spikes can occur in
-larger battles; please use the reporting steps below when they do.
+Limits: FoC only. Galactic Conquest is partial and its AI is early; mod support is unfinished; online
+play is an early preview and the Linux downloads have no online play. Combat balance, some abilities and visual effects
+still need comparison with the original game, and frame-time spikes can occur in larger battles on older
+graphics cards; please use the reporting steps below when they do.
 The [roadmap](plan/backlog.md) and [phase plans](plan/) say what comes next.
 
-## Try the space battle
+## Play it (Windows)
+
+You need your own FoC installation and a graphics card with Vulkan or Direct3D 12 support. The release
+is not code-signed, so Windows may warn about the download; the player guide inside the zip explains it.
+
+1. Download `eaw-revised-<version>-windows-x64-player.zip` from
+   [Releases](https://github.com/EaW-Revised/EaW-Revised/releases), compare it with `SHA256SUMS.txt`, and extract the
+   whole archive to a folder you can write to. No installer, administrator rights or Python is needed.
+2. Double-click **`EAWR.exe`**. It finds your Steam or GOG copy of Forces of Corruption (or asks you to browse
+   for the folder that contains `GameData/` and `corruption/`), reads the interface fonts out of your own game
+   executable on the first start, and opens the game.
+3. Pick a map and factions in the setup screen and press **Start Battle**.
+
+The same release has `windows-x64-debug.zip` (debug symbols and consistency checks, slower; for bug reports).
+
+## Try the space battle with your own Godot (testers and developers)
 
 You need your own FoC installation, Python 3.8 or newer, the standard **Godot 4.7.2**
 binary, and a GPU with Vulkan support (Forward+). You do not need a source checkout,

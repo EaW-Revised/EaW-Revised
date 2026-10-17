@@ -10,9 +10,11 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <set>
 #include <utility>
 
 #include "battle_effects_internal.hpp"
@@ -318,6 +320,9 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
             looks.weapons.emplace(tactical::death_projectile_slot_flag | static_cast<std::uint32_t>(index),
                 look_of(type.death_projectiles[index]));
         }
+        // RP-09: the station's retreat explosion is looked up by its own weapon slot.
+        if (!type.retreat_self_destruct.empty())
+            looks.weapons.emplace(tactical::retreat_explosion_slot_flag, look_of(type.retreat_self_destruct));
         for (const auto& ability : type.abilities)
             if (ability.type == "REPLENISH_WINGMEN") looks.replenish_particle = ability.replenish_particle;
             else if (ability.type == "LURE") looks.lure_particle = ability.lure_particle;
@@ -464,11 +469,13 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
                 looks.leech_effect = nested.leech_effect;
             }
             if (beam == 0) looks.energy_owner_particle = nested.beam_owner_particle;
-            if (!nested.beam_owner_bone.empty() && !type.model_path.empty()) {
+            // TBF-05: tractor uses the conventional model socket, not Beam_Bone_Name.
+            const auto origin_bone = beam == 1 ? std::string{"HP_trac_bone"} : nested.beam_owner_bone;
+            if (!origin_bone.empty() && !type.model_path.empty()) {
                 if (auto model = assets::load_model(*filesystem_, type.model_path)) {
                     const auto frames = units::bind_frames(model.value());
                     if (frames) for (std::size_t bone = 0; bone < model.value().bones.size(); ++bone) {
-                        if (lower(model.value().bones[bone].name) != lower(nested.beam_owner_bone)) continue;
+                        if (lower(model.value().bones[bone].name) != lower(origin_bone)) continue;
                         const auto& frame = frames.value()[bone];
                         looks.beam_bones[beam] = static_cast<std::uint32_t>(bone);
                         // live_model_point applies the model quarter-turn; keep this fallback in asset space.
@@ -478,9 +485,100 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
                     }
                 }
             }
+            if (beam != 0) {
+                auto& lightning = (beam == 2 ? leech_beams_[id] : hero_beams_[beam]).lightning;
+                const std::string effect_name = beam == 1 ? "Tractor_Beam" : nested.leech_lightning;
+                if (effect_name.empty() || !lightning.name.empty()) continue;
+                const auto document = data::load_document(*filesystem_, "data/xml/lightningeffecttypes.xml");
+                if (!document) continue;
+                for (const auto& effect : document.value().root.children) {
+                    const auto name = std::find_if(effect.attributes.begin(), effect.attributes.end(), [](const auto& attribute) {
+                        return lower(attribute.name) == "name";
+                    });
+                    if (name == effect.attributes.end() || lower(name->value) != lower(effect_name)) continue;
+                    lightning.name = effect_name;
+                    const auto text = [&](const std::string_view key) {
+                        for (const auto& child : effect.children) if (lower(child.name) == lower(key)) {
+                            data::tag_trace::used(child); return trim(child.raw_text);
+                        }
+                        return std::string{};
+                    };
+                    const auto scalar = [&](const std::string_view key, const float fallback) {
+                        const auto values = numbers(text(key)); return values.empty() ? fallback : values.front();
+                    };
+                    // TBF-07: defaults are engine defaults, not bounds inferred from retail data.
+                    lightning.texture = text("Texture_Name");
+                    if (lightning.texture.empty()) lightning.texture = "lightning_default.tga";
+                    lightning.width_min = scalar("Width_Min", 20.0F); lightning.width_max = scalar("Width_Max", 5.0F);
+                    lightning.fade_min = scalar("Fadeout_Time_Min", 3.0F); lightning.fade_max = scalar("Fadeout_Time_Max", 1.0F);
+                    lightning.interval_min = scalar("Bolt_Creation_Interval_Min", 0.05F);
+                    lightning.interval_max = scalar("Bolt_Creation_Interval_Max", 0.3F);
+                    lightning.detail = scalar("Detail", 10.0F);
+                    lightning.count = static_cast<std::uint32_t>(std::clamp(static_cast<double>(scalar("Number_Bolts", 10.0F)),
+                        0.0, static_cast<double>(std::numeric_limits<std::uint32_t>::max())));
+                    lightning.cycles = scalar("Cycles_Per_Distance", 0.0F);
+                    lightning.rotations = scalar("Rotations_Per_Second", 0.0F);
+                    lightning.repeat = scalar("Texture_Repeat", 0.0F); lightning.scroll = scalar("Texture_Scroll", 0.0F);
+                    lightning.update_all = truthy(text("Update_All")); lightning.replace_faded = truthy(text("Replace_Faded"));
+                    const auto displacement = numbers(text("Displace"));
+                    for (std::size_t axis = 0; axis < 3; ++axis)
+                        lightning.displacement[axis] = std::clamp(axis < displacement.size() ? displacement[axis] : 0.4F, 0.0F, 1.0F);
+                    const auto colour = [&](const std::string_view key, const particles::Color fallback) {
+                        const auto v = numbers(text(key));
+                        return v.size() >= 4 ? particles::Color{v[0] / 255.0F, v[1] / 255.0F, v[2] / 255.0F, v[3] / 255.0F} : fallback;
+                    };
+                    lightning.start = colour("Color_Start", {100.0F / 255.0F, 100.0F / 255.0F, 1.0F, 1.0F});
+                    lightning.end = colour("Color_End", {0.0F, 0.0F, 0.0F, 0.0F});
+                    break;
+                }
+            }
         }
         types_.emplace(id, std::move(looks));
     }
+    // Warm programs from the references this battle's loaded looks actually use.
+    // Resource holds are bounded by the backend; definitions decoded only for
+    // this pass are released so the lazy CPU effect cache does not grow here.
+    const auto warm_start = std::chrono::steady_clock::now();
+    std::set<std::string_view> seen;
+    const auto warm = [&](const std::string& name) {
+        if (name.empty() || !seen.emplace(name).second) return;
+        if (!backend_->begin_prewarm_reference()) return;
+        const bool cached = particle_types_.contains(name);
+        const auto lookup_start = std::chrono::steady_clock::now();
+        const auto* type = particle_type(name);
+        backend_->record_prewarm_lookup(std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - lookup_start).count(), !cached && type != nullptr && type->system.has_value());
+        if (type != nullptr && type->system) {
+            for (const auto& plan : particles::plan_system(*type->system)) {
+                if (plan.drawable) static_cast<void>(backend_->prewarm_program(plan));
+            }
+        }
+        if (!cached) particle_types_.erase(name);
+    };
+    for (const auto& name : move_particles_) warm(name);
+    for (const auto& entry : weaken_particles_) warm(entry.second);
+    for (const auto& entry : types_) {
+        const auto& looks = entry.second;
+        for (const auto* weapons : {&looks.weapons, &looks.ability_weapons,
+                &looks.barrage_weapons, &looks.charged_weapons}) {
+            for (const auto& weapon : *weapons) {
+                const auto& look = weapon.second;
+                for (const auto* name : {&look.detonation, &look.lifetime_detonation,
+                        &look.death_explosion, &look.armor_reduced, &look.shield_absorbed}) warm(*name);
+            }
+        }
+        for (const auto* name : {&looks.death_explosion, &looks.spin_explosion, &looks.leech_effect,
+                &looks.energy_owner_particle, &looks.replenish_particle, &looks.corrupt_target_particle,
+                &looks.corrupt_owner_particle, &looks.lure_particle, &looks.blast_charging_particle,
+                &looks.blast_charged_particle}) warm(*name);
+        for (const auto* names : {&looks.hardpoint_explosions, &looks.damage_hits,
+                &looks.shield_hits, &looks.asteroid_hits}) {
+            for (const auto& name : *names) warm(name);
+        }
+        for (const auto& handler : looks.healing) warm(handler.heal_particle);
+    }
+    backend_->finish_program_prewarm(std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - warm_start).count());
 }
 
 const BattleEffects::ParticleType* BattleEffects::particle_type(const std::string& name) {

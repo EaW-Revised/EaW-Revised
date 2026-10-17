@@ -24,6 +24,8 @@ struct BattleMessageLooks {
     data::ui::Rgba8 win{223, 243, 255, 255};        // xml-fallback: Win_Message_Color; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
     data::ui::Rgba8 lose{255, 244, 223, 255};       // xml-fallback: Lose_Message_Color; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
     data::ui::Rgba8 pending{255, 32, 32, 240};      // xml-fallback: Battle_Pending_Message_Color: the pause text; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
+    double countdown_x{0.005};                      // xml-fallback: GUI_Tactical_Countdown_Timers_Screen_X, a share of the width; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
+    double countdown_y{0.10};                       // xml-fallback: GUI_Tactical_Countdown_Timers_Screen_Y, a share of the height; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
     std::vector<core::Diagnostic> diagnostics;
 };
 

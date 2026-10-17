@@ -22,6 +22,7 @@ class GalacticFleetStackPopupRuntime(unittest.TestCase):
         driver.write_text('''extends SceneTree
 var frame = 0
 var elapsed = 0.0
+var hover_start = -1.0
 var capture_path = ''' + json.dumps((directory / "native.png").as_posix()) + '''
 func _initialize():
     call_deferred("_start")
@@ -50,7 +51,9 @@ func _process(delta):
         motion.position = target.get_global_rect().get_center()
         motion.global_position = motion.position
         Input.parse_input_event(motion)
-    if frame == 330:
+    if frame >= 70 and hover_start < 0.0: hover_start = elapsed
+    # The encyclopedia delay is wall-clock time, so the capture waits for it rather than for a frame count.
+    if frame >= 330 and hover_start >= 0.0 and elapsed - hover_start > 3.0:
         root.get_texture().get_image().save_png(capture_path)
         current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
         quit()
@@ -112,11 +115,11 @@ func _process(delta):
     def test_centre_icon_opens_and_presence_only_icon_does_not(self):
         data = self.hover("fleet-contents", "fleet_presence_101_1")
         self.assertIsNotNone(data["fleet_hud"]["stack_popup"]["popup"]["tooltip"], self.hover_facts(data))
-        # A presence-only enemy has nothing to list: its icon opens nothing. The
-        # plain fixture has no attached superweapon, which would grant counts (WGUI-17).
-        data = self.hover("fleet-presence-plain", "fleet_presence_101_0")
-        self.assertEqual(self.presence(data, 0)["contents"], [])
-        self.assertIsNone(data["fleet_hud"]["stack_popup"]["popup"]["tooltip"], self.hover_facts(data))
+        # GHUD-S76: stack icons need a filtered fleet card, so a presence-only enemy draws no stack at all and there is
+        # nothing to hover or open. The plain fixture has no attached superweapon, which would grant counts (WGUI-17).
+        data = self.hover("fleet-presence-plain", "fleet_presence_101_1")
+        self.assertFalse([row for row in data["fleet_hud"]["presence"] if row["planet"] == 101 and row["icon"] == 0],
+                         self.hover_facts(data))
 
 
 if __name__ == "__main__":

@@ -396,8 +396,19 @@ void test_phase_map() {
             expect(partitions == expected_partitions, "phase " + name + " uses its deterministic partition count");
             names.push_back(name);
         }
-        expect(names == expected, "tick " + std::to_string(tick) + ": the phase map is gather, movement, hull-service, combat-input-refresh, targeting, unit-systems, squadrons, "
-            "fog-reveal, fog-cells, visibility");
+        // The tick runs more named phases than these ten (projectiles, orders, object turns ...); these ten must
+        // keep running in this order, partitioned, and the visibility phase must come after the fog phases.
+        auto at = names.begin();
+        bool in_order = true;
+        for (const auto& wanted : expected) {
+            at = std::find(at, names.end(), wanted);
+            if (at == names.end()) { in_order = false; break; }
+            ++at;
+        }
+        std::string actual;
+        for (const auto& name : names) actual += (actual.empty() ? "" : ", ") + name;
+        expect(in_order, "tick " + std::to_string(tick) + ": gather, movement, hull-service, combat-input-refresh, targeting, "
+            "unit-systems, squadrons, fog-reveal, fog-cells, visibility run in this order; the tick ran: " + actual);
     }
 }
 

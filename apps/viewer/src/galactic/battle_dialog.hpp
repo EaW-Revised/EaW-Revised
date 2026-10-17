@@ -4,7 +4,9 @@
 #include "ui/dialog_builder.hpp"
 #include "ui/battle_overlay.hpp"
 #include <godot_cpp/classes/label.hpp>
+#include <map>
 #include <memory>
+#include <string>
 
 namespace eawr::presentation::godot_backend {
 
@@ -51,6 +53,7 @@ private:
     double listed_at_{-1};
     bool advanced_{true}, submitted_{};
     bool summary_rows_dirty_{true};
+    std::map<std::string, std::string> graph_state_; // last applied centre-graph key per graph (change-gated)
     std::uint64_t summary_refreshes_{};
     std::uint64_t choices_{}, rebuilds_{};
 };

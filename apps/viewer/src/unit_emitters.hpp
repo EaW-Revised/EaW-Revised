@@ -24,6 +24,7 @@
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -72,10 +73,15 @@ namespace eawr::presentation::godot_backend {
 // snapshots; it never feeds back, so the session's hashes are unchanged.
 class UnitEmitters final {
 public:
-    UnitEmitters(godot::Node3D& host, const vfs::Vfs& filesystem);
+    UnitEmitters(godot::Node3D& host, const vfs::Vfs& filesystem,
+                 std::span<const sim::tactical::DurabilityProfile> durability);
     ~UnitEmitters();
     UnitEmitters(const UnitEmitters&) = delete;
     UnitEmitters& operator=(const UnitEmitters&) = delete;
+
+    // CPU asset preparation only, before Begin: no particle instances, random
+    // draws or lifecycle updates. Unknown later assets keep the lazy fallback.
+    void prepare_assets(const SpacePopulation& population);
 
     // What a unit's snapshot says about its engine and ability emitters: the engines online
     // (BP-42), TURBO or SPOILER_LOCK running, POWER_TO_WEAPONS running (#76, AB-31, AB-32).
@@ -83,6 +89,7 @@ public:
         bool engines_online{true};
         bool turbo{};
         bool power_to_weapons{};
+        bool ion_stun_effect{}; // IS-09: initialization hides this type's ion emitters
         bool ion_stunned{};  // IS-09: the stun shows the ion-stun ("pi") emitters
         bool invulnerability{}; // WHE-52: the active Falcon mode shows "pem" emitters
         bool gravity_well{}; // BP-73: INTERDICT shows "pgw"
@@ -132,7 +139,15 @@ public:
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
-    void measure_particles(bool on) noexcept { registry_->begin_measurement(on); }
+    void measure_particles(bool on) noexcept {
+        registry_->begin_measurement(on);
+        measure_owner_ = on;
+        owner_timings_ = {};
+    }
+    // Fine diagnostic only: setup, fading, catch-up, owner update, placement,
+    // brightness, registry calls, final bookkeeping, then caller clone retirement.
+    [[nodiscard]] const std::array<double, 9>& owner_timings() const noexcept { return owner_timings_; }
+    [[nodiscard]] double* clone_retire_timer() noexcept { return measure_owner_ ? &owner_timings_[8] : nullptr; }
     [[nodiscard]] const particles::RegistryTimings& particle_timings() const noexcept { return registry_->timings(); }
     [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
         return registry_->set_detail(detail);
@@ -153,6 +168,8 @@ public:
     [[nodiscard]] std::uint64_t particles() const noexcept { return particles_; }
 
 private:
+    bool measure_owner_{};
+    std::array<double, 9> owner_timings_{};
     bool measure_preparation_{};
     double emitter_prepare_ms_{};
     double clone_prepare_ms_{};
@@ -234,6 +251,11 @@ private:
         std::uint64_t born{};
     };
     struct Ship final {
+        // The two vectors frame() checks for every pooled slot come first, so that check touches
+        // the start of each slot only.
+        std::vector<Running> running;
+        // #421: a death clone's proxies, planned at its first shown sample.
+        std::vector<CloneProxy> clone;
         sim::EntityId entity{};
         struct AttachedModel final {
             std::size_t hardpoint{};
@@ -248,11 +270,15 @@ private:
         Modes modes;                                // and the engines' and abilities' modes
         // BP-45: FoC's engine emitter brightness from the ship's last step (1 until it has one).
         float engine_brightness{1.0F};
+        // The report's engine_brightness_ node for `brightness_entity` (std::map nodes keep their
+        // address), so the per-frame write needs no lookup.
+        double* brightness_slot{};
+        sim::EntityId brightness_entity{};
         std::vector<Wanted> wanted;
-        std::vector<Running> running;
-        // #421: a death clone's proxies, planned at its first shown sample.
+        // True once update() has made `running` match `wanted`; cleared by every change that can break
+        // the match (a replan, stop_all, a released emitter), so a quiet ship skips the walk.
+        bool reconciled{};
         bool clone_planned{};
-        std::vector<CloneProxy> clone;
     };
     struct ModelFrames final {
         std::vector<std::optional<bool>> blast_phases; // BP-74: proxy ancestors' charge mesh, false=buildup
@@ -266,6 +292,7 @@ private:
     };
 
     [[nodiscard]] const assets::Texture* resolve_texture(std::string_view name);
+    [[nodiscard]] const assets::Model* emitter_model(const std::string& path);
     [[nodiscard]] const EffectSystem& effect_system(const std::string& path);
     [[nodiscard]] const ModelFrames* model_frames(const scene::Placement& placement, const assets::Model*& model);
     void plan(Ship& ship, const SpacePopulation::LiveShipEmitterView& view,
@@ -286,6 +313,9 @@ private:
     void place(std::size_t index, const sim::math::Mat3x4& pose);
     // Advances nonprojectile emitters and clones by one 30 Hz sample.
     [[nodiscard]] bool advance_sample();
+    // busy_: the slots (in slot order) that run emitters or clone proxies, which every per-frame pass
+    // visits instead of all the pooled slots; visit_: the slots the frame's own sample handled.
+    void rebuild_busy();
     [[nodiscard]] bool advance_running(float delta_seconds, bool projectiles);
     [[nodiscard]] bool advance_projectiles(double presented_tick);
     // #433: draws every running emitter again at the frame last set, without advancing.
@@ -305,6 +335,7 @@ private:
 
     godot::Node3D* host_;
     const vfs::Vfs* filesystem_;
+    std::vector<sim::tactical::TypeId> ion_stun_types_;
     scene::VfsAssetCache cache_;
     std::map<std::string, std::optional<assets::Texture>, std::less<>> textures_;
     std::unique_ptr<GodotParticleBackend> backend_;
@@ -315,7 +346,14 @@ private:
     std::vector<particles::EffectFrameStats> batch_stats_;
     std::map<std::string, ModelFrames> frames_;
     std::map<std::string, EffectSystem> systems_;
+    std::set<std::string> model_paths_;
+    std::map<std::string, std::uint64_t> unprepared_models_, unprepared_systems_, unprepared_frames_;
+    bool assets_prepared_{};
+    std::uint64_t prepared_model_requests_{}, prepared_models_{}, prepared_system_requests_{}, prepared_systems_{};
+    std::uint64_t prepared_source_bytes_{};
+    double asset_prepare_ms_{};
     std::vector<Ship> ships_;
+    std::vector<std::size_t> visit_, busy_;
     particles::CameraFrame camera_frame_{};
     std::optional<double> clock_start_;
     std::optional<double> projectile_clock_tick_;

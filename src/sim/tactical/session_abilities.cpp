@@ -541,7 +541,8 @@ void TacticalSession::Impl::register_concentrate(const LiveUnit& unit) {
     if (state.active && state.target != invalid_entity_id) {
         concentrate_changed_targets.insert(state.target);
         concentrate_effects.push_back({state.target, unit.state.entity_id, nested->concentrate_stacking_category,
-            math::Fixed::from_raw(-nested->target_damage_increase.raw())});
+            math::Fixed::from_raw(-nested->target_damage_increase.raw()),
+            math::Fixed::from_raw(-nested->target_speed_decrease.raw())});
         std::sort(concentrate_effects.begin(), concentrate_effects.end(), [](const auto& a, const auto& b) {
             return std::tie(a.target, a.category, a.source) < std::tie(b.target, b.category, b.source);
         });
@@ -584,7 +585,8 @@ core::Result<void> TacticalSession::Impl::service_concentrate(std::vector<LiveUn
             }
             special.next_service_frame = tick + nested->service_interval;
             effects[partition].push_back({active.target, unit.state.entity_id, nested->concentrate_stacking_category,
-                math::Fixed::from_raw(-nested->target_damage_increase.raw())});
+                math::Fixed::from_raw(-nested->target_damage_increase.raw()),
+                math::Fixed::from_raw(-nested->target_speed_decrease.raw())});
         }
     });
     if (!result) return result;

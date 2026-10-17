@@ -102,6 +102,8 @@ void LiveSessionView::resume() {
 
 void LiveSessionView::quit() {
     godot::UtilityFunctions::print("EAWR live session quit requested in phase ", static_cast<int>(phase_));
+    if (options_.lan) godot::UtilityFunctions::print("EAWR net event=quit-request tick=", session_ ? session_->completed_tick() : 0,
+        " reason=", phase_ == Phase::results ? "return-from-results" : "local-leave");
     if (options_.lan && try_abort_lan(*options_.lan, std::function<void()>([this] { if (session_) session_->stop(); }))) {
         // MP-33: no tick can consume Quit while the other player is still reviewing.
         // Join the driver before closing the transport it owns.
@@ -127,17 +129,33 @@ void LiveSessionView::quit() {
     if (!options_.real_time) session_->advance_to(scheduler_->open_tick() + 1U);
 }
 
+bool LiveSessionView::leave() {
+    godot::UtilityFunctions::print("EAWR live session leave requested in phase ", static_cast<int>(phase_));
+    const Phase before = phase_;
+    quit();
+    if (phase_ == before) return false;
+    // A running battle ends through the sim's departure command; its end then returns without a result screen.
+    leave_on_end_ = phase_ == Phase::quitting;
+    return true;
+}
+
 core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population, GodotRenderer& renderer,
                                                      const double delta) {
     FrameTimer frame_timer(trace_frames_ ? &live_frame_ms_ : nullptr);
     tick_wait_ms_ = session_tail_ms_ = clip_pose_ms_ = 0.0;
     using UpdateResult = core::Result<SpaceLiveUpdate>;
-    const auto fail = [](std::string message) {
+    const auto fail = [this](std::string message) {
+        if (options_.lan) godot::UtilityFunctions::print("EAWR net event=battle-end reason=viewer-error tick=",
+            session_ ? session_->completed_tick() : 0, " code=EAWR-VIEWER-LIVE-SESSION");
         return UpdateResult::failure({.code = "EAWR-VIEWER-LIVE-SESSION", .message = std::move(message)});
     };
     // The simulation thread stopped: keep the last poses and carry its error to the view.
     const auto stopped = [this](const core::Diagnostic& failure) {
-        simulation_error_ = core::format_diagnostic(failure);
+        if (options_.lan && simulation_error_.empty()) godot::UtilityFunctions::print("EAWR net event=battle-end reason=",
+            lan_connection_loss(failure.code) ? "connection-loss" : "simulation-error", " tick=", session_->completed_tick(),
+            " code=", godot::String::utf8(failure.code.c_str()));
+        simulation_error_ = options_.lan && lan_connection_loss(failure.code)
+            ? lan_message(options_.lan->view()) : core::format_diagnostic(failure);
         save_failure_replay();
         SpaceLiveUpdate update;
         update.quit = quit_;
@@ -385,6 +403,22 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     }
     if (latest->outcome() && outcome_ != latest->outcome()) {
         outcome_ = latest->outcome();
+        if (options_.lan) {
+            constexpr std::array conditions{"none", "enemy-starbase-destroyed", "all-enemy-units-destroyed",
+                "intentional-quit", "enemies-retreated", "enemy-leader-destroyed", "campaign-station-destroyed"};
+            const auto condition = static_cast<std::size_t>(outcome_->condition);
+            std::string winners, losers;
+            for (const auto& player : latest->players()) {
+                auto& group = player.team_id == outcome_->winner_team ? winners : losers;
+                group += std::to_string(player.player_id) + "@" + std::to_string(player.team_id) + ",";
+            }
+            godot::UtilityFunctions::print("EAWR net event=battle-end reason=simulation-outcome tick=",
+                latest->completed_tick(), " local_player=", player_, " condition=",
+                condition < conditions.size() ? conditions[condition] : "unknown",
+                " winner_team=", outcome_->winner_team, " winning_players_at_teams=", godot::String::utf8(winners.c_str()),
+                " losing_players_at_teams=", godot::String::utf8(losers.c_str()),
+                " decided_tick=", outcome_->decided_tick, " end_tick=", outcome_->end_tick);
+        }
         // #453 BEP-02: the battle ends at end_tick; BE-02: the winner's team wins, every other
         // lobby team loses.
         session_->halt_at(outcome_->end_tick);
@@ -438,16 +472,16 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         phase_ = Phase::results;
         time_.end(battle_end_->end_tick);
         apply_time();
+        if (leave_on_end_ && !options_.lan) {
+            phase_ = Phase::returning;
+            quit_ = true;
+        }
     }
     battle_frame_.previous = previous;
     battle_frame_.latest = latest;
     if (scheduler_) {
         scheduler_->present_snapshot(latest->completed_tick());
         if (options_.lan && lost_through) scheduler_->present_event_gap(*lost_through);
-        if (options_.lan) for (const auto& record : battle_frame_.reached) for (const auto& event : record.events) {
-            if (event.player == player_ && (event.kind == tactical::EventKind::order_accepted || event.kind == tactical::EventKind::order_rejected))
-                scheduler_->present_result(event.sequence);
-        }
     }
     battle_frame_.alpha = std::clamp(alpha, 0.0, 1.0);
     battle_frame_.presented_tick = presented_tick_;
@@ -535,8 +569,18 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
                 {to_float(instance.fixed_transform.rows[0][3]), to_float(instance.fixed_transform.rows[1][3]),
                  to_float(instance.fixed_transform.rows[2][3])},
                 std::binary_search(drawn_now.begin(), drawn_now.end(), instance.entity_id), type->second.second});
-            // WNO-44: copy radar identity only on observation, never from a hidden live owner.
-            if (std::binary_search(visible_now.begin(), visible_now.end(), instance.entity_id)) {
+            const bool observed = std::binary_search(visible_now.begin(), visible_now.end(), instance.entity_id);
+            // MM-18: the retail witness covers initially known build pads. Borrow the
+            // battle-start identity and its already composed slot, never a hidden respawn.
+            const auto definition = presentation_types_.find(instance.type_id);
+            const auto initial_ship = ship_of_entity_.find(instance.entity_id);
+            const auto* initial = !observed && setup_ && type->second.second
+                && definition != presentation_types_.end() && definition->second->build_pad
+                && !radar_memories_.contains(instance.entity_id) && initial_ship != ship_of_entity_.end()
+                ? ui::minimap_initial_identity(setup_->units, instance.entity_id, instance.type_id) : nullptr;
+            const bool initial_model = initial
+                && population.live_ship_model_present(initial_ship->second).value_or(false);
+            if (observed || initial_model) {
                 auto& radar = radar_memories_[instance.entity_id];
                 radar.type = instance.type_id;
                 radar.owner = instance.owner;
@@ -544,6 +588,21 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
                 radar.yaw = std::atan2(to_float(instance.fixed_transform.rows[1][0]),
                     to_float(instance.fixed_transform.rows[0][0])) * 180.0 / std::acos(-1.0);
                 radar.capture_point = economy_.pads.point(instance.type_id) != nullptr;
+                if (initial_model) {
+                    radar.type = initial->type_id;
+                    radar.owner = initial->owner;
+                    radar.position = {to_float(initial->position.x), to_float(initial->position.y),
+                                      to_float(initial->position.z)};
+                    radar.yaw = 0.0;
+                    if (const auto transform = sim::math::to_matrix(initial->rotation, initial->position)) {
+                        radar.yaw = space::instance_yaw_degrees(transform.value());
+                    }
+                    radar.retained_model = true;
+                    radar.world_half_size = {};
+                    if (const auto box = population.live_ship_box(initial_ship->second)) {
+                        radar.world_half_size = ui::minimap_world_half_size(box->model_to_world, box->low, box->high);
+                    }
+                }
             }
             const auto remembered = fog_ghosts_.states().find(instance.entity_id);
             if (observations.back().visible || remembered == fog_ghosts_.states().end()
@@ -1037,10 +1096,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         memory.yaw = visible.yaw;
         memory.world_half_size = {};
         if (const auto box = population.live_ship_box(visible.ship)) {
-            for (std::size_t row = 0; row < 2; ++row) for (std::size_t axis = 0; axis < 3; ++axis) {
-                memory.world_half_size[row] += std::abs(to_float(box->model_to_world.rows[row][axis]))
-                    * static_cast<double>(box->high[axis] - box->low[axis]) * 0.5;
-            }
+            memory.world_half_size = ui::minimap_world_half_size(box->model_to_world, box->low, box->high);
         }
     }
     fog_ghost_instances_.clear();
@@ -1048,7 +1104,9 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     std::erase_if(radar_memories_, [this](const auto& entry) { return !fog_ghosts_.states().contains(entry.first); });
     for (auto& [entity, memory] : radar_memories_) {
         const auto& state = fog_ghosts_.states().at(entity);
-        memory.retained_model = state.known && state.ghost && population.fog_model_pieces(entity) != 0;
+        // MM-18: a radar-only initial copy survives hidden changes until knowledge is retired.
+        memory.retained_model = state.known && state.ghost
+            && (memory.retained_model || population.fog_model_pieces(entity) != 0);
     }
     if (fog_ghost_logged_tick_ != latest->completed_tick()) {
         fog_ghost_logged_tick_ = latest->completed_tick();

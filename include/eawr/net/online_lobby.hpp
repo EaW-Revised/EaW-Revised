@@ -56,5 +56,8 @@ public:
     virtual core::Result<void> send_chat(std::string text) = 0;
     virtual core::Result<OnlineChatPage> chat(std::uint32_t after) = 0;
     virtual core::Result<void> kick(const OnlineRoomPublication&, std::uint32_t seat) = 0;
+    // The directory principal of this connection, the capability that proves the room's owner when its signalling scope is
+    // opened (NetworkGnsRoom::open). A secret: never copy it into a row, chat, profile or report. Empty when there is none.
+    virtual std::string principal() const { return {}; }
 };
 } // namespace eawr::net

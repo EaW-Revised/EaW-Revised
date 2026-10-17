@@ -183,6 +183,10 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
                 if (!member) throw std::runtime_error("missing first company member");
                 const auto original = required(catalog.resolve(member->name, data::Category::game_object));
                 row.movement_class = text(original, "MovementClass");
+                for (const auto& unit : source.company_units) { // WGA-489: any member unit's authored object script
+                    const auto* found = types.find(unit); if (!found) continue;
+                    if (!text(required(catalog.resolve(found->name, data::Category::game_object)), "Lua_Script").empty()) row.member_script = true;
+                }
                 if (!flag(original, "Create_Team")) row.survival_type = ai::upper_case(member->name);
                 if (!source.company_transport.empty()) row.hyperspace_speed = script::numeric::from_fixed(required(units::resolve_initial_galactic_type(types, source.company_transport)).hyperspace_speed.value());
             }
@@ -218,6 +222,19 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
         }
         if (out->registered_types.size() != out->types.size())
             throw std::runtime_error("registered selection type order is incomplete");
+        // PL-20: ai.types is the type table in load order (registry file, then place in the file); a
+        // category team enumerates it in that order, not in binding-id order. Duplicate names
+        // retain catalog winner order pending the duplicate-entry/name-lookup seam (legacy #3741).
+        {
+            std::map<std::string, std::uint64_t, std::less<>> table_order;
+            for (const auto& binding : bindings) {
+                const auto* definition = catalog.find(binding.original_type, data::Category::game_object);
+                table_order.emplace(ai::upper_case(binding.original_type), definition == nullptr ? std::numeric_limits<std::uint64_t>::max()
+                    : (static_cast<std::uint64_t>(definition->registry_order) << 32) | definition->definition_order);
+            }
+            std::stable_sort(out->ai.types.begin(), out->ai.types.end(),
+                [&](const auto& a, const auto& b) { return table_order.at(a.name) < table_order.at(b.name); });
+        }
         for (const auto& location : plan.locations()) if (location.planet) {
             const auto object = required(catalog.resolve(location.original_type, data::Category::game_object));
             ai::GalacticSelectionContentPlanet row; row.terrain = text(object, "Terrain");
@@ -255,10 +272,26 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             }
             out->planets.emplace(location.planet->id, std::move(row));
         }
+        for (auto& [id, type] : out->types) {
+            (void)id;
+            // WGA-483: an unresolved authored link is a null lookup, not a
+            // failure of the complete selection content publication.
+            if (type.starbase && !type.original->next_level_base.empty()) {
+                const auto next = identities.find(ai::upper_case(type.original->next_level_base));
+                if (next != identities.end()) type.next_base = next->second;
+            }
+        }
         for (const auto& binding : plan.player_bindings()) {
             const auto* faction = data.faction(binding.faction);
             if (!faction || !faction->hyperspace_speed_factor) throw std::runtime_error("selection requires faction hyperspace factor");
             out->faction_speed.emplace(binding.player.player_id, script::numeric::from_fixed(*faction->hyperspace_speed_factor));
+            // WGA-481: the debug build's initial-base resolver names only
+            // these two roots; later levels follow the type's authored chain.
+            const auto faction_name = ai::upper_case(binding.faction);
+            const auto first_base = faction_name == "REBEL" ? "REBEL_STAR_BASE_1"
+                : faction_name == "EMPIRE" ? "EMPIRE_STAR_BASE_1" : "";
+            if (const auto first = identities.find(first_base); first != identities.end())
+                out->initial_starbase_types.emplace(binding.player.player_id, first->second);
         }
         const auto terrain = required(data::load_document(filesystem, "Data/XML/AITerrainEffectiveness.xml"));
         for (const auto& row : terrain.root.children) for (const auto& cell : row.children) {

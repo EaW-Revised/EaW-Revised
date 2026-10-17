@@ -288,12 +288,41 @@
 
 ### The craft's targeting service (every frame) — interface only
 
-- **WSQ-41** (debug build, EWSQ-26) A squadron craft adopts its formation's attack target (and
-  hardpoint) as its own and its weapons', when that target is suitable and in reach. This query
+- **WSQ-41** (debug build, EWSQ-26; E1192-WSQ41-a..d) A squadron craft adopts its formation's attack target (and
+  hardpoint) as its own and its weapons', when that target passes base admission and is in reach. This query
   starts at the base destination (stack index 0), not the current top override. An autonomous
   attack override above an idle/escort base does not qualify; the separate collision-target
   fallback can still supply an enemy. Held-target suitability and notification use the top
-  destination instead (WSQ-45/46).
+  destination instead (WSQ-45/46). The base query accepts a hostile object destination unless
+  its native destination movement type is escort; an object attack-move is included, as well as an explicit
+  attack. The remake represents object attack-move with escort mode plus attack-move diversion:
+  the retained diversion distinguishes it from guard, including after a face-only order.
+  Adoption marks the target direct before the autonomous scan, so a nearby higher
+  priority fighter does not replace that destination. A point, friendly object or guard does
+  not supply this hostile non-escort base. Scan priority and its exclusions do not veto direct
+  formation adoption. The following subrules distinguish entry from retention and release:
+  **WSQ-41a** Base admission checks hostility, life, limbo and the special-weapon/starbase
+  exception; non-team objects also need living projectile collision and valid-target flags.
+  It does not check fog visibility, stealth targetability, weapon category compatibility or
+  scan priority. **WSQ-41b** With no selected hardpoint, adoption tests the target centre plus its
+  facing hard extent; an explicitly selected standing hardpoint supplies its own point and
+  the soft radius (AT-10). A nearer hardpoint chosen later for firing cannot enlarge this
+  admission. Minimum reach also gates adoption; refusal does not require the subsequent ordinary
+  target service to choose a different object. **WSQ-41c** The subsequent held-target service clears a dead, missing, fogged or
+  uncountered stealthed target and returns before scanning; it does not reset the scan clock.
+  While a retained hidden base stays eligible and in reach, adoption repeats followed by this
+  clear/return: no autonomous scan runs, even after its deadline expires. Removing that base
+  or moving it outside entry reach lets an already-due ordinary scan run; revealing it instead
+  retains the newly visible direct target without scanning. **WSQ-41d** A visible direct target remains held
+  despite weapon-category refusal, lower scan priority or later range loss. Those are not
+  autonomous rescan triggers. Death, visibility loss or replacement of the underlying base
+  clears the member's holder; a face-only order preserves that base. An ordinary admitted scan after release
+  still observes its existing deadline. Regression cases cover retained hidden bases and
+  unattackable targets beyond the ordinary deadline, replacement and eventual alternative
+  acquisition, explicit attack replacement, stop and move replacement through arrival, asserting
+  equal hashes on 1/2/4/8 workers. A pending buzz request preserves the ordinary team target
+  and base (FS-23), while its plain Move clears craft weapon targets through FT-07. Application
+  Stop removes that base and permits ordinary autonomous acquisition.
 - **WSQ-42** (debug build, EWSQ-27; FT-02, FT-06, G-F5) Without a target the craft scans for one
   itself, around itself, at most once per scan period: each scan sets the next one 30 frames plus
   a synchronized random 0 to 15 frames later. The scan range is the craft's
@@ -475,7 +504,7 @@ Our code: `src/sim/tactical/fighters_motion.cpp` and `src/sim/tactical/fighters_
 | WSQ-38 | none | missing, not needed in M2 |
 | WSQ-39 | FO-03 | same |
 | WSQ-40 | FM-08 | same |
-| WSQ-41 | partitioned player command hand-off before member scans | base attacks retain direct assignment; autonomous overrides over an idle/escort base remain autonomous; destination-stack collision fallback, target extents and hardpoint persistence remain gaps |
+| WSQ-41a..d | partitioned base adoption before member scans; retained-base replacement clears member direct state | object attack-move and explicit attack adopt inside centre/extent reach; fog clears and returns, visible direct holders retain outside reach or weapon compatibility; idle/guard overrides remain autonomous; destination-stack collision fallback and complete hardpoint-stack persistence remain gaps |
 | WSQ-43, WSQ-47 | `Tick::targets` member results and `hand_target` | normalized team sharing with the actual player-direct flag |
 | WSQ-42 | `target_combat` in partitioned member preparation | per-member collection box, own 30 + 0..15 clock and formation diversion admission; guard candidates admit from the guarded destination; launch admission delay retained |
 | WSQ-44, WSQ-45 | `UnitCombat::ship_target`, shared target-loss commit | live/hostile/visible checks, member admission with facing-dependent hard extent, and better-target rescan; `commit_squadron_target` shares a held target's loss with the team, its members and the formation destination, then ends the combat; stealth and detailed limbo service remain outside this port |

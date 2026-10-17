@@ -162,7 +162,7 @@ core::Result<void> GalacticSession::Impl::finish_corruption_mission(std::uint64_
     }
     touch_abilities(); return core::Result<void>::success();
 }
-core::Result<void> GalacticSession::Impl::service_corruption(const PartitionExecutor& executor) {
+core::Result<void> GalacticSession::Impl::service_corruption(const PartitionExecutor& executor, std::size_t preceding_events) {
     if (!ability_host || corruption_due.empty() || corruption_due.begin()->first > clock.galactic_frame)
         return core::Result<void>::success();
     struct Completion { PlanetId planet{}; corruption_fixture::Transition before, after; bool destroyed{}; };
@@ -191,12 +191,13 @@ core::Result<void> GalacticSession::Impl::service_corruption(const PartitionExec
         auto* row = find(ability_host->transitions, item.planet, [](const auto& r) { return r.planet; });
         row->transition = item.after;
         if (item.destroyed) continue; // ruins abort; no reward or repeat callback
-        auto applied = apply_corruption_completion(item.planet, item.before.current, item.after.current);
+        auto applied = apply_corruption_completion(item.planet, item.before.current, item.after.current, {}, preceding_events);
         if (!applied) return applied;
     }
     touch_abilities(); return core::Result<void>::success();
 }
-core::Result<void> GalacticSession::Impl::apply_corruption_completion(PlanetId planet, CorruptionType old, CorruptionType next, std::optional<PlayerId> recipient) {
+core::Result<void> GalacticSession::Impl::apply_corruption_completion(PlanetId planet, CorruptionType old, CorruptionType next,
+    std::optional<PlayerId> recipient, std::optional<std::size_t> preceding_events) {
     auto* economic = find(economy_corruption->planets, planet, [](const auto& r) { return r.planet; });
     if (!economic || economic->destroyed) return invalid("corruption completion planet unavailable");
     economic->corruption = next;
@@ -240,6 +241,16 @@ core::Result<void> GalacticSession::Impl::apply_corruption_completion(PlanetId p
     const auto* added = reward(next); const auto* removed = reward(old);
     const auto beneficiary = std::find_if(economy_corruption->players.begin(), economy_corruption->players.end(),
         [&](const auto& p) { return recipient ? p.player == *recipient : p.benefits; }); // WGCH-161: current first beneficiary, never retained actor owner
+    // WGP-54/WGCH-75: a due completion voices the local owner first, otherwise
+    // the designated beneficiary if local. Startup and ruins cleanup are silent.
+    if (preceding_events && feedback_notice_handler && observer && observer->local_player) {
+        const auto location = planets.find(planet);
+        const auto owner = location == planets.end() ? 0 : registry.get<session_detail::PlanetData>(location->second).owner;
+        const auto local = observer->local_player;
+        if (owner == local || (beneficiary != economy_corruption->players.end() && beneficiary->player == local))
+            feedback_notice_handler({next == CorruptionType::none ? GalacticFeedbackNotice::Kind::corruption_removed
+                : GalacticFeedbackNotice::Kind::planet_corrupted, local, planet, *preceding_events});
+    }
     for (const auto& player : setup.ability_host->corruption_players) {
         const auto key = std::pair{planet, player.player};
         auto* entitlements = find(ability_host->planet_entitlements, key, [](const auto& r) { return std::pair{r.planet, r.player}; });

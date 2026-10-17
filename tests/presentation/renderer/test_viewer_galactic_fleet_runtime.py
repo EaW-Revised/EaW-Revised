@@ -221,8 +221,9 @@ func _process(delta):
         self.assertEqual([(group["type"], group["count"], group["fleet"]) for group in card["groups"]],
                          [(1000, 3, 601), (1003, 1, 601), (1002, 1, 605)])
         controls = {row["name"]: row for row in hud["controls"]}
+        # WGUI-175: the fixture has another owner's fleet at the planet, so the local slot-0 fleets list in panel 3.
         groups = {row["group"]: row for row in hud["controls"]
-                  if row["name"].startswith("q1_") and row.get("group") is not None and self.drawn(row)}
+                  if row["name"].startswith("q3_") and row.get("group") is not None and self.drawn(row)}
         # #3079, debug build: the group count reads "x<count>" and is blank for one unit.
         self.assertEqual(set(groups), {0, 1, 2}, "double-cell admission keeps every observed group")
         for index, count in [(0, "x3"), (1, ""), (2, "")]:
@@ -235,7 +236,7 @@ func _process(delta):
     def test_slot_group_click_selects_that_groups_own_fleet(self):
         initial, _ = self.capture("fleet-slot")
         groups = {row["group"]: row for row in initial["fleet_hud"]["controls"]
-                  if row["name"].startswith("q1_") and row.get("group") is not None and self.drawn(row)}
+                  if row["name"].startswith("q3_") and row.get("group") is not None and self.drawn(row)}
         for index, fleet, member in [(2, 605, 7011), (0, 601, 7001)]:
             name = groups[index]["name"]
             with self.subTest(group=index):
@@ -246,20 +247,20 @@ func _process(delta):
     def test_double_cell_count_anchor_and_linked_cell_click(self):
         initial, _ = self.capture("fleet-slot")
         controls = {row["name"]: row for row in initial["fleet_hud"]["controls"]}
-        first = controls["q1_0001"]
+        first = controls["q3_0001"]  # WGUI-175: local slot 0 lists in panel 3 beside another owner's fleet
         self.assertTrue(first["shared_cell"])
         self.assertFalse(first["compact"])
         self.assertEqual((first["group"], first["count"]), (0, "x3"))
-        self.assertEqual(controls["q1_0002"]["group"], 0, "the next cell belongs to the wide Star Destroyer")
-        self.assertFalse(controls["q1_0002"]["visible"], "the reserved neighbour cannot draw another group")
+        self.assertEqual(controls["q3_0002"]["group"], 0, "the next cell belongs to the wide Star Destroyer")
+        self.assertFalse(controls["q3_0002"]["visible"], "the reserved neighbour cannot draw another group")
         icon, count = first["portrait_rect"], first["count_rect"]
         scale = 720 / 768
         self.assertGreaterEqual(icon[2], 52 * scale)
-        # FoC Config.meg q1_0001 authors Text_Offset (13,-17); the
+        # FoC Config.meg q1_0001 (and q3_0001) authors Text_Offset (13,-17); the
         # horizontal offset was previously estimated as 17 from the capture.
         self.assertAlmostEqual(count[0] + count[2] / 2 - icon[0] - icon[2] / 2, 13 * scale, delta=1)
         self.assertAlmostEqual(count[1] + count[3] / 2 - icon[1] - icon[3] / 2, 17 * scale, delta=1)
-        data = self.native_run(True, "fleet-slot", {"q1_0001"}, x_fraction=0.75)
+        data = self.native_run(True, "fleet-slot", {"q3_0001"}, x_fraction=0.75)
         self.assertEqual((data["fleet_hud"]["selected_fleet"], data["fleet_hud"]["selected_member"]), (601, 7001))
 
     def test_native_overview_faction_badges_do_not_leak_to_world(self):

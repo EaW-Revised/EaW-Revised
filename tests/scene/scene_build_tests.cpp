@@ -211,6 +211,34 @@ void scene_contracts() {
             }
         }
     }
+    {
+        // ML-24 (#3631): a blank or TBD variant LandBehavior inherits the parent's list, a real one replaces it.
+        const std::vector<Record> lands{
+            {"EAWR_SCENE_LAND_BASE", std::array<float, 3>{1, 2, 3}},
+            {"EAWR_SCENE_LAND_BLANK", std::array<float, 3>{1, 2, 3}},
+            {"EAWR_SCENE_LAND_TBD", std::array<float, 3>{1, 2, 3}},
+            {"EAWR_SCENE_LAND_REPLACED", std::array<float, 3>{1, 2, 3}},
+            {"EAWR_SCENE_LAND_ONLY_BLANK", std::array<float, 3>{1, 2, 3}},
+        };
+        const auto land_bytes = ted(lands);
+        auto land_source = source;
+        land_source.stored_size = land_bytes.size();
+        auto land_map = eawr::assets::load_map(land_bytes, land_source, types);
+        expect(static_cast<bool>(land_map), "LandBehavior fixture map loads");
+        if (land_map) {
+            auto land_input = input;
+            land_input.map = &land_map.value();
+            const auto land_scene = eawr::scene::build(land_input);
+            expect(land_scene.placements.size() == 5, "LandBehavior fixtures compose");
+            if (land_scene.placements.size() == 5) {
+                const auto& l = land_scene.placements;
+                expect(l[0].capture_point && l[1].capture_point && l[2].capture_point,
+                       "a blank or TBD variant LandBehavior inherits CAPTURE_POINT from its parent");
+                expect(!l[3].capture_point && !l[4].capture_point,
+                       "a real variant LandBehavior replaces the list; a lone blank names nothing");
+            }
+        }
+    }
     const eawr::scene::Scene scene = eawr::scene::build(input);
     const std::string serial_bytes = eawr::scene::canonical_text(scene);
     eawr::assets::Map reversed_source = map.value();

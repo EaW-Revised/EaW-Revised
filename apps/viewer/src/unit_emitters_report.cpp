@@ -84,6 +84,14 @@ void UnitEmitters::write_report(std::ostream& output) const {
     output << "  \"unit_emitters\": {\"frames\": " << frames_count_ << ", \"samples\": " << samples_
            << ", \"ships\": " << ships_.size() << ", \"plans\": " << plans_ << ", \"running\": " << running
            << ", \"max_running\": " << max_running_ << ", \"max_particles\": " << max_particles_;
+    output << ", \"asset_prepare\": {\"model_requests\": " << prepared_model_requests_
+           << ", \"models\": " << prepared_models_ << ", \"effect_path_requests\": " << prepared_system_requests_
+           << ", \"systems\": " << prepared_systems_ << ", \"source_bytes\": " << prepared_source_bytes_
+           << ", \"cpu_ms\": " << asset_prepare_ms_;
+    counts(output, "unprepared_model_paths", unprepared_models_);
+    counts(output, "late_system_cache_misses", unprepared_systems_);
+    counts(output, "late_bind_frame_cache_misses", unprepared_frames_);
+    output << '}';
     counts(output, "started", started_);
     output << ", \"model_axis\": {";
     bool first_axis = true;

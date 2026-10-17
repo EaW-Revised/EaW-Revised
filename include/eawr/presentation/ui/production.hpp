@@ -88,8 +88,6 @@ template <typename Counts>
     for (const auto type : r.prerequisites) {
         const auto prerequisite = counts(type);
         result.visible = result.visible && held(prerequisite.current_allies, prerequisite.queued_allies) != 0;
-        // Preserve WPR-33's existing buyer-owned purchase permission.
-        result.enabled = result.enabled && prerequisite.owned_player != 0;
     }
     for (const auto type : option.higher_upgrades) {
         const auto higher = counts(type);

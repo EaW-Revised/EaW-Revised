@@ -244,6 +244,87 @@ void intervals() {
         == LiveGameSession::tick_interval(Fixed::from_raw(galactic::max_speed_factor_raw)), "interval arithmetic clamps without overflow");
 }
 
+// Ticks a pacer completes in `seconds` of simulated wall time when each wake-up arrives `latency`
+// after the due time and each tick costs `cost`. Pure arithmetic over LivePaceSchedule.
+std::uint64_t scheduled_ticks(const Fixed speed, const std::chrono::nanoseconds latency,
+    const std::chrono::nanoseconds cost, const std::chrono::seconds seconds) {
+    using Clock = eawr::platform::LivePaceSchedule::Clock;
+    const Clock::time_point begin{};
+    eawr::platform::LivePaceSchedule schedule;
+    schedule.rebase(begin, LiveGameSession::tick_interval(speed));
+    auto now = begin;
+    std::uint64_t ticks = 0;
+    while (now - begin < seconds) {
+        now = std::max(now, schedule.next_due() + latency);
+        schedule.drop_backlog(now, 5);
+        now += cost;
+        schedule.stepped();
+        ++ticks;
+    }
+    return ticks;
+}
+
+void applied_speed_schedule() {
+    // The applied factor, not the setting: ticks per real second at 1x versus the fast-forward factor.
+    const Fixed one = Fixed::from_raw(Fixed::scale);
+    const Fixed fast = Fixed::from_raw(galactic::fast_forward_factor_raw);
+    for (const std::chrono::nanoseconds latency : {0ns, std::chrono::nanoseconds(1ms), std::chrono::nanoseconds(2ms)}) {
+        const auto slow_ticks = scheduled_ticks(one, latency, 2ms, 10s);
+        const auto fast_ticks = scheduled_ticks(fast, latency, 2ms, 10s);
+        expect(slow_ticks >= 299 && slow_ticks <= 301, "1x schedule runs 30 ticks per real second");
+        expect(fast_ticks >= 1199 && fast_ticks <= 1201, "fast forward schedule runs 120 ticks per real second whatever the wake latency");
+    }
+    // Tick cost above the interval: bound by cost, no catch-up burst beyond max_catch_up, no stall.
+    const auto bound = scheduled_ticks(fast, 0ns, 12ms, 10s);
+    expect(bound >= 800 && bound <= 840, "a 12 ms tick caps fast forward near 83 ticks per second");
+    // A speed change starts a fresh interval.
+    eawr::platform::LivePaceSchedule schedule;
+    const auto begin = eawr::platform::LivePaceSchedule::Clock::time_point{};
+    schedule.rebase(begin, LiveGameSession::tick_interval(one));
+    schedule.stepped();
+    schedule.rebase(begin + 1s, LiveGameSession::tick_interval(fast));
+    expect(schedule.next_due() == begin + 1s + LiveGameSession::tick_interval(fast), "rebase restarts at the new interval");
+    expect(schedule.behind(begin + 1s) == 0 && schedule.behind(begin + 1s + 2 * LiveGameSession::tick_interval(fast)) == 2,
+        "behind counts the steps due and not yet run");
+}
+
+// Live thread, observation only: prints the measured ticks per real second at 1x and fast forward.
+void applied_speed_live() {
+    // One human seat: TM-04 refuses the fast-forward factor when several seats are active.
+    auto single = galactic::synthetic_galaxy({.seed = 91, .planets = 16, .players = 3, .fleets_per_player = 2, .members_per_fleet = 2});
+    for (auto& seat : single.seats) {
+        if (seat.seat_id == eawr::sim::SeatId{1}) continue;
+        seat.kind = galactic::SeatKind::ai;
+        seat.human_side_id = 0;
+    }
+    auto started = LiveGameSession::start(single, {.workers = 2, .pacing = LiveGameSession::Pacing::real_time, .entries = {}});
+    expect(static_cast<bool>(started), "applied speed session starts");
+    if (!started) return;
+    auto& live = *started.value();
+    const auto rate = [&](const std::chrono::milliseconds window) {
+        const auto before = live.completed_tick();
+        const auto at = std::chrono::steady_clock::now();
+        std::this_thread::sleep_for(window);
+        const auto ticks = live.completed_tick() - before;
+        return static_cast<double>(ticks) / std::chrono::duration<double>(std::chrono::steady_clock::now() - at).count();
+    };
+    std::this_thread::sleep_for(100ms);
+    const double normal = rate(1500ms);
+    live.submit(LiveGameOrder{{1}, galactic::SetSpeed{false, Fixed::from_raw(galactic::fast_forward_factor_raw)}, {}});
+    expect(live.wait_for(live.completed_tick() + 2, 5s), "fast forward command executes");
+    expect(live.frame().latest->clock().strategic_speed.raw() == galactic::fast_forward_factor_raw, "fast forward reaches the snapshot");
+    std::this_thread::sleep_for(100ms);
+    const double fast = rate(1500ms);
+    std::cout << "live pacing ticks/s: 1x " << normal << ", fast-forward " << fast << ", ratio " << fast / normal << '\n';
+    const auto costs = live.tick_costs_after(0);
+    expect(!costs.empty() && costs.back().phases.size() == 2 && costs.back().total_ms >= 0.0, "each parent step records its cost");
+    live.stop();
+    // Observation only: wall-clock rates on a loaded host are not a gate. The gate is the schedule arithmetic
+    // above (applied_speed_schedule), which runs on injected time.
+    static_cast<void>(normal);
+    static_cast<void>(fast);
+}
+
 void observer_story_publication() {
     galactic::GalacticSetup initial;
     initial.players = {{1, 1, 0}, {2, 2, 0}, {3, 3, 0}, {4, 4, 0}, {5, 5, 0}};
@@ -986,6 +1067,8 @@ void repeated_child_lifetimes() {
 int main() {
     retained_campaign_root();
     intervals();
+    applied_speed_schedule();
+    applied_speed_live();
     configured_services();
     campaign_end_owner();
     campaign_end_movies();

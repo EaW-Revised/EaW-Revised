@@ -1,4 +1,6 @@
 #include "galactic_support.hpp"
+#include "../../src/script/foc/galactic_ai_actions.hpp"
+#include "eawr/core/gc_profile.hpp"
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/campaign/fleets.hpp"
 #include "eawr/checkpoint/game.hpp"
@@ -55,6 +57,174 @@ const gc::Fleet& fleet(const gc::GalacticSnapshot& s, gc::FleetId id = 10) {
 }
 bool event(const gc::GalacticSnapshot& s, gc::GalacticEventKind kind, gc::FleetId id = 10) {
     return std::any_of(s.events().begin(), s.events().end(), [&](const auto& e) { return e.kind == kind && e.subject == id; });
+}
+void staged_arrival_recheck_contracts() {
+    namespace ga = eawr::script::foc::galactic_ai;
+    using eawr::sim::math::Fixed;
+    const auto f = [](std::int64_t value) { return Fixed::from_integer(value).value(); };
+    gc::GalacticSetup setup;
+    setup.players = {{1, 1, 0}, {2, 2, 0}};
+    setup.seats = {{{1}, 1, gc::SeatKind::ai, 0, true, 0}, {{2}, 2, gc::SeatKind::ai, 1, true, 0}};
+    setup.planets = {{1, {}, 1}, {2, {f(12), {}, {}}, 1}};
+    setup.routes = {{3, 1, 2, f(2)}};
+    setup.fleets = {{10, 1, 1, {{20, 1}}}};
+    setup.rules.maximum_fleet_movement_distance = f(12); setup.rules.fiscal_cycle_frames = 10000;
+    setup.fleet_control.emplace(); setup.fleet_control->types = {{1, false, true, false}};
+    setup.player_economy.emplace(); setup.fiscal.emplace(); setup.production.emplace(); setup.census.emplace();
+    setup.production->maximum_human_queue = 1; setup.census->types = {{1, {}}};
+    for (const auto& player : setup.players) {
+        gc::GalacticPlayerEconomy account; account.player = player.player_id;
+        setup.player_economy->players.push_back(account);
+        setup.fiscal->players.push_back({player.player_id, false, f(1)});
+        setup.production->players.push_back({player.player_id, false, true, false, {}, {}, {}, {}, {}});
+        setup.census->players.push_back({player.player_id, 0, false, {}});
+    }
+    for (const auto& planet : setup.planets) {
+        setup.fiscal->planets.push_back({planet.id, {}});
+        gc::PlanetProduction row; row.planet = planet.id; setup.production->planets.push_back(row);
+    }
+    setup.census->objects = {
+        {10, 1, 1, 1, 1, false, false, 1, 0, gc::ActorCombatRole::fleet, {}, {}},
+        {20, 1, 1, 1, 10, false, false, 1, 0, gc::ActorCombatRole::ordinary, {}, {}}};
+    setup.movement.emplace(); auto& movement = *setup.movement;
+    movement.mode_modifier = f(1); movement.types = {{1, f(2), f(100), 0, true, false, false, false}};
+    movement.players = {{1, f(1), f(1), false}, {2, f(1), f(1), false}};
+    movement.planets = {{1, f(1), false}, {2, f(1), false}};
+    for (const auto& player : setup.players) for (const auto& planet : setup.planets)
+        movement.access.push_back({player.player_id, planet.id, true, false});
+    const auto bind = [](auto& actions, auto& world) {
+        actions.bind_admission_gate([] { return false; });
+        actions.bind_movement([](auto, const auto& snapshot) {
+            ga::NativeActions::MovementInput input; input.ai_player = true;
+            for (const auto& planet : snapshot.planets()) {
+                gc::PathPlanet row; row.id = planet.id; row.relation = gc::PathRelation::allied;
+                row.ai_classification_succeeded = false; row.ai_enemy_space_force = false;
+                input.access.push_back(row); input.orbital_occupants[planet.id] = 0;
+            }
+            return eawr::core::Result<ga::NativeActions::MovementInput>::success(std::move(input));
+        }, [] { return false; }, [&world](auto player, auto actor) { return world.recheck_native_orbit(player, actor); });
+    };
+    const auto mutable_world = [](eawr::campaign::GameSession& current) -> gc::GalacticSession& {
+        gc::GalacticSession* world{};
+        take(current.configure_native_replay_owners([&](auto& owner) {
+            world = &owner; return eawr::core::Result<void>::success();
+        }));
+        return *world;
+    };
+    const std::array<gc::PlayerId, 1> players{1};
+    std::string baseline;
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers), resumed_executor(workers == 8 ? 1 : workers * 2);
+        auto game = take(eawr::campaign::GameSession::create(setup));
+        auto oracle = take(eawr::campaign::GameSession::create(setup));
+        ga::NativeActions actions(mutable_world(game), std::make_shared<eawr::script::foc::ai::GalacticFunding>(), {}, {});
+        ga::NativeActions direct(mutable_world(oracle), std::make_shared<eawr::script::foc::ai::GalacticFunding>(), {}, {});
+        bind(actions, mutable_world(game)); bind(direct, mutable_world(oracle));
+        ga::ActionRequest request; request.kind = ga::ActionKind::move; request.player = 1; request.object = 10; request.target = 2;
+        const auto admitted = take(direct.admit(request));
+        auto barrier = take(mutable_world(game).begin_native_barrier(players, 16)); take(barrier->select_player(1));
+        const auto staged = take(actions.admit(request));
+        expect(admitted.admitted && staged.request == admitted.request && staged.admitted, "ordinary native movement departs through a real staged admission");
+        take(barrier->commit()); barrier.reset();
+        take(game.step(executor)); take(oracle.step(executor));
+        expect(game.galaxy().snapshot()->fleets().front().motion.transit.has_value(), "checkpoint is saved in actual fleet transit");
+        const auto native = take(actions.capture());
+        const auto identities = eawr::checkpoint::game_identities(setup);
+        const auto bytes = take(eawr::checkpoint::save_game_checkpoint(game, identities));
+        auto restored = take(eawr::checkpoint::load_game_checkpoint(bytes, identities, {}, resumed_executor)).session;
+        ga::NativeActions resumed(mutable_world(restored), std::make_shared<eawr::script::foc::ai::GalacticFunding>(), {}, {});
+        bind(resumed, mutable_world(restored)); take(resumed.restore(native));
+        bool finished{}; std::string trace;
+        for (unsigned tick = 0; tick < 64 && !finished; ++tick) {
+            const auto expected = take(direct.poll_movement(admitted.request));
+            const auto poll = [&](auto& current, auto& native_actions) {
+                const auto profiling = eawr::gc_profile::enabled.exchange(true);
+                const auto index = static_cast<std::size_t>(eawr::gc_profile::Phase::make_snapshot);
+                const auto before = eawr::gc_profile::snapshot()[index].calls;
+                const auto committed = current.galaxy().canonical_state_bytes();
+                auto pending = take(mutable_world(current).begin_native_barrier(players, 16)); take(pending->select_player(1));
+                const auto result = take(native_actions.poll_movement(admitted.request));
+                expect(result.finished == expected.finished && result.actor == expected.actor,
+                    "staged arrival poll retains the ordinary terminal/no-hop result");
+                expect(current.galaxy().canonical_state_bytes() == committed,
+                    "arrival recheck leaves the committed movement owner unchanged until the barrier commit");
+                expect(current.galaxy().snapshot()->canonical_bytes() == oracle.galaxy().snapshot()->canonical_bytes(),
+                    "arrival recheck is visible to later reads in its own chain");
+                take(pending->commit());
+                const auto calls = eawr::gc_profile::snapshot()[index].calls - before;
+                eawr::gc_profile::enabled.store(profiling);
+                expect(calls == (result.finished ? 1U : 0U), "arrival recheck has one full snapshot per publishing barrier");
+                expect(current.galaxy().canonical_state_bytes() == oracle.galaxy().canonical_state_bytes()
+                    && current.galaxy().record() == oracle.galaxy().record(), "staged and restored arrival state and record bytes match the unbatched oracle");
+            };
+            poll(game, actions); poll(restored, resumed);
+            expect(take(actions.capture()).components == take(direct.capture()).components
+                && take(resumed.capture()).components == take(direct.capture()).components,
+                "native movement retention matches the oracle after restore on a different worker count");
+            trace += game.state_sha256(); finished = expected.finished;
+            if (!finished) { take(game.step(executor)); take(oracle.step(executor)); take(restored.step(resumed_executor)); }
+        }
+        expect(finished && game.galaxy().snapshot()->fleets().front().orbit == 2,
+            "real movement arrives and executes its terminal no-hop recheck inside the barrier");
+        if (baseline.empty()) baseline = trace; else expect(trace == baseline, "arrival recheck and restored continuation match on 1/2/4/8 workers");
+    }
+}
+
+void native_movement_layers() {
+    for (const bool packing : {false, true}) {
+        std::vector<std::string> reference;
+        for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+            auto source = setup();
+            if (packing) {
+                source.movement->types[0].squadron_capacity = 1;
+                source.fleets[0].members = {{20, 1}, {30, 2}, {31, 2}};
+                source.movement->contents = {{30, {{40, 3}}}, {31, {{41, 3}}}};
+            }
+            auto staged = take(gc::GalacticSession::create(source));
+            auto direct = take(gc::GalacticSession::create(source));
+            const auto initial = staged.snapshot(); const auto initial_hash = staged.state_sha256();
+            auto lower = take(staged.begin_native_actions(1, 16));
+            const auto apply = [&](gc::GalacticSession::NativeActionShadow& layer, gc::PlayerId player, const gc::CommandPayload& payload) {
+                auto prepared = layer.admit_fleet(player, payload, false);
+                auto applied = direct.admit_native_fleet(player, payload, false);
+                expect(prepared && applied && prepared.value().admitted == applied.value().admitted
+                    && prepared.value().object == applied.value().object && prepared.value().reason == applied.value().reason,
+                    "native movement layer uses the live admission and refusal rules");
+                expect(layer.snapshot()->canonical_bytes() == direct.snapshot()->canonical_bytes(),
+                    "movement layer exposes exact staged motion, packing and event bytes before commit");
+            };
+            const auto remnant = lower.next_entity_id();
+            apply(lower, 1, gc::MoveFleet{10, {1, 2}, {}});
+            expect(lower.fleet(10) && lower.fleet(10)->motion.transit.has_value() && !fleet(*initial, 10).motion.transit,
+                "staged departure is visible locally while the completed publication remains immutable");
+            if (packing) expect(lower.fleet(remnant) && lower.fleet(remnant)->members == std::vector<gc::FleetMember>{{30, 2}},
+                "packing stages the same remnant identity and membership as live admission");
+            apply(lower, 1, gc::MoveFleet{10, {1, 2}, {}}); // a moving fleet cannot redirect
+            apply(lower, 1, gc::SetFleetOrbitSlot{11, 1});
+            auto higher = take(lower.for_player(2, 16));
+            expect(higher.fleet(10) && higher.fleet(10)->motion.transit.has_value(),
+                "higher player sees the lower player's staged departure");
+            apply(higher, 2, gc::MoveFleet{12, {2, 3}, {}});
+            apply(higher, 2, gc::MoveFleet{11, {1, 2}, {}}); // ownership refusal remains ordered
+            expect(staged.snapshot() == initial && staged.state_sha256() == initial_hash,
+                "movement decisions do not mutate the live galaxy before ordered commit");
+            const std::array layers{lower, higher};
+            expect(bool(staged.commit_native_actions(layers)) && staged.record() == direct.record()
+                && staged.canonical_state_bytes() == direct.canonical_state_bytes(),
+                "ordered movement layer commit preserves state and native replay bytes");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned tick = 0; tick < 24; ++tick) {
+                auto a = staged.step(executor), b = direct.step(executor);
+                expect(a && b && a.value().state_hash.get() == b.value().state_hash.get(),
+                    "staged departures and remnants continue identically through arrival");
+                if (!a || !b) return;
+                hashes.push_back(a.value().state_hash.get());
+            }
+            if (reference.empty()) reference = hashes;
+            else expect(reference == hashes, "native movement layers remain equal at 1/2/4/8 workers");
+        }
+    }
 }
 void departure() {
     auto s = setup(); auto& m = *s.movement;
@@ -369,7 +539,43 @@ void orbit_placement_and_recheck() {
         expect(bool(world.step(executor)), "recheck candidate stays enroute before the forced test");
         expect(!world.recheck_native_orbit(2, 10) && !world.recheck_native_orbit(1, 11),
             "native recheck refuses wrong owner and a lane actor without planet parent");
+        auto staged = take(gc::GalacticSession::from_replay(world.record()));
+        (void)take(staged.step(executor));
+        const auto initial = staged.snapshot(); const auto owner_bytes = staged.canonical_state_bytes();
+        auto stale = take(world.begin_native_actions(1, 16));
+        std::vector<gc::GalacticEvent> direct_notices, staged_notices;
+        world.set_native_movement_listener([&](const auto& notice) { direct_notices.push_back(notice); });
+        staged.set_native_movement_listener([&](const auto& notice) {
+            staged_notices.push_back(notice);
+            expect(staged.snapshot()->canonical_bytes() == initial->canonical_bytes(), "recheck listeners observe the preceding publication until relink and gather finish");
+        });
         expect(bool(world.recheck_native_orbit(1, 10)), "native AI no-hop provider relinks and gathers at an existing planet");
+        const auto stale_commit = world.commit_native_actions(stale);
+        expect(!stale_commit && stale_commit.error().message.find("stale, unordered") != std::string::npos,
+            "a genuinely replaced base snapshot is still rejected before replay");
+        const auto profiling = eawr::gc_profile::enabled.exchange(true);
+        const auto index = static_cast<std::size_t>(eawr::gc_profile::Phase::make_snapshot);
+        const auto before_calls = eawr::gc_profile::snapshot()[index].calls;
+        const std::array<gc::PlayerId, 2> players{1, 2};
+        auto barrier = take(staged.begin_native_barrier(players, 16));
+        expect(bool(barrier->select_player(1)), "select orbit-recheck player");
+        expect(!staged.recheck_native_orbit(2, 10) && !staged.recheck_native_orbit(1, 11),
+            "staged recheck preserves owner and planet-parent admission");
+        expect(bool(staged.recheck_native_orbit(1, 10)), "staged orbit recheck gathers inbound attacker and defender");
+        expect(staged.snapshot()->canonical_bytes() == world.snapshot()->canonical_bytes()
+            && staged.canonical_state_bytes() == owner_bytes && staged_notices == direct_notices,
+            "same-chain recheck reads and listener order match the oracle while the live owner stays unchanged");
+        const auto lower = staged.snapshot();
+        expect(bool(barrier->select_player(2)) && staged.snapshot()->canonical_bytes() == lower->canonical_bytes(),
+            "later player inherits the staged recheck");
+        expect(bool(barrier->commit()), "orbit recheck cannot replace a live barrier base or cause stale-base refusal");
+        const auto calls = eawr::gc_profile::snapshot()[index].calls - before_calls;
+        eawr::gc_profile::enabled.store(profiling);
+        expect(calls == 1 && staged_notices == direct_notices,
+            "orbit rechecks build one full snapshot per barrier and never redeliver movement listeners at commit");
+        expect(staged.canonical_state_bytes() == world.canonical_state_bytes() && staged.record() == world.record(),
+            "staged recheck committed state and record bytes equal the unbatched oracle");
+        barrier.reset();
         expect(fleet(*world.snapshot(), 11).orbit == 3 && event(*world.snapshot(), gc::GalacticEventKind::movement_conflict)
             && fleet(*world.snapshot()).motion.position.x == f(42), "native and ordinary arrival share gathered orbit placement");
         expect(fleet(*world.snapshot(), 12).orbit == 3 && !fleet(*world.snapshot(), 12).motion.transit
@@ -587,7 +793,7 @@ int main(int argc, const char* const argv[]) {
     try {
         if (argc == 3 && std::string_view(argv[1]) == "--generate") { generate(argv[2]); return 0; }
         if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); return galactic_test::failures == 0 ? 0 : 1; }
-        departure(); mixed_squadron_packing(); move_after_merge(); roundtrip_and_parity(); arrival(); orbit_placement_and_recheck(); transports(); adapter();
+        staged_arrival_recheck_contracts(); native_movement_layers(); departure(); mixed_squadron_packing(); move_after_merge(); roundtrip_and_parity(); arrival(); orbit_placement_and_recheck(); transports(); adapter();
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;
 }

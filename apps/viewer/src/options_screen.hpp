@@ -23,10 +23,12 @@
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/input_event.hpp>
 #include <godot_cpp/variant/string.hpp>
+#include <godot_cpp/variant/vector2.hpp>
 
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,7 +40,10 @@ class EawrOptionsScreen final : public godot::CanvasLayer {
 public:
     // Which menu opened the screen: it picks the hub (ST-H1).
     enum class Context : std::uint8_t { main_menu, in_game };
-    enum class Page : std::uint8_t { hub, audio, video, advanced_video, gameplay, keyboard, network };
+    // `game_menu` is the in-game menu itself (IDD_GAME_OPTIONS_DIALOG, in_game context only): Options opens
+    // the hub, whose Back returns here; Resume closes the screen; Quit Game asks first, then closes it with
+    // quit_requested() set.
+    enum class Page : std::uint8_t { hub, audio, video, advanced_video, gameplay, keyboard, network, game_menu };
 
     struct Options final {
         // The content the caller already mounted (its VFS); otherwise the roots below are mounted
@@ -82,6 +87,13 @@ public:
     void show(godot::Node& parent, Page start = Page::hub);
     [[nodiscard]] bool shown() const noexcept { return shown_; }
     [[nodiscard]] Page page() const noexcept { return page_; }
+    // The game menu's Quit Game was confirmed; the screen closed itself on it. Cleared by show().
+    [[nodiscard]] bool quit_requested() const noexcept { return quit_requested_; }
+    // Whether the quit confirmation box is up over the screen.
+    [[nodiscard]] bool confirm_open() const;
+    // A control's centre in viewport pixels while it is shown (a page gadget by id, or the
+    // confirmation box's `yes` / `no`); scripted gestures click there.
+    [[nodiscard]] std::optional<godot::Vector2> control_point(const std::string& name) const;
     [[nodiscard]] static const char* page_name(Page which) noexcept;
     [[nodiscard]] static bool parse_page(const std::string& name, Page& result) noexcept;
 
@@ -97,6 +109,7 @@ public:
 
     // The controls of the page as the player sees them.
     [[nodiscard]] std::vector<ControlState> control_states() const;
+    [[nodiscard]] std::string rectangles() const;
     [[nodiscard]] const presentation::ui::PlayerSettings& committed() const noexcept { return committed_; }
     [[nodiscard]] const presentation::ui::PlayerSettings& draft() const noexcept { return draft_; }
     [[nodiscard]] const ApplyReport& last_apply() const noexcept { return last_apply_; }
@@ -132,6 +145,10 @@ private:
     void cancel_page();
     void defaults_page();
     void leave_to_hub();
+    // The hub's Back (and Esc on it): the game menu when that opened the screen, else closes it.
+    void leave_hub();
+    void ask_quit();
+    void on_confirm_result(int64_t result);
     void close_screen();
     void apply_committed();
 
@@ -150,6 +167,10 @@ private:
     bool file_existed_{};
     bool shown_{};
     bool built_{};
+    // Opened on the game menu: the hub is one level below it.
+    bool menu_root_{};
+    bool quit_requested_{};
+    int64_t confirm_id_{};
     // The page being filled: control signals fire while values are set and must not edit the draft.
     bool loading_{};
     bool dirty_{};

@@ -6,9 +6,9 @@
 
 namespace eawr::sim {
 
-// ADR-023: command-seat and human-owner bounds; faction rows are independent.
+// ADR-023 (2026-10-15): each skirmish human has its own owner; teams are independent.
 inline constexpr std::size_t max_match_seats = 9;
-inline constexpr std::size_t max_match_human_sides = 3;
+inline constexpr std::size_t max_match_human_sides = max_match_seats;
 
 // ADR-020 A1: controller identity is distinct from the faction that owns assets.
 struct SeatId {

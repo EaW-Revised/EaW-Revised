@@ -64,6 +64,19 @@ add_test(
     NAME tactical_ability_contracts
     COMMAND tactical_ability_tests
 )
+add_test(
+    NAME tactical_stealth
+    COMMAND tactical_ability_tests --stealth
+)
+# #3644 A1: the object-turn world seam, with a synthetic provider.
+add_executable(tactical_object_turn_tests object_turn_tests.cpp)
+target_link_libraries(tactical_object_turn_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_object_turn_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_object_turn_tests)
+add_test(
+    NAME tactical_object_turn_contracts
+    COMMAND tactical_object_turn_tests
+)
 # #530: skirmish purchasing (credits, build queues, hyperspace arrival).
 add_executable(tactical_economy_tests economy_tests.cpp
     economy_purchase_tests.cpp

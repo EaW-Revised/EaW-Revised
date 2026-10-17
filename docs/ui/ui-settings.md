@@ -136,6 +136,9 @@ centred, with the network page); the pages are centred dialogs. It is a modal la
   `IDD_SELECT_MOD_DIALOG`.
 - The keyboard pages' Accept stays disabled (no key can change yet, ST-K1), as retail disables it
   until a change.
-- The in-game menu does not open the screen; the pause menu's Options button is a follow-up.
+- The in-game menu (legacy EAWR-3925) is a page of this screen: `Page::game_menu` (`--eawr-options-page game` with
+  `--eawr-options-context game`) is `IDD_GAME_OPTIONS_DIALOG`. Its Options button opens the in-game hub, whose
+  Back returns to it; Resume (and Esc) closes the screen; Quit Game asks `TEXT_QUIT_SURE` first and closes
+  the screen with `quit_requested()` set, which the battle's owner turns into leaving for the main menu.
 
 The online service fields are also reachable from Multiplayer → Network Options. Online uses the saved service only when selected; LAN keeps its existing transport. Certificate trust is explicit: `system` verifies a DNS host through the operating system certificate store; `pin` requires 64 hexadecimal SHA-256 digits, and `ca-file` requires a certificate file and verifies the service host. Invalid trust settings never fall back. Service addresses, certificate paths and pins are omitted from UI reports. Password-room invitations are sent privately to the service and handed to one admitted guest; public rooms may also display an invitation code.

@@ -24,6 +24,16 @@ endif()
 if(NOT EAWR_BUILD_VALUE MATCHES "^[a-zA-Z0-9_.+-]+$")
     message(FATAL_ERROR "EAWR_BUILD_IDENTITY must contain only portable identifier characters")
 endif()
+# The admission identity carries the same native sync format as tick hashing,
+# including package builds that provide an explicit identity override.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${EAWR_BUILD_ROOT}/include/eawr/script/foc/galactic_ai_state.hpp")
+file(STRINGS "${EAWR_BUILD_ROOT}/include/eawr/script/foc/galactic_ai_state.hpp" EAWR_NATIVE_SYNC_VERSION_LINE
+    REGEX "^inline constexpr std::uint32_t native_sync_digest_version = [0-9]+;")
+string(REGEX MATCH "= ([0-9]+)" EAWR_NATIVE_SYNC_VERSION_MATCH "${EAWR_NATIVE_SYNC_VERSION_LINE}")
+if(NOT EAWR_NATIVE_SYNC_VERSION_MATCH)
+    message(FATAL_ERROR "Missing native sync digest version")
+endif()
+string(APPEND EAWR_BUILD_VALUE "+gcsync${CMAKE_MATCH_1}")
 set(EAWR_BUILD_IDENTITY_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/build_identity.cpp")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(CONFIGURE OUTPUT "${EAWR_BUILD_IDENTITY_CPP}" CONTENT

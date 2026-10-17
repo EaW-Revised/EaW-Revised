@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/net/transport.hpp"
+#include <functional>
 #include <string_view>
 
 namespace eawr::net {
@@ -41,6 +42,15 @@ public:
         core::Diagnostic error;
         error.code = "EAWR-NET-1207";
         error.message = "monitor does not support a resync barrier";
+        return core::Result<void>::failure(std::move(error));
+    }
+    // Authenticated stream replacement (and bounded retries while a mesh hash
+    // gate waits). A self call enables retry semantics before the zero barrier
+    // without sending. Ownership identifies peers whose failed sends belong to
+    // the mesh decision. Resend retained evidence, never reset the comparison.
+    virtual core::Result<void> on_link_repair(PeerIndex, std::function<bool(PeerIndex)> = {}) {
+        core::Diagnostic error;
+        error.code = "EAWR-NET-1790"; error.message = "Monitor does not support authenticated link repair";
         return core::Result<void>::failure(std::move(error));
     }
     virtual bool may_step() const = 0; // False while an exchange is pending or the match is frozen.

@@ -18,6 +18,10 @@ public:
     struct Player {
         std::int64_t credits_raw{}, tech{}, initial_tech{}, allowed_tech{};
         std::uint64_t planets_owned{}, builds_started{}, builds_completed{}, units_built_space{}, units_built_ground{};
+        // Per-category production events (accumulated on events, never by scanning).
+        struct Categories { std::uint64_t space{}, ground{}, structures{}, starbases{}, technology{}; };
+        Categories started_by_category{}, completed_by_category{};
+        std::uint64_t hostile_moves{};
         std::uint64_t fleet_moves{}, attacks{}, battles{}, battles_won{}, battles_lost{};
         std::uint64_t last_activity_frame{}, maximum_idle_frames{};
         std::optional<std::uint64_t> first_production_frame{};
@@ -30,6 +34,8 @@ public:
     };
     std::uint64_t cursor{}, observed_session_tick{};
     std::string failure, end_state_hash;
+    // Neutral-owned destinations are expansion, not hostility (set by the caller from the faction table).
+    std::optional<sim::galactic::PlayerId> neutral_owner;
 
     void observe(const platform::LiveGameFrame& publication, const platform::LiveGalacticEvents& feed) {
         if (!publication.latest) return;
@@ -37,6 +43,9 @@ public:
         const auto frame = snapshot.clock().galactic_frame;
         observed_session_tick = publication.session_tick;
         if (feed.incomplete) { failure = "AI proof event retention gap"; return; }
+        // Re-walk fleets, queues and seats only when the sim advanced or events arrived.
+        const bool changed = !initialized_ || publication.session_tick != scanned_session_tick_ || !feed.events.empty();
+        scanned_session_tick_ = publication.session_tick;
         // A bounded driven request keeps the feed and snapshot at the same boundary.
         if (!initialized_) {
             for (const auto& player : snapshot.players()) players_.try_emplace(player.player_id);
@@ -44,7 +53,9 @@ public:
             update_accounts(snapshot, true);
             initialized_ = true;
             sample(snapshot);
+            next_sample_frame_ = 60 * sim::galactic::galactic_frames_per_second;
         }
+        if (changed) {
         for (const auto& seat : snapshot.seats()) {
             seats_[seat.seat_id.value] = seat.player;
             active_ai_seen_ |= seat.active && seat.kind == sim::SeatKind::ai;
@@ -67,6 +78,12 @@ public:
                 const auto owner = fleet_owners_.find(event.subject);
                 if (owner == fleet_owners_.end()) { failure = "AI proof departure owner unavailable"; return; }
                 auto& player = players_[owner->second]; ++player.fleet_moves; player.activity(frame);
+                // Hostile: the destination is held by another non-neutral player at this publication
+                // (a feed may span several ticks, so ownership is not the owner at the event tick).
+                for (const auto& planet : snapshot.planets()) if (planet.id == event.value) {
+                    if (planet.owner != owner->second && planet.owner != neutral_owner) ++player.hostile_moves;
+                    break;
+                }
             } else if (event.kind == Kind::production_started || event.kind == Kind::production_completed) {
                 auto build = builds_.find(event.sequence);
                 if (build == builds_.end()) {
@@ -84,10 +101,21 @@ public:
                 if (build == builds_.end()) { failure = "AI proof production owner unavailable"; return; }
                 const auto& [owner, channel, kind] = build->second;
                 auto& player = players_[owner]; player.activity(frame);
+                const auto count = [&](Player::Categories& by_category) {
+                    if (!kind) return;
+                    switch (*kind) {
+                    case sim::galactic::ProductionKind::unit: ++(channel == 1 ? by_category.space : by_category.ground); break;
+                    case sim::galactic::ProductionKind::structure: ++by_category.structures; break;
+                    case sim::galactic::ProductionKind::starbase: ++by_category.starbases; break;
+                    case sim::galactic::ProductionKind::technology: ++by_category.technology; break;
+                    }
+                };
                 if (event.kind == Kind::production_started) {
+                    count(player.started_by_category);
                     ++player.builds_started;
                     if (!player.first_production_frame) player.first_production_frame = frame;
                 } else {
+                    count(player.completed_by_category);
                     ++player.builds_completed;
                     // Keep the first published admission classification across offer changes.
                     if (!kind) ++unclassified_builds_[owner];
@@ -103,6 +131,7 @@ public:
                 auto& player = players_[row.pending_alert->invader]; ++player.attacks; player.activity(frame);
                 players_[row.pending_alert->defender].activity(frame);
             }
+        }
         }
         cursor = feed.through;
         const auto completed = [&](const campaign::BattleResult& result, auto invader, auto defender) {
@@ -122,9 +151,20 @@ public:
             completed(*publication.result, conflict->invader, conflict->defender);
         }
         update_accounts(snapshot, false);
-        if (frame && frame % (60 * sim::galactic::galactic_frames_per_second) == 0) sample(snapshot);
+        // A publication may jump over a 60 s boundary; sample on the first frame at or past it.
+        if (frame >= next_sample_frame_) {
+            sample(snapshot);
+            constexpr std::uint64_t period = 60 * sim::galactic::galactic_frames_per_second;
+            next_sample_frame_ = (frame / period + 1) * period;
+        }
     }
 
+    static std::string categories(const Player::Categories& c) {
+        std::ostringstream out;
+        out << "{\"space\":" << c.space << ",\"ground\":" << c.ground << ",\"structures\":" << c.structures
+            << ",\"starbase_upgrades\":" << c.starbases << ",\"technology\":" << c.technology << "}";
+        return out.str();
+    }
     void sample(const sim::galactic::GalacticSnapshot& snapshot) {
         const auto frame = snapshot.clock().galactic_frame;
         if (!samples_.empty() && last_sample_ == frame) return;
@@ -144,13 +184,17 @@ public:
                 << ",\"units_built_space\":" << p.units_built_space << ",\"units_built_ground\":" << p.units_built_ground
                 << ",\"builds_unclassified\":" << unclassified_builds_[id]
                 << ",\"units_built_available\":" << (unclassified_builds_[id] == 0 ? "true" : "false")
-                << ",\"fleet_moves\":" << p.fleet_moves << ",\"attacks\":" << p.attacks << ",\"battles\":" << p.battles
+                << ",\"production_started_by_category\":" << categories(p.started_by_category)
+                << ",\"production_completed_by_category\":" << categories(p.completed_by_category)
+                << ",\"fleet_moves\":" << p.fleet_moves << ",\"hostile_moves\":" << p.hostile_moves
+                << ",\"conflicts_started\":" << p.attacks /* alias of attacks */ << ",\"attacks\":" << p.attacks << ",\"battles\":" << p.battles
                 << ",\"battles_won\":" << p.battles_won << ",\"battles_lost\":" << p.battles_lost
                 << ",\"initial_tech\":" << p.initial_tech << ",\"allowed_tech\":" << p.allowed_tech << ",\"tech\":" << p.tech
-                << ",\"maximum_idle_frames\":" << std::max(p.maximum_idle_frames, frame - p.last_activity_frame)
+                << ",\"maximum_idle_frames\":" << std::max(p.maximum_idle_frames, frame >= p.last_activity_frame ? frame - p.last_activity_frame : std::uint64_t{})
                 << ",\"last_activity_frame\":" << p.last_activity_frame << ",\"first_production_frame\":";
             if (p.first_production_frame) output << *p.first_production_frame; else output << "null";
-            output << ",\"plans_executed\":[],\"plans_available\":false,\"plans_unavailable_reason\":\"plan observer not published\"}";
+            output << ",\"plans_executed\":[],\"plans_available\":false,\"plans_unavailable_reason\":\"plan observer not published\""
+                << ",\"unavailable_perceptions\":null}";
         }
         output << "]}";
         samples_.push_back(output.str()); last_sample_ = frame;
@@ -175,7 +219,7 @@ private:
         }
     }
     bool initialized_{}, active_ai_seen_{};
-    std::uint64_t human_seat_observations_{}, last_sample_{};
+    std::uint64_t human_seat_observations_{}, last_sample_{}, next_sample_frame_{}, scanned_session_tick_{};
     std::map<sim::galactic::PlayerId, Player> players_;
     std::map<std::uint32_t, sim::galactic::PlayerId> seats_;
     std::map<std::uint64_t, sim::galactic::PlayerId> fleet_owners_;

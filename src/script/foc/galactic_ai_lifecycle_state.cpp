@@ -125,6 +125,31 @@ core::Result<LifecycleState> decoded(Reader& in) {
 }
 } // namespace
 
+namespace {
+std::vector<std::uint8_t> lifecycle_record(const LifecycleState& state, std::string_view configuration, gc::PlayerId player) {
+    LifecycleState record;
+    std::string bytes;
+    if (!player) {
+        record.version = state.version; record.clocks = state.clocks; record.admission = state.admission;
+        record.service_periods = state.service_periods; text(bytes, configuration);
+    } else {
+        for (const auto& row : state.players) if (row.selected.player == player) { record.players.push_back(row); break; }
+    }
+    bytes += encoded(record);
+    return {bytes.begin(), bytes.end()};
+}
+}
+void Manager::Impl::update_record(gc::PlayerId player) { records.set(player, 0, 0, lifecycle_record(state, configuration_digest, player)); }
+core::RecordDigest Manager::Impl::rebuild_records() const {
+    core::RecordDigest rebuilt; rebuilt.set(0, 0, 0, lifecycle_record(state, configuration_digest, 0));
+    for (const auto& row : state.players) rebuilt.set(row.selected.player, 0, 0, lifecycle_record(state, configuration_digest, row.selected.player));
+    return rebuilt;
+}
+std::size_t Manager::record_byte_upper_bound() const noexcept { return impl_->records.byte_size() + 1024; }
+core::Result<std::string> Manager::record_sync_hash(bool cold) const {
+    if (impl_->failure) return core::Result<std::string>::failure(*impl_->failure);
+    return core::Result<std::string>::success(cold ? impl_->rebuild_records().digest(component_domain) : impl_->records.digest(component_domain));
+}
 std::string lifecycle_configuration_digest(const LifecycleSetup& setup, const ai::AiData& data, std::span<const PlanInput> plans) {
     std::string bytes; text(bytes, "eawr-galactic-ai-lifecycle-configuration-v1");
     const auto paths = setup.xml_paths.empty() ? required_xml() : setup.xml_paths;
@@ -137,6 +162,7 @@ std::string lifecycle_configuration_digest(const LifecycleSetup& setup, const ai
 }
 core::Result<std::string> Manager::lifecycle_hash() const { return core::Result<std::string>::success(digest(encoded(impl_->state))); }
 core::Result<NativeState> Manager::capture() const {
+    if (auto verified = verify_record_sync_hash(); !verified) return core::Result<NativeState>::failure(verified.error());
     if (impl_->failure) return core::Result<NativeState>::failure(*impl_->failure);
     std::string payload; text(payload, component_domain); text(payload, impl_->configuration_digest); payload += encoded(impl_->state);
     NativeState state;

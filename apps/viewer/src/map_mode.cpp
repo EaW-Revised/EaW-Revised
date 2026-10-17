@@ -3,6 +3,7 @@
 #include "battle_content.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
+#include "battle_audio_internal.hpp"
 #include "eawr/presentation/camera/overview.hpp"
 #include "render_profile_viewport.hpp"
 #include "viewer_path.hpp"
@@ -99,6 +100,34 @@ bool MapMode::campaign_briefing(const std::string_view event_name) {
     return state_->battle_audio && state_->battle_audio->campaign_briefing(event_name);
 }
 TacticalHud* MapMode::tactical_hud() const noexcept { return state_->hud.get(); }
+void MapMode::update_retreat_countdown(const sim::tactical::RetreatState& state, const std::uint64_t tick, const bool cinematic_playing) {
+    if (!state_->hud) return;
+    auto& cache = state_->retreat_countdown;
+    if (!state_->live_session || !state_->catalog || !ui::retreat_countdown_visible(state, cinematic_playing)) {
+        if (cache.shown) state_->hud->set_retreat_countdown({}, {255, 255, 255, 255});
+        cache.shown = false;
+        return;
+    }
+    if (cache.shown && cache.phase == state.phase && cache.tick == tick) return;
+    const auto& faction_name = state_->live_session->player_faction(state.player);
+    if (cache.faction != faction_name || cache.text.empty()) {
+        cache.faction = faction_name;
+        cache.presentation = battle_audio_detail::read_retreat_faction(*state_->catalog, faction_name);
+        const auto& id = cache.presentation.countdown_text_id;
+        cache.text = state_->hud->localized_text(id, id);
+    }
+    cache.shown = true;
+    cache.phase = state.phase;
+    cache.tick = tick;
+    state_->hud->set_retreat_countdown(
+        ui::retreat_countdown_line(cache.text, state, tick, sim::tactical::logical_frames_per_second), cache.presentation.colour);
+}
+
+void MapMode::retreat_refused(const sim::tactical::RetreatRefusal refusal) {
+    if (state_->battle_audio) state_->battle_audio->retreat_refused(refusal);
+}
+void MapMode::set_menu_handler(std::function<void()> handler) { state_->menu_handler = std::move(handler); }
+bool MapMode::leave_to_menu() const noexcept { return state_->leave_to_menu; }
 
 
 

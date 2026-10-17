@@ -95,13 +95,12 @@ core::Result<void> validate_offer(const SetupOffer& offer) {
         if (std::none_of(slots.begin(), slots.end(), [&](const auto& slot) {
                 return slot.player == seat.player && slot.human;
             })) return error<void>(SetupReason::options, "seat is not bound to a human skirmish slot");
-        humans.insert(seat.player); // LAN-8B: several independent seats may share one owner.
+        if (!humans.insert(seat.player).second)
+            return error<void>(SetupReason::options, "skirmish human seats must have distinct owners");
     }
     for (const auto& slot : setup.value().skirmish->slots)
         if (slot.human && !humans.contains(slot.player))
             return error<void>(SetupReason::options, "human skirmish slot has no seat");
-    if (humans.size() > max_match_human_sides)
-        return error<void>(SetupReason::options, "a match supports one coop owner or up to three human sides");
     std::set<sim::tactical::TeamId> human_teams;
     for (const auto player : humans) {
         const auto found = std::find_if(setup.value().players.begin(), setup.value().players.end(),
@@ -110,15 +109,13 @@ core::Result<void> validate_offer(const SetupOffer& offer) {
             return error<void>(SetupReason::options, "human seat owner is not commandable");
         human_teams.insert(found->team_id);
     }
-    if (human_teams.size() != humans.size())
-        return error<void>(SetupReason::options, "coop seats must share one owner, versus owners must be opposing sides");
-    if (humans.size() == 1 && std::none_of(setup.value().skirmish->slots.begin(),
+    if (human_teams.size() == 1 && std::none_of(setup.value().skirmish->slots.begin(),
             setup.value().skirmish->slots.end(), [&](const auto& slot) {
                 return !slot.human && std::any_of(setup.value().players.begin(), setup.value().players.end(),
                     [&](const auto& player) { return player.player_id == slot.player
                         && !human_teams.contains(player.team_id); });
             }))
-        return error<void>(SetupReason::options, "coop requires an opposing AI side");
+        return error<void>(SetupReason::options, "skirmish requires at least two opposing teams, including AI");
     return core::Result<void>::success();
 }
 core::Result<sim::MatchIdentity> read_identity(std::span<const std::uint8_t> bytes,
@@ -300,6 +297,9 @@ struct SetupRuntime final : SessionMonitor, MessageTransport {
         return frame;
     }
     LinkState link(PeerIndex peer) const override { return transport->link(peer); }
+    std::optional<LinkStats> link_stats(PeerIndex peer) const override { return transport->link_stats(peer); }
+    std::uint64_t edge_identity(PeerIndex peer) const override { return transport->edge_identity(peer); }
+    void fail_repair(PeerIndex peer, unsigned code) override { transport->fail_repair(peer, code); }
     PeerIndex self() const override { return transport->self(); }
     std::uint32_t peer_count() const override { return transport->peer_count(); }
 
@@ -325,6 +325,9 @@ struct SetupRuntime final : SessionMonitor, MessageTransport {
         return result;
     }
     core::Result<void> receive(const Received& received) override { return providers.monitor->receive(received); }
+    core::Result<void> on_link_repair(PeerIndex peer, std::function<bool(PeerIndex)> ownership = {}) override {
+        return providers.monitor->on_link_repair(peer, std::move(ownership));
+    }
     core::Result<void> on_departure(PeerIndex peer, std::uint64_t tick) override {
         return providers.monitor->on_departure(peer, tick);
     }

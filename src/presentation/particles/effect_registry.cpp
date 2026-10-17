@@ -253,6 +253,19 @@ core::Result<void> EffectRegistry::set_brightness(const EffectHandle handle, con
     return core::Result<void>::success();
 }
 
+core::Result<void> EffectRegistry::set_dynamic(const EffectHandle handle, const float size, const float energy) {
+    Instance* const instance = find(handle);
+    if (!instance) return core::Result<void>::failure(unknown(handle));
+    return instance->cpu.set_dynamic(size, energy);
+}
+
+core::Result<void> EffectRegistry::set_pinched_cylinder(const EffectHandle handle,
+    const float radius, const float height, const float fraction) {
+    Instance* const instance = find(handle);
+    if (!instance) return core::Result<void>::failure(unknown(handle));
+    return instance->cpu.set_pinched_cylinder(radius, height, fraction);
+}
+
 core::Result<EffectFrameStats> EffectRegistry::advance(
     const EffectHandle handle, const float delta_seconds, const CameraFrame& camera) {
     Instance* const instance = find(handle);
@@ -630,6 +643,14 @@ core::Result<void> EffectRegistry::stop_emission(const EffectHandle handle) {
 const std::vector<EmitterRenderPlan>* EffectRegistry::plans(const EffectHandle handle) const {
     const Instance* const instance = find(handle);
     return instance != nullptr ? &instance->plans : nullptr;
+}
+
+std::size_t EffectRegistry::reserved_particles(const EffectHandle handle) const {
+    const auto* instance = find(handle);
+    if (!instance) return 0;
+    std::size_t reserved{};
+    for (const auto& capacity : instance->cpu.emitter_capacities()) reserved += capacity.reserved;
+    return reserved;
 }
 
 std::size_t EffectRegistry::live_effects() const noexcept { return instances_.size(); }

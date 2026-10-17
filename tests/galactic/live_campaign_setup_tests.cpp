@@ -7,11 +7,14 @@
 #include "../../src/platform/galactic/save_repository.hpp"
 #include "eawr/platform/live_game_session.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/sim/galactic/fleet_intelligence.hpp"
+#include "galactic/fleet_traits.hpp"
 #include "eawr/presentation/ui/campaign_setup.hpp"
 #include <cstdlib>
 #include <filesystem>
 #include <set>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <chrono>
 
@@ -588,6 +591,131 @@ void installed(bool domains_only = false) {
     }
     expect(installed_stealth_hero_fleet, "installed automatic stealth hero has a recursively stealthed fleet");
 }
+void installed_origin_starbases() {
+    const auto root = game_root();
+    if (!root) { std::cout << "SKIPPED: Origin starbases require EAWR_EAW_GAME_ROOT\n"; return; }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data").value().mount);
+    const auto fs = std::make_shared<const eawr::vfs::Vfs>(eawr::vfs::Vfs::mount(mounts).value());
+    const auto catalog = eawr::data::load_catalog(*fs, eawr::data::Profile::foc).value();
+    const auto data = eawr::data::galactic::load_galactic_data(*fs, catalog.catalog).value();
+    const auto types = eawr::units::galactic_type_table(catalog.catalog);
+    namespace ui = eawr::presentation::ui;
+    // The preview's campaign setup screen supplies these same listing/variant facts.
+    std::vector<ui::CampaignFacts> facts;
+    for (const auto& source : data.campaigns) {
+        ui::CampaignFacts entry;
+        entry.name = source.name; entry.campaign_set = source.campaign_set;
+        entry.faction = source.starting_active_player; entry.title = source.text_id;
+        entry.sort_order = source.sort_order.value_or(1000);
+        entry.listed = source.is_listed.value_or(true);
+        entry.multiplayer = source.is_multiplayer.value_or(false);
+        entry.tutorial = source.tutorial.value_or(false);
+        facts.push_back(std::move(entry));
+    }
+    std::vector<ui::FactionFacts> factions;
+    for (const auto& source : data.factions)
+        factions.push_back({source.name, source.name, source.is_playable.value_or(false),
+            source.displayed_tech_level_adjustment.value_or(0)});
+    ui::CampaignSetupModel menu(std::move(facts), std::move(factions));
+    bool mixed_surface_seen = false;
+    for (const auto* name : {"Sandbox_Origin_Rebel", "Sandbox_Origin_Empire"}) {
+        const auto* source = data.campaign(name);
+        if (!source) throw std::runtime_error("missing stock Origin campaign");
+        std::optional<std::size_t> row;
+        for (std::size_t i = 0; i < menu.rows().size(); ++i)
+            if (menu.campaigns()[menu.rows()[i].campaign].campaign_set == source->campaign_set) row = i;
+        expect(row.has_value(), "Origin appears in the preview campaign setup list");
+        menu.select_row(row);
+        for (std::size_t i = 0; i < menu.factions().size(); ++i)
+            if (menu.factions()[i].name == source->starting_active_player) menu.select_faction(i);
+        const auto request = menu.start_request();
+        expect(request && request->campaign == name, "listed Origin faction produces the campaign launch request");
+        if (!request) throw std::runtime_error("Origin campaign is unreachable from the menu model");
+        cp::CampaignSetupOptions options; options.seed = 42;
+        for (const auto& faction : data.factions) {
+            const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+            options.players.push_back({{id, id, 0}, faction.name, true});
+            const bool human = faction.name == source->starting_active_player;
+            if (human) options.local_observer = id;
+            if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
+                human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});
+        }
+        std::vector<std::string> names;
+        for (const auto& type : types.types) names.push_back(type.name);
+        std::sort(names.begin(), names.end());
+        for (const auto& type : names) options.types.push_back({options.types.size() + 1, type});
+        auto result = eawr::platform::PreparedLiveCampaign::create(fs, catalog.catalog, data,
+            types, request->campaign, options, "Normal_Default");
+        if (!result) throw std::runtime_error(std::string(name) + ": " + eawr::core::format_diagnostic(result.error()));
+        auto prepared = std::move(result).value();
+        const auto& plan = prepared->plan(); const auto& setup = prepared->layout();
+        for (const auto& planet : setup.control->planets) if (!planet.landed.empty())
+            mixed_surface_seen |= std::any_of(planet.landed.begin(), planet.landed.end(),
+                [&](const auto& force) { return force.owner != planet.landed.front().owner; });
+        std::map<gc::PlanetId, cp::StartingForceRequest> last;
+        std::size_t duplicates{};
+        for (const auto& force : plan.forces()) {
+            const auto* type = plan.original_type(force.type);
+            if (!type || std::find(type->behavior.begin(), type->behavior.end(), "DUMMY_STAR_BASE") == type->behavior.end()) continue;
+            duplicates += last.contains(force.planet) ? 1U : 0U;
+            last[force.planet] = force;
+        }
+        expect(duplicates == (source->starting_active_player == "Rebel" ? 2U : 6U),
+            "installed Origin retains every authored duplicate station");
+        for (const auto& [planet, force] : last) {
+            const auto control = std::find_if(setup.control->planets.begin(), setup.control->planets.end(),
+                [&](const auto& entry) { return entry.planet == planet; });
+            const auto production = std::find_if(setup.production->planets.begin(), setup.production->planets.end(),
+                [&](const auto& entry) { return entry.planet == planet; });
+            const auto level = static_cast<std::uint32_t>(*plan.original_type(force.type)->base_level);
+            expect(control != setup.control->planets.end() && control->starbase == gc::ControlBase{force.owner, level}
+                && production != setup.production->planets.end() && production->starbase_type == force.type
+                && production->starbase_owner == force.owner && production->space_level == level,
+                "installed station type, level and owner match the last authored record");
+        }
+        for (const auto* planet_name : {"Bothawui", "Mandalore"}) {
+            const auto location = std::find_if(plan.locations().begin(), plan.locations().end(),
+                [&](const auto& entry) { return entry.original_type == planet_name; });
+            if (location == plan.locations().end() || !location->planet) throw std::runtime_error("missing Origin test planet");
+            const auto& force = last.at(location->planet->id);
+            expect(force.original_type == "Underworld_Star_Base_2", "Bothawui and Mandalore resolve to the authored Underworld station");
+            const auto surface = std::find_if(setup.control->planets.begin(), setup.control->planets.end(),
+                [&](const auto& entry) { return entry.planet == location->planet->id; });
+            const auto index = static_cast<std::size_t>(surface - setup.control->planets.begin());
+            expect(surface != setup.control->planets.end() && !surface->landed.empty(), "Origin test planet has authored surface forces");
+            const auto ground = surface->ground_base.level ? surface->ground_base.owner : surface->landed.front().owner;
+            expect(setup.control->state[index].controller == ground, "WGS-186 Origin initial controller follows ground base then first transport");
+            std::cout << name << ' ' << planet_name << " station=" << force.original_type << " owner=" << force.owner << '\n';
+        }
+        std::string baseline;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto world = gc::GalacticSession::create(setup).value();
+            const auto stepped = world.step(executor).value();
+            const auto snapshot = world.snapshot();
+            for (std::size_t i = 0; i < snapshot->control()->planets.size(); ++i) {
+                const auto& surface = snapshot->control()->planets[i];
+                if (surface.landed.empty()) continue;
+                const auto owner = surface.ground_base.level ? surface.ground_base.owner : surface.landed.front().owner;
+                expect(snapshot->control()->state[i].controller == owner
+                    && snapshot->production()->planets[i].ground_occupier == owner,
+                    "WGS-186 installed Origin controller and production ground occupation retain authored precedence");
+            }
+            if (baseline.empty()) baseline = stepped.state_hash.get();
+            else expect(stepped.state_hash.get() == baseline, "Origin startup and continuation equal on 1/2/4/8 workers");
+        }
+        eawr::platform::LiveGameSession::Options live_options;
+        live_options.workers = 2; live_options.pacing = eawr::platform::LiveGameSession::Pacing::driven;
+        auto live = eawr::platform::LiveGameSession::start(std::move(prepared), live_options).value();
+        live->advance_to(1);
+        expect(live->wait_for(1, std::chrono::seconds(20)), "Origin menu launch creates and advances a live campaign");
+        live->stop();
+        std::cout << "origin-live " << name << " duplicates=" << duplicates << " menu-listed=yes parity=1/2/4/8\n";
+    }
+    expect(mixed_surface_seen, "installed Origin startup retains authored mixed surface owners");
+}
 void installed_starting_levels(const bool accepted_route = false) {
     const auto root = game_root();
     if (!root) { std::cout << "SKIPPED: starting technology requires EAWR_EAW_GAME_ROOT\n"; return; }
@@ -665,9 +793,9 @@ void installed_starting_levels(const bool accepted_route = false) {
                     "all stock plans map the selected level through each human/AI faction");
             }
             ++cases;
-            // Duplicate same-level starbases in other authored families have an
-            // independent placement refusal (#3453); retain all 90 plan mappings
-            // and exercise live creation in every Equal Footing faction variant.
+            // Retain all 90 tech-plan mappings and exercise live creation in
+            // every Equal Footing faction variant. Origin duplicate stations
+            // have their own focused installed_origin_starbases coverage.
             if (!equal_footing && !accepted_route) continue;
             auto services = checked(cp::prepare_live_campaign_services(*fs, catalog.catalog, data, types, planned, "Normal_Default"));
             auto campaign = checked(cp::CampaignRoot::create(planned, services));
@@ -824,6 +952,242 @@ void installed_starting_levels(const bool accepted_route = false) {
         std::filesystem::remove(directory);
     }
 }
+// Retail rig observation (Sandbox Equal Footing, human Empire then Rebel, first campaign day): what the local
+// observer knows of planets it has not scouted. Empire (default mask 0) learns no foreign owner and no fleet;
+// Rebel (default mask 17) learns owner and fleet presence of every discovered planet. Planets outside the
+// discovery reach stay undiscovered for both (WGUI-04/05/06/12/38).
+void installed_unscouted_intel() {
+    const auto root = game_root();
+    if (!root) { std::cout << "SKIPPED: stock live campaign requires EAWR_EAW_GAME_ROOT\n"; return; }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}}) {
+        auto mount = eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data");
+        if (!mount) throw std::runtime_error(eawr::core::format_diagnostic(mount.error()));
+        mounts.push_back(std::move(mount).value().mount);
+    }
+    const auto filesystem_owner = std::make_shared<const eawr::vfs::Vfs>(eawr::vfs::Vfs::mount(mounts).value());
+    const auto& filesystem = *filesystem_owner;
+    const auto catalog = eawr::data::load_catalog(filesystem, eawr::data::Profile::foc).value();
+    const auto data = eawr::data::galactic::load_galactic_data(filesystem, catalog.catalog).value();
+    const auto types = eawr::units::galactic_type_table(catalog.catalog);
+    for (const bool empire : {true, false}) {
+        const std::string name = empire ? "Sandbox_Equal_Footing_Empire" : "Sandbox_Equal_Footing_Rebel";
+        const auto* source = data.campaign(name); expect(source != nullptr, "stock family exists"); if (!source) continue;
+        cp::CampaignSetupOptions options; options.seed = 42;
+        for (const auto& faction : data.factions) {
+            const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+            options.players.push_back({{id, id, 0}, faction.name, true});
+            const bool local = faction.name == source->starting_active_player;
+            if (local) options.local_observer = id;
+            if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
+                local ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, local ? id : 0});
+        }
+        std::vector<std::string> originals;
+        for (const auto& type : types.types) originals.push_back(type.name);
+        std::sort(originals.begin(), originals.end());
+        for (const auto& original : originals) options.types.push_back({options.types.size() + 1, original});
+        auto planned = cp::plan_live_campaign_setup(filesystem, data, types, name, options, "Normal_Default");
+        if (!planned) throw std::runtime_error(eawr::core::format_diagnostic(planned.error()));
+        auto services = cp::prepare_live_campaign_services(filesystem, catalog.catalog, data, types, planned.value(), "Normal_Default");
+        if (!services) throw std::runtime_error(eawr::core::format_diagnostic(services.error()));
+        auto created = cp::CampaignRoot::create(planned.value(), services.value());
+        if (!created) throw std::runtime_error(eawr::core::format_diagnostic(created.error()));
+        auto campaign = std::move(created).value();
+        auto session = gc::GalacticSession::create(campaign.game()->galaxy().setup());
+        if (!session) throw std::runtime_error(eawr::core::format_diagnostic(session.error()));
+        auto galaxy = std::move(session).value();
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        auto step = galaxy.step(executor); // the first service pass runs discovery
+        if (!step) throw std::runtime_error(eawr::core::format_diagnostic(step.error()));
+        const auto snapshot = galaxy.snapshot();
+        const auto local = *options.local_observer;
+        const auto by_name = [&](const char* planet) -> const gc::ObservedPlanet* {
+            const auto row = std::find_if(planned.value().locations().begin(), planned.value().locations().end(),
+                [&](const auto& value) { return value.original_type == planet; });
+            if (row == planned.value().locations().end() || !row->planet) return nullptr;
+            for (const auto& view : snapshot->observations())
+                if (view.player == local && view.planet == row->planet->id) return &view;
+            return nullptr;
+        };
+        const auto owner_of = [&](const gc::ObservedPlanet& view) -> std::optional<gc::PlayerId> {
+            for (const auto& planet : campaign.game()->galaxy().setup().planets)
+                if (planet.id == view.planet) return planet.owner;
+            return std::optional<gc::PlayerId>{};
+        };
+        const std::string label = empire ? "Empire: " : "Rebel: ";
+        for (const char* wireframe : empire
+            ? std::initializer_list<const char*>{"Thyferra", "AlzocIII", "Hoth", "Mustafar", "Shola", "Hypori", "Ryloth", "Bonadan"}
+            : std::initializer_list<const char*>{"Coruscant", "Byss", "Alderaan", "Corulag", "Kuat", "Abregado_Rae", "Fresia"}) {
+            const auto* view = by_name(wireframe);
+            expect(view && !view->discovered, label + wireframe + " is outside the first-day discovery reach (retail wireframe)");
+        }
+        std::size_t scouted_foreign = 0;
+        for (const auto& view : snapshot->observations()) {
+            if (view.player != local || !view.discovered) continue;
+            const auto owner = owner_of(view);
+            if (owner == local) continue;
+            ++scouted_foreign;
+            if (empire)
+                expect(!view.knowledge.ownership && !view.knowledge.fleet_presence && !view.known_owner,
+                    "Empire's default intelligence shows a discovered foreign planet with no owner and no fleet");
+            else
+                expect(view.knowledge.ownership && view.knowledge.fleet_presence && view.known_owner == owner,
+                    "Rebel's default intelligence shows owner and fleet presence of every discovered planet");
+        }
+        expect(scouted_foreign >= 10, label + "discovery reaches foreign planets beyond the owned ones");
+        if (empire) {
+            for (const char* planet : {"Jabiim", "Carida", "Fondor", "Muunilinst", "Dagobah", "NalHutta"}) {
+                const auto* view = by_name(planet);
+                expect(view && view->discovered, std::string("Empire: ") + planet + " is textured but unowned in the retail capture");
+            }
+        } else {
+            for (const char* planet : {"Anaxes", "AetenII", "Wayland"}) {
+                const auto* view = by_name(planet);
+                expect(view && view->discovered && view->known_owner && owner_of(*view) != local,
+                    std::string("Rebel: ") + planet + " shows its Empire owner in the retail capture");
+            }
+        }
+        if (empire) {
+            // Growth over time (owner retail game, day 13: Naboo and Nal Hutta owner-coloured, Tatooine, Bothawui and
+            // Dagobah still neutral; rig timeline, human Empire, no player action: Jabiim turned owner-coloured on
+            // day 6 and two more planets on days 8 and 11). Stock starts every AI planet beside the Empire with a
+            // level-2 starbase and the Empire's Minimum_Visible_Base_Level is 3 (Rebel and Underworld 1), so the AI's
+            // base upgrades are what reveal ownership to the Empire: WGUI-11/12. Step one planet's levels 0..5.
+            const auto& observer = *campaign.game()->galaxy().setup().observer;
+            const auto player = std::find_if(observer.players.begin(), observer.players.end(),
+                [&](const auto& row) { return row.player == local; });
+            expect(player != observer.players.end() && player->minimum_visible_base_level == 3, "Empire's authored visibility threshold is 3");
+            const std::int64_t threshold = player->minimum_visible_base_level;
+            for (const char* stock_planet : {"Jabiim", "Fondor", "Bothawui", "Tatooine", "Naboo", "NalHutta", "Dagobah", "Carida"}) {
+                const auto row = std::find_if(planned.value().locations().begin(), planned.value().locations().end(),
+                    [&](const auto& value) { return value.original_type == stock_planet; });
+                expect(row != planned.value().locations().end() && row->planet, std::string(stock_planet) + " is a stock planet");
+                if (row == planned.value().locations().end() || !row->planet) continue;
+                const auto planet = std::find_if(observer.planets.begin(), observer.planets.end(),
+                    [&](const auto& value) { return value.planet == row->planet->id; });
+                expect(planet != observer.planets.end(), std::string(stock_planet) + " has an observer row");
+                if (planet == observer.planets.end()) continue;
+                std::cout << "growth " << stock_planet << " start space_level=" << planet->space_level
+                          << " ground_level=" << planet->ground_level << " owner=" << planet->target_owner << '\n';
+                expect(std::max(planet->space_level, planet->ground_level) < threshold,
+                    std::string(stock_planet) + " starts below the Empire's visibility threshold, so its owner is unknown");
+                std::string line = std::string("growth ") + stock_planet + " steps:";
+                for (std::int64_t level = 0; level <= 5; ++level) {
+                    for (const bool space : {true, false}) {
+                        auto grown = *planet; (space ? grown.space_level : grown.ground_level) = level;
+                        (space ? grown.ground_level : grown.space_level) = 0;
+                        if (space) grown.space_owner = grown.target_owner; else grown.ground_owner = grown.target_owner;
+                        gc::IntelligenceContext context;
+                        context.observer = local; context.local_player = observer.local_player;
+                        context.allegiance = grown.allegiance; context.target_owner = grown.target_owner;
+                        context.space_owner = grown.space_owner; context.ground_owner = grown.ground_owner;
+                        context.space_stealth = grown.space_stealth; context.ground_stealth = grown.ground_stealth;
+                        context.space_level = grown.space_level; context.ground_level = grown.ground_level;
+                        context.minimum_visible_level = threshold; context.mask = player->default_intelligence;
+                        const auto knowledge = gc::planet_knowledge(context);
+                        const bool revealed = knowledge.ownership;
+                        // A stealth base hides its level whatever it is (WGUI-10): Dagobah's ground base never reveals.
+                        const bool stealth = space ? planet->space_stealth : planet->ground_stealth;
+                        expect(revealed == (level >= threshold && !stealth), std::string(stock_planet) + (space ? " starbase" : " ground base")
+                            + " level " + std::to_string(level) + ": the owner is known exactly from the threshold");
+                        if (space) line += " " + std::to_string(level) + (revealed ? "=owner" : "=grey");
+                    }
+                }
+                std::cout << line << '\n';
+            }
+
+            // Owner capture 2026-10-16 (day 15, Aeten 2): an Empire-owned planet with a Rebel fleet in orbit listed the
+            // fleet as three count-only cells in our tooltip, where retail shows the ship icons. The owner mask of an
+            // owned planet must keep the fleet's contents known while a hostile fleet sits there (WGUI-28/29/73).
+            auto hostile_setup = campaign.game()->galaxy().setup();
+            const auto own_planet = std::find_if(hostile_setup.planets.begin(), hostile_setup.planets.end(),
+                [&](const auto& row) { return row.owner == local; });
+            auto hostile = std::find_if(hostile_setup.fleets.begin(), hostile_setup.fleets.end(),
+                [&](const auto& row) { return row.owner != local && !row.members.empty(); });
+            expect(own_planet != hostile_setup.planets.end() && hostile != hostile_setup.fleets.end(),
+                "Empire campaign has an own planet and a foreign fleet to stage");
+            if (own_planet != hostile_setup.planets.end() && hostile != hostile_setup.fleets.end()) {
+                const auto target = own_planet->id;
+                hostile->orbit = target; hostile->orbit_slot = 0; hostile->motion.transit.reset();
+                auto staged = gc::GalacticSession::create(hostile_setup);
+                if (!staged) throw std::runtime_error(eawr::core::format_diagnostic(staged.error()));
+                auto world = std::move(staged).value();
+                for (int tick = 0; tick < 6; ++tick) {
+                    auto stepped = world.step(executor);
+                    if (!stepped) throw std::runtime_error(eawr::core::format_diagnostic(stepped.error()));
+                    const auto view_snapshot = world.snapshot();
+                    for (const auto& view : view_snapshot->observations()) {
+                        if (view.player != local || view.planet != target) continue;
+                        // The viewer supplies a display trait for every type (hero class) through the live helper.
+                        struct Row { bool hero{}, named_hero{}, force_sensitive{}; std::optional<float> max_health; };
+                        std::map<std::string, Row> art;
+                        std::map<gc::TypeId, std::string> type_names;
+                        for (const auto& fleet : view_snapshot->fleets())
+                            for (const auto& member : fleet.members) {
+                                type_names.emplace(member.type, "type" + std::to_string(member.type));
+                                art.emplace("type" + std::to_string(member.type), Row{});
+                            }
+                        const auto traits = eawr::viewer::galactic::live_fleet_display_traits(type_names, art);
+                        // The viewer passes the planets the seat currently sees; without that list no card is published.
+                        std::vector<gc::FleetDisplayVisibility> sight;
+                        for (const auto& row : view_snapshot->observations())
+                            if (row.player == local) sight.push_back({row.planet, true});
+                        const auto cards = gc::observed_fleets(*view_snapshot, observer.local_player, traits, 8, sight);
+                        std::size_t typed = 0, groups = 0;
+                        for (const auto& card : cards.cards) {
+                            if (card.planet != target || card.local) continue;
+                            for (const auto& group : card.groups) { ++groups; typed += group.type ? 1U : 0U; }
+                        }
+                        std::cout << "hostile tick " << tick << " ownership=" << view.knowledge.ownership
+                                  << " contents=" << view.knowledge.fleet_contents << " count=" << view.knowledge.fleet_count
+                                  << " known_owner=" << view.known_owner.value_or(0) << " typed_groups=" << typed << '/' << groups << '\n';
+                        expect(view.knowledge.fleet_contents && groups > 0 && typed == groups,
+                            "an own planet lists the typed groups of a hostile fleet in its orbit");
+                    }
+                }
+            }
+            // Korriban (owner capture 2026-10-16: Empire fleet in orbit, space battle imminent, enemy fleet hidden).
+            // An own fleet in orbit makes the owner known (WGUI-12) but reveals neither the foreign fleet nor the
+            // starbase level; only an active probe does (WGUI-25: stock Probe_Droid_System_Spy, Ground_Activated, 60 s,
+            // despawns, bases, fleet count/contents, ground, structures, political control; no income, no stealth).
+            const auto korriban_row = std::find_if(planned.value().locations().begin(), planned.value().locations().end(),
+                [&](const auto& value) { return value.original_type == "Korriban"; });
+            expect(korriban_row != planned.value().locations().end() && korriban_row->planet, "Korriban is a stock planet");
+            if (korriban_row != planned.value().locations().end() && korriban_row->planet) {
+                const auto korriban = std::find_if(observer.planets.begin(), observer.planets.end(),
+                    [&](const auto& value) { return value.planet == korriban_row->planet->id; });
+                expect(korriban != observer.planets.end(), "Korriban has an observer row");
+                if (korriban != observer.planets.end()) {
+                    gc::IntelligenceContext context;
+                    context.observer = local; context.local_player = observer.local_player;
+                    context.allegiance = korriban->allegiance; context.target_owner = korriban->target_owner;
+                    context.space_owner = korriban->space_owner; context.ground_owner = korriban->ground_owner;
+                    context.space_stealth = korriban->space_stealth; context.ground_stealth = korriban->ground_stealth;
+                    context.space_level = korriban->space_level; context.ground_level = korriban->ground_level;
+                    context.minimum_visible_level = threshold; context.mask = player->default_intelligence;
+                    context.own_orbit = true;
+                    const auto passive = gc::planet_knowledge(context);
+                    expect(!passive.fleet_presence && !passive.fleet_count && !passive.fleet_contents,
+                        "an own fleet in orbit alone does not reveal the foreign fleet");
+                    expect(!passive.space_level || korriban->space_level >= threshold,
+                        "an own fleet in orbit alone does not reveal the starbase level below the Empire threshold");
+                    using gc::Intelligence;
+                    context.mask |= gc::bit(Intelligence::space_level) | gc::bit(Intelligence::ground_level)
+                        | gc::bit(Intelligence::fleet_presence) | gc::bit(Intelligence::fleet_count)
+                        | gc::bit(Intelligence::fleet_contents) | gc::bit(Intelligence::ground_count)
+                        | gc::bit(Intelligence::ground_contents) | gc::bit(Intelligence::structures)
+                        | gc::bit(Intelligence::political_control);
+                    const auto probed = gc::planet_knowledge(context);
+                    expect(probed.space_level && probed.ground_level && probed.fleet_contents && probed.fleet_count
+                        && probed.structures && !probed.income && !probed.income_breakdown,
+                        "an active probe reveals bases, fleet contents and structures but no income");
+                    std::cout << "korriban passive fleet_contents=" << passive.fleet_contents << " space_level=" << passive.space_level
+                              << " probed fleet_contents=" << probed.fleet_contents << " space_level=" << probed.space_level << '\n';
+                }
+            }
+        }
+    }
+}
 } // namespace
 int main(int argc, const char* const argv[]) {
 #if defined(_MSC_VER)
@@ -832,8 +1196,10 @@ int main(int argc, const char* const argv[]) {
     expect(setenv("EAWR_VERIFY_GALACTIC_HASH", "1", 1) == 0, "installed galactic hash verifier enabled");
 #endif
     try {
-        if (argc == 2 && std::string_view(argv[1]) == "--starting-tech") installed_starting_levels();
+        if (argc == 2 && std::string_view(argv[1]) == "--origin-starbases") installed_origin_starbases();
+        else if (argc == 2 && std::string_view(argv[1]) == "--starting-tech") installed_starting_levels();
         else if (argc == 2 && std::string_view(argv[1]) == "--accepted-starting-tech") installed_starting_levels(true);
+        else if (argc == 2 && std::string_view(argv[1]) == "--unscouted-intel") installed_unscouted_intel();
         else installed(argc == 2 && std::string_view(argv[1]) == "--production-domains");
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

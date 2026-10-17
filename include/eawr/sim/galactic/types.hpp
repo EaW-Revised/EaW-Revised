@@ -358,6 +358,7 @@ struct PoliticalControlEffect {
 struct ControlBattleReturn {
     PlanetId planet{};
     PlayerId invader{}, defender{}, winner{};
+    PlayerId station_owner{}; // space return: the owner whose starbase fought; zero means the defender
     bool land{};
     std::uint32_t station_level{};
     std::vector<EntityId> destroyed;

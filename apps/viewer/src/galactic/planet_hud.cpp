@@ -56,6 +56,23 @@ int production_percent(std::int64_t full, std::int64_t remaining) noexcept {
     return low;
 }
 
+bool clock_controls_admitted(const std::size_t active_humans, const bool fixture) noexcept {
+    return fixture || active_humans <= 1;
+}
+std::optional<sim::math::Fixed> live_fast_forward_factor(const bool fixture, const bool live_game) noexcept {
+    if (fixture || !live_game) return std::nullopt;
+    return sim::math::Fixed::from_raw(sim::galactic::fast_forward_factor_raw);
+}
+bool fast_forward_available(const bool controls_enabled, const bool paused, const bool has_factor) noexcept {
+    return controls_enabled && !paused && has_factor;
+}
+sim::math::Fixed fast_forward_target(const sim::math::Fixed current, const sim::math::Fixed factor) noexcept {
+    return current == factor ? sim::math::Fixed::from_raw(sim::math::Fixed::scale) : factor;
+}
+bool pause_ends_fast_forward(const sim::math::Fixed current, const std::optional<sim::math::Fixed> factor) noexcept {
+    return factor && current == *factor;
+}
+
 std::string credit_balance(sim::math::Fixed value) {
     return std::to_string(value.raw() / sim::math::Fixed::scale);
 }
@@ -167,6 +184,32 @@ void append_queue(std::vector<QueueComponent>& output,
 }
 }
 
+ProductionQueueItems production_queue_items(const sim::galactic::PlanetProduction& production,
+    const DescribeProductionType& describe) {
+    ProductionQueueItems result;
+    for (std::size_t domain = 0; domain < production.queues.size(); ++domain) {
+        auto& queue = domain == 1 ? result.space : result.ground;
+        for (const auto& entry : production.queues[domain]) {
+            const auto [name, icon] = describe(entry.type);
+            // WGEP-44: retained remaining time survives payment stalls
+            // and blocked producers; the clock alone is not progress.
+            const int progress = production_percent(entry.full_seconds.raw(), entry.last_remaining.raw());
+            queue.push_back({name, icon, {}, progress, entry.type, entry.build_id});
+        }
+    }
+    return result;
+}
+
+bool publish_production_queue(PlanetHudFacts& facts, const sim::galactic::ObservedPlanet& observation,
+    const sim::galactic::PlanetProduction* production, const bool reveal, const DescribeProductionType& describe) {
+    if (!facts.discovered || !(facts.locally_controlled || reveal) || !production || !observation.knowledge.production) return false;
+    facts.queue_revealed = !facts.locally_controlled;
+    auto items = production_queue_items(*production, describe);
+    facts.space_queue = std::move(items.space);
+    facts.ground_queue = std::move(items.ground);
+    return true;
+}
+
 PlanetHudView planet_hud_view(const PlanetHudFacts* selected, bool space_tab,
     std::size_t space_components, std::size_t ground_components) {
     PlanetHudView result;
@@ -178,11 +221,13 @@ PlanetHudView planet_hud_view(const PlanetHudFacts* selected, bool space_tab,
     if (selected->visible_income) result.income = credits(*selected->visible_income);
     result.ground_enabled = selected->surface_accessible;
     result.space_tab = space_tab || !selected->surface_accessible;
-    if (!selected->locally_controlled) return result;
+    if (!selected->locally_controlled && !selected->queue_revealed) return result;
     result.queues_enabled = true;
     result.queues.clear();
     append_queue(result.queues, selected->space_queue, space_components, true);
     append_queue(result.queues, selected->ground_queue, ground_components, false);
+    // #3931: another player's queue is observed only: no build cards, no room to queue.
+    if (!selected->locally_controlled) return result;
     const auto& active = result.space_tab ? selected->space_queue : selected->ground_queue;
     result.accepts_queue = active && active->size() < selected->maximum_queue;
     for (const auto& choice : selected->choices) {
@@ -226,7 +271,7 @@ double overview_name_alpha(double zoom_alpha) noexcept {
 }
 
 bool production_activity(const PlanetHudFacts& planet) {
-    if (!planet.local_allegiance) return false;
+    if (!planet.local_allegiance && !planet.queue_revealed) return false;
     return (planet.space_queue && !planet.space_queue->empty())
         || (planet.ground_queue && !planet.ground_queue->empty());
 }

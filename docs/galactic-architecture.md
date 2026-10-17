@@ -644,14 +644,30 @@ Rules:
 
 ## 8. AI
 
-- **Opt-in native GC AI.** Fresh campaigns leave native galactic AI off by default while
-  its compute cost is being reduced. `--eawr-galactic-ai on` enables it in the viewer;
-  `off` is the default. The capture-only `--eawr-galactic-all-ai yes` proof also opts in.
+- **Native GC AI, on by default.** Fresh campaigns install native galactic AI unless
+  `--eawr-galactic-ai off` is passed (viewer and front-end path); `on` is the default.
+  The capture-only `--eawr-galactic-all-ai yes` proof also opts in.
   Enabled AI keeps the retail service periods (300/1/3/3/300/1 frames). Saves retain
-  their native AI state; loading such a save also requires the opt-in flag. With AI
+  their native AI state; loading such a save requires AI to be on (the default). With AI
   off, no native AI inputs are prepared or validated. The compute budget remains a
   known limit; redesign follows
   in separate slices.
+- **Galaxy reveal (preview/debug).** `--eawr-galactic-reveal on` (default `off`, also accepted on the
+  front-end path) shows the whole galaxy to the local player so the owner can watch the AI factions:
+  every planet discovered, every fleet (in orbit and in transit, stealthed ones too) with its contents,
+  ground forces, ownership and intelligence, and every player's per-planet production queues as the
+  planet HUD's own queue rows, read-only (no build cards, and a queue button never cancels another
+  player's item). It is draw-only:
+  the viewer wraps each published snapshot in a derived view whose observer knows everything
+  (`apps/viewer/src/galactic/galactic_reveal.hpp`), and only the map, radar and HUDs read it. The truth
+  publication still feeds command gating (destination discovery, route preview), the report digest and
+  the session, so simulation state, saves, digests, replays and every AI's own knowledge are unchanged,
+  and the player cannot issue a command the fog would refuse: fleet and ground-launch commands, queue
+  cancels (never another player's item, reveal on or off), object sales and their rosters all read the truth. The
+  reveal is single-human only: a multiplayer campaign (more than one active human seat, so coop preview and LAN)
+  refuses `--eawr-galactic-reveal on` with an error, because one seat would see what the others hide. Planet
+  selection alone follows the revealed discovery, so an unexplored planet can be selected to inspect
+  its queue and forces (view only; every command from it is still gated on truth). Orbiting stealth fleets show on the map but have no HUD card.
 - **One engine, two managers.** The galactic AI reuses the FoC AI engine in `src/script/foc`
   (expressions, goal functions and history, plans and their threads, TaskForce definitions,
   freestore pattern, budgets) and adds a galactic manager beside the tactical one (WGA-01).

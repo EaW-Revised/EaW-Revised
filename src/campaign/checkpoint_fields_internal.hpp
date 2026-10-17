@@ -133,7 +133,7 @@ template <> struct Fields<::eawr::campaign::ConflictForce> {
 
 template <> struct Fields<::eawr::campaign::ConflictRecord> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.id, v.layer, v.planet, v.invader, v.defender, v.raid, v.corruption_mission, v.tutorial, v.ai_tactical_credits, v.forces, v.seats, v.station, v.superweapon, v.station_type, v.station_level, v.terrain_index, v.map_identity, v.story_plot, v.linked_mission_options, v.structure_markers, v.upgrades, v.tactical, v.corruption_request);
+        a(v.id, v.layer, v.planet, v.invader, v.defender, v.raid, v.corruption_mission, v.tutorial, v.ai_tactical_credits, v.forces, v.seats, v.station, v.superweapon, v.station_owner, v.station_type, v.station_level, v.terrain_index, v.map_identity, v.story_plot, v.linked_mission_options, v.structure_markers, v.upgrades, v.tactical, v.corruption_request);
     }
 };
 

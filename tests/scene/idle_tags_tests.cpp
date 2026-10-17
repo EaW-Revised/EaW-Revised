@@ -64,6 +64,39 @@ void land_contracts() {
     expect(idle_tags(object({}), MapKind::land) == eawr::scene::IdleTags{}, "land: no tags, no playback facts");
 }
 
+// ML-24 (#3631): a blank or TBD variant list inherits the parent's real list.
+eawr::data::EffectiveObject placeholder_over(const std::string& tag, const std::string& placeholder, const std::string& inherited) {
+    eawr::data::EffectiveObject result;
+    eawr::data::EffectiveValue value;
+    value.value.name = tag;
+    value.value.raw_text = placeholder;
+    if (!inherited.empty()) value.inherited_real = eawr::data::InheritedValue{[&] {
+        eawr::data::XmlNode node;
+        node.name = tag;
+        node.raw_text = inherited;
+        return node;
+    }(), "PARENT"};
+    result.values.push_back(std::move(value));
+    return result;
+}
+
+void placeholder_contracts() {
+    for (const char* placeholder : {"", "TBD", " TBD "}) {
+        expect(idle_tags(placeholder_over("LandBehavior", placeholder, "REVEAL, IDLE"), MapKind::land).idle_behavior,
+               "land: a blank or TBD variant LandBehavior inherits IDLE");
+        expect(!idle_tags(placeholder_over("SpaceBehavior", placeholder, "IDLE"), MapKind::space).idle_behavior
+                   && !idle_tags(placeholder_over("Behavior", placeholder, "IDLE"), MapKind::land).idle_behavior,
+               "Behavior and SpaceBehavior keep the plain value() read (#3631 names LandBehavior only)");
+        expect(!idle_tags(placeholder_over("LandBehavior", placeholder, ""), MapKind::land).idle_behavior,
+               "land: a placeholder with nothing to inherit names nothing");
+    }
+}
+
+void lowercase_tbd_contract() {
+    expect(!idle_tags(placeholder_over("LandBehavior", "tbd", "IDLE"), MapKind::land).idle_behavior,
+           "lowercase tbd is an authored value, not a placeholder: it replaces the parent's list");
+}
+
 void space_contracts() {
     expect(!idle_tags(object({{"LandBehavior", "IDLE"}}), MapKind::space).idle_behavior,
            "space: LandBehavior is not a space list");
@@ -87,6 +120,8 @@ void space_contracts() {
 int main() {
     land_contracts();
     space_contracts();
+    placeholder_contracts();
+    lowercase_tbd_contract();
     if (failures != 0) {
         std::cerr << failures << " idle tag contract(s) failed\n";
         return EXIT_FAILURE;

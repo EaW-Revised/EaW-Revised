@@ -111,12 +111,15 @@ template <typename T>
         }
         if (seat.kind == SeatKind::human) {
             ++humans;
-            human_sides.insert(player->player_id);
+            // Campaign children also carry SKSU map metadata; campaign ownership
+            // retains shared controllers (ADR-020).
+            if (!human_sides.insert(player->player_id).second && setup.skirmish && !setup.campaign)
+                return fail<void>(code, "section seats: skirmish human seats must have distinct owners", path);
         }
     }
     // ADR-023: command seats are distinct from loaded faction/team rows.
-    if (humans > sim::max_match_seats || human_sides.size() > sim::max_match_human_sides) {
-        return fail<void>(code, "section seats: at most nine human seats and three human sides are supported", path);
+    if (humans > sim::max_match_seats) {
+        return fail<void>(code, "section seats: at most nine human seats are supported", path);
     }
     return core::Result<void>::success();
 }

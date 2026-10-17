@@ -279,6 +279,7 @@ public:
         if (auto added = add_squadron_craft(); !added) return Result::failure(added.error());
         if (auto placed = place_companies(); !placed) return Result::failure(placed.error());
         if (!selected_ && !fixture_.placed) if (auto added = add_special_weapons(); !added) return Result::failure(added.error());
+        if (!selected_ && !fixture_.placed) if (auto placed = place_tactical_super_weapons(); !placed) return Result::failure(placed.error());
         if (auto checked = check_ids(); !checked) return Result::failure(checked.error());
         add_launches();
         for (const auto& player : start_.players) start_.setup.players.push_back(player.player);
@@ -472,6 +473,29 @@ private:
             if (!type->members.empty()) unit.craft_type = type->members.front().craft;
         }
         start_.units.push_back(std::move(unit));
+        return Void::success();
+    }
+
+    // TSW-01: a tactical super weapon is repositioned at its first service from the nearest enemy-owned target; a
+    // selected (campaign) start does it after formation (form_space_entry).
+    core::Result<void> place_tactical_super_weapons() {
+        using Void = core::Result<void>;
+        for (auto& unit : start_.units) {
+            const auto* type = inputs_.tables->find(unit.type);
+            if (type == nullptr || !type->tactical_super_weapon) continue;
+            // Enemy-owned only: a target owned by the object's own faction is skipped. Skirmish has no defender (both
+            // sides arrive the same way), so every start uses the start distance.
+            const auto owner = std::find_if(start_.players.begin(), start_.players.end(), [&](const StartPlayer& p) { return p.player.player_id == unit.state.owner; });
+            const auto targets = tactical_super_weapon_targets(inputs_.placements, owner == start_.players.end() ? std::string_view{} : std::string_view{owner->faction});
+            if (!targets) return Void::failure(targets.error());
+            const auto started = tactical_super_weapon_start(*type->tactical_super_weapon, unit.state.position, targets.value(), false);
+            if (!started) return Void::failure(started.error());
+            const auto rotation = yaw_rotation(started.value().yaw_degrees);
+            if (!rotation) return Void::failure(rotation.error());
+            unit.state.position = started.value().position;
+            unit.state.rotation = rotation.value();
+            unit.yaw_degrees = started.value().yaw_degrees;
+        }
         return Void::success();
     }
 
@@ -1014,6 +1038,76 @@ core::Result<Vec3> layer_position(Vec3 at, const std::optional<Fixed> layer_z_ad
     if (!z) return core::Result<Vec3>::failure(z.error());
     at.z = z.value();
     return core::Result<Vec3>::success(at);
+}
+
+core::Result<std::vector<Vec3>> tactical_super_weapon_targets(const std::vector<MapPlacement>& placements, const std::string_view own_faction) {
+    std::vector<Vec3> targets;
+    for (const auto& placement : placements) {
+        if (!placement.tactical_super_weapon_target || !placement.position) continue;
+        if (!own_faction.empty() && detail::iequals(placement.owner_faction, own_faction)) continue;
+        targets.push_back(*placement.position);
+    }
+    return core::Result<std::vector<Vec3>>::success(std::move(targets));
+}
+
+core::Result<TacticalSuperWeaponStart> tactical_super_weapon_start(const units::UnitType::TacticalSuperWeapon& data,
+    const Vec3 current, const std::span<const Vec3> targets, const bool owner_defends) {
+    using StartResult = core::Result<TacticalSuperWeaponStart>;
+    const auto fail = [](core::Diagnostic diagnostic) { return StartResult::failure(std::move(diagnostic)); };
+    TacticalSuperWeaponStart start;
+    start.position = current;
+    const Vec3* nearest = nullptr;
+    Fixed nearest_distance{};
+    for (const auto& target : targets) {
+        const auto dx = sim::math::subtract(target.x, current.x);
+        const auto dy = sim::math::subtract(target.y, current.y);
+        const auto dz = sim::math::subtract(target.z, current.z);
+        if (!dx) return fail(dx.error());
+        if (!dy) return fail(dy.error());
+        if (!dz) return fail(dz.error());
+        const auto distance = sim::math::length(Vec3{dx.value(), dy.value(), dz.value()});
+        if (!distance) return fail(distance.error());
+        if (nearest == nullptr || distance.value() < nearest_distance) { nearest = &target; nearest_distance = distance.value(); }
+    }
+    const Fixed distance = owner_defends ? data.attack_distance : data.start_distance;
+    if (nearest != nullptr && distance > Fixed{} && nearest_distance > Fixed{}) {
+        const auto ox = sim::math::subtract(current.x, nearest->x);
+        const auto oy = sim::math::subtract(current.y, nearest->y);
+        const auto oz = sim::math::subtract(current.z, nearest->z);
+        if (!ox) return fail(ox.error());
+        if (!oy) return fail(oy.error());
+        if (!oz) return fail(oz.error());
+        const auto direction = sim::math::normalize(Vec3{ox.value(), oy.value(), oz.value()});
+        if (!direction) return fail(direction.error());
+        const auto sx = sim::math::multiply(direction.value().x, distance);
+        const auto sy = sim::math::multiply(direction.value().y, distance);
+        const auto sz = sim::math::multiply(direction.value().z, distance);
+        if (!sx) return fail(sx.error());
+        if (!sy) return fail(sy.error());
+        if (!sz) return fail(sz.error());
+        const auto x = sim::math::add(nearest->x, sx.value());
+        const auto y = sim::math::add(nearest->y, sy.value());
+        const auto base_z = data.start_pos_match_target_z ? core::Result<Fixed>::success(nearest->z) : sim::math::add(nearest->z, sz.value());
+        if (!base_z) return fail(base_z.error());
+        const auto z = sim::math::add(base_z.value(), data.z_adjust);
+        if (!x) return fail(x.error());
+        if (!y) return fail(y.error());
+        if (!z) return fail(z.error());
+        start.position = {x.value(), y.value(), z.value()};
+    }
+    if (start.position.x == Fixed{} && start.position.y == Fixed{}) return StartResult::success(start);
+    const auto toward_y = sim::math::negate(start.position.y);
+    const auto toward_x = sim::math::negate(start.position.x);
+    if (!toward_y) return fail(toward_y.error());
+    if (!toward_x) return fail(toward_x.error());
+    const auto turn = sim::math::atan2_turn(toward_y.value(), toward_x.value());
+    if (!turn) return fail(turn.error());
+    const auto full = Fixed::from_integer(360);
+    if (!full) return fail(full.error());
+    const auto yaw = sim::math::multiply(turn.value(), full.value());
+    if (!yaw) return fail(yaw.error());
+    start.yaw_degrees = yaw.value();
+    return StartResult::success(start);
 }
 
 bool is_map_object_placement(const MapPlacement& placement) noexcept {

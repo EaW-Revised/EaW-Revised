@@ -1,6 +1,7 @@
 #include "eawr/sim/galactic/movement.hpp"
 #include "session_impl.hpp"
 #include "encoding.hpp"
+#include "native_movement_admission.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -100,6 +101,35 @@ template<class T, class Key> bool ordered(const std::vector<T>& rows, Key key) {
     return std::adjacent_find(rows.begin(), rows.end(), [&](const T& a, const T& b) { return !(key(a) < key(b)); }) == rows.end();
 }
 } // namespace
+
+void GalacticSession::Impl::notify_fleet_approach(FleetId id, PlanetId destination,
+    bool notify, std::size_t preceding_events) {
+    // WGUI-114/122: committed enroute assignment, never an arrival/snapshot delta.
+    if (!notify || !destination || !feedback_notice_handler || !observer || !control
+        || !production || !production->nested_creation || !fleets.contains(id)) return;
+    const auto local = observer->local_player;
+    const auto at = std::lower_bound(control->state.begin(), control->state.end(), destination,
+        [](const auto& state, PlanetId planet) { return state.planet < planet; });
+    if (!local || at == control->state.end() || at->planet != destination || at->current_player != local) return;
+    const auto& fleet = registry.get<session_detail::FleetData>(fleets.at(id));
+    const auto& relations = production->nested_creation->relations;
+    if (std::none_of(relations.begin(), relations.end(), [&](const auto& r) {
+        return r.player == fleet.owner && r.other == local && r.enemy;
+    })) return;
+    const auto actors = actor_inputs();
+    if (actors.empty()) {
+        if (!movement_inputs || skips_combat(*movement_inputs, fleet.members)) return;
+    } else {
+        const auto skip = fleet_combat_skip(Fleet{id, fleet.owner, 0, fleet.members}, actors, movement_inputs.get());
+        if (!skip || skip.value()) return;
+    }
+    const bool own_orbit = std::any_of(fleets.begin(), fleets.end(), [&](const auto& entry) {
+        const auto& other = registry.get<session_detail::FleetData>(entry.second);
+        return other.owner == local && other.orbit == destination && !other.motion.transit;
+    });
+    if (own_orbit) feedback_notice_handler({GalacticFeedbackNotice::Kind::enemy_approaching,
+        local, destination, preceding_events});
+}
 
 core::Result<FleetDeparture> prepare_fleet_departure(const Fleet& fleet, const MovementSetup& inputs) {
     try {
@@ -213,84 +243,56 @@ core::Result<void> validate_movement_setup(const GalacticSetup& setup) {
     } catch (const InvalidMovement& error) { return core::Result<void>::failure(error.diagnostic); }
 }
 
-void GalacticSession::Impl::execute_movement(const GameCommand& command, std::uint64_t tick,
-    std::vector<GalacticEvent>& events, bool pending_local_conflict, std::optional<PlayerId> returning_player) {
+session_detail::NativeMovementAdmission session_detail::prepare_native_movement(
+    const Fleet& f, const GameCommand& command, const MovementSetup& movement, const FleetControlSetup& traits,
+    const PlanetGraph& graph, std::span<const Planet> planets, std::span<const Route> routes,
+    EntityId next_id, std::size_t live_object_count, bool returning_player) {
     const auto& move = std::get<MoveFleet>(command.payload);
-    GalacticEvent event{tick, GalacticEventKind::command_executed, command.key.seat, move.fleet, command.key.sequence, move.path.back(), GalacticRejectReason::none};
-    const auto emit = [&](GalacticEventKind kind, GalacticRejectReason reason = GalacticRejectReason::none) {
-        auto e = event; e.kind = kind; e.reason = reason; events.push_back(e);
-        if (native_movement_listener) native_movement_listener(e);
-    };
-    const auto reject = [&](GalacticRejectReason reason) { emit(GalacticEventKind::command_rejected, reason); emit(GalacticEventKind::movement_canceled, reason); };
-    if (move.destination_slot && *move.destination_slot > 2) return reject(GalacticRejectReason::unknown_value);
-    const auto* issuer = seat(command.key.seat);
-    if (!returning_player && (!issuer || !issuer->active)) return reject(GalacticRejectReason::inactive_seat);
-    if (!setup.movement) return reject(GalacticRejectReason::unknown_value);
-    const auto& gates = setup.fleet_control->gates;
-    const auto humans = std::count_if(seats.begin(), seats.end(), [](const auto& r) { return r.kind == SeatKind::human; });
-    if (!returning_player && (clock.pause_depth || (humans <= 1 && pending_local_conflict && (gates.queued_campaign_conflict || gates.active_speech)))) return reject(GalacticRejectReason::paused);
-    if (!fleets.contains(move.fleet)) return reject(GalacticRejectReason::unknown_subject);
-    auto& f = registry.get<session_detail::FleetData>(fleets.at(move.fleet));
-    if (f.owner != (returning_player ? *returning_player : issuer->player)) return reject(GalacticRejectReason::not_authorized);
-    // WGM-84: a fleet with no orbit parent cannot be redirected.
-    if (f.orbit == 0 || f.motion.transit) return reject(GalacticRejectReason::movement_blocked);
     if (move.destination_slot) {
         bool qualifying = false;
         try {
             const auto qualifies = [&](const FleetMember& unit) {
-                const auto& trait = row(setup.fleet_control->types, unit.type, [](const auto& r) { return r.type; });
+                const auto& trait = row(traits.types, unit.type, [](const auto& r) { return r.type; });
                 return !trait.transport && trait.can_hyperspace_without_ability;
             };
-            for (const auto& member : f.members) flatten(*movement_inputs, member, [&](const auto& leaf, const auto& leaf_type) {
+            for (const auto& member : f.members) flatten(movement, member, [&](const auto& leaf, const auto& leaf_type) {
                 qualifying = qualifying || qualifies(leaf);
                 // WGM-83 (debug build): the fleet breakdown also lists a transport's carried units, one level.
-                if (leaf_type.transport) for (const auto& carried : children(*movement_inputs, leaf.id))
+                if (leaf_type.transport) for (const auto& carried : children(movement, leaf.id))
                     qualifying = qualifying || qualifies(carried);
             });
-        } catch (const InvalidMovement&) { return reject(GalacticRejectReason::invalid_membership); }
-        if (!qualifying) return reject(GalacticRejectReason::movement_ability_required);
+        } catch (const InvalidMovement&) { return {GalacticRejectReason::invalid_membership, {}, {}}; }
+        if (!qualifying) return {GalacticRejectReason::movement_ability_required, {}, {}};
     }
-    if (move.path.size() < 2 || move.path.front() != f.orbit || move.path.back() == f.orbit) return reject(GalacticRejectReason::invalid_path);
+    if (move.path.size() < 2 || move.path.front() != f.orbit || move.path.back() == f.orbit) return {GalacticRejectReason::invalid_path, {}, {}};
     // WGM-198: retreat supplies its selected endpoints directly, outside the
     // ordinary player path search and its authored graph-distance constraint.
     for (std::size_t i = 1; !returning_player && i < move.path.size(); ++i) {
-        const auto* node = graph->node(move.path[i-1]);
-        if (!node || std::none_of(node->edges.begin(), node->edges.end(), [&](const auto& e) { return e.to == move.path[i]; })) return reject(GalacticRejectReason::invalid_path);
+        const auto* node = graph.node(move.path[i-1]);
+        if (!node || std::none_of(node->edges.begin(), node->edges.end(), [&](const auto& e) { return e.to == move.path[i]; })) return {GalacticRejectReason::invalid_path, {}, {}};
     }
-    const auto prepared = prepare_fleet_departure({move.fleet, f.owner, f.orbit, f.members, f.orbit_slot, f.motion}, *movement_inputs);
-    if (!prepared) return reject(GalacticRejectReason::cannot_depart);
-    if (!prepared.value().left_behind.empty() && (next_id == std::numeric_limits<EntityId>::max() || live_object_count >= galactic_max_objects)) return reject(GalacticRejectReason::resource_limit);
+    const auto prepared = prepare_fleet_departure({move.fleet, f.owner, f.orbit, f.members, f.orbit_slot, f.motion}, movement);
+    if (!prepared) return {GalacticRejectReason::cannot_depart, {}, {}};
+    if (!prepared.value().left_behind.empty() && (next_id == std::numeric_limits<EntityId>::max() || live_object_count >= galactic_max_objects)) return {GalacticRejectReason::resource_limit, {}, {}};
     auto motion = f.motion;
     motion.transit = FleetTransit{move.path, 0, {}, {}, prepared.value().base_speed, {}, prepared.value().packed, move.destination_slot, command.key.seat, command.key.sequence};
     try {
-        std::map<PlanetId, Vec3> positions; for (const auto& p : sorted_planets()) positions.emplace(p.id, p.position);
-        install_hop(motion, *movement_inputs, f.owner, positions, sorted_routes());
-    } catch (const InvalidMovement&) { return reject(GalacticRejectReason::cannot_depart); }
-    // Admission is complete: commit the remnant by existing identity, then unlink/depart.
-    if (!prepared.value().left_behind.empty()) {
-        Fleet remnant{next_id, f.owner, f.orbit, {}, f.orbit_slot, {}};
-        for (const auto& member : f.members) if (std::find(prepared.value().left_behind.begin(), prepared.value().left_behind.end(), member.id) != prepared.value().left_behind.end()) remnant.members.push_back(member);
-        std::erase_if(f.members, [&](const auto& member) { return std::find(prepared.value().left_behind.begin(), prepared.value().left_behind.end(), member.id) != prepared.value().left_behind.end(); });
-        insert(remnant); ++next_id; ++live_object_count;
-        record_fleet_shell(remnant.id, remnant.owner, remnant.orbit);
-        for (const auto& member : remnant.members) relocate_actor(member.id, remnant.owner, remnant.orbit, remnant.id);
-        dirty[static_cast<std::size_t>(StateSection::session)] = true;
-        // EnTT insertion may relocate FleetData: reacquire it below.
-        auto e = event; e.kind = GalacticEventKind::fleet_created; e.subject = remnant.id; e.value = remnant.orbit; events.push_back(e);
-        for (const auto& member : remnant.members) {
-            e.kind = GalacticEventKind::member_detached; e.subject = member.id; e.value = move.fleet; events.push_back(e);
-            e.kind = GalacticEventKind::member_attached; e.value = remnant.id; events.push_back(e);
-        }
-        dirty[static_cast<std::size_t>(StateSection::fleet_control)] = true;
+        std::map<PlanetId, Vec3> positions; for (const auto& p : planets) positions.emplace(p.id, p.position);
+        install_hop(motion, movement, f.owner, positions, routes);
+    } catch (const InvalidMovement&) { return {GalacticRejectReason::cannot_depart, {}, {}}; }
+    return {GalacticRejectReason::none, prepared.value(), std::move(motion)};
+}
+
+void GalacticSession::Impl::execute_movement(const GameCommand& command, std::uint64_t tick,
+    std::vector<GalacticEvent>& events, bool pending_local_conflict, std::optional<PlayerId> returning_player) {
+    session_detail::execute_native_movement(*this, command, tick, events, pending_local_conflict, returning_player);
+    // WGUI-122: only the accepted departure assigns its final enroute identity
+    // with notify=true. Shadow admissions have no external feedback side effects;
+    // their eventual ordered native commit enters this same owner.
+    if (!events.empty() && events.back().kind == GalacticEventKind::movement_begin) {
+        const auto& move = std::get<MoveFleet>(command.payload);
+        notify_fleet_approach(move.fleet, move.path.back(), true, events.size());
     }
-    auto& departing = registry.get<session_detail::FleetData>(fleets.at(move.fleet));
-    departing.orbit = 0; departing.motion = std::move(motion);
-    relocate_actor(move.fleet, departing.owner, 0, 0);
-    for (const auto& member : departing.members) relocate_actor(member.id, departing.owner, 0, move.fleet);
-    dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
-    invalidate_observer_projection();
-    dirty[static_cast<std::size_t>(StateSection::movement)] = true;
-    emit(GalacticEventKind::command_executed); emit(GalacticEventKind::movement_begin);
 }
 
 core::Result<void> GalacticSession::apply_retreat_return(PlayerId player, PlanetId source,
@@ -364,55 +366,26 @@ void GalacticSession::set_native_movement_listener(NativeMovementListener listen
 }
 void GalacticSession::Impl::link_movement_orbit(FleetId id, PlanetId destination,
     std::uint64_t tick, std::vector<GalacticEvent>& events) {
-    auto& f = registry.get<session_detail::FleetData>(fleets.at(id));
-    // WGM-35/GLM-01: prefer the old slot, then 1/2; only equal-owner occupants
-    // block a preference. Full occupancy falls back to slot zero.
-    auto slot = std::uint8_t{0};
-    for (const auto candidate : {f.orbit_slot, std::uint8_t{1}, std::uint8_t{2}}) {
-        bool occupied = false;
-        for (const auto& [other_id, handle] : fleets) {
-            const auto& other = registry.get<session_detail::FleetData>(handle);
-            if (other_id != id && other.orbit == destination && other.owner == f.owner && other.orbit_slot == candidate) { occupied = true; break; }
-        }
-        if (!occupied) { slot = candidate; break; }
-    }
-    std::uint64_t latest = 0;
-    for (const auto& [other_id, handle] : fleets) {
-        (void)other_id; latest = std::max(latest, registry.get<session_detail::FleetData>(handle).motion.orbit_entry);
-    }
-    if (latest == std::numeric_limits<std::uint64_t>::max()) invalid("orbit order exhausted");
-    const auto position = add(registry.get<session_detail::PlanetData>(planets.at(destination)).position,
-        {Fixed::from_raw(18 * Fixed::scale), Fixed::from_raw(10 * Fixed::scale), {}}); // WGM-153: code-authored offset.
-    const auto transit = f.motion.transit; f.motion.orbit_entry = latest + 1;
-    f.motion.position = position;
-    // WGM-153: this model stores a direction, so 90-degree planar facing is +Y.
-    f.motion.facing = {{}, one, {}};
-    f.orbit_slot = slot; f.orbit = destination; f.motion.transit.reset();
-    relocate_actor(id, f.owner, destination, destination);
-    for (const auto& member : f.members) relocate_actor(member.id, f.owner, destination, id);
-    if (transit) {
-        events.push_back({tick, GalacticEventKind::movement_finished, transit->producer, id, transit->sequence, destination, GalacticRejectReason::none});
-        if (native_movement_listener) native_movement_listener(events.back());
-    }
-    dirty[static_cast<std::size_t>(StateSection::movement)] = true;
-    dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
-    dirty[static_cast<std::size_t>(StateSection::fleet_control)] = true;
-    invalidate_observer_projection();
+    const auto visit = [&](auto consume) {
+        for (const auto& [other_id, handle] : fleets) consume(other_id, registry.get<session_detail::FleetData>(handle));
+    };
+    checked(session_detail::link_native_movement_orbit(*this, visit, id, destination, tick, events));
 }
-
 void GalacticSession::Impl::gather_movement_orbit(FleetId id, PlanetId destination,
     std::uint64_t tick, std::vector<GalacticEvent>& events) {
-    const auto attacker = registry.get<session_detail::FleetData>(fleets.at(id)).owner;
-    const auto defender = registry.get<session_detail::PlanetData>(planets.at(destination)).owner;
-    // WGM-108/149: shared encounter commit, final AND current hop, no distance filter.
-    for (const auto& [other_id, handle] : fleets) {
-        if (other_id == id) continue;
-        const auto& other = registry.get<session_detail::FleetData>(handle);
-        if (other.motion.transit && (other.owner == attacker || other.owner == defender)
-            && other.motion.transit->path.back() == destination
-            && other.motion.transit->path.at(other.motion.transit->hop + 1) == destination)
-            link_movement_orbit(other_id, destination, tick, events);
-    }
+    const auto visit = [&](auto consume) {
+        for (const auto& [other_id, handle] : fleets) consume(other_id, registry.get<session_detail::FleetData>(handle));
+    };
+    checked(session_detail::gather_native_movement_orbit(*this, visit, id, destination, tick, events));
+}
+core::Result<bool> session_detail::native_orbit_conflict(const Fleet& fleet,
+    std::optional<std::span<const CensusObject>> actors, const MovementSetup& movement, const MovementSetup* contents) {
+    try {
+        const auto& permitted = access(movement, fleet.owner, fleet.orbit);
+        const auto skip = !actors ? skips_combat(movement, fleet.members)
+            : checked(fleet_combat_skip(fleet, *actors, contents ? contents : &movement));
+        return core::Result<bool>::success(permitted.accessible && permitted.potential_conflict && !skip);
+    } catch (const InvalidMovement& error) { return core::Result<bool>::failure(error.diagnostic); }
 }
 
 core::Result<void> GalacticSession::Impl::recheck_movement_orbit(EntityId target,
@@ -436,12 +409,12 @@ core::Result<void> GalacticSession::Impl::recheck_movement_orbit(EntityId target
     if (!movement_inputs) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "orbit recheck requires movement inputs"));
     try {
         const auto destination = fleet.orbit;
-        const auto& permitted = access(*movement_inputs, fleet.owner, destination);
         const auto actors = actor_inputs();
-        const auto live_skip = actors.empty() ? skips_combat(*movement_inputs, fleet.members)
-            : checked(fleet_combat_skip(Fleet{id, fleet.owner, fleet.orbit, fleet.members}, actors, movement_inputs.get()));
+        const auto conflict = checked(session_detail::native_orbit_conflict(
+            Fleet{id, fleet.owner, fleet.orbit, fleet.members}, actors.empty() ? std::nullopt
+                : std::optional<std::span<const CensusObject>>(actors), *movement_inputs));
         link_movement_orbit(id, destination, tick, events);
-        if (permitted.accessible && permitted.potential_conflict && !live_skip) {
+        if (conflict) {
             gather_movement_orbit(id, destination, tick, events);
             events.push_back({tick, GalacticEventKind::movement_conflict, {}, id, 0, destination, GalacticRejectReason::none});
             if (native_movement_listener) native_movement_listener(events.back());
@@ -451,6 +424,7 @@ core::Result<void> GalacticSession::Impl::recheck_movement_orbit(EntityId target
 }
 
 core::Result<void> GalacticSession::recheck_native_orbit(PlayerId owner, FleetId id) {
+    if (auto* shadow = native_shadow()) return stage_native_orbit_recheck(*shadow, owner, id);
     auto& impl = *impl_;
     if (impl.failed || !impl.movement_inputs || !impl.fleets.contains(id))
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "native orbit recheck requires its live movement actor"));
@@ -459,7 +433,7 @@ core::Result<void> GalacticSession::recheck_native_orbit(PlayerId owner, FleetId
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "native orbit recheck differs from its owned planet parent"));
     std::vector<GalacticEvent> events(impl.snapshot->events().begin(), impl.snapshot->events().end());
     if (auto checked = impl.recheck_movement_orbit(id, impl.completed_tick, events); !checked) return checked;
-    impl.snapshot = impl.make_snapshot(std::move(events));
+    impl.snapshot = impl.publish_native_snapshot(std::move(events));
     if (!impl.native_applying) if (auto delivered = impl.deliver_actor_changes(); !delivered) return delivered;
     return impl.journal_native_receipt(*this, NativeEffectKind::orbit_recheck, owner, id, 0, false, nullptr, {true, id});
 }

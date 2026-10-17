@@ -1,4 +1,6 @@
 #include "galactic_mode_internal.hpp"
+#include "advisor_duration.hpp"
+#include "notice_text.hpp"
 #include "weapon_action_live_fixture.hpp"
 #include "map_mode_types.hpp"
 #include "viewer_path.hpp"
@@ -92,6 +94,16 @@ void GalacticMode::State::update_hud() {
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
         }
     } measure{*this, started};
+    // Explicit audio-adapter qualification, never fabricated campaign objectives.
+    // The live story-to-HUD publication remains #2042.
+    if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "objectives-audio" && audio) {
+        if (const auto* icon = command_catalog.find("objective_icon"); icon && hud_updates == 5) {
+            audio->objectives_rebuilt(*icon, false);
+            audio->objectives_rebuilt(*icon, true);
+        }
+        if (const auto* text = command_catalog.find("tutorial_text"); text && (hud_updates == 6 || hud_updates == 10))
+            audio->teletype_revealed(*text);
+    }
     refresh_hud_facts();
     service_production_tooltip();
     service_reference_pages(*this);
@@ -187,8 +199,8 @@ void GalacticMode::State::update_hud() {
     for (const auto planet_index : hud_planet_indices) {
         const auto planet = galaxy->planets.begin() + static_cast<std::ptrdiff_t>(planet_index);
         const auto observation = hud_facts.find(planet->id);
-        if (observation == hud_facts.end() ? options.campaign != galactic_view::synthetic_campaign
-            : !observation->second.discovered) continue;
+        // WGUI-38: an undiscovered planet keeps its name, in the neutral colour.
+        if (observation == hud_facts.end() && options.campaign != galactic_view::synthetic_campaign) continue;
         const galactic_view::PlanetArt* art = nullptr;
         if (content) {
             const auto found = content->art.find(planet->id);
@@ -456,23 +468,16 @@ void GalacticMode::State::refresh_hud_facts() {
                 facts.visible_income = static_cast<double>(row->actual.value_or(row->basic).raw()) / sim::math::Fixed::scale;
         }
         if (facts.visible_income) facts.income_overlay = galactic_view::income_overlay_text(*facts.visible_income);
-        if (facts.locally_controlled && production && observation.knowledge.production) {
+        // #3931: the galaxy reveal also shows another player's queue, read-only.
+        const auto describe_type = [this](const sim::galactic::TypeId type) {
+            const auto name = production_names.find(type);
+            const auto art = name == production_names.end() ? production_art.end() : production_art.find(name->second);
+            return std::pair{name == production_names.end() ? std::string{} : name->second,
+                art == production_art.end() ? std::string{} : art->second.icon};
+        };
+        if (galactic_view::publish_production_queue(facts, observation, production, options.galactic_reveal, describe_type)) {
             facts.maximum_queue = displayed_snapshot->production()->maximum_human_queue;
             // WGUI-91: admission is a sim projection, never reconstructed here.
-            facts.space_queue = std::vector<galactic_view::ProductionItem>{};
-            facts.ground_queue = std::vector<galactic_view::ProductionItem>{};
-            for (std::size_t domain = 0; domain < production->queues.size(); ++domain) {
-                auto& queue = domain == 1 ? *facts.space_queue : *facts.ground_queue;
-                for (const auto& entry : production->queues[domain]) {
-                    const auto name = production_names.find(entry.type);
-                    const auto art = name == production_names.end() ? production_art.end() : production_art.find(name->second);
-                    // WGEP-44: retained remaining time survives payment stalls
-                    // and blocked producers; the clock alone is not progress.
-                    const int progress = galactic_view::production_percent(entry.full_seconds.raw(), entry.last_remaining.raw());
-                    queue.push_back({name == production_names.end() ? std::string{} : name->second,
-                        art == production_art.end() ? std::string{} : art->second.icon, {}, progress, entry.type, entry.build_id});
-                }
-            }
             for (const auto& row : displayed_snapshot->production_offers()) {
                 if (row.player != galaxy->local.player || row.planet != location.id) continue;
                 const auto name = production_names.find(row.type);
@@ -519,6 +524,16 @@ void GalacticMode::State::refresh_hud_facts() {
     if (const auto selected = hud_facts.find(selected_planet);
         selected != hud_facts.end() && !selected->second.discovered) {
         selected_planet = 0; map_input.selected = 0; ++selection_invalidations;
+    }
+    // WGUI-05: a discovery change swaps that planet's alternate model, so resubmit once per change.
+    std::vector<galactic_view::ObjectId> ids;
+    ids.reserve(galaxy->planets.size());
+    for (const auto& planet : galaxy->planets) ids.push_back(planet.id);
+    auto undiscovered = galactic_view::undiscovered_planets(ids, scene_objects,
+        [this](const galactic_view::ObjectId id) { return planet_discovered(id); });
+    if (undiscovered != undiscovered_planets) {
+        undiscovered_planets = std::move(undiscovered);
+        if (renderer) submit();
     }
 }
 
@@ -696,6 +711,9 @@ bool GalacticMode::State::build_command_bar() {
     }
     if (thresholds[0] > thresholds[1]) { failure = "planet name thresholds are out of order"; return false; }
     name_size_thresholds = thresholds;
+    advisor_character_seconds = galactic_view::advisor_hint_duration(
+        document.document_element().child("Advisor_Hint_Duration").text().as_string()).value_or(-1);
+    // Negative is this adapter's unavailable marker, never a replacement duration.
     {
         // GHUD-S72: pointer tooltip delay is milliseconds, independent of campaign pause.
         // WGUI-40: the retail gate waits only for a positive signed delay.
@@ -791,6 +809,21 @@ bool GalacticMode::State::build_command_bar() {
     }
     production_tooltip->hide();
     auto text = data::ui::load_language_text_database(*filesystem, "english");
+    approach_label = memnew(Label);
+    approach_label->set_name("GalacticApproachAdvisor");
+    approach_label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    approach_label->set_z_index(10);
+    approach_label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+    if (const auto* style = command_catalog.find("tooltip_left_text")) {
+        const auto face = hud_fonts->resolve({std::string(style->text(data::ui::Field::font_name)),
+            style->integer(data::ui::Field::font_point_size).value_or(0)}, "english");
+        approach_label->add_theme_font_override("font", hud_fonts->font(face));
+        approach_label->add_theme_font_size_override("font_size",
+            std::max(1, presentation::ui::font_pixel_height(face.point_size, camera.height)));
+    }
+    approach_label->add_theme_color_override("font_color", Color(0, 193.0F / 255, 91.0F / 255));
+    hud->add_child(approach_label);
+    approach_label->hide();
     EncyclopediaPopupStyle popup_style;
     std::vector<core::Diagnostic> popup_diagnostics;
     fill_encyclopedia_popup(popup_style, command_catalog, *filesystem, *hud_fonts, "english",
@@ -888,12 +921,8 @@ bool GalacticMode::State::build_command_bar() {
             else if (name == "b_filters1") base_levels_visible = !base_levels_visible;
             else if (name == "b_planet_tab" && selected_hud.ground_enabled) selected_hud.space_tab = false;
             else if (name == "b_play_pause" && clock_controls_enabled) request_pause(!paused);
-            else if (name == "b_fast_forward" && clock_controls_enabled && fast_forward_factor && game) {
-                const auto factor = displayed_snapshot->clock().strategic_speed == *fast_forward_factor
-                    ? sim::math::Fixed::from_raw(sim::math::Fixed::scale) : *fast_forward_factor;
-                game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
-                    sim::galactic::SetSpeed{false, factor}, {}});
-                ++submitted_orders;
+            else if (name == "b_fast_forward" && galactic_view::fast_forward_available(clock_controls_enabled, paused, fast_forward_factor.has_value()) && game) {
+                submit_strategic_speed(galactic_view::fast_forward_target(strategic_speed_now(), *fast_forward_factor));
             }
             update_hud();
         });
@@ -980,14 +1009,16 @@ bool GalacticMode::State::build_command_bar() {
         button->set_action([this, name = component.name] {
             const auto row = displayed_queues.find(name);
             if (row == displayed_queues.end() || !row->second.visible || !game
-                || !displayed_snapshot->production()) return;
-            const auto planet = std::find_if(displayed_snapshot->production()->planets.begin(),
-                displayed_snapshot->production()->planets.end(), [this](const auto& value) { return value.planet == selected_planet; });
-            if (planet == displayed_snapshot->production()->planets.end()) return;
+                || !published_snapshot->production()) return;
+            const auto planet = std::find_if(published_snapshot->production()->planets.begin(),
+                published_snapshot->production()->planets.end(), [this](const auto& value) { return value.planet == selected_planet; });
+            if (planet == published_snapshot->production()->planets.end()) return;
             const auto domain = row->second.space ? sim::galactic::ProductionDomain::space : sim::galactic::ProductionDomain::ground;
             const auto& queue = planet->queues[static_cast<std::size_t>(domain)];
             const auto index = row->second.index;
             if (index >= queue.size() || queue[index].build_id != row->second.build_id || queue[index].type != row->second.type_id) return;
+            // #3931: a queue row built by another player is never cancellable, with the reveal on or off.
+            if (queue[index].builder != galaxy->local.player) return;
             game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
                 sim::galactic::ProductionCommand{selected_planet, row->second.type_id,
                     sim::galactic::ProductionAction::cancel_index, domain, index, row->second.build_id}, {}});
@@ -1010,12 +1041,14 @@ bool GalacticMode::State::build_command_bar() {
     if (!options.hud_fixture.empty()) {
         if (options.campaign != galactic_view::synthetic_campaign
             || (options.hud_fixture != "accessible" && options.hud_fixture != "inaccessible"
+                && options.hud_fixture != "objectives-audio"
                 && options.hud_fixture != "known" && options.hud_fixture != "masked"
                 && options.hud_fixture != "known-zero" && options.hud_fixture != "discovered-only"
                 && options.hud_fixture != "production" && options.hud_fixture != "production-unlocks"
                 && options.hud_fixture != "capture-live" && !galactic_view::fleet_hud_fixture(options.hud_fixture)
                 && options.hud_fixture != "radar-locked"
                 && options.hud_fixture != "corruption" && options.hud_fixture != "corruption-clean"
+                && !options.hud_fixture.starts_with("corruption-spread")
                 && options.hud_fixture != "corruption-gaps" && options.hud_fixture != "corruption-locked"
                 && options.hud_fixture != "theft" && options.hud_fixture != "theft-single"
                 && options.hud_fixture != "neutralization" && options.hud_fixture != "hack" && options.hud_fixture != "hack-poor"
@@ -1259,8 +1292,8 @@ void GalacticMode::State::service_encyclopedia() {
 void GalacticMode::State::update_command_bar() {
     if (!command_bar || !displayed_snapshot) return;
     const bool clock_enabled = !map_input.gates.tutorial_locked && map_input.gates.world_allowed()
-        && (!options.hud_fixture.empty() || std::count_if(metadata.seats.begin(), metadata.seats.end(),
-            [](const auto& seat) { return seat.active && seat.human; }) <= 1);
+        && galactic_view::clock_controls_admitted(static_cast<std::size_t>(std::count_if(metadata.seats.begin(), metadata.seats.end(),
+            [](const auto& seat) { return seat.active && seat.human; })), !options.hud_fixture.empty());
     const auto current_key = [&] {
         return HudCommandKey{displayed_snapshot, selected_planet, selected_hud.space_tab,
             base_levels_visible, income_layer_visible, clock_enabled, paused, choice_page,
@@ -1290,6 +1323,9 @@ void GalacticMode::State::update_command_bar() {
         selected_hud.space_tab, queue_buttons[1].size(), queue_buttons[0].size());
     // WGUI-79: missing tutorial/MP profile admission (#1979) stays an explicit seam.
     clock_controls_enabled = clock_enabled;
+    // TM-03/04: a live campaign (no synthetic HUD fixture) fast-forwards at the shared 4x rule; the
+    // button stays disabled with more than one human, as in retail network play.
+    if (const auto live = galactic_view::live_fast_forward_factor(!options.hud_fixture.empty(), game != nullptr)) fast_forward_factor = live;
     const auto placement = command_bar->placement();
     const auto screen = [&](const data::ui::ReferenceRect& rect) {
         const auto pixels = presentation::ui::shell_to_screen(rect, placement);
@@ -1475,7 +1511,7 @@ void GalacticMode::State::update_command_bar() {
             button->set_disabled(!clock_controls_enabled);
             hud_button->set_flashing(paused && clock_controls_enabled);
         } else if (name == "b_fast_forward") {
-            button->set_disabled(!clock_controls_enabled || !fast_forward_factor);
+            button->set_disabled(!galactic_view::fast_forward_available(clock_controls_enabled, paused, fast_forward_factor.has_value()));
             button->set_pressed_no_signal(fast_forward_factor && clock.strategic_speed == *fast_forward_factor);
         }
     }
@@ -1610,6 +1646,46 @@ void GalacticMode::State::update_command_bar() {
     }
     // Admission may force the space tab or clamp the page during this refresh.
     hud_command_key = current_key();
+}
+
+void GalacticMode::State::enqueue_approach(sim::galactic::PlanetId planet) {
+    if (advisor_character_seconds < 0 || !approach_label || !hud || !battle_text) return;
+    const auto at = std::find_if(metadata.planets.begin(), metadata.planets.end(),
+        [&](const auto& row) { return row.id == planet; });
+    if (at == metadata.planets.end()) return;
+    auto name = at->name;
+    if (audio_catalog) {
+        auto type = audio_catalog->resolve(name, data::Category::game_object);
+        if (type) if (const auto* key = type.value().value("Text_ID")) name = battle_text(key->value.raw_text);
+    }
+    const std::array<std::string, 1> arguments{name};
+    auto line = String::utf8(galactic_view::expand_notice_text(
+        battle_text("TEXT_ENEMY_FLEET_APPROACHING_LOCATION"), arguments).c_str());
+    // WGUI-66/114: urgent prepend, no duplicate suppression; interrupt removal delay.
+    approach_text.push_front(std::move(line));
+    approach_delay = 0;
+}
+
+void GalacticMode::State::service_approach(double delta) {
+    if (advisor_character_seconds < 0 || !approach_label || !hud || !command_bar) return;
+    // GFC-29: outer wall-clock update, independent of strategic pause.
+    if (!hud->is_visible_in_tree()) return;
+    approach_delay = std::max(0.0, approach_delay - std::max(0.0, delta));
+    if (approach_delay > 0) approach_alpha = static_cast<std::uint8_t>(std::min(255, int(approach_alpha) + 8));
+    else if (approach_alpha) approach_alpha = static_cast<std::uint8_t>(std::max(0, int(approach_alpha) - 8));
+    else if (!approach_text.empty() && !map_input.gates.action_menu && !map_input.gates.cinematic
+        && !(advanced_map_shell && advanced_map_shell->is_visible_in_tree())) {
+        approach_label->set_text(approach_text.front());
+        approach_delay = advisor_character_seconds * static_cast<double>(approach_text.front().length());
+        approach_text.pop_front();
+        if (audio) audio->advisor_urgent();
+    }
+    const auto placement = command_bar->placement();
+    const auto point = presentation::ui::shell_to_screen({encyclopedia_anchor.x, encyclopedia_anchor.y, 0, 0}, placement);
+    approach_label->set_position(Vector2(static_cast<float>(point.x), static_cast<float>(point.y)));
+    approach_label->set_size(Vector2(static_cast<float>(camera.width) - static_cast<float>(point.x), 0));
+    approach_label->set_modulate(Color(1, 1, 1, approach_alpha / 255.0F));
+    approach_label->set_visible(approach_alpha > 0 && !encyclopedia_timing.shown);
 }
 
 } // namespace eawr::presentation::godot_backend

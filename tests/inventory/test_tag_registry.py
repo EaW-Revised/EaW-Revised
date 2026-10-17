@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "inventory"))
 
 import tag_registry as tr  # noqa: E402
+import tag_registry_seed as seed  # noqa: E402
 
 
 def inventory_row(path: str, kind: str = "element", usage: int = 1, profile: str = "foc") -> dict:
@@ -316,6 +317,43 @@ class RegistryRuleTests(Fixture):
         # Without a repository root the locations are not looked at.
         self.assertEqual(self.problems(registry(*rows, gone), root=False), "")
 
+    def test_a_by_design_row_cites_a_rule_that_exists(self) -> None:
+        rows = [r for r in full_rows() if r["tag"] != "Max_Speed"]
+        evidence = {"DB-NOTAG": "debug build: no tag table row carries the name",
+                    "REPLACED": "MV-11 says our code replaces it", "NO-RULE": "our code replaces it",
+                    "GONE": "XX-99 says our code replaces it"}
+
+        def by_design(source: str) -> dict:
+            return {"tag": "Max_Speed", "classes": ["SpaceUnit"], "status": "by-design", "area": "movement",
+                    "evidence": source}
+        self.assertEqual(self.problems(registry(*rows, by_design("REPLACED"), evidence=evidence)), "")
+        self.assertIn("cites the rule ID", self.problems(registry(*rows, by_design("NO-RULE"), evidence=evidence)))
+        self.assertIn("rule XX-99 is in no docs/behaviour note",
+                      self.problems(registry(*rows, by_design("GONE"), evidence=evidence)))
+    def test_a_tactical_applied_row_must_cite_code_outside_auto_resolve(self) -> None:
+        autos = ["src/campaign/auto_resolve_strength.cpp", "include/eawr/campaign/auto_resolve_strength.hpp"]
+        for auto in autos:
+            (self.root / auto).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / auto).write_text(CODE_TEXT, encoding="utf-8")
+        rows = [r for r in full_rows() if r["tag"] != "Max_Speed"]
+
+        def row(classes: list[str], codes: list[dict], status: str = "applied", **extra) -> dict:
+            return {"tag": "Max_Speed", "classes": classes, "status": status, "area": "movement",
+                    "applied": codes, **extra}
+        auto_only = [{"code": f"{autos[0]}#max_speed", "rules": ["MV-11"]}]
+        header_only = [{"code": f"{autos[1]}#max_speed", "rules": ["MV-11"]}]
+        for codes in (auto_only, header_only):
+            self.assertIn("tactical class SpaceUnit cites only auto-resolve code",
+                          self.problems(registry(*rows, row(["SpaceUnit"], codes))))
+        self.assertIn("tactical class HeroUnit cites only auto-resolve code",
+                      self.problems(registry(*rows, row(["HeroUnit"], auto_only))))
+        partial = row(["SpaceUnit"], [dict(auto_only[0], types=["craft"])], "partial", ticket=666, missing_types=["ship"])
+        self.assertIn("cites only auto-resolve code", self.problems(registry(*rows, partial)))
+        self.assertEqual(self.problems(registry(*rows, row(["SpaceUnit"], auto_only + [applied()]))), "")
+        self.assertEqual(self.problems(registry(*rows, row(["SpaceUnit"], header_only + [applied()]))), "")
+        self.assertEqual(self.problems(registry(*rows, row(["GameConstants"], auto_only)), universe=False), "")
+        self.assertEqual(self.problems(registry(*rows, row(["GroundInfantry"], auto_only)), universe=False), "")
+
     def test_rules_must_exist_and_reviewed_rows_need_them(self) -> None:
         rows = [r for r in full_rows() if r["tag"] != "Max_Speed"]
         unknown = {"tag": "Max_Speed", "classes": ["SpaceUnit"], "status": "applied", "area": "movement",
@@ -341,6 +379,26 @@ class RegistryRuleTests(Fixture):
         rows = [dict(r) for r in full_rows()]
         rows[2]["evidence"] = "DB-OTHER"
         self.assertIn("is not defined in the evidence table", self.problems(registry(*rows)))
+
+
+class ScopeOfNameTests(unittest.TestCase):
+    """The seed's name-based scope rule: a tactical class keeps the tag todo, a pure ground class does not."""
+
+    def test_tactical_classes_drop_the_name_scope_and_keep_menu_scope(self) -> None:
+        self.assertIsNone(seed.scope_of_name("Hyperspace", "Hyperspace", "SpaceUnit"))
+        self.assertIsNone(seed.scope_of_name("Land_FOW_Reveal_Range", "Land_FOW_Reveal_Range", "HeroUnit"))
+        self.assertEqual(seed.scope_of_name("Garrison_Radius", "Garrison_Radius", "UniqueUnit")[2], "SCOPE-LAND")
+        self.assertEqual(seed.scope_of_name("Hyperspace", "Hyperspace", "GroundCompany")[2], "SCOPE-GALACTIC")
+        self.assertEqual(seed.scope_of_name("Piracy_Bonus", "Piracy_Bonus", "GroundCompany")[2], "SCOPE-GALACTIC")
+        self.assertEqual(seed.scope_of_name("Galactic_Movie_Credits", "Galactic_Movie_Credits", "SpaceUnit")[2],
+                         "SCOPE-MENU")
+
+    def test_galactic_map_fields_stay_galactic_on_every_class(self) -> None:
+        for cls in ("SpaceUnit", "Squadron", "HeroUnit"):
+            self.assertEqual(seed.scope_of_name("Piracy_Value_Credits", "Piracy_Value_Credits", cls)[2], "SCOPE-GALACTIC")
+
+    def test_the_gate_and_the_seed_share_one_class_list(self) -> None:
+        self.assertIs(seed.TACTICAL_CLASSES, tr.TACTICAL_CLASSES)
 
 
 class LayoutTests(Fixture):
@@ -538,7 +596,7 @@ class CheckedInRegistryTests(unittest.TestCase):
     def test_every_status_is_in_use_or_deliberately_empty(self) -> None:
         value = tr.load_registry(tr.DEFAULT_STATUSES)
         by_status, _ = tr.counts(value)
-        for status in ("applied", "partial", "todo", "foc-ignores", "land-or-galactic"):
+        for status in ("applied", "partial", "todo", "foc-ignores", "land-or-galactic", "by-design"):
             self.assertGreater(by_status.get(status, 0), 0, status)
 
     def test_the_layer_z_adjust_class_of_bug_is_recorded(self) -> None:

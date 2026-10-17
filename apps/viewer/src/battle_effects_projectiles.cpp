@@ -618,10 +618,12 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
     for (auto& look : hero_beams_) {
         look.batch.stream.clear();
         look.sparks.stream.clear();
+        look.lightning.batch.stream.clear();
     }
     for (auto& [type, look] : leech_beams_) {
         static_cast<void>(type);
         look.batch.stream.clear(); look.sparks.stream.clear();
+        look.lightning.batch.stream.clear();
     }
     // WHE-26/27: tracked endpoints follow the live poses; releasing the slot removes the beam.
     for (const auto& instance : latest.instances()) {
@@ -636,6 +638,7 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
             if (!target) continue;
             const auto beam = status.kind == tactical::AbilityKind::energy_weapon ? 0U
                 : status.kind == tactical::AbilityKind::leech_shields ? 2U : 1U;
+            if (beam == 1) active_tractors.insert(instance.entity_id);
             auto origin = space::live_model_point(type->second.beam_origins[beam], source->position,
                 source->yaw_degrees, source->roll_degrees, 1.0, source->pitch_degrees);
             bool origin_from_pose = false;
@@ -691,6 +694,103 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
             look.last_source = *source;
             look.last_bind_origin = type->second.beam_origins[beam];
             look.last_origin_from_pose = origin_from_pose;
+            // TBF-06..08: independent lightning geometry, lifetime and texture.
+            auto& lightning = look.lightning;
+            if (!lightning.name.empty() && lightning.count != 0) {
+                const V start = vec(origin), end = vec(endpoint), delta = sub(end, start);
+                const float distance = length(delta);
+                if (distance > 0.0F) {
+                    if (lightning.batch.resource == 0) {
+                        particles::EmitterRenderPlan plan;
+                        plan.family = particles::RenderFamily::billboard;
+                        plan.blend_selector = 1; plan.program = "Engine/PrimAdditive.fx"; plan.technique = "t1";
+                        plan.blend = particles::Blend::additive; plan.phase = particles::DrawPhase::transparent;
+                        plan.depth_test = true; plan.depth_write = false; plan.drawable = true; plan.texture = lightning.texture;
+                        lightning.batch.resource = backend_->create_emitter(plan);
+                        if (lightning.batch.resource == 0) { failure_ = "beam lightning: " + backend_->failure_cause(); return false; }
+                    }
+                    auto& live = lightning.sources[instance.entity_id];
+                    if (live.target != status.target) { live = {}; live.target = status.target; }
+                    const double now = healing_presented_tick_ / 30.0;
+                    std::erase_if(live.bolts, [&](const auto& bolt) { return now - bolt.born > bolt.lifetime; });
+                    if (now > live.sampled && now >= live.next && live.bolts.size() < lightning.count
+                        && (lightning.replace_faded || live.created < lightning.count)) {
+                        HeroBeamLook::Lightning::Bolt bolt;
+                        const auto key = static_cast<std::uint64_t>(instance.entity_id) * 65537U + live.created * 17ULL;
+                        bolt.born = now;
+                        bolt.lifetime = std::max(0.0F, lightning.fade_min + random(key) * (lightning.fade_max - lightning.fade_min));
+                        bolt.width = lightning.width_min + random(key + 1) * (lightning.width_max - lightning.width_min);
+                        bolt.phase = random(key + 2) * 6.283185307F;
+                        bolt.start = start; bolt.end = end;
+                        const auto basis = screen_axes(view, scale(add(start, end), 0.5F), scale(delta, 1.0F / distance));
+                        bolt.side = basis.side; bolt.normal = cross(scale(delta, 1.0F / distance), basis.side);
+                        // Normalized midpoint path; resource guards bound malformed mod data,
+                        // independently of any retail definition's values (TBF-08).
+                        bolt.points = {{0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}};
+                        float amplitude = std::max({lightning.displacement[0], lightning.displacement[1], lightning.displacement[2]}) * distance;
+                        for (std::uint32_t level = 0; level < 16 && amplitude > 0.0001F && amplitude >= lightning.detail; ++level) {
+                            std::vector<V> refined;
+                            refined.reserve(bolt.points.size() * 2 - 1);
+                            for (std::size_t point = 0; point + 1 < bolt.points.size(); ++point) {
+                                refined.push_back(bolt.points[point]);
+                                auto middle = scale(add(bolt.points[point], bolt.points[point + 1]), 0.5F);
+                                const auto noise = key + level * 104729ULL + point * 3ULL;
+                                const float attenuation = std::ldexp(1.0F, -static_cast<int>(level));
+                                middle.x += (random(noise) - 0.5F) * lightning.displacement[0] * attenuation;
+                                middle.y += (random(noise + 1) - 0.5F) * lightning.displacement[1] * attenuation;
+                                middle.z += (random(noise + 2) - 0.5F) * lightning.displacement[2] * attenuation;
+                                refined.push_back(middle);
+                            }
+                            refined.push_back(bolt.points.back()); bolt.points = std::move(refined);
+                            amplitude *= 0.5F;
+                        }
+                        live.bolts.push_back(std::move(bolt)); ++live.created; ++lightning.bolts_created;
+                        live.next = now + std::max(0.0F, lightning.interval_min + random(key + 3) * (lightning.interval_max - lightning.interval_min));
+                    }
+                    live.sampled = now;
+                    for (const auto& bolt : live.bolts) {
+                        const float age = static_cast<float>(std::max(0.0, now - bolt.born));
+                        const float fade = bolt.lifetime > 0.0 ? static_cast<float>(std::clamp((now - bolt.born) / bolt.lifetime, 0.0, 1.0)) : 1.0F;
+                        const particles::Color colour{
+                            lightning.start.x + (lightning.end.x - lightning.start.x) * fade,
+                            lightning.start.y + (lightning.end.y - lightning.start.y) * fade,
+                            lightning.start.z + (lightning.end.z - lightning.start.z) * fade,
+                            lightning.start.w + (lightning.end.w - lightning.start.w) * fade};
+                        const float born_distance = length(sub(bolt.end, bolt.start));
+                        const auto point_at = [&](const std::size_t index) {
+                            if (index == 0) return start;
+                            if (index + 1 == bolt.points.size()) return end;
+                            const V point = bolt.points[index];
+                            const float angle = bolt.phase + 6.283185307F * (lightning.cycles * point.x * born_distance + lightning.rotations * age);
+                            const float y = point.y * std::cos(angle) - point.z * std::sin(angle);
+                            const float z = point.y * std::sin(angle) + point.z * std::cos(angle);
+                            auto centre = add(bolt.start, scale(sub(bolt.end, bolt.start), point.x));
+                            if (lightning.update_all) {
+                                const float fraction = static_cast<float>(index) / static_cast<float>(bolt.points.size() - 1);
+                                centre = add(centre, add(scale(sub(start, bolt.start), 1.0F - fraction), scale(sub(end, bolt.end), fraction)));
+                            }
+                            return add(centre, add(scale(bolt.side, y * born_distance), scale(bolt.normal, z * born_distance)));
+                        };
+                        for (std::size_t point = 0; point + 1 < bolt.points.size(); ++point) {
+                            const V a = point_at(point), b = point_at(point + 1);
+                            const auto tangent = normalized(sub(b, a));
+                            if (!tangent) continue;
+                            const V side = scale(screen_axes(view, scale(add(a, b), 0.5F), *tangent).side, bolt.width * 0.5F);
+                            const float offset = lightning.scroll * age;
+                            const float repeats = lightning.repeat == 0.0F ? 1.0F : distance * lightning.repeat;
+                            auto& mesh = lightning.batch.stream;
+                            const auto first = static_cast<std::uint32_t>(mesh.vertices.size());
+                            const float v0 = bolt.points[point].x * repeats + offset;
+                            const float v1 = bolt.points[point + 1].x * repeats + offset;
+                            push(mesh, add(a, side), colour, 0.0F, v0); push(mesh, sub(a, side), colour, 1.0F, v0);
+                            push(mesh, add(b, side), colour, 0.0F, v1); push(mesh, sub(b, side), colour, 1.0F, v1);
+                            for (const auto index : {0U, 1U, 2U, 1U, 3U, 2U}) mesh.indices.push_back(first + index);
+                            ++mesh.quads; ++lightning.segments_drawn;
+                        }
+                    }
+                    lightning.last_start = {start.x, start.y, start.z}; lightning.last_end = {end.x, end.y, end.z};
+                }
+            }
             if (look.texture.empty() || look.width <= 0) continue;
             if (look.batch.resource == 0) {
                 particles::EmitterRenderPlan plan;
@@ -836,10 +936,14 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         std::erase_if(look.births, [&](const auto& entry) { return !active_leeches.contains(entry.first); });
         if (look.batch.resource != 0) backend_->update_emitter(look.batch.resource, look.batch.stream);
         if (look.sparks.resource != 0) backend_->update_emitter(look.sparks.resource, look.sparks.stream);
+        std::erase_if(look.lightning.sources, [&](const auto& entry) { return !active_leeches.contains(entry.first); });
+        if (look.lightning.batch.resource != 0) backend_->update_emitter(look.lightning.batch.resource, look.lightning.batch.stream);
     }
     for (auto& look : hero_beams_) {
         if (look.batch.resource != 0) backend_->update_emitter(look.batch.resource, look.batch.stream);
         if (look.sparks.resource != 0) backend_->update_emitter(look.sparks.resource, look.sparks.stream);
+        std::erase_if(look.lightning.sources, [&](const auto& entry) { return !active_tractors.contains(entry.first); });
+        if (look.lightning.batch.resource != 0) backend_->update_emitter(look.lightning.batch.resource, look.lightning.batch.stream);
     }
     max_kites_ = std::max<std::uint64_t>(max_kites_, kites_.stream.quads);
     max_beams_ = std::max<std::uint64_t>(max_beams_, beams_.stream.quads);

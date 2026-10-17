@@ -183,6 +183,13 @@ public:
         sim::AssetId asset_id{};
         std::vector<animation::Matrix> palette{};
         std::vector<Transform3D> model_transforms{};
+        std::shared_ptr<const SkinPosePalette<Transform3D>> prepared;
+        [[nodiscard]] const std::vector<animation::Matrix>& active_palette() const noexcept {
+            return prepared ? prepared->palette : palette;
+        }
+        [[nodiscard]] const std::vector<Transform3D>& active_models() const noexcept {
+            return prepared ? prepared->model_transforms : model_transforms;
+        }
     };
 
     explicit Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders, bool attach_scene);
@@ -191,6 +198,8 @@ public:
     ~Impl();
 
     void apply_lighting_params(RenderingServer& rendering, const RID& material) const;
+    void apply_ambient_params(RenderingServer& rendering, const RID& material) const;
+    void set_ambient_light(const std::array<float, 3>& rgb);
 
     void set_lighting(const GodotRenderer::LightingState& lighting);
     [[nodiscard]] const std::optional<GodotRenderer::LightingState>& lighting() const noexcept { return lighting_; }
@@ -248,6 +257,19 @@ public:
         const sim::EntityId entity_id,
         const sim::AssetId asset_id,
         const std::span<const animation::BonePose> bones);
+
+    void begin_skin_batch(const bool enabled) {
+        skin_work_ = {};
+        skin_profile_ = enabled;
+        skin_batch_active_ = true;
+        skin_batch_.clear();
+    }
+    [[nodiscard]] SkinPoseWork end_skin_batch() {
+        skin_profile_ = false;
+        skin_batch_active_ = false;
+        skin_batch_.clear();
+        return skin_work_;
+    }
 
     void clear_skin_pose(const sim::EntityId entity_id);
 
@@ -347,7 +369,7 @@ private:
 
     [[nodiscard]] static bool apply_skin_pose(
         RenderingServer& rendering, const Instance& instance, const PendingPose& pose,
-        std::span<const std::uint8_t> changes = {});
+        std::span<const std::uint8_t> changes = {}, SkinPoseWork* work = nullptr);
 
     void refresh_billboards(RenderingServer& rendering, const sim::EntityId entity,
                             const Instance& instance, const Resource& resource);
@@ -447,6 +469,7 @@ private:
     std::map<std::pair<std::uint64_t, std::uint64_t>, PooledTexture> texture_pool_;
     std::uint64_t unshared_textures_{};
     std::optional<GodotRenderer::LightingState> lighting_;
+    std::optional<std::array<float, 3>> ambient_;
     std::optional<GodotRenderer::WindState> wind_;
     bool scene_bloom_active_{};
     RID sun_light_;
@@ -458,6 +481,10 @@ private:
     std::unordered_map<sim::EntityId, Instance> instances_;
     std::unordered_map<sim::EntityId, PendingPose> skin_poses_;
     std::vector<std::uint8_t> skin_changes_;
+    SkinPoseWork skin_work_{};
+    bool skin_profile_{};
+    SkinPoseBatch<Transform3D> skin_batch_;
+    bool skin_batch_active_{};
     BillboardPoseScratch<Transform3D> billboard_pose_;
     // Per-entity light scale RGB (set_light_scale); absent means (1, 1, 1).
     std::unordered_map<sim::EntityId, std::array<float, 3>> light_scales_;

@@ -157,6 +157,7 @@ public:
     campaign::CampaignRoot root;
     std::shared_ptr<const CampaignServiceConfiguration> services;
     LiveSaveCampaignSource saved_campaign; // #3035
+    std::vector<NativeAiPlayer> native_ai_players;
 };
 PreparedLiveCampaign::PreparedLiveCampaign(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 PreparedLiveCampaign::~PreparedLiveCampaign() = default;
@@ -298,6 +299,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::create
             const auto* faction = binding == campaign_plan.player_bindings().end() ? nullptr : data.faction(binding->faction);
             return faction && !faction->is_neutral.value_or(false);
         });
+    std::vector<NativeAiPlayer> native_ai_players;
     if (install_native_ai && has_ai) {
         const auto* fog = data.constant("AIUsesFogOfWarGalactic");
         const auto uses_fog = fog ? data::retail::boolean(fog->text) : std::nullopt;
@@ -309,13 +311,15 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::create
             std::make_shared<sim::InlineExecutor>(), *uses_fog, galactic::galactic_max_objects, galactic::galactic_max_objects, difficulty,
             ai_service_periods);
         if (!runtime) return Result::failure(runtime.error());
+        for (const auto& selected : runtime.value()->lifecycle.players)
+            native_ai_players.push_back({selected.player, selected.player_type});
         auto usability = campaign::prepare_stock_galactic_ai_usability(data, campaign_plan, runtime.value()->perception);
         if (!usability) return Result::failure(usability.error());
         campaign::GalacticAiStockQueryFactory queries = [content = usability.value()] {
             auto owner = std::make_shared<campaign::GalacticAiUsabilityProvider>(content);
             campaign::GalacticAiStockQueries out;
             out.usability = [owner](auto player, const auto& snapshot, auto planet) { return owner->usability(player, snapshot, planet); };
-            out.connectivity = [owner](const auto& parent, auto& world, auto& engine, const auto& workers) { return owner->connectivity(parent, world, engine, workers); };
+            out.connectivity_publication = [owner](const auto& parent, auto& world, auto& engine, const auto& workers) { return owner->connectivity_publication(parent, world, engine, workers); };
             out.movement = [owner](auto player, const auto& snapshot, const auto& world, const auto& engine, const auto& workers) { return owner->movement(player, snapshot, world, engine, workers); };
             out.external.emplace("GALACTIC_USABILITY", std::move(owner));
             return core::Result<campaign::GalacticAiStockQueries>::success(std::move(out));
@@ -337,11 +341,13 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::create
     configuration->configure_native_ai = {};
     auto impl = std::make_unique<Impl>(std::move(root).value(), std::move(configuration));
     impl->saved_campaign = std::move(saved_campaign);
+    impl->native_ai_players = std::move(native_ai_players);
     return Result::success(std::unique_ptr<PreparedLiveCampaign>(new PreparedLiveCampaign(std::move(impl))));
 }
 const campaign::CampaignSetupPlan& PreparedLiveCampaign::plan() const noexcept { return *impl_->root.plan(); }
 const galactic::GalacticSetup& PreparedLiveCampaign::layout() const noexcept { return impl_->root.game()->galaxy().setup(); }
 std::shared_ptr<const galactic::GalacticSnapshot> PreparedLiveCampaign::snapshot() const { return impl_->root.game()->galaxy().snapshot(); }
+const std::vector<PreparedLiveCampaign::NativeAiPlayer>& PreparedLiveCampaign::native_ai_players() const noexcept { return impl_->native_ai_players; }
 bool PreparedLiveCampaign::native_ai_installed() const noexcept { return impl_->root.game()->native_ai_installed(); }
 
 class PreparedLiveRestore::Impl {
@@ -425,6 +431,11 @@ public:
                 if (galactic_events_.size() > 4096) galactic_events_.pop_front();
             }
             return core::Result<void>::success();
+        });
+        session_->set_feedback_notice_handler([this](const auto& notice) {
+            // Simulation-thread staging: failed steps publish no feedback, and
+            // WGP-53's ownership notice stays before its credited reward cue.
+            pending_feedback_.push_back(notice);
         });
         publish_preparation();
     }
@@ -727,7 +738,9 @@ public:
             if (stopping_) return;
         }
         const ThreadWorkerAdapter executor(options_.workers, ThreadWorkerAdapter::Dispatch::by_cost);
-        auto next_due = Clock::now() + tick_interval(frame_.latest->clock().strategic_speed);
+        // ADR-013: speed only sets the interval of this wall-clock schedule (LivePaceSchedule).
+        LivePaceSchedule schedule;
+        schedule.rebase(Clock::now(), tick_interval(frame_.latest->clock().strategic_speed));
         std::vector<LiveGameOrder> orders = std::move(restored_input_.orders);
         std::vector<galactic::GameCommand> commands = std::move(restored_input_.commands);
         for (;;) {
@@ -767,7 +780,7 @@ public:
                         || (!paused && options_.pacing == Pacing::driven && target_ > tick);
                 };
                 if (paused || options_.pacing == Pacing::driven) wake_.wait(lock, ready);
-                else wake_.wait_until(lock, next_due, ready);
+                else wake_.wait_until(lock, schedule.next_due(), ready);
                 if (stopping_) return;
                 battle_rate = battle_rate_;
                 std::move(order_inbox_.begin(), order_inbox_.end(), std::back_inserter(orders));
@@ -776,7 +789,9 @@ public:
                 command_inbox_.clear();
                 commanded = std::any_of(orders.begin(), orders.end(), due_order)
                     || std::any_of(commands.begin(), commands.end(), due_command);
-                paced = !paused && (options_.pacing == Pacing::driven ? target_ > tick : Clock::now() >= next_due);
+                paced = !paused && (options_.pacing == Pacing::driven ? target_ > tick : Clock::now() >= schedule.next_due());
+                // Too slow for real time: drop the missed wall time rather than spiral.
+                if (paced && options_.pacing == Pacing::real_time) schedule.drop_backlog(Clock::now(), options_.max_catch_up);
             }
             if (!commanded && !paced) continue;
 
@@ -809,6 +824,7 @@ public:
                 auto sourced = options_.command_source(tick);
                 std::move(sourced.begin(), sourced.end(), std::back_inserter(commands));
             }
+            const auto source_done = Clock::now();
             std::function<std::vector<sim::tactical::PlayerCommand>(std::uint64_t)> battle_source;
             const std::lock_guard source_lock(source_mutex_);
             {
@@ -884,9 +900,19 @@ public:
                         }
                     }
                     auto stepped = session_->step(executor);
+                    const auto step_done = Clock::now();
                     std::unique_lock lock(mutex_);
                     if (!stepped) failure_ = stepped.error();
                     else {
+                        {
+                            const auto ms = [](const Clock::time_point from, const Clock::time_point to) {
+                                return std::chrono::duration<double, std::milli>(to - from).count();
+                            };
+                            LiveTickCost cost{stepped.value().completed_tick, ms(step_started, step_done),
+                                {{"command-source", ms(step_started, source_done)}, {"session-step", ms(source_done, step_done)}}};
+                            costs_.push_back(std::move(cost));
+                            if (costs_.size() > tick_cost_history) costs_.pop_front();
+                        }
                         capture_saves(stepped.value(), orders, commands);
                         hashes_.push_back(std::move(stepped.value().state_hash));
                         const auto previous_result = frame_.result;
@@ -894,7 +920,25 @@ public:
                         // Session controls can replace the published snapshot
                         // during a child while the galaxy's tick stays frozen.
                         if (stepped.value().galaxy != frame_.latest) {
+                            std::size_t event_index{}, feedback_index{};
+                            const auto publish_feedback = [&] {
+                                while (feedback_index < pending_feedback_.size()
+                                    && pending_feedback_[feedback_index].preceding_events <= event_index) {
+                                    LiveGalacticEvent published{};
+                                    const auto notice = pending_feedback_[feedback_index++];
+                                    if (notice.kind == galactic::GalacticFeedbackNotice::Kind::enemy_approaching) {
+                                        const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            Clock::now().time_since_epoch()).count());
+                                        if (!approach_throttle_.admit(notice.player, now)) continue;
+                                    }
+                                    published.cursor = ++galactic_cursor_;
+                                    published.feedback = notice;
+                                    galactic_events_.push_back(std::move(published));
+                                    if (galactic_events_.size() > 4096) galactic_events_.pop_front();
+                                }
+                            };
                             for (const auto& event : stepped.value().galaxy->events()) {
+                                publish_feedback();
                                 LiveGalacticEvent published{++galactic_cursor_, event, std::nullopt};
                                 if (event.kind == galactic::GalacticEventKind::conflict_pending) {
                                     const auto alert = stepped.value().pending_alerts.find(event.subject);
@@ -916,7 +960,10 @@ public:
                                 galactic_events_.push_back(std::move(published));
                                 // A presentation resource bound, not a gameplay limit.
                                 if (galactic_events_.size() > 4096) galactic_events_.pop_front();
+                                ++event_index;
                             }
+                            publish_feedback();
+                            pending_feedback_.clear();
                         }
                         frame_ = {frame_.latest, stepped.value().galaxy, Clock::now(), 0, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, false, {}, {}, {}, {}};
                         frame_.session_tick = stepped.value().completed_tick;
@@ -1026,15 +1073,16 @@ public:
                 }
             }
             published_.notify_all();
-            // Pace from the tick's start so simulation work does not add to every interval.
-            // There is no wall-time catch-up loop. Resume and speed commands start a fresh
-            // interval; pacing remains outside deterministic state (ADR-013).
+            // Pace on a fixed-rate schedule so neither wake-up latency nor simulation work adds to every
+            // interval; a backlog beyond max_catch_up is dropped. Resume and speed commands start a
+            // fresh interval; pacing remains outside deterministic state (ADR-013).
             if (accepted || paced) {
                 const auto after = session_->galaxy().clock();
                 const bool changed = after.pause_depth != clock.pause_depth || after.strategic_speed != clock.strategic_speed;
-                next_due = (changed ? Clock::now() : step_started)
-                    + (session_->mode() == campaign::SessionMode::battle ? LiveSession::tick_interval(battle_rate)
-                        : tick_interval(after.strategic_speed));
+                const auto interval = session_->mode() == campaign::SessionMode::battle ? LiveSession::tick_interval(battle_rate)
+                    : tick_interval(after.strategic_speed);
+                if (changed || interval != schedule.interval()) schedule.rebase(Clock::now(), interval);
+                else schedule.stepped();
             }
         }
     }
@@ -1068,6 +1116,8 @@ public:
     LiveEventLog battle_events_{LiveEventLog::Bounds{}};
     std::uint64_t galactic_cursor_{};
     std::deque<LiveGalacticEvent> galactic_events_;
+    std::vector<galactic::GalacticFeedbackNotice> pending_feedback_; // simulation thread only
+    GalacticApproachThrottle approach_throttle_;
     std::map<galactic::PlanetId, galactic::PlayerId> published_owners_;
     std::map<sim::tactical::PlayerId, std::deque<std::shared_ptr<const LiveFog>>> battle_fog_;
     std::vector<sim::StateHash> battle_hashes_;
@@ -1076,6 +1126,7 @@ public:
     sim::galactic::SeatId battle_seat_{};
     bool battle_paused_{true};
     std::uint32_t battle_rate_{30};
+    std::deque<LiveTickCost> costs_;
     std::function<std::vector<sim::tactical::PlayerCommand>(std::uint64_t)> battle_source_;
     std::vector<LiveGameOrder> order_inbox_;
     std::vector<galactic::GameCommand> command_inbox_;
@@ -1536,6 +1587,14 @@ LiveGalacticEvents LiveGameSession::galactic_events_after(const std::uint64_t cu
     return result;
 }
 std::uint64_t LiveGameSession::completed_tick() const { return frame().session_tick; }
+
+std::vector<LiveTickCost> LiveGameSession::tick_costs_after(const std::uint64_t after) const {
+    const std::lock_guard lock(impl_->mutex_);
+    std::vector<LiveTickCost> costs;
+    for (auto it = impl_->costs_.rbegin(); it != impl_->costs_.rend() && it->tick > after; ++it) costs.push_back(*it);
+    std::reverse(costs.begin(), costs.end());
+    return costs;
+}
 std::optional<core::Diagnostic> LiveGameSession::failure() const { const std::lock_guard lock(impl_->mutex_); return impl_->failure_; }
 std::vector<core::Diagnostic> LiveGameSession::rejected_orders() const { const std::lock_guard lock(impl_->mutex_); return impl_->rejected_; }
 std::size_t LiveGameSession::worker_count() const noexcept { return impl_->options_.workers; }

@@ -370,7 +370,8 @@ core::Result<void> validate_replay(const TacticalReplay& replay) {
         if (size > std::numeric_limits<std::uint16_t>::max())
             return fail<void>(diagnostic_codes::invalid_setup, "native scene body exceeds header limit", path);
     }
-    if (replay.final_tick_count > max_ticks || replay.commands.size() > max_commands) {
+    if (replay.final_tick_count > max_ticks || replay.commands.size() > max_commands
+        || replay.object_turns.size() > max_commands) {
         return fail<void>(diagnostic_codes::resource_limit,
             "tick/command count exceeds tactical replay resource limits", path);
     }
@@ -392,6 +393,28 @@ core::Result<void> validate_replay(const TacticalReplay& replay) {
         if (const auto* cancel = std::get_if<CancelPayload>(&command.payload);
             cancel != nullptr && cancel->entry_id != 0 && !replay.setup.queue_identities) {
             return fail<void>(diagnostic_codes::invalid_command, label + ": cancel entry requires QIDS extension", path);
+        }
+    }
+    // #3644: object-turn uses are applied by the world at the seam, so a record names a unit and a real ability.
+    for (std::size_t index = 0; index < replay.object_turns.size(); ++index) {
+        const auto& record = replay.object_turns[index];
+        const auto label = "object-turn record " + std::to_string(index);
+        if (record.tick >= replay.final_tick_count) {
+            return fail<void>(diagnostic_codes::malformed, label + " tick is not less than final tick count", path);
+        }
+        if (index != 0) {
+            const auto& previous = replay.object_turns[index - 1];
+            const std::tuple before{previous.tick, previous.use.unit, previous.use.sequence};
+            if (!(before < std::tuple{record.tick, record.use.unit, record.use.sequence})) {
+                return fail<void>(diagnostic_codes::order,
+                    label + " does not strictly follow the previous (tick, unit, sequence)", path);
+            }
+        }
+        if (record.use.unit == invalid_entity_id || record.use.ability == AbilityKind::none
+            || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::blast)
+            || static_cast<std::uint8_t>(record.use.action) < static_cast<std::uint8_t>(AbilityAction::activate)
+            || static_cast<std::uint8_t>(record.use.action) > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
+            return fail<void>(diagnostic_codes::invalid_command, label + " names no unit, ability or action", path);
         }
     }
     return core::Result<void>::success();

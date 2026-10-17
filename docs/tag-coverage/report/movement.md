@@ -4,15 +4,16 @@
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 132 | 132 |
-| partial | 112 | 112 |
-| todo | 128 | 128 |
+| applied | 133 | 133 |
+| partial | 105 | 105 |
+| todo | 134 | 134 |
 | presentation-later | 0 | 0 |
 | foc-ignores | 24 | 24 |
 | deferred | 16 | 16 |
+| by-design | 2 | 2 |
 | land-or-galactic | 0 | 77 |
 | multiplayer | 0 | 0 |
-| **Total** | **412** | **489** |
+| **Total** | **414** | **491** |
 
 Tables group the exact object class families listed together in the registry. Object kinds
 are station, ship, squadron or craft when specified; an empty kind list means the whole
@@ -41,7 +42,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Behavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); ship (src/sim/tactical/session_step_systems.cpp); ship (src/units/unit_motion.cpp); Container (src/units/unit_tables_profiles.cpp); missing: other galactic behavior dispatch | WAR-24; WGT-121; C-05, D-04, L-05, L-23, L-43; WCC-25; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WHZ-20; WSU-15, WSU-19, WSU-21 | 679 | src/campaign/auto_resolve_strength.cpp; src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/units/unit_motion.cpp; src/units/unit_tables_profiles.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
 | FormationSpacing | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Arctic_Human_Civ_Team, Bothan_Slave_Team, Bothan_Team, Civilian_Independent_AI_Team, Civilian_Urban_Usable_Team, Desert_Human_Civ_Team, Empire_Field_Commander_Team, Ewok_Team (+33 more)) |
-| LandBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); missing: other galactic behavior dispatch | WAR-24 | 679 | src/campaign/auto_resolve_strength.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
+| LandBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/scene/scene_build.cpp); missing: other galactic behavior dispatch | WAR-24; ML-24 | 679 | src/campaign/auto_resolve_strength.cpp; src/scene/scene_build.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
 | Layer_Z_Adjust | partial | Galactic_Fleet container marker (apps/viewer/src/galactic/galactic_scene.cpp); missing: Other container presentation paths remain outside the galactic fleet marker. | WGP-16 | 650 | apps/viewer/src/galactic/galactic_scene.cpp | The Galactic_Fleet marker adds the authored Layer_Z_Adjust to the model position; other container paths are not claimed.; basis: reviewed |
 | Max_Rate_Of_Turn | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Arctic_Human_Civ_Team, Bothan_Slave_Team, Bothan_Team, Civilian_Independent_AI_Team, Civilian_Urban_Usable_Team, Desert_Human_Civ_Team, Empire_Field_Commander_Team, Ewok_Team (+33 more)) |
 | Max_Speed | partial | craft (src/units/unit_motion.cpp); missing: ship | WMV-44 | 649 | src/units/unit_motion.cpp | WMV-44: resolved Create_Team_Type maximum supplies the member formation deceleration ratio; ordinary team-container maximum velocity and land consumers remain open under &#35;649. |
@@ -61,6 +62,12 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Mass | todo | application not recorded | — | 649 | — | Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on HeroUnit: Boba_Fett, Bossk, Captain_Piet, Chewbacca, Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion (+14 more). Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, Defense_Satellite_Laser, Defense_Satellite_Laser_Small, Defense_Satellite_Missile, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks (+46 more). Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Arc_Hammer, Biggs_XWing, Eclipse_Super_Star_Destroyer, Escort_TIE_Fighter, Executor_Super_Star_Destroyer (+50 more). Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Commander_Akbar, Luke_Skywalker. Mixed ground/space, space carriers on SpecialStructure: Civilian_Command_Center, Communications_Array_E, Communications_Array_R, Defense_Satellite_Laser, Defense_Satellite_Laser_Small, Defense_Satellite_Missile, E_Ground_Advanced_Vehicle_Factory, E_Ground_Barracks (+46 more). Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Arc_Hammer, Biggs_XWing, Eclipse_Super_Star_Destroyer, Escort_TIE_Fighter, Executor_Super_Star_Destroyer (+50 more). |
+
+## Container, GenericHeroUnit, HeroUnit, Mobile_Defense_Unit, SpaceUnit, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| MovementClass | todo | application not recorded | — | 649 | — | applied only by the galactic auto-resolve (src/campaign/auto_resolve_*); no tactical code reads it, and whether FoC's tactical battle does is unverified (&#35;4002) |
 
 ## Container, SpaceUnit
 
@@ -87,7 +94,6 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Hyperspace_Speed | partial | eligible live galactic leaf members, squadron template packing keys (src/campaign/fleets.cpp); missing: fleet-container authored speeds; live child speeds are used for fleet travel | WGM-118, WGM-151, WGM-26 | 680 | src/campaign/fleets.cpp | basis: reviewed |
-| MovementClass | partial | live galactic auto-resolve (src/campaign/auto_resolve_live.cpp); missing: other tactical consumers | WAR-35 | 1965 | src/campaign/auto_resolve_live.cpp | Mixed ground/space, space carriers on Container: Darth_Vader_TIE_Fighter_Container, Hutt_VWing_Squadron_Container, Red_Squadron_Container, Rogue_Squadron_Space_Container, StarViper_Team, TIE_Defender_Squadron_Container, Y_Wing_Squadron_Container. Mixed ground/space, space carriers on HeroUnit: Boba_Fett, Bossk, Chewbacca, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo, IG-88 (+11 more). Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Arc_Hammer, Biggs_XWing, Eclipse_Super_Star_Destroyer, Escort_TIE_Fighter, Executor_Super_Star_Destroyer (+50 more). Mixed ground/space, space carriers on Container: Darth_Vader_TIE_Fighter_Container, Hutt_VWing_Squadron_Container, Red_Squadron_Container, Rogue_Squadron_Space_Container, StarViper_Team, TIE_Defender_Squadron_Container, Y_Wing_Squadron_Container. Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Arc_Hammer, Biggs_XWing, Eclipse_Super_Star_Destroyer, Escort_TIE_Fighter, Executor_Super_Star_Destroyer (+50 more). Live galactic auto-resolve reads the effective authored value; other tactical consumers remain outside this adapter.; basis: reviewed |
 
 ## Container, SpaceUnit, UniqueUnit
 
@@ -161,7 +167,9 @@ and are plain numbers. Code locations are repository paths without identifier an
 | RepushDistance | todo | application not recorded | — | 649 | — | — |
 | Rotate_Formation_Facing_Moves | deferred | application not recorded | — | 626 | — | — |
 | Short_Range_Attack_Formation_Coefficient | deferred | application not recorded | — | 626 | — | — |
+| Space_Collidable_Grid_Cull_Size | by-design | application not recorded | — | — | — | BY-DESIGN-PATHING |
 | Space_Guard_Range | applied | whole class (src/units/unit_motion.cpp) | OR-14 | — | src/units/unit_motion.cpp | basis: reviewed |
+| Space_Large_Ship_Grid_Cull_Size | by-design | application not recorded | — | — | — | BY-DESIGN-PATHING |
 | Space_Reinforcement_Collision_Check_Distance | applied | whole class (src/sim/tactical/session_economy.cpp) | WR-25 | — | src/sim/tactical/session_economy.cpp | basis: reviewed |
 | Space_Retreat_Allowed_Countdown_Seconds | partial | campaign tactical return (src/campaign/tactical_return_live.cpp); missing: cinematic flight cadence and hero placement | WR-43 | 1116 | src/campaign/tactical_return_live.cpp | Validated return bindings feed the native countdown, attrition and scheduled hero records; the remaining cinematic cadence and placement owners are explicit services.; basis: reviewed |
 | Space_Retreat_Attrition_Factor | partial | campaign tactical return (src/campaign/tactical_return_live.cpp); missing: cinematic flight cadence and hero placement | WGT-36 | 1116 | src/campaign/tactical_return_live.cpp | Validated return bindings feed the native countdown, attrition and scheduled hero records; the remaining cinematic cadence and placement owners are explicit services.; basis: reviewed |
@@ -206,12 +214,6 @@ and are plain numbers. Code locations are repository paths without identifier an
 | OverrideAcceleration | applied | ship (src/units/unit_motion.cpp) | MV-01 | — | src/units/unit_motion.cpp | basis: auto |
 | OverrideDeceleration | applied | ship (src/units/unit_motion.cpp) | MV-01 | — | src/units/unit_motion.cpp | basis: auto |
 | UnitCollisionClass | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Generic_Commander_00, Generic_Field_Commander_Empire, Generic_Field_Commander_Rebel, Hutt_Field_Commander, R_General_Rieekan_Commander, Squad_Generic_Field_Commander_Empire, Squad_Generic_Field_Commander_Rebel, Underworld_Saboteur (+1 more)) |
-
-## GenericHeroUnit, HeroUnit, Mobile_Defense_Unit
-
-| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
-|---|---|---|---|---|---|---|
-| MovementClass | partial | live galactic auto-resolve (src/campaign/auto_resolve_live.cpp); missing: other tactical consumers | WAR-35 | 1965 | src/campaign/auto_resolve_live.cpp |  Live galactic auto-resolve reads the effective authored value; other tactical consumers remain outside this adapter.; basis: reviewed |
 
 ## GenericHeroUnit, HeroUnit, SecondaryStructure, SpaceStructure, SpecialStructure, TechBuilding
 
@@ -358,7 +360,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Rotations_Per_Second | todo | application not recorded | — | 649 | — | — |
+| Rotations_Per_Second | partial | tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | TBF-06, TBF-07, TBF-08 | 649 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
 
 ## Marker, MiscObject, Mobile_Defense_Unit, Projectile, SpaceProp
 
@@ -529,7 +531,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Space_Layer | todo | application not recorded | — | 649 | — | the loader reads it for other classes; the M2 scene's objects of this class never have it read |
 | Space_Obstacle_Radius | todo | application not recorded | — | 649 | — | the loader reads it for other classes; the M2 scene's objects of this class never have it read |
-| SpaceBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); missing: other galactic behavior dispatch | WAR-24 | 679 | src/campaign/auto_resolve_strength.cpp | Skirmish_Merchant_Dock contributes inherited SpaceStructure metadata to the M2 corpus, but no read of this class's authored SpaceBehavior is traced. Applied consumers on the effective live object classes are unchanged. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
+| SpaceBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/presentation/space/live_units.cpp); missing: other galactic behavior dispatch | WAR-24; FW-24 | 679 | src/campaign/auto_resolve_strength.cpp; src/presentation/space/live_units.cpp | Skirmish_Merchant_Dock contributes inherited SpaceStructure metadata to the M2 corpus, but no read of this class's authored SpaceBehavior is traced. Applied consumers on the effective live object classes are unchanged. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
 
 ## SpaceUnit
 
@@ -647,7 +649,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Max_Speed | todo | application not recorded | — | 650 | — | WHE-07/49: the M2 resolver touches carried heroes, unselected transports and unique creation templates as metadata; the generic body or ability consumer for other classes is not applied to these scene objects. Mixed ground/space, space carriers on HeroUnit: Boba_Fett, Boba_Fett_NoStealth, Bossk, Chewbacca, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo (+12 more). |
 | Min_Speed | todo | application not recorded | — | 650 | — | WHE-07/49: the M2 company resolver touches carried hero or unselected transport metadata without deploying its body; the generic loader consumer for other classes is not applied to these scene objects. |
 | Space_Layer | todo | application not recorded | — | 650 | — | WHE-07/49: the M2 company resolver touches carried hero or unselected transport metadata without deploying its body; the generic loader consumer for other classes is not applied to these scene objects. |
-| SpaceBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); missing: other galactic behavior dispatch | WAR-24 | 679 | src/campaign/auto_resolve_strength.cpp | WHE-07/49: the M2 company resolver touches carried hero or unselected transport metadata without deploying its body; the generic loader consumer for other classes is not applied to these scene objects. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
+| SpaceBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/presentation/space/live_units.cpp); missing: other galactic behavior dispatch | WAR-24; FW-24 | 679 | src/campaign/auto_resolve_strength.cpp; src/presentation/space/live_units.cpp | WHE-07/49: the M2 company resolver touches carried hero or unselected transport metadata without deploying its body; the generic loader consumer for other classes is not applied to these scene objects. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
 
 ## TransportUnit, UniqueUnit
 
@@ -659,7 +661,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Abilities/Concentrate_Fire_Attack_Ability/Target_Speed_Decrease_Percent | partial | Home One concentrate fire (src/sim/tactical/session_abilities.cpp); missing: nonzero target speed decreases; overlapping speed debuffs remain unverified | WHE-24, WHE-25 | 939 | src/sim/tactical/session_abilities.cpp | Stock Home One authors zero; nonzero values fail validation rather than inventing an unverified speed policy.; basis: reviewed |
+| Abilities/Concentrate_Fire_Attack_Ability/Target_Speed_Decrease_Percent | applied | concentrate-fire targets (src/sim/tactical/session_abilities.cpp); concentrate-fire activation and manual release (src/sim/tactical/session_step_commands.cpp) | WHE-24, WHE-25; FD-01, WHE-25 | — | src/sim/tactical/session_abilities.cpp; src/sim/tactical/session_step_commands.cpp | The negative authored fraction joins the shared source/category speed reduction and is removed on expiry or source deletion; stock Home One authors zero. Nonzero activation and manual release use the existing command replan transaction even for targets without abilities; synthetic expiry/release cases cover 1/2/4/8 workers.; basis: reviewed |
 | Apply_Y_Turret_Rotate_To_Axis | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Veers_AT_AT_Walker, Veers_AT_AT_Walker_Death_Clone, Veers_AT_AT_Walker_Deployed_Death_Clone) |
 | Apply_Z_Turret_Rotate_To_Axis | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Veers_AT_AT_Walker, Veers_AT_AT_Walker_Death_Clone, Veers_AT_AT_Walker_Deployed_Death_Clone) |
 | Attack_Move_Response_Range | partial | loaded fighter locomotor craft, including solo heroes (src/units/unit_motion.cpp); missing: nonfighter ships and containers | FT-02, WHE-SQ-02 | 649 | src/units/unit_motion.cpp | Fighter flight applies authored diversion ranges through the self-represented group; ship and container consumers remain open.; basis: reviewed |

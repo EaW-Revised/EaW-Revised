@@ -7,7 +7,9 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cstring>
+#include <map>
 #include <optional>
 #include <set>
 #include <utility>
@@ -131,7 +133,8 @@ namespace {
 std::string plan_stem(const std::string& path) {
     const std::size_t slash = path.rfind('/');
     std::string name = path.substr(slash == std::string::npos ? 0 : slash + 1);
-    if (name.size() > 4 && name.ends_with(".lua")) name.resize(name.size() - 4);
+    const auto extension = name.rfind('.');
+    if (extension != std::string::npos) name.resize(extension);
     return name;
 }
 
@@ -140,22 +143,22 @@ std::string plan_stem(const std::string& path) {
 // PL-10: each selected plan's definition load (PlanDefinitionLoad, Base_Definitions) runs in its
 // own instance; host glue hands the globals it leaves to the engine.
 core::Result<std::vector<ai::PlanDef>> load_plans(const HostPtr& host, const std::map<std::string, std::string>& modules,
-    std::vector<std::string>& notes) {
+    std::vector<std::string>& notes, const std::set<std::string>* selected_goals) {
     using PlansResult = core::Result<std::vector<ai::PlanDef>>;
     authoritative::ModuleManifest manifest;
     for (const auto& [path, bytes] : modules) {
         if (auto added = manifest.add(path, bytes); !added) return PlansResult::failure(added.error());
     }
-    const std::vector<std::string> paths = selected_plans();
+    const std::vector<std::string> paths = selected_plans(modules);
     for (const std::string& path : paths) {
         // L-03a / ML-33: require substitutes the request verbatim. Keep the
         // admitted logical directory so root-level AI plans resolve too.
-        const std::string loader = "require(\"" + path.substr(0, path.size() - 4) + "\")\n"
+        const std::string loader = "require(\"" + path.substr(0, path.rfind('.')) + "\")\n"
             "PlanDefinitionLoad = true\n"
             "Base_Definitions()\n"
             "_EAWR_Plan(Category, TaskForce, IgnoreTarget, MagicPlan, AllowFreeStoreUnits, AllowEngagedUnits,\n"
             "    PerFailureContrastAdjust, MinContrastScale, MaxContrastScale, RequiredCategories)\n";
-        if (auto added = manifest.add("EAWR/PLAN_LOADER/" + upper(plan_stem(path)) + ".LUA", loader); !added) {
+        if (auto added = manifest.add("EAWR/PLAN_LOADER/" + upper(path) + ".LUA", loader); !added) {
             return PlansResult::failure(added.error());
         }
     }
@@ -178,10 +181,11 @@ core::Result<std::vector<ai::PlanDef>> load_plans(const HostPtr& host, const std
     }
     if (!errors.empty()) return PlansResult::failure(errors.front());
     std::vector<ai::PlanDef> plans;
+    std::size_t outside_selection{};
     std::uint64_t instance = 1;
     for (const std::string& path : paths) {
         const std::string name = plan_stem(path);
-        if (auto created = scripts.value().create_instance(instance, "EAWR/PLAN_LOADER/" + upper(name) + ".LUA"); !created) {
+        if (auto created = scripts.value().create_instance(instance, "EAWR/PLAN_LOADER/" + upper(path) + ".LUA"); !created) {
             notes.push_back(name + ": " + created.error().code + " " + created.error().message);
             ++instance;
             continue;
@@ -192,6 +196,18 @@ core::Result<std::vector<ai::PlanDef>> load_plans(const HostPtr& host, const std
             notes.push_back(name + ": the definition load left nothing");
             continue;
         }
+        // AI-16 / PL-02: global registration has a wider corpus. This space
+        // host validates forces only for its selected controllers' goals.
+        const auto* category = found->second.empty() ? nullptr : as_text(found->second.front());
+        if (selected_goals && category) {
+            const auto goals = ai::split_names(*category, "|");
+            if (std::none_of(goals.begin(), goals.end(), [&](const auto& goal) {
+                    return selected_goals->contains(upper(goal));
+                })) {
+                ++outside_selection;
+                continue;
+            }
+        }
         auto plan = ai::build_plan(*host, name, path, found->second, notes);
         if (!plan) {
             notes.push_back(plan.error().code + " " + plan.error().message);
@@ -199,18 +215,53 @@ core::Result<std::vector<ai::PlanDef>> load_plans(const HostPtr& host, const std
         }
         plans.push_back(std::move(plan).value());
     }
+    if (selected_goals) notes.push_back("AI selected space plan definitions loaded=" + std::to_string(plans.size())
+        + ", outside selection=" + std::to_string(outside_selection));
     return PlansResult::success(std::move(plans));
 }
 
-// PE-01 converter constants: category masks, the difficulty levels and hardpoint types.
+namespace {
+constexpr std::string_view goal_category_converter = "AIGoalCategoryType";
+
+std::string enum_path(const std::string_view name) {
+    std::string path = "data/xml/enum/";
+    for (const char character : name)
+        path += character >= 'A' && character <= 'Z' ? static_cast<char>(character + ('a' - 'A')) : character;
+    return path + ".xml";
+}
+} // namespace
+
+// PE-01 converter constants: category masks, difficulty levels, hardpoints and authored goal categories.
 ai::ConverterFunction converters(const HostPtr& host) {
-    return [host](std::string_view converter, std::string_view value) -> std::optional<ai::Real> {
+    std::map<std::string, ai::Real, std::less<>> goal_categories;
+    const auto goal_path = upper(enum_path(goal_category_converter));
+    for (const auto& [path, text] : host->setup.xml) {
+        if (upper(path) != goal_path) continue;
+        const auto document = ai::parse_xml(path, text);
+        if (!document) break;
+        for (const auto& entry : document.value().children) {
+            const auto number = ai::trimmed(entry.text);
+            std::int64_t value{};
+            const auto parsed = std::from_chars(number.data(), number.data() + number.size(), value);
+            if (parsed.ec == std::errc{} && parsed.ptr == number.data() + number.size())
+                goal_categories.emplace(upper(entry.name), LuaNumber(value));
+        }
+        break;
+    }
+    return [host, goal_categories = std::move(goal_categories)](std::string_view converter,
+        std::string_view value) -> std::optional<ai::Real> {
         const std::string name = upper(converter);
-        if (name == "GAMEOBJECTCATEGORYTYPE") {
+        if (name == upper(goal_category_converter)) {
+            const auto found = goal_categories.find(upper(ai::trimmed(value)));
+            return found == goal_categories.end() ? std::nullopt : std::optional<ai::Real>{found->second};
+        }
+        if (name == "GAMEOBJECTCATEGORYTYPE" || name == "GAMEOBJECTPROPERTIESTYPE") {
+            const auto& entries = name == "GAMEOBJECTCATEGORYTYPE"
+                ? host->setup.content.categories : host->setup.content.properties;
             std::uint64_t bits = 0;
             for (const std::string& part : ai::split_names(value, "|")) {
-                const auto found = host->setup.content.categories.find(upper(part));
-                if (found == host->setup.content.categories.end()) return std::nullopt;
+                const auto found = entries.find(upper(part));
+                if (found == entries.end()) return std::nullopt;
                 bits |= found->second;
             }
             return LuaNumber(static_cast<std::int64_t>(bits));
@@ -232,17 +283,28 @@ ai::ConverterFunction converters(const HostPtr& host) {
 using namespace detail;
 using namespace tactical_ai_detail;
 
-std::vector<std::string> required_xml() { return ai::ai_xml_files(); }
+std::vector<std::string> required_xml() {
+    auto paths = ai::ai_xml_files();
+    paths.push_back(enum_path(goal_category_converter));
+    return paths;
+}
 
 std::vector<std::string> required_modules(const AiSetup& setup) {
-    std::vector<std::string> paths{setup.freestore_module,
+    std::vector<std::string> paths{
         "Data/Scripts/Library/PGCommands.lua",
         "Data/Scripts/Library/PGBaseDefinitions.lua",
         "Data/Scripts/Library/PGBase.lua",
         "Data/Scripts/Library/PGDebug.lua",
         "Data/Scripts/Library/PGAICommands.lua"};
+    for (const auto& player : setup.players) {
+        if (!player.ai) continue;
+        const auto path = freestore_module(setup, player);
+        if (std::find(paths.begin(), paths.end(), path) == paths.end()) paths.push_back(path);
+    }
+    if (setup.players.empty()) paths.push_back(setup.freestore_module);
     if (setup.bounds && !setup.xml.empty()) {
-        for (auto list : {plan_library_modules(), selected_plans()}) paths.insert(paths.end(), list.begin(), list.end());
+        const auto list = plan_library_modules();
+        paths.insert(paths.end(), list.begin(), list.end());
     }
     // SOS-01/45: authored module names are data, never a stock admission list.
     std::set<std::string> objects;
@@ -254,6 +316,48 @@ std::vector<std::string> required_modules(const AiSetup& setup) {
     // SOS-17: the stock Sundered Heart script also requires its hero-plan library.
     if (objects.contains("SUNDERED_HEART")) paths.push_back("Data/Scripts/GameObject/HeroPlanAttach.lua");
     for (const auto& script : objects) paths.push_back("Data/Scripts/GameObject/" + script + ".lua");
+    return paths;
+}
+
+std::string freestore_module(const AiSetup& setup, const AiPlayer& player) {
+    // A host may explicitly substitute a diagnostic freestore. Ordinary setup
+    // keeps the default and follows the selected controller's XML instead.
+    if (setup.freestore_module != AiSetup{}.freestore_module) return setup.freestore_module;
+    if (player.player_type.empty()) return setup.freestore_module;
+    for (const auto& [path, text] : setup.xml) {
+        if (upper(path).find("/AI/PLAYERS/") == std::string::npos) continue;
+        const auto document = ai::parse_xml(path, text);
+        if (!document || upper(document.value().child_text("Name")) != upper(player.player_type)) continue;
+        auto script = document.value().child_text("SpaceFreeStoreScript");
+        if (script.empty()) return setup.freestore_module;
+        if (!upper(script).ends_with(".LUA") && !upper(script).ends_with(".LC")) script += ".lua";
+        return "Data/Scripts/FreeStore/" + script;
+    }
+    return setup.freestore_module;
+}
+
+std::vector<std::string> selected_plans(const std::map<std::string, std::string>& modules) {
+    std::vector<std::string> paths;
+    for (const auto& [path, bytes] : modules) {
+        static_cast<void>(bytes);
+        const auto key = upper(path);
+        if (!key.ends_with(".LUA") && !key.ends_with(".LC")) continue;
+        if (!key.starts_with("DATA/SCRIPTS/AI/") && !key.starts_with("DATA/SCRIPTS/INTERVENTIONS/")) continue;
+        // PL-02 enumerates each configured directory, rather than recursively
+        // treating helper subdirectories as plan roots.
+        const auto relative = key.substr(key.starts_with("DATA/SCRIPTS/AI/") ? 16 : 27);
+        const auto slash = relative.find('/');
+        if (slash != std::string::npos) {
+            const auto directory = relative.substr(0, slash);
+            if ((directory != "SPACEMODE" && directory != "LANDMODE" && directory != "STORYARC")
+                || relative.find('/', slash + 1) != std::string::npos) continue;
+        }
+        if (key.ends_with(".LC")) {
+            const auto source = key.substr(0, key.size() - 3) + ".LUA";
+            if (std::any_of(modules.begin(), modules.end(), [&](const auto& entry) { return upper(entry.first) == source; })) continue;
+        }
+        paths.push_back(path);
+    }
     return paths;
 }
 
@@ -275,6 +379,11 @@ std::vector<std::string> plan_library_modules() {
 }
 
 core::Result<std::vector<PlanInspection>> inspect_plans(const AiSetup& setup, const std::map<std::string, std::string>& modules) {
+    return inspect_plans(setup, modules, selected_plans(modules));
+}
+
+core::Result<std::vector<PlanInspection>> inspect_plans(const AiSetup& setup,
+    const std::map<std::string, std::string>& modules, const std::vector<std::string>& paths) {
     using InspectResult = core::Result<std::vector<PlanInspection>>;
     auto host = std::make_shared<Host>();
     host->setup = setup;
@@ -291,7 +400,7 @@ core::Result<std::vector<PlanInspection>> inspect_plans(const AiSetup& setup, co
     authoritative::SessionConfig config;
     config.seed = setup.seed;
     config.tick_duration = authoritative::TickDuration{tactical::tick_numerator, tactical::tick_denominator};
-    config.script_directories = {"Data/Scripts/Library/"};
+    config.script_directories = {"Data/Scripts/Library/", "Data/Scripts/AI/SpaceMode/"};
     auto scripts = ScriptScheduler::create(std::move(config), std::move(manifest));
     if (!scripts) return InspectResult::failure(scripts.error());
     std::vector<core::Diagnostic> errors;
@@ -300,7 +409,7 @@ core::Result<std::vector<PlanInspection>> inspect_plans(const AiSetup& setup, co
     if (!errors.empty()) return InspectResult::failure(errors.front());
     std::vector<PlanInspection> plans;
     std::uint64_t instance = 1;
-    for (const std::string& path : selected_plans()) {
+    for (const std::string& path : paths) {
         PlanInspection plan;
         plan.path = path;
         if (auto created = scripts.value().create_instance(instance, path); !created) {

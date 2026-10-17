@@ -1,6 +1,12 @@
 #include "eawr/presentation/audio/galactic.hpp"
 
 namespace eawr::presentation::audio {
+bool galactic_population_warning(std::uint32_t serviced, std::uint32_t local, bool strategic,
+    sim::math::Fixed previous, sim::math::Fixed current, sim::math::Fixed capacity) noexcept {
+    return local && serviced == local && strategic && previous.raw() > 0
+        && current > previous && current >= capacity;
+}
+
 namespace {
 std::string field(std::span<const Field> fields, std::string_view name) {
     for (const auto& [tag, value] : fields) if (upper(tag) == upper(name)) return value;
@@ -13,6 +19,7 @@ std::string_view galactic_sound_tag(const GalacticSound cue) noexcept {
     case GalacticSound::planet_gained: return "SFXEvent_Planet_Gained_Control";
     case GalacticSound::planet_lost: return "SFXEvent_Planet_Lost_Control";
     case GalacticSound::planet_corrupted: return "SFXEvent_Planet_Corrupted";
+    case GalacticSound::corruption_removed: return "SFXEvent_Corruption_Removed";
     case GalacticSound::enemy_approaching: return "SFXEvent_Enemy_Fleet_Approaching_Planet";
     case GalacticSound::planet_revealed: return "SFXEvent_Planet_Revealed";
     case GalacticSound::capture_bonus: return "SFXEvent_Planet_Capture_Bonus_Reward";
@@ -51,8 +58,20 @@ std::string galactic_sound_event(const GalacticSound cue, std::span<const Field>
 std::optional<GalacticSound> galactic_event_sound(const sim::galactic::GalacticEvent& event,
     const std::uint32_t local, const std::optional<std::uint32_t> previous_owner,
     const std::optional<GalacticPendingAlert> pending, const bool new_owner_playable,
-    const std::optional<std::uint32_t> construction_options_player) noexcept {
+    const std::optional<std::uint32_t> construction_options_player,
+    const std::optional<sim::galactic::GalacticFeedbackNotice> feedback) noexcept {
     if (!local) return std::nullopt;
+    if (feedback) {
+        if (feedback->player != local) return std::nullopt;
+        using Kind = sim::galactic::GalacticFeedbackNotice::Kind;
+        switch (feedback->kind) {
+        case Kind::capture_reward: return GalacticSound::capture_bonus;
+        case Kind::enemy_approaching: return GalacticSound::enemy_approaching;
+        case Kind::planet_corrupted: return GalacticSound::planet_corrupted;
+        case Kind::corruption_removed: return GalacticSound::corruption_removed;
+        }
+        return std::nullopt;
+    }
     // SND-68: one ordinary faction SFX per qualified assignment, local only.
     if (construction_options_player)
         return *construction_options_player == local ? std::optional{GalacticSound::construction_options} : std::nullopt;

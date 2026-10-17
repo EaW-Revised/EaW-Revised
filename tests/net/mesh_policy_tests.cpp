@@ -577,6 +577,22 @@ void formation() {
     expect(admission_order.pair_failed(1, 2, {true, true}).seat == 1, "Pre-Start refusal uses later admission, not higher slot");
     expect(mesh_newcomer_refusal_text("Player Blue").find("Player Blue") != std::string::npos, "Curated refusal names unreachable player");
     expect(!MeshFormation(10).attach(0, 1), "Capacity bound enforced");
+    // A silent end of a failed pair counts as failed after the grace: five seconds, at most half the pair deadline.
+    expect(mesh_report_grace(20s) == 5s && mesh_report_grace(8s) == 4s && mesh_report_grace(100ms) == 50ms, "Report grace bounds");
+    const auto silent = [](MeshRelayFailure reported, std::chrono::milliseconds waited, std::chrono::milliseconds deadline = 20s) {
+        return mesh_silent_end_failed(reported, waited, deadline);
+    };
+    expect(silent({true, false}, 4999ms).b_failed == false && silent({true, false}, 4999ms).a_failed, "Within the grace the silent end is not failed");
+    expect(silent({true, false}, 5s).b_failed && silent({false, true}, 5s).a_failed, "After the grace the silent end counts as failed");
+    expect(silent({true, false}, 4s, 8s).b_failed && !silent({true, false}, 3999ms, 8s).b_failed, "The grace is half a short pair deadline");
+    expect(!silent({false, false}, 60s).a_failed && !silent({false, false}, 60s).b_failed, "A pair nobody reported on is never inferred failed");
+    expect(silent({true, true}, 0ms).a_failed && silent({true, true}, 0ms).b_failed, "Both reported stays failed");
+    MeshFormation silence(3);
+    expect(silence.attach(0, 1) && silence.attach(1, 2) && silence.attach(2, 3), "Silence formation");
+    expect(silence.pair_open(0, 1) && silence.pair_open(0, 2) && silence.pair_open(1, 2), "Silence formation complete");
+    expect(silence.pair_failed(1, 2, silent({true, false}, 1s)).action == MeshFormationAction::none, "One report inside the grace waits");
+    expect(silence.pair_failed(1, 2, silent({true, false}, 6s)).action == MeshFormationAction::regrant, "A silent end after the grace regrants once");
+    expect(silence.pair_failed(1, 2, silent({true, false}, 6s)).action == MeshFormationAction::refuse, "Then the silent pair refuses the newcomer");
 }
 InProcessGnsRoom::Clock::time_point time_now{};
 InProcessGnsRoom::Clock::time_point now() { return time_now; }

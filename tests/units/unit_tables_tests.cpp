@@ -11,6 +11,9 @@
 #include "eawr/data/xml.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/platform/battle_scoring.hpp"
+#include "eawr/platform/live_ai.hpp"
+#include "eawr/platform/live_session.hpp"
 #include "eawr/sim/math/geometry.hpp"
 #include "eawr/sim/replay.hpp"
 #include "eawr/sim/tactical/damage.hpp"
@@ -19,6 +22,9 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/world.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "eawr/skirmish/start.hpp"
+#include "eawr/skirmish/ai.hpp"
+#include "eawr/skirmish/roster_gate.hpp"
 
 #include "../../src/units/unit_internal.hpp"
 
@@ -160,6 +166,182 @@ void engine_disable_durations() {
 using namespace unit_tables_test_support;
 
 int main(const int argc, char** argv) {
+    // A selected installed-mod battle, using the same faction dependency closure as the viewer.
+    // Arguments supply all installed paths, the playable map and both faction names.
+    if (argc == 7 && std::string_view(argv[1]) == "--battle-mod") {
+        const auto fail = [](const eawr::core::Diagnostic& diagnostic) {
+            std::cerr << eawr::core::format_diagnostic(diagnostic) << '\n';
+            return 1;
+        };
+        auto roots = eawr::vfs::mod_chain_roots(std::filesystem::path(argv[3]));
+        roots.emplace_back("expansion", std::filesystem::path(argv[2]) / "corruption" / "Data");
+        roots.emplace_back("base", std::filesystem::path(argv[2]) / "GameData" / "Data");
+        auto chain = eawr::vfs::resolve_manifest_chain(roots);
+        if (!chain) return fail(chain.error());
+        std::vector<eawr::vfs::MountSpec> specs;
+        for (auto& layer : chain.value()) specs.push_back(std::move(layer.mount));
+        auto filesystem = eawr::vfs::Vfs::mount(specs);
+        if (!filesystem) return fail(filesystem.error());
+        auto catalog = eawr::data::load_catalog_strict(filesystem.value(), eawr::data::Profile::remake);
+        if (!catalog) return fail(catalog.error());
+        eawr::skirmish::FixtureOptions options;
+        options.map = argv[4];
+        options.slots = std::vector<eawr::skirmish::LobbySlot>{
+            {1, argv[5], 0, false, {}, {}}, {2, argv[6], 1, false, {}, {}}};
+        auto fixture = eawr::skirmish::fixture_from_options(options, filesystem.value(), catalog.value().catalog);
+        if (!fixture) return fail(fixture.error());
+        eawr::scene::VfsAssetCache cache(filesystem.value());
+        eawr::units::LoadInput input;
+        input.catalog = &catalog.value().catalog;
+        input.filesystem = &filesystem.value();
+        input.model = cache.access().model;
+        input.space_map = fixture.value().map;
+        auto tables = eawr::units::load_unit_tables(input);
+        if (!tables) return fail(tables.error());
+        auto inputs = eawr::skirmish::read_start_inputs(fixture.value(), filesystem.value(),
+            catalog.value().catalog, tables.value());
+        if (!inputs) return fail(inputs.error());
+        std::set<std::string> missing;
+        const auto need = [&](const std::string& type) {
+            if (!eawr::skirmish::roster_disabled_types().contains(eawr::skirmish::type_id(type))
+                && !tables.value().find(type)) missing.insert(type);
+        };
+        for (const auto& slot : fixture.value().slots) {
+            for (const auto& type : slot.fleet) need(type);
+            for (const auto& forces : inputs.value().faction_forces) {
+                if (!eawr::units::detail::iequals(forces.faction, slot.faction)) continue;
+                for (const auto& type : forces.space_skirmish_default_forces) need(type);
+            }
+            const auto marker = "team_" + std::string(slot.team < 10 ? "0" : "")
+                + std::to_string(slot.team) + "_space_station";
+            for (const auto& placement : inputs.value().placements) {
+                if (!placement.marker || !eawr::units::detail::iequals(placement.type, marker)) continue;
+                for (const auto& candidate : placement.marker_for) {
+                    for (const auto& affiliation : eawr::units::detail::tokens(candidate.affiliation))
+                        if (eawr::units::detail::iequals(affiliation, slot.faction)) need(candidate.type);
+                }
+            }
+        }
+        if (!missing.empty()) {
+            for (const auto type : eawr::units::pinned_m2_types()) input.types.emplace_back(type);
+            input.types.insert(input.types.end(), missing.begin(), missing.end());
+            for (const auto type : eawr::units::pinned_m2_obstacles()) input.obstacles.emplace_back(type);
+            tables = eawr::units::load_unit_tables(input);
+            if (!tables) return fail(tables.error());
+            inputs = eawr::skirmish::read_start_inputs(fixture.value(), filesystem.value(),
+                catalog.value().catalog, tables.value());
+            if (!inputs) return fail(inputs.error());
+        }
+        print_rows("notes", tables.value().notes);
+        print_rows("unresolved", tables.value().unresolved);
+        auto start = eawr::skirmish::build_start(fixture.value(), inputs.value());
+        if (!start) return fail(start.error());
+        auto content = eawr::skirmish::session_content(tables.value(), eawr::skirmish::human_slots(fixture.value()));
+        if (!content) return fail(content.error());
+        auto fog = eawr::skirmish::fog_rules(inputs.value());
+        if (!fog) return fail(fog.error());
+        auto economy = eawr::skirmish::economy_rules(start.value(), inputs.value(), tables.value());
+        if (!economy) return fail(economy.error());
+        std::map<eawr::sim::tactical::PlayerId, std::string> factions;
+        for (const auto& player : start.value().players) factions.emplace(player.player.player_id, player.faction);
+        auto scoring = eawr::platform::BattleScoring::create(filesystem.value(), catalog.value().catalog,
+            tables.value(), std::move(factions), fixture.value().map);
+        if (!scoring) return fail(scoring.error());
+        std::shared_ptr<const eawr::platform::BattleScoring> shared_scoring(std::move(scoring).value());
+        auto journal = std::make_shared<eawr::script::foc::AiJournal>();
+        auto ai = eawr::platform::live_ai(start.value(), inputs.value(), tables.value(), filesystem.value(), shared_scoring, journal);
+        if (!ai) return fail(ai.error());
+        if (ai.value().players.size() != 2) { std::cerr << "Expected two initialized AI players\n"; return 1; }
+        const auto traits = eawr::skirmish::ai_setup(start.value(), inputs.value(), tables.value());
+        std::map<eawr::sim::tactical::TypeId, const eawr::script::foc::AiType*> type_traits;
+        for (const auto& type : traits.content.types) type_traits.emplace(type.type_id, &type);
+        for (const auto& unit : start.value().setup.units) {
+            if (std::find(ai.value().players.begin(), ai.value().players.end(), unit.owner) == ai.value().players.end()) continue;
+            const auto type = type_traits.find(unit.type_id);
+            if (type == type_traits.end()) continue;
+            std::cout << "AI initial unit: player=" << unit.owner << ", unit=" << unit.entity_id
+                      << ", type=" << type->second->name << ", locomotor=" << type->second->locomotor
+                      << ", squadron=" << type->second->squadron << ", craft=" << type->second->craft
+                      << ", ship_motion=" << (content.value().motion.find(unit.type_id) != nullptr)
+                      << ", formation_motion=" << (content.value().motion.squadrons.find_squadron(unit.type_id) != nullptr) << '\n';
+        }
+        eawr::platform::LiveSession::Options live_options;
+        live_options.workers = 2;
+        live_options.pacing = eawr::platform::LiveSession::Pacing::driven;
+        live_options.scripts = ai.value().scripts;
+        const auto& bound = content.value();
+        auto session = eawr::platform::LiveSession::start(
+            eawr::skirmish::recording_setup(fixture.value(), start.value()), bound.sensors, bound.durability,
+            bound.motion, bound.combat, live_options, eawr::skirmish::victory_rules(start.value(), tables.value()),
+            fog.value(), bound.abilities, economy.value(), eawr::skirmish::map_box(inputs.value()));
+        if (!session) return fail(session.error());
+        auto& live = *session.value();
+        live.advance_to(1);
+        if (!live.wait_for(1, std::chrono::seconds(60))) {
+            live.stop();
+            if (const auto failure = live.failure()) return fail(*failure);
+            std::cerr << "First simulation frame timed out\n";
+            return 1;
+        }
+        std::cout << "battle first simulation frame reached with AI\n";
+        live.advance_to(1800);
+        const bool finished = live.wait_for(1800, std::chrono::seconds(600));
+        live.stop();
+        if (const auto failure = live.failure()) return fail(*failure);
+        if (!finished) { std::cerr << "Battle did not complete 1800 ticks\n"; return 1; }
+        const auto report = live.script_report();
+        for (const auto& diagnostic : report.diagnostics) std::cerr << "AI diagnostic: " << diagnostic << '\n';
+        const auto hashes = live.tick_hashes();
+        std::map<eawr::sim::tactical::PlayerId, std::uint64_t> production, attacks, moves, guards;
+        for (const auto& command : live.record().commands) {
+            const auto player = command.key.player_id;
+            if (std::holds_alternative<eawr::sim::tactical::BuyPayload>(command.payload)
+                || std::holds_alternative<eawr::sim::tactical::PadBuildPayload>(command.payload)) ++production[player];
+            if (std::holds_alternative<eawr::sim::tactical::AttackPayload>(command.payload)
+                || std::holds_alternative<eawr::sim::tactical::AttackMovePayload>(command.payload)) ++attacks[player];
+            if (std::holds_alternative<eawr::sim::tactical::MovePayload>(command.payload)) ++moves[player];
+            if (std::holds_alternative<eawr::sim::tactical::GuardPayload>(command.payload)) ++guards[player];
+            if (const auto* purchase = std::get_if<eawr::sim::tactical::BuyPayload>(&command.payload)) {
+                const auto type = type_traits.find(purchase->type);
+                std::cout << "AI production request: player=" << player << ", type="
+                          << (type == type_traits.end() ? std::to_string(purchase->type) : type->second->name) << '\n';
+            }
+        }
+        std::ofstream plan_trace("ai-plan-journal.tsv");
+        plan_trace << "tick\tplayer\tplan\tgoal\ttarget\tevent\tdetail\n";
+        std::map<std::pair<eawr::sim::tactical::PlayerId, std::string>, std::uint64_t> plan_events;
+        for (const auto& row : journal->plans) {
+            auto detail = row.detail;
+            for (auto& character : detail) if (character == '\n' || character == '\r' || character == '\t') character = ' ';
+            plan_trace << row.tick << '\t' << row.player << '\t' << row.plan << '\t' << row.goal << '\t'
+                       << row.target << '\t' << row.event << '\t' << detail << '\n';
+            ++plan_events[{row.player, row.event}];
+        }
+        plan_trace.close();
+        if (!plan_trace) { std::cerr << "Cannot write AI plan diagnostic journal\n"; return 1; }
+        for (const auto& [key, count] : plan_events)
+            std::cout << "AI plan events: player=" << key.first << ", event=" << key.second << ", count=" << count << '\n';
+        std::uint64_t free_runs{}, goals_scored{}, plans_attached{};
+        for (const auto& row : journal->costs) {
+            free_runs += row.freestore_runs; goals_scored += row.goals_evaluated; plans_attached += row.plans_attached;
+        }
+        std::cout << "AI services: freestore=" << free_runs << ", goals=" << goals_scored
+                  << ", plans=" << plans_attached << ", dropped plan diagnostics=" << journal->plans_dropped << '\n';
+        bool active = true;
+        for (const auto player : ai.value().players) {
+            std::cout << "AI activity: player=" << player << ", production=" << production[player]
+                      << ", attacks=" << attacks[player] << ", moves=" << moves[player] << ", guards=" << guards[player] << '\n';
+            active = active && production[player] != 0 && attacks[player] != 0;
+        }
+        std::cout << "battle acceptance: ticks=" << live.completed_tick()
+                  << ", types=" << tables.value().units.size() << ", notes=" << tables.value().notes.size()
+                  << ", AI players=" << ai.value().players.size() << ", script ticks=" << report.ticks
+                  << ", AI diagnostics=" << report.diagnostics.size()
+                  << ", rejected orders=" << live.rejected_orders().size()
+                  << ", hash=" << (hashes.empty() ? std::string{} : hashes.back()) << '\n';
+        if (!active) { std::cerr << "Each AI must issue production and attack orders\n"; return 1; }
+        return 0;
+    }
     if (argc == 2 && (std::string_view(argv[1]) == "--installed"
         || std::string_view(argv[1]) == "--formation-deceleration-installed")) {
         const auto root = environment("EAWR_EAW_GAME_ROOT");

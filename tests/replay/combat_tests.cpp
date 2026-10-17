@@ -1110,7 +1110,8 @@ void test_validation() {
     expect(static_cast<bool>(skewed_y), "the skewed axis normalizes");
     if (skewed_y) {
         bad.profiles[0].weapons[0].fire_axes = std::array<math::Vec3, 3>{at(1, 0), skewed_y.value(), at(0, 0, 1)};
-        expect(!tactical::validate_combat(bad), "a skewed fire bone frame of unit axes is rejected");
+        expect(static_cast<bool>(tactical::validate_combat(bad)),
+            "W-07: nonorthogonal unit fire axes retain their authored cone projections");
     }
     auto rounded = table();
     rounded.profiles[0].weapons[0].fire_axes =

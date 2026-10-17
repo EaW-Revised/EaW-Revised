@@ -89,6 +89,22 @@ void reservations() {
     auto existing = must(f::begin_maintenance(l));
     auto changed = r; changed.unallocated_resources = n(100);
     expect(!must(f::feasible(existing, changed, false)), "WGA-21 positive unallocated resources included");
+    auto short_horizon = seeded(); short_horizon.last_interval = n(45);
+    short_horizon.categories.at(1).cash = short_horizon.categories.at(1).available_cash = n(2508);
+    short_horizon.categories.at(1).income = short_horizon.categories.at(1).available_income = ratio(34479, 1000);
+    f::GoalRequest retained{17, 1, n(655), n(3), {}, n(2190)};
+    retained.proposal_budget = n(2845);
+    short_horizon = must(f::reserve(short_horizon, retained));
+    short_horizon = must(f::begin_maintenance(short_horizon));
+    expect(must(f::feasible(short_horizon, retained, true)) && must(f::feasible(short_horizon, retained, false)),
+        "WGA-21/346 existing goal with three seconds remaining can use the last 45-second fiscal interval");
+    expect(short_horizon.goals.at(17).remaining == n(3), "WGA-346 feasibility floor preserves retained funding time");
+    short_horizon.categories.at(1).available_cash = n(100);
+    expect(!must(f::feasible(short_horizon, retained, true)) && must(f::feasible(short_horizon, retained, false)),
+        "WGA-21 existing-goal interval floor preserves available versus total resources and unallocated cost");
+    short_horizon.categories.at(1).available_cash = n(2508);
+    short_horizon.goals.at(17).remaining = n(0);
+    expect(must(f::feasible(short_horizon, retained, true)), "WGA-21 existing goal with zero remaining time uses fiscal interval");
     auto proportional = seeded(); proportional.last_interval = n(10);
     proportional.categories.at(1).income = proportional.categories.at(1).available_income = n(5);
     proportional = must(f::reserve(proportional, request(1, n(75))));

@@ -28,8 +28,43 @@ core::Result<void> GalacticWorld::publish_execution_routes(bool available, std::
         static_cast<void>(owner);
         if (count != planets_.size() * planets_.size()) return invalid("execution publication requires a complete player matrix");
     }
-    connectivity_.execution_available = available; connectivity_.execution_routes = std::move(routes);
-    connectivity_.revision = revision; work_.prepared_routes = connectivity_.execution_routes.size();
+    auto next = std::make_shared<GalacticConnectivity>(*connectivity_);
+    next->execution_available = available; next->execution_routes = std::move(routes); next->player_routes.clear();
+    next->revision = revision; work_.prepared_routes = next->execution_routes.size();
+    connectivity_ = std::move(next);
+    return core::Result<void>::success();
+}
+core::Result<void> GalacticWorld::publish_execution_route_generations(bool available, std::uint64_t revision,
+    std::map<tactical::PlayerId, std::shared_ptr<const std::vector<GalacticExecutionRoute>>> generations) {
+    const auto invalid = [](std::string message) {
+        return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, std::move(message)));
+    };
+    if (!snapshot_ || (available && !planets_.empty() && generations.empty()))
+        return invalid("execution generations require a current world and complete availability");
+    std::uint64_t count{};
+    for (const auto& [owner, rows] : generations) {
+        if (!player(owner) || !rows || rows->size() != planets_.size() * planets_.size())
+            return invalid("execution generation requires a complete player matrix");
+        const auto previous = connectivity_->player_routes.find(owner);
+        if (previous == connectivity_->player_routes.end() || previous->second != rows) {
+            std::optional<std::pair<galactic::PlanetId, galactic::PlanetId>> last;
+            for (const auto& row : *rows) {
+                const auto key = std::pair{row.source, row.candidate};
+                if (row.player != owner || !planet(row.source) || !planet(row.candidate) || (last && key <= *last))
+                    return invalid("execution generation has unresolved, unordered or duplicate route identity");
+                if (!row.empty && (!numeric::binary64::is_finite(row.distance.repr) || !numeric::binary64::is_finite(row.threat.repr)
+                    || !numeric::binary64::is_finite(row.prefix_threat.repr) || row.distance < Real{} || row.threat < Real{}
+                    || row.prefix_threat < Real{} || row.threat < row.prefix_threat))
+                    return invalid("execution generation has invalid decoded costs");
+                last = key;
+            }
+        }
+        count += rows->size();
+    }
+    auto next = std::make_shared<GalacticConnectivity>(*connectivity_);
+    next->execution_available = available; next->revision = revision;
+    next->execution_routes.clear(); next->player_routes = std::move(generations);
+    connectivity_ = std::move(next); work_.prepared_routes = count;
     return core::Result<void>::success();
 }
 const Engine* GalacticFindTargetQueries::manager(FindTargetManager mode) const {
@@ -74,7 +109,15 @@ std::optional<FindTargetPath> GalacticFindTargetQueries::execution_path(const En
 const GalacticExecutionRoute* GalacticWorld::execution_route(tactical::PlayerId owner,
     galactic::PlanetId source, galactic::PlanetId candidate) const {
     if (!planet(source) || !planet(candidate)) return nullptr;
-    for (const auto& route : connectivity_.execution_routes)
+    if (const auto generation = connectivity_->player_routes.find(owner); generation != connectivity_->player_routes.end()) {
+        const auto& rows = *generation->second;
+        const auto key = std::tuple{owner, source, candidate};
+        const auto found = std::lower_bound(rows.begin(), rows.end(), key, [](const auto& row, const auto& value) {
+            return std::tuple{row.player, row.source, row.candidate} < value;
+        });
+        return found != rows.end() && std::tuple{found->player, found->source, found->candidate} == key ? &*found : nullptr;
+    }
+    for (const auto& route : connectivity_->execution_routes)
         if (route.player == owner && route.source == source && route.candidate == candidate) return &route;
     return nullptr;
 }
@@ -86,7 +129,7 @@ std::optional<bool> GalacticWorld::goal_reachable(tactical::PlayerId owner,
         "ENEMY_UNDEFENDED", "SINGLE_HOP_DISCONNECTED", "ANY"};
     if (!accepted.contains(canonical)) return false;
     if (source == candidate) return true; // WGA-18
-    for (const auto& relation : connectivity_.goal_reach)
+    for (const auto& relation : connectivity_->goal_reach)
         if (relation.player == owner && relation.source == source && upper_case(relation.policy) == canonical)
             return std::find(relation.production_sites.begin(), relation.production_sites.end(), candidate) != relation.production_sites.end();
     return {}; // named production-site producer dependency, never an execution-cost substitute

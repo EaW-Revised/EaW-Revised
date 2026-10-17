@@ -79,6 +79,10 @@ PerfSummary PerfStats::summary() const {
         }
         out.tick = tick_samples_.back().tick;
         out.tick_avg_ms = sum / static_cast<double>(tick_samples_.size());
+        std::size_t recent = 0;
+        for (auto it = tick_samples_.rbegin(); it != tick_samples_.rend() && now_ - it->time < perf_fps_seconds; ++it) ++recent;
+        const double span = std::min(perf_fps_seconds, now_ - first_);
+        if (span > 0.0) out.ticks_per_second = static_cast<double>(recent) / span;
     }
     return out;
 }

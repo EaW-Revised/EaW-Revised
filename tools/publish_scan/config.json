@@ -217,14 +217,6 @@
       },
       {
         "path": "apps/viewer/src/live_session_frame.cpp",
-        "sha256": "b6fb3bfffc26ac6a97ae591d78b088cb337df11ce4f61b853227a0273e34ae1d",
-        "patterns": [
-          "lan-host"
-        ],
-        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
-      },
-      {
-        "path": "apps/viewer/src/live_session_frame.cpp",
         "sha256": "686dd3b87445130664eb265c36be17945d9b4665545b290f3337e56487e64a0d",
         "patterns": [
           "lan-host"
@@ -774,6 +766,102 @@
           "lan-host"
         ],
         "reason": "C++ member access to the skirmish setup state LAN flag, not a host name."
+      },
+      {
+        "path": "apps/viewer/src/live_session_economy.cpp",
+        "sha256": "1f8dec9af684d6d9ff01d20d5941a46004a394f1585fef585d8154a4595a39e3",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "2a3438d10126da06eb702db09e7dc18e249cc7dcf52d840fb6d5d52202190faa",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "5372e4921711690c7278a711e391695466ec6e26ea6464d406e1e50b3880353b",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "5989ecc4ac26f4039f05a5c642ffe7a2d2caa9007eba4bea6a82e1e19fda3162",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "7c3e16097c3024fbbf1252d15636af1fef2215196937a7ef72d52737f8d5b99a",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "b66faa08a44026f3f200232594a6df4b637d38d83a3462eb74ce2410dc11356f",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "f2d50d992c4a2eef590c6de82ac7e961cded1a4e59e1903d5b55765dff5718fa",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "f6579b7871d9d78a2a270d86db387e72eff31e6e37ede1a9ee622696fce70170",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_report.cpp",
+        "sha256": "edbc062d2962d79720275f1d116c07ae040a0dded4a80ef1f792ca8c5db48ac6",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_hud.cpp",
+        "sha256": "0a61c932a72808ea7ac919d51ea46ea0751edb1aec11ccd77ae1e4fd7178ee4e",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/gns_frame_codec_tests.cpp",
+        "sha256": "60b562eb8cffae4066781624d3819f4bad96a56b2f3a14a8997d6c86aa475ba4",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/presentation/renderer/test_ingame_menu.py",
+        "sha256": "304d430316985ecae8ae46515e0846d7dfdb330db9cd94969e847fed9cc98697",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
       }
     ]
   },
@@ -828,9 +916,9 @@
       "third_party/lua/etc/lua.xpm": "2efc535d4e7ea430363a9592a6238217c3a24d825994f6546262bac3c83b709e"
     },
     "binary_allowlist": {
-      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "ec95f37d13abd1464f14396a7f5d3cef645eea5a075594a1d37095ba8ec854a8",
-      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "1b22b075bb949f46f024fa2dd3e76edd9b6aacf656c7f1d6439a09ad06aa8935",
-      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "7dcae733fe6ba8432b2c5bc1cf4dbe09daf93e1825f1fa6543a7d40abcf6c175",
+      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "7943b02755ce44a7853c38eef055118bf6a4104b0d0bb663b35467047f2974c8",
+      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "f9e3d60429c114df858e1358419b2d6f425494787caa1b110f837ab0ccaf088a",
+      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "c73e88d0c8a1d8d969fdd35c31d4ca6e8022bff19846ff206e2e894cd9739038",
       "tests/fog/fixtures/fog-stub-v1-one-cell.eawr-fog": "a3f3015681fac46bb56f8fd5270c46bf29e7f090559a6d6d2f8e7c29246f9b27",
       "tests/fog/fixtures/fog-stub-v1-zero-tick.eawr-fog": "34a86fcc4b9bc2a39556d8aa249355c5df37e9955a3bda7e983c10bb5e53664b",
       "tests/fog/fixtures/fog-stub-v1.eawr-fog": "259541928e1855e91b084d6743fbde1f579851cd41b81199f440f1881c0a9c58",
@@ -900,7 +988,7 @@
       "tests/replay/fixtures/tactical-visibility-frame-6.eawr-replay": "8bc3d6aa2d789702fde9af586071cb36a06ff28f0d679907b3eba9219f85668a",
       "tests/replay/fixtures/tactical-visibility-frame-7.eawr-replay": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
       "tests/replay/fixtures/zero-tick-v1.eawr-replay": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
-      "tests/skirmish/fixtures/m2-start.eawr-replay": "0950c1fc37694268440909146ada690d142dd9cf49f23f58a83cc1e6f883b6a9",
+      "tests/skirmish/fixtures/m2-start.eawr-replay": "671507c662ea6daf6d8a13da2ae8b70565ae4cec188cec871eec11e42edfe193",
       "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2",
       "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "5de18cf77870675b3ec7a184a7611237af3d5e6188448e7b91ea8f5044149fc1",
       "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "427a20237b1f22a35232bb56c67a23cadccb7443c5a7e1ac9472ad0e9d2d8251",

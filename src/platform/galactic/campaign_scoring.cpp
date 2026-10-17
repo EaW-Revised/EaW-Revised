@@ -118,8 +118,10 @@ struct Host {
         sim::InlineExecutor executor;
         const auto result = scheduler->service(executor, {.host_paced = [](std::uint64_t) { return true; }});
         if (!result) return Void::failure(result.error());
-        for (const auto& diagnostic : result.value().diagnostics)
+        if (!result.value().diagnostics.empty()) {
+            const auto& diagnostic = result.value().diagnostics.front();
             return Void::failure(error(diagnostic.code + ": " + diagnostic.message));
+        }
         for (const auto& command : result.value().commands) {
             // The only scoring side effect of the stock module is its tactical fog policy, which a
             // campaign end never reads; refuse any other so a mod's effect is never dropped silently.

@@ -23,9 +23,9 @@ while a negative expiry after a future positive entry survives that sweep. Empty
 keys remain and cumulative counters do not decay (WGA-216).
 
 The shared player archive includes all eight tables. The galactic component uses
-`eawr-galactic-goals-v4` and payload version 6; the tactical archive uses
-`eawr-tactical-ai-v6`. Restore checks the exact configuration/content closure and
-retains target identities, results, order, expiries, counters and synchronized RNG.
+`eawr-galactic-goals-v4` and payload version 14; the tactical archive uses
+`eawr-tactical-ai-v10`. Restore checks the exact configuration/content closure and
+retains target identities, results, order, expiries, counters and per-player synchronized RNG (GFS-A24).
 No outcome or fresh expiry is manufactured by restore (WGA-223).
 
 The battle adapter takes `GalacticAiServices::battle` notices directly. It validates

@@ -1,6 +1,7 @@
 #include "eawr/campaign/conflict_policy.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <map>
 #include <set>
 
@@ -56,9 +57,17 @@ core::Result<LayerPresence> collect_conflict_presence(const sim::galactic::Galac
     if (surface) {
         out.starbase_owner = surface->starbase.owner; out.starbase_level = surface->starbase.level;
         out.ground_base_level = surface->ground_base.level;
-        if (!explicit_invasion && request.kind == gc::GalacticEventKind::land_conflict_requested)
-            out.defender = surface->ground_base.level ? surface->ground_base.owner
-                : (surface->landed.empty() ? planet->owner : surface->landed.front().owner);
+        if (!explicit_invasion && request.kind == gc::GalacticEventKind::land_conflict_requested) {
+            const auto* control = snapshot.control();
+            const auto index = static_cast<std::size_t>(surface - control->planets.data());
+            assert(index < control->state.size() && control->state[index].planet == planet->id);
+            // WGS-186: a valid nonneutral target precedes the first linked owner.
+            out.defender = surface->ground_base.level ? surface->ground_base.owner : control->state[index].target_player;
+            const auto owner = std::find_if(control->players.begin(), control->players.end(),
+                [&](const auto& row) { return row.player == out.defender; });
+            if (!surface->ground_base.level && (!out.defender || (owner != control->players.end() && owner->neutral)) && !surface->landed.empty())
+                out.defender = surface->landed.front().owner;
+        }
     }
     const auto append = [&](std::span<const gc::FleetMember> members, gc::PlayerId owner, sim::EntityId parent,
         std::vector<AdmissionForce>& destination) -> core::Result<void> {
@@ -119,6 +128,14 @@ core::Result<LayerPresence> collect_conflict_presence(const sim::galactic::Galac
         out.attached_fleets.push_back(std::move(attached));
         if (auto added = append(row->members, row->owner, row->id, out.orbital_forces); !added)
             return core::Result<LayerPresence>::failure(added.error());
+    }
+    if (!explicit_invasion && request.kind == gc::GalacticEventKind::movement_conflict) {
+        // WGM-202: the space defender is never read from the planet owner. It is the first orbit-list fleet that is not
+        // stealth and not the invader's, else a nonzero starbase the invader does not own; no candidate means no battle.
+        out.defender = 0;
+        for (const auto& fleet_row : out.attached_fleets)
+            if (fleet_row.owner != out.invader && !skips_space_combat(fleet_row.direct_members)) { out.defender = fleet_row.owner; break; }
+        if (!out.defender && out.starbase_level != 0 && out.starbase_owner != out.invader) out.defender = out.starbase_owner;
     }
     if (surface) for (const auto& force : surface->landed) {
         const gc::FleetMember member{force.id, force.type};

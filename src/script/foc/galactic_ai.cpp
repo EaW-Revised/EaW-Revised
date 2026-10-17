@@ -1,6 +1,8 @@
 #include "galactic_ai_internal.hpp"
 
 #include "galactic_ai_lifecycle_state.hpp"
+#include "eawr/core/gc_profile.hpp"
+#include "eawr/script/foc/ai_diagnostics.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -9,6 +11,30 @@ namespace eawr::script::foc::galactic_ai {
 
 Manager::Manager(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 Manager::~Manager() = default;
+
+void Manager::Impl::policy_changed(gc::PlayerId player) {
+    auto& cache = policy_cache[player];
+    if (++cache.revision == 0) std::terminate();
+    cache.snapshot.reset();
+}
+void Manager::Impl::policy_restored() {
+    for (auto& entry : policy_cache) policy_changed(entry.first);
+}
+std::shared_ptr<const TemplatePolicy> Manager::Impl::policy_snapshot(const PlayerLifecycle& player) {
+    auto& cache = policy_cache[player.selected.player];
+    if (cache.snapshot && cache.built_revision == cache.revision) {
+#ifndef NDEBUG
+        if (*cache.snapshot != player.policy) std::terminate(); // a policy write skipped policy_changed.
+#endif
+        ++policy_stats.reuses;
+        return cache.snapshot;
+    }
+    gc_profile::Scope profile_scope(gc_profile::Phase::policy_snapshot);
+    ++policy_stats.builds;
+    cache.snapshot = std::make_shared<const TemplatePolicy>(player.policy);
+    cache.built_revision = cache.revision;
+    return cache.snapshot;
+}
 
 core::Result<std::shared_ptr<Manager>> Manager::create(LifecycleSetup setup, Capabilities capabilities) {
     using Result = core::Result<std::shared_ptr<Manager>>;
@@ -44,6 +70,7 @@ core::Result<std::shared_ptr<Manager>> Manager::create(LifecycleSetup setup, Cap
         player.active_templates.resize(type->second.galactic_templates.size());
         impl->state.players.push_back(std::move(player));
     }
+    impl->records = impl->rebuild_records();
     return Result::success(std::shared_ptr<Manager>(new Manager(std::move(impl))));
 }
 
@@ -55,7 +82,7 @@ core::Result<void> Manager::service(Clocks clocks, Admission admission, authorit
         return core::Result<void>::failure(*impl.failure);
     };
     mark_state_changed();
-    impl.state.admission = admission;
+    impl.state.admission = admission; impl.update_record();
     if (admission.active_mode != Mode::galactic) return core::Result<void>::success();
     if (impl.capabilities.immediate_effects) {
         if (auto bound = scripts.set_immediate_effect_host(impl.capabilities.immediate_effects,
@@ -64,8 +91,9 @@ core::Result<void> Manager::service(Clocks clocks, Admission admission, authorit
     if (clocks.synchronization < impl.state.clocks.synchronization || clocks.mode < impl.state.clocks.mode) return abort(lifecycle_error("galactic manager clocks went backwards"));
     const auto world = impl.capabilities.queries->copy_world();
     if (!world || world->clocks != clocks) return abort(lifecycle_error("galactic manager requires a copied view at its two clocks"));
-    impl.state.clocks = clocks;
+    impl.state.clocks = clocks; impl.update_record();
     for (auto& player : impl.state.players) {
+        struct RecordWrite { Impl& owner; gc::PlayerId player{}; ~RecordWrite() { owner.update_record(player); } } record_write{impl, player.selected.player};
         if (!player.initialized) if (auto initialized = impl.initialize(player); !initialized) return abort(initialized.error());
         for (std::size_t index = 0; index < service_count; ++index) {
             const auto service_kind = static_cast<Service>(index);
@@ -74,11 +102,11 @@ core::Result<void> Manager::service(Clocks clocks, Admission admission, authorit
             const auto delay = impl.state.service_periods[index];
             if (clocks.synchronization > std::numeric_limits<std::uint64_t>::max() - delay) return abort(lifecycle_error("galactic service deadline overflow"));
             player.deadlines[index] = clocks.synchronization + delay;
-            impl.traces.push_back({player.selected.player, service_kind, clocks});
+            append_ai_diagnostic(impl.traces, impl.traces_dropped, ServiceTrace{player.selected.player, service_kind, clocks});
             if (service_kind == Service::templates) {
                 if (auto changed = impl.templates(player); !changed) return abort(changed.error());
             }
-            const ServiceInput input{player.selected.player, service_kind, clocks, world, std::make_shared<const TemplatePolicy>(player.policy)};
+            const ServiceInput input{player.selected.player, service_kind, clocks, world, impl.policy_snapshot(player)};
             if (auto served = impl.capabilities.services->run(input, scripts); !served) return abort(served.error());
         }
     }
@@ -115,10 +143,12 @@ core::Result<void> Manager::after_service(authoritative::ServiceReport& report) 
 
 void Manager::set_admission(Admission admission) noexcept {
     if (impl_->state.admission != admission) mark_state_changed();
-    impl_->state.admission = admission;
+    impl_->state.admission = admission; impl_->update_record();
 }
 LifecycleState Manager::lifecycle() const { return impl_->state; }
 const std::vector<ServiceTrace>& Manager::trace() const noexcept { return impl_->traces; }
+std::uint64_t Manager::trace_dropped() const noexcept { return impl_->traces_dropped; }
+PolicySnapshotStats Manager::policy_snapshot_stats() const noexcept { return impl_->policy_stats; }
 
 core::Result<void> Manager::restore_lifecycle(const LifecycleState& saved) {
     if (saved.version != 2 || std::any_of(saved.service_periods.begin(), saved.service_periods.end(), [](auto frames) { return frames == 0; })
@@ -158,6 +188,8 @@ core::Result<void> Manager::restore_lifecycle(const LifecycleState& saved) {
     }
     mark_state_changed();
     impl_->state = saved; // deadlines and policy survive; never fresh initialization.
+    impl_->policy_restored();
+    impl_->records = impl_->rebuild_records();
     impl_->failure.reset();
     impl_->traces.clear();
     return core::Result<void>::success();

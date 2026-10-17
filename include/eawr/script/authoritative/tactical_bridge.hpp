@@ -2,8 +2,9 @@
 
 // Script commands as replay input (#247, docs/lua-sandbox.md "Command routing"):
 // one authoritative tick of a tactical session that runs scripts. The world
-// steps first; the scripts are serviced after it, seeing its result; the
-// commands they issue are translated into tactical player commands keyed for
+// owns an optional in-tick object turn; other scripts are serviced after it,
+// seeing its result. Object ability uses commit at that seam; other commands
+// are translated into tactical player commands keyed for
 // the next tick and submitted through TacticalSession::submit like any
 // player's input, so the session's replay records them and a headless replay
 // of that record reproduces the world without running a script. No script
@@ -89,6 +90,12 @@ struct ScriptedTick {
 class ScriptEngine {
 public:
     virtual ~ScriptEngine() = default;
+    // Installed at the same boundary as the engine, including checkpoint rebuilds.
+    // A failed step poisons the scripted session: callers discard both owners.
+    [[nodiscard]] virtual core::Result<std::shared_ptr<sim::tactical::ObjectTurnService>> object_turn_service(
+        const sim::tactical::TacticalSession&, ScriptScheduler&) {
+        return core::Result<std::shared_ptr<sim::tactical::ObjectTurnService>>::success({});
+    }
     // FD-71: scoring visits precede mode/object work, unlike the later Lua pass.
     [[nodiscard]] virtual core::Result<void> before_world(
         const sim::PartitionExecutor&, const sim::tactical::TacticalSession&) {

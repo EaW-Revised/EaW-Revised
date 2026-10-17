@@ -83,6 +83,9 @@ public:
     using NoHop = std::function<core::Result<void>(gc::PlayerId, sim::EntityId)>;
     using BribeHop = std::function<core::Result<void>(gc::PlayerId, sim::EntityId, gc::PlanetId)>;
     void bind_movement(MovementProvider, ConflictPending, NoHop = {}, BribeHop = {});
+    using MovementFrontier = std::function<core::Result<void>(gc::PlayerId,
+        std::shared_ptr<const gc::GalacticSnapshot>)>;
+    void bind_movement_frontier(MovementFrontier frontier) { movement_frontier_ = std::move(frontier); }
     [[nodiscard]] core::Result<Movement> poll_movement(std::uint64_t request, bool taskforce_has_members = true);
     [[nodiscard]] core::Result<void> movement_conflict(std::uint64_t request, gc::PlanetId location, bool begin);
     [[nodiscard]] core::Result<void> invalidate_freestore_actor(std::uint64_t request, gc::FleetId subject);
@@ -122,6 +125,11 @@ public:
     // Completed owner identities for TaskForce formation/launch, independent
     // of tactical scene parents and the copied perception generation.
     [[nodiscard]] std::optional<gc::FleetId> containing_fleet(gc::PlayerId, sim::EntityId) const;
+    struct AssemblyLocation { gc::PlanetId planet{}; gc::FleetId fleet{}; bool landed{}, transit{}; };
+    [[nodiscard]] std::optional<AssemblyLocation> assembly_location(gc::PlayerId, sim::EntityId) const;
+    // WGA-485: ordinary per-actor staging, independent of Launch_Units' batch.
+    [[nodiscard]] core::Result<ActionReceipt> prepare_assembly_actor(gc::PlayerId, sim::EntityId, bool separate = true);
+    [[nodiscard]] core::Result<void> land_assembly_arrival(gc::PlayerId, sim::EntityId);
     [[nodiscard]] bool movement_actor_exists(sim::EntityId) const;
     [[nodiscard]] const gc::GalacticSession::NativeInvasion* invasion_status(std::uint64_t request) const noexcept;
     [[nodiscard]] core::Result<void> retire_invasion(std::uint64_t request);
@@ -130,6 +138,8 @@ public:
     [[nodiscard]] core::Result<sim::EntityId> build_actor(gc::PlayerId, sim::EntityId build) const;
     [[nodiscard]] core::Result<sim::math::Fixed> generic_build_cost(gc::TypeId type) const;
     [[nodiscard]] std::shared_ptr<const gc::GalacticSnapshot> snapshot() const { return world_.snapshot(); }
+    // Direct native actions can allocate after the AI perception view was bound.
+    [[nodiscard]] sim::EntityId next_entity_id() const noexcept { return world_.next_entity_id(); }
     struct BuildHead {
         gc::PlanetId producer{};
         gc::ProductionDomain channel{};
@@ -142,6 +152,8 @@ public:
     [[nodiscard]] core::Result<NativeState> capture() const override;
     [[nodiscard]] core::Result<void> restore(const NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
+    [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return records_.byte_size() + freestore_->record_byte_upper_bound() + 1024; }
     [[nodiscard]] std::uint64_t build_state_revision() const noexcept { return build_revision_; }
     [[nodiscard]] const std::map<sim::EntityId, Purchase>& purchases() const noexcept { return purchases_; }
     [[nodiscard]] QualifiedFreestore& qualified_freestore() noexcept { return *freestore_; }
@@ -152,6 +164,14 @@ public:
     [[nodiscard]] bool qualified_freestore_available() const noexcept { return static_cast<bool>(freestore_validation_); }
     [[nodiscard]] std::span<const sim::EntityId> created() const noexcept { return created_; }
 private:
+    void update_record(std::uint32_t kind, std::uint64_t id);
+    void update_metadata_record();
+    [[nodiscard]] core::RecordDigest rebuild_records() const;
+    core::RecordDigest records_;
+    struct RecordWrite {
+        NativeActions& owner; std::uint32_t kind{}; std::uint64_t id{};
+        ~RecordWrite() { owner.update_record(kind, id); }
+    };
     void mark_build_state_changed() const noexcept {
         if (++build_revision_ == 0) std::terminate();
         mark_state_changed();
@@ -187,6 +207,7 @@ private:
     PlanetUsability planet_usability_;
     FreestorePathProvider freestore_path_;
     MovementProvider movement_provider_;
+    MovementFrontier movement_frontier_;
     MovementReferenceValidator movement_references_;
     MovementInventoryValidator movement_inventory_;
     ConflictPending conflict_pending_;

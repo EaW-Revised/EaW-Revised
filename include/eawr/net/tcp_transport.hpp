@@ -13,7 +13,9 @@ namespace eawr::net {
 enum class TcpMessage : std::uint8_t {
     hello = 1, accept = 2, refuse = 3, keepalive = 4, close = 5, data = 6, ping = 7, pong = 8,
     mesh_join = 9, mesh_assign = 10, mesh_roster = 11, mesh_pair = 12,
-    mesh_ready = 13, mesh_open = 14
+    mesh_ready = 13, mesh_open = 14,
+    // GNS room mesh only (N-peer slice N2); the TCP mesh refuses these.
+    mesh_grant = 15, mesh_vacated = 16, mesh_report = 17, mesh_ready_mask = 18
 };
 
 struct TcpOptions {
@@ -72,7 +74,7 @@ public:
     const std::optional<core::Diagnostic>& diagnostic() const;
     // Ordered close of one admitted edge; discard its application input. Vacant/closed is a no-op success.
     [[nodiscard]] core::Result<void> close_peer(PeerIndex peer);
-    [[nodiscard]] std::uint64_t edge_identity(PeerIndex peer) const; // Local generation, never a display name or credential.
+    [[nodiscard]] std::uint64_t edge_identity(PeerIndex peer) const override; // Local generation, never a display name or credential.
     [[nodiscard]] core::Result<void> reopen_staging_listener(); // Two-seat unauthenticated LAN host only; same port.
     void close(); // ordered clean-close frame, flushed by poll; destructor aborts immediately
     // Like poll/link, query only on the current I/O owner's thread. Ownership may

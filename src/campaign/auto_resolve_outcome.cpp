@@ -155,9 +155,13 @@ core::Result<AutoResolveOutcomeApplication> plan_auto_resolve_outcome(const Conf
         }
     }
     // WAR-57's losing raid returns from orbit even without a solver retreat flag.
-    if (a.land && outcome.winner != conflict.invader && !inputs.raid_destination_entries.empty())
+    const bool losing_raid = a.land && outcome.winner != conflict.invader
+        && (conflict.raid || !inputs.raid_destination_entries.empty());
+    if (losing_raid)
         a.result.retreat_player = conflict.invader;
-    if (a.result.retreat_player) {
+    // WGM-201: ordinary land losses gather surface survivors only. WAR-57's
+    // losing raid is the separate orbital-retreat exception.
+    if (a.result.retreat_player && (!a.land || losing_raid)) {
         for (auto it = roster.orbit_fleets.rbegin(); it != roster.orbit_fleets.rend(); ++it) {
             const auto row = fleets.find(*it);
             if (row != fleets.end() && row->second->fleet.owner == *a.result.retreat_player && !dead.contains(*it)

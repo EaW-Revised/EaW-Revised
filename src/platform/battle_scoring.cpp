@@ -76,8 +76,10 @@ struct BattleScoring::Impl {
         sim::InlineExecutor executor;
         const auto result = scheduler->service(executor, {.host_paced = [](std::uint64_t) { return true; }});
         if (!result) return Void::failure(result.error());
-        for (const auto& diagnostic : result.value().diagnostics)
+        if (!result.value().diagnostics.empty()) {
+            const auto& diagnostic = result.value().diagnostics.front();
             return Void::failure(error(diagnostic.code + ": " + diagnostic.message));
+        }
         for (const auto& command : result.value().commands) {
             if (command.verb == "scoring-suspend-ai" && command.arguments.size() == 1) {
                 const auto* value = std::get_if<Number>(&command.arguments.front().data);

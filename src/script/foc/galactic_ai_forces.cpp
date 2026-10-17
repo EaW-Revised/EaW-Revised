@@ -1,4 +1,5 @@
 #include "galactic_ai_world.hpp"
+#include "eawr/core/gc_profile.hpp"
 #include "eawr/script/numeric/binary64.hpp"
 
 namespace eawr::script::foc::ai {
@@ -39,7 +40,9 @@ Real normalized(Real value, Real denominator) {
 
 core::Result<void> GalacticWorld::prepare_forces(std::vector<PlanetRow>& rows,
     const galactic::GalacticSnapshot& snapshot, const GalacticConnectivity& connectivity,
-    const sim::PartitionExecutor& executor) const {
+    const sim::PartitionExecutor& executor, bool retained_nearby) const {
+    gc_profile::Scope profile_scope(gc_profile::Phase::forces);
+    if (rows.empty()) return core::Result<void>::success();
     // Ordered input indexing keeps fleet and surface-list summation order. All
     // independent planet preparation runs in disjoint partition staging slots.
     std::map<galactic::PlanetId, std::vector<const galactic::Fleet*>> fleets;
@@ -49,9 +52,12 @@ core::Result<void> GalacticWorld::prepare_forces(std::vector<PlanetRow>& rows,
     std::map<sim::EntityId, const galactic::MovementContents*> contents;
     if (snapshot.movement()) for (const auto& payload : snapshot.movement()->contents) contents.emplace(payload.container, &payload);
     std::map<galactic::PlanetId, std::set<galactic::PlanetId>> direct_routes;
-    for (const auto& route : snapshot.routes()) { direct_routes[route.from].insert(route.to); direct_routes[route.to].insert(route.from); }
+    if (!retained_nearby) for (const auto& route : snapshot.routes()) {
+        direct_routes[route.from].insert(route.to); direct_routes[route.to].insert(route.from);
+    }
     // WGA-192: unchanged authored positions/topology reuse the derived neighbourhood.
-    const bool reuse_nearby = snapshot_ && snapshot_->planets().size() == snapshot.planets().size()
+    const bool reuse_nearby = !retained_nearby && snapshot_ && planets_.size() == snapshot.planets().size()
+        && snapshot_->planets().size() == snapshot.planets().size()
         && std::equal(snapshot_->planets().begin(), snapshot_->planets().end(), snapshot.planets().begin(),
             [](const auto& a, const auto& b) { return a.id == b.id && a.position == b.position; })
         && snapshot_->routes().size() == snapshot.routes().size()
@@ -70,6 +76,11 @@ core::Result<void> GalacticWorld::prepare_forces(std::vector<PlanetRow>& rows,
         const auto range = sim::partition_range(partition, rows.size());
         for (auto index = range.begin; index < range.end; ++index) {
             auto& row = rows[index];
+            row.space.clear(); row.ground.clear(); row.starbase.clear();
+            row.space_units.clear(); row.ground_units.clear();
+            row.space_presence.clear(); row.ground_presence.clear();
+            row.forces_available = row.ground_units_available = true;
+            row.neighbourhood_pairs = 0;
             const auto append = [&](auto& output, tactical::TypeId id, tactical::PlayerId owner) {
                 const auto* facts = type(id);
                 if (!facts) { row.forces_available = false; return; }
@@ -124,8 +135,9 @@ core::Result<void> GalacticWorld::prepare_forces(std::vector<PlanetRow>& rows,
                     }
                 }
             }
-            if (setup_.maximum_fleet_distance && reuse_nearby) row.nearby = planets_[index].nearby;
-            else if (setup_.maximum_fleet_distance) for (const auto& other : snapshot.planets()) {
+            // Native layers retain the completed topology/neighbourhood in row.
+            if (!retained_nearby && setup_.maximum_fleet_distance && reuse_nearby) row.nearby = planets_[index].nearby;
+            else if (!retained_nearby && setup_.maximum_fleet_distance) for (const auto& other : snapshot.planets()) {
                 ++row.neighbourhood_pairs;
                 const auto separation = distance(row.planet.position, other.position);
                 const auto routes = direct_routes.find(row.planet.id);
@@ -142,7 +154,7 @@ std::optional<Real> GalacticWorld::force_token(const GalacticQueryKey& key, Read
     if (key.tokens.size() == 2 && key.tokens.front() == "VARIABLE_TARGET") {
         if (!at) return {};
         if (token == "CONNECTSISOLATEDPLANETSBYFORCE" || token == "CONNECTSLARGESTISLANDS") {
-            for (const auto& path : connectivity_.island_paths) if (path.player == key.player && path.planet == key.planet)
+            for (const auto& path : connectivity_->island_paths) if (path.player == key.player && path.planet == key.planet)
                 return real((token == "CONNECTSLARGESTISLANDS" ? path.largest : path.least_force) ? 1 : 0); // WGA-194
             return {}; // producer must publish known false as well as true
         }

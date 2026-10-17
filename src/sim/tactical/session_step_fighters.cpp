@@ -600,7 +600,7 @@ core::Result<void> session_detail::Tick::hangars() {
     auto& spawners = fighters_.value().spawners.value();
     const auto& squadron_table = impl_->motion.squadrons;
     auto& pads = impl_->pad_stage.values;
-    const auto& arrivals = staging_.value().arrivals.value();
+    auto& arrivals = staging_.value().arrivals.value();
     auto& garrisons = fighters_.value().free_garrisons.value();
     const auto allied_pending = [&](const PlayerId owner) {
         const auto station_player = std::lower_bound(impl_->snapshot_players.begin(), impl_->snapshot_players.end(), owner,
@@ -633,6 +633,12 @@ core::Result<void> session_detail::Tick::hangars() {
                     intact.push_back(!unit.durability || hull == nullptr || bay.hardpoint >= hull->hardpoints.size()
                         || !hardpoint_destroyed(*hull, *unit.durability, bay.hardpoint));
                 }
+                // WSL-19: a launched single ship that left the session frees its entry slot like a lost squadron.
+                std::erase_if(hangars[index].second.ships, [&](const SpawnedShip& ship) {
+                    if (survivor(ship.id) != nullptr) return false;
+                    squadron_lost(profile, hangars[index].second, ship.entry, frame);
+                    return true;
+                });
                 const bool service_due = frame == hangars[index].second.next_service_frame;
                 decisions[index] = service_spawner(profile, hangars[index].second, impl_->setup.seed, frame,
                     hangars[index].first, intact, arrivals.contains(hangars[index].first) || !unit.state.garrison_enabled);
@@ -658,12 +664,24 @@ core::Result<void> session_detail::Tick::hangars() {
                 if (pending == garrisons.end()) continue; // an earlier station claimed the pending front
             }
             const auto decision = decisions[index].value_or(SpawnDecision{0, free_bays[index].value_or(0)});
+            const auto first_id = next_id;
             const auto flown_out = impl_->launch(spawner, profile, decision, frame, next_id, survivors, instances,
                 squadrons, crafts, minds, pending != garrisons.end() ? pending->pending.front() : 0,
                 pending != garrisons.end() ? pending->setup.player : 0,
-                pending != garrisons.end() ? &pending->registered : nullptr);
+                pending != garrisons.end() ? &pending->registered : nullptr, &arrivals);
             if (!flown_out) {
                 return core::Result<void>::failure(flown_out.error());
+            }
+            if (decisions[index] && profile.entries[decision.entry].ship) {
+                auto& hangar = spawners.at(hangars[index].first);
+                if (survivors.size() == first_added) {
+                    // WSL-16: no free spot beside the bay: the launch did not happen, so the slot is returned.
+                    auto& entry = hangar.entries[decision.entry];
+                    if (entry.alive > 0) --entry.alive;
+                    if (entry.remaining != unlimited_reserve) ++entry.remaining;
+                } else {
+                    hangar.ships.push_back({first_id, decision.entry});
+                }
             }
             if (pending != garrisons.end()) {
                 pending->pending.erase(pending->pending.begin());

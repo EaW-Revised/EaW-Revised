@@ -251,6 +251,16 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
             if (!shot.value()) return Result::failure(failure(unit.id + ": unresolved Death_Projectiles entry"));
             profile.death_projectiles.push_back(*shot.value());
         }
+        if (unit.retreat_self_destruct_index != no_index) {
+            Weapon payload;
+            payload.projectile_index = unit.retreat_self_destruct_index;
+            auto shot = shot_profile(payload, false);
+            if (!shot) return Result::failure(shot.error());
+            if (!shot.value()) return Result::failure(failure(unit.id + ": unresolved Retreat_Self_Destruct_Explosion"));
+            profile.retreat_explosion = *shot.value();
+        } else if (!unit.retreat_self_destruct.empty()) {
+            return Result::failure(failure(unit.id + ": unresolved Retreat_Self_Destruct_Explosion"));
+        }
         profile.max_attack_distance = unit.targeting_max_attack_distance;
         profile.stickiness = unit.targeting_stickiness_seconds.value_or(Fixed{}); // WCC-15
         profile.min_attack_distance = unit.targeting_min_attack_distance.value_or(Fixed{});

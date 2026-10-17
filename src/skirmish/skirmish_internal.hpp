@@ -31,4 +31,14 @@ namespace eawr::skirmish::detail {
 // zero, a negative, a subnormal, an infinity, a NaN or a value past the Q24 range.
 [[nodiscard]] std::optional<std::int64_t> q24_from_binary32_bits(std::uint32_t bits) noexcept;
 
+// Content-wide setup validation, independent of any selected map. Placement
+// errors sit between these two phases, matching read_start_inputs diagnostics.
+struct SetupContentChecks final {
+    std::optional<core::Diagnostic> before_placements, after_placements;
+};
+[[nodiscard]] SetupContentChecks inspect_setup_content(const vfs::Vfs& filesystem, const data::Catalog& catalog);
+[[nodiscard]] core::Result<std::vector<MapPlacement>> inspect_setup_placements(const assets::Map& map,
+    std::span<const std::byte> bytes, const std::string& path, const data::Catalog& catalog,
+    const SetupContentChecks& checks);
+
 } // namespace eawr::skirmish::detail

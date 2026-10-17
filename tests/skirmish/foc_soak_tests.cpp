@@ -47,6 +47,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -183,6 +184,73 @@ void write_replay_file(const std::filesystem::path& path, const tactical::Tactic
     result.replay_file = path.filename().string();
 }
 
+void report_dropped(std::ostream& output, const foc::AiJournal& journal) {
+    if (journal.costs_dropped || journal.plans_dropped || journal.services_dropped)
+        output << "AI journal: costs_dropped=" << journal.costs_dropped
+               << " plans_dropped=" << journal.plans_dropped
+               << " services_dropped=" << journal.services_dropped << '\n';
+}
+
+void write_tick_trace(std::ostream& trace, const foc::AiJournal& journal,
+    const std::vector<double>& total_ms, const std::vector<double>& world_ms,
+    const std::vector<double>& ai_ms, const std::vector<double>& lua_ms) {
+    trace << "tick,total_ms,world_ms,ai_ms,lua_ms,goals_evaluated,maintenances,plans_attached,plans_deferred,plans_pumped,"
+             "plan_instances,plan_instructions,freestore_runs,freestore_instructions,object_turn_due_ticks,object_pumps,object_turn_rows\n";
+    trace << std::fixed << std::setprecision(3);
+    for (const auto& cost : journal.costs) {
+        if (cost.tick == 0 || cost.tick > total_ms.size()) continue;
+        const auto at = static_cast<std::size_t>(cost.tick - 1);
+        trace << cost.tick << ',' << total_ms[at] << ',' << world_ms[at] << ',' << ai_ms[at] << ',' << lua_ms[at] << ','
+              << cost.goals_evaluated << ',' << cost.maintenances << ',' << cost.plans_attached << ',' << cost.plans_deferred
+              << ',' << cost.plans_pumped << ',' << cost.plan_instances << ',' << cost.plan_instructions << ','
+              << cost.freestore_runs << ',' << cost.freestore_instructions << ',' << cost.object_turn_due_ticks
+              << ',' << cost.object_pumps << ',' << cost.object_turn_rows << '\n';
+    }
+}
+
+// Overflow must retain the original tick's timing and make incomplete history explicit.
+int journal_regression() {
+    foc::AiJournal journal;
+    const auto count = foc::ai_diagnostic_capacity + 3;
+    std::vector<double> timing(count);
+    for (std::size_t at = 0; at < count; ++at) {
+        const auto tick = static_cast<std::uint64_t>(at + 1);
+        timing[at] = static_cast<double>(tick);
+        journal.append_cost({.tick = tick});
+        foc::PlanEvent event{};
+        event.tick = tick;
+        journal.append_plan(std::move(event));
+        journal.append_service({.frame = tick});
+    }
+    std::ostringstream trace, report;
+    write_tick_trace(trace, journal, timing, timing, timing, timing);
+    report_dropped(report, journal);
+    std::istringstream rows(trace.str());
+    std::string line;
+    std::getline(rows, line); // CSV header
+    std::size_t retained = 0;
+    while (std::getline(rows, line)) {
+        std::istringstream fields(line);
+        std::string tick, value;
+        std::getline(fields, tick, ',');
+        const auto expected = journal.costs.at(retained++).tick;
+        if (std::stoull(tick) != expected) return 1;
+        for (int column = 0; column < 4; ++column) {
+            std::getline(fields, value, ',');
+            if (std::stod(value) != static_cast<double>(expected)) return 1;
+        }
+    }
+    const auto dropped = count - journal.costs.size();
+    const std::string expected = "AI journal: costs_dropped=" + std::to_string(dropped)
+        + " plans_dropped=" + std::to_string(dropped) + " services_dropped=" + std::to_string(dropped) + '\n';
+    if (dropped == 0 || retained != journal.costs.size() || report.str() != expected) return 1;
+    std::ostringstream full_report;
+    report_dropped(full_report, foc::AiJournal{});
+    if (!full_report.str().empty()) return 1;
+    std::cout << "bounded AI journal tick pairing and dropped report passed\n";
+    return 0;
+}
+
 // #957 (SCH-04): the most work of one kind any tick of a seed's battle does, counted by the AI's
 // journal (deterministic: no clock), under one schedule.
 struct ScheduleCounts {
@@ -204,6 +272,7 @@ std::variant<ScheduleCounts, std::string> count_schedule(const Loaded& loaded, c
         auto stepped = battle.session->step(executor);
         if (!stepped) return "step " + std::to_string(tick + 1) + ": " + stepped.error().code + ' ' + stepped.error().message;
     }
+    report_dropped(std::cout, *journal);
     ScheduleCounts counts;
     for (const auto& cost : journal->costs) {
         counts.max_attached = std::max(counts.max_attached, cost.plans_attached);
@@ -230,6 +299,7 @@ std::variant<std::vector<foc::AiServiceEvent>, std::string> service_frames(const
         auto stepped = battle.session->step(executor);
         if (!stepped) return "step " + std::to_string(tick + 1) + ": " + stepped.error().code + ' ' + stepped.error().message;
     }
+    report_dropped(std::cout, *journal);
     return journal->services;
 }
 
@@ -455,16 +525,8 @@ void run_battle(const Loaded& loaded, const soak::Options& options, const std::u
         std::error_code ignored;
         std::filesystem::create_directories(*options.tick_trace, ignored);
         std::ofstream trace(*options.tick_trace / ("seed-" + std::to_string(seed) + "-ticks.csv"), std::ios::binary);
-        trace << "tick,total_ms,world_ms,ai_ms,lua_ms,goals_evaluated,maintenances,plans_attached,plans_deferred,plans_pumped,"
-                 "plan_instances,plan_instructions,freestore_runs,freestore_instructions\n";
-        trace << std::fixed << std::setprecision(3);
-        for (std::size_t at = 0; at < total_ms.size() && at < journal->costs.size(); ++at) {
-            const auto& cost = journal->costs[at];
-            trace << at + 1 << ',' << total_ms[at] << ',' << world_ms[at] << ',' << ai_ms[at] << ',' << lua_ms[at] << ','
-                  << cost.goals_evaluated << ',' << cost.maintenances << ',' << cost.plans_attached << ',' << cost.plans_deferred
-                  << ',' << cost.plans_pumped << ',' << cost.plan_instances << ',' << cost.plan_instructions << ','
-                  << cost.freestore_runs << ',' << cost.freestore_instructions << '\n';
-        }
+        write_tick_trace(trace, *journal, total_ms, world_ms, ai_ms, lua_ms);
+        report_dropped(std::cout, *journal);
     }
     if (options.tick_trace && journal) {
         // The plan timeline (#957 behaviour comparison): who plans what against which target, when.
@@ -657,6 +719,7 @@ void print_result(const soak::Options& options, const SeedResult& result) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--journal-regression") return journal_regression();
     std::vector<std::string> arguments;
     for (int index = 1; index < argc; ++index) arguments.emplace_back(argv[index]);
     auto parsed = soak::parse_options(arguments);

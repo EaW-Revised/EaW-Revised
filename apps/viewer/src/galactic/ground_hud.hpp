@@ -29,6 +29,8 @@ struct GroundHudState {
     std::map<std::string, godot::TextureButton*> buttons;
     std::vector<viewer::galactic::InputWidget> widgets;
     std::map<viewer::galactic::ObjectId, viewer::galactic::GroundRoster> rosters;
+    // #3931: launch/land gating reads rosters built from the truth publication; equals rosters when the reveal is off.
+    std::map<viewer::galactic::ObjectId, viewer::galactic::GroundRoster> command_rosters;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> publication;
     EawrGroundInput* input{};
     godot::Label* count{};
@@ -49,6 +51,7 @@ struct GroundHudState {
     std::uint64_t reorders{};
     bool drag_sound{}, layout_dirty{};
     std::vector<viewer::galactic::ObjectId> last_launch_units;
+    std::vector<viewer::galactic::ObjectId> last_launch_path;
     viewer::galactic::ObjectId last_launch_target{};
     std::uint8_t last_launch_slot{};
 };

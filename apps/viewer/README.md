@@ -182,8 +182,8 @@ Nebulas and ion storms are classified but neither drawn nor simulated; shield,
 weapon and movement effects are absent. No placed mine type was found in these
 maps; mine behaviour remains unsupported. Mineral extractor pads are not mines.
 Some maps also use unsupported environment materials: Bespin has no primary
-stars and its secondary skydome is currently reported as undrawn, so its battle
-opens against the viewport background. Map selection does not add shader routes.
+stars; its secondary skydome (Skydome.fx) draws its BaseTexture only. The
+skydome cloud layer is not drawn and is listed in the report. Map selection does not add shader routes.
 
 | Map (`data/art/maps/_mp_space_<name>.ted`) | Spawn markers | Unsupported hazards present |
 | --- | ---: | --- |

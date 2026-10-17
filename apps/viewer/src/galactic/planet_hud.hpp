@@ -2,10 +2,16 @@
 
 #include "galaxy_view.hpp"
 
+#include "eawr/sim/galactic/commands.hpp"
+
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace eawr::viewer::galactic {
 
@@ -18,6 +24,17 @@ namespace eawr::viewer::galactic {
 // is not modelled; the separator follows the text database language the HUD loaded. `digits` may lead with '-'.
 [[nodiscard]] std::string grouped_number(std::string_view digits, std::string_view language);
 
+// TM-03..TM-06: the galactic clock's fast-forward button. A live single-human campaign has the factor and
+// the clock controls; the synthetic HUD fixture keeps its own.
+[[nodiscard]] bool clock_controls_admitted(std::size_t active_humans, bool fixture) noexcept; // TM-04
+[[nodiscard]] std::optional<sim::math::Fixed> live_fast_forward_factor(bool fixture, bool live_game) noexcept;
+// TM-06: the button is disabled, and its press does nothing, while paused or without a factor.
+[[nodiscard]] bool fast_forward_available(bool controls_enabled, bool paused, bool has_factor) noexcept;
+// TM-06: a press turns fast forward on, and off again to the normal speed (1x).
+[[nodiscard]] sim::math::Fixed fast_forward_target(sim::math::Fixed current, sim::math::Fixed factor) noexcept;
+// TM-05: pausing from fast forward ends it, so play returns at the normal speed.
+[[nodiscard]] bool pause_ends_fast_forward(sim::math::Fixed current, std::optional<sim::math::Fixed> factor) noexcept;
+
 // Published observer-filtered facts, copied at the presentation boundary. An
 // absent value means unavailable, not zero. No scene placement/owner adapter
 // is allowed to supply economic or intelligence facts here.
@@ -29,6 +46,15 @@ struct ProductionItem final {
     sim::galactic::TypeId type_id{};
     sim::EntityId build_id{};
 };
+
+// #3931 galaxy reveal: one planet's production queues as HUD rows, ground and space apart. `describe` names a
+// type and its icon (empty when the art is unknown).
+struct ProductionQueueItems final {
+    std::vector<ProductionItem> ground, space;
+};
+using DescribeProductionType = std::function<std::pair<std::string, std::string>(sim::galactic::TypeId)>;
+[[nodiscard]] ProductionQueueItems production_queue_items(const sim::galactic::PlanetProduction& production,
+    const DescribeProductionType& describe);
 
 // PU-64 / WGEP-44: truncate the published retained time ratio once, exactly.
 [[nodiscard]] int production_percent(std::int64_t full, std::int64_t remaining) noexcept;
@@ -69,6 +95,8 @@ struct PlanetHudFacts final {
     std::optional<PlayerId> apparent_owner, apparent_allegiance_owner;
     bool locally_controlled{};
     bool local_allegiance{};
+    // #3931: another player's queue, shown read-only because the galaxy reveal is on.
+    bool queue_revealed{};
     bool surface_accessible{};
     std::string display_name;
     std::string observed_faction;
@@ -90,6 +118,12 @@ struct PlanetHudFacts final {
     // corruption benefit select the status-row corruption icon.
     bool corrupted{}, local_benefits_from_corruption{};
 };
+
+// Fills the queue rows of a planet the local observation controls and knows the production of, and, with
+// the #3931 galaxy reveal on, of any planet whose production the (revealed) observation knows: those rows
+// are marked `queue_revealed` and stay read-only. Returns whether the rows were published.
+[[nodiscard]] bool publish_production_queue(PlanetHudFacts& facts, const sim::galactic::ObservedPlanet& observation,
+    const sim::galactic::PlanetProduction* production, bool reveal, const DescribeProductionType& describe);
 
 // WGUI-06..18/33/38/39: publish only what the local observation admits.
 // Raw snapshot payloads never imply knowledge, and missing payloads stay absent.

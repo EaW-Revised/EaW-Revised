@@ -171,7 +171,7 @@ core::Result<void> DesyncMonitor::on_reconnect(std::uint64_t tick, std::string_v
     rows_sent_ = false;
     rows_.clear(); inputs_.clear(); checkpoints_.clear(); retained_bytes_ = 0;
     summaries_.clear(); remote_rows_.clear(); future_frames_.clear();
-    local_summary_.reset(); previous_.reset(); previous_frozen_ = false;
+    local_summary_.reset(); previous_.reset(); retired_summaries_.clear(); previous_frozen_ = false;
     next_first_ = tick + 1;
     reconnect_floor_ = tick;
     return core::Result<void>::success();
@@ -228,6 +228,27 @@ core::Result<void> DesyncMonitor::on_departure(PeerIndex peer, std::uint64_t tic
     return evaluate();
 }
 
+core::Result<void> DesyncMonitor::on_link_repair(PeerIndex peer, std::function<bool(PeerIndex)> ownership) {
+    repair_enabled_ = true;
+    if (ownership) repair_ownership_ = std::move(ownership);
+    if (peer >= active_peers_.size() || !active_peers_[peer] || peer == transport_.self()) return core::Result<void>::success();
+    const auto send = [&](const Summary& summary, const std::vector<Row>& rows, bool details) {
+        std::vector<std::uint8_t> frame{desync_combined_kind};
+        append_u64(frame, summary.first); append_u64(frame, summary.last); append_hash(frame, summary.hash); frame.push_back(summary.end ? 1 : 0);
+        auto result = transport_.send(peer, frame);
+        if (!result || !details) return result;
+        frame = {desync_rows_kind}; append_u64(frame, summary.first); append_u64(frame, summary.last);
+        for (const auto& row : rows) { append_hash(frame, row.state); append_hash(frame, row.input); }
+        return transport_.send(peer, frame);
+    };
+    if (previous_) {
+        auto sent = send(previous_->local, previous_->rows, previous_->rows_sent);
+        if (!sent) return sent;
+    }
+    if (local_summary_) return send(*local_summary_, rows_, rows_sent_);
+    return core::Result<void>::success();
+}
+
 core::Result<void> DesyncMonitor::broadcast(std::span<const std::uint8_t> frame) {
     for (std::uint32_t peer = 0; peer < transport_.peer_count(); ++peer) {
         if (peer == transport_.self() || !active_peers_[peer]) continue;
@@ -236,7 +257,8 @@ core::Result<void> DesyncMonitor::broadcast(std::span<const std::uint8_t> frame)
             // Closure can be discovered while the core drains a delivered hash
             // frame, before its membership check. Leave this voter pending: the
             // core will agree departure (opt-in) or return typed link_closed.
-            if (transport_.link(peer) == LinkState::closed) continue;
+            if (transport_.link(peer) == LinkState::closed
+                || (repair_enabled_ && repair_ownership_ && repair_ownership_(peer))) continue;
             failed_ = true; frozen_ = true; return sent;
         }
     }
@@ -303,19 +325,40 @@ core::Result<void> DesyncMonitor::receive(std::uint32_t from, std::span<const st
     const bool previous = previous_ && summary.first == previous_->local.first;
     if (!active_peers_[from] && !previous && summary.first != next_first_)
         return core::Result<void>::success();
+    if (repair_enabled_ && !previous && summary.first != next_first_) {
+        const auto retired = retired_summaries_.find(from);
+        if (retired != retired_summaries_.end() && summary.first == retired->second.first) {
+            if (summary.last != retired->second.last || summary.hash != retired->second.hash
+                || (frame[0] == desync_combined_kind && summary.end != retired->second.end))
+                return fail("replayed retired desync window contradicts agreed digest");
+            return core::Result<void>::success();
+        }
+    }
     if (!previous && summary.first != next_first_ && local_summary_
         && local_summary_->last != std::numeric_limits<std::uint64_t>::max()
         && summary.first == local_summary_->last + 1) {
         auto& queued = future_frames_[from];
+        if (repair_enabled_ && std::any_of(queued.begin(), queued.end(), [&](const auto& prior) {
+            return prior.size() == frame.size() && std::equal(prior.begin(), prior.end(), frame.begin());
+        })) return core::Result<void>::success();
         if (queued.size() >= 2) return fail("future desync window exceeds its bound");
         queued.emplace_back(frame.begin(), frame.end());
         return core::Result<void>::success();
     }
-    if (!previous && summary.first != next_first_) return fail("out-of-window desync frame");
+    if (!previous && summary.first != next_first_) return fail("out-of-window desync frame: peer=" + std::to_string(from)
+        + " received=" + std::to_string(summary.first) + ".." + std::to_string(summary.last)
+        + " next=" + std::to_string(next_first_) + " previous="
+        + (previous_ ? std::to_string(previous_->local.first) + ".." + std::to_string(previous_->local.last) : "none"));
     auto& summaries = previous ? previous_->summaries : summaries_;
     auto& remote = previous ? previous_->remote : remote_rows_;
     if (frame[0] == desync_combined_kind) {
-        if (!summaries.emplace(from, std::move(summary)).second) return fail("duplicate combined hash");
+        const auto prior = summaries.find(from);
+        if (prior != summaries.end()) {
+            if (!repair_enabled_ || prior->second.first != summary.first || prior->second.last != summary.last
+                || prior->second.hash != summary.hash || prior->second.end != summary.end) return fail("duplicate combined hash");
+            return core::Result<void>::success();
+        }
+        summaries.emplace(from, std::move(summary));
     } else {
         if (!summaries.contains(from)) {
             if (!active_peers_[from]) return core::Result<void>::success();
@@ -323,7 +366,14 @@ core::Result<void> DesyncMonitor::receive(std::uint32_t from, std::span<const st
         }
         if (summary.last != summaries.at(from).last || summary.hash != summaries.at(from).hash)
             return fail("hash rows do not authenticate the combined hash");
-        if (!remote.emplace(from, std::move(decoded)).second) return fail("duplicate desync hash rows");
+        const auto prior = remote.find(from);
+        if (prior != remote.end()) {
+            if (!repair_enabled_ || prior->second.size() != decoded.size() || !std::equal(prior->second.begin(), prior->second.end(), decoded.begin(),
+                [](const Row& a, const Row& b) { return a.tick == b.tick && a.state == b.state && a.input == b.input; }))
+                return fail("duplicate desync hash rows");
+            return core::Result<void>::success();
+        }
+        remote.emplace(from, std::move(decoded));
     }
     if (previous) return evaluate_previous();
     return evaluate();
@@ -369,6 +419,8 @@ core::Result<void> DesyncMonitor::evaluate() {
         if (frozen_) return core::Result<void>::success();
         if (completed_ == 0) setup_agreed_ = true;
         next_first_ = completed_ + 1;
+        retired_summaries_.clear();
+        if (repair_enabled_ && previous_) retired_summaries_ = std::move(previous_->summaries);
         previous_ = AgreedWindow{*local_summary_, std::move(rows_), std::move(summaries_), std::move(remote_rows_), rows_sent_};
         rows_.clear();
         remote_rows_.clear();

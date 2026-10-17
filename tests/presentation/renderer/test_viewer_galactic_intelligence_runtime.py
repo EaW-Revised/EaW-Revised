@@ -29,7 +29,11 @@ class GalacticIntelligenceRuntime(unittest.TestCase):
                 self.assertFalse(facts[103]["discovered"])
                 self.assertEqual(facts[103]["name"], "")
                 self.assertIsNone(facts[103]["income"])
-                self.assertNotIn(103, {label["planet"] for label in hud["labels"]})
+                # WGUI-05/38: an undiscovered planet keeps a neutral name and draws its grid shell.
+                undiscovered = {label["planet"]: label for label in hud["labels"]}
+                self.assertEqual(undiscovered[103]["colour"], [100, 100, 100])
+                self.assertIn(103, data["alternate2_planets"])
+                self.assert_shell_drawn(data)
                 for row in facts.values():
                     if not row["discovered"] or fixture in ["masked", "discovered-only"]:
                         for field in ["owner", "ground", "space", "structures", "control"]:
@@ -63,6 +67,11 @@ class GalacticIntelligenceRuntime(unittest.TestCase):
                     self.assertIn("Political control: 3", facts[101]["hover"])
         self.assertEqual(len(set(captures[:3])), 3, "masked, known, and known zero must draw distinct states")
 
+    def assert_shell_drawn(self, data):
+        # The submitted instances, not the cached undiscovered list: a planet draws its grid shell exactly when it
+        # is undiscovered and its model has an alternate-2 surface (a model without one keeps its normal draw).
+        self.assertEqual(set(data["shell_drawn_planets"]), set(data["alternate2_planets"]) & set(data["shell_models"]))
+
     def assert_name_pixels(self, capture, rows, expected_minimum):
         # The glyph pixels of enough names carry the reported colour: the
         # frame, not only the report, shows the tint (some names may sit under
@@ -85,7 +94,7 @@ class GalacticIntelligenceRuntime(unittest.TestCase):
         hud = data["hud"]
         self.assertEqual(data["flights"][0]["state"], "overview", "zoomed-out frame")
         facts = {row["planet"]: row for row in hud["intelligence"]}
-        labels = {row["planet"]: row for row in hud["labels"] if row["visible"]}
+        labels = {row["planet"]: row for row in hud["labels"] if row["visible"] and facts[row["planet"]]["discovered"]}
         planets = {row["id"]: row for row in data["planets"]}
         blips = {row["planet"]: row for row in data["radar_hud"]["blips"] if row["radar"] == 0}
         return data, capture, facts, labels, planets, blips
@@ -154,6 +163,26 @@ class GalacticIntelligenceRuntime(unittest.TestCase):
             if any(fact["apparent_owner"] is None for fact in ends):
                 self.assertEqual(route["line_type"], "neutral", route)
         self.assertGreater(hidden, 0, "the Empire start has trade lines to undiscovered planets")
+
+    def test_undiscovered_planets_show_the_grid_shell_and_a_neutral_name(self):
+        # WGUI-05/38 with the retail Empire capture: planets outside the discovery reach draw only
+        # their alternate-2 grid shell, keep their name in the neutral colour and a dim radar blip.
+        for campaign in ("Sandbox_Equal_Footing_Empire", "Sandbox_Equal_Footing_Rebel"):
+            with self.subTest(campaign=campaign):
+                data, capture = support.PlanetHudRuntime.capture(self, campaign)
+                facts = {row["planet"]: row for row in data["hud"]["intelligence"]}
+                labels = {row["planet"]: row for row in data["hud"]["labels"]}
+                blips = {row["planet"]: row for row in data["radar_hud"]["blips"] if row["radar"] == 0}
+                undiscovered = {planet for planet, row in facts.items() if not row["discovered"]}
+                self.assertGreaterEqual(len(undiscovered), 8, "the first day leaves part of the galaxy undiscovered")
+                self.assertEqual(set(data["alternate2_planets"]), undiscovered)
+                self.assert_shell_drawn(data)
+                self.assertTrue(set(data["shell_models"]) >= undiscovered, "stock planet models all author the grid shell")
+                self.assertEqual(set(data["shell_drawn_planets"]), undiscovered)
+                neutral = next(blip["colour"] for blip in blips.values() if blip["alpha"] == 128)
+                for planet in undiscovered:
+                    self.assertEqual(labels[planet]["colour"], neutral, planet)
+                    self.assertEqual(blips[planet]["colour"], neutral, planet)
 
     def test_native_hover_survives_refresh_and_drops_when_camera_hides_label(self):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-hover-lifetime-"))

@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -16,6 +17,18 @@ except ImportError:
 
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
 class GalacticSaveRuntime(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # D1/UI-F3: every launch uses fonts extracted from this host's install,
+        # independent of an existing checkout cache or the caller's environment.
+        cls.font_cache = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-save-fonts-"))
+        extracted = subprocess.run([
+            sys.executable, str(support.ROOT / "tools/fonts/extract_eaw_fonts.py"),
+            "--game-root", support.GAME_ROOT, "--out", str(cls.font_cache),
+            "--allow-unknown-build", "--json"], capture_output=True, text=True, timeout=120)
+        if extracted.returncode != 0:
+            raise RuntimeError(extracted.stdout + extracted.stderr)
+
     def roundtrip(self, child=False):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-save-"))
         report = directory / "report.json"
@@ -29,6 +42,7 @@ var instance
 var restored = false
 var last_click = "none"
 var wait_for_child = CHILD
+var font_checks = {}
 func _initialize():
     instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
     root.add_child(instance)
@@ -79,9 +93,24 @@ func acknowledged(menu):
     return panel != null and panel.is_visible_in_tree()
 func finish(error):
     var out = FileAccess.open(TRACE, FileAccess.WRITE)
-    out.store_string(JSON.stringify({"error": error, "restored": restored, "phase": phase}))
+    out.store_string(JSON.stringify({"error": error, "restored": restored, "phase": phase, "fonts": font_checks}))
     current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
     quit(0 if error == "" else 2)
+func capture_dialog(panel, title_name, button_name, name):
+    if panel == null or not panel.is_visible_in_tree(): return false
+    var title = panel.find_child(title_name, true, false)
+    var button = panel.find_child(button_name, true, false)
+    var title_face = title.get_theme_font("L_Text").get_font_name()
+    var button_face = button.get_theme_font("Push_Button").get_font_name()
+    var title_size = title.get_theme_font_size("L_Text")
+    var button_size = button.get_theme_font_size("Push_Button")
+    # Stock GUIDialogs overrides and UI-F1: 14pt -> 22px, 8pt -> 12px at 720p.
+    if title_face != "Empire At War Bold" or button_face != "Empire At War Bold" or title_size != 22 or button_size != 12:
+        finish("authored dialog font differs: " + name + " title=" + title_face + "/" + str(title_size) + " button=" + button_face + "/" + str(button_size))
+        return false
+    font_checks[name] = {"title_face": title_face, "title_pixels": title_size, "button_face": button_face, "button_pixels": button_size}
+    root.get_texture().get_image().save_png(OUTPUT + "/" + name + ".png")
+    return true
 func _process(delta):
     if not check_world(): return false
     elapsed += delta
@@ -103,16 +132,22 @@ func _process(delta):
                 return false
             key(KEY_ESCAPE); phase = 1
         1:
+            # Escape is refused while the battle's loading state is still shown: press it again.
+            if esc == null or not esc.is_visible_in_tree():
+                key(KEY_ESCAPE); return false
+            if not capture_dialog(esc, "IDC_STATIC_MEDIUM", "IDC_GAME_OPTIONS_RESUME", "escape"): return false
             if button(esc, "IDC_GAME_OPTIONS_RESUME"): phase = 2
         2:
             if not menu.visible: key(KEY_ESCAPE); phase = 3
         3:
             if button(esc, "IDC_SAVE_GAME"): phase = 4
         4:
+            if not capture_dialog(save, "IDC_STATIC_BIG", "IDC_SAVE_GAME_BUTTON", "save"): return false
             if button(save, "IDC_SAVE_CANCEL_BUTTON"): phase = 5
         5:
             if button(esc, "IDC_LOAD_GAME"): phase = 6
         6:
+            if not capture_dialog(load_panel, "IDC_STATIC_MEDIUM", "IDC_LOAD_GAME_BUTTON", "load"): return false
             if button(load_panel, "IDC_LOAD_CANCEL_BUTTON"): phase = 7
         7:
             if button(esc, "IDC_SAVE_GAME"): phase = 8
@@ -211,6 +246,9 @@ func _process(delta):
             corrupt.store_string("invalid checkpoint"); corrupt.close()
             key(KEY_ESCAPE); phase = 38
         38:
+            # The restored battle shows its loading state again: Escape is refused until it is up.
+            if esc == null or not esc.is_visible_in_tree():
+                key(KEY_ESCAPE); return false
             if button(esc, "IDC_LOAD_GAME"): phase = 39
         39:
             if row(load_panel, "Corrupt"): phase = 40
@@ -226,11 +264,13 @@ func _process(delta):
             .replace("SAVED", json.dumps(str(directory / "saved.png").replace("\\", "/")))
             .replace("RESTORED", json.dumps(str(directory / "restored.png").replace("\\", "/")))
             .replace("REFUSED", json.dumps(str(directory / "refused.png").replace("\\", "/")))
+            .replace("OUTPUT", json.dumps(directory.as_posix()))
             , encoding="utf-8")
         arguments = [
             os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
             "--eawr-game-root", support.GAME_ROOT,
+            "--eawr-font-cache", str(self.font_cache),
             "--eawr-lighting", "sh", "--eawr-shadows", "on", "--eawr-report", str(report)]
         if child:
             arguments += qualified_campaign_arguments("save")
@@ -243,6 +283,7 @@ func _process(delta):
         self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
         trace_data = json.loads(trace.read_text(encoding="utf-8"))
         self.assertEqual(trace_data["error"], "")
+        self.assertEqual(set(trace_data["fonts"]), {"escape", "save", "load"})
         self.assertEqual(data["save_controls"]["saved"], 2 if child else 4)
         self.assertEqual(data["save_controls"]["loaded"], 1 if child else 3, "corrupt refusal replaced the successful owner")
         self.assertTrue(data["save_controls"]["visible"], "load refusal discarded the old menu/view")
@@ -260,7 +301,7 @@ func _process(delta):
             self.assertEqual(data["handoff"]["conflict"], data["save_controls"]["restored_conflict"])
             self.assertEqual(data["handoff"]["child_ready_tick"], data["save_controls"]["restored_child_tick"],
                              "loaded success preceded the retained MapMode readiness barrier")
-        for name in ("saved.png", "restored.png", "refused.png"):
+        for name in ("escape.png", "save.png", "load.png", "saved.png", "restored.png", "refused.png"):
             self.assertTrue((directory / name).is_file())
 
     def run_viewer(self, directory, driver_source, extra):
@@ -271,6 +312,7 @@ func _process(delta):
             os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
             "--eawr-game-root", support.GAME_ROOT,
+            "--eawr-font-cache", str(self.font_cache),
             "--eawr-lighting", "sh", "--eawr-shadows", "on", "--eawr-report", str(report)] + extra
         result = subprocess.run(arguments, cwd=support.ROOT, capture_output=True, text=True, timeout=900)
         (directory / (report.stem + ".log")).write_text(result.stdout + result.stderr, encoding="utf-8")

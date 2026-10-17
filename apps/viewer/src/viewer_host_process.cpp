@@ -68,6 +68,19 @@ void ViewerHost::open_skirmish_loading() {
     skirmish_loading_ = screen;
 }
 
+void ViewerHost::leave_campaign_to_menu() {
+    UtilityFunctions::print("EAWR campaign left for the main menu");
+    world_capture_.clear();
+    galactic_mode_->close();
+    galactic_mode_.reset();
+    if (galactic_host_) {
+        remove_child(galactic_host_);
+        memdelete(galactic_host_);
+        galactic_host_ = nullptr;
+    }
+    front_end_->return_to_main_menu();
+}
+
 void ViewerHost::start_skirmish_battle() {
     auto selected = std::exchange(pending_start_, std::nullopt);
     const std::string map_path = *selected->map;
@@ -188,13 +201,28 @@ void ViewerHost::_process(const double delta) {
     }
     if (galactic_mode_) {
         sync_modal_holds();
-        if (const std::optional<int> exit_code = galactic_mode_->process(delta)) stop(*exit_code);
+        if (const std::optional<int> exit_code = galactic_mode_->process(delta)) {
+            // #4039: a failed campaign ends the session; say why, or the log stops at the host teardown.
+            if (*exit_code != 0) UtilityFunctions::printerr("EAWR galactic mode ended with exit code ", *exit_code, ": ",
+                String::utf8(galactic_mode_->failure().c_str()));
+            stop(*exit_code);
+        }
         else if (const auto destination = galactic_mode_->score_destination();
-                 destination && *destination != platform::CampaignScoreDestination::none) {
-            // STAND-IN until the main menu exists (Thom-Ernst/Skirmish): the host owns what a score
-            // destination means, and with no menu or LAN lobby to show it ends the session. The
-            // menu owner replaces this branch with its navigation; the mode never quits itself.
-            UtilityFunctions::print("EAWR score exit: host ends the session (no main menu in this build)");
+                 galactic_mode_->leave_requested()
+                 || (destination && *destination == platform::CampaignScoreDestination::main_menu)) {
+            // The in-game menu's Quit Game and the score screen's Main Menu: the host owns what they
+            // mean. With the front end behind the campaign it is the main menu; a run started
+            // straight into the mode has no menu to show and ends.
+            if (galactic_host_ && front_end_) leave_campaign_to_menu();
+            else {
+                UtilityFunctions::print(galactic_mode_->leave_requested()
+                    ? "EAWR campaign exit: host ends the session (no main menu behind it)"
+                    : "EAWR score exit: host ends the session (no main menu behind it)");
+                stop(0);
+            }
+        } else if (destination && *destination != platform::CampaignScoreDestination::none) {
+            // The LAN lobby has no screen to return to from a campaign yet: the host ends the session.
+            UtilityFunctions::print("EAWR score exit: host ends the session (no LAN lobby behind it)");
             stop(0);
         }
         return;
@@ -229,12 +257,20 @@ void ViewerHost::_process(const double delta) {
                 UtilityFunctions::print("EAWR battle left with exit code ", *exit_code);
                 const auto return_start = StartupTrace::Clock::now();
                 world_capture_.clear();
+                // Quit Game in the battle's menu goes to the main menu, not back to the setup screen.
+                const bool to_menu = front_end_ && map_mode_->leave_to_menu();
                 map_mode_.reset();
                 remove_child(skirmish_battle_host_);
                 memdelete(skirmish_battle_host_);
                 skirmish_battle_host_ = nullptr;
                 skirmish_loading_ = nullptr;
                 gpu_memory_trace.battle_released();
+                if (to_menu) {
+                    // The shell leaves the setup screen on its next frame and shows the main menu.
+                    front_end_->return_to_main_menu();
+                    startup_trace.returning(return_start);
+                    return;
+                }
                 skirmish_setup_->show(*exit_code == 0 ? "Battle finished. Choose your next battle." : "Battle could not finish; see the run report.");
                 startup_trace.returning(return_start);
                 RenderingServer::get_singleton()->connect("frame_post_draw",

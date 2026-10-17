@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/core/tick_profile.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include "eawr/sim/tactical/formation.hpp"
@@ -76,11 +77,38 @@ core::Result<void> session_detail::Tick::service_retreat_flight(UnitStage& stage
         // WR-51/53: sparse lifecycle commit over the ending player's live roster.
         // Escaped actors remain persistent survivors. Ordinary death notifications
         // account for stations and the unescaped remainder exactly once.
+        // WR-85: craft depart with their escaping squadron. Build this membership
+        // only at the terminal lifecycle barrier, after squadron attrition.
+        std::set<EntityId> escaped;
+        if (effect.completed) {
+            escaped.insert(pending_retreat_.actors.begin(), pending_retreat_.actors.end());
+            for (const auto& squadron : impl_->squadrons) if (escaped.contains(squadron.container))
+                escaped.insert(squadron.members.begin(), squadron.members.end());
+        }
         if (effect.destroy_stations || effect.completed) for (auto at = staged.begin(); at != staged.end();) {
             const auto& unit = at->second;
             const bool station = std::binary_search(impl_->victory.starbase_types.begin(), impl_->victory.starbase_types.end(), unit.state.type_id);
-            const bool escaped = std::find(pending_retreat_.actors.begin(), pending_retreat_.actors.end(), at->first) != pending_retreat_.actors.end();
-            if (unit.state.owner != issuer || !(effect.destroy_stations ? station : !escaped)) { ++at; continue; }
+            if (unit.state.owner != issuer || !(effect.destroy_stations ? station : !escaped.contains(at->first))) { ++at; continue; }
+            // RP-09 / FS-R06: a station destroyed by the retreat creates its authored explosion first, a real
+            // projectile at its position (the shooter is the station itself): its blast damages what is near.
+            if (effect.destroy_stations) if (const auto* profile = impl_->combat.find(unit.state.type_id); profile && profile->retreat_explosion) {
+                auto origin = unit.state.position;
+                auto height = math::add(origin.z, profile->ranged_target_z_adjust);
+                if (!height) return core::Result<void>::failure(height.error());
+                origin.z = height.value();
+                auto matrix = math::to_matrix(unit.state.rotation, origin);
+                if (!matrix) return core::Result<void>::failure(matrix.error());
+                auto aim = math::transform_point(matrix.value(), {math::Fixed::from_raw(math::Fixed::scale), {}, {}});
+                if (!aim) return core::Result<void>::failure(aim.error());
+                CombatEvent shot;
+                shot.tick = tick; shot.shooter = unit.state.entity_id;
+                shot.weapon = retreat_explosion_slot_flag;
+                shot.target_hardpoint = no_hardpoint; shot.origin = origin; shot.aim = aim.value();
+                auto projectile = detail::launch_projectile(shot, *profile->retreat_explosion, unit.state.owner,
+                    true, flights_.value().next_projectile.value()++, {}, {});
+                if (!projectile) return core::Result<void>::failure(projectile.error());
+                impacts_.value().projectiles.value().push_back(std::move(projectile).value());
+            }
             events.push_back(destruction_event(tick, EventKind::unit_destroyed, unit.state));
             killed.push_back(unit.state); impl_->adjust_owned(unit.state, false);
             staged.erase(at); ++at;
@@ -305,6 +333,9 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
             replans.push_back(id);
         }
     }
+    // #3644: the object turn follows the ability service and the special-ability handlers and precedes the
+    // replan merge, tracking, late impacts and the commands. Without a provider or recorded uses it is a no-op.
+    if (auto turned = object_turn_seam(); !turned) return turned;
     std::sort(replans.begin(), replans.end());
     replans.erase(std::unique(replans.begin(), replans.end()), replans.end());
     // Tracking phase (#71, AV-02, AV-03): with avoidance rules and a move due this tick,
@@ -417,6 +448,14 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
         }
     }
 
+    // WHE-63: turn births are already allocated and attached in command order.
+    // Join only after the index-aligned movement/tracking inputs have finished.
+    const auto first_turn_birth = object_turn_births_.empty() ? staging_->next_id.value() : object_turn_births_.front().state.entity_id;
+    for (auto& born : object_turn_births_) {
+        track_victory_change(nullptr, &born.state, false);
+        moving.push_back(std::move(born));
+    }
+    object_turn_births_.clear();
     auto& production_census_visits = tracked_.value().production_census_visits.emplace(0);
     const bool buying = std::any_of(impl_->pending.begin(), impl_->pending.end(), [&](const auto& entry) {
         const auto* buy = std::get_if<BuyPayload>(&entry.second.payload);
@@ -435,6 +474,7 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
     }
     mark("staged_map_build", true);
     tracked_.value().staged.emplace(std::move(moving));
+    sync_radar_creations(*tracked_->staged, first_turn_birth, *staging_->next_id);
 
     mark("staged_map_build", false);
     // Serial, in ascending projectile ID: each hit applies to the staged unit it reached (DG-01 to
@@ -474,6 +514,7 @@ core::Result<void> session_detail::Tick::commands() {
     // AV-15). `clip`: a waiting group member's plan frame, the end of its prediction (FM-10).
     const auto submit = [&](const EntityId unit_id, const LiveUnit& live, const std::size_t layer,
                             const std::optional<std::uint64_t> clip) -> core::Result<void> {
+        core::tick_profile::Scope submit_scope("serial.commands.submit");
         rebuilt[layer] = true;
         if (!tracking) return core::Result<void>::success();
         tracking->views[layer].reset();
@@ -496,6 +537,7 @@ core::Result<void> session_detail::Tick::commands() {
     // not the search's end, is the unit's submission (PC-08), so when the search ends (which
     // depends on the slice size) changes only what a later search reads before the landing.
     const auto publish = [&](const EntityId unit_id, const LiveUnit& live, const Impl::SlicedSearch& search) -> core::Result<void> {
+        core::tick_profile::Scope publish_scope("serial.commands.publish");
         if (!tracking) return core::Result<void>::success();
         const auto* footprint = tracked_footprint(table, live.state.type_id);
         const auto layer = footprint != nullptr ? dynamic_layer_index(footprint->layer) : std::nullopt;
@@ -524,6 +566,7 @@ core::Result<void> session_detail::Tick::commands() {
     };
     // The collision world a move in dynamic layer `layer` plans against (AV-01).
     const auto world_for = [&](const std::size_t layer, CollisionWorld& collisions) -> core::Result<void> {
+        core::tick_profile::Scope collision_scope("serial.commands.collision-view");
         if (auto ensured = ensure_view(*tracking, table, staged, rebuilt, layer); !ensured) return ensured;
         if (auto statics = ensure_statics(*tracking, table, staged); !statics) return statics;
         collisions.interval = tracking->interval;
@@ -563,6 +606,7 @@ core::Result<void> session_detail::Tick::commands() {
     std::array<std::uint64_t, 4> spent{};
     // PC-08: `job`'s search runs in slices from now on; its unit waits for the landing.
     const auto start_sliced = [&](const PlanJob& job) -> core::Result<void> {
+        core::tick_profile::Scope sliced_scope("serial.commands.start-sliced");
         auto& live = staged.at(job.unit);
         CollisionWorld world;
         if (auto built = world_for(job.layer, world); !built) return built;
@@ -579,6 +623,7 @@ core::Result<void> session_detail::Tick::commands() {
     // PC-08: the unit takes its sliced search's plan, while it still plans from what the search
     // planned from; otherwise (a change the prediction could not see) it plans now.
     const auto land = [&](const PlanJob& job) -> core::Result<void> {
+        core::tick_profile::Scope landing_scope("serial.commands.land");
         auto& live = staged.at(job.unit);
         auto found = impl_->searches.find(job.unit);
         if (found == impl_->searches.end()) {
@@ -610,6 +655,7 @@ core::Result<void> session_detail::Tick::commands() {
         return submit(job.unit, live, job.layer, std::nullopt);
     };
     const auto plan_pending = [&]() -> std::optional<std::pair<EntityId, core::Diagnostic>> {
+        core::tick_profile::Scope pending_scope("serial.commands.plan-pending");
         const auto budget = table.avoidance->search_budget;
         std::array<std::vector<std::size_t>, 4> lanes;
         for (std::size_t index = 0; index < pending.size(); ++index) lanes[pending[index].layer].push_back(index);
@@ -643,6 +689,7 @@ core::Result<void> session_detail::Tick::commands() {
             const auto search = [&](const std::size_t index) {
                 if (errors[index]) return;
                 const auto& job = pending[round[index]];
+                core::tick_profile::JobScope path_job_scope("job.pending-search", job.unit);
                 auto result = impl_->plan_path_within(*units[index], job.destination, frame, &worlds[index], job.max_speed,
                     &work[index], budget - spent[job.layer]);
                 if (!result) {
@@ -652,8 +699,10 @@ core::Result<void> session_detail::Tick::commands() {
                 planned[index] = result.value() ? 1 : 0;
             };
             if (searching.size() == 1) {
+                core::tick_profile::Scope inline_scope("serial.commands.inline-search");
                 search(searching.front());
             } else if (!searching.empty()) {
+                core::tick_profile::prepare_jobs(searching.size());
                 const auto searched = executor.execute_phase("plan-searches", tick_partition_count, [&](const std::size_t partition) {
                     const auto range = partition_range(partition, searching.size());
                     for (auto index = range.begin; index < range.end; ++index) search(searching[index]);
@@ -692,6 +741,7 @@ core::Result<void> session_detail::Tick::commands() {
     // formation's slots around it, each at its own layer height, and its lanes. Serial, once per
     // command.
     const auto spread_squadrons = [&](const std::vector<EntityId>& squadrons) -> core::Result<void> {
+        core::tick_profile::Scope squadron_scope("serial.commands.squadron-slots");
         std::vector<GroupSquadron> members;
         members.reserve(squadrons.size());
         for (const auto id : squadrons) {
@@ -742,6 +792,7 @@ core::Result<void> session_detail::Tick::commands() {
     // single move; two or more move as a group: each gets its slot and planning speed, the
     // front ship of each layer plans now and the others wait, their predictions clipped.
     const auto plan_group = [&](const PlayerCommand& command, const std::vector<EntityId>& group) -> core::Result<void> {
+        core::tick_profile::Scope group_scope("serial.commands.group");
         const auto destination = *point_move(command.payload);
         const auto layer_of = [&](const LiveUnit& live) {
             return *dynamic_layer_index(tracked_footprint(table, live.state.type_id)->layer);
@@ -782,7 +833,10 @@ core::Result<void> session_detail::Tick::commands() {
                 footprint->asteroid_damage, live.state.order.through_hazards});
             if (auto built = world_for(layer_of(live), mapping); !built) return built;
         }
-        const auto slots = map_group_move(members, destination, mapping, frame, *table.avoidance);
+        const auto slots = [&] {
+            core::tick_profile::Scope mapping_scope("serial.commands.group-mapping");
+            return map_group_move(members, destination, mapping, frame, *table.avoidance);
+        }();
         if (!slots) return core::Result<void>::failure(slots.error());
         for (std::size_t rank = 0; rank < slots.value().size(); ++rank) {
             const auto& slot = slots.value()[rank];
@@ -852,14 +906,27 @@ core::Result<void> session_detail::Tick::commands() {
     // PC-08: every sliced search runs one slice, side by side in the `plan-searches` phase; a
     // search that lands this frame runs to its end.
     if (!impl_->searches.empty()) {
-        std::vector<Impl::SlicedSearch*> running;
-        for (auto& entry : impl_->searches) running.push_back(&entry.second);
+        std::vector<std::pair<const EntityId, Impl::SlicedSearch>*> running;
+        for (auto& entry : impl_->searches) running.push_back(&entry);
         const auto slice = table.avoidance->search_slice;
+        core::tick_profile::prepare_jobs(running.size());
         const auto sliced = executor.execute_phase("plan-searches", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, running.size());
             for (auto index = range.begin; index < range.end; ++index) {
-                auto& search = *running[index];
-                static_cast<void>(search.search.run(search.frame <= frame ? std::numeric_limits<std::uint64_t>::max() : slice));
+                auto& search = running[index]->second;
+                core::tick_profile::JobWork job_work;
+                const auto limit = search.frame <= frame ? std::numeric_limits<std::uint64_t>::max() : slice;
+                if (core::tick_profile::active_jobs) {
+                    job_work.before = search.search.expansions(); job_work.deadline = search.frame; job_work.limit = limit;
+                }
+                core::tick_profile::JobScope sliced_job_scope(search.frame <= frame ? "job.sliced-landing" : "job.sliced-slice",
+                    running[index]->first, &job_work);
+                PathSearchStats job_stats;
+                static_cast<void>(search.search.run(limit, core::tick_profile::active_jobs ? &job_stats : nullptr));
+                if (core::tick_profile::active_jobs) {
+                    job_work.after = search.search.expansions(); job_work.children = job_stats.children;
+                    job_work.queries = job_stats.queries; job_work.leaves = job_stats.leaves; job_work.narrow = job_stats.narrow;
+                }
             }
         });
         if (!sliced) return core::Result<void>::failure(sliced.error());
@@ -1247,6 +1314,22 @@ core::Result<void> session_detail::Tick::commands() {
             auto& special = source.abilities->special.slots[special_index];
             auto& state = source.abilities->slots[*ordinary];
             const auto& ability = profile->abilities[*ordinary];
+            const auto refresh_target_speed = [&](const EntityId target_id) -> core::Result<void> {
+                if (nested->target_speed_decrease.raw() == 0) return core::Result<void>::success();
+                const auto recipient = staged.find(target_id);
+                if (recipient == staged.end()) return core::Result<void>::success();
+                // WHE-25, FD-01: use the existing command replan transaction, including
+                // targets without an ability component to carry a pending replan flag.
+                std::map<EntityId, TypeId> speed_containers;
+                for (const auto& account : ledgers) for (const auto& held : account.completed)
+                    if (const auto station = staged.find(held.station); station != staged.end())
+                        speed_containers.emplace(held.station, station->second.state.type_id);
+                std::vector<CombatBonuses> speed_categories(impl_->bonus_categories.size());
+                if (auto applied = impl_->apply_bonuses(recipient->second, impl_->command_bonuses_for(recipient->second,
+                    impl_->command_ledger, ledgers, speed_containers, speed_categories, &staged), Impl::BonusAdjustment::loss); !applied)
+                    return core::Result<void>::failure(applied.error());
+                return replan(target_id);
+            };
             // AB-40, WAB-36: the autofire flag the attack-state pass reads, only where Supports_Autofire allows it.
             if (payload.action == AbilityAction::autofire_on || payload.action == AbilityAction::autofire_off) {
                 if (!ability.supports_autofire) return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
@@ -1254,6 +1337,7 @@ core::Result<void> session_detail::Tick::commands() {
                 return core::Result<RejectReason>::success(RejectReason::none);
             }
             if (payload.action == AbilityAction::deactivate) {
+                const auto previous_target = state.target;
                 static_cast<void>(deactivate_ability(ability, state, tick));
                 state.target = invalid_entity_id;
                 state.target_hardpoint = no_hardpoint;
@@ -1261,6 +1345,8 @@ core::Result<void> session_detail::Tick::commands() {
                 special.targets.clear();
                 special.context.reset();
                 impl_->register_concentrate(source);
+                if (auto refreshed = refresh_target_speed(previous_target); !refreshed)
+                    return core::Result<RejectReason>::failure(refreshed.error());
                 return core::Result<RejectReason>::success(RejectReason::none);
             }
             if (payload.action != AbilityAction::activate || state.active || special.cancelled || source.abilities->special.service_cancelled
@@ -1338,6 +1424,8 @@ core::Result<void> session_detail::Tick::commands() {
             special.targets = {payload.target};
             special.next_service_frame = tick + nested->service_interval;
             impl_->register_concentrate(source);
+            if (auto refreshed = refresh_target_speed(state.target); !refreshed)
+                return core::Result<RejectReason>::failure(refreshed.error());
             return core::Result<RejectReason>::success(RejectReason::none);
         }
         if (payload.ability == AbilityKind::barrage && payload.action == AbilityAction::activate) {
@@ -1480,6 +1568,7 @@ core::Result<void> session_detail::Tick::commands() {
             return profile.abilities[*ability_slot(profile, payload.ability)];
         };
         const auto slot_of = [&](LiveUnit& live) -> AbilitySlot& { return live.abilities->slots[*holds(live)]; };
+        const auto original_order = staged.at(unit_id).state.order;
         std::vector<EntityId> changed_speed;
         bool hunt_stopped = false; // also LURE: WAB-05 and WLU-02 stop the behaviour's move
         switch (payload.action) {
@@ -1569,25 +1658,59 @@ core::Result<void> session_detail::Tick::commands() {
             for (auto* live : holders) slot_of(*live).autofire = payload.action == AbilityAction::autofire_on;
             break;
         }
-        const bool behaviour_on = (payload.ability == AbilityKind::hunt || payload.ability == AbilityKind::lure)
+        const bool behaviour_on = (payload.ability == AbilityKind::hunt || payload.ability == AbilityKind::lure
+            || payload.ability == AbilityKind::stealth)
             && payload.action == AbilityAction::activate;
-        // WLU-02: switching LURE on also stops the squadron's move (only HUNT keeps it, WAB-04).
+        // WLU-02 stops the move; HUNT and STEALTH retain their own destination rules.
         if (behaviour_on && payload.ability == AbilityKind::lure) hunt_stopped = true;
         if (behaviour_on) {
             const auto& membership = craft_prep_->craft_squadron.value();
             const auto member = membership.find(unit_id);
             const auto container_id = member != membership.end() ? member->second : unit_id;
-            if (const auto mind = minds.find(container_id); mind != minds.end()) {
-                minds.at(container_id).target = invalid_entity_id;
-                minds.at(container_id).target_hardpoint = attack_hull;
-                minds.at(container_id).approach = false;
+            // WST-03 applies whole-team release to a team request. A member-addressed cloak
+            // keeps the other members' order; it does not claim the team's destination.
+            if (payload.ability != AbilityKind::stealth || container_id == unit_id) {
+                auto& container = staged.at(container_id);
+                bool preserve_escort = false;
+                if (const auto mind = minds.find(container_id); mind != minds.end()) {
+                    // WST-03: release the team's attack as well as the members' targets. Otherwise
+                    // the old player attack is shared back as a direct order on the next turn.
+                    auto& team = minds.at(container_id);
+                    const auto escort = staged.find(team.escorted);
+                    preserve_escort = payload.ability == AbilityKind::stealth && team.mode == SquadronMode::escort
+                        && escort != staged.end() && !players_hostile(impl_->snapshot_players,
+                            container.state.owner, escort->second.state.owner);
+                    if (payload.ability == AbilityKind::stealth && !preserve_escort
+                        && (team.target != invalid_entity_id || team.escorted != invalid_entity_id
+                            || (team.formation && team.formation->attack_target != invalid_entity_id))) {
+                        auto destination = container.state.position;
+                        if (team.attack_path && !team.attack_path->stack.empty()
+                            && !team.attack_path->stack.back().nodes.empty())
+                            destination = team.attack_path->stack.back().nodes.back();
+                        apply_squadron_order(team, MovePayload{destination}, container.state.position, squadron_table);
+                        container.state.order = order_for(MovePayload{destination}, tick);
+                    }
+                    if (preserve_escort) {
+                        team.attack_path.reset();
+                        if (team.formation) {
+                            auto& held = *team.formation;
+                            if (held.attack_override) held.complete = held.has_reached_done;
+                            held.attack_override = false;
+                            held.attack_target = invalid_entity_id;
+                            held.attack_hardpoint = attack_hull;
+                        }
+                    }
+                    team.target = invalid_entity_id;
+                    team.target_hardpoint = attack_hull;
+                    team.approach = false;
+                }
+                if (container.combat) {
+                    container.combat->attack_target = invalid_entity_id;
+                    container.combat->direct = false;
+                }
+                if (preserve_escort) container.state.order = original_order;
+                else if (container.state.order.target != invalid_entity_id) container.state.order = {};
             }
-            auto& container = staged.at(container_id);
-            if (container.combat) {
-                container.combat->attack_target = invalid_entity_id;
-                container.combat->direct = false;
-            }
-            if (container.state.order.target != invalid_entity_id) container.state.order = {};
         }
         if (hunt_stopped) {
             // WAB-05: disabling the behaviour also stops its current movement.
@@ -2024,6 +2147,11 @@ core::Result<void> session_detail::Tick::commands() {
             std::get<ReinforcePayload>(resolved->payload).position = search->result.position;
         }
         const auto& command = resolved ? *resolved : current;
+        core::tick_profile::Scope command_scope(
+            std::holds_alternative<MovePayload>(command.payload) ? "serial.commands.move"
+            : std::holds_alternative<AttackPayload>(command.payload) ? "serial.commands.attack"
+            : std::holds_alternative<ReinforcePayload>(command.payload) ? "serial.commands.reinforce"
+            : "serial.commands.other");
         concentrate_command_key = command.key;
         // A command other than a move may read or change what the queued searches read.
         if (!std::holds_alternative<MovePayload>(command.payload) && !pending.empty()) {
@@ -2082,7 +2210,7 @@ core::Result<void> session_detail::Tick::commands() {
             const auto source_id = command.units.front();
             const auto source = staged.find(source_id);
             const auto target = staged.find(special->target);
-            const auto* player = impl_->economy.player(issuer);
+            const auto player = impl_->economy.player_at(issuer, tick);
             const auto* profile = source != staged.end() ? impl_->combat.find(source->second.state.type_id) : nullptr;
             auto reason = RejectReason::none;
             const bool ai = special->admission != SpecialFireAdmission::player;
@@ -2314,7 +2442,9 @@ core::Result<void> session_detail::Tick::commands() {
             if (target != staged.end()) {
                 // WCC-25: direct assignment promotes a craft to its team, then refuses an
                 // invalid type without replacing the held target. The outer order still
-                // proceeds; collision and special-weapon admission belong to scans only.
+                // proceeds; collision and special-weapon admission belong to scans only. A squadron
+                // team holds such a target, but its members take it only through that admission
+                // (session_step_targets.cpp, #3922).
                 const auto& membership = craft_prep_.value().craft_squadron.value();
                 const auto member = membership.find(attack->target);
                 const auto container = member != membership.end() ? staged.find(member->second) : target;
@@ -3008,7 +3138,7 @@ void session_detail::Tick::pay_bounty(const TypeId victim, const PlayerId owner,
         if (scaled.value().raw() % math::Fixed::scale >= math::Fixed::scale / 2) ++integral;
         const auto payment = math::Fixed::from_integer(std::max<std::int64_t>(1, integral));
         if (!payment) { bounty_error_ = payment.error(); return; }
-        const auto* policy = rules.player(recipient.player);
+        const auto policy = rules.player_at(recipient.player, tick);
         if (!policy) continue;
         auto paid = change_credits(recipient, *policy, payment.value());
         if (!paid) { bounty_error_ = paid.error(); return; }

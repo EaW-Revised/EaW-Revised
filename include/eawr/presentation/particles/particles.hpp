@@ -256,6 +256,11 @@ public:
     void set_origin(Vec3 origin);
     void set_basis(Basis3 basis);
     void set_wind(Vec3 acceleration);
+    // WGP-47, PS-17/28: opt-in dynamic settings; unchanged consumers retain
+    // their existing scheduling/random stream. Size does not scale positions.
+    [[nodiscard]] core::Result<void> set_dynamic(float size, float energy);
+    // WGP-49: replace the local position volume without rebuilding live particles.
+    [[nodiscard]] core::Result<void> set_pinched_cylinder(float radius, float height, float fraction);
     [[nodiscard]] core::Result<void> set_wind_disturbances(std::span<const WindDisturbance> disturbances);
     [[nodiscard]] core::Result<void> set_detail(ParticleDetail detail);
     [[nodiscard]] ParticleDetail detail() const noexcept { return detail_; }
@@ -362,6 +367,8 @@ private:
 
     SystemDefinition definition_;
     ParticleDetail detail_;
+    float dynamic_size_{1.0F}, dynamic_energy_{1.0F};
+    bool dynamic_settings_{};
     std::vector<std::uint8_t> enabled_;
     std::vector<EmitterState> emitters_;
     std::vector<std::vector<std::size_t>> children_;

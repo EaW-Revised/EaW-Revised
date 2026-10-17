@@ -5,10 +5,16 @@
 #include "family.hpp"
 #include "grass.hpp"
 #include "mesh_additive.hpp"
+#include "mesh_additive_2x.hpp"
+#include "mesh_bump_spec_glow_colorize.hpp"
 #include "mesh_additive_offset.hpp"
 #include "mesh_additive_vcolor.hpp"
 #include "mesh_gloss_colorize.hpp"
 #include "mesh_solid_color.hpp"
+#include "rskin.hpp"
+#include "planet_deathstar.hpp"
+#include "mesh_shield.hpp"
+#include "missing_effect.hpp"
 #include "tree.hpp"
 
 #include <iterator>
@@ -39,6 +45,14 @@ inline constexpr Family families[]{
     dx8_mesh::batch_mesh_gloss_family,
     dx8_mesh::batch_mesh_alpha_family,
     dx8_mesh::mesh_alpha_gloss_family,
+    missing_effect::family,
+    mesh_additive_2x::family,
+    mesh_bump_spec_glow_colorize::family,
+    rskin::additive_family,
+    rskin::alpha_family,
+    mesh_shield::family,
+    mesh_shield::farseer_family,
+    planet_deathstar::family,
 };
 
 [[nodiscard]] inline std::span<const Family> registry() noexcept {
@@ -94,8 +108,16 @@ inline constexpr Family families[]{
 // A zero XY rate needs no per-tick write, including unused nonzero Z/W.
 [[nodiscard]] inline bool reads_effect_time(const MaterialDescription& material) noexcept {
     const Family* family = find_family(material);
-    if (family == nullptr || material.pass_name != family->pass_name || !admits_pass(*family, material.pass)
-        || (family->program != mesh_additive::family.program && family->program != mesh_additive_vcolor::family.program)) {
+    if (family != nullptr && family->program == planet_deathstar::family.program
+        && material.pass_name == family->pass_name && admits_pass(*family, material.pass)) {
+        return bindings::scalar_or(material, "CloudScrollRate", 0.0025F) != 0.0F;
+    }
+    if (family == nullptr || material.pass_name != family->pass_name || !admits_pass(*family, material.pass)) {
+        return false;
+    }
+    if (family->program == mesh_shield::family.program) return mesh_shield::reads_effect_time(material);
+    if (family->program != mesh_additive::family.program && family->program != mesh_additive_vcolor::family.program
+        && family->program != mesh_additive_2x::family.program && family->program != rskin::additive_family.program) {
         return false;
     }
     const auto rate = bindings::vector_or(material, "UVScrollRate", {0.0F, 0.0F, 0.0F, 0.0F});
