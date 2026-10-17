@@ -20,9 +20,13 @@ template<class T> core::Result<T> fail(std::string message) {
 struct Writer {
     Bytes bytes;
     void word(std::uint64_t value, std::size_t width = 8) {
-        for (std::size_t i = 0; i < width; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (i * 8U)));
+        const auto at = bytes.size(); bytes.resize(at + width);
+        for (std::size_t i = 0; i < width; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8U));
     }
-    void raw(std::span<const std::uint8_t> value) { bytes.insert(bytes.end(), value.begin(), value.end()); }
+    void raw(std::span<const std::uint8_t> value) {
+        const auto at = bytes.size(); bytes.resize(at + value.size());
+        std::copy(value.begin(), value.end(), bytes.begin() + static_cast<std::ptrdiff_t>(at));
+    }
     void text(std::string_view value) {
         word(value.size(), 4); raw({reinterpret_cast<const std::uint8_t*>(value.data()), value.size()});
     }

@@ -66,8 +66,9 @@ void test_countdown() {
     expect(ui::retreat_countdown_line("T", state, 400, 30) == "T 000.000", "RP-07: expiry reads zero");
     state.phase = tactical::RetreatPhase::escaping;
     expect(ui::retreat_countdown_line("T", state, 100, 30) == "T 000.000", "RP-07: the escape phase reads zero");
-    expect(ui::retreat_countdown_line("T", tactical::RetreatState{.phase = tactical::RetreatPhase::countdown, .deadline = 30 * 125 + 10},
-        10, 30) == "T 125.000", "RP-07: seconds past 99 keep three digits");
+    tactical::RetreatState long_countdown;
+    long_countdown.phase = tactical::RetreatPhase::countdown; long_countdown.deadline = 30 * 125 + 10;
+    expect(ui::retreat_countdown_line("T", long_countdown, 10, 30) == "T 125.000", "RP-07: seconds past 99 keep three digits");
 }
 
 void test_colour() {

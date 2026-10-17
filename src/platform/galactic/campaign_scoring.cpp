@@ -116,7 +116,8 @@ struct Host {
     }
     Void service() {
         sim::InlineExecutor executor;
-        const auto result = scheduler->service(executor, {.host_paced = [](std::uint64_t) { return true; }});
+        lua::ServiceOptions options; options.host_paced = [](std::uint64_t) { return true; };
+        const auto result = scheduler->service(executor, options);
         if (!result) return Void::failure(result.error());
         if (!result.value().diagnostics.empty()) {
             const auto& diagnostic = result.value().diagnostics.front();
