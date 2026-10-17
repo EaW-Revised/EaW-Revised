@@ -23,11 +23,13 @@ struct EngineContractAccess {
         Goal goal; goal.id = 7; goal.function = 0; player.active.push_back(goal);
         GoalFunctionEntry function; function.goal = &definition; player.functions.push_back(function);
         engine.players_.push_back(std::move(player));
-        Plan plan; plan.id = plan.goal = 7; plan.player = 1; plan.instance = first_plan_instance; plan.taskforces = {8};
-        engine.running_.emplace(plan.id, plan); engine.plan_of_instance_.emplace(plan.instance, plan.id);
-        TaskForce force; force.id = 8; force.plan = 7; force.units = {20, 21, 22}; force.galactic_fleet = 10;
-        engine.taskforces_.emplace(force.id, std::move(force));
-        engine.next_plan_id_ = 8; engine.next_taskforce_id_ = 9; engine.next_instance_ = first_plan_instance + 1;
+        Plan plan; plan.goal = 7; plan.id = galactic_id_base(0) | 7; plan.player = 1; plan.instance = galactic_instance_base(0); plan.taskforces = {galactic_id_base(0) | 8};
+        engine.players_.back().running.emplace(plan.id, plan); engine.players_.back().plan_of_instance.emplace(plan.instance, plan.id);
+        TaskForce force; force.id = galactic_id_base(0) | 8; force.plan = plan.id; force.units = {20, 21, 22}; force.galactic_fleet = 10;
+        engine.players_.back().taskforces.emplace(force.id, std::move(force));
+        auto& retained = engine.players_.back(); retained.slot = 0; retained.next_plan_local = 8; retained.next_taskforce_local = 9; retained.next_instance_local = 1;
+
+        engine.rebuild_runtime_index();
     }
     static void blocks(Engine& engine) { engine.service_blocks(); }
 };
@@ -124,7 +126,7 @@ void shared_movement_block() {
     const auto issue = [&](std::uint64_t sequence, std::string operation, auth::Value argument) {
         auth::ServiceReport report; auth::ScriptCommand command;
         command.issuer = ai::first_plan_instance; command.sequence = sequence; command.verb = ai::verb_ai;
-        command.arguments = {auth::Value{std::move(operation)}, auth::Value{auth::Handle{ai::handle_taskforce, 8}}, std::move(argument)};
+        command.arguments = {auth::Value{std::move(operation)}, auth::Value{auth::Handle{ai::handle_taskforce, ai::galactic_id_base(0) | 8}}, std::move(argument)};
         report.commands.push_back(std::move(command)); done(engine->after_service(report));
     };
     issue(1, "galactic_move", auth::Value{auth::Handle{eawr::script::foc::handle_game_object, 3}});
@@ -185,8 +187,10 @@ void taskforce_containment() {
     request.kind = ga::ActionKind::land; request.object = 10; (void)take(actions.admit(request));
     request.kind = ga::ActionKind::launch; request.members = {20, 21, 22};
     const auto launched = take(actions.admit(request));
-    expect(launched.admitted && launched.request == 10 && world.snapshot()->control()->planets.front().landed.empty(),
-        "TaskForce launch scans selected members in joining order and reuses retained fleet");
+    const auto first = actions.containing_fleet(1, 21), second = actions.containing_fleet(1, 22);
+    expect(launched.admitted && first && second && *first != 10 && *second != 10 && first != second
+        && launched.request == *second && world.snapshot()->control()->planets.front().landed.empty(),
+        "WGA-486 per-parent launches retain their own fleets and return the last actual fleet without reusing the retained fleet");
 }
 std::uint64_t section_size(const gc::GalacticSession& world, std::uint16_t wanted) {
     const auto bytes = world.canonical_state_bytes(); std::size_t offset = 12;
@@ -427,7 +431,7 @@ void invasion_retention() {
     namespace auth = eawr::script::authoritative;
     auth::ServiceReport admit_report; auth::ScriptCommand command;
     command.issuer = ai::first_plan_instance; command.sequence = 1; command.verb = ai::verb_ai;
-    command.arguments = {auth::Value{std::string("galactic_invade")}, auth::Value{auth::Handle{ai::handle_taskforce, 8}}};
+    command.arguments = {auth::Value{std::string("galactic_invade")}, auth::Value{auth::Handle{ai::handle_taskforce, ai::galactic_id_base(0) | 8}}};
     admit_report.commands.push_back(std::move(command)); done(engine->after_service(admit_report));
     const auto block_id = ai::block_id(ai::first_plan_instance, 1);
     const auto request = engine->block(block_id)->galactic_request;
@@ -460,7 +464,7 @@ void equal_owner_invasion_block() {
         namespace auth = eawr::script::authoritative;
         auth::ServiceReport admission; auth::ScriptCommand command;
         command.issuer = ai::first_plan_instance; command.sequence = 1; command.verb = ai::verb_ai;
-        command.arguments = {auth::Value{std::string("galactic_invade")}, auth::Value{auth::Handle{ai::handle_taskforce, 8}}};
+        command.arguments = {auth::Value{std::string("galactic_invade")}, auth::Value{auth::Handle{ai::handle_taskforce, ai::galactic_id_base(0) | 8}}};
         admission.commands.push_back(std::move(command)); done(engine->after_service(admission));
         const auto id = ai::block_id(ai::first_plan_instance, 1); const auto request = engine->block(id)->galactic_request;
         expect(world->native_invasion(request)->state == gc::GalacticSession::NativeInvasion::State::completed
@@ -618,6 +622,22 @@ void changed_path() {
     const auto result = take(actions.poll_movement(accepted.request));
     expect(result.finished && result.actor == 10 && world.snapshot()->fleets().front().orbit == 2 && searches == 2,
         "changed live path facts terminate at intermediate system rather than traverse cached predecessors or invent success");
+}
+// Known deviation (#3981): without an AI bribe owner a corruption-benefiting move ends before an occupied intermediate hop.
+void bribed_traversal_without_owner() {
+    auto world = take(gc::GalacticSession::create(fixture()));
+    auto funding = std::make_shared<ai::GalacticFunding>(); ga::NativeActions actions(world, funding, {}, {});
+    actions.bind_admission_gate([] { return false; });
+    actions.bind_movement([&](auto player, const auto& snapshot) {
+        auto input = copied(player, snapshot);
+        input.benefits_from_corruption = true; input.orbital_occupants[2] = 2;
+        return eawr::core::Result<ga::NativeActions::MovementInput>::success(std::move(input));
+    }, [] { return false; }, [&](auto player, auto actor) { return world.recheck_native_orbit(player, actor); });
+    ga::ActionRequest request; request.kind = ga::ActionKind::move; request.player = 1; request.object = 10; request.target = 3;
+    const auto accepted = take(actions.admit(request));
+    const auto state = take(actions.poll_movement(accepted.request));
+    expect(state.finished && world.snapshot()->fleets().front().orbit == 1 && !world.snapshot()->fleets().front().motion.transit,
+        "an unowned AI bribe hop ends the move at the previous planet instead of faulting");
 }
 void skipped_arrival_polls() {
     eawr::sim::InlineExecutor executor; auto world = take(gc::GalacticSession::create(fixture()));
@@ -778,7 +798,7 @@ void installed() {
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
-        else { shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); native_journal_disk(); contracts(); changed_path(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); }
+        else { shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

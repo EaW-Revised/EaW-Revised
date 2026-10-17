@@ -143,7 +143,16 @@ public:
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
-    void measure_particles(bool on) noexcept { registry_->begin_measurement(on); }
+    void measure_particles(bool on) noexcept {
+        registry_->begin_measurement(on);
+        measure_owner_ = on;
+        owner_timings_ = {};
+        owner_counts_ = {};
+    }
+    // Fine diagnostic only: setup, unit lookup, abilities, contacts, events,
+    // projectiles, final advance, cleanup; shield casts overlap the events lap.
+    [[nodiscard]] const std::array<double, 9>& owner_timings() const noexcept { return owner_timings_; }
+    [[nodiscard]] const std::array<std::uint64_t, 3>& owner_counts() const noexcept { return owner_counts_; }
     [[nodiscard]] const particles::RegistryTimings& particle_timings() const noexcept { return registry_->timings(); }
     [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
         return registry_->set_detail(detail);
@@ -161,6 +170,9 @@ public:
     [[nodiscard]] std::uint64_t particles() const noexcept { return particles_; }
 
 private:
+    bool measure_owner_{};
+    std::array<double, 9> owner_timings_{};
+    std::array<std::uint64_t, 3> owner_counts_{};
     bool measure_preparation_{};
     double projectile_prepare_ms_{};
     enum class Render : std::uint8_t { none, model, beam, kite };
@@ -280,6 +292,32 @@ private:
     struct HeroBeamLook {
         Batch batch;
         Batch sparks;
+        // TBF-06..08: a separate authored lightning layer, on the presentation clock.
+        struct Lightning {
+            Batch batch;
+            std::string name, texture;
+            float width_min{}, width_max{}, fade_min{}, fade_max{}, interval_min{}, interval_max{};
+            float detail{}, cycles{}, rotations{}, repeat{}, scroll{};
+            std::array<float, 3> displacement{};
+            particles::Color start{}, end{};
+            std::uint32_t count{};
+            bool update_all{}, replace_faded{};
+            struct Bolt {
+                double born{}, lifetime{};
+                float width{}, phase{};
+                particles::Vec3 start{}, end{}, side{}, normal{};
+                std::vector<particles::Vec3> points;
+            };
+            struct Source {
+                sim::EntityId target{};
+                double next{}, sampled{-1.0};
+                std::uint32_t created{};
+                std::vector<Bolt> bolts;
+            };
+            std::map<sim::EntityId, Source> sources;
+            std::uint64_t segments_drawn{}, bolts_created{}, active_at_release{};
+            std::array<float, 3> last_start{}, last_end{};
+        } lightning;
         std::string texture;
         float width{};
         std::int32_t frames{};
@@ -359,7 +397,7 @@ private:
     void note_types(const sim::tactical::TacticalSnapshot& previous, const sim::tactical::TacticalSnapshot& latest);
     // BP-63, BP-64: one entry of `list` for the hit `event` ended, drawn from its projectile's ID.
     [[nodiscard]] const std::string* hit_pick(const std::vector<std::string>& list, space::HitParticleList kind,
-                                              const sim::tactical::CombatEvent& event, const SnapshotAt& snapshot_at);
+        const sim::tactical::CombatEvent& event, std::optional<std::uint64_t> projectile);
 
     godot::Node3D* host_;
     const vfs::Vfs* filesystem_;

@@ -2,6 +2,9 @@ add_library(eawr_project_warnings INTERFACE)
 add_library(eawr::project_warnings ALIAS eawr_project_warnings)
 
 if(MSVC)
+    # Large translation units can exceed COFF's section limit, especially in Debug.
+    # Directory scope also covers targets that do not link the warnings interface.
+    add_compile_options(/bigobj)
     target_compile_options(eawr_project_warnings INTERFACE /W4 /permissive-)
     if(EAWR_WARNINGS_AS_ERRORS)
         target_compile_options(eawr_project_warnings INTERFACE /WX)

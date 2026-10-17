@@ -71,6 +71,13 @@ target_compile_features(ui_time_controls_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_time_controls_tests)
 add_test(NAME ui_time_controls_contracts COMMAND ui_time_controls_tests)
 
+# Tag audit T7: the space retreat cues, countdown line and colour.
+add_executable(ui_retreat_presentation_tests retreat_presentation_tests.cpp)
+target_link_libraries(ui_retreat_presentation_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_retreat_presentation_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_retreat_presentation_tests)
+add_test(NAME ui_retreat_presentation_contracts COMMAND ui_retreat_presentation_tests)
+
 # #848: the battle UI in the tactical overview levels (what hides, the level-change fade).
 add_executable(ui_overview_ui_tests overview_ui_tests.cpp)
 target_link_libraries(ui_overview_ui_tests PRIVATE eawr::ui_model)

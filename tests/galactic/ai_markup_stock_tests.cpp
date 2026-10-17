@@ -122,7 +122,7 @@ std::string run(const eawr::vfs::Vfs& files, const eawr::data::Catalog& catalog,
         auto provider = std::make_shared<cp::GalacticAiUsabilityProvider>(usability);
         cp::GalacticAiStockQueries out;
         out.usability = [provider](auto player, const auto& snapshot, auto planet) { return provider->usability(player, snapshot, planet); };
-        out.connectivity = [provider](const auto& parent, auto& world, auto& engine, const auto& workers_) { return provider->connectivity(parent, world, engine, workers_); };
+        out.connectivity_publication = [provider](const auto& parent, auto& world, auto& engine, const auto& workers_) { return provider->connectivity_publication(parent, world, engine, workers_); };
         out.movement = [provider](auto player, const auto& snapshot, const auto& world, const auto& engine, const auto& workers_) { return provider->movement(player, snapshot, world, engine, workers_); };
         out.external.emplace("GALACTIC_USABILITY", std::move(provider));
         return eawr::core::Result<cp::GalacticAiStockQueries>::success(std::move(out));

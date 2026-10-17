@@ -129,8 +129,10 @@ class CrispTextContract(unittest.TestCase):
                            ("apps/viewer/src/map_mode_hud.cpp", "lan_overlay")):
             source = (ROOT / path).read_text(encoding="utf-8")
             self.assertIn(root + "->" + enabled, source, path)
-            self.assertIn("set_scale(Vector2(scale, scale));", source, path)
-            self.assertIn("refresh_text_oversampling(*", source, path)
+            self.assertIn("fit_letterbox_canvas(*", source, path)
+        helper = (ROOT / "src/presentation/godot/ui/kit.cpp").read_text(encoding="utf-8")
+        self.assertIn("canvas.set_scale(Vector2(scale, scale));", helper)
+        self.assertIn("refresh_text_oversampling(canvas);", helper)
         for path in ("kit_buttons.cpp", "kit_controls.cpp", "kit_text.cpp"):
             source = (ROOT / "src/presentation/godot/ui" / path).read_text(encoding="utf-8")
             self.assertIn("track_oversampling(*this);", source, path)

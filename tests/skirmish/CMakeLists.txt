@@ -57,6 +57,16 @@ target_link_libraries(foc_ai_tests PRIVATE eawr::skirmish eawr::platform)
 target_compile_features(foc_ai_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(foc_ai_tests)
 add_test(NAME foc_ai_battle COMMAND foc_ai_tests)
+# GFS-A24 release acceptance runs BOTH the pure identity profile and the restore row below.
+eawr_add_game_data_test(NAME foc_ai_player_stream_profile COMMAND foc_ai_tests --player-stream-profile 5400)
+set_tests_properties(foc_ai_player_stream_profile PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:"
+    LABELS "game-data;opt-in;batch-only" TIMEOUT 3600 RUN_SERIAL TRUE)
+eawr_add_game_data_test(NAME foc_ai_player_stream_reference COMMAND foc_ai_tests --player-stream-profile 5400 1)
+set_tests_properties(foc_ai_player_stream_reference PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:"
+    LABELS "game-data;opt-in;batch-only" TIMEOUT 1800 RUN_SERIAL TRUE)
+eawr_add_game_data_test(NAME foc_ai_player_stream_restore COMMAND foc_ai_tests --player-stream-restore 5400)
+set_tests_properties(foc_ai_player_stream_restore PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:"
+    LABELS "game-data;opt-in;batch-only" TIMEOUT 1800 RUN_SERIAL TRUE)
 eawr_add_game_data_test(NAME foc_ai_serial_profile COMMAND foc_ai_tests --serial-profile 5400)
 set_tests_properties(foc_ai_serial_profile PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:"
     LABELS "game-data;performance;opt-in;batch-only" TIMEOUT 3600)
@@ -66,7 +76,7 @@ set_tests_properties(foc_ai_serial_breakdown PROPERTIES SKIP_REGULAR_EXPRESSION 
 add_test(NAME foc_ai_squadron_idle_trace COMMAND foc_ai_tests --squadron-idle-trace 3600)
 set_tests_properties(foc_ai_squadron_idle_trace PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 2520)
 # Wall budget rounds 1.5 * 1660.26s measured whole-case time up to minutes.
-set_tests_properties(foc_ai_battle PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 2520)
+set_tests_properties(foc_ai_battle PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 2520 RUN_SERIAL TRUE)
 add_test(NAME foc_ai_stock_economy_witness COMMAND foc_ai_tests --stock-economy-witness)
 # Wall budget rounds 1.5 * 1027.5s measured whole-case time up to minutes.
 set_tests_properties(foc_ai_stock_economy_witness PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:"
@@ -168,6 +178,15 @@ eawr_add_game_data_test(NAME foc_ai_station_pace
         "$<TARGET_FILE:ai_progression_probe>" "${CMAKE_CURRENT_BINARY_DIR}/station-pace")
 set_tests_properties(foc_ai_station_pace PROPERTIES
     SKIP_REGULAR_EXPRESSION "SKIPPED:" LABELS "game-data" TIMEOUT 1800)
+# Coordinator-defined #3716 acceptance remains outside CTest/default release
+# suites while the timing gap is open. This target is deliberately not ALL.
+add_custom_target(foc_ai_extractor_lifetime
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CMAKE_CURRENT_LIST_DIR}/extractor_lifetime_check.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/extractor_lifetime_check.py"
+    DEPENDS ai_progression_probe
+    COMMENT "Prepare the manual #3716 acceptance runner (execute separately with an installed root)"
+    VERBATIM)
 # #1933: 60000-tick AI-vs-AI duels on the live skirmish economy with the full stock menu, logging
 # superweapon purchase, permission, readiness and population room. Observation only; outputs under
 # the build tree's superweapon-long/ folder.
@@ -203,6 +222,7 @@ add_executable(foc_soak_tests foc_soak_tests.cpp)
 target_link_libraries(foc_soak_tests PRIVATE eawr::skirmish eawr::platform eawr_soak eawr_m2_battle)
 target_compile_features(foc_soak_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(foc_soak_tests)
+add_test(NAME foc_journal_overflow COMMAND foc_soak_tests --journal-regression)
 add_test(NAME foc_soak_615 COMMAND foc_soak_tests --seeds 12 --ticks 2500 --no-invariants)
 set_tests_properties(foc_soak_615 PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 # #664 (space-fighters FM-20): an idle leader that sat on its hold point let a wingman run away. On

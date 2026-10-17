@@ -1,7 +1,9 @@
 #pragma once
 
 #include "eawr/net/transport.hpp"
+#include "eawr/core/sha256.hpp"
 #include <array>
+#include <algorithm>
 #include <functional>
 #include <string_view>
 
@@ -76,6 +78,83 @@ public:
 [[nodiscard]] std::array<std::uint8_t, 32> rejoin_authenticator(
     const std::array<std::uint8_t, 32>& token, const std::array<std::uint8_t, 32>& identity,
     std::uint32_t seat, std::uint64_t epoch, const RejoinNonce& nonce, bool transfer = true);
+
+// Mutual, nonce-bound replacement-stream proof, using the held-seat pair key.
+// A room capability and a GNS identity never substitute for this proof. The
+// caller supplies a transport domain and only publishes the edge when proven.
+class RejoinLinkProof final {
+public:
+    using Bytes = std::vector<std::uint8_t>;
+    RejoinLinkProof(const RejoinNonce& match, const RejoinNonce& key, PeerIndex self,
+        PeerIndex remote, std::uint64_t epoch, std::string_view domain)
+        : key_(key), self_(self), remote_(remote), epoch_(epoch) {
+        Bytes text(domain.begin(), domain.end()); text.insert(text.end(), match.begin(), match.end());
+        put(text, std::min(self, remote), 4); put(text, std::max(self, remote), 4);
+        identity_ = core::sha256(text);
+    }
+    ~RejoinLinkProof() { erase_reconnect_secret(key_); }
+    core::Result<Bytes> start() {
+        if (nonce_) return core::Result<Bytes>::success(frame(rejoin_link_challenge, remote_, *nonce_));
+        auto nonce = make_rejoin_nonce();
+        if (!nonce) return core::Result<Bytes>::failure(nonce.error());
+        nonce_ = nonce.value();
+        return core::Result<Bytes>::success(frame(rejoin_link_challenge, remote_, *nonce_));
+    }
+    core::Result<std::optional<Bytes>> receive(std::span<const std::uint8_t> bytes) {
+        using Result = core::Result<std::optional<Bytes>>;
+        const auto bad = [] {
+            core::Diagnostic error; error.code = "EAWR-NET-1792"; error.message = "Replacement pair proof differs";
+            return Result::failure(std::move(error));
+        };
+        if (bytes.size() < 78 || bytes[0] != rejoin_hello_kind || get(bytes.subspan(1), 8) != epoch_
+            || !std::equal(identity_.begin(), identity_.end(), bytes.begin() + 14)) return bad();
+        const auto phase = bytes[9]; const auto seat = get(bytes.subspan(10), 4);
+        RejoinNonce nonce{}; std::copy_n(bytes.begin() + 46, 32, nonce.begin());
+        if (phase == rejoin_link_challenge && seat == remote_seat(self_) && bytes.size() == 78) {
+            if (peer_nonce_) {
+                if (*peer_nonce_ != nonce) return bad();
+                return Result::success({}); // The reliable stream already carries the response.
+            }
+            peer_nonce_ = nonce;
+            auto reply = frame(rejoin_link_response, self_, nonce);
+            const auto tag = rejoin_authenticator(key_, identity_, remote_seat(self_), epoch_, nonce, false);
+            reply.insert(reply.end(), tag.begin(), tag.end());
+            return Result::success(std::move(reply));
+        }
+        if (phase == rejoin_link_response && seat == remote_seat(remote_) && bytes.size() == 110 && nonce_ && nonce == *nonce_) {
+            const auto tag = rejoin_authenticator(key_, identity_, remote_seat(remote_), epoch_, nonce, false);
+            std::uint8_t difference{};
+            for (std::size_t i = 0; i < tag.size(); ++i) difference |= tag[i] ^ bytes[78 + i];
+            if (difference != 0) return bad();
+            verified_ = true; return Result::success({});
+        }
+        return bad();
+    }
+    bool proven() const { return verified_ && peer_nonce_.has_value(); }
+    bool recognizes(std::span<const std::uint8_t> bytes) const {
+        return bytes.size() >= 46 && bytes[0] == rejoin_hello_kind
+            && std::equal(identity_.begin(), identity_.end(), bytes.begin() + 14);
+    }
+private:
+    static std::uint32_t remote_seat(PeerIndex peer) { return peer + 1; }
+    static void put(Bytes& bytes, std::uint64_t value, unsigned count) {
+        for (unsigned i = 0; i < count; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
+    }
+    static std::uint64_t get(std::span<const std::uint8_t> bytes, unsigned count) {
+        std::uint64_t value{};
+        for (unsigned i = 0; i < count; ++i) value |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
+        return value;
+    }
+    Bytes frame(std::uint8_t phase, PeerIndex seat, const RejoinNonce& nonce) const {
+        Bytes bytes{rejoin_hello_kind}; put(bytes, epoch_, 8); bytes.push_back(phase); put(bytes, remote_seat(seat), 4);
+        bytes.insert(bytes.end(), identity_.begin(), identity_.end()); bytes.insert(bytes.end(), nonce.begin(), nonce.end()); return bytes;
+    }
+    RejoinNonce key_, identity_{};
+    PeerIndex self_{}, remote_{};
+    std::uint64_t epoch_{};
+    std::optional<RejoinNonce> nonce_, peer_nonce_;
+    bool verified_{};
+};
 
 struct ReconnectOptions {
     // False retains history for connected-peer recovery only; no new stream is admitted.

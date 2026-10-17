@@ -17,9 +17,11 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from common import ascii_fold
     from tag_coverage import guess_area, tag_words
+    from tag_registry import TACTICAL_CLASSES
 else:
     from .common import ascii_fold
     from .tag_coverage import guess_area, tag_words
+    from .tag_registry import TACTICAL_CLASSES
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -114,12 +116,29 @@ def named_todo(tag: str) -> tuple[str, str, int, str] | None:
 GALACTIC_ABILITY_WORDS = frozenset({"piracy", "sabotage", "slice", "siphon"})
 
 
-def scope_of_name(tag: str, path: str = "") -> tuple[str, str, str] | None:
+# A name-based scope word (hyperspace, land, piracy, ...) says what the tag is called, not what a tactical battle does
+# with it (the Hyperspace arrival of #3956), so the tactical classes keep a tag todo unless its words are pure
+# ground-game words (menu scope words still apply). Fields only the galactic map reads stay galactic on every class.
+GROUND_ONLY_WORDS = frozenset({"garrison", "ground", "infantry"})
+GALACTIC_ONLY_TAGS = frozenset({"galacticbehavior", "galactic_fleet_override_icon_index",
+                                "galactic_fleet_override_model_name", "disallows_hyperspace_retreat",
+                                "piracy_value_credits", "bribe_modifier_on_corrupted_planets",
+                                "bribe_modifier_on_uncorrupted_planets", "galactic_influence_range",
+                                "hyperspace_fleet_reveal_range", "spawn_planet"})
+
+
+def scope_of_name(tag: str, path: str = "", object_class: str = "") -> tuple[str, str, str] | None:
     words = set(tag_words(tag))
-    if words & GALACTIC_ABILITY_WORDS and not path.startswith(("Abilities/", "Unit_Abilities_Data/")):
+    in_space = ascii_fold(object_class) in TACTICAL_CLASSES and not path.startswith(
+        ("Abilities/", "Unit_Abilities_Data/")) and not words & GROUND_ONLY_WORDS
+    if ascii_fold(tag) in GALACTIC_ONLY_TAGS:
+        return "land-or-galactic", "economy", "SCOPE-GALACTIC"
+    if words & GALACTIC_ABILITY_WORDS and not path.startswith(("Abilities/", "Unit_Abilities_Data/")) and not in_space:
         return "land-or-galactic", "economy", "SCOPE-GALACTIC"
     for names, status, area, evidence in NAME_SCOPE:
         if words & names:
+            if in_space and evidence in ("SCOPE-LAND", "SCOPE-GALACTIC"):
+                continue
             return status, area, evidence
     return None
 

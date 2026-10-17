@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <chrono>
 #include <fstream>
 #include <optional>
@@ -11,6 +12,7 @@
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
 #include "particle_adapter.hpp"
+#include "eawr/presentation/skin_pose_profile.hpp"
 
 namespace eawr::presentation::godot_backend {
 
@@ -43,11 +45,15 @@ public:
         double session_tail_ms{};
         double clip_pose_ms{};
         double emitter_frame_ms{};
+        std::array<double, 9> emitter_owner_ms{}, effects_owner_ms{};
+        std::array<std::uint64_t, 3> effects_owner_counts{};
         double effects_frame_ms{};
         double debris_frame_ms{};
         double idle_frame_ms{};
         double idle_sample_ms{};
         double idle_upload_ms{};
+        SkinPoseWork idle_skin_work{};
+        std::size_t idle_placements{}, idle_surfaces{};
         GodotParticleBackend::FrameWork particle_work{};
         particles::RegistryTimings emitter_timing{}, effects_timing{}, debris_timing{};
         double bookkeeping_ms{};
@@ -74,7 +80,16 @@ public:
         double sim_fog_ms{};
         double sim_lock_ms{};
         double sim_publish_ms{};
+        std::uint64_t sim_completed_tick{};
+        double presentation_lag_ticks{};
+        double sim_pacing_lag_ms{}, sim_discarded_wall_ms{};
+        // Acquisition time for the five explicitly wrapped LiveSession accessors;
+        // excludes frame()/tick_costs_after() and time spent holding a lock.
+        double ui_accessor_lock_wait_ms{};
+        std::vector<std::pair<std::string, double>> ui_accessor_lock_phases;
         std::vector<std::pair<std::string, double>> worker_phases;
+        // Exclusive caller-thread costs already collected by the live session.
+        std::vector<std::pair<std::string, double>> serial_phases;
         // #888: the main thread's wall-clock ms in the space view's snapshot build and renderer
         // submit, and the pieces that submit carried.
         double submit_ms{};

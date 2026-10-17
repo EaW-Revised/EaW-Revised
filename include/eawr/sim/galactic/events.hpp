@@ -3,12 +3,23 @@
 #include "eawr/sim/galactic/types.hpp"
 
 #include <cstdint>
+#include <cstddef>
 #include <string_view>
 
 // Galactic events: what one completed tick did, in the order its serial commits did it. They feed
 // presentation, and later the Lua inbox and the AI; nothing reads them back into the galaxy.
 // Galactic event kinds are their own number space, separate from the tactical EventKind.
 namespace eawr::sim::galactic {
+
+// WGP-53/54: qualified feedback at its committed gameplay owner. Runtime
+// delivery only: these values are neither replay opcodes nor checkpoint state.
+struct GalacticFeedbackNotice {
+    enum class Kind { capture_reward, planet_corrupted, corruption_removed, enemy_approaching };
+    Kind kind{};
+    PlayerId player{};
+    PlanetId planet{};
+    std::size_t preceding_events{}; // committed tick events before this notice
+};
 
 enum class GalacticEventKind : std::uint8_t {
     ability_prepared = 44, // request identity only; observer facts are published separately

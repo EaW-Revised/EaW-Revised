@@ -15,7 +15,10 @@
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 // Test-only loopback UDP IPC carries registration and opaque signals, never
 // game frames. The parent owns the real in-process introduction implementation;
@@ -77,7 +80,7 @@ void broker() {
     std::array<bool, 2> finished{};
     std::array<unsigned, 2> forwarded{};
     std::cout << udp.binding.port << '\n' << std::flush;
-    const auto deadline = Clock::now() + 50s;
+    const auto deadline = Clock::now() + 100s;
     while (!finished[0] || !finished[1]) {
         expect(Clock::now() < deadline, "Introduced broker deadline");
         while (auto packet = udp.poll()) {
@@ -161,6 +164,8 @@ public:
         }
     }
     GnsRendezvous rendezvous() const override { return rendezvous_; }
+    std::optional<GnsTurnCredentials> turn_credentials() const override { return turn_; }
+    void use_turn(GnsTurnCredentials turn) { turn_ = std::move(turn); }
     eawr::core::Result<void> send(std::span<const std::uint8_t> signal) override {
         if (outage_.load()) return eawr::core::Result<void>::failure(failure("Injected established signalling outage"));
         if (signal.empty() || signal.size() > 60000)
@@ -225,6 +230,7 @@ private:
     std::uint8_t role_{};
     std::uint16_t broker_port_{};
     GnsRendezvous rendezvous_;
+    std::optional<GnsTurnCredentials> turn_;
     std::mutex send_mutex_;
     std::atomic<bool> outage_{};
     bool expiry_observed_{};
@@ -348,6 +354,100 @@ void peer(std::uint8_t role, std::uint16_t port) {
     endpoint->finish();
     std::cout << "Peer " << static_cast<unsigned>(role) << ": ICE, post-admission outage, ordered frames and close tail passed\n";
 }
+// #3912: a relayed pair through a TURN server that drops a permission 300 s after it was last created or refreshed
+// (here: a few seconds). The pair exchanges a counter frame every 100 ms for `seconds`, and no direction may go quiet
+// for longer than a permission lifetime. GNS keeps saying Connected while the relay silently drops, so the gap check
+// is the only thing that notices.
+//
+// With `silent` the server instead stops forwarding for good a few seconds in, and the link must say so within the
+// acknowledgement-silence timeout, far below GNS's own connection timeout (and the 30 s lockstep completeness wait).
+//
+// #4021: the same run also proves the diagnostics reach the log sink: a TURN reply line (and the repeat line when the server
+// rotates its nonce) from GNS, and the 1507 stop with this seat and its peer when the path goes silent.
+void turn_peer(std::uint8_t role, std::uint16_t port, const std::string& turn_address, unsigned seconds, bool silent,
+    bool nonce = false) {
+    std::vector<std::string> log_lines;
+    struct SinkGuard { ~SinkGuard() { GnsTransport::set_log_sink({}); } } sink_guard;
+    GnsTransport::set_log_sink([&log_lines](std::string_view line) { log_lines.emplace_back(line); });
+    const auto turn_host = turn_address.substr(0, turn_address.rfind(':'));
+    const auto logged = [&](std::string_view text) {
+        return std::any_of(log_lines.begin(), log_lines.end(), [&](const std::string& line) {
+            return line.starts_with("EAWR net event=gns utc=") && line.find(text) != std::string::npos; });
+    };
+    auto endpoint = std::make_shared<ProxyEndpoint>(role, port);
+    endpoint->use_turn(GnsTurnCredentials{"turn:" + turn_address, "eawr-turn-test", "eawr-turn-secret", 3600s});
+    GnsOptions options; options.build_identity = "introduced-process-test";
+    options.turn_only = true; options.timeout = 80s; options.handshake_timeout = 30s;
+    // The shipped default: the silent case below must be named inside 30 s with it, not with a shortened test value.
+    expect(options.ack_silence_timeout == 15s, "The acknowledgement-silence default is 15 s");
+    auto transport = require(role == 0 ? GnsTransport::host_introduced(endpoint, options)
+        : GnsTransport::connect_introduced(endpoint, options));
+    const auto connect_deadline = Clock::now() + 30s;
+    while (transport->link(1 - role) != LinkState::open) {
+        transport->poll();
+        if (transport->diagnostic()) throw std::runtime_error("TURN pair did not open: " + transport->diagnostic()->message);
+        expect(Clock::now() < connect_deadline, "Relayed ICE connection deadline"); std::this_thread::sleep_for(1ms);
+    }
+    const auto begin = Clock::now(), end = begin + std::chrono::seconds(silent ? 30u : seconds);
+    auto last_send = begin, last_receive = begin;
+    std::uint64_t sent = 0, received = 0;
+    std::chrono::milliseconds worst_gap{0};
+    while (Clock::now() < end) {
+        const auto now = Clock::now();
+        if (now - last_send >= 100ms) {
+            Bytes frame(8); for (unsigned i = 0; i < 8; ++i) frame[i] = static_cast<std::uint8_t>(sent >> (8 * i));
+            require(transport->send(1 - role, frame)); ++sent; last_send = now;
+        }
+        while (auto frame = transport->poll()) {
+            expect(frame->frame.size() == 8, "Relayed frame size");
+            std::uint64_t counter = 0; for (unsigned i = 0; i < 8; ++i) counter |= static_cast<std::uint64_t>(frame->frame[i]) << (8 * i);
+            expect(counter == received, "Relayed frames arrive complete and in order"); ++received; last_receive = Clock::now();
+        }
+        const auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - last_receive);
+        worst_gap = std::max(worst_gap, gap);
+        if (silent && transport->diagnostic()) {
+            const auto& diagnostic = *transport->diagnostic();
+            expect(diagnostic.code == "EAWR-NET-1507" && diagnostic.message.find("GNS link silent") != std::string::npos
+                && diagnostic.message.find("relay") != std::string::npos, "Silent relay path is named as such");
+            std::cout << "Peer " << static_cast<unsigned>(role) << ": " << diagnostic.code << ' ' << diagnostic.message << '\n';
+            while (transport->poll()) {}
+            expect(logged("seat=" + std::to_string(role) + " peer=" + std::to_string(1 - role)
+                + " link stops: EAWR-NET-1507 GNS link silent"), "The 1507 stop reaches the log sink with seat and peer");
+            for (const auto& line : log_lines) std::cout << line << '\n';
+            GnsTransport::set_log_sink({});
+            endpoint->finish();
+            return;
+        }
+        if (transport->diagnostic()) throw std::runtime_error("Relayed link failed after "
+            + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now - begin).count()) + " s: "
+            + transport->diagnostic()->code + ": " + transport->diagnostic()->message);
+        if (!silent && gap > 4s) throw std::runtime_error("Relayed link went silent for " + std::to_string(gap.count()) + " ms at "
+            + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now - begin).count())
+            + " s while GNS still reports Connected (TURN permission not refreshed)");
+        std::this_thread::sleep_for(1ms);
+    }
+    expect(!silent, "A silent relay path was not reported within 30 s");
+    expect(received > 10ull * seconds / 2, "Relayed frames kept flowing");
+    while (transport->poll()) {}
+    expect(logged("ICE: TURN server <addr> accepted a request"), "A TURN refresh reply reaches the log sink, address redacted");
+    if (nonce) expect(logged("answered 438, repeating the request"), "The nonce repeat reaches the log sink");
+    expect(!turn_host.empty() && std::none_of(log_lines.begin(), log_lines.end(), [&](const std::string& line) {
+        return line.find(turn_host) != std::string::npos || line.find("127.0.0.1") != std::string::npos; }), "The log carries no address");
+    std::cout << "Peer " << static_cast<unsigned>(role) << ": " << log_lines.size() << " log lines, first: "
+              << (log_lines.empty() ? std::string{} : log_lines.front()) << '\n';
+    GnsTransport::set_log_sink({});
+    // Closing needs the peer's frames drained too; the host leaves first.
+    if (role == 0) transport->close();
+    const auto close_deadline = Clock::now() + 20s;
+    while (!transport->closed()) {
+        while (transport->poll()) {}
+        expect(Clock::now() < close_deadline, "Relayed close deadline"); std::this_thread::sleep_for(1ms);
+    }
+    endpoint->finish();
+    std::cout << "Peer " << static_cast<unsigned>(role) << ": " << sent << " frames sent, " << received
+              << " received over " << seconds << " s through a permission-expiring TURN relay, worst gap "
+              << worst_gap.count() << " ms\n";
+}
 #if EAWR_HAS_GNS
 void u32(Bytes& bytes, std::uint32_t value) {
     for (unsigned shift = 0; shift < 32; shift += 8) bytes.push_back(static_cast<std::uint8_t>(value >> shift));
@@ -401,7 +501,7 @@ void delayed_ack_peer(std::uint16_t port, bool retry_case, bool native_reason = 
                 Bytes packet{static_cast<std::uint8_t>(TcpMessage::hello), 'E', 'A', 'W', 'R'};
                 u32(packet, mismatch.protocol_version); u32(packet, static_cast<std::uint32_t>(mismatch.build_identity.size()));
                 packet.insert(packet.end(), mismatch.build_identity.begin(), mismatch.build_identity.end());
-                u32(packet, mismatch.max_frame_size); packet.push_back(1);
+                u32(packet, mismatch.max_frame_size); u32(packet, 1); u32(packet, mismatch.peers); packet.push_back(1);
                 expect(sdk.SendMessageToConnection(connection, packet.data(), static_cast<uint32>(packet.size()),
                     k_nSteamNetworkingSend_ReliableNoNagle, nullptr) == k_EResultOK, "Raw mismatched hello send");
                 refusal_sent = true;
@@ -458,7 +558,7 @@ void delayed_ack_peer(std::uint16_t port, bool retry_case, bool native_reason = 
                 packet.insert(packet.end(), {static_cast<std::uint8_t>(TcpMessage::hello), 'E', 'A', 'W', 'R'});
                 u32(packet, options.protocol_version); u32(packet, static_cast<std::uint32_t>(options.build_identity.size()));
                 packet.insert(packet.end(), options.build_identity.begin(), options.build_identity.end());
-                u32(packet, options.max_frame_size); packet.push_back(1); send(packet);
+                u32(packet, options.max_frame_size); u32(packet, 1); u32(packet, options.peers); packet.push_back(1); send(packet);
             }
             hello_sent = true;
         }
@@ -536,10 +636,16 @@ int main(int argc, char** argv) {
         expect(argc >= 2, "introduced test mode required");
         if (std::string_view(argv[1]) == "broker") broker();
         else {
-            expect(argc == 4, "introduced peer role and broker port required");
+            expect(argc == 4 || ((argc == 6 || argc == 7) && std::string_view(argv[1]) == "turn-peer"),
+                "introduced peer role and broker port required");
             const auto role = std::stoul(argv[2]), port = std::stoul(argv[3]);
             expect(role < 2 && port > 0 && port <= 65535, "introduced arguments");
-            if (std::string_view(argv[1]) == "closure-refusal-host") {
+            if (std::string_view(argv[1]) == "turn-peer") {
+                expect(argc >= 6, "TURN peer address and duration required");
+                turn_peer(static_cast<std::uint8_t>(role), static_cast<std::uint16_t>(port), argv[4],
+                    static_cast<unsigned>(std::stoul(argv[5])), argc == 7 && std::string_view(argv[6]) == "silent",
+                    argc == 7 && std::string_view(argv[6]) == "nonce");
+            } else if (std::string_view(argv[1]) == "closure-refusal-host") {
                 expect(role == 0, "Closure refusal host role"); closure_refusal_host(static_cast<std::uint16_t>(port));
             } else if (std::string_view(argv[1]) == "closure-refusal-peer") {
 #if EAWR_HAS_GNS

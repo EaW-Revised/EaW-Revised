@@ -62,6 +62,30 @@ void test_tick_cost() {
     expect(!stats.summary().tick && near(stats.summary().tick_worst_ms, 0.0), "ticks leave the window like frames");
 }
 
+void test_ticks_per_second() {
+    // A 60 Hz render with 120 sim ticks per second (fast forward): two ticks land in each frame.
+    ui::PerfStats stats;
+    std::uint64_t tick = 0;
+    for (int i = 0; i < 180; ++i) {
+        stats.record_frame(1.0 / 60.0);
+        stats.record_tick({++tick, 1.0, {}});
+        stats.record_tick({++tick, 1.0, {}});
+    }
+    expect(std::fabs(stats.summary().ticks_per_second - 120.0) <= 2.5, "120 ticks per second read as about 120 TICKS/S");
+    // The same render at the 1x rate: one tick every other frame.
+    ui::PerfStats normal;
+    tick = 0;
+    for (int i = 0; i < 180; ++i) {
+        normal.record_frame(1.0 / 60.0);
+        if (i % 2 == 0) normal.record_tick({++tick, 1.0, {}});
+    }
+    expect(std::fabs(normal.summary().ticks_per_second - 30.0) <= 1.5, "30 ticks per second read as about 30 TICKS/S");
+    // Paused: the ticks leave the last second.
+    for (int i = 0; i < 70; ++i) normal.record_frame(1.0 / 60.0);
+    expect(normal.summary().ticks_per_second == 0.0, "no ticks in the last second read as zero TICKS/S");
+    expect(ui::PerfStats().summary().ticks_per_second == 0.0, "an empty history has no tick rate");
+}
+
 void test_graph_keeps_spikes() {
     ui::PerfStats stats;
     for (int i = 0; i < 400; ++i) {
@@ -94,6 +118,7 @@ int main() {
     test_steady_frames();
     test_hitch_and_window();
     test_tick_cost();
+    test_ticks_per_second();
     test_graph_keeps_spikes();
     test_bad_input();
     if (test::ui::failures() != 0) {

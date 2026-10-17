@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <set>
+#include <tuple>
 
 namespace eawr::sim::tactical {
 
@@ -312,7 +313,8 @@ public:
         const SpawnDecision& decision, const std::uint64_t frame, EntityId& next, std::vector<LiveUnit>& survivors,
         std::vector<TacticalInstance>& instances, std::vector<Squadron>& squadron_list,
         detail::MapStage<CraftState>& flights, detail::MapStage<SquadronState>& orders,
-        TypeId free_type = 0, PlayerId free_owner = 0, std::vector<EntityId>* registered = nullptr) const;
+        TypeId free_type = 0, PlayerId free_owner = 0, std::vector<EntityId>* registered = nullptr,
+        std::map<EntityId, ArrivalState>* lane_arrivals = nullptr) const;
 
     // Publishes the snapshot of the staged units at the completed tick, with the given events.
     void publish_staged(const std::vector<LiveUnit>& live, std::vector<Event> events,
@@ -556,6 +558,10 @@ public:
         LiveUnit& unit, bool projectile = false) const;
 
     [[nodiscard]] std::vector<std::uint8_t> canonical_bytes() const;
+    [[nodiscard]] std::vector<std::uint8_t> canonical_bytes(const PartitionExecutor& executor) const;
+    [[nodiscard]] std::vector<std::uint8_t> canonical_bytes(std::span<const LiveUnit> units,
+        std::span<const std::vector<std::uint8_t>> encoded_units) const;
+    void append_canonical_unit(std::vector<std::uint8_t>& bytes, const LiveUnit& unit) const;
     [[nodiscard]] bool special_weapons_enabled(PlayerId player, const std::vector<PlayerEconomy>& accounts,
         const UnitStage* live = nullptr, const std::set<PlayerId>* staged_disabled = nullptr) const;
 
@@ -661,6 +667,12 @@ public:
     std::map<CommandKey, PlayerCommand> pending;
     std::map<PlayerId, std::pair<std::uint64_t, std::uint64_t>> last_submitted;
     std::vector<PlayerCommand> executed;
+    // #3644 object turn: the provider (not state), the re-entrancy guard held while it runs, the replayed
+    // uses that wait for their tick's seam, and the uses already applied (the replay's object_turns).
+    std::shared_ptr<ObjectTurnService> object_turn;
+    bool object_turn_running{};
+    std::map<std::tuple<std::uint64_t, EntityId, std::uint64_t>, ObjectTurnRecord> object_turn_pending;
+    std::vector<ObjectTurnRecord> object_turns_executed;
     std::map<PlayerId, ManualPlayerClock> manual_clocks; // WAD-40: shared across stations
     std::map<EntityId, SpecialWeaponState> special_weapons; // WSW-14/19: persistent planetary sources.
     std::set<PlayerId> special_disabled_by_hardpoint; // WSW-48: absence is the default enabled permission

@@ -4,15 +4,16 @@
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 31 | 31 |
+| applied | 35 | 35 |
 | partial | 31 | 31 |
-| todo | 8 | 8 |
+| todo | 7 | 7 |
 | presentation-later | 0 | 2 |
 | foc-ignores | 21 | 21 |
 | deferred | 8 | 8 |
+| by-design | 0 | 0 |
 | land-or-galactic | 0 | 8 |
 | multiplayer | 0 | 0 |
-| **Total** | **99** | **109** |
+| **Total** | **102** | **112** |
 
 Tables group the exact object class families listed together in the registry. Object kinds
 are station, ship, squadron or craft when specified; an empty kind list means the whole
@@ -29,7 +30,8 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Difficulty_Adjustments/Normal | applied | whole class (src/script/foc/ai_service.cpp) | AB-24, BP-17 | — | src/script/foc/ai_service.cpp | basis: reviewed |
 | GalacticFreeStoreScript | land-or-galactic | application not recorded | — | — | — | WGA-10 |
 | GoalProposalFunctionSets | applied | whole class (src/script/foc/ai_data.cpp) | none recorded | — | src/script/foc/ai_data.cpp | no behaviour-note rule mentions this tag yet; basis: reviewed |
-| GoalSetExtensionSize | todo | application not recorded | — | 737 | — | — |
+| GoalSetExtensionSize | applied | whole class (src/script/foc/ai_goals.cpp) | GS-30 | — | src/script/foc/ai_goals.cpp | basis: reviewed |
+| SpaceFreeStoreScript | applied | whole class (src/script/foc/tactical_ai.cpp) | AI-16 | — | src/script/foc/tactical_ai.cpp | basis: reviewed |
 | Templates/Galactic | partial | Selected galactic lifecycle (src/script/foc/galactic_ai_templates.cpp); missing: Galactic live opponent composition | WGA-02, WGA-09, WGA-102 | 1120 | src/script/foc/galactic_ai_templates.cpp | Preserves authored mode-vector and active-list order; primary installed live-provider proof remains open.; basis: reviewed |
 
 ## AITemplates
@@ -54,6 +56,12 @@ and are plain numbers. Code locations are repository paths without identifier an
 | */Turn_On/Goals/Goal_Type | partial | Galactic template policy (src/script/foc/galactic_ai_templates.cpp); missing: Galactic live opponent composition, Land, Space | WGA-106, WGA-107, WGA-108 | 1120 | src/script/foc/galactic_ai_templates.cpp | Selected galactic lifecycle materializes prioritized policy and partial reversal; live funding, goal, plan and freestore provider composition remains open.; basis: reviewed |
 | */Turn_On/Plans/Goal_Category | partial | Galactic template policy (src/script/foc/galactic_ai_templates.cpp); missing: Galactic live opponent composition, Land, Space | WGA-106, WGA-107, WGA-108 | 1120 | src/script/foc/galactic_ai_templates.cpp | Selected galactic lifecycle materializes prioritized policy and partial reversal; live funding, goal, plan and freestore provider composition remains open.; basis: reviewed |
 | */Turn_On/Plans/Name | partial | Galactic template policy (src/script/foc/galactic_ai_templates.cpp); missing: Galactic live opponent composition, Land, Space | WGA-106, WGA-107, WGA-108 | 1120 | src/script/foc/galactic_ai_templates.cpp | Selected galactic lifecycle materializes prioritized policy and partial reversal; live funding, goal, plan and freestore provider composition remains open. Deferred under &#35;2585 with the GC AI owner: verify named-plan switch semantics and add support for galactic/campaign AI and mod-authored space templates. SandboxHuman lists intervention templates for Space and Land too; no whole-tag mode exclusion or FoC ignore is claimed.; TCFA-15 stock scope survey (docs/behaviour/tag-coverage-fighters-ai.md): all three skirmish faction AI players select Test_Space without Plans/Name; named switches occur in galactic defaults and campaign intervention templates. The current loader has no named-plan consumer.; basis: reviewed |
+
+## Campaign
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| AI_Player_Control | applied | whole class (src/campaign/galactic_ai_runtime.cpp) | none recorded | — | src/campaign/galactic_ai_runtime.cpp | no behaviour rule names the tag; the galactic AI runtime selects each faction player type from it; basis: reviewed |
 
 ## CIN_SpaceUnit, Container, GenericHeroUnit, GroundBase, GroundCompany, GroundStructure, GroundVehicle, HeroUnit, LandBombingUnit, MOV_Cinematic, Props_Story, SecondaryStructure, SlaveCompany, SpaceUnit, SpecialStructure, Squadron, StarBase, TransportUnit, UniqueUnit
 
@@ -110,6 +118,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | MaxCombatAccuracyAlignmentBonus | deferred | application not recorded | — | 652 | — | Authored XML value established; parser and live combat consumer remain unverified, so no tactical alignment bonus is inferred.; TCFA-09; basis: reviewed |
 | MaxCombatDamageAlignmentBonus | deferred | application not recorded | — | 652 | — | Authored XML value established; parser and live combat consumer remain unverified, so no tactical alignment bonus is inferred.; TCFA-09; basis: reviewed |
 | MaxCombatSensorRangeAlignmentBonus | deferred | application not recorded | — | 652 | — | Authored XML value established; parser and live combat consumer remain unverified, so no tactical alignment bonus is inferred.; TCFA-09; basis: reviewed |
+| MaximumPoliticalControl | applied | whole class (src/campaign/ai_perception_content.cpp) | WGA-475 | — | src/campaign/ai_perception_content.cpp | basis: reviewed |
 | MaxInfluenceTransitionAlignmentBonus | land-or-galactic | application not recorded | — | — | — | Planet income or influence/control alignment modifier (WGEP-07, WGM-72); no space skirmish consumer.; TCFA-09; basis: reviewed |
 | MaxInfluenceTransitionAlignmentPenalty | land-or-galactic | application not recorded | — | — | — | Planet income or influence/control alignment modifier (WGEP-07, WGM-72); no space skirmish consumer.; TCFA-09; basis: reviewed |
 | Medium_Threat_Reachability_Tolerance | partial | immutable planet and land execution queries (src/script/foc/plan_bindings.cpp); missing: campaign execution-path provider, land hint-zone provider | FT-09 | 2494 | src/script/foc/plan_bindings.cpp | Loaded and applied to immutable planet/land execution-path queries; campaign/land providers remain to be integrated. Space candidates have no reachability service (FT-12).; TCFA-08; basis: reviewed |

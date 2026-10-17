@@ -66,6 +66,21 @@ def main():
         assert untrusted.returncode == 1 and "RESULT: FAIL" in untrusted.stdout, untrusted.stdout + untrusted.stderr
         assert "(EAWR-NET-1519)" not in untrusted.stdout, "system trust must reach TLS rather than reject valid DNS options"
 
+        # A service without room aliases cannot give the host a code: the host fails at once with the typed diagnostic.
+        bare = subprocess.Popen([relay, "--certificate-file", str(cert), "--key-file", str(key), "--port", "0", "--room-aliases", "0"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        children.append(bare)
+        bare_lines = queue.Queue()
+        threading.Thread(target=lambda: [bare_lines.put(row) for row in bare.stdout], daemon=True).start()
+        bare_ready = bare_lines.get(timeout=30)
+        assert bare_ready.startswith("relay ready port="), bare_ready
+        bare_common = ["--address", "127.0.0.1", "--port", bare_ready.strip().split("=")[1], *trust, "--timeout", "30"]
+        no_code = subprocess.run([tool, "host", *bare_common, "--log", str(directory / "no-code.log")],
+                                 capture_output=True, text=True, timeout=60, cwd=clean, env=environment)
+        assert no_code.returncode == 1 and "RESULT: FAIL" in no_code.stdout and "(EAWR-NET-1787)" in no_code.stdout, no_code.stdout + no_code.stderr
+        bare.terminate()
+        bare.wait(timeout=10)
+
         # Argument errors exit 2 and never touch the network.
         bad = subprocess.run([tool, "host", "--port", "0"], capture_output=True, text=True, timeout=30)
         assert bad.returncode == 2 and "RESULT: FAIL" in bad.stderr, bad.stdout + bad.stderr

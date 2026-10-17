@@ -92,8 +92,8 @@ network. A cross-host check is the owner's.
 
 The staging screen uses `net::LobbySession` over the admitted reliable LAN streams.
 Discovery still lists games and carries lobby-wide chat; it cannot edit a room's roster,
-readiness or chat. The host publishes revisioned map/options and owner rows; players
-request their own name, colour, faction, team and owner slot. Loaded map/team/palette
+readiness or chat. The host publishes revisioned map/options and individual player rows; players
+request their own name, colour, faction, team and an unoccupied human row. Loaded map/team/palette
 validation applies before publication. A repaired map and its player assignments commit
 as one revision, so a joiner never sees an invalid intermediate configuration.
 
@@ -142,12 +142,17 @@ or service configuration". The standalone mode feeds a fixed source from `--eawr
   shows `The password was not accepted.` and a cooldown shows `Too many password attempts. Wait a
   minute and try again.`; both keep the prompt open, any other refusal closes it. The attempt is
   one at a time and cancellable. The password goes to the source only: not to the chat, the report or
-  a log. An admitted join sends the room's code into the existing two-player online bridge
-  (`LanMatch::join`) and opens the shared staging.
-- **Room code.** The field under the list takes the optional four-character code (or a pasted 128-bit
-  invitation) and goes straight to the same bridge.
+  a log. An admitted join attaches the room's signalling scope with the directory admission
+  (`LanMatch::join_admitted`; the source keeps its directory connection until the attach returns) and opens
+  the shared staging.
+- **Room code.** The field under the list takes the optional four-character code and attaches the room by
+  its alias the same way. A pasted long invitation of the earlier two-player bridge is no alias: the room service refuses it.
 - **Host.** `Host Online` opens the host options with the password edit enabled: empty lists a public
-  room, a password makes it private. The seat chooser offers two humans while the bridge is two-seat.
+  room, a password makes it private. **Human players** offers two humans up to the chosen map's
+  player-row count (up to nine), just as LAN does. Each human has a separate row,
+  faction, colour and Team; the create dialog has no shared-sides Teams selector. Set alliances
+  with the Team selector on each staging row (LLB-08/09), with one faction per team. Shared sides
+  are reserved for galactic conquest. Capacity is fixed while connected; changing it creates a new room.
   The published state (`Listing your room…`, `Your room is listed.`, `Could not list your room.
   Trying again…`) shows as a notice line in the staging chat.
 - **Chat.** The window shows the service's room chat. Slice 1's service has room chat only, so before
@@ -157,11 +162,39 @@ or service configuration". The standalone mode feeds a fixed source from `--eawr
 - **Failures** are classified from the diagnostic code alone into curated text; no id, code, address or
   password is shown or logged.
 
+## Joiner setup review
+
+The shared LAN/online staging shows the joiner the selected map's local name and preview,
+plus a read-only summary of the received space match options, before Accept. The host's
+map controls remain hidden for the joiner; the map-list area displays disabled settings
+rows. An options-only revision refreshes that summary without requiring a map or roster
+change. This follows the owner's joined-game review requirement (legacy EAWR-3759); the host-only
+visibility described in the earlier LLB-08 implementation no longer describes this screen.
+
+## Nine-seat online staging
+
+Directory and room-code joins obtain the agreed capacity from the attached room roster before
+creating the mesh. Every skirmish human has a separate command seat and player row. A newcomer fills the next
+free human row with that row's own faction and unused default colour. Joined members appear by
+name on both host and joiner staging screens; AI rows keep their existing controls. The local
+skirmish screen keeps its retail eight-row layout; a nine-start map enables the ninth network row.
+The **My connections** button opens a scrollable list of all room seats, including vacancies. It shows
+your own named links as connecting, checking, direct, relayed or failed; a failed link says whether
+relay was available. Closing the list restores the map/settings view. The host can Start only after
+every pair in the room is connected and every human accepts the current setup. Its tooltip explains
+an incomplete room mesh even when all the host's own links are open; the link count is explicitly local.
+
+Edits remain available while staging. The team and faction checks run at Ready and Start, with
+their reason shown once for the failed attempt. A newcomer who cannot reach an existing player
+is refused with that player's name and the room keeps the seat available for another joiner.
+Connection-state refreshes do not add chat lines. Confirmed battle departures name both affected
+players in a banner that expires after ten seconds, and a removed player sees why they left once,
+in the terminal dialog. See the [nine-player crew runbook](../net-online-playtest.md)
+for the cross-network dry run and the logs to keep.
+
 ## Fidelity list: gaps this note does not close
 
-- **Online rooms list up to nine seats, the bridge joins two.** The online seat chooser stops at two humans until the roster/relay slice; a room code and a room id are used as the bridge's code as they are.
 - **No room-less online chat channel yet.** The lobby window can only carry chat for a joined or hosted room until the service gets a lobby channel (reserved relay kinds 20..33).
-- **Capacity remains the existing LAN transport limit.** Human command seats may share one or two faction-owner rows; the separate nine-seat presentation work is pending.
 - **Eight rows, not nine.** The shared setup model caps a map's rows at eight (WSS-08 sourced from the skirmish
   dialog); the staging's ninth row is never shown. The retail LAN staging has nine.
 - **One AI level.** Easy and hard are listed disabled; there is no AI difficulty yet.

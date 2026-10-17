@@ -51,15 +51,48 @@ public:
     GodotParticleBackend& operator=(const GodotParticleBackend&) = delete;
 
     [[nodiscard]] std::uint64_t create_emitter(const particles::EmitterRenderPlan& plan) override;
+    // Caller-owned name remains alive until the immediately following spawn ends.
+    // Used only by the opt-in backend spawn diagnostic.
+    void set_spawn_context(std::string_view effect, std::uint64_t tick) noexcept;
     // Population-time hidden, empty emitters pin shared textures/shaders. Runtime
     // instances retain ordinary creation order. Oversized/refused plans fall back.
     [[nodiscard]] bool prewarm_emitter(const particles::EmitterRenderPlan& plan);
+    // Pin only the compiled program of a loaded render plan, bounded separately
+    // from the texture-bearing warm emitters. No texture, material, mesh or
+    // instance is created. A refused plan keeps the ordinary runtime fallback.
+    [[nodiscard]] bool prewarm_program(const particles::EmitterRenderPlan& plan);
+    // Population-only accounting; a full budget skips further definition decodes.
+    [[nodiscard]] bool begin_prewarm_reference();
+    void record_prewarm_lookup(double milliseconds, bool decoded);
+    void finish_program_prewarm(double milliseconds);
+    struct ProgramPrewarmWork final {
+        std::size_t references{}, skipped_references{}, requested{}, duplicate_requests{}, refused{};
+        std::size_t programs{}, prepared_shaders{}, live_shaders{}, decoded_systems{};
+        double prepare_ms{}, lookup_ms{};
+    };
+    [[nodiscard]] ProgramPrewarmWork program_prewarm_work() const noexcept;
+    // Releases both kinds of warm hold; ordinary live emitters keep their refs.
     void release_prewarm();
+    // Historical peak survives release for the final capture's budget evidence.
+    [[nodiscard]] std::size_t peak_prewarmed_programs() const noexcept;
+    [[nodiscard]] static std::size_t prewarm_program_limit() noexcept;
     [[nodiscard]] std::size_t prewarmed_emitters() const noexcept;
     [[nodiscard]] std::uint64_t prewarmed_texture_bytes() const noexcept;
     void prepare_emitter(std::uint64_t resource, const particles::VertexStream& stream) override;
     void update_emitter(std::uint64_t resource, const particles::VertexStream& stream) override;
     void destroy_emitter(std::uint64_t resource) override;
+    // Battle backends may retain retired transparent non-fog emitters hidden, bounded by
+    // entry and charged GPU-byte caps. Disable to drain before explicit teardown.
+    // Every new owner still gets a fresh public resource ID and simulation state.
+    void set_emitter_reuse(bool enabled);
+    struct ReuseWork final {
+        std::size_t retained_emitters{};
+        std::uint64_t retained_bytes{};
+        std::size_t peak_emitters{};
+        std::uint64_t peak_bytes{}, hits{}, misses{}, refusals{};
+        std::size_t live_rids{};
+    };
+    [[nodiscard]] ReuseWork reuse_work() const noexcept;
     [[nodiscard]] std::string failure_cause() const override;
     [[nodiscard]] particles::CullingFrame culling_frame() const override;
     void set_emitter_visible(std::uint64_t resource, bool visible) override;
@@ -93,7 +126,7 @@ public:
 
     // Every RenderingServer RID this backend currently owns (meshes, materials,
     // instances, shared textures and shaders). Zero after the last emitter is
-    // destroyed (including prewarm holds) is the no-leak evidence.
+    // destroyed and all reuse/prewarm holds are released is the no-leak evidence.
     [[nodiscard]] std::size_t live_rids() const noexcept;
     [[nodiscard]] std::size_t live_emitters() const noexcept;
     [[nodiscard]] std::vector<FogEmitterEvidence> fog_emitter_evidence() const;
@@ -107,6 +140,7 @@ public:
         std::uint64_t replacements{};
         double conversion_ms{};
         double submission_ms{};
+        double retirement_ms{};
         std::uint64_t groups{}, visible_groups{}, prepared_groups{}, stepped_groups{};
     };
     static void begin_frame_measurement(bool enabled);

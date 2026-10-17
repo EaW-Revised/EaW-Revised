@@ -34,6 +34,24 @@ namespace {
     }
     return bytes;
 }
+
+// #3644 OBJT record, 64 bytes: tick, unit, sequence, ability, action, flags (bit 0: position), zero word,
+// target, position (zero without the flag).
+void append_object_turn(std::vector<std::uint8_t>& bytes, const ObjectTurnRecord& record) {
+    const auto& use = record.use;
+    sim::detail::append_u64(bytes, record.tick);
+    sim::detail::append_u64(bytes, use.unit);
+    sim::detail::append_u64(bytes, use.sequence);
+    bytes.push_back(static_cast<std::uint8_t>(use.ability));
+    bytes.push_back(static_cast<std::uint8_t>(use.action));
+    sim::detail::append_u16(bytes, use.position ? 1U : 0U);
+    sim::detail::append_u32(bytes, 0);
+    sim::detail::append_u64(bytes, use.target);
+    const math::Vec3 position = use.position.value_or(math::Vec3{});
+    sim::detail::append_i64(bytes, position.x.raw());
+    sim::detail::append_i64(bytes, position.y.raw());
+    sim::detail::append_i64(bytes, position.z.raw());
+}
 } // namespace
 
 std::optional<std::uint16_t> peek_replay_format_version(
@@ -148,7 +166,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         || replay.setup.first_free_entity_id.has_value() || replay.setup.campaign.has_value() || !carriers.empty()
         || !replay.setup.cinematic_seats.empty() || !identity.empty()
         || replay.setup.departure_policy.has_value() || !replay.setup.beacon_rules.empty()
-        || replay.setup.attract_pool.has_value() || replay.setup.native_scene.has_value();
+        || replay.setup.attract_pool.has_value() || replay.setup.native_scene.has_value()
+        || !replay.object_turns.empty();
     const auto header_size = replay_header_size + (extensions ? 4U : 0U)
         + (replay.setup.match_policy ? 8U : 0U) + (replay.setup.skirmish ? 4U + metadata.size() : 0U)
         + (disabled_garrisons.empty() ? 0U : 4U + 8U * disabled_garrisons.size())
@@ -160,7 +179,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         + (replay.setup.departure_policy ? 12U + 4U * replay.setup.departure_policy->humans.size() : 0U)
         + (replay.setup.beacon_rules.empty() ? 0U : 12U + 16U * replay.setup.beacon_rules.size())
         + (replay.setup.attract_pool ? 12U + 8U * replay.setup.attract_pool->types.size() : 0U)
-        + (native.empty() ? 0U : 4U + native.size());
+        + (native.empty() ? 0U : 4U + native.size())
+        + (replay.object_turns.empty() ? 0U : 12U);
     if (header_size > std::numeric_limits<std::uint16_t>::max()) {
         return fail<Bytes>(diagnostic_codes::resource_limit, "encoded replay header exceeds the 65535-byte limit", {});
     }
@@ -173,6 +193,11 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     if (size > replay_max_bytes) {
         return fail<Bytes>(diagnostic_codes::resource_limit, "encoded replay exceeds the 256 MiB output limit", {});
     }
+    if (replay.object_turns.size() > max_commands
+        || size > replay_max_bytes - replay.object_turns.size() * replay_object_turn_record_size) {
+        return fail<Bytes>(diagnostic_codes::resource_limit, "encoded replay exceeds the 256 MiB output limit", {});
+    }
+    size += replay.object_turns.size() * replay_object_turn_record_size;
     for (const auto& command : replay.commands) {
         const auto record = 4 + detail::command_body_size(command);
         if (size > replay_max_bytes - record) {
@@ -208,7 +233,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             + (replay.setup.campaign ? 1U : 0U) + (carriers.empty() ? 0U : 1U)
             + (replay.setup.cinematic_seats.empty() ? 0U : 1U)
             + (identity.empty() ? 0U : 1U) + (replay.setup.departure_policy ? 1U : 0U)
-            + (replay.setup.beacon_rules.empty() ? 0U : 1U) + (replay.setup.attract_pool ? 1U : 0U) + (replay.setup.native_scene ? 1U : 0U));
+            + (replay.setup.beacon_rules.empty() ? 0U : 1U) + (replay.setup.attract_pool ? 1U : 0U) + (replay.setup.native_scene ? 1U : 0U)
+            + (replay.object_turns.empty() ? 0U : 1U));
     }
     if (replay.setup.match_policy) {
         sim::detail::append_u16(bytes, replay_extension_match_policy);
@@ -304,6 +330,12 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         sim::detail::append_u16(bytes, static_cast<std::uint16_t>(native.size()));
         bytes.insert(bytes.end(), native.begin(), native.end());
     }
+    if (!replay.object_turns.empty()) {
+        sim::detail::append_u16(bytes, replay_extension_object_turn);
+        sim::detail::append_u16(bytes, 8);
+        sim::detail::append_u32(bytes, 1); // OBJT extension version
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(replay.object_turns.size()));
+    }
     for (const auto& player : replay.setup.players) {
         detail::append_player(bytes, player);
     }
@@ -321,6 +353,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     for (const auto& command : replay.commands) {
         detail::append_command(bytes, command);
     }
+    for (const auto& record : replay.object_turns) append_object_turn(bytes, record);
     return core::Result<Bytes>::success(std::move(bytes));
 }
 

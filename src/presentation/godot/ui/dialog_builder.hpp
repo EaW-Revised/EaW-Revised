@@ -17,6 +17,7 @@
 #include <godot_cpp/classes/control.hpp>
 
 #include <string>
+#include <functional>
 #include <vector>
 
 namespace eawr::presentation::godot_backend {
@@ -46,6 +47,7 @@ struct BuiltDialog final {
 // skirmish setup, #3167).
 [[nodiscard]] BuiltDialog build_dialog(const data::ui::Dialog& dialog, const presentation::ui::ThemeModel& theme,
                                        data::ui::TextLookup* text, presentation::ui::Placement placement,
-                                       bool retail_combos = false);
+                                       bool retail_combos = false,
+                                       std::function<void(std::string_view)> sound = {});
 
 } // namespace eawr::presentation::godot_backend

@@ -1,5 +1,6 @@
 #include "eawr/net/lobby_session.hpp"
 #include "eawr/net/lan_directory.hpp"
+#include "eawr/net/mesh_policy.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -106,7 +107,9 @@ bool valid_limits(const LobbyLimits& limits) {
 
 core::Diagnostic lobby_diagnostic(LobbyReason reason, std::string message) {
     core::Diagnostic value;
-    value.code = "EAWR-NET-" + std::to_string(1600U + static_cast<unsigned>(reason));
+    const unsigned code = reason == LobbyReason::pair_unreachable ? 1762U : reason == LobbyReason::mesh_incomplete ? 1764U
+        : 1600U + static_cast<unsigned>(reason);
+    value.code = "EAWR-NET-" + std::to_string(code);
     value.message = sanitize_lobby_text(message, 512);
     return value;
 }
@@ -156,7 +159,7 @@ core::Result<Bytes> encode_lobby_frame(const LobbyFrame& frame) {
                 if (!value.revision || value.frame.empty()) throw std::runtime_error("invalid setup envelope");
                 out.u64(value.revision); out.blob(value.frame, max_lobby_payload_bytes);
             } else {
-                if (!value.revision || static_cast<unsigned>(value.reason) > static_cast<unsigned>(LobbyReason::recovery_unavailable))
+                if (!value.revision || static_cast<unsigned>(value.reason) > static_cast<unsigned>(LobbyReason::mesh_incomplete))
                     throw std::runtime_error("invalid room notice");
                 out.u64(value.revision); out.u8(static_cast<std::uint8_t>(value.reason)); out.text(value.message, 512);
             }
@@ -214,7 +217,7 @@ core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> bytes)
         case lobby_cancel_kind: case lobby_closed_kind: case lobby_rejected_kind: {
             LobbyNotice value;
             value.room = room; value.revision = in.u64(); const auto reason = in.u8(); value.message = in.text(512);
-            if (!value.revision || reason > static_cast<unsigned>(LobbyReason::recovery_unavailable)) throw std::runtime_error("invalid room notice");
+            if (!value.revision || reason > static_cast<unsigned>(LobbyReason::mesh_incomplete)) throw std::runtime_error("invalid room notice");
             value.reason = static_cast<LobbyReason>(reason);
             if (kind == lobby_cancel_kind) result = LobbyCancel{std::move(value)};
             else if (kind == lobby_closed_kind) result = LobbyClosed{std::move(value)};
@@ -269,6 +272,12 @@ public:
     std::uint32_t peer_count() const override { return static_cast<std::uint32_t>(peers.size()); }
     std::optional<LinkStats> link_stats(PeerIndex peer) const override {
         return peer < peers.size() ? outer->link_stats(peers[peer]) : std::nullopt;
+    }
+    std::uint64_t edge_identity(PeerIndex peer) const override {
+        return peer < peers.size() ? outer->edge_identity(peers[peer]) : 0;
+    }
+    void fail_repair(PeerIndex peer, unsigned code) override {
+        if (peer < peers.size()) outer->fail_repair(peers[peer], code);
     }
 };
 }
@@ -364,6 +373,13 @@ struct LobbyRuntime {
     }
     core::Result<void> abort(LobbyReason reason, std::string message) {
         const auto frozen = state.frozen_revision;
+        // A poll inside the Start drain can observe a close after pump's loss
+        // scan. Remove every such guest before publishing the cancellation.
+        std::vector<PeerIndex> lost;
+        for (const auto& value : state.seats)
+            if (value.peer != state.host && transport->link(value.peer) == LinkState::closed) lost.push_back(value.peer);
+        for (const auto peer : lost)
+            if (auto removed = drop(peer, LobbyReason::link_closed, false); !removed) return removed;
         reset_setup(); state.phase = LobbyPhase::staging; state.frozen_revision = 0; clear_ready();
         if (auto advanced = advance(); !advanced) return advanced;
         notice = LobbyNotice{state.room, frozen, reason, sanitize_lobby_text(message, 512)};
@@ -388,7 +404,7 @@ struct LobbyRuntime {
         if (auto advanced = advance(); !advanced) return advanced;
         candidate.revision = state.revision; state = std::move(candidate); return broadcast(state);
     }
-    core::Result<void> drop(PeerIndex peer, LobbyReason reason, bool deny) {
+    core::Result<void> drop(PeerIndex peer, LobbyReason reason, bool deny, std::string notice_text = "seat removed from room") {
         if (peer == state.host || !seat(peer)) return failure<void>(LobbyReason::authority, "cannot remove this seat");
         if (deny && denied.size() >= limits.denied_identities)
             return failure<void>(LobbyReason::resource_limit, "room identity denial budget exhausted");
@@ -399,12 +415,12 @@ struct LobbyRuntime {
         state.seats.erase(std::remove_if(state.seats.begin(), state.seats.end(), [peer](const auto& value) { return value.peer == peer; }), state.seats.end());
         clear_ready();
         hooks.remove_peer(peer, reason);
-        static_cast<void>(send(peer, LobbyClosed{{state.room, state.revision, reason, "seat removed from room"}}));
+        static_cast<void>(send(peer, LobbyClosed{{state.room, state.revision, reason, sanitize_lobby_text(notice_text, 512)}}));
         return core::Result<void>::success();
     }
-    core::Result<void> remove(PeerIndex peer, LobbyReason reason, bool deny) {
+    core::Result<void> remove(PeerIndex peer, LobbyReason reason, bool deny, std::string notice_text = "seat removed from room") {
         const bool starting = state.phase == LobbyPhase::starting;
-        if (auto removed = drop(peer, reason, deny); !removed) return removed;
+        if (auto removed = drop(peer, reason, deny, std::move(notice_text)); !removed) return removed;
         if (starting) return abort(reason, "seat removed during Start");
         if (state.phase == LobbyPhase::committed) {
             return terminal(LobbyReason::link_closed, "committed room peer lost before handoff");
@@ -428,6 +444,7 @@ struct LobbyRuntime {
         switch (value.action) {
         case LobbyAction::select: return edit(peer, value.selection, local->player);
         case LobbyAction::ready:
+            if (auto valid = validate(state, true); !valid) return valid;
             if (local->ready) return core::Result<void>::success();
             local->ready = true; return broadcast(state);
         case LobbyAction::unready:
@@ -445,7 +462,7 @@ struct LobbyRuntime {
         history.push_back(std::move(value));
         while (history.size() > limits.chat_history) history.pop_front();
     }
-    core::Result<void> post(PeerIndex peer, std::string text) {
+    core::Result<void> post(PeerIndex peer, std::string text, bool room_notice = false) {
         if (state.phase == LobbyPhase::closed || state.phase == LobbyPhase::committed)
             return failure<void>(LobbyReason::frozen, "room chat is closed");
         const auto* sender = seat(peer);
@@ -453,7 +470,7 @@ struct LobbyRuntime {
         text = sanitize_lobby_text(text, chat_limit);
         if (text.empty() || std::all_of(text.begin(), text.end(), [](char c) { return c == ' '; }))
             return failure<void>(LobbyReason::invalid_choice, "empty room chat");
-        if (!budget(chat_times, peer)) return failure<void>(LobbyReason::chat_limit, "room chat rate exceeded");
+        if (!room_notice && !budget(chat_times, peer)) return failure<void>(LobbyReason::chat_limit, "room chat rate exceeded");
         if (chat_sequence == std::numeric_limits<std::uint64_t>::max()) return failure<void>(LobbyReason::resource_limit, "room chat sequence exhausted");
         LobbyChat value{state.room, ++chat_sequence, sender->seat, sender->selection.name, std::move(text)};
         state.chat_sequence = chat_sequence;
@@ -684,22 +701,61 @@ core::Result<void> LobbySession::kick(PeerIndex peer, std::uint64_t revision) {
     auto& value = *runtime_; if (auto valid = value.allowed(revision, true, true); !valid) return valid;
     return value.remove(peer, LobbyReason::kicked, true);
 }
+core::Result<void> LobbySession::refuse_unreachable(PeerIndex newcomer, PeerIndex unreachable, bool relay_configured) {
+    auto& value = *runtime_;
+    if (!value.is_host) return failure<void>(LobbyReason::authority, "only the host refuses a newcomer");
+    if (value.taken || value.state.phase == LobbyPhase::committed || value.state.phase == LobbyPhase::closed)
+        return failure<void>(LobbyReason::frozen, "room controls are locked");
+    if (newcomer == value.state.host || newcomer == unreachable) return failure<void>(LobbyReason::authority, "cannot refuse this seat");
+    const auto* other = value.seat(unreachable);
+    const auto* guest = value.seat(newcomer);
+    const std::string other_name = other ? other->selection.name : "another player";
+    const std::string guest_name = guest ? guest->selection.name : "A player";
+    const auto line = guest_name + " could not connect to " + other_name + " and was not admitted.";
+    value.notice = LobbyNotice{value.state.room, value.state.revision, LobbyReason::pair_unreachable,
+        sanitize_lobby_text(line, 400) + " " + lobby_diagnostic(LobbyReason::pair_unreachable, "").code};
+    // The room hears it once, as a line from the host's seat; the newcomer hears why through its closed notice.
+    auto posted = value.post(value.state.host, line, true);
+    if (!guest) return posted;
+    auto removed = value.remove(newcomer, LobbyReason::pair_unreachable, false, mesh_newcomer_refusal_text(other_name, relay_configured));
+    return posted ? removed : posted;
+}
 core::Result<void> LobbySession::close() {
     auto& value = *runtime_; if (auto valid = value.allowed(value.state.revision, true, true); !valid) return valid;
     return value.terminal(LobbyReason::host_closed, "host closed the room");
 }
 core::Result<void> LobbySession::start(std::uint64_t revision) {
     auto& value = *runtime_; if (auto valid = value.allowed(revision); !valid) return valid;
+    if (auto valid = value.validate(value.state, true); !valid) return valid;
     if (value.state.seats.size() < 2 || !std::all_of(value.state.seats.begin(), value.state.seats.end(), [](const auto& seat) { return seat.ready; }))
         return failure<void>(LobbyReason::not_ready, "every admitted seat, including host, must be ready");
     for (const auto& seat : value.state.seats) if (seat.peer != value.transport->self() && value.transport->link(seat.peer) != LinkState::open)
         return failure<void>(LobbyReason::link_closed, "Start requires connected seats");
-    if (auto valid = value.validate(value.state, true); !valid) return valid;
+    // Online room mesh: every agreed seat present and every pair verified, not only the host's own pairs.
+    if (value.hooks.mesh_complete)
+        if (auto complete = value.hooks.mesh_complete(); !complete)
+            return failure<void>(LobbyReason::mesh_incomplete, "Every player must be connected to every other player before the game can start.");
     std::vector<SetupSeat> roster;
     for (const auto& seat : value.state.seats) roster.push_back({static_cast<PeerIndex>(roster.size()), seat.seat, seat.player});
     auto frozen = value.state; frozen.phase = LobbyPhase::starting; frozen.frozen_revision = frozen.revision;
     auto offer = value.hooks.offer(frozen, roster);
-    if (!offer) return core::Result<void>::failure(offer.error());
+    if (!offer) {
+        auto error = offer.error();
+        if (error.code == "EAWR-NET-1022") {
+            // A later key-row send may fail after earlier guests received theirs.
+            // A fresh staging revision clears that partial attempt everywhere,
+            // without accepting duplicate credentials or closing the host room.
+            if (auto advanced = value.advance(); !advanced) return advanced;
+            value.clear_ready();
+            error.message = "Connections are not ready. Everyone must accept the setup again before Start.";
+            value.notice = LobbyNotice{value.state.room, value.state.revision, LobbyReason::setup_failed, error.message};
+            if (auto sent = value.broadcast(value.state); !sent) {
+                auto send_error = sent.error(); send_error.message += " Everyone must accept the setup again before Start.";
+                return core::Result<void>::failure(std::move(send_error));
+            }
+        }
+        return core::Result<void>::failure(std::move(error));
+    }
     if (offer.value().seats != roster) return failure<void>(LobbyReason::setup_failed, "builder changed the frozen seat mapping");
     // Preflight setup capacity and loaded owner/team bindings before publishing Start.
     auto encoded = encode_setup_offer(offer.value());
@@ -740,7 +796,18 @@ core::Result<void> LobbySession::pump(std::uint64_t now) {
     if (value.is_host && value.state.phase != LobbyPhase::committed) {
         std::vector<PeerIndex> lost;
         for (const auto& seat : value.state.seats) if (seat.peer != value.state.host && value.transport->link(seat.peer) == LinkState::closed) lost.push_back(seat.peer);
-        for (const auto peer : lost) if (auto removed = value.remove(peer, LobbyReason::link_closed, false); !removed) return removed;
+        // Remove the whole observed loss batch before publishing a new roster.
+        // Publishing after the first removal would send to the other closed
+        // streams and report a fatal broadcast error for an ordinary vacancy.
+        for (const auto peer : lost) if (auto removed = value.drop(peer, LobbyReason::link_closed, false); !removed) return removed;
+        if (!lost.empty()) {
+            if (value.state.phase == LobbyPhase::starting) {
+                if (auto aborted = value.abort(LobbyReason::link_closed, "seat removed during Start"); !aborted) return aborted;
+            } else {
+                if (auto advanced = value.advance(); !advanced) return advanced;
+                if (auto sent = value.broadcast(value.state); !sent) return sent;
+            }
+        }
     }
     // Drain a bounded batch before setup can publish commitment. If the batch
     // fills, defer setup/commit to the next pump so queued Unready/Leave wins.
@@ -776,16 +843,25 @@ core::Result<void> LobbySession::pump(std::uint64_t now) {
                 }
                 return value.abort(LobbyReason::setup_failed, pumped.error().message);
             }
+            // A committed room has no abort to wait for: the guest's own barrier failed (timeout, closed link), so surface the typed code.
+            if (value.state.phase == LobbyPhase::committed) return pumped;
             value.notice = LobbyNotice{value.state.room, value.state.frozen_revision, LobbyReason::setup_failed, pumped.error().message};
             return core::Result<void>::success(); // Host serializes the abort/new revision.
         }
         if (value.is_host && value.state.phase == LobbyPhase::starting && value.setup->phase() == SetupPhase::ready) {
+            if (value.hooks.lock_room)
+                if (auto locked = value.hooks.lock_room(); !locked)
+                    return value.abort(LobbyReason::mesh_incomplete, "The room could not be locked for Start; every player must be connected to every other player.");
             auto committed = value.state; committed.phase = LobbyPhase::committed;
             if (auto sent = value.broadcast(committed); !sent) return sent;
             value.state = std::move(committed); return core::Result<void>::success();
         }
     }
     return core::Result<void>::success();
+}
+bool LobbySession::result_ready() const {
+    const auto& value = *runtime_;
+    return !value.taken && value.state.phase == LobbyPhase::committed && value.setup && value.setup->phase() == SetupPhase::ready;
 }
 core::Result<LobbyResult> LobbySession::take_result() {
     auto& value = *runtime_;

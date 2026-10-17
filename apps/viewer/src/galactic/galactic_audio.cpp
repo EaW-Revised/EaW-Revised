@@ -182,11 +182,15 @@ void GalacticAudio::consume(const platform::LiveGalacticEvent& published, const 
     if (published.pending_alert) pending = audio::GalacticPendingAlert{
         published.pending_alert->invader, published.pending_alert->defender, published.pending_alert->land};
     const auto cue = audio::galactic_event_sound(published.event, local, published.previous_owner, pending,
-        published.new_owner_playable, published.construction_options_player);
+        published.new_owner_playable, published.construction_options_player, published.feedback);
     if (!cue) return;
     if (*cue == audio::GalacticSound::space_battle_pending || *cue == audio::GalacticSound::land_battle_pending)
         battle_pending(*cue == audio::GalacticSound::land_battle_pending);
     else sound(*cue);
+}
+void GalacticAudio::advisor_urgent() {
+    // WGUI-66/114: queue feedback is separate from the approach faction cue.
+    play_event(value(faction_fields_, "SFXEvent_HUD_Advisor_Urgent"));
 }
 void GalacticAudio::battle_load() {
     strategic_ = false;

@@ -159,6 +159,119 @@ gc::GalacticSetup setup() {
     value.rules.maximum_fleet_movement_distance = f(10);
     return value;
 }
+// WGS-182..184: renamed authored types; no dependency on stock endpoint spellings.
+void external_endpoints() {
+    eawr::data::galactic::GalacticData data;
+    eawr::data::galactic::Planet first; first.name = "Amber"; first.behaviors = {"PLANET"};
+    first.galactic_position = eawr::data::galactic::Position{f(0), f(0), f(0)};
+    auto second = first; second.name = "Cobalt"; second.galactic_position->x = f(200);
+    auto outside = first; outside.name = "Violet";
+    auto variant = first; variant.name = "Amber_Variant";
+    data.planets = {first, second, outside, variant};
+    data.constants = {{"MaximumFleetMovementDistance", "5", f(5)}};
+    eawr::data::galactic::TradeRoute lane; lane.name = "Renamed_Lane";
+    lane.point_a = "AMBER"; lane.point_b = "cobalt"; lane.hs_speed_factor = f(4);
+    data.trade_routes = {lane};
+    eawr::data::galactic::Campaign campaign; campaign.name = "Renamed_Campaign";
+    campaign.file = "data/xml/renamed_campaign.xml";
+    campaign.planets = {first.name, second.name}; campaign.locations = campaign.planets;
+    campaign.trade_routes = {lane.name};
+    const eawr::units::GalacticTypeTable types;
+    const auto build = [&] { return eawr::campaign::build_campaign_galaxy(data, types, campaign, 1, 1); };
+    const auto control = build().value();
+    expect(control.routes.size() == 1 && control.next_id == 4 && control.diagnostics.empty(),
+        "complete renamed route remains unchanged");
+    for (const bool missing_a : {false, true}) {
+        data.trade_routes[0].point_a = missing_a ? outside.name : first.name;
+        data.trade_routes[0].point_b = missing_a ? second.name : outside.name;
+        const auto missing = build().value();
+        expect(missing.routes.empty() && missing.names.size() == 2 && missing.next_id == 3,
+            "one absent endpoint consumes no graph identity in either orientation");
+        expect(missing.diagnostics.size() == 1
+            && missing.diagnostics[0].code == "campaign_route_external_endpoint"
+            && missing.diagnostics[0].severity == eawr::core::Severity::warning
+            && missing.diagnostics[0].logical_path == campaign.file
+            && missing.diagnostics[0].message.find(outside.name) != std::string::npos,
+            "one absent endpoint is a named warning with campaign provenance");
+        const auto graph = gc::PlanetGraph::build(missing.planets, missing.routes, missing.maximum_movement_distance).value();
+        expect(graph.node(1)->edges.empty() && graph.node(2)->edges.empty(),
+            "skipped route contributes no long-distance adjacency");
+    }
+    data.trade_routes[0].point_a = outside.name; data.trade_routes[0].point_b = variant.name;
+    const auto both = build().value();
+    expect(both.routes.empty() && both.diagnostics.empty() && both.next_id == 3,
+        "both absent endpoint types silently contribute no route");
+    data.trade_routes[0] = lane;
+    campaign.planets[0] = variant.name;
+    const auto variant_only = build().value();
+    expect(variant_only.routes.empty() && variant_only.diagnostics.size() == 1,
+        "a same-position derived type does not substitute for an absent parent endpoint");
+    data.trade_routes[0].point_a = "amber_variant";
+    expect(build().value().routes.size() == 1, "an explicitly named variant endpoint resolves case-insensitively");
+    campaign.planets.push_back("AMBER_VARIANT");
+    const auto duplicate = build().value();
+    expect(duplicate.planets.size() == 3 && duplicate.routes[0].from == 3 && duplicate.routes[0].to == 2
+        && duplicate.diagnostics.size() == 1 && duplicate.diagnostics[0].code == "campaign_route_duplicate_endpoint"
+        && duplicate.diagnostics[0].message.find(lane.name) != std::string::npos,
+        "duplicate live endpoint lookup selects first live, last-created instance and warns");
+    campaign.trade_routes.clear();
+    expect(build().value().diagnostics.empty(), "duplicate locations without a route lookup do not warn");
+    campaign.trade_routes = {lane.name};
+    campaign.planets.push_back(outside.name);
+    data.trade_routes[0] = lane; data.trade_routes[0].point_a = second.name;
+    data.trade_routes[0].point_b = outside.name;
+    expect(build().value().diagnostics.empty(), "a route not using the duplicated type does not warn");
+    campaign.planets = {first.name, second.name};
+    data.trade_routes[0] = lane; data.trade_routes[0].point_b = "Unknown_Type";
+    expect(!build(), "undefined endpoint type still refuses instead of becoming campaign-external tolerance");
+    data.trade_routes[0] = lane; data.trade_routes[0].point_b = outside.name;
+    auto valid = lane; valid.name = "Retained_Lane"; data.trade_routes.push_back(valid);
+    campaign.trade_routes.push_back(valid.name);
+    const auto external_only = build().value();
+    expect(external_only.routes.size() == 1 && external_only.routes[0].id == 3 && external_only.names.back().name == valid.name,
+        "a skipped route does not shift a following admitted route identity");
+    auto repeated_pair = valid; repeated_pair.name = "Later_Lane";
+    std::swap(repeated_pair.point_a, repeated_pair.point_b); repeated_pair.hs_speed_factor = f(8);
+    data.trade_routes.push_back(repeated_pair); campaign.trade_routes.push_back(repeated_pair.name);
+    const auto admitted = build().value();
+    expect(admitted.routes == external_only.routes && admitted.next_id == external_only.next_id
+        && admitted.names.back().name == valid.name && admitted.diagnostics.size() == 2
+        && admitted.diagnostics.back().code == "campaign_route_duplicate_pair",
+        "duplicate unordered pair keeps first authored route, factor and identities with a named warning");
+    std::swap(campaign.trade_routes[1], campaign.trade_routes[2]);
+    const auto reordered = build().value();
+    expect(reordered.routes.size() == 1 && reordered.routes[0].hs_speed_factor == f(8)
+        && reordered.names.back().name == repeated_pair.name,
+        "route winner follows campaign authoring order rather than global table order");
+    std::swap(campaign.trade_routes[1], campaign.trade_routes[2]);
+    auto value = setup(); value.planets = admitted.planets; value.routes = admitted.routes;
+    value.rules.maximum_fleet_movement_distance = admitted.maximum_movement_distance;
+    value.content_identity = admitted.content_identity;
+    std::vector<std::string> reference;
+    std::vector<std::uint8_t> reference_checkpoint;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto session = eawr::campaign::GameSession::create(value).value();
+        const auto identities = eawr::checkpoint::game_identities(value);
+        const auto saved = eawr::checkpoint::save_game_checkpoint(session, identities).value();
+        if (workers == 1) reference_checkpoint = saved;
+        else expect(saved == reference_checkpoint, "external-route checkpoint bytes equal at 1/2/4/8 workers");
+        eawr::checkpoint::GameLoadOptions options;
+        auto restored = eawr::checkpoint::load_game_checkpoint(saved, identities, options, executor);
+        expect(static_cast<bool>(restored), "external-route graph checkpoint restores");
+        std::vector<std::string> hashes;
+        for (int tick = 0; tick < 3; ++tick) {
+            hashes.push_back(session.step(executor).value().state_hash.get());
+            if (restored) expect(restored.value().session.step(executor).value().state_hash.get() == hashes.back(),
+                "external-route restored continuation equals uninterrupted state");
+        }
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "external-route graph/checkpoint identity equals at 1/2/4/8 workers");
+    }
+    const auto before = admitted.content_identity;
+    data.trade_routes[0].point_b = variant.name;
+    expect(build().value().content_identity != before, "skipped authored route definitions remain in content identity");
+}
 void persistence() {
     const auto value = setup();
     const auto bytes = gc::write_replay({value, 8, {}}).value();
@@ -240,6 +353,47 @@ std::optional<std::string> game_root() {
     return value && *value ? std::optional<std::string>(value) : std::nullopt;
 #endif
 }
+void installed_remake(const std::filesystem::path& mod_root) {
+    const auto root = game_root();
+    expect(root.has_value(), "Remake canary requires EAWR_EAW_GAME_ROOT"); if (!root) return;
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, directory] : std::vector<std::pair<std::string, std::filesystem::path>>{
+            {"mod", mod_root / "Data"}, {"expansion", std::filesystem::path(*root) / "corruption/Data"},
+            {"base", std::filesystem::path(*root) / "GameData/Data"}}) {
+        auto resolved = eawr::vfs::resolve_manifest_mount(id, directory);
+        expect(static_cast<bool>(resolved), "Remake layered manifest mount"); if (!resolved) return;
+        mounts.push_back(std::move(resolved).value().mount);
+    }
+    const auto filesystem = eawr::vfs::Vfs::mount(mounts).value();
+    const auto catalog = eawr::data::load_catalog(filesystem, eawr::data::Profile::remake).value();
+    const auto data = eawr::data::galactic::load_galactic_data(filesystem, catalog.catalog).value();
+    const auto types = eawr::units::galactic_type_table(catalog.catalog);
+    const auto* campaign = data.campaign("GC_Mini_Web_Way_Rebel");
+    expect(campaign != nullptr, "installed Remake canary definition"); if (!campaign) return;
+    const auto model = eawr::campaign::build_campaign_galaxy(data, types, *campaign, 1, 1);
+    expect(static_cast<bool>(model), "installed unmodified Remake canary passes graph admission");
+    if (!model) { std::cerr << eawr::core::format_diagnostic(model.error()) << '\n'; return; }
+    expect(model.value().planets.size() == campaign->planets.size(), "canary keeps all authored planets");
+    expect(model.value().planets.size() == 105 && campaign->trade_routes.size() == 139
+        && model.value().routes.size() == 135, "installed canary retains exactly 105 planets and 135 of 139 routes");
+    expect(model.value().diagnostics.size() == 4, "installed canary emits exactly four admission warnings");
+    for (const auto* name : {"WW_064", "WW_126", "WW_127"}) {
+        const auto count = std::count_if(model.value().diagnostics.begin(), model.value().diagnostics.end(),
+            [&](const auto& row) {
+                return row.code == "campaign_route_external_endpoint" && row.severity == eawr::core::Severity::warning
+                    && row.message.find(std::string("skipped route ") + name + ":") != std::string::npos;
+            });
+        expect(count == 1, std::string("installed canary external endpoint warning: ") + name);
+    }
+    expect(std::count_if(model.value().diagnostics.begin(), model.value().diagnostics.end(), [](const auto& row) {
+        return row.code == "campaign_route_duplicate_pair" && row.severity == eawr::core::Severity::warning
+            && row.message.ends_with(": WW_288");
+    }) == 1, "installed canary duplicate pair warning: WW_288");
+    for (const auto& diagnostic : model.value().diagnostics)
+        std::cout << eawr::core::format_diagnostic(diagnostic) << '\n';
+    std::cout << "Remake canary: planets=" << model.value().planets.size() << " routes=" << model.value().routes.size()
+        << " authored-routes=" << campaign->trade_routes.size() << " warnings=" << model.value().diagnostics.size() << '\n';
+}
 void installed() {
     const auto root = game_root();
     if (!root) { std::cout << "SKIPPED: stock galaxy graphs need EAWR_EAW_GAME_ROOT\n"; return; }
@@ -273,6 +427,7 @@ void installed() {
         expect(static_cast<bool>(model), "stock campaign galaxy " + campaign.name);
         if (!model) { std::cerr << eawr::core::format_diagnostic(model.error()) << '\n'; continue; }
         ++campaigns;
+        expect(model.value().diagnostics.empty(), "stock route admission has no new warnings");
         expect(std::none_of(model.value().names.begin(), model.value().names.end(), [&](const auto& row) {
             return data.galaxy_art_object(row.name) != nullptr;
         }), "stock graph/state names exclude every galaxy art record");
@@ -331,6 +486,7 @@ int main(const int argc, const char* const argv[]) {
         replay.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
         return replay && hashes ? 0 : 1;
     }
-    if (argc > 1) installed(); else { paths(); gates(); campaign_boundary(); persistence(); partitioned_parity(); }
+    if (argc == 3 && std::string_view(argv[1]) == "--remake") installed_remake(argv[2]);
+    else if (argc > 1) installed(); else { paths(); gates(); campaign_boundary(); external_endpoints(); persistence(); partitioned_parity(); }
     return galactic_test::failures == 0 ? 0 : 1;
 }

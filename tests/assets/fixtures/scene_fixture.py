@@ -210,6 +210,14 @@ def objects_xml() -> str:
     return "\n".join(lines) + "\n"
 
 
+def write_effect_presence(data: pathlib.Path, shaders) -> None:
+    """Invented file-presence inputs for tests of existing material adapters."""
+    directory = data / "Art" / "Shaders"
+    directory.mkdir(parents=True, exist_ok=True)
+    for shader in shaders:
+        (directory / (pathlib.Path(shader).stem + ".fxo")).write_bytes(b"invented effect presence fixture")
+
+
 def write_fixture_root(root: pathlib.Path) -> pathlib.Path:
     data = root / "GameData" / "Data"
     (data / "Art" / "Maps").mkdir(parents=True, exist_ok=True)
@@ -219,6 +227,9 @@ def write_fixture_root(root: pathlib.Path) -> pathlib.Path:
     (data / "Art" / "Maps" / "EAWR_SCENE_SYNTHETIC.TED").write_bytes(ted_bytes())
     for name, surfaces in MODELS.items():
         (data / "Art" / "Models" / name).write_bytes(alo_bytes(surfaces))
+        # Presence-only inputs: these tests exercise adapter admission rather
+        # than the missing-effect no-draw route (ALDEFAULT-01).
+        write_effect_presence(data, (surface[0] for surface in surfaces))
     for name, rgba in TEXTURES.items():
         (data / "Art" / "Textures" / name).write_bytes(dds_bytes(rgba))
     xml = data / "XML"

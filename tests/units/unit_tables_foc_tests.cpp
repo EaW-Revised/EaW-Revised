@@ -2504,6 +2504,14 @@ void foc_fleet(const bool formation_only) {
             std::string("WHE-49: company conversion: ") + purchase);
     }
     if (hero_loaded) {
+        bool concentrate_found = false;
+        for (const auto& unit : hero_loaded.value().units) for (const auto& special : unit.special_abilities) {
+            if (special.kind != eawr::sim::tactical::SpecialAbilityKind::concentrate_fire) continue;
+            concentrate_found = true;
+            expect(special.target_speed_decrease.raw() == 0,
+                "WHE-25: installed FoC retains its strict zero target-speed contribution");
+        }
+        expect(concentrate_found, "WHE-25: installed hero closure qualifies the concentrate-fire handler");
         const auto hero_motion = eawr::units::motion_table(hero_loaded.value());
         expect(static_cast<bool>(hero_motion), "WHE-SQ-02: hero locomotors bind");
         for (const auto* name : {"Slave_I", "Millennium_Falcon", "HoundsTooth", "IG-2000"}) {
@@ -2531,8 +2539,28 @@ void foc_fleet(const bool formation_only) {
     }
     // EN-07/08: production and station ion weapons retain their authored projectile flags.
     const auto ion_combat = eawr::units::combat_table(tables);
+    expect(std::none_of(tables.notes.begin(), tables.notes.end(), [](const auto& note) {
+        return note.reason.find("WAB-36: targeted ability row skipped") != std::string::npos;
+    }), "WAB-36: installed FoC keeps strict named-handler resolution without skipped rows");
     expect(static_cast<bool>(ion_combat), "ion production combat table loads");
     if (ion_combat) {
+        // Keep the installed FoC corpus under the stricter stock-frame audit even though
+        // W-07 admits mod-authored nonorthogonal fire frames at runtime.
+        for (const auto& profile : ion_combat.value().profiles) {
+            for (const auto& weapon : profile.weapons) {
+                if (!weapon.fire_axes) continue;
+                const auto& axes = *weapon.fire_axes;
+                for (std::size_t left = 0; left < axes.size(); ++left) {
+                    for (std::size_t right = left; right < axes.size(); ++right) {
+                        const auto product = eawr::sim::math::dot(axes[left], axes[right]);
+                        const auto expected = left == right ? Fixed::scale : 0;
+                        expect(product && std::llabs(product.value().raw() - expected)
+                                <= eawr::sim::tactical::frame_tolerance_raw,
+                            "W-07: installed FoC fire frames still pass strict orthogonality validation");
+                    }
+                }
+            }
+        }
         for (const auto* name : {"Nebulon_B_Frigate", "Corellian_Corvette", "Skirmish_Empire_Star_Base_1", "TIE_Fighter_Squadron"}) {
             const auto* type = tables.find(name);
             expect(type && type->unit_ai && std::binary_search(ion_combat.value().unit_ai_types.begin(),

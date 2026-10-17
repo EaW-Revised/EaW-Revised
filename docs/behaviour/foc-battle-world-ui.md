@@ -86,6 +86,11 @@ Nothing here reaches the simulation.
   `Show_Hero_Head` gets the world identity frame and its `Icon_Name`. Generic hero
   identity alone does not enable the head. This is independent of the command-bar
   hero tray. In space a member of a team is represented by the team's identity.
+  The squadron path is exclusive: its contained hero does not add a second world
+  portrait at a craft's position (debug build, HWI-3, space identity collection).
+  This follows runtime team membership, regardless of the container's hero flags
+  or portrait. The effective Vader container has an `Icon_Name` but no
+  `Is_Named_Hero`; its company's carried hero still shares the squadron icon.
 - WU-48 (debug build, HWI-2). Standalone hero identities project the ship's position
   and add 0.048 of the screen height downward, using the same frame and health bar
   as squadron identities. Selection and hover change the frame, not admission.

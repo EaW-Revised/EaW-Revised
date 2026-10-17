@@ -94,6 +94,14 @@ std::optional<MeshLossDecision> selection(MeshSeats active, MeshSeats reported, 
         survivors == active ? MeshLossOutcome::restored : MeshLossOutcome::departure};
 }
 }
+std::chrono::milliseconds mesh_report_grace(std::chrono::milliseconds pair_timeout) {
+    return std::min(std::chrono::milliseconds{5000}, pair_timeout / 2);
+}
+MeshRelayFailure mesh_silent_end_failed(MeshRelayFailure reported, std::chrono::milliseconds waited,
+    std::chrono::milliseconds pair_timeout) {
+    if (reported.a_failed == reported.b_failed || waited < mesh_report_grace(pair_timeout)) return reported;
+    return {true, true};
+}
 std::string mesh_newcomer_refusal_text(std::string_view name, bool relay_configured) {
     return "Could not connect to " + std::string(name) + ". Your network or theirs blocks a direct connection and "
         + (relay_configured ? "the relay could not help." : "no relay is configured on this server.");

@@ -55,6 +55,7 @@ public:
     [[nodiscard]] core::Result<void> restore(const script::foc::galactic_ai::NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
     [[nodiscard]] core::Result<std::string> sync_hash() const override;
+    [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
     // Deterministic work receipt, excluded from saves/hashes.
     [[nodiscard]] std::uint64_t digest_generations() const noexcept { return digest_generations_; }
     [[nodiscard]] std::uint64_t digest_requests() const noexcept { return digest_requests_; }

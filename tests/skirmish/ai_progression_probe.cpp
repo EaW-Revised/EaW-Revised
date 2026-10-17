@@ -1,5 +1,5 @@
 // Observe a real lobby skirmish, including its economy and AI purchase decisions.
-// Usage: ai_progression_probe GAME_ROOT MAP DIFFICULTY TICKS WORKERS OUT_DIR [MODE] [--gate]
+// Usage: ai_progression_probe GAME_ROOT MAP DIFFICULTY TICKS WORKERS OUT_DIR [MODE] [--gate] [--seed=N] [--handoff=TICK] [--no-journal]
 // MODE: control, team-empire, team-rebel, human-mines-empire, human-mines-rebel, or duel:FACTION:FACTION
 // (two AI players, any factions, e.g. duel:Underworld:Empire). superweapons.csv samples population room,
 // special-weapon permission and each planetary source's readiness every 300 ticks (#1933).
@@ -93,11 +93,21 @@ struct Sample {
 };
 
 int run(int argc, char** argv) {
-    if (argc < 7 || argc > 9) throw std::runtime_error("usage: ai_progression_probe GAME_ROOT MAP DIFFICULTY TICKS WORKERS OUT_DIR [MODE] [--gate]");
+    if (argc < 7 || argc > 12) throw std::runtime_error("usage: ai_progression_probe GAME_ROOT MAP DIFFICULTY TICKS WORKERS OUT_DIR [MODE] [--gate] [--seed=N] [--handoff=TICK] [--no-journal]");
     const std::string mode = argc >= 8 ? argv[7] : "control";
     const bool human_mines = mode == "human-mines-empire" || mode == "human-mines-rebel";
-    const bool gate = argc == 9 && std::string_view(argv[8]) == "--gate";
-    if (argc == 9 && !gate) throw std::runtime_error("expected --gate");
+    bool gate = false;
+    std::uint64_t seed = 67;
+    std::uint64_t handoff_tick = 0;
+    bool journal_enabled = true;
+    for (int index = 8; index < argc; ++index) {
+        const std::string_view option(argv[index]);
+        if (option == "--gate" && !gate) gate = true;
+        else if (option.starts_with("--seed=")) seed = number(argv[index] + 7);
+        else if (option.starts_with("--handoff=")) handoff_tick = number(argv[index] + 10);
+        else if (option == "--no-journal") journal_enabled = false;
+        else throw std::runtime_error("expected --gate, --seed=N, --handoff=TICK or --no-journal");
+    }
     std::vector<std::string> duel;
     if (mode.starts_with("duel:")) {
         for (std::size_t begin = 5; begin <= mode.size();) {
@@ -118,6 +128,8 @@ int run(int argc, char** argv) {
     }
     const std::filesystem::path out(argv[6]);
     const auto ticks = number(argv[4]), workers = number(argv[5]);
+    if (handoff_tick && (duel.empty() || handoff_tick >= ticks))
+        throw std::runtime_error("handoff requires a duel and a tick before the end");
     if (ticks > tactical::max_ticks || workers > eawr::platform::ThreadWorkerAdapter::max_worker_count)
         throw std::runtime_error("tick or worker limit exceeded");
     std::filesystem::create_directories(out);
@@ -128,7 +140,7 @@ int run(int argc, char** argv) {
     auto catalog = take(eawr::data::load_catalog(filesystem, eawr::data::Profile::foc));
     skirmish::FixtureOptions options;
     options.map = argv[2];
-    options.seed = 67;
+    options.seed = seed;
     options.match = take(skirmish::read_match_defaults(filesystem));
     options.slots = std::vector<skirmish::LobbySlot>{{1, "Empire", 0, false, {}, {}}, {2, "Rebel", 1, false, {}, {}}};
     if (!duel.empty()) {
@@ -191,7 +203,10 @@ int run(int argc, char** argv) {
     content.map_box = skirmish::map_box(inputs);
     auto economy = take(skirmish::economy_rules(start, inputs, tables));
     auto setup = skirmish::ai_setup(start, inputs, tables);
-    setup.journal = std::make_shared<foc::AiJournal>();
+    if (handoff_tick) setup.player_ai_start_ticks[2] = handoff_tick;
+    economy.player_ai_start_ticks = setup.player_ai_start_ticks;
+    const auto journal = std::make_shared<foc::AiJournal>();
+    setup.journal = journal_enabled ? journal : nullptr;
     check(skirmish::enable_goal_system(filesystem, setup));
     auto modules = take(skirmish::ai_modules(filesystem, setup));
     auto world = take(tactical::TacticalSession::create(start.setup, content.sensors, content.durability,
@@ -227,7 +242,7 @@ int run(int argc, char** argv) {
     std::vector<Sample> samples;
     std::ofstream hashes(out / "hashes.csv"), events(out / "events.csv"), combat(out / "combat.csv");
     hashes << "tick,sha256\n";
-    events << "tick,player,sequence,kind,order,unit,reason\n";
+    events << "tick,player,sequence,kind,order,unit,reason,owner,type\n";
     combat << "tick,player,shooter,type,class,target,target_type\n";
     std::ofstream superweapons(out / "superweapons.csv");
     superweapons << "tick,player,population,population_cap,room,special_enabled,source,source_type,readiness,recharge_until,target\n";
@@ -361,6 +376,7 @@ int run(int argc, char** argv) {
     observe();
     observe_accounts();
     const eawr::platform::ThreadWorkerAdapter executor(static_cast<std::size_t>(workers));
+    std::uint64_t first_handoff_service = 0;
     for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
         std::vector<tactical::PlayerCommand> human_input;
         if (human_mines && tick == 1) human_input = std::move(human_moves);
@@ -380,12 +396,23 @@ int run(int argc, char** argv) {
             }
         }
         auto result = take(session.step(executor, human_input));
+        if (handoff_tick) {
+            for (auto service = journal->services.rbegin(); service != journal->services.rend()
+                && service->frame == tick; ++service) {
+                if (service->player != 2) continue;
+                if (tick < handoff_tick) throw std::runtime_error("delayed AI serviced before handoff");
+                if (!first_handoff_service) first_handoff_service = tick;
+            }
+        }
         observe_accounts();
         hashes << tick << ',' << result.world.state_sha256 << '\n';
         for (const auto& unit : result.world.snapshot->instances()) identities[unit.entity_id] = {unit.owner, unit.type_id};
         for (const auto& event : result.world.snapshot->events()) {
+            const auto identity = identities.find(event.unit);
             events << event.tick << ',' << event.player << ',' << event.sequence << ',' << tactical::to_string(event.kind)
-                << ',' << tactical::to_string(event.order) << ',' << event.unit << ',' << tactical::to_string(event.reason) << '\n';
+                << ',' << tactical::to_string(event.order) << ',' << event.unit << ',' << tactical::to_string(event.reason) << ','
+                << (identity != identities.end() ? identity->second.first : 0) << ','
+                << (identity != identities.end() ? type_name(identity->second.second) : std::string{}) << '\n';
             if (event.kind == tactical::EventKind::order_accepted) accepted.emplace(event.tick, event.player, event.sequence);
             if (event.kind == tactical::EventKind::order_rejected) rejections.emplace(Key{event.tick, event.player, event.sequence}, event.reason);
         }
@@ -412,6 +439,13 @@ int run(int argc, char** argv) {
         if (tick % 1800 == 0 || tick == ticks) observe();
     }
     const auto record = session.record();
+    if (handoff_tick) {
+        if (journal_enabled && (!first_handoff_service || first_handoff_service > handoff_tick + 3))
+            throw std::runtime_error("delayed AI did not begin at the handoff boundary");
+        for (const auto& command : record.commands)
+            if (command.key.player_id == 2 && command.key.tick < handoff_tick)
+                throw std::runtime_error("delayed AI commanded before handoff");
+    }
     std::ofstream transactions(out / "transactions.csv"), income_profiles(out / "income-profiles.csv");
     transactions << std::setprecision(17);
     income_profiles << std::setprecision(17);
@@ -445,12 +479,17 @@ int run(int argc, char** argv) {
     const auto bytes = take(tactical::write_replay(record));
     std::ofstream replay(out / "battle.eawr-replay", std::ios::binary);
     replay.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    const auto& history = *journal;
+    if (history.costs_dropped || history.plans_dropped || history.services_dropped)
+        std::cout << "AI journal: costs_dropped=" << history.costs_dropped
+                  << " plans_dropped=" << history.plans_dropped
+                  << " services_dropped=" << history.services_dropped << '\n';
     std::ofstream plans(out / "plans.csv");
     plans << "tick,player,plan,goal,target,event,detail\n";
-    for (const auto& event : setup.journal->plans)
+    for (const auto& event : journal->plans)
         plans << event.tick << ',' << event.player << ',' << event.plan << ',' << event.goal << ',' << event.target << ','
             << event.event << ',' << quoted(event.detail) << '\n';
-    for (const auto& event : setup.journal->plans)
+    for (const auto& event : journal->plans)
         if (event.event == "proposed" || event.event == "rejected")
             decisions << event.tick << ',' << event.player << ',' << event.event << ',' << event.goal
                 << ",goal," << quoted(event.detail) << '\n';
@@ -507,6 +546,9 @@ int run(int argc, char** argv) {
     std::ofstream receipt(out / "setup.txt");
     receipt << "map=" << fixture.map << "\nmap_sha256=" << fixture.map_sha256 << "\ndifficulty=" << load.difficulty
         << "\nseed=" << fixture.seed << "\nworkers=" << workers << "\nticks=" << ticks
+        << "\nai_handoff_tick=" << handoff_tick << "\nfirst_handoff_service=" << first_handoff_service
+        << "\nai_economy_handoff_tick=" << (economy.player_ai_start_ticks.contains(2) ? economy.player_ai_start_ticks.at(2) : 0)
+        << "\njournal_enabled=" << journal_enabled
         << "\nstart_tech=" << start.match.start_tech << "\nmax_tech=" << start.match.max_tech
         << "\ncredits=" << credits(start.match.credits) << "\nmode=" << mode
         << "\nempty extra fleets, fog on, economy on\n"

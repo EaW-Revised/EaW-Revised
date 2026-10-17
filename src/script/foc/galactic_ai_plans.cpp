@@ -130,6 +130,8 @@ CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string
             "_EAWR_GalacticDefinition(Category, TaskForce, IgnoreTarget, MagicPlan, AllowFreeStoreUnits, AllowEngagedUnits,\n"
             " PerFailureContrastAdjust, MinContrastScale, MaxContrastScale, RequiredCategories, MagicPlanStealing,\n"
             " MinimumCost, AdditionalCost, ScriptPoolCount, AllowSpecialWeapons)\n"
+            "if EnemyContrastTypes then\n for index, enemy in pairs(EnemyContrastTypes) do\n"
+            " _EAWR_GalacticContrast(enemy, FriendlyContrastTypes[index])\n end\nend\n"
             "_EAWR_GalacticPacing(DifficultyBasedMinPause(\"Easy\"), DifficultyBasedMinPause(\"Normal\"), DifficultyBasedMinPause(\"Hard\"))\n";
         if (const auto added = manifest.add("EAWR/GALACTIC_PLAN/" + stem(path) + ".LUA", loader); !added)
             return CatalogResult::failure(added.error());
@@ -142,8 +144,40 @@ CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string
     if (!created) return CatalogResult::failure(created.error());
     auto& scripts = created.value();
     std::vector<core::Diagnostic> errors;
-    tactical_ai_detail::register_globals(scripts, host, errors);
-    tactical_ai_detail::register_methods(scripts, host, errors);
+    tactical_ai_detail::register_globals(scripts, host, errors, false);
+    tactical_ai_detail::register_methods(scripts, host, errors, false);
+    using WeightedList = std::vector<std::pair<std::string, Real>>;
+    using ContrastLists = std::vector<std::pair<std::string, WeightedList>>;
+    auto lists = std::make_shared<std::vector<WeightedList>>();
+    auto contrast = std::make_shared<std::map<std::uint64_t, ContrastLists>>();
+    const auto check = [&](core::Result<void> result) { if (!result) errors.push_back(result.error()); };
+    check(scripts.register_binding("WeightedTypeList.Create", [lists](auth::BindingContext&, const auth::ValueList&) {
+        lists->emplace_back();
+        return detail::one(detail::handle(handle_type_list, lists->size()));
+    }));
+    check(scripts.register_method(handle_type_list, "Parse", [lists](auth::BindingContext&, const auth::ValueList& values) -> core::Result<auth::ValueList> {
+        const auto* handle = values.empty() ? nullptr : detail::as_handle(values[0], handle_type_list);
+        const auto names = field<std::vector<auth::Value>>(values, 1);
+        const auto weights = field<std::vector<auth::Value>>(values, 2);
+        if (!handle || !handle->id || handle->id > lists->size() || !names || !weights || names->size() != weights->size())
+            return detail::fail("plan weighted list requires names and weights of equal length");
+        WeightedList parsed;
+        for (std::size_t index = 0; index < names->size(); ++index) {
+            const auto* name = std::get_if<std::string>(&(*names)[index].data);
+            const auto* weight = std::get_if<Real>(&(*weights)[index].data);
+            if (!name || !weight) return detail::fail("plan weighted list requires text names and numeric weights");
+            parsed.emplace_back(upper_case(*name), *weight);
+        }
+        (*lists)[handle->id - 1] = std::move(parsed);
+        return detail::none();
+    }));
+    check(scripts.register_binding("_EAWR_GalacticContrast", [lists, contrast](auth::BindingContext& context, const auth::ValueList& values) -> core::Result<auth::ValueList> {
+        const auto name = field<std::string>(values, 0);
+        const auto* handle = values.size() == 2 ? detail::as_handle(values[1], handle_type_list) : nullptr;
+        if (!name || !handle || !handle->id || handle->id > lists->size()) return detail::fail("plan contrast requires an enemy category and a weighted list");
+        (*contrast)[context.instance()].emplace_back(upper_case(*name), (*lists)[handle->id - 1]);
+        return detail::none();
+    }));
     auto definitions = std::make_shared<std::map<std::uint64_t, auth::ValueList>>();
     auto pacing = std::make_shared<std::map<std::uint64_t, auth::ValueList>>();
     const auto capture = [](const auto& destination) -> auth::Binding {
@@ -165,6 +199,7 @@ CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string
         if (found == definitions->end()) return CatalogResult::failure(error(path + ": no definition output"));
         auto plan = definition(path, found->second);
         if (!plan) return CatalogResult::failure(plan.error());
+        if (const auto rows = contrast->find(instance); rows != contrast->end()) plan.value().contrast = rows->second;
         out.plans.push_back(std::move(plan).value());
         const auto pause = pacing->find(instance);
         if (pause == pacing->end()) return CatalogResult::failure(error(path + ": no pacing output"));

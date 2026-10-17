@@ -2,6 +2,7 @@
 #include "log.hpp"
 #include "setup_test_support.hpp"
 #include "online_match.hpp"
+#include "online_service_settings.hpp"
 #include "eawr/net/gns_transport.hpp"
 #include <array>
 #include <chrono>
@@ -70,6 +71,7 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
     match_options.service.ca_file = options.server.ca_file;
     match_options.identity = host ? "online-test-host" : "online-test-guest";
     match_options.short_invitation = true;
+    match_options.require_short_code = true; // the guest joins by the code alone: a service without room codes fails the host at once
     match_options.turn_only = options.turn_only;
     match_options.hash_exchange_every = target_ticks;
     match_options.turn_credentials_observer = [&log](const net::GnsTurnCredentials& credentials) {
@@ -88,6 +90,15 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
     }
     if (!code.empty()) log.add_secret(code);
 
+    // The host publishes a plain directory room for the two humans and opens its signalling scope; the 4-character code is the
+    // room's alias. The guest attaches with that code alone.
+    std::shared_ptr<net::OnlineRoomSource> rooms;
+    // The source's worker must be gone before the process exits, also when play() unwinds with a Failure.
+    struct RoomCloser { std::shared_ptr<net::OnlineRoomSource>& source; ~RoomCloser() { if (source) source->close(); } } closer{rooms};
+    if (host) {
+        rooms = viewer::host_standalone_room(match_options, "Online test", 2);
+        if (!rooms) throw Failure{"", "The room could not be configured."};
+    }
     auto match = viewer::make_online_match(match_options);
     match->configure_factions({"Rebel", "Empire", "Underworld"});
     const auto initial = initial_setup();
@@ -110,8 +121,8 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
     auto deadline = std::chrono::steady_clock::now() + options.timeout;
     net::GnsRoute route{};
     const auto pause = [&](const char* stage) {
-        if (const auto seen = net::GnsTransport::observed_route(); seen != net::GnsRoute::unknown) route = seen;
         const auto view = match->view();
+        if (view.online_route != net::GnsRoute::unknown) route = view.online_route;
         if (view.phase == viewer::LanPhase::ended)
             throw Failure{view.diagnostic_code, std::string("The session ended during ") + stage + "."};
         if (std::chrono::steady_clock::now() >= deadline)
@@ -200,10 +211,10 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
                 + ": The session ended; no peer-confirmed tick-10 hash was received."};
         if (!confirmed() && std::chrono::steady_clock::now() >= deadline)
             throw Failure{"ONLINE-TEST-HASH-UNCONFIRMED", "Timed out waiting for a peer-confirmed tick-10 hash."};
-        if (const auto seen = net::GnsTransport::observed_route(); seen != net::GnsRoute::unknown) route = seen;
+        if (const auto seen = match->view().online_route; seen != net::GnsRoute::unknown) route = seen;
         std::this_thread::sleep_for(2ms);
     }
-    if (const auto seen = net::GnsTransport::observed_route(); seen != net::GnsRoute::unknown) route = seen;
+    if (const auto seen = match->view().online_route; seen != net::GnsRoute::unknown) route = seen;
     // Our confirmation must reach the other peer before teardown; do not advance further.
     for (const auto until = std::chrono::steady_clock::now() + linger; std::chrono::steady_clock::now() < until;) {
         if (!driver(context, {}, clock())) break;

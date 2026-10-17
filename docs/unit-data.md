@@ -60,7 +60,8 @@ single/list selection still differs where this section says so.
   list tags below in the shared retail module. Nested records with child nodes are values even
   when their scalar text is empty. FoC reads object-type files with surrounding whitespace
   trimmed and makes this check before it looks the tag up, so no tag's own parser sees such a
-  value (ML-24). M2 `Object::single` still keeps an empty authored override: in stock data 43
+  value (ML-24). `EffectiveObject::single` / `single_text` apply the rule (battle-audio tags,
+  `No_Colorization_Color`, `LandBehavior`); readers still on `value()` keep the empty override. M2 `Object::single` still keeps an empty authored override: in stock data 43
   variant tags differ, mostly unit sounds, plus the scenery `Space_Junk_Large_NO_Collision`,
   whose blank `Space_Layer` keeps its base's `StaticObject` in FoC.
 - Booleans read true for `1` or for a value whose first letter is Y or T, in either case, and

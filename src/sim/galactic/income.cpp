@@ -6,6 +6,7 @@
 #include <tuple>
 #include "encoding.hpp"
 #include "session_impl.hpp"
+#include "native_income_projection.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/galactic/production.hpp"
 #include "eawr/sim/galactic/economy_corruption.hpp"
@@ -355,13 +356,12 @@ core::Result<math::Fixed> income_production_multiplier(const IncomeSetup& income
     return income_production_multiplier(production_reduction_sources(income, planets), planet, player, type, price);
 }
 
-const IncomeSetup& GalacticSession::Impl::live_income_inputs() const {
-    if (gathered_income_inputs && income_gather_generation == income_input_generation)
-        return *gathered_income_inputs;
-    if (!gathered_income_inputs) gathered_income_inputs = *setup.income;
-    auto& inputs = *gathered_income_inputs;
+void session_detail::project_native_income(IncomeSetup& inputs, const IncomeSetup& schema,
+    const PoliticalControlSetup* control, std::span<const Planet> planets, std::span<const Fleet> fleets,
+    std::span<const DetachedUnit> detached_units, const ProductionSetup* production,
+    std::span<const CensusObject> actors, std::vector<NativeIncomeSourceCandidate>& income_source_candidates) {
     for (std::size_t i = 0; i < inputs.planets.size(); ++i)
-        inputs.planets[i].destroyed = setup.income->planets[i].destroyed;
+        inputs.planets[i].destroyed = schema.planets[i].destroyed;
     if (control) for (std::size_t i = 0; i < inputs.planets.size(); ++i)
         inputs.planets[i].destroyed = inputs.planets[i].destroyed || control->planets[i].destroyed;
     income_source_candidates.clear(); // retain the gather buffer across misses
@@ -369,9 +369,9 @@ const IncomeSetup& GalacticSession::Impl::live_income_inputs() const {
         if (profile(inputs, type)) income_source_candidates.push_back({{id, type, planet, owner, false, true}, fallback});
     };
     // Immutable identity gather; arithmetic runs in partitioned staging below.
-    for (const auto& fleet : sorted_fleets()) for (const auto& member : fleet.members)
+    for (const auto& fleet : fleets) for (const auto& member : fleet.members)
         add(member.id, member.type, fleet.motion.transit ? 0 : fleet.orbit, fleet.owner);
-    for (const auto& [id, row] : detached_units) add(id, row.member.type, row.planet, row.owner);
+    for (const auto& row : detached_units) add(row.member.id, row.member.type, row.planet, row.owner);
     if (control) for (const auto& planet : control->planets) for (const auto& row : planet.landed)
         add(row.id, row.type, planet.planet, row.owner);
     if (production) for (const auto& planet : production->planets) for (const auto& row : planet.objects)
@@ -380,7 +380,7 @@ const IncomeSetup& GalacticSession::Impl::live_income_inputs() const {
     // set their location to zero in transit, and remove them on losses. Reading
     // retained actors also covers detached/landed payloads without rewalking the
     // static contents graph or reviving a child after its destruction.
-    for (const auto& actor : actor_inputs())
+    for (const auto& actor : actors)
         if (actor.id != actor.planet && !actor.dead && !actor.delete_pending)
             add(actor.id, actor.original_type, actor.planet, actor.owner);
     // Match the former map's precedence exactly: last primary row, otherwise first
@@ -398,16 +398,28 @@ const IncomeSetup& GalacticSession::Impl::live_income_inputs() const {
         inputs.sources.push_back(income_source_candidates[selected].source);
         begin = end;
     }
-    for (const auto& declared : setup.income->sources) {
+    for (const auto& declared : schema.sources) {
         const auto at = std::lower_bound(inputs.sources.begin(), inputs.sources.end(), declared.id,
             [](const auto& row, auto id) { return row.id < id; });
         if (declared.planet_source) {
             auto source = declared;
-            source.owner = registry.get<session_detail::PlanetData>(planets.at(source.planet)).owner;
+            source.owner = std::lower_bound(planets.begin(), planets.end(), source.planet, [](const auto& row, auto id) { return row.id < id; })->owner;
             if (at != inputs.sources.end() && at->id == source.id) *at = source;
             else inputs.sources.insert(at, source);
         } else if (at != inputs.sources.end() && at->id == declared.id) at->enabled = at->enabled && declared.enabled;
     }
+}
+
+const IncomeSetup& GalacticSession::Impl::live_income_inputs() const {
+    if (gathered_income_inputs && income_gather_generation == income_input_generation)
+        return *gathered_income_inputs;
+    if (!gathered_income_inputs) gathered_income_inputs = *setup.income;
+    auto& inputs = *gathered_income_inputs;
+    std::vector<DetachedUnit> detached;
+    detached.reserve(detached_units.size());
+    for (const auto& [id, row] : detached_units) { (void)id; detached.push_back(row); }
+    session_detail::project_native_income(inputs, *setup.income, control ? &*control : nullptr,
+        sorted_planets(), sorted_fleets(), detached, production ? &*production : nullptr, actor_inputs(), income_source_candidates);
     income_sources_gathered += income_source_candidates.size();
     income_gather_generation = income_input_generation;
     return inputs;
@@ -485,11 +497,12 @@ core::Result<void> GalacticSession::Impl::service_income(const PartitionExecutor
     return core::Result<void>::success();
 }
 
-core::Result<std::vector<math::Fixed>> GalacticSession::Impl::income_bonuses(const PartitionExecutor& executor) const {
-    std::vector<math::Fixed> totals(setup.planets.size());
-    if (!income) return core::Result<std::vector<math::Fixed>>::success(std::move(totals));
-    const auto& inputs = live_income_inputs();
-    const auto current = sorted_planets();
+core::Result<std::vector<math::Fixed>> session_detail::project_native_income_bonuses(
+    const IncomeSetup* source_inputs, std::span<const GamblingIncomeState> gambling, std::span<const Planet> current,
+    std::span<const math::Fixed> base_credits, const PartitionExecutor& executor) {
+    std::vector<math::Fixed> totals(current.size());
+    if (!source_inputs) return core::Result<std::vector<math::Fixed>>::success(std::move(totals));
+    const auto& inputs = *source_inputs;
     std::vector<math::Fixed> bonuses(inputs.sources.size());
     std::vector<std::optional<core::Diagnostic>> errors(inputs.sources.size());
     const auto phase = executor.execute_phase("galactic-income-bonuses", tick_partition_count, [&](std::size_t partition) {
@@ -503,7 +516,7 @@ core::Result<std::vector<math::Fixed>> GalacticSession::Impl::income_bonuses(con
             if (!where || !type || !type->mining) continue;
             const auto index = static_cast<std::size_t>(planet - current.begin());
             const auto& mine = *type->mining;
-            auto value = mining_income_bonus(planet_base_credits(index),
+            auto value = mining_income_bonus(base_credits[index],
                 mine.percentage, mine.absolute, where->mining_colony, mine.colony_multiplier);
             if (!value) errors[i] = value.error(); else bonuses[i] = value.value();
         }
@@ -519,7 +532,7 @@ core::Result<std::vector<math::Fixed>> GalacticSession::Impl::income_bonuses(con
         if (!sum) return core::Result<std::vector<math::Fixed>>::failure(sum.error());
         totals[index] = sum.value();
     }
-    for (const auto& row : income->gambling) if (row.planet && row.income.raw()) {
+    for (const auto& row : gambling) if (row.planet && row.income.raw()) {
         const auto source = std::lower_bound(inputs.sources.begin(), inputs.sources.end(), row.source,
             [](const auto& value, auto id) { return value.id < id; });
         if (source == inputs.sources.end() || source->id != row.source || !source->enabled || source->planet != row.planet) continue;
@@ -536,25 +549,20 @@ core::Result<std::vector<math::Fixed>> GalacticSession::Impl::income_bonuses(con
     return core::Result<std::vector<math::Fixed>>::success(std::move(totals));
 }
 
-core::Result<std::vector<PlanetIncomeContribution>> GalacticSession::Impl::income_contributions(const PartitionExecutor& executor) const {
-    auto bonuses = income_bonuses(executor);
-    if (!bonuses) return core::Result<std::vector<PlanetIncomeContribution>>::failure(bonuses.error());
+core::Result<std::vector<math::Fixed>> GalacticSession::Impl::income_bonuses(const PartitionExecutor& executor) const {
+    if (!income) return core::Result<std::vector<math::Fixed>>::success(std::vector<math::Fixed>(setup.planets.size()));
+    const auto& inputs = live_income_inputs();
     const auto current = sorted_planets();
-    const auto& fiscal = *setup.fiscal;
+    std::vector<math::Fixed> base_credits; base_credits.reserve(current.size());
+    for (std::size_t i = 0; i < current.size(); ++i) base_credits.push_back(planet_base_credits(i));
+    return session_detail::project_native_income_bonuses(&inputs, income->gambling, current, base_credits, executor);
+}
+
+core::Result<std::vector<PlanetIncomeContribution>> session_detail::project_native_income_contributions(
+    const FiscalSetup& fiscal, std::span<const Planet> current, std::span<const math::Fixed> base_credits,
+    const PoliticalControlSetup* control, const EconomyCorruptionState* economy_corruption, const IncomeState* income,
+    std::span<const math::Fixed> bonuses, const NativeIncomeEdges& income_edges, const PartitionExecutor& executor) {
     const auto* rules = fiscal.contributions ? &*fiscal.contributions : nullptr;
-    // The route graph is immutable: index endpoints once, not on every fiscal query.
-    if (rules && income_edges.size() != current.size()) {
-        income_edges.resize(current.size());
-        for (std::size_t i = 0; i < setup.routes.size(); ++i) {
-            const auto from = std::lower_bound(current.begin(), current.end(), setup.routes[i].from,
-                [](const auto& p, auto id) { return p.id < id; });
-            const auto to = std::lower_bound(current.begin(), current.end(), setup.routes[i].to,
-                [](const auto& p, auto id) { return p.id < id; });
-            const auto a = static_cast<std::size_t>(from - current.begin());
-            const auto b = static_cast<std::size_t>(to - current.begin());
-            income_edges[a].push_back({i, b}); income_edges[b].push_back({i, a});
-        }
-    }
     std::vector<PlanetIncomeContribution> out(current.size());
     std::vector<std::optional<core::Diagnostic>> errors(current.size());
     // WGEP-05: the same unexpired-blocker predicate serves actual collection and the pure forecast.
@@ -606,8 +614,8 @@ core::Result<std::vector<PlanetIncomeContribution>> GalacticSession::Impl::incom
             }
             if (errors[i]) continue;
             // WGEP-06/14: last post-payment roll affects this cycle.
-            auto value = planet_income_contribution(planet_base_credits(i), // WGCH-143: ruined planets read their authored destroyed value
-                economy_corruption ? economy_corruption->planets[i].factor : math::Fixed::from_raw(math::Fixed::scale), bonuses.value()[i], like, opposing,
+            auto value = planet_income_contribution(base_credits[i], // WGCH-143: ruined planets read their authored destroyed value
+                economy_corruption ? economy_corruption->planets[i].factor : math::Fixed::from_raw(math::Fixed::scale), bonuses[i], like, opposing,
                 rules ? rules->maximum_alignment_bonus : math::Fixed{},
                 rules ? rules->maximum_alignment_penalty : math::Fixed{}, political_value, route_factor);
             if (!value) { errors[i] = value.error(); continue; }
@@ -625,6 +633,32 @@ core::Result<std::vector<PlanetIncomeContribution>> GalacticSession::Impl::incom
     if (!phase) return core::Result<std::vector<PlanetIncomeContribution>>::failure(phase.error());
     for (const auto& error : errors) if (error) return core::Result<std::vector<PlanetIncomeContribution>>::failure(*error);
     return core::Result<std::vector<PlanetIncomeContribution>>::success(std::move(out));
+}
+
+core::Result<std::vector<PlanetIncomeContribution>> GalacticSession::Impl::income_contributions(const PartitionExecutor& executor) const {
+    auto bonuses = income_bonuses(executor);
+    if (!bonuses) return core::Result<std::vector<PlanetIncomeContribution>>::failure(bonuses.error());
+    const auto current = sorted_planets();
+    const auto& fiscal = *setup.fiscal;
+    const auto* rules = fiscal.contributions ? &*fiscal.contributions : nullptr;
+    // The route graph is immutable: index endpoints once, not on every fiscal query.
+    if (rules && income_edges.size() != current.size()) {
+        income_edges.resize(current.size());
+        for (std::size_t i = 0; i < setup.routes.size(); ++i) {
+            const auto from = std::lower_bound(current.begin(), current.end(), setup.routes[i].from,
+                [](const auto& p, auto id) { return p.id < id; });
+            const auto to = std::lower_bound(current.begin(), current.end(), setup.routes[i].to,
+                [](const auto& p, auto id) { return p.id < id; });
+            const auto a = static_cast<std::size_t>(from - current.begin());
+            const auto b = static_cast<std::size_t>(to - current.begin());
+            income_edges[a].push_back({i, b}); income_edges[b].push_back({i, a});
+        }
+    }
+    std::vector<math::Fixed> base_credits; base_credits.reserve(current.size());
+    for (std::size_t i = 0; i < current.size(); ++i) base_credits.push_back(planet_base_credits(i));
+    return session_detail::project_native_income_contributions(fiscal, current, base_credits,
+        control ? &*control : nullptr, economy_corruption ? &*economy_corruption : nullptr,
+        income ? &*income : nullptr, bonuses.value(), income_edges, executor);
 }
 
 core::Result<std::span<const PlanetIncomeContribution>> GalacticSession::Impl::forecast_contributions(

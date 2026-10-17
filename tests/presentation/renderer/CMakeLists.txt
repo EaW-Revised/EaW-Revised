@@ -1,4 +1,10 @@
 find_package(Threads REQUIRED)
+add_executable(eawr_particle_reuse_contracts particle_reuse_tests.cpp)
+target_include_directories(eawr_particle_reuse_contracts PRIVATE "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+target_compile_features(eawr_particle_reuse_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_particle_reuse_contracts)
+add_test(NAME particle_reuse_contracts COMMAND eawr_particle_reuse_contracts)
+
 add_executable(eawr_renderer_contracts
     main.cpp
     renderer_resource_tests.cpp
@@ -140,6 +146,7 @@ eawr_add_python_contract(python_presentation_renderer_input_routing tests.presen
 
 eawr_add_python_contract(python_presentation_renderer_front_end tests.presentation.renderer.test_front_end)
 eawr_add_python_contract(python_presentation_renderer_front_end_campaign tests.presentation.renderer.test_front_end_campaign)
+eawr_add_python_contract(python_presentation_renderer_ingame_menu tests.presentation.renderer.test_ingame_menu)
 
 eawr_add_python_contract(python_presentation_renderer_map_attached_effects tests.presentation.renderer.test_map_attached_effects)
 eawr_add_python_contract(python_presentation_renderer_map_camera tests.presentation.renderer.test_map_camera NEEDS PIL)

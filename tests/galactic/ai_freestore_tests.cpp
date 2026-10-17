@@ -1,6 +1,7 @@
 #include "galactic_support.hpp"
 #include "galactic_ai_actions.hpp"
 #include "galactic_ai_freestore.hpp"
+#include "galactic_ai_estimates.hpp"
 #include "host.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/core/sha256.hpp"
@@ -105,7 +106,59 @@ void landing_gates_and_preference() {
     expect(ga::ordinary_freestore_birth(bad).prefer_ground, "only a fresh actor constructor defaults preference true");
     done(owner.update(actor(21))); expect(!owner.set_prefer_ground(21, false), "setter requires actual unit-AI behavior");
 }
-void retained(eawr::platform::ThreadWorkerAdapter& executor) {
+void player_publications(eawr::platform::ThreadWorkerAdapter& executor) {
+    const auto check_records = [](const ga::QualifiedFreestore& value) {
+        expect(value.record_sync_hash() == value.record_sync_hash(true),
+            "copy-on-write freestore writes match an independent cold record sum");
+    };
+    ga::QualifiedFreestore owner;
+    auto first = actor(20), second = actor(21); second.object.owner = 2;
+    done(owner.update(first)); done(owner.update(second));
+    const std::array a{first.object.id}, b{second.object.id};
+    done(owner.initialize(1, a)); done(owner.initialize(2, b));
+    check_records(owner); const auto original_digest = owner.record_sync_hash();
+    const auto bytes = owner.encode();
+    const auto published = take(owner.publish(executor));
+    const auto one = published->players.at(1), two = published->players.at(2);
+    expect(one == take(owner.publish(1, executor)) && two == take(owner.publish(2, executor)),
+        "combined view retains each immutable player publication");
+    auto staged = owner.clone();
+    expect(take(staged.publish(executor)) == published, "a clone shares the unchanged immutable view");
+    expect(take(staged.reserve(1, 20, 77)), "clone reserves only its own player store");
+    check_records(staged); check_records(owner);
+    expect(staged.record_sync_hash() != original_digest && owner.record_sync_hash() == original_digest,
+        "a clone's reservation changes only its own record sum");
+    const auto changed = take(staged.publish(executor));
+    expect(changed->players.at(1) != one && changed->players.at(2) == two,
+        "one player's write keeps the other player's publication shared");
+    expect(one->reservations.empty() && owner.encode() == bytes && owner.reservations(1)->empty(),
+        "a clone's reservation cannot mutate the original owner or retained view");
+    owner.replace(staged); check_records(owner);
+    expect(owner.record_sync_hash() == staged.record_sync_hash(), "replacement adopts the matching record sums");
+    expect(take(owner.publish(executor)) == changed && owner.reservations(1)->at(20) == 77,
+        "ordered replacement adopts the player's new publication");
+    const auto callback_view = take(owner.publish(executor));
+    done(owner.consume_additions(1, 1)); check_records(owner); check_records(staged);
+    expect(owner.record_sync_hash() != staged.record_sync_hash(),
+        "callback consumption changes its native record while retaining the published pool");
+    expect(take(owner.publish(executor)) == callback_view && staged.additions(1).size() == 1,
+        "callback consumption detaches native order without rebuilding the pool");
+    auto detached = owner.clone(); detached.remove_membership(2, 21); check_records(detached); check_records(owner);
+    expect(owner.contains(2, 21) && !detached.contains(2, 21)
+        && take(detached.publish(executor))->players.at(1) == changed->players.at(1),
+        "membership removal detaches only its player");
+    first.enroute = true; done(detached.update(first)); check_records(detached); check_records(owner);
+    expect(!owner.facts(20)->enroute && take(detached.publish(1, executor))->objects.front().transit,
+        "raw fact changes invalidate the writing player's publication");
+    std::array<gc::GalacticPlayer, 2> players{{{1, 1, 0}, {2, 2, 0}}};
+    ga::QualifiedFreestore restored; const auto saved = owner.encode();
+    done(restored.restore(saved, 100, players)); check_records(restored);
+    expect(restored.record_sync_hash() == owner.record_sync_hash(), "fresh restore reconstructs the warm record sums");
+    expect(restored.encode() == saved && take(restored.publish(executor))->objects == take(owner.publish(executor))->objects
+        && take(restored.publish(executor))->reservations == take(owner.publish(executor))->reservations,
+        "cold restore preserves canonical bytes and the warm pool's facts and reservations");
+}
+void retained(eawr::platform::ThreadWorkerAdapter& executor, std::vector<std::uint8_t>& return_baseline) {
     std::uint64_t changes{}; ga::QualifiedFreestore owner([&] { ++changes; });
     auto row = actor(); done(owner.update(row));
     const std::array offers{row.object.id}; done(owner.initialize(1, offers));
@@ -151,7 +204,26 @@ void retained(eawr::platform::ThreadWorkerAdapter& executor) {
     row.object.planet = row.parent = 1; row.parent_is_planet = row.object.directly_parented_to_planet = true; done(owner.update(row));
     expect(owner.assign(1, row.object.id, 7) == ga::FreestoreAssignment::assigned && !owner.contains(1, row.object.id),
         "successful assignment erases galactic membership");
-    expect(take(owner.offer(1, row.object.id)), "returned task actor can be explicitly reoffered");
+    owner.release_object(1, row.object.id, 7);
+    expect(owner.contains(1, row.object.id) && !owner.reservations(1)->contains(row.object.id)
+        && owner.additions(1).size() == 1,
+        "WGA-163 task return reoffers an assigned survivor for the next selection");
+    const auto returned = take(owner.publish(executor));
+    const auto returned_bytes = owner.encode();
+    if (return_baseline.empty()) return_baseline = returned_bytes;
+    else expect(return_baseline == returned_bytes, "task-return state is identical on 1/2/4/8 workers");
+    owner.release_object(1, row.object.id, 7);
+    expect(take(owner.publish(executor)) == returned && owner.additions(1).size() == 1,
+        "repeated task return preserves publication and emits no duplicate callback");
+    owner.remove_membership(1, row.object.id);
+    row.dead = true; done(owner.update(row));
+    owner.release_object(1, row.object.id, 7);
+    owner.release_object(2, row.object.id, 7);
+    owner.release_object(1, 21, 7);
+    expect(!owner.contains(1, row.object.id) && !owner.contains(2, row.object.id) && !owner.contains(1, 21),
+        "task return refuses dead, foreign and lost actors through ordinary admission");
+    row.dead = false; done(owner.update(row));
+    expect(take(owner.offer(1, row.object.id)), "eligible task actor can be explicitly reoffered");
     expect(owner.assign(1, row.object.id, 7) == ga::FreestoreAssignment::failed, "nonnull assignment requires exact nonnull reservation");
     row.object.owner = 2;
     expect(!owner.update(row), "raw updater refuses ownership rewrite");
@@ -302,9 +374,15 @@ void automatic_landing(eawr::platform::ThreadWorkerAdapter& executor, std::strin
     expect(deletion_restored.state_sha256() == deletion_world.state_sha256(),
         "native landing with a retained delete-pending entry restores the same world");
     auto mixed = setup; mixed.census->objects.back().owner = 2;
+    mixed.control->max_ground_forces = 3;
+    auto third = mixed.census->objects.back(); third.id = 32; third.owner = 3;
+    mixed.census->objects.push_back(third);
+    mixed.control->planets.front().landed.push_back({32, 2, 3});
+    mixed.movement->contents.push_back({32, {}});
     mixed.control->planets.front().landed.front().owner = 2;
     for (auto& relation : mixed.control->relations)
-        if ((relation.player == 1 && relation.other == 2) || (relation.player == 2 && relation.other == 1)) relation.allied = true;
+        if ((relation.player == 1 && (relation.other == 2 || relation.other == 3))
+            || (relation.player == 2 && relation.other == 1)) relation.allied = true;
     auto mixed_world = take(gc::GalacticSession::create(mixed));
     ga::NativeActions mixed_actions(mixed_world, funding, {}, {}); mixed_actions.bind_admission_gate([] { return false; });
     auto& mixed_owner = mixed_actions.qualified_freestore(); done(mixed_owner.update(parent));
@@ -314,11 +392,18 @@ void automatic_landing(eawr::platform::ThreadWorkerAdapter& executor, std::strin
     done(ga::prepare_freestore_safety(mixed_pool, *mixed_world.snapshot(), traits, executor));
     expect(mixed_pool.objects.front().safe == true
         && take(mixed_world.native_transport_landing_available(1, 1))
-            == gc::GalacticSession::NativeTransportLandingGate::mixed_allied_owner_unavailable,
-        "GAL-U01 mixed allied occupation is a named world seam after sourced safety/capacity");
+            == gc::GalacticSession::NativeTransportLandingGate::admitted,
+        "WGS-187 mixed allied ownership passes automatic landing preflight");
     done(mixed_actions.service_freestore_landing(1, mixed_pool, executor));
-    expect(mixed_world.native_effects().empty() && mixed_world.snapshot()->fleets().front().members == setup.fleets.front().members,
-        "unavailable mixed allied occupation skips before direct removal and preserves the single-owner world");
+    expect(mixed_world.snapshot()->control()->planets.front().landed == std::vector<gc::SurfaceForce>{{30, 2, 2}, {32, 2, 3}, {21, 2, 1}}
+        && mixed_world.snapshot()->fleets().front().members == std::vector<gc::FleetMember>{{20, 2}}
+        && mixed_world.native_effects().size() == 2 && mixed_owner.facts(21)->parent == 1,
+        "WGS-187 automatic direct landing appends its owner and preserves the prior allied owner");
+    auto mixed_replayed = take(gc::GalacticSession::from_replay(
+        take(gc::parse_replay(take(gc::write_replay(mixed_world.record()))))));
+    done(mixed_replayed.replay_native_barrier(executor)); done(mixed_replayed.finish_native_replay());
+    expect(mixed_replayed.state_sha256() == mixed_world.state_sha256(),
+        "mixed-owner direct link replay retains ordered containment and notifications");
 }
 void bind_move(ga::NativeActions& actions, gc::GalacticSession& world, bool& restricted, bool& conflict) {
     actions.bind_admission_gate([&conflict] { return conflict; });
@@ -554,6 +639,21 @@ void selector(eawr::platform::ThreadWorkerAdapter& executor) {
         && selected.front().path_cost == ga::Number(12) && selected.front().garrison,
         "frozen R1 callback preserves qualified original identity and supplied staging cost/garrison");
     expect(!provider(2, 1, plan), "uninitialized manager is unknown, not known empty");
+    auto staged = ga::qualified_freestore_selection(input, world, engine,
+        [](gc::PlayerId, gc::PlanetId, eawr::sim::EntityId id, const ai::PlanDef&) {
+            return eawr::core::Result<std::pair<ga::Number, bool>>::success(
+                {id == 20 ? ai::galactic_goals::rejected_estimate() : ga::Number(7), false});
+        });
+    expect(take(staged(1, 1, plan)).empty(), "BTP-S02 all staging refusals are known empty, not a finite-cost actor");
+    done(owner.update(actor(21))); expect(take(owner.offer(1, 21)), "admit reachable staging witness");
+    for (const bool reserved : {false, true}) {
+        if (reserved) expect(take(owner.reserve(1, 20, 77)), "reserve rejected staging witness");
+        input->pool = take(owner.publish(executor));
+        const auto reachable = take(staged(1, 1, plan));
+        expect(reachable.size() == 1 && reachable.front().object == 21 && reachable.front().path_cost == ga::Number(7),
+            "BTP-S02 unreachable reserved and unreserved actors never enter path normalization or allocation");
+        expect(owner.contains(1, 20), "staging rejection preserves retained freestore membership");
+    }
     input->pool = std::make_shared<ga::FreestorePool>(); expect(!provider(1, 1, plan), "broad presence copy cannot qualify selector membership");
 }
 void continuation(eawr::platform::ThreadWorkerAdapter& executor, std::string& baseline) {
@@ -1017,8 +1117,8 @@ void installed() {
 }
 int main(int argc, char** argv) {
     try { if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
-        else { gates(); landing_gates_and_preference(); std::string baseline, movement_baseline, direct_baseline, landing_baseline, callbacks_baseline;
-            for (const auto workers : {1U, 2U, 4U, 8U}) { eawr::platform::ThreadWorkerAdapter executor(workers); retained(executor); automatic_landing(executor, landing_baseline); movement(executor, movement_baseline); direct_movement(executor, direct_baseline); fresh_conversion(executor); continuation(executor, baseline); lua(executor); selector(executor); const auto callbacks = object_callbacks(executor); if (callbacks_baseline.empty()) callbacks_baseline = callbacks; else expect(callbacks_baseline == callbacks, "object callback answers are equal on 1/2/4/8 workers"); }
+        else { gates(); landing_gates_and_preference(); std::vector<std::uint8_t> return_baseline; std::string baseline, movement_baseline, direct_baseline, landing_baseline, callbacks_baseline;
+            for (const auto workers : {1U, 2U, 4U, 8U}) { eawr::platform::ThreadWorkerAdapter executor(workers); player_publications(executor); retained(executor, return_baseline); automatic_landing(executor, landing_baseline); movement(executor, movement_baseline); direct_movement(executor, direct_baseline); fresh_conversion(executor); continuation(executor, baseline); lua(executor); selector(executor); const auto callbacks = object_callbacks(executor); if (callbacks_baseline.empty()) callbacks_baseline = callbacks; else expect(callbacks_baseline == callbacks, "object callback answers are equal on 1/2/4/8 workers"); }
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

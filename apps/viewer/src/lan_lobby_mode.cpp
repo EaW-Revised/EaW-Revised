@@ -87,10 +87,13 @@ constexpr double default_wait_seconds = 60.0;
 
 [[nodiscard]] std::string snapshot_json(const EawrLanLobby::Snapshot& shot) {
     std::ostringstream output;
-    output << "{\"page\": " << json(shot.page) << ", \"name\": " << json(shot.name) << ", \"colour\": " << shot.colour
+    output << "{\"rectangles\": " << shot.rectangles << ", \"page\": " << json(shot.page) << ", \"name\": " << json(shot.name) << ", \"colour\": " << shot.colour
            << ", \"host\": " << (shot.host ? "true" : "false") << ", \"map\": " << json(shot.map)
+           << ", \"drawn_map\": " << json(shot.drawn_map) << ", \"settings\": " << strings_json(shot.settings)
+           << ", \"preview_visible\": " << (shot.preview_visible ? "true" : "false")
+           << ", \"settings_read_only\": " << (shot.settings_read_only ? "true" : "false")
            << ", \"status\": " << json(shot.status) << ", \"start\": {\"caption\": " << json(shot.start_caption)
-           << ", \"enabled\": " << (shot.start_enabled ? "true" : "false") << "}"
+           << ", \"enabled\": " << (shot.start_enabled ? "true" : "false") << ", \"reason\": " << json(shot.start_reason) << "}"
            << ", \"room_revision\": " << shot.room_revision
            << ", \"local_ready\": " << (shot.local_ready ? "true" : "false")
            << ", \"preparing\": " << (shot.preparing ? "true" : "false")
@@ -104,6 +107,8 @@ constexpr double default_wait_seconds = 60.0;
            << ", \"prompt_open\": " << (shot.prompt_open ? "true" : "false") << ", \"prompt_error\": " << json(shot.prompt_error)
            << ", \"hosting\": " << json(shot.hosting) << ", \"room_notice\": " << json(shot.room_notice)
            << ", \"room_private\": " << (shot.room_private ? "true" : "false")
+           << ", \"connections\": " << strings_json(shot.connections)
+           << ", \"connections_open\": " << (shot.connections_open ? "true" : "false")
            << ", \"chat_open\": " << (shot.chat_open ? "true" : "false") << ", \"locked\": " << strings_json(shot.locked)
            << ", \"rows\": [";
     for (std::size_t index = 0; index < shot.rows.size(); ++index) {
@@ -364,6 +369,20 @@ bool LanLobbyMode::State::run_action(const std::string& action) {
     const auto colon = action.find(':');
     const std::string verb = action.substr(0, colon);
     const std::string argument = colon == std::string::npos ? std::string{} : action.substr(colon + 1);
+    if (verb == "resize") {
+        const auto separator = argument.find('x');
+        int resize_width{}, resize_height{};
+        if (separator == std::string::npos) return false;
+        const auto w = std::from_chars(argument.data(), argument.data() + separator, resize_width);
+        const auto h = std::from_chars(argument.data() + separator + 1, argument.data() + argument.size(), resize_height);
+        if (w.ec != std::errc{} || w.ptr != argument.data() + separator || h.ec != std::errc{}
+            || h.ptr != argument.data() + argument.size() || resize_width <= 0 || resize_height <= 0) return false;
+        // Captures pin the root viewport; this step must follow the window like play.
+        host->get_window()->set_content_scale_mode(Window::CONTENT_SCALE_MODE_DISABLED);
+        host->get_window()->set_content_scale_size(Vector2i(0, 0));
+        host->get_window()->set_size(Vector2i(resize_width, resize_height));
+        return true;
+    }
     if (verb == "snapshot") {
         snapshots.push_back(snapshot_json(screen->snapshot()));
         return true;

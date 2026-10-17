@@ -37,9 +37,20 @@ SCHEMA_VERSION = 2
 # `applied` row that cites one of these is for a tag the trace must show read (tag_coverage.py scene).
 TRACED_CODE = ("src/units/", "src/skirmish/", "src/sim/", "src/data/")
 STATUSES = ("applied", "partial", "todo", "foc-ignores", "land-or-galactic", "multiplayer", "presentation-later",
-            "deferred")
+            "deferred", "by-design")
 # Statuses that say "out of scope for now": each names a ticket or a reason.
 OUT_OF_SCOPE = ("land-or-galactic", "multiplayer", "presentation-later", "deferred")
+# Classes whose objects fight in a tactical battle, so a name-based scope word on them (Hyperspace, Land_, Piracy) says
+# what the tag is called, not what the battle does with it, and the tag stays todo until someone has read it. Shared by
+# the seed's scope rule (tag_registry_seed.py) and the gate on auto-resolve-only citations.
+TACTICAL_CLASSES = frozenset({"spaceunit", "uniqueunit", "transportunit", "container", "squadron", "starbase",
+                              "spacebuildable", "spacestructure", "specialstructure", "secondarystructure",
+                              "herounit", "genericherounit", "mobile_defense_unit"})
+# Galactic auto-resolve code: src/campaign/auto_resolve_*.cpp and include/eawr/campaign/auto_resolve_*.hpp. Applying a
+# value there is not the battle applying it (tag audit 2026-10-16), so an applied or partial row of a tactical class
+# cites at least one other location.
+AUTO_RESOLVE_CODE = re.compile(r"^(?:src|include/eawr)/campaign/auto_resolve[^/]*$")
+RULE_IN_TEXT = re.compile(r"(?<![A-Za-z0-9-])[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d+[a-z]?(?![A-Za-z0-9-])")
 AREAS = ("movement", "combat", "fighters", "ai", "presentation", "economy", "data")
 BASES = ("auto", "reviewed")
 ROW_FIELDS = {"applied", "area", "basis", "classes", "evidence", "missing_types", "note", "status", "tag", "ticket",
@@ -486,6 +497,11 @@ def registry_problems(registry: dict[str, Any], universe: dict[tuple[str, str], 
                 types = target.get("types", [])
                 if types != sorted(set(types), key=ascii_fold):
                     problems.append(f"{where}: applied types must be a sorted list without duplicates")
+            tactical = sorted(c for c in row.get("classes", []) if ascii_fold(c) in TACTICAL_CLASSES)
+            if tactical and targets and all(
+                    AUTO_RESOLVE_CODE.match(code_location(str(t.get("code", "")))[0] or "") for t in targets):
+                problems.append(f"{where}: an {status} row of the tactical class {', '.join(tactical)} cites only "
+                                "auto-resolve code; cite the tactical code that applies it, or make the row todo")
             if status == "partial":
                 if not row.get("missing_types"):
                     problems.append(f"{where}: a partial row lists the missing types")
@@ -506,6 +522,15 @@ def registry_problems(registry: dict[str, Any], universe: dict[tuple[str, str], 
                 problems.append(f"{where}: a {status} row names a ticket or gives its reason as evidence")
             if status == "deferred" and ticket is None:
                 problems.append(f"{where}: a deferred row names its ticket")
+            if status == "by-design":
+                resolved = evidence.get(row.get("evidence"), row.get("evidence")) or ""
+                cited = RULE_IN_TEXT.findall(resolved) if isinstance(resolved, str) else []
+                if not cited:
+                    problems.append(f"{where}: a by-design row cites the rule ID that says our code replaces it")
+                elif root is not None:
+                    for rule in cited:
+                        if rule not in known_rules(root):
+                            problems.append(f"{where}: rule {rule} is in no docs/behaviour note")
     order = [row_order(row) for row in registry["rows"]]
     if order != sorted(order):
         problems.append("registry rows are not sorted by tag, then first class (ASCII case folded)")

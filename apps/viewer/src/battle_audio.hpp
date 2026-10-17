@@ -7,6 +7,7 @@
 #include "eawr/presentation/audio/sfx.hpp"
 #include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/renderer.hpp"
+#include "eawr/presentation/ui/retreat_presentation.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -72,6 +73,8 @@ public:
                std::vector<LiveSessionView::ReinforcementFeedback> reinforcement_feedback = {},
                std::vector<BattleEffects::TerminalSound> terminal_sounds = {});
     void release();
+    // RP-05: the local player pressed the retreat button and the request was refused.
+    void retreat_refused(sim::tactical::RetreatRefusal refusal);
     void loading_complete();
     [[nodiscard]] bool briefing_queue_empty() const { return speech_queue_.size() == 0; }
     [[nodiscard]] bool campaign_briefing(std::string_view event_name);
@@ -117,6 +120,8 @@ private:
         std::map<std::uint32_t, const audio::SfxEvent*> charged_detonate;
         std::map<std::uint32_t, const audio::SfxEvent*> charged_detonate_armor;
         const audio::SfxEvent* blast_activate{};
+        const audio::SfxEvent* retreat_start{};  // SFXEvent_Retreat_Start (WR-44, RP-02)
+        const audio::SfxEvent* retreat_cancel{}; // SFXEvent_Retreat_Cancel (RP-03)
         const audio::SfxEvent* death{};
         const audio::SfxEvent* spin_death{};
         const audio::SfxEvent* asteroid_damage{};
@@ -149,6 +154,8 @@ private:
         std::vector<const audio::SfxEvent*> hardpoint_deaths;           // HardPoints order
         std::vector<sim::math::Vec3> hardpoint_points;
         std::vector<std::string> hardpoint_types;
+        std::map<std::string, const audio::SfxEvent*> hardpoint_loss;
+        const audio::SfxEvent* all_weapons_lost{};
         const audio::SfxEvent* select{};
         const audio::SfxEvent* move{};
         const audio::SfxEvent* attack{};
@@ -262,6 +269,16 @@ private:
     void arm_droids(const sim::tactical::TacticalSnapshot& snapshot, const LiveSessionView& live);
     [[nodiscard]] const std::map<sim::tactical::AbilityKind, Toggle>& toggles_of(const std::string& faction);
     void cue_music(const audio::MusicDirector::Cue& cue);
+    // RP-01..RP-04: the faction cues of the space retreat, from the retreat state each snapshot publishes.
+    void retreat_cues(const sim::tactical::TacticalSnapshot& snapshot, const LiveSessionView& live);
+    [[nodiscard]] const ui::RetreatFactionPresentation& retreat_faction(const std::string& faction);
+    [[nodiscard]] const TypeSounds* retreat_roster_type(const sim::tactical::TacticalSnapshot& snapshot,
+        const sim::tactical::RetreatState& state, bool first_with_start_cue) const;
+    std::map<std::string, ui::RetreatFactionPresentation> retreat_factions_;
+    sim::tactical::RetreatState retreat_seen_;
+    std::uint64_t retreat_cue_tick_{};
+    bool retreat_cue_seen_{};
+    std::string local_faction_;
     void update_voices(const audio::Vec3& listener, const LiveSessionView& live);
     void update_pause(bool paused, double delta);
     void update_music(double delta);

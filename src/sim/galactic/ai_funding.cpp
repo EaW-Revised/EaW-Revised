@@ -185,7 +185,7 @@ core::Result<bool> feasible(const Ledger& l, const GoalRequest& r, bool activati
     auto cost = r.cost;
     if (const auto it = l.goals.find(r.id); it != l.goals.end()) {
         if (it->second.category != r.category) return a.fail<bool>(diagnostic_codes::invalid_input, "goal category changed");
-        h = it->second.remaining;
+        h = std::max(it->second.remaining, l.last_interval); // WGA-21/346: feasibility floor, not retained time
         cost = positive(a.minus(a.plus(std::max(cost, it->second.marked), positive(r.unallocated_resources)), it->second.accumulated));
     }
     return a.finish(cost <= positive(a.plus(activation ? c.available_cash : c.cash,

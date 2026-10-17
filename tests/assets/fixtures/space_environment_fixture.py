@@ -62,7 +62,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import camera_fixture
-from scene_fixture import _chunk, _cstring, _mini, _vertex  # noqa: E402
+from scene_fixture import _chunk, _cstring, _mini, _vertex, write_effect_presence  # noqa: E402
 
 MAP_LOGICAL_PATH = "data/art/maps/eawr_space_synthetic.ted"
 SKY_OBJECT = "EAWR_SPACE_PRIMARY_SKY"
@@ -409,6 +409,8 @@ def write_fixture_root(root: pathlib.Path, variant: str = "baseline") -> pathlib
     shaders = [QUALIFIED_SHADER, UNREVIEWED_SHADER if variant == "unqualified_shader" else QUALIFIED_SHADER]
     if variant in MATERIALS:
         shaders = [MESHGLOSS_SHADER, "MeshGloss.fxo" if variant == "meshgloss_fxo" else MESHGLOSS_SHADER]
+    write_effect_presence(data, [*shaders, MESHADDITIVE_SHADER,
+                                "MeshGlossForStarfields.fxo", "MeshAdditive2x.fxo"])
     if variant in ADDITIVE_VARIANTS:
         (data / "Art" / "Models" / SKY_MODEL).write_bytes(additive_alo_bytes(variant))
         alphas = None if variant == "meshadditive_opaque_alpha" else ADDITIVE_ALPHAS

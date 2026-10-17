@@ -68,7 +68,7 @@ public:
             if (!value || value->trailing_text) return std::nullopt;
             values.push_back(scalar(value->value));
         }
-        return values.size() == count ? std::optional(values) : std::nullopt;
+        return count == 0 || values.size() == count ? std::optional(values) : std::nullopt;
     }
 private:
     data::Definition own_;
@@ -116,6 +116,9 @@ std::map<std::string, ProductionArt> load_production_art(
         art.text = looks.name; art.text_id = fields.text("Text_ID"); art.type_order = order++;
         art.encyclopedia = looks.description;
         art.max_health = fields.number("Tactical_Health");
+        art.named_hero = fields.flag("Is_Named_Hero");
+        art.hero = art.named_hero || fields.flag("Is_Generic_Hero") || fields.flag("Is_Special_Weapon_In_Space");
+        art.force_sensitive = fields.flag("Is_Force_Sensitive");
         // Shared object content (CARD-17): negative Population_Value usage.
         art.population = looks.population;
         art.encyclopedia_looks = std::move(looks);
@@ -200,6 +203,26 @@ const Affiliation* affiliation_for_owner(const SceneContent& content, std::optio
     return nullptr;
 }
 
+std::optional<presentation::particles::SystemDefinition> load_galactic_particle(
+    const vfs::Vfs& filesystem, const data::Catalog& catalog, const std::string_view type) {
+    const Fields particle(catalog, type, data::Category::game_object);
+    const auto path = model_path(particle.text("Galactic_Model_Name"));
+    if (path.empty()) return {};
+    const auto bytes = filesystem.open(path);
+    if (!bytes) return {};
+    auto system = presentation::particles::load_alo(bytes.value(), path);
+    if (!system || system.value().emitters.empty()) return {};
+    return std::move(system.value());
+}
+
+SceneLayer galactic_particle_layer(const data::Catalog& catalog, const std::string_view type) {
+    const Fields fields(catalog, type, data::Category::game_object);
+    if (fields.flag("In_Background")) return SceneLayer::background;
+    if (fields.flag("In_Midground")) return SceneLayer::midground;
+    if (fields.flag("In_Midforeground")) return SceneLayer::midforeground;
+    return SceneLayer::world;
+}
+
 core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const data::Catalog& catalog,
     const data::galactic::GalacticData& tables, std::string_view campaign_name) {
     const auto* campaign = tables.campaign(campaign_name);
@@ -218,7 +241,6 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
     result.side_names = {settings.text("Good_Side_Name"), settings.text("Evil_Side_Name"),
         settings.text("Corrupt_Side_Name")};
     // WGP-19: use the effective authored type and its galactic particle model.
-    // U-06: type-by-level and brightness/scale/energy mapping remain unavailable.
     result.corruption_particle = settings.text("Corruption_Particle_Name");
     if (!result.corruption_particle.empty()) {
         const Fields particle(catalog, result.corruption_particle, data::Category::game_object);
@@ -231,6 +253,35 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
                 else result.diagnostics.push_back("corruption particle model could not be decoded");
             } else result.diagnostics.push_back("corruption particle model unavailable");
         } else result.diagnostics.push_back("corruption particle has no galactic model");
+    }
+    // WGP-47..49: all settings follow the mounted data, including mod values.
+    const auto pair = [&](std::string_view tag, std::array<float, 2>& target) {
+        if (const auto values = settings.components(tag, 0); values && values->size() >= 2) {
+            if ((*values)[0] >= 0 && (*values)[1] >= 0) target = {(*values)[0], (*values)[1]};
+            else result.diagnostics.push_back("negative corruption parameter: " + std::string(tag));
+        }
+    };
+    pair("Particle_Brightness_Per_Corruption_Level", result.corruption_parameters.brightness);
+    pair("Particle_Scale_Per_Corruption_Level", result.corruption_parameters.scale);
+    pair("Particle_Energy_Per_Corruption_Level", result.corruption_parameters.energy);
+    auto& style = result.corruption_style;
+    style.line_particle = settings.text("Corruption_Particle_Line_Name");
+    style.radius = settings.number("Corruption_Line_Radius").value_or(0);
+    style.endpoint_offset = settings.number("Corruption_Line_Start_End_Offset").value_or(0);
+    style.grow_seconds = settings.number("Corruption_Line_Grow_Seconds").value_or(0);
+    style.path_width = settings.number("Corruption_Path_Width").value_or(0);
+    style.path_texture = settings.text("Fleet_Hyperspace_Band_Texture_Name");
+    if (const auto colour = settings.components("Corruption_Path_Color", 4))
+        std::copy(colour->begin(), colour->end(), style.path_colour.begin());
+    if (const auto offset = settings.components("Corruption_Path_Offset", 3))
+        style.path_offset = {(*offset)[0], (*offset)[1], (*offset)[2]};
+    if (!style.line_particle.empty()) {
+        const Fields particle(catalog, style.line_particle, data::Category::game_object);
+        const auto path = model_path(particle.text("Galactic_Model_Name"));
+        if (!path.empty()) if (const auto bytes = filesystem.open(path)) {
+            auto system = presentation::particles::load_alo(bytes.value(), path);
+            if (system && !system.value().emitters.empty()) result.corruption_line_system = std::move(system.value());
+        }
     }
     const Fields fleet(catalog, "Galactic_Fleet", data::Category::game_object);
     result.fleet_model = model_path(fleet.text("Galactic_Model_Name"));
@@ -258,6 +309,7 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
         appearance.present = true;
         players.emplace(folded(faction.name), player.id);
         result.factions.emplace(player.id, std::move(appearance));
+        result.leader_types.emplace(player.id, faction.faction_leader);
         result.snapshot.players.push_back(std::move(player));
     }
     // WGUI-38/96: unknown overview owners require authored Neutral Color.
@@ -351,6 +403,17 @@ const StubPlanet* initial_home(const SceneContent& content, const PlayerId playe
     const auto object = std::find_if(content.snapshot.planets.begin(), content.snapshot.planets.end(),
         [&](const auto& planet) { return folded(planet.name) == folded(home->second); });
     return object == content.snapshot.planets.end() ? nullptr : &*object;
+}
+
+sim::galactic::TypeId home_leader_type(const SceneContent& content, const PlayerId player,
+    const std::map<sim::galactic::TypeId, std::string>& type_names) {
+    const auto leader = content.leader_types.find(player);
+    if (leader == content.leader_types.end() || leader->second.empty()) return 0;
+    const auto wanted = folded(leader->second);
+    const auto type = std::find_if(type_names.begin(), type_names.end(), [&](const auto& row) {
+        return folded(row.second) == wanted;
+    });
+    return type == type_names.end() ? 0 : type->first;
 }
 
 } // namespace eawr::viewer::galactic

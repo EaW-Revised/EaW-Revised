@@ -2,6 +2,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "eawr/presentation/space/space.hpp"
 #include "frame_timer.hpp"
+#include "perf_trace.hpp"
 #include "render_profile_viewport.hpp"
 
 #include "family_textures.hpp"
@@ -56,6 +57,7 @@ void SpacePopulation::pose_pending_units(GodotRenderer& renderer) {
 
 void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sample) {
     idle_frame_ms_ = idle_sample_ms_ = idle_upload_ms_ = 0.0;
+    idle_skin_work_ = {};
     FrameTimer frame_timer(trace_frames_ ? &idle_frame_ms_ : nullptr);
     const std::uint32_t held_sample = options_.live_clock ? sample : std::min(sample, options_.animation_frames - 1U);
     if (!effect_clock_assets_.empty() && effect_sample_ != held_sample) {
@@ -84,16 +86,24 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
         if (poses[idle]) contact_bones_[ship] = poses[idle]->bones;
     }
     FrameTimer upload_timer(trace_frames_ ? &idle_upload_ms_ : nullptr);
+    renderer.begin_skin_batch(trace_frames_ && PerfTrace::fine_particle_timings());
     for (const AnimatedInstance& instance : animated_instances_) {
         if (!poses[instance.idle]) continue;
         const auto posed = renderer.set_skin_pose(instance.entity, instance.asset, poses[instance.idle]->bones);
         if (!posed) upload_failures_.push_back("entity " + std::to_string(instance.entity) + " idle pose: "
                                                + core::format_diagnostic(posed.error()));
     }
+    idle_skin_work_ = renderer.end_skin_batch();
 }
 
 bool SpacePopulation::live_ship_drawn(const std::size_t ship) const noexcept {
     return ship < live_decisions_.size() && live_decisions_[ship].has_value();
+}
+
+bool SpacePopulation::live_ship_emitter_visit(const std::size_t ship) const noexcept {
+    if (ship >= live_shown_.size() || ship >= live_death_clone_.size()) return true;
+    if (!live_shown_[ship] && !live_death_clone_[ship]) return false;
+    return live_ship_drawn(ship) && !live_retired_[ship];
 }
 
 bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span<const LivePose> poses,
@@ -206,17 +216,28 @@ std::optional<SpacePopulation::LiveShipBox> SpacePopulation::live_ship_box(const
     return LiveShipBox{*live_transforms_[ship], live_bounds_[ship]->first, live_bounds_[ship]->second};
 }
 
-std::optional<SpacePopulation::LiveShipEmitterView> SpacePopulation::live_ship_emitter_view(const std::size_t ship) const {
-    if (!live_ship_drawn(ship) || live_retired_[ship]) return std::nullopt;
+std::optional<SpacePopulation::LiveShipEmitterView> SpacePopulation::live_ship_emitter_assets(const std::size_t ship) const {
+    if (!scene_ || ship >= live_decisions_.size() || !live_decisions_[ship]
+        || ship >= options_.placed_ships.size()) return std::nullopt;
     const std::size_t decision = *live_decisions_[ship];
+    if (decision >= decisions_.size() || decisions_[decision].scene_ordinal >= scene_->placements.size()) return std::nullopt;
     LiveShipEmitterView view;
     view.placement = &scene_->placements[decisions_[decision].scene_ordinal];
     view.hardpoints = decisions_[decision].hardpoints;
-    if (decision < hardpoint_states_.size()) view.states = hardpoint_states_[decision];
-    if (live_shown_[ship] && ship < live_transforms_.size()) view.model_to_world = live_transforms_[ship];
     view.death_clone = options_.placed_ships[ship].death_clone;
     view.projectile = options_.placed_ships[ship].projectile_slot;
     view.entity = options_.placed_ships[ship].live_entity;
+    return view;
+}
+
+std::optional<SpacePopulation::LiveShipEmitterView> SpacePopulation::live_ship_emitter_view(const std::size_t ship) const {
+    if (!live_ship_drawn(ship) || live_retired_[ship]) return std::nullopt;
+    const std::size_t decision = *live_decisions_[ship];
+    auto assets = live_ship_emitter_assets(ship);
+    if (!assets) return std::nullopt;
+    LiveShipEmitterView& view = *assets;
+    if (decision < hardpoint_states_.size()) view.states = hardpoint_states_[decision];
+    if (live_shown_[ship] && ship < live_transforms_.size()) view.model_to_world = live_transforms_[ship];
     return view;
 }
 

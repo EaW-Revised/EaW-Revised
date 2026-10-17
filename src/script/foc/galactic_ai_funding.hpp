@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/sim/galactic/ai_funding.hpp"
+#include "eawr/core/record_digest.hpp"
 #include "eawr/sim/galactic/session.hpp"
 #include "eawr/script/foc/galactic_ai.hpp"
 
@@ -39,6 +40,9 @@ struct EvaluatedFundingTemplate {
 class GalacticFunding final : public galactic_ai::Funding {
 public:
     using State = funding::State;
+    GalacticFunding();
+    [[nodiscard]] std::string record_sync_hash(bool cold = false) const;
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept { return record_digest_.byte_size() + state_.size() * 32 + 1024; }
     [[nodiscard]] const State& state() const noexcept { return state_; }
     [[nodiscard]] std::uint64_t state_revision() const noexcept { return revision_; }
     // Owned immutable copy: retain the shared pointer while traversing its fields.
@@ -90,5 +94,6 @@ private:
     [[nodiscard]] core::Result<funding::Amount> commit_transfer(sim::galactic::PlayerId, core::Result<funding::TransferResult>);
     std::uint64_t revision_{1};
     State state_;
+    core::RecordDigest record_digest_;
 };
 } // namespace eawr::script::foc::ai

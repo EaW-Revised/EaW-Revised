@@ -183,6 +183,10 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
     renderer_ = std::make_unique<GodotRenderer>(host, options_.shaders);
     renderer_->set_camera(camera_);
     renderer_->set_scene_bloom(options_.bloom);
+    // Independent material ambient does not change the population's lighting
+    // policy or the existing sky/planet adapters (CEM-12A).
+    if (light_) renderer_->set_ambient_light({light_->ambient.x, light_->ambient.y, light_->ambient.z});
+    else not_rendered_.push_back("independent material ambient unavailable: environment 0 has no complete finite light record");
 
     // Skies: camera-centred, scaled to the environment sky radius, oriented by
     // R-SKY-02 through the object rule.
@@ -216,7 +220,12 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
         }
         const auto [slot, inserted] = sky_models.emplace(role, std::move(model.value()));
         static_cast<void>(inserted);
-        const std::vector<space::SceneSurface> surfaces = space::scene_surfaces(slot->second);
+        const std::vector<space::SceneSurface> surfaces = space::scene_surfaces(slot->second,
+            [this](const std::string_view program) {
+                const scene::AssetAccess access{.exists = [this](const std::string_view path) {
+                    return static_cast<bool>(filesystem_->stat(path)); }};
+                return scene::missing_material_effect(access, program);
+            });
         const float radius = space::surface_radius(surfaces);
         Placed placed;
         placed.role = role;
@@ -292,7 +301,12 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
                         / static_cast<double>(sim::math::Fixed::scale));
                 }
             }
-            const std::vector<space::SceneSurface> surfaces = space::scene_surfaces(*model);
+            const std::vector<space::SceneSurface> surfaces = space::scene_surfaces(*model,
+                [this](const std::string_view program) {
+                    const scene::AssetAccess access{.exists = [this](const std::string_view path) {
+                        return static_cast<bool>(filesystem_->stat(path)); }};
+                    return scene::missing_material_effect(access, program);
+                });
             placed.radius = space::surface_radius(surfaces) * placed.scale;
             if (!bind_idle(placement, *model, filesystem, placed)) return false;
             compose_object(placed, surfaces);
@@ -313,9 +327,12 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
     const bool sky_drawn = std::any_of(items_.begin(), items_.end(), [](const Item& item) {
         return item.role == "primary_sky" && item.status == "drawn";
     });
-    // #908: some valid maps author only a secondary sky (Bespin). An absent
-    // primary is optional; a declared primary still needs a supported route.
-    if (!primary_sky_.empty() && !sky_drawn) return fail("the primary sky drew no surface");
+    // CEM-04: an unsupported effect contributes zero passes. Keep the surface
+    // diagnostics and the rest of the scene; do not invent a replacement sky.
+    if (!primary_sky_.empty() && !sky_drawn) {
+        not_rendered_.push_back("primary sky drew no surface; continuing without a primary sky");
+        UtilityFunctions::push_warning("the primary sky drew no surface; continuing without a primary sky");
+    }
     snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
     if (!initialize_idle()) return false;
     return true;

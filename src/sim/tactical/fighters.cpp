@@ -101,7 +101,8 @@ core::Result<void> validate_squadron_table(const SquadronTable& table) {
             if (!point(bay.position) || !point(bay.spawn_vector)) return invalid(label + ": a bay point is out of range");
         }
         for (const auto& entry : spawner.entries) {
-            if (find_by_type(table.squadrons, entry.squadron) == nullptr) {
+            // WSL-16a: a ship entry is a single ship of the campaign scene, not a squadron profile.
+            if (!entry.ship && find_by_type(table.squadrons, entry.squadron) == nullptr) {
                 return invalid(label + ": entry squadron type " + std::to_string(entry.squadron) + " is not in the table");
             }
         }

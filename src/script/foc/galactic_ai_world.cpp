@@ -48,11 +48,20 @@ struct GalacticWorld::PreparedProducerOffers {
         std::shared_ptr<const std::vector<BuildRow>> rows;
         std::shared_ptr<PriceCache> prices;
         galactic::ProductionReservations reservations;
+        // Live catalogs share one immutable record per owner instead of copying it into every job.
+        std::shared_ptr<const galactic::ProductionReservations> owner_reservation;
+        [[nodiscard]] const galactic::ProductionReservations* reserved() const noexcept {
+            return owner_reservation ? owner_reservation.get() : &reservations;
+        }
     };
     std::shared_ptr<const galactic::GalacticSnapshot> source;
     std::vector<galactic::ProductionReductionSource> reductions;
     std::shared_ptr<const std::vector<galactic::ProductionReductionSource>> price_reductions;
     std::vector<Job> jobs;
+    // Live catalogs publish an immutable job list that an unchanged refresh shares with its successor.
+    std::shared_ptr<const std::vector<Job>> live_jobs;
+    std::vector<std::shared_ptr<const galactic::ProductionReservations>> owner_reservations;
+    [[nodiscard]] const std::vector<Job>& job_list() const noexcept { return live_jobs ? *live_jobs : jobs; }
     bool unique_jobs{true};
     sim::EntityId next_id{};
     std::size_t live_objects{};
@@ -68,7 +77,7 @@ core::Result<std::vector<galactic_ai::ProducerInput>> GalacticWorld::read_produc
     if (!snapshot.production() || !snapshot.player_economy()) return Result::success({});
     const auto& production = *snapshot.production();
     std::vector<const PreparedProducerOffers::Job*> jobs;
-    for (const auto& job : catalog.jobs)
+    for (const auto& job : catalog.job_list())
         if ((!player || job.player == player) && (!planet_id || job.planet == planet_id)) jobs.push_back(&job);
     std::sort(jobs.begin(), jobs.end(), [](const auto* a, const auto* b) {
         return std::tie(a->source_owner, a->source_location) < std::tie(b->source_owner, b->source_location);
@@ -106,7 +115,7 @@ core::Result<std::vector<galactic_ai::ProducerInput>> GalacticWorld::read_produc
             catalog.queried_offers.fetch_add(1, std::memory_order_relaxed);
             if (prepared.frames > std::numeric_limits<std::uint32_t>::max()) continue;
             const galactic::ProductionAdmissionInputs inputs{production, *location, *owner, *account,
-                snapshot.fleets(), at->owner, population, catalog.next_id, catalog.live_objects, &job.reservations};
+                snapshot.fleets(), at->owner, population, catalog.next_id, catalog.live_objects, job.reserved()};
             const auto admission = galactic::production_admission(inputs, &offer, offer.domain, !owner->human);
             if (first_allowed && admission != galactic::ProductionAdmission::allowed) continue;
             galactic_ai::ProducerInput row;
@@ -143,7 +152,8 @@ core::Result<std::vector<galactic_ai::ProducerInput>> GalacticWorld::read_produc
 }
 
 core::Result<void> GalacticWorld::refresh_live_producers(
-    std::shared_ptr<const galactic::GalacticSnapshot> snapshot, sim::EntityId frontier, std::size_t objects) {
+    std::shared_ptr<const galactic::GalacticSnapshot> snapshot, sim::EntityId frontier, std::size_t objects,
+    bool inputs_unchanged) {
     build_options_.clear();
     if (!snapshot->production() || !snapshot->player_economy()) {
         prepared_producer_offers_.reset();
@@ -153,48 +163,104 @@ core::Result<void> GalacticWorld::refresh_live_producers(
     const auto* income = snapshot->income() ? &snapshot->income()->inputs : nullptr;
     auto next = std::make_shared<PreparedProducerOffers>();
     next->source = snapshot; next->next_id = frontier; next->live_objects = objects;
-    next->reductions = income ? galactic::production_reduction_sources(*income, snapshot->planets())
-        : std::vector<galactic::ProductionReductionSource>{};
     const auto* previous = prepared_producer_offers_.get();
     const auto* old_income = previous && previous->source->income() ? &previous->source->income()->inputs : nullptr;
-    const auto reduction_key = [](const auto& row) {
-        return std::tie(row.type, row.price, row.id, row.planet, row.planet_owner, row.planet_source,
-            row.intimidation, row.galaxy_wide, row.category, row.reduction);
+    const bool previous_usable = previous && previous->unique_jobs && previous->price_reductions && previous->source->production();
+    // The caller proves the price inputs equal (same income inputs and planets) relative to the retained source.
+    bool same_prices = previous_usable && inputs_unchanged && bool(income) == bool(old_income);
+    if (same_prices) next->price_reductions = previous->price_reductions;
+    else {
+        auto fresh = income ? galactic::production_reduction_sources(*income, snapshot->planets())
+            : std::vector<galactic::ProductionReductionSource>{};
+        const auto reduction_key = [](const auto& row) {
+            return std::tie(row.type, row.price, row.id, row.planet, row.planet_owner, row.planet_source,
+                row.intimidation, row.galaxy_wide, row.category, row.reduction);
+        };
+        same_prices = previous_usable && bool(income) == bool(old_income)
+            && (!income || income->offers == old_income->offers)
+            && std::equal(fresh.begin(), fresh.end(), previous->price_reductions->begin(), previous->price_reductions->end(),
+                [&](const auto& a, const auto& b) { return reduction_key(a) == reduction_key(b); });
+        next->price_reductions = same_prices ? previous->price_reductions
+            : std::make_shared<const std::vector<galactic::ProductionReductionSource>>(std::move(fresh));
+    }
+    // One record per owner. An equal record keeps the previous publication's identity.
+    next->owner_reservations.reserve(production.players.size());
+    bool reservations_equal = same_prices && inputs_unchanged
+        && previous->owner_reservations.size() == production.players.size();
+    for (std::size_t owner_index = 0; owner_index < production.players.size(); ++owner_index) {
+        auto fresh = galactic::production_reservations(production, production.players[owner_index].player);
+        if (reservations_equal && previous->owner_reservations[owner_index]
+            && previous->owner_reservations[owner_index]->population == fresh.population
+            && previous->owner_reservations[owner_index]->counts == fresh.counts)
+            next->owner_reservations.push_back(previous->owner_reservations[owner_index]);
+        else {
+            reservations_equal = false;
+            next->owner_reservations.push_back(std::make_shared<const galactic::ProductionReservations>(std::move(fresh)));
+        }
+    }
+    const auto* old_production = previous_usable ? &*previous->source->production() : nullptr;
+    // The checked queue clocks are refused here even when no service requests the producer. They depend on the
+    // location only, so each location is summed once, when some owner would reach it.
+    const bool owner_has_account = std::any_of(production.players.begin(), production.players.end(),
+        [&](const auto& owner) { return find_row(snapshot->player_economy()->players, owner.player, [](const auto& row) { return row.player; }); });
+    const auto check_queues = [&](const galactic::PlanetProduction& location) -> core::Result<void> {
+        if (!owner_has_account || !find_row(snapshot->planets(), location.planet, [](const auto& row) { return row.id; }))
+            return core::Result<void>::success();
+        for (const auto& queue : location.queues) {
+            math::Fixed seconds;
+            for (const auto& entry : queue) {
+                auto total = math::add(seconds, entry.last_remaining);
+                if (!total) return core::Result<void>::failure(total.error());
+                seconds = total.value();
+            }
+        }
+        return core::Result<void>::success();
     };
-    const bool same_prices = previous && previous->unique_jobs && previous->price_reductions
-        && previous->source->production() && bool(income) == bool(old_income)
-        && (!income || income->offers == old_income->offers)
-        && std::equal(next->reductions.begin(), next->reductions.end(), previous->reductions.begin(), previous->reductions.end(),
-            [&](const auto& a, const auto& b) { return reduction_key(a) == reduction_key(b); });
-    next->price_reductions = same_prices ? previous->price_reductions
-        : std::make_shared<const std::vector<galactic::ProductionReductionSource>>(next->reductions);
-    next->jobs.reserve(production.players.size() * production.planets.size());
+    const bool share_jobs = reservations_equal && inputs_unchanged
+        && previous->job_list().size() == production.players.size() * production.planets.size();
+    if (share_jobs) {
+        // Players, planets, offers and prices equal: only queue clocks, credits and the frontier moved.
+        for (const auto& location : production.planets) if (auto checked = check_queues(location); !checked) return checked;
+        next->live_jobs = previous->live_jobs;
+        next->unique_jobs = previous->unique_jobs;
+        prepared_producer_offers_ = std::move(next);
+        return core::Result<void>::success();
+    }
+    // Offer lists are owner-independent: compare each location once.
+    std::vector<signed char> offers_same(production.planets.size(), -1);
+    const auto planet_offers_same = [&](std::size_t location_index) {
+        auto& cached = offers_same[location_index];
+        if (cached < 0) {
+            const auto* old_location = old_production ? find_row(old_production->planets, production.planets[location_index].planet,
+                [](const auto& row) { return row.planet; }) : nullptr;
+            cached = old_location && old_location->offers == production.planets[location_index].offers ? 1 : 0;
+        }
+        return cached == 1;
+    };
+    std::vector<signed char> queues_checked(production.planets.size(), 0);
+    std::vector<PreparedProducerOffers::Job> jobs;
+    jobs.reserve(production.players.size() * production.planets.size());
+    const std::vector<PreparedProducerOffers::Job>* old_jobs = previous_usable ? &previous->job_list() : nullptr;
     for (std::size_t owner_index = 0; owner_index < production.players.size(); ++owner_index) {
         const auto& owner = production.players[owner_index];
-        const auto reservations = galactic::production_reservations(production, owner.player);
         for (std::size_t location_index = 0; location_index < production.planets.size(); ++location_index) {
             const auto& location = production.planets[location_index];
             PreparedProducerOffers::Job job;
             job.player = owner.player; job.planet = location.planet;
-            job.source_owner = owner_index; job.source_location = location_index; job.reservations = reservations;
+            job.source_owner = owner_index; job.source_location = location_index;
+            job.owner_reservation = next->owner_reservations[owner_index];
             if (find_row(snapshot->player_economy()->players, owner.player, [](const auto& row) { return row.player; })
                 && find_row(snapshot->planets(), location.planet, [](const auto& row) { return row.id; })) {
                 // Preserve the atomic binder's checked queue-clock refusal even
                 // when no service requests this producer on the current frame.
-                for (const auto& queue : location.queues) {
-                    math::Fixed seconds;
-                    for (const auto& entry : queue) {
-                        auto total = math::add(seconds, entry.last_remaining);
-                        if (!total) return core::Result<void>::failure(total.error());
-                        seconds = total.value();
-                    }
+                if (!queues_checked[location_index]) {
+                    queues_checked[location_index] = 1;
+                    if (auto checked = check_queues(location); !checked) return checked;
                 }
-                if (same_prices) {
-                    const auto* old_location = find_row(previous->source->production()->planets, location.planet,
-                        [](const auto& row) { return row.planet; });
-                    const auto* old_job = find_row(previous->jobs, std::pair{owner.player, location.planet},
+                if (same_prices && old_jobs && planet_offers_same(location_index)) {
+                    const auto* old_job = find_row(*old_jobs, std::pair{owner.player, location.planet},
                         [](const auto& row) { return std::pair{row.player, row.planet}; });
-                    if (old_location && old_job && old_location->offers == location.offers) job.prices = old_job->prices;
+                    if (old_job) job.prices = old_job->prices;
                 }
                 if (!job.prices) {
                     job.prices = std::make_shared<PreparedProducerOffers::PriceCache>();
@@ -215,15 +281,16 @@ core::Result<void> GalacticWorld::refresh_live_producers(
                     };
                 }
             }
-            next->jobs.push_back(std::move(job));
+            jobs.push_back(std::move(job));
         }
     }
-    std::sort(next->jobs.begin(), next->jobs.end(), [](const auto& a, const auto& b) {
+    std::sort(jobs.begin(), jobs.end(), [](const auto& a, const auto& b) {
         return std::pair{a.player, a.planet} < std::pair{b.player, b.planet};
     });
-    next->unique_jobs = std::adjacent_find(next->jobs.begin(), next->jobs.end(), [](const auto& a, const auto& b) {
+    next->unique_jobs = std::adjacent_find(jobs.begin(), jobs.end(), [](const auto& a, const auto& b) {
         return a.player == b.player && a.planet == b.planet;
-    }) == next->jobs.end();
+    }) == jobs.end();
+    next->live_jobs = std::make_shared<const std::vector<PreparedProducerOffers::Job>>(std::move(jobs));
     prepared_producer_offers_ = std::move(next);
     return core::Result<void>::success();
 }
@@ -262,7 +329,7 @@ std::uint64_t GalacticWorld::producer_demand_offer_checks() const noexcept {
 
 core::Result<void> GalacticWorld::prepare_catalog_slice(const sim::PartitionExecutor& executor, std::uint64_t frame) {
     if (!live_deltas_ || !prepared_producer_offers_ || last_catalog_slice_ == frame) return core::Result<void>::success();
-    const auto& jobs = prepared_producer_offers_->jobs;
+    const auto& jobs = prepared_producer_offers_->job_list();
     const auto count = jobs.size() / perception_period_ + (jobs.size() % perception_period_ != 0 ? 1 : 0);
     const auto slice = frame % perception_period_;
     // Fixed sim-frame slices: no wall-clock budgets, worker timing or catch-up.
@@ -294,6 +361,7 @@ GalacticWorld::GalacticWorld(GalacticPerceptionSetup setup) : setup_(std::move(s
     if (setup_.logical_fps == 0 || setup_.players.size() > 64)
         throw std::invalid_argument("invalid galactic perception logical rate/player count");
     std::sort(setup_.players.begin(), setup_.players.end(), [](const auto& a, const auto& b) { return a.player < b.player; });
+    for (const auto& row : setup_.players) shards_[row.player]; // S9a: one perception shard per player, from load
     std::sort(setup_.planets.begin(), setup_.planets.end(), [](const auto& a, const auto& b) { return a.planet < b.planet; });
     std::sort(setup_.types.begin(), setup_.types.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
     std::sort(setup_.force_types.begin(), setup_.force_types.end(), [](const auto& a, const auto& b) { return a.type < b.type; });
@@ -354,6 +422,10 @@ GalacticWorld::GalacticWorld(GalacticPerceptionSetup setup) : setup_(std::move(s
     setup_.cache_intervals.try_emplace("TARGETPLAYERID", Real{}); // WGA-258: fogged ownership getter
     for (auto& row : setup_.players) { row.faction = upper_case(row.faction); row.difficulty = upper_case(row.difficulty); }
     for (auto& row : setup_.planets) row.name = upper_case(row.name);
+    for (const auto& row : setup_.force_types)
+        type_traits_.push_back({row.type, row.object_traits.has_value(), row.object_traits && row.object_traits->hero,
+            row.object_traits && row.object_traits->named_hero});
+    for (const auto& row : setup_.players) teams_.push_back({row.player, row.team});
     for (const auto& row : setup_.players) players_.push_back({row.player, row.team, 0, 0});
     std::set<tactical::PlayerId> ids, ai_ids;
     std::set<galactic::PlanetId> planets;
@@ -365,41 +437,115 @@ GalacticWorld::GalacticWorld(GalacticPerceptionSetup setup) : setup_(std::move(s
 core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticSnapshot> snapshot,
     GalacticConnectivity connectivity, const sim::PartitionExecutor& executor,
     std::uint64_t synchronized_frame, sim::EntityId next_entity_id, bool perception_due) {
+    return bind_publication(std::move(snapshot), std::make_shared<const GalacticConnectivity>(std::move(connectivity)),
+        executor, synchronized_frame, next_entity_id, perception_due);
+}
+
+core::Result<void> GalacticWorld::bind_native_frontier(tactical::PlayerId player,
+    std::shared_ptr<const galactic::GalacticSnapshot> snapshot, const sim::PartitionExecutor& executor,
+    sim::EntityId next_entity_id) {
+    if (!snapshot || !player || !next_entity_id)
+        return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request,
+            "native movement requires its player frontier"));
+    if (native_frontier_work_.barrier != snapshot->completed_tick()) {
+        native_frontier_work_ = {}; native_frontier_work_.barrier = snapshot->completed_tick();
+    }
+    ++native_frontier_work_.requests;
+    // Native layers cache their immutable publication until another real write.
+    // The player key also keeps independent player frontiers distinct.
+    if (native_frontier_player_ == player && snapshot_ == snapshot && next_id_ == next_entity_id)
+        return core::Result<void>::success();
+    std::set<sim::EntityId> stealth;
+    for (const auto& fleet : snapshot->fleets()) {
+        const auto skipped = snapshot->fleet_combat_skip(fleet.id);
+        if (!skipped) return core::Result<void>::failure(skipped.error());
+        if (skipped.value()) stealth.insert(fleet.id);
+    }
+    auto publication = connectivity_;
+    if (publication->stealth_fleets != stealth) {
+        auto updated = std::make_shared<GalacticConnectivity>(*publication);
+        updated->stealth_fleets = std::move(stealth); publication = std::move(updated);
+    }
+    const auto frame = snapshot->completed_tick();
+    auto bound = bind_publication_impl(std::move(snapshot), std::move(publication), executor, frame, next_entity_id,
+        false, sparse_native_frontiers_);
+    if (!bound) return bound;
+    native_frontier_player_ = player;
+    ++native_frontier_work_.binds;
+    native_frontier_work_.prepared_planets += work_.prepared_planets;
+    native_frontier_work_.prepared_force_planets += work_.prepared_force_planets;
+    native_frontier_work_.force_terms += work_.force_terms;
+    return core::Result<void>::success();
+}
+
+core::Result<void> GalacticWorld::bind_publication(std::shared_ptr<const galactic::GalacticSnapshot> snapshot,
+    std::shared_ptr<const GalacticConnectivity> publication, const sim::PartitionExecutor& executor,
+    std::uint64_t synchronized_frame, sim::EntityId next_entity_id, bool perception_due) {
+    return bind_publication_impl(std::move(snapshot), std::move(publication), executor, synchronized_frame,
+        next_entity_id, perception_due, false);
+}
+
+core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const galactic::GalacticSnapshot> snapshot,
+    std::shared_ptr<const GalacticConnectivity> publication, const sim::PartitionExecutor& executor,
+    std::uint64_t synchronized_frame, sim::EntityId next_entity_id, bool perception_due, bool native_sparse) {
+    if (!publication) return core::Result<void>::failure(detail::make_error(
+        authoritative::codes::invalid_request, "galactic perception needs an immutable connectivity publication"));
+    const auto& connectivity = *publication;
     gc_profile::Scope profile_scope(gc_profile::Phase::world_bind);
     if (!snapshot || !next_entity_id) return core::Result<void>::failure(detail::make_error(
         authoritative::codes::invalid_request, "galactic perception needs a completed snapshot and identity frontier"));
+    // Any ordinary publication bind ends the previous native-reader cache key.
+    // bind_native_frontier installs its player only after a successful bind.
+    native_frontier_player_ = 0;
     admission_preparations_ = 0;
     // The owning publisher invalidates this record for physical/economic writers.
     // A clock-only snapshot changes neither forces nor production admission. Keep
     // its producer data and ordered rows; only publish the new boundary clocks.
     // Unqualified synthetic snapshots have no generation and take the full path.
     const auto& generation = snapshot->economy_input_generation();
+    // The same retained rows or object compare equal without a walk.
     const auto equal_rows = [](const auto& left, const auto& right) {
-        return std::equal(left.begin(), left.end(), right.begin(), right.end());
+        return (left.size() == right.size() && left.data() == right.data())
+            || std::equal(left.begin(), left.end(), right.begin(), right.end());
     };
     const auto equal_optional_pointer = [](const auto* left, const auto* right) {
-        return bool(left) == bool(right) && (!left || *left == *right);
+        return left == right || (bool(left) == bool(right) && (!left || *left == *right));
     };
     bool queues_changed{};
     const auto same_production = [&](const auto& left, const auto& right) {
+        gc_profile::Scope production_scope(gc_profile::Phase::compare_production);
         if (bool(left) != bool(right)) return false;
         if (!left) return true;
         if (left->maximum_human_queue != right->maximum_human_queue || left->players != right->players
             || left->fleet_blockers != right->fleet_blockers || left->nested_creation != right->nested_creation
             || left->technology_types != right->technology_types || left->planets.size() != right->planets.size()) return false;
-        for (std::size_t index = 0; index < left->planets.size(); ++index) {
-            const auto& a = left->planets[index]; const auto& b = right->planets[index];
-            // Every nonqueue producer fact still qualifies the physical publication.
-            // Current queues are published separately for admission/economy reads.
-            if (std::tie(a.planet, a.target_owner, a.starbase_owner, a.ground_occupier, a.orbit_occupier,
-                a.starbase_type, a.ground_level, a.space_level, a.maximum_space_level, a.ground_slots,
-                a.space_slots, a.landed_transports, a.maximum_ground_forces, a.enabled, a.surface_accessible,
-                a.starbase_blocked, a.offers, a.objects)
-                != std::tie(b.planet, b.target_owner, b.starbase_owner, b.ground_occupier, b.orbit_occupier,
-                b.starbase_type, b.ground_level, b.space_level, b.maximum_space_level, b.ground_slots,
-                b.space_slots, b.landed_transports, b.maximum_ground_forces, b.enabled, b.surface_accessible,
-                b.starbase_blocked, b.offers, b.objects)) return false;
-            queues_changed = queues_changed || a.queues != b.queues;
+        // Per-planet equality is independent: compare in a partitioned prepass, then fold in planet order so
+        // the first mismatching planet and the queue flag read exactly as the serial walk would leave them.
+        const auto count = left->planets.size();
+        std::vector<unsigned char> nonqueue_same(count), queues_same(count);
+        const auto compare_range = [&](std::size_t begin, std::size_t end) {
+            for (auto index = begin; index < end; ++index) {
+                const auto& a = left->planets[index]; const auto& b = right->planets[index];
+                // Every nonqueue producer fact still qualifies the physical publication.
+                // Current queues are published separately for admission/economy reads.
+                nonqueue_same[index] = std::tie(a.planet, a.target_owner, a.starbase_owner, a.ground_occupier, a.orbit_occupier,
+                    a.starbase_type, a.ground_level, a.space_level, a.maximum_space_level, a.ground_slots,
+                    a.space_slots, a.landed_transports, a.maximum_ground_forces, a.enabled, a.surface_accessible,
+                    a.starbase_blocked, a.offers, a.objects)
+                    == std::tie(b.planet, b.target_owner, b.starbase_owner, b.ground_occupier, b.orbit_occupier,
+                    b.starbase_type, b.ground_level, b.space_level, b.maximum_space_level, b.ground_slots,
+                    b.space_slots, b.landed_transports, b.maximum_ground_forces, b.enabled, b.surface_accessible,
+                    b.starbase_blocked, b.offers, b.objects);
+                queues_same[index] = a.queues == b.queues;
+            }
+        };
+        if (!executor.execute_phase("galactic-ai-compare", sim::tick_partition_count, [&](std::size_t partition) {
+                const auto range = sim::partition_range(partition, count);
+                compare_range(range.begin, range.end);
+            })) compare_range(0, count);
+        for (std::size_t index = 0; index < count; ++index) {
+            if (!nonqueue_same[index]) return false;
+            queues_changed = queues_changed || !queues_same[index];
         }
         return true;
     };
@@ -417,6 +563,8 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
         return true;
     };
     bool same_projection{};
+    std::optional<gc_profile::Scope> compare_scope;
+    compare_scope.emplace(gc_profile::Phase::world_compare);
     if (!perception_due && live_deltas_ && bound_source_ && generation && bound_source_->economy_input_generation()) {
         const auto& old = *bound_source_;
         const auto& old_generation = *old.economy_input_generation();
@@ -442,38 +590,63 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
                         && bool(a.motion.transit) == bool(b.motion.transit) && a.members == b.members;
                 });
     }
+    compare_scope.reset();
     if (!perception_due && bound_source_ && generation && (same_projection || (generation == bound_source_->economy_input_generation()
         && snapshot->observer_input_generation() != 0
         && snapshot->observer_input_generation() == bound_source_->observer_input_generation()))
-        && next_entity_id == next_id_ && connectivity.stealth_fleets == connectivity_.stealth_fleets) {
-        auto view = std::make_shared<WorldView>(*view_);
+        && next_entity_id == next_id_ && connectivity.stealth_fleets == connectivity_->stealth_fleets) {
+        std::optional<gc_profile::Scope> copy_scope;
+        copy_scope.emplace(gc_profile::Phase::world_view);
+        // The spare buffer is two publications old: when it has the same roster only positions can differ.
+        bool aligned{};
+        auto view = reader_.take_buffer(aligned);
+        if (aligned) {
+            for (std::size_t index = 0; index < view->units.size(); ++index) view->units[index].position = reader_.view()->units[index].position;
+        } else {
+            view->units = reader_.view()->units; view->players = reader_.view()->players; view->capture_candidates = reader_.view()->capture_candidates;
+        }
         view->tick = snapshot->completed_tick();
         if (same_projection) {
-            std::map<sim::EntityId, math::Vec3> moved;
+            gc_profile::Scope moved_scope(gc_profile::Phase::view_moved);
+            // First insertion of an identity keeps its position; passes over the contents rows repeat until
+            // no payload is added (nested payloads inherit the container's position).
+            FlatIdMap slots(snapshot->fleets().size() * 4 + 16);
+            std::vector<std::pair<sim::EntityId, math::Vec3>> moved;
+            const auto place = [&](sim::EntityId id, const math::Vec3& position) {
+                const bool inserted = slots.insert(id).second;
+                if (inserted) moved.emplace_back(id, position);
+                return inserted;
+            };
             for (const auto& fleet : snapshot->fleets()) if (fleet.motion.transit) {
-                moved.emplace(fleet.id, fleet.motion.position);
-                for (const auto& member : fleet.members) moved.emplace(member.id, fleet.motion.position);
+                place(fleet.id, fleet.motion.position);
+                for (const auto& member : fleet.members) place(member.id, fleet.motion.position);
             }
-            if (snapshot->movement()) {
+            if (snapshot->movement() && !moved.empty()) {
                 bool appended = true;
                 while (appended) {
                     appended = false;
-                    for (const auto& contents : snapshot->movement()->contents) if (const auto parent = moved.find(contents.container); parent != moved.end())
-                        for (const auto& child : contents.children) appended = moved.emplace(child.id, parent->second).second || appended;
+                    for (const auto& contents : snapshot->movement()->contents) if (const auto parent = slots.find(contents.container); parent != FlatIdMap::npos) {
+                        const auto position = moved[parent].second;
+                        for (const auto& child : contents.children) appended = place(child.id, position) || appended;
+                    }
                 }
             }
-            if (!moved.empty()) {
-                const auto motion = executor.execute_phase("galactic-ai-live-motion", sim::tick_partition_count, [&](std::size_t partition) {
-                    const auto range = sim::partition_range(partition, view->units.size());
-                    for (auto index = range.begin; index < range.end; ++index)
-                        if (const auto at = moved.find(view->units[index].id); at != moved.end()) view->units[index].position = at->second;
-                });
-                if (!motion) return motion;
+            std::sort(moved.begin(), moved.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+            // Both lists ascend by identity: one pass moves every listed unit that exists.
+            auto unit = view->units.begin();
+            for (const auto& [id, position] : moved) {
+                unit = std::lower_bound(unit, view->units.end(), id, [](const auto& row, sim::EntityId key) { return row.id < key; });
+                if (unit == view->units.end()) break;
+                if (unit->id == id) unit->position = position;
             }
         }
+        copy_scope.reset();
         const bool economy_changed = queues_changed || credits_changed;
         if (economy_changed) {
-            if (auto refreshed = refresh_live_producers(snapshot, next_entity_id, view->units.size() + snapshot->routes().size()); !refreshed) return refreshed;
+            {
+                gc_profile::Scope producers_scope(gc_profile::Phase::world_producers);
+                if (auto refreshed = refresh_live_producers(snapshot, next_entity_id, view->units.size() + snapshot->routes().size(), same_projection); !refreshed) return refreshed;
+            }
             for (auto& row : planets_) row.production = snapshot->production()
                 ? find_row(snapshot->production()->planets, row.planet.id, [](const auto& at) { return at.planet; }) : nullptr;
             // Do not qualify a partially refreshed publication after refusal.
@@ -486,6 +659,7 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
                 accounts_.push_back(std::move(account));
             }
         }
+        copy_scope.emplace(gc_profile::Phase::world_copy);
         auto input = std::make_shared<galactic_ai::WorldInput>(*input_);
         input->clocks = {synchronized_frame, snapshot->clock().galactic_frame};
         if (economy_changed) {
@@ -494,19 +668,69 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
         }
         if (live_deltas_ && prepared_producer_offers_) input->producers.set_query(producer_query());
         snapshot_ = std::move(snapshot); synchronized_frame_ = synchronized_frame;
-        view_ = std::move(view); input_ = std::move(input); work_ = {};
-        if (economy_changed) if (auto prepared_economy = refresh_economy_queues(executor, queues_changed); !prepared_economy) return prepared_economy;
-        bind_connectivity(std::move(connectivity));
+        reader_.publish(std::move(view)); work_ = {};
+        copy_scope.reset();
+        {
+            gc_profile::Scope release_scope(gc_profile::Phase::world_release);
+            input_ = std::move(input);
+        }
+        if (economy_changed) {
+            gc_profile::Scope economy_scope(gc_profile::Phase::world_economy);
+            if (auto prepared_economy = refresh_economy_queues(executor, queues_changed); !prepared_economy) return prepared_economy;
+        }
+        bind_connectivity(std::move(publication));
+        gc_profile::Scope catalog_scope(gc_profile::Phase::world_catalog);
         auto prepared_catalog = prepare_catalog_slice(executor, synchronized_frame);
         if (prepared_catalog && economy_changed) bound_source_ = snapshot_;
         return prepared_catalog;
     }
-    // A failed preparation must never make a partially published input reusable.
+    // Only staged native publications can prove local writes. Shared root identity
+    // also admits rewinding to another player's retained frontier: compare BOTH
+    // revision maps so removed writes are prepared again. Unknown publishers use
+    // the full oracle, regardless of equal counters or planet counts.
+    std::optional<std::vector<std::size_t>> sparse_planets;
+    if (native_sparse && bound_source_ && snapshot_ && snapshot->native_planet_revisions()
+        && snapshot_->native_root() == snapshot->native_root()
+        && (snapshot_.get() == snapshot_->native_root() || snapshot_->native_planet_revisions())) {
+        bool same_tech = bool(snapshot_->player_economy()) == bool(snapshot->player_economy());
+        if (same_tech && snapshot->player_economy()) {
+            const auto& old = snapshot_->player_economy()->players;
+            const auto& fresh = snapshot->player_economy()->players;
+            same_tech = old.size() == fresh.size() && std::equal(old.begin(), old.end(), fresh.begin(),
+                [](const auto& a, const auto& b) { return a.player == b.player && a.current_tech == b.current_tech; });
+        }
+        if (same_tech) {
+            sparse_planets.emplace();
+            const auto* before = snapshot_->native_planet_revisions();
+            const auto& after = *snapshot->native_planet_revisions();
+            for (std::size_t index = 0; index < planets_.size(); ++index) {
+                const auto id = planets_[index].planet.id;
+                const auto old = before ? before->find(id) : after.end();
+                const auto fresh = after.find(id);
+                const auto previous = before && old != before->end() ? old->second : nullptr;
+                const auto current = fresh != after.end() ? fresh->second : nullptr;
+                if (previous != current) sparse_planets->push_back(index);
+            }
+        }
+    }
+    // Clock-only binds can leave production pointers in an older physical
+    // publication. Keep that owner alive, and restore its proof if staging
+    // refuses before anything is published.
+    struct SourceRetention {
+        std::shared_ptr<const galactic::GalacticSnapshot>& current;
+        std::shared_ptr<const galactic::GalacticSnapshot> previous;
+        bool published{};
+        ~SourceRetention() { if (!published) current = std::move(previous); }
+    } source_retention{bound_source_, bound_source_};
     bound_source_.reset();
     // ADR-009: stage every independent planet in disjoint slots, then publish once.
-    std::vector<PlanetRow> rows(snapshot->planets().size());
+    std::optional<gc_profile::Scope> full_scope;
+    full_scope.emplace(gc_profile::Phase::world_rows);
+    // Copy only changed rows into disjoint staging slots. Keep the published
+    // vector and its source alive through every fallible preparation below.
+    std::vector<PlanetRow> rows(sparse_planets ? sparse_planets->size() : snapshot->planets().size());
     std::map<galactic::PlanetId, std::pair<std::uint64_t, std::uint64_t>> routes;
-    for (const auto& route : snapshot->routes()) {
+    if (!sparse_planets) for (const auto& route : snapshot->routes()) {
         const auto* from = find_row(snapshot->planets(), route.from, [](const auto& p) { return p.id; });
         const auto* to = find_row(snapshot->planets(), route.to, [](const auto& p) { return p.id; });
         const bool active = from && to && from->owner != 0 && allied(from->owner, to->owner);
@@ -515,137 +739,71 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
             if (active) ++routes[id].second;
         }
     }
+    const auto refresh_row = [&](PlanetRow& row) {
+        row.production = snapshot->production()
+            ? find_row(snapshot->production()->planets, row.planet.id, [](const auto& p) { return p.planet; }) : nullptr;
+        row.income.reset();
+        if (snapshot->economy_input_generation() && snapshot->economy_input_generation()->income) {
+            const auto* income = find_row(*snapshot->economy_input_generation()->income, row.planet.id, [](const auto& p) { return p.first; });
+            if (income) row.income = to_single(numeric::from_fixed(income->second));
+        } else if (snapshot->economy_forecast()) {
+            const auto* income = find_row(snapshot->economy_forecast()->planets, row.planet.id, [](const auto& p) { return p.planet; });
+            if (income && income->actual) row.income = numeric::from_fixed(*income->actual);
+        }
+    };
     const auto prepared = executor.execute_phase("galactic-ai-planets", sim::tick_partition_count,
         [&](std::size_t partition) {
             const auto range = sim::partition_range(partition, rows.size());
             for (auto index = range.begin; index < range.end; ++index) {
-                auto& row = rows[index]; row.planet = snapshot->planets()[index];
-                if (const auto* authored = find_row(setup_.planets, row.planet.id, [](const auto& p) { return p.planet; })) row.facts = *authored;
-                else { row.facts.planet = row.planet.id; row.facts.name = "PLANET_" + std::to_string(row.planet.id); }
-                if (snapshot->production()) {
-                    const auto* production = find_row(snapshot->production()->planets, row.planet.id, [](const auto& p) { return p.planet; });
-                    if (production) row.production = production;
+                auto& row = rows[index];
+                if (sparse_planets) {
+                    const auto& previous = planets_[(*sparse_planets)[index]];
+                    row.planet = previous.planet; row.facts = previous.facts;
+                    row.routes = previous.routes; row.active_routes = previous.active_routes;
+                    row.nearby = previous.nearby;
                 }
+                else {
+                    row.planet = snapshot->planets()[index];
+                    if (const auto* authored = find_row(setup_.planets, row.planet.id, [](const auto& p) { return p.planet; })) row.facts = *authored;
+                    else { row.facts.planet = row.planet.id; row.facts.name = "PLANET_" + std::to_string(row.planet.id); }
+                }
+                refresh_row(row);
                 if (const auto found = routes.find(row.planet.id); found != routes.end())
                     std::tie(row.routes, row.active_routes) = found->second;
-                if (snapshot->economy_input_generation() && snapshot->economy_input_generation()->income) {
-                    const auto* income = find_row(*snapshot->economy_input_generation()->income, row.planet.id, [](const auto& p) { return p.first; });
-                    if (income) row.income = to_single(numeric::from_fixed(income->second));
-                } else if (snapshot->economy_forecast()) {
-                    const auto* income = find_row(snapshot->economy_forecast()->planets, row.planet.id, [](const auto& p) { return p.planet; });
-                    if (income && income->actual) row.income = numeric::from_fixed(*income->actual);
-                }
             }
         });
     if (!prepared) return prepared;
-    const auto forces = prepare_forces(rows, *snapshot, connectivity, executor);
+    full_scope.reset();
+    const auto forces = prepare_forces(rows, *snapshot, connectivity, executor, sparse_planets.has_value());
     if (!forces) return forces;
-    auto view = std::make_shared<WorldView>(); view->tick = snapshot->completed_tick();
-    for (std::size_t index = 0; index < setup_.players.size(); ++index)
-        view->players.push_back({setup_.players[index].player, setup_.players[index].team, index});
-    std::map<sim::EntityId, galactic::PlanetId> containment;
-    std::set<sim::EntityId> transit;
-    struct ObjectInput { sim::EntityId id{}; tactical::TypeId type{}; tactical::PlayerId owner{}; math::Vec3 position; galactic::PlanetId planet{}; galactic::IntelligenceContainer container{}; bool structure{}; };
-    std::vector<ObjectInput> objects;
-    std::set<sim::EntityId> identities;
-    const auto add = [&](sim::EntityId id, tactical::TypeId type, tactical::PlayerId owner,
-                         const math::Vec3& position, galactic::PlanetId containing,
-                         galactic::IntelligenceContainer container = galactic::IntelligenceContainer::none, bool structure = false) {
-        if (!identities.insert(id).second) return;
-        objects.push_back({id, type, owner, position, containing, container, structure});
-        if (containing) containment.emplace(id, containing);
-    };
-    // Ordered roster indexing resolves shared persistent identities. Token/visibility
-    // preparation below is partitioned; this traversal never services world entities.
-    for (const auto& row : rows) add(row.planet.id, row.facts.type, row.planet.owner, row.planet.position, row.planet.id);
-    for (const auto& fleet : snapshot->fleets()) {
-        // In transit a fleet has no planet parent. Do not retain its former orbit as containment.
-        const auto* at = find_row(rows, fleet.orbit, [](const auto& p) { return p.planet.id; });
-        const auto containing = fleet.motion.transit ? galactic::PlanetId{} : fleet.orbit;
-        const auto position = fleet.motion.transit || !at ? fleet.motion.position : at->planet.position;
-        add(fleet.id, 0, fleet.owner, position, containing, galactic::IntelligenceContainer::orbit);
-        for (const auto& member : fleet.members) {
-            add(member.id, member.type, fleet.owner, position, containing, galactic::IntelligenceContainer::orbit);
-            if (fleet.motion.transit) transit.insert(member.id);
-        }
-        if (fleet.motion.transit) transit.insert(fleet.id);
+    full_scope.emplace(gc_profile::Phase::world_objects);
+    std::vector<ReaderPlanet> reader_planets;
+    const auto& roster_rows = sparse_planets ? planets_ : rows;
+    reader_planets.reserve(roster_rows.size());
+    for (const auto& row : roster_rows) {
+        const auto* production = sparse_planets && snapshot->production()
+            ? find_row(snapshot->production()->planets, row.planet.id, [](const auto& p) { return p.planet; }) : row.production;
+        reader_planets.push_back({row.planet.id, row.planet.owner, row.planet.position, row.facts.type, production});
     }
-    if (snapshot->control()) for (const auto& control : snapshot->control()->planets) {
-        const auto* at = find_row(rows, control.planet, [](const auto& p) { return p.planet.id; });
-        if (!at) continue;
-        for (const auto& force : control.landed) add(force.id, force.type, force.owner, at->planet.position, control.planet, galactic::IntelligenceContainer::ground);
-    }
-    for (const auto& row : rows) if (row.production) for (const auto& object : row.production->objects)
-        add(object.id, object.type, object.owner, row.planet.position, row.planet.id,
-            object.domain == galactic::ProductionDomain::space ? galactic::IntelligenceContainer::orbit : galactic::IntelligenceContainer::ground,
-            object.kind == galactic::ProductionKind::structure);
-    // Nested payloads inherit the resolved parent's location, never a type-based guess.
-    if (snapshot->movement()) {
-        std::map<sim::EntityId, const galactic::MovementContents*> nested;
-        for (const auto& contents : snapshot->movement()->contents) nested.emplace(contents.container, &contents);
-        for (std::size_t index = 0; index < objects.size(); ++index) {
-            const auto parent = objects[index];
-            const auto found = nested.find(parent.id); if (found == nested.end()) continue;
-            for (const auto& member : found->second->children) {
-                if (identities.contains(member.id)) continue;
-                const auto where = containment.find(parent.id);
-                add(member.id, member.type, parent.owner, parent.position, where == containment.end() ? 0 : where->second, parent.container);
-                if (transit.contains(parent.id)) transit.insert(member.id);
-            }
-        }
-    }
-    view->units.resize(objects.size());
-    std::vector<GalacticVisibility> visibility_state;
+    auto roster = std::make_shared<const StructuralIndex>(build_structural_index(reader_planets, *snapshot));
+    bool aligned{};
+    auto view = reader_.take_buffer(aligned);
+    view->tick = snapshot->completed_tick();
+    view->players.clear(); view->capture_candidates.clear();
+    for (std::size_t player_index = 0; player_index < setup_.players.size(); ++player_index)
+        view->players.push_back({setup_.players[player_index].player, setup_.players[player_index].team, player_index});
+    full_scope.emplace(gc_profile::Phase::world_visibility);
+    std::vector<ReaderLegacyVisibility> legacy;
     if (!snapshot->observer()) {
         const auto lock = query_lock();
-        visibility_state = state_.visibility;
+        for (const auto& [who, mine] : shards_) {
+            static_cast<void>(who);
+            for (const auto& observed : mine.visibility) if (observed.mask == 0 && observed.visible) legacy.push_back({observed.player, observed.planet});
+        }
     }
-    const auto object_phase = executor.execute_phase("galactic-ai-objects", sim::tick_partition_count,
-        [&](std::size_t partition) {
-            const auto range = sim::partition_range(partition, objects.size());
-            for (auto index = range.begin; index < range.end; ++index) {
-                const auto& source = objects[index]; auto& unit = view->units[index];
-                unit.id = source.id; unit.type = source.type; unit.owner = source.owner; unit.position = source.position;
-                if (const auto* owner_row = player(source.owner)) unit.team = owner_row->team;
-                if (!setup_.uses_fog) unit.visible_to = ~std::uint64_t{}; // WGA-08
-                else if (snapshot->observer()) for (const auto& viewer : view->players) {
-                    const auto* observer = find_row(snapshot->observer()->players, viewer.id, [](const auto& row) { return row.player; });
-                    const bool allied_owner = source.owner == viewer.id || (observer
-                        && std::binary_search(observer->allies.begin(), observer->allies.end(), source.owner));
-                    const auto* known = find_row(snapshot->observations(), std::pair{viewer.id, source.planet},
-                        [](const auto& row) { return std::pair{row.player, row.planet}; });
-                    bool visible = allied_owner;
-                    if (known && !visible) {
-                        // WGUI-18: scalar ownership/presence/count is not an
-                        // object-details grant. The planet target is separate.
-                        if (source.id == source.planet) visible = known->knowledge.ownership;
-                        else {
-                            const auto* type = find_row(setup_.force_types, source.type, [](const auto& row) { return row.type; });
-                            const auto* live = find_row(snapshot->observer()->types, source.type, [](const auto& row) { return row.type; });
-                            if (source.type == 0 || source.structure || (type && type->object_traits)) {
-                                galactic::ObjectIntelligenceContext object;
-                                object.planetary_system = source.planet != 0; object.structure = source.structure;
-                                object.container = source.container;
-                                if (type && type->object_traits) {
-                                    object.hero = type->object_traits->hero; object.named_hero = type->object_traits->named_hero;
-                                }
-                                object.stealth_hero = live && live->stealth_hero;
-                                visible = galactic::object_details_known(object, known->knowledge);
-                            }
-                        }
-                    }
-                    if (visible) unit.visible_to |= std::uint64_t{1} << viewer.snapshot_index;
-                }
-                else for (const auto& observed : visibility_state) {
-                    // Explicit legacy fixture visibility is a separate input.
-                    if (observed.mask != 0 || observed.planet != source.planet || !observed.visible) continue;
-                    const auto* viewer = view->player(observed.player);
-                    if (viewer) unit.visible_to |= std::uint64_t{1} << viewer->snapshot_index;
-                }
-            }
-        });
-    if (!object_phase) return object_phase;
-    std::sort(view->units.begin(), view->units.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    const ReaderFog fog{setup_.uses_fog, snapshot.get(), type_traits_, teams_, legacy, view->players};
+    if (auto filled = fill_view_units(view->units, *roster, fog, executor); !filled) return filled;
+    full_scope.reset();
     std::vector<tactical::EconomyView> accounts;
     if (snapshot->player_economy()) for (const auto& row : snapshot->player_economy()->players) {
         tactical::EconomyView account; account.player = row.player; account.credits = row.credits;
@@ -729,7 +887,7 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
                 if (same_adjustments) {
                     old_location = find_row(previous->source->production()->planets, location.planet,
                         [](const auto& p) { return p.planet; });
-                    old_job = find_row(previous->jobs, std::pair{owner.player, location.planet},
+                    old_job = find_row(previous->job_list(), std::pair{owner.player, location.planet},
                         [](const auto& job) { return std::pair{job.player, job.planet}; });
                     if (old_location && old_job && old_location->offers == location.offers) cached.offers = old_job->offers;
                 }
@@ -795,11 +953,11 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
         // Keep the canonical publication when every producer chunk is unchanged.
         // A changed chunk still contributes its current queue/account/admission
         // facts; unchanged chunks are copied only for that changed publication.
-        producer_rows_reused = !live_deltas_ && previous && previous->unique_jobs && previous->jobs.size() == prepared_offers->jobs.size();
+        producer_rows_reused = !live_deltas_ && previous && previous->unique_jobs && previous->job_list().size() == prepared_offers->jobs.size();
         std::size_t staged_rows{};
         for (const auto& job : prepared_offers->jobs) {
             if (job.rows) staged_rows += job.rows->size();
-            const auto* old = previous ? find_row(previous->jobs, std::pair{job.player, job.planet},
+            const auto* old = previous ? find_row(previous->job_list(), std::pair{job.player, job.planet},
                 [](const auto& row) { return std::pair{row.player, row.planet}; }) : nullptr;
             producer_rows_reused = producer_rows_reused && old && job.rows == old->rows;
         }
@@ -821,22 +979,39 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
     }
     const bool observer_changed = !snapshot_ || snapshot_->observer_input_generation() != snapshot->observer_input_generation();
     markup_->retain_planets(snapshot->planets());
-    snapshot_ = std::move(snapshot); planets_ = std::move(rows); view_ = std::move(view);
-    containment_ = std::move(containment); transit_ = std::move(transit); accounts_ = std::move(accounts);
+    if (sparse_planets) {
+        for (std::size_t slot = 0; slot < sparse_planets->size(); ++slot)
+            planets_[(*sparse_planets)[slot]] = std::move(rows[slot]);
+        rows = std::move(planets_);
+        // Borrowed producer pointers and globally derived income can change even
+        // on untouched force planets. Refresh only these small fields at commit.
+        for (auto& row : rows) refresh_row(row);
+    }
+    snapshot_ = std::move(snapshot); planets_ = std::move(rows); reader_.publish(std::move(view), std::move(roster));
+    source_retention.published = true;
+    accounts_ = std::move(accounts);
     if (!producer_rows_reused) { builds_ = std::move(builds); build_options_.clear(); }
     next_id_ = next_entity_id; synchronized_frame_ = synchronized_frame;
     if (live_deltas_) {
-        if (auto refreshed = refresh_live_producers(snapshot_, next_id_, view_->units.size() + snapshot_->routes().size()); !refreshed) return refreshed;
+        gc_profile::Scope producers_scope(gc_profile::Phase::world_producers);
+        if (auto refreshed = refresh_live_producers(snapshot_, next_id_, reader_.view()->units.size() + snapshot_->routes().size()); !refreshed) return refreshed;
     } else prepared_producer_offers_ = std::move(prepared_offers);
-    work_ = {planets_.size(), view_->units.size(), snapshot_->routes().size(), builds_.size()};
+    const auto prepared_count = sparse_planets ? sparse_planets->size() : planets_.size();
+    work_ = {prepared_count, reader_.view()->units.size(), sparse_planets ? 0 : snapshot_->routes().size(), builds_.size()};
+    work_.prepared_force_planets = prepared_count;
+    if (sparse_planets) ++native_frontier_work_.sparse_binds;
     work_.producer_offer_preparations = offer_preparations;
     if (live_deltas_ && prepared_producer_offers_)
-        for (const auto& job : prepared_producer_offers_->jobs)
+        for (const auto& job : prepared_producer_offers_->job_list())
             if (const auto* location = find_row(snapshot_->production()->planets, job.planet, [](const auto& p) { return p.planet; }))
                 work_.producer_offers += location->offers.size();
-    if (auto prepared_economy = prepare_economy_tokens(executor); !prepared_economy) return prepared_economy;
+    {
+        gc_profile::Scope economy_scope(gc_profile::Phase::world_economy);
+        if (auto prepared_economy = prepare_economy_tokens(executor); !prepared_economy) return prepared_economy;
+    }
     // WGA-258/65: each fogged unit has its own qualified visibility category.
     // A unchanged bind does not refresh caches or reset observation ages.
+    full_scope.emplace(gc_profile::Phase::world_observed);
     if (observer_changed && snapshot_->observer()) for (const auto& known : snapshot_->observations()) {
         const std::array values{
             std::pair{galactic::bit(galactic::Intelligence::ownership), known.knowledge.ownership},
@@ -853,11 +1028,14 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
             if (changed) visibility_changed(known.player, known.planet, value, mask);
         }
     }
-    for (const auto& row : planets_) {
+    full_scope.reset();
+    for (std::size_t slot = 0; slot < (sparse_planets ? sparse_planets->size() : planets_.size()); ++slot) {
+        const auto& row = planets_[sparse_planets ? (*sparse_planets)[slot] : slot];
         work_.force_terms += row.space.size() + row.ground.size() + row.starbase.size();
         work_.neighbourhood_pairs += row.neighbourhood_pairs;
     }
-    bind_connectivity(std::move(connectivity));
+    bind_connectivity(std::move(publication));
+    full_scope.emplace(gc_profile::Phase::world_input);
     auto input = std::make_shared<galactic_ai::WorldInput>();
     input->clocks = {synchronized_frame_, snapshot_->clock().galactic_frame};
     for (const auto& row : planets_) {
@@ -895,20 +1073,35 @@ core::Result<void> GalacticWorld::bind(std::shared_ptr<const galactic::GalacticS
     }
     for (const auto& row : accounts_) input->credits.emplace(row.player, row.credits);
     input_ = std::move(input);
+    full_scope.emplace(gc_profile::Phase::world_catalog);
     if (auto prepared_catalog = prepare_catalog_slice(executor, synchronized_frame); !prepared_catalog) return prepared_catalog;
     bound_source_ = snapshot_;
     return core::Result<void>::success();
 }
 
-void GalacticWorld::bind_connectivity(GalacticConnectivity connectivity) {
-    if (connectivity.revision != connectivity_.revision) {
+void GalacticWorld::bind_connectivity(std::shared_ptr<const GalacticConnectivity> connectivity) {
+    if (connectivity->revision != connectivity_->revision) {
         const auto lock = query_lock();
         mark_state_changed();
-        cache_index_.clear();
-        std::erase_if(cache_, [&](const auto& row) {
-            const auto& tokens = tokens_.at(row.key.token)->tokens;
-            return std::any_of(tokens.begin(), tokens.end(), [](const auto& token) { return token.starts_with("ISCONNECTED") || token.starts_with("CONNECTS"); });
-        });
+        for (auto& [who, mine] : shards_) {
+            static_cast<void>(who);
+            mine.cache_index.clear();
+            std::size_t kept{};
+            for (std::size_t index = 0; index < mine.cache.size(); ++index) {
+                auto& row = mine.cache[index];
+                const auto& tokens = token_of(mine, row.key.token).tokens;
+                if (std::any_of(tokens.begin(), tokens.end(), [](const auto& token) { return token.starts_with("ISCONNECTED") || token.starts_with("CONNECTS"); })) {
+                    if (records_ready_) mine.records.erase(row.key.player, 1, index);
+                    continue;
+                }
+                if (index != kept) {
+                    if (records_ready_) mine.records.relocate(row.key.player, 1, index, kept);
+                    mine.cache[kept] = std::move(row);
+                }
+                ++kept;
+            }
+            mine.cache.resize(kept);
+        }
     }
     connectivity_ = std::move(connectivity);
 }
@@ -927,7 +1120,7 @@ bool GalacticWorld::allied(tactical::PlayerId a, tactical::PlayerId b) const {
     return left && right && !left->neutral && !right->neutral && left->team == right->team;
 }
 const tactical::EconomyView* GalacticWorld::account(tactical::PlayerId id) const { return find_row(accounts_, id, [](const auto& p) { return p.player; }); }
-bool GalacticWorld::arriving(sim::EntityId id) const { return transit_.contains(id); }
+bool GalacticWorld::arriving(sim::EntityId id) const { return reader_.arriving(id); }
 bool GalacticWorld::build_allowed(tactical::PlayerId owner, sim::EntityId producer, tactical::TypeId type) const {
     const auto* option = build_option(owner, producer, type); return option && option->available;
 }
@@ -989,6 +1182,7 @@ bool GalacticWorld::target_matches(tactical::PlayerId owner, const std::set<std:
     return flags.contains(allied(owner, other->player) ? "FRIENDLY" : "ENEMY");
 }
 std::optional<galactic::PlanetId> GalacticWorld::containing_planet(sim::EntityId object) const {
-    const auto found = containment_.find(object); return found == containment_.end() ? std::nullopt : std::optional{found->second};
+    const auto containing = reader_.containing(object);
+    return containing ? std::optional{containing} : std::nullopt;
 }
 } // namespace eawr::script::foc::ai

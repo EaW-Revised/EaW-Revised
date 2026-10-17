@@ -44,6 +44,7 @@ public:
     std::function<FakeDelivery(net::PeerIndex, net::PeerIndex, std::span<const std::uint8_t>)> fault;
     std::function<void(net::PeerIndex, net::PeerIndex, std::span<const std::uint8_t>)> before_send;
     std::function<bool(net::PeerIndex, net::PeerIndex, std::span<const std::uint8_t>)> fail_send;
+    std::function<void(net::PeerIndex)> before_poll;
 
     void emulate(WanProfile profile) {
         wan_ = profile;
@@ -97,6 +98,7 @@ public:
         return core::Result<void>::success();
     }
     std::optional<net::Received> poll() override {
+        if (network_->before_poll) network_->before_poll(self_);
         auto& inbox = network_->inbox[self_];
         const auto entry = std::min_element(inbox.begin(), inbox.end(),
             [](const auto& left, const auto& right) { return left.due < right.due; });

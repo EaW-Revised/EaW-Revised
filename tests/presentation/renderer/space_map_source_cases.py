@@ -12,6 +12,19 @@ from space_map_test_support import (
 
 
 class SpaceSourceCases:
+    def test_additive2x_variant_matches_the_shared_shader(self):
+        stock = read("apps/viewer/src/space_environment_internal.hpp").split(
+            'meshadditive_sky_shader = R"GODOT(', 1)[1].split(')GODOT";', 1)[0]
+        variant = read("apps/viewer/src/space_environment_surfaces.cpp").split(
+            "meshadditive2x_sky_shader() {", 1)[1].split("\n}", 1)[0]
+        original = json.loads(variant.split("constexpr std::string_view from = ", 1)[1].split(";", 1)[0])
+        replacement = json.loads(variant.split("constexpr std::string_view to = ", 1)[1].split(";", 1)[0])
+        self.assertEqual(stock.count(original), 1,
+                         "the doubled variant must replace one expression, never silently use stock text")
+        self.assertEqual(replacement,
+                         "clamp(2.0 * eawr_vertex_color * texture(BaseTexture, eawr_scrolled_uv).rgb, 0.0, 1.0)")
+        self.assertIn("text.replace(at, from.size(), to)", variant)
+
     def test_debug_ship_uses_real_space_unit_population(self):
         mode = mode_source("map_mode")
         population = read("apps/viewer/src/space_populate.cpp")
@@ -158,7 +171,9 @@ class SpaceSourceCases:
         end = physical.index("case space::SceneRoute::unsupported:", companion)
         self.assertNotIn("MaterialRoute::legacy_effect", source.replace(physical[companion:end], "", 1))
         self.assertIn("scene::find_legacy_selector(surface.shader)", physical[companion:end])
-        self.assertNotIn("placeholder", source.lower())
+        # ALDEFAULT-01: the built-in fallback texture family is the one allowed use of the word.
+        self.assertNotIn("placeholder", source.lower().replace("family_placeholder_texture", "")
+                         .replace("legacy::textureplaceholder", ""))
         self.assertNotIn("terrain::build(", source)
         # One upload per accepted surface with its own texture, and the sky is
         # made non-casting before any instance exists.

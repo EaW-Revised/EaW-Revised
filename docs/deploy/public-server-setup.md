@@ -30,7 +30,7 @@ Who does what:
 - [Owner] Pick the public host name, for example `play.example.org`. This guide uses that
   name, and `203.0.113.10` stands for the server's IPv4 address.
 - [Claude] The public repository carries the relay server source under the tag
-  `server-source-2026-10-15.2` (a source sync, not a release). You build the image from that tag
+  `server-source-2026-10-15.3` (a source sync, not a release). You build the image from that tag
   (step 3).
 
 ## 1. Cloudflare: TURN key and DNS
@@ -92,9 +92,9 @@ systemctl enable --now docker
 dpkg-reconfigure -plow unattended-upgrades   # security updates for the OS
 adduser --system --group --uid 10001 relay   # same UID/GID as the container user
 mkdir -p /srv/eawr/config /srv/eawr/src
-git clone --depth 1 --branch server-source-2026-10-15.2 https://github.com/EaW-Revised/EaW-Revised.git /srv/eawr/src
+git clone --depth 1 --branch server-source-2026-10-15.3 https://github.com/EaW-Revised/EaW-Revised.git /srv/eawr/src
 cd /srv/eawr/src
-docker build -f apps/relay_server/Dockerfile -t eawr-relay:server-source-2026-10-15.2 .
+docker build -f apps/relay_server/Dockerfile -t eawr-relay:server-source-2026-10-15.3 .
 ```
 
 Once the public clone works, remove the old private-repo deploy key. On the server:
@@ -144,6 +144,9 @@ certificate_file=cert.pem
 key_file=key.pem
 # Public community server: no publisher token (owner answer, legacy #3461).
 require_access_token=0
+# Four-character invitation codes. Required: the game and the online test kit show only
+# these short codes, so with the default (0) hosting waits without ever showing a code.
+room_aliases=1
 # Cloudflare Realtime TURN for relayed game traffic. The key ID and API token come from the
 # environment file below, never from this file.
 turn_provider=cloudflare
@@ -175,7 +178,7 @@ docker run -d --name eawr-relay --restart unless-stopped \
   --env-file /srv/eawr/config/turn.env \
   --mount type=bind,source=/srv/eawr/config,target=/config,readonly \
   --memory 512m --cpus 1.5 \
-  eawr-relay:server-source-2026-10-15.2
+  eawr-relay:server-source-2026-10-15.3
 docker ps                          # STATUS shows "healthy" after about 30 s
 docker logs --tail 50 eawr-relay   # sanitized; no secrets, codes or addresses
 docker exec eawr-relay eawr_relay_server --health --config /config/relay.local.conf
@@ -255,6 +258,8 @@ docker build -f apps/relay_server/Dockerfile -t eawr-relay:<new tag> .
 docker stop eawr-relay && docker rm eawr-relay
 # run the step 6 docker run command with eawr-relay:<new tag>
 ```
+
+The client and server must come from the same sync tag; a mismatch shows EAWR-NET-1521.
 
 Updating drops open invitations and lobby rooms; running matches are not affected. Update when
 few people are hosting. OS security updates install automatically (step 3). Reboot after kernel

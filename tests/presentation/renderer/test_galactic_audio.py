@@ -9,6 +9,36 @@ import unittest
 from tests.galactic.test_galactic_viewer_mode import run_viewer
 
 
+class GalacticAdvisorDurationContract(unittest.TestCase):
+    def test_missing_or_invalid_duration_disables_only_text(self):
+        from tools.native_cpp_fixture import compile_fixture, select_toolchain
+        root = pathlib.Path(__file__).resolve().parents[3]
+        toolchain = select_toolchain()
+        self.assertIsNotNone(toolchain, "the advisor contract requires a native C++ toolchain")
+        source = r'''
+#include "__HEADER__"
+#include <cassert>
+int main() {
+    using eawr::viewer::galactic::advisor_hint_duration;
+    assert(!advisor_hint_duration({})); // absent XML text, not a fabricated default
+    for (const auto text : {" ", "garbage", "-0.1", "nan", "inf", "1e999", "0.1s"})
+        assert(!advisor_hint_duration(text));
+    assert(advisor_hint_duration("0") == 0.0);
+    assert(advisor_hint_duration(" 0.1 ") == 0.1);
+    assert(advisor_hint_duration("2.75") == 2.75);
+    assert(advisor_hint_duration("1e-1") == 0.1);
+}
+'''.replace("__HEADER__", (root / "apps/viewer/src/galactic/advisor_duration.hpp").as_posix())
+        with tempfile.TemporaryDirectory(prefix="eawr-advisor-duration-") as temporary:
+            directory = pathlib.Path(temporary)
+            cpp = directory / "duration.cpp"
+            executable = directory / ("duration.exe" if os.name == "nt" else "duration")
+            cpp.write_text(source, encoding="utf-8")
+            compile_fixture(toolchain, cpp, executable)
+            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST")
                      and os.environ.get("EAWR_EAW_GAME_ROOT"), "requires viewer GPU host and game data")
 class GalacticAudioGpu(unittest.TestCase):
@@ -323,6 +353,96 @@ func _process(_delta):
             sounds = data["galactic_audio"]["sounds"]
             self.assertEqual(sounds.get("GUI_Dial_Switch_SFX", 0), 1, sounds)
             self.assertEqual(sounds.get("GUI_Highlight_Mouse_Over", 0), 1, sounds)
+
+    def test_objective_teletype_and_dialog_events_use_gc_router(self):
+        from tests.presentation.renderer import test_viewer_galactic_command_bar_runtime as support
+        initial, _ = support.GalacticCommandBarRuntime.capture(self, 1, "accessible")
+        control = next(row for row in initial["command_bar"]["controls"] if row["name"] == "b_droid_help")
+        rect = control["hit_rect"]
+        point = [rect[0] + rect[2] / 2, rect[1] + rect[3] / 2]
+        with tempfile.TemporaryDirectory(prefix="galactic-component-audio-") as temporary:
+            directory = pathlib.Path(temporary)
+            report, driver = directory / "report.json", directory / "input.gd"
+            driver.write_text("""extends SceneTree
+var frame = 0
+var point = Vector2(%s, %s)
+func _initialize():
+    call_deferred("_start")
+func _start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func motion(position):
+    var event = InputEventMouseMotion.new()
+    event.position = position
+    event.global_position = position
+    Input.parse_input_event(event)
+func click(button, down):
+    var event = InputEventMouseButton.new()
+    event.position = point
+    event.global_position = point
+    event.button_index = button
+    event.pressed = down
+    Input.parse_input_event(event)
+func _process(_delta):
+    frame += 1
+    var target = root.find_child("b_droid_help", true, false)
+    if frame == 20:
+        assert(target != null)
+        target.disabled = true
+        motion(point)
+    if frame == 21: click(MOUSE_BUTTON_LEFT, true)
+    if frame == 22: click(MOUSE_BUTTON_LEFT, false)
+    if frame == 25: motion(Vector2(640, 200))
+    if frame == 30:
+        target.disabled = false
+        motion(point)
+    if frame == 31: click(MOUSE_BUTTON_RIGHT, true)
+    if frame == 32: click(MOUSE_BUTTON_RIGHT, false)
+    if frame == 35: click(MOUSE_BUTTON_LEFT, true)
+    if frame == 36: click(MOUSE_BUTTON_LEFT, false)
+    if frame == 40:
+        var close_button = root.find_child("IDC_BUTTON_CLOSE", true, false)
+        assert(close_button != null)
+        point = close_button.get_global_rect().get_center()
+        close_button.disabled = true
+        motion(point)
+    if frame == 41: click(MOUSE_BUTTON_LEFT, true)
+    if frame == 42: click(MOUSE_BUTTON_LEFT, false)
+    if frame == 43: motion(Vector2(0, 0))
+    if frame == 44:
+        root.find_child("IDC_BUTTON_CLOSE", true, false).disabled = false
+        motion(point)
+    if frame == 45: click(MOUSE_BUTTON_RIGHT, true)
+    if frame == 46: click(MOUSE_BUTTON_RIGHT, false)
+    if frame == 47: click(MOUSE_BUTTON_LEFT, true)
+    if frame == 48: click(MOUSE_BUTTON_LEFT, false)
+    if frame == 60:
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+""" % tuple(point), encoding="utf-8")
+            result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+                "--eawr-galactic", "synthetic", "--eawr-galactic-seat", "1",
+                "--eawr-galactic-hud-fixture", "objectives-audio", "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                "--eawr-galactic-paused", "yes", "--eawr-report", str(report)],
+                cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
+            self.assertTrue(report.is_file(), result.stdout + result.stderr)
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
+            sounds = data["galactic_audio"]["sounds"]
+            self.assertEqual(sounds.get("GUI_Dial_Switch_SFX", 0), 1, sounds)
+            self.assertEqual(sounds.get("GUI_Highlight_Mouse_Over", 0), 1, sounds)
+
+            # One announce (a non-announcing rebuild is silent), two synthetic
+            # reveal steps, and one admitted dialog press; disabled/right input is silent.
+            for event, count in (("GUI_Button_Press_2_SFX", 1), ("GUI_Text_SFX", 2),
+                                 ("GUI_Common_Dialog_Button_Press", 1),
+                                 ("GUI_Common_Dialog_Button_Hilight", 1)):
+                self.assertEqual(sounds.get(event, 0), count, data["galactic_audio"])
+                self.assertGreater(data["galactic_audio"]["played_sounds"].get(event, 0), 0,
+                                   data["galactic_audio"])
 
     def test_music_decodes_content_under_reversed_extensions(self):
         from tools.inventory.corpus import Corpus

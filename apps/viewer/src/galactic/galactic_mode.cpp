@@ -8,6 +8,8 @@
 #include "weapon_action_live_fixture.hpp"
 #include "live_battle_dialog_view.hpp"
 #include "galactic_mode_seats.hpp"
+#include "galactic_reveal.hpp"
+#include "native_ai_flag.hpp"
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/campaign/setup_plan.hpp"
@@ -41,6 +43,10 @@ using namespace galactic_detail;
 bool GalacticMode::State::build_view() {
     if (options.native_ai_invalid) {
         failure = "--eawr-galactic-ai expects on or off";
+        return false;
+    }
+    if (options.galactic_reveal_invalid) {
+        failure = "--eawr-galactic-reveal expects on or off";
         return false;
     }
     if (options.proof_options_invalid || (options.all_ai_capture && (interactive || options.paused
@@ -105,6 +111,12 @@ bool GalacticMode::State::build_view() {
             }
             const auto observer = galactic_view::configure_campaign_seats(snapshot, options.seat, options.coop_preview);
             if (!observer) { failure = "campaign requires an active human observer seat"; return false; }
+            if (const auto* refusal = galactic_view::reveal_refusal(options.galactic_reveal,
+                    static_cast<std::size_t>(std::count_if(snapshot.seats.begin(), snapshot.seats.end(),
+                        [](const auto& seat) { return seat.human && seat.active; })))) {
+                failure = refusal;
+                return false;
+            }
             for (const auto& player : snapshot.players) {
                 setup_options.players.push_back({{player.id, player.id, 0}, player.faction, true});
                 const auto* faction = tables.value().faction(player.faction);
@@ -122,6 +134,9 @@ bool GalacticMode::State::build_view() {
                 setup_options.types.push_back({++next_type, name});
                 production_names.emplace(next_type, name);
             }
+            // WGUI-72..74: without display traits an enemy group stays a bare count (no icon), so supply one per type
+            // from its authored object (hero class, maximum health), as the local cards already know them.
+            fleet_display_traits = galactic_view::live_fleet_display_traits(production_names, production_art);
             setup_options.local_observer = observer->player;
             // SK-42/WGEP-16: the preview selects the authored Normal difficulty.
             auto created = platform::PreparedLiveCampaign::create(filesystem, loaded.value().catalog,
@@ -129,21 +144,21 @@ bool GalacticMode::State::build_view() {
             if (!created) { failure = core::format_diagnostic(created.error()); return false; }
             campaign_root = std::move(created).value();
             native_ai_installed = campaign_root->native_ai_installed();
+            // A restored save would start its counters mid-game; report whole-game activity only.
+            ai_activity = native_ai_installed && !options.restore_save;
+            capture_metrics.neutral_owner = static_cast<sim::galactic::PlayerId>(neutral_owner);
             const auto& planned = campaign_root->plan();
             if (!options.restore_save && native_ai_installed) {
-                std::vector<std::string> ai_factions;
-                for (const auto& seat : planned.galaxy().seats) {
-                    if (!seat.active || seat.kind != sim::SeatKind::ai) continue;
-                    const auto binding = std::find_if(planned.player_bindings().begin(), planned.player_bindings().end(),
-                        [&](const auto& player) { return player.active && player.player.player_id == seat.player; });
-                    if (binding == planned.player_bindings().end()) continue;
-                    const auto* faction = tables.value().faction(binding->faction);
-                    if (!faction || faction->is_neutral.value_or(false)) continue;
-                    ai_factions.push_back(binding->faction);
-                }
+                // Report what the runtime installed, not every non-neutral AI seat.
                 std::string names;
-                for (const auto& faction : ai_factions) names += (names.empty() ? "" : ", ") + faction;
-                UtilityFunctions::print("EAWR galactic: native AI on for ", static_cast<int64_t>(ai_factions.size()),
+                for (const auto& installed : campaign_root->native_ai_players()) {
+                    const auto binding = std::find_if(planned.player_bindings().begin(), planned.player_bindings().end(),
+                        [&](const auto& player) { return player.active && player.player.player_id == installed.player; });
+                    if (binding == planned.player_bindings().end()) continue;
+                    native_ai_players.push_back({installed.player, binding->faction, installed.player_type});
+                    names += (names.empty() ? "" : ", ") + binding->faction + "=" + installed.player_type;
+                }
+                UtilityFunctions::print("EAWR galactic: native AI on for ", static_cast<int64_t>(native_ai_players.size()),
                     " AI players (", String::utf8(names.c_str()), ")");
             } else if (!options.restore_save) {
                 UtilityFunctions::print("EAWR galactic: native AI off");
@@ -218,9 +233,11 @@ bool GalacticMode::State::build_view() {
             if (candidate.human && candidate.active && (seat == 0 || candidate.id < seat)) seat = candidate.id;
         }
     }
-    auto built = campaign_root ? galactic_view::build_live_view(*campaign_root->snapshot(),
+    const auto first_publication = campaign_root && options.galactic_reveal
+        ? galactic_view::reveal_snapshot(campaign_root->snapshot()) : campaign_root ? campaign_root->snapshot() : nullptr;
+    auto built = campaign_root ? galactic_view::build_live_view(*first_publication,
         snapshot, seat, neutral_owner, scene_objects,
-        {galactic_view::live_fleet_visibility(*campaign_root->snapshot()), {}, options.all_ai_capture}) : galactic_view::build_view(snapshot, seat);
+        {galactic_view::live_fleet_visibility(*first_publication), {}, options.all_ai_capture || options.galactic_reveal, options.galactic_reveal}) : galactic_view::build_view(snapshot, seat);
     if (!built.view) {
         failure = built.failure;
         return false;
@@ -246,12 +263,42 @@ bool GalacticMode::State::build_view() {
             }
         }
     }
+    if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "fleet-drag-home") {
+        // Explicit native Home producer fixture: no configured home, first leader at another world.
+        galaxy_setup.fleets.front().orbit = 102;
+        // The census owner requires the live production service, with a complete seat/planet table.
+        auto& production = galaxy_setup.production.emplace();
+        production.maximum_human_queue = 5;
+        for (const auto& player : galaxy_setup.players) {
+            const bool human = std::any_of(galaxy_setup.seats.begin(), galaxy_setup.seats.end(), [&](const auto& candidate) {
+                return candidate.player == player.player_id && candidate.kind == sim::SeatKind::human;
+            });
+            sim::galactic::ProductionPlayer row; row.player = player.player_id; row.human = human;
+            row.pay_as_you_go = !human; row.uses_population_cap = human;
+            production.players.push_back(row);
+        }
+        for (const auto& planet : galaxy_setup.planets) {
+            sim::galactic::PlanetProduction row; row.planet = planet.id; row.target_owner = planet.owner;
+            row.maximum_space_level = 5; production.planets.push_back(row);
+        }
+        auto& census = galaxy_setup.census.emplace();
+        for (const auto& type : galaxy_setup.fleet_control->types) census.types.push_back({type.type, {}, 0});
+        for (const auto& player : galaxy_setup.players) census.players.push_back({player.player_id, 50, false, {}});
+        for (const auto& fleet : galaxy_setup.fleets) for (const auto& member : fleet.members)
+            census.objects.push_back({member.id, member.type, fleet.owner, fleet.orbit, fleet.id, false, false,
+                member.type, 0, sim::galactic::ActorCombatRole::ordinary});
+        std::sort(census.objects.begin(), census.objects.end(), [](const auto& left, const auto& right) { return left.id < right.id; });
+        if (content) {
+            content->home_types.erase(galaxy->local.player);
+            content->leader_types[galaxy->local.player] = production_names.at(census.objects.front().current_type);
+        }
+    }
     if (options.campaign == galactic_view::synthetic_campaign && galactic_view::ground_fixture(options.hud_fixture))
         galactic_view::configure_ground_fixture(galaxy_setup,galaxy->local.player,options.hud_fixture,
             fleet_display_traits,fleet_visibility,production_names);
     if (options.campaign == galactic_view::synthetic_campaign && galactic_view::weapon_action_live_fixture(options.hud_fixture))
         galactic_view::configure_weapon_action_live_fixture(galaxy_setup, galaxy->local.player,
-            fleet_display_traits, fleet_visibility, production_names);
+            fleet_display_traits, fleet_visibility, production_names, options.hud_fixture);
     if (options.campaign == galactic_view::synthetic_campaign
         && (options.hud_fixture == "production" || options.hud_fixture == "production-unlocks")) {
         galactic_view::configure_synthetic_hud_production(galaxy_setup, galaxy->local.player);
@@ -298,7 +345,7 @@ bool GalacticMode::State::start_game(platform::LiveGameSession::Options live_opt
     game = std::move(started).value();
     campaign_root.reset();
     owner_lifetime = game->lifetime();
-    if (options.all_ai_capture) {
+    if (options.all_ai_capture || ai_activity) {
         const auto initial = game->frame();
         if (initial.latest) capture_metrics.observe(initial, {});
     }
@@ -362,10 +409,12 @@ bool GalacticMode::State::start_game(platform::LiveGameSession::Options live_opt
     if (!run_score_ledger()) return false;
     if (!options.queue_type.empty() && !queue_requested_build()) return false;
     if (options.campaign == galactic_view::synthetic_campaign && galactic_view::weapon_action_live_fixture(options.hud_fixture)) {
-        // Live acceptance fixture: the hack menu is opened by a real seat command; the HUD then queues the host's
+        // Live acceptance fixture: the ability menu is opened by a real seat command; the HUD then queues the host's
         // typed capability (never a copied menu). Real-time pacing processes it even while the galaxy is paused.
         game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::PrepareGalacticAbility{
-            galactic_view::live_hack_actor, galactic_view::live_hack_planet, sim::galactic::AbilityKind::superweapon_hack}, {}});
+            galactic_view::live_hack_actor, galactic_view::live_hack_planet,
+            options.hud_fixture.starts_with("destruction-live") ? sim::galactic::AbilityKind::planet_destruction
+                : sim::galactic::AbilityKind::superweapon_hack}, {}});
     }
     return refresh_game();
 }
@@ -410,9 +459,74 @@ bool GalacticMode::State::queue_requested_build() {
     return false;
 }
 
+sim::math::Fixed GalacticMode::State::strategic_speed_now() const {
+    if (submitted_strategic_speed && submitted_speed_snapshot == displayed_snapshot) return *submitted_strategic_speed;
+    return displayed_snapshot ? displayed_snapshot->clock().strategic_speed : sim::math::Fixed::from_raw(sim::math::Fixed::scale);
+}
+
+void GalacticMode::State::submit_strategic_speed(const sim::math::Fixed factor) {
+    game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::SetSpeed{false, factor}, {}});
+    ++submitted_orders;
+    submitted_strategic_speed = factor;
+    submitted_speed_snapshot = displayed_snapshot;
+}
+
+void GalacticMode::State::set_perf_overlay(const bool shown) {
+    if (perf == nullptr) {
+        if (!shown || host == nullptr) return;
+        // Above the HUD (canvas layer 1) and the battle overlays, in the HUD's face (the engine font without a cache).
+        auto* layer = memnew(CanvasLayer);
+        layer->set_name("EawrPerfOverlayLayer");
+        layer->set_layer(100);
+        perf = memnew(EawrPerfOverlay);
+        perf->set_name("EawrPerfOverlay");
+        Ref<Font> font;
+        std::string face = "engine font";
+        if (hud_fonts) {
+            const presentation::ui::ResolvedFont resolved = hud_fonts->resolve({"EmpireAtWar-Medium", 7}, "ENGLISH");
+            font = hud_fonts->font(resolved);
+            if (!resolved.face.empty()) face = resolved.face;
+        }
+        perf->setup(font, face);
+        layer->add_child(perf);
+        host->add_child(layer);
+    }
+    perf->set_shown(shown);
+}
+
+void GalacticMode::State::sync_perf_overlay() {
+    if (perf == nullptr || !perf->shown()) return;
+    std::vector<presentation::ui::PerfTick> ticks;
+    if (game) {
+        // After a hidden spell the old ticks are skipped, not drawn as one burst.
+        const bool rebase = perf->wants_rebase();
+        for (const platform::LiveTickCost& cost : game->tick_costs_after(perf_last_tick)) {
+            perf_last_tick = cost.tick;
+            if (rebase) continue;
+            presentation::ui::PerfTick tick{cost.tick, cost.total_ms, {}};
+            for (const platform::LivePhaseCost& phase : cost.phases) tick.phases.push_back({phase.name, phase.ms});
+            ticks.push_back(std::move(tick));
+        }
+        if (displayed_snapshot) {
+            const auto& clock = displayed_snapshot->clock();
+            const double factor = static_cast<double>(clock.strategic_speed.raw()) / static_cast<double>(sim::math::Fixed::scale);
+            perf->set_clock(factor, factor * static_cast<double>(sim::galactic::galactic_frames_per_second), clock.pause_depth != 0);
+        }
+    }
+    perf->frame(ticks, std::nullopt, game != nullptr);
+}
+
+std::string GalacticMode::State::perf_report_json() const {
+    if (perf != nullptr) return perf->report_json();
+    return std::string("{\"key\": \"") + EawrPerfOverlay::key_name + "\", \"shown\": false}";
+}
+
 void GalacticMode::State::request_pause(const bool value) {
     if (!game || !pause_guard.begin(paused, value)) return;
     // WGM-05/06: input enters the session as a seat-issued nested pause/resume command.
+    // TM-05: pausing from fast forward ends it first, so play resumes at the normal speed.
+    // The displayed snapshot can lag a press in the same frame, so submit 1x whenever the factor exists (a no-op at 1x).
+    if (value && fast_forward_factor) submit_strategic_speed(sim::math::Fixed::from_raw(sim::math::Fixed::scale));
     if (value) game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::PauseGalaxy{}, {}});
     else game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::ResumeGalaxy{}, {}});
     ++submitted_orders;
@@ -423,33 +537,36 @@ bool GalacticMode::State::refresh_game() {
     if (const auto error = game->failure()) { failure = core::format_diagnostic(*error); return false; }
     const auto frame = game->frame();
     if (!frame.latest) return true;
-    if (options.all_ai_capture) {
+    if (options.all_ai_capture || ai_activity) {
         const auto events = game->galactic_events_after(capture_metrics.cursor);
         capture_metrics.observe(frame, events);
-        if (!capture_metrics.failure.empty()) { failure = capture_metrics.failure; return false; }
+        if (options.all_ai_capture && !capture_metrics.failure.empty()) { failure = capture_metrics.failure; return false; }
     }
-    if (frame.latest == displayed_snapshot) return true;
+    if (frame.latest == published_snapshot) return true;
+    // #3931: with the reveal on, every presentation reader gets the omniscient draw view of this publication.
+    const auto shown = options.galactic_reveal ? galactic_view::reveal_snapshot(frame.latest) : frame.latest;
     if (!galactic_view::fleet_hud_fixture(options.hud_fixture))
-        fleet_visibility = galactic_view::live_fleet_visibility(*frame.latest);
-    auto built = galactic_view::build_live_view(*frame.latest, metadata, galaxy->local.seat, neutral_owner,
-        scene_objects, {fleet_visibility, {}, options.all_ai_capture});
+        fleet_visibility = galactic_view::live_fleet_visibility(*shown);
+    auto built = galactic_view::build_live_view(*shown, metadata, galaxy->local.seat, neutral_owner,
+        scene_objects, {fleet_visibility, {}, options.all_ai_capture || options.galactic_reveal, options.galactic_reveal});
     if (!built.view) { failure = built.failure; return false; }
     const bool changed = !displayed_snapshot
         || galaxy->fleets != built.view->fleets
-        || !std::equal(frame.latest->planets().begin(), frame.latest->planets().end(),
+        || !std::equal(shown->planets().begin(), shown->planets().end(),
             displayed_snapshot->planets().begin(), displayed_snapshot->planets().end())
-        || !std::equal(frame.latest->routes().begin(), frame.latest->routes().end(),
+        || !std::equal(shown->routes().begin(), shown->routes().end(),
             displayed_snapshot->routes().begin(), displayed_snapshot->routes().end())
-        || !std::equal(frame.latest->fleets().begin(), frame.latest->fleets().end(),
+        || !std::equal(shown->fleets().begin(), shown->fleets().end(),
             displayed_snapshot->fleets().begin(), displayed_snapshot->fleets().end())
-        || (frame.latest->observations().data() != displayed_snapshot->observations().data()
-            && !std::equal(frame.latest->observations().begin(), frame.latest->observations().end(),
+        || (shown->observations().data() != displayed_snapshot->observations().data()
+            && !std::equal(shown->observations().begin(), shown->observations().end(),
                 displayed_snapshot->observations().begin(), displayed_snapshot->observations().end()));
     galaxy = std::move(built.view);
-    displayed_snapshot = frame.latest;
+    displayed_snapshot = shown;
+    published_snapshot = frame.latest;
     ++snapshots_presented;
-    paused = frame.latest->clock().pause_depth != 0;
-    snapshot_events.assign(frame.latest->events().begin(), frame.latest->events().end());
+    paused = shown->clock().pause_depth != 0;
+    snapshot_events.assign(shown->events().begin(), shown->events().end());
     // Pause commands nest. Admit one toggle until its accepted state is
     // published or the local seat receives a rejection; display stays factual.
     pause_guard.observe(paused, sim::SeatId{galaxy->local.seat}, snapshot_events);
@@ -493,18 +610,27 @@ galactic_view::OrbitCamera& GalacticMode::State::seat_camera() {
     return cameras.try_emplace(galaxy->local.seat, overview).first->second;
 }
 
+bool GalacticMode::State::planet_discovered(const galactic_view::ObjectId id) const {
+    return planet_discovered_in(displayed_snapshot, id);
+}
+
+bool GalacticMode::State::planet_discovered_in(const std::shared_ptr<const sim::galactic::GalacticSnapshot>& source,
+    const galactic_view::ObjectId id) const {
+    const auto fact = hud_facts.find(id);
+    const bool synthetic = options.campaign == galactic_view::synthetic_campaign;
+    const auto observed = source ? galactic_view::observer_discovery(*source, galaxy->local.player, id) : std::nullopt;
+    return observed.value_or(fact == hud_facts.end() ? synthetic : fact->second.discovered);
+}
+
 std::vector<galactic_view::InputPlanet> GalacticMode::State::input_planets() const {
     std::vector<galactic_view::InputPlanet> result;
     if (!galaxy) return result;
     for (const auto& planet : galaxy->planets) {
         // Ignore scene-only art; discovery comes from the local faction's observer.
         if (std::find(scene_objects.begin(), scene_objects.end(), planet.id) != scene_objects.end()) continue;
-        const auto fact = hud_facts.find(planet.id);
         // Named campaigns require published discovery. The explicit synthetic
         // harness retains its fixture discovery when no observer is installed.
-        const bool synthetic = options.campaign == galactic_view::synthetic_campaign;
-        const auto observed = displayed_snapshot ? galactic_view::observer_discovery(
-            *displayed_snapshot, galaxy->local.player, planet.id) : std::nullopt;
+        // Command gating: discovery comes from the truth publication, never the #3931 reveal view.
         auto allegiance = planet.owner.value_or(0);
         if (displayed_snapshot && displayed_snapshot->control()) {
             const auto& control = displayed_snapshot->control()->state;
@@ -512,8 +638,17 @@ std::vector<galactic_view::InputPlanet> GalacticMode::State::input_planets() con
                 [&](const auto& row) { return row.planet == planet.id; });
             if (current != control.end()) allegiance = current->current_player; // WGUI-75: current allegiance.
         }
-        result.push_back({planet.id, planet.position, allegiance,
-            observed.value_or(fact == hud_facts.end() ? synthetic : fact->second.discovered)});
+        result.push_back({planet.id, planet.position, allegiance, planet_discovered_in(published_snapshot, planet.id)});
+    }
+    return result;
+}
+
+std::vector<galactic_view::InputPlanet> GalacticMode::State::selection_planets() const {
+    auto result = input_planets();
+    if (!options.galactic_reveal) return result;
+    for (auto& planet : result) {
+        const auto fact = hud_facts.find(planet.id);
+        if (fact != hud_facts.end() && fact->second.discovered) planet.discovered = true;
     }
     return result;
 }
@@ -623,6 +758,7 @@ void GalacticMode::State::apply_camera() {
     GodotRenderer::LightingState lighting_state;
     lighting_state.sph = lighting::source_to_render(lighting::sph_light_all(environment)).rgb;
     lighting_state.sph_fill = lighting::source_to_render(lighting::sph_light_fill(environment)).rgb;
+    lighting_state.ambient = {environment.ambient.r * environment.ambient.a, environment.ambient.g * environment.ambient.a, environment.ambient.b * environment.ambient.a};
     lighting_state.sun_diffuse = lighting::sun_diffuse(environment);
     const auto sun = lighting::source_to_render(environment.lights[0].direction);
     lighting_state.toward_light = {-sun.x, -sun.y, -sun.z};
@@ -686,8 +822,8 @@ std::optional<std::array<float, 12>> GalacticMode::State::zoom_pose(const bool a
 
 void GalacticMode::State::submit() {
     // WGUI-60/62: the camera switches its target between ALT0 and ALT1.
-    // The static observer starts discovered in overview; discovery-driven ALT2
-    // (WGUI-05) belongs to the live observer seam. Untagged surfaces always draw.
+    // WGUI-05: an undiscovered planet shows its ALT2 surfaces (the authored grid
+    // shell) whatever the camera does. Untagged surfaces always draw.
     active_planet_alternate = seat_flight().alternate_model() ? 1 : 0;
     for (std::size_t index = 0; index < scenes.size(); ++index) {
         GodotRenderer& target = index == 0 ? *renderer : *scenes[index].renderer;
@@ -698,11 +834,20 @@ void GalacticMode::State::submit() {
         scenes[index].submitted_instances = 0;
         for (const auto& instance : scenes[index].instances) {
             const auto object = instance_planets.at(instance.entity_id);
-            const bool planet = index == 0 && std::any_of(galaxy->planets.begin(), galaxy->planets.end(),
-                [&](const auto& value) { return value.id == object; });
-            const int desired = planet && object == seat_flight().planet() ? active_planet_alternate : 0;
+            const bool planet = galaxy_planet_ids.contains(object);
+            galactic_view::PlanetShellInput art;
+            art.galaxy_planet = planet;
+            if (planet) {
+                art.scene_art = std::find(scene_objects.begin(), scene_objects.end(), object) != scene_objects.end();
+                art.discovered = art.scene_art || planet_discovered(object);
+                art.has_shell = shell_planets.contains(object);
+                art.world_layer = index == 0;
+                art.camera_target = object == seat_flight().planet();
+                art.camera_alternate = active_planet_alternate;
+            }
+            const int desired = galactic_view::planet_alternate(art);
             const int authored = asset_alternates.at(instance.asset_id);
-            const bool visible = authored < 0 || authored == desired;
+            const bool visible = galactic_view::surface_drawn(authored, desired);
             target.set_instance_visible(instance.entity_id, visible);
             if (visible) ++scenes[index].submitted_instances;
         }
@@ -756,8 +901,14 @@ GalacticMode::Options GalacticMode::from_command_line() {
             options.capture_seed = seed;
         }
         else if (argument == "--eawr-galactic-ai") {
-            options.native_ai = value == "on";
-            options.native_ai_invalid |= value != "on" && value != "off";
+            galactic_view::NativeAiFlag flag{options.native_ai, options.native_ai_invalid};
+            galactic_view::apply_native_ai_flag(flag, value);
+            options.native_ai = flag.enabled;
+            options.native_ai_invalid = flag.invalid;
+        }
+        else if (argument == "--eawr-galactic-reveal") {
+            options.galactic_reveal = value == "on";
+            options.galactic_reveal_invalid |= value != "on" && value != "off";
         }
         else if (argument == "--eawr-galactic-all-ai") {
             options.all_ai_capture = value == "yes";
@@ -865,7 +1016,8 @@ bool GalacticMode::ready(Node3D& host) {
             state.selected_planet = home->id;
         }
     }
-    if (state.options.all_ai_capture) {
+    if (state.options.all_ai_capture || (state.options.campaign == galactic_view::synthetic_campaign
+        && state.options.hud_fixture.starts_with("corruption-spread"))) {
         // Capture the playable galaxy rather than only the authored starting home.
         auto camera_metadata = state.metadata;
         std::erase_if(camera_metadata.planets, [&](const auto& planet) {
@@ -969,6 +1121,12 @@ bool GalacticMode::ready(Node3D& host) {
     };
     state.save_controls = std::make_unique<GalacticSaveControls>(state);
     if (state.options.restore_save && !state.save_controls->restore_at_start(state.options.restore_save->name)) return fail();
+    if (const std::string perf_error = parse_perf_overlay_argument(OS::get_singleton()->get_cmdline_user_args(), state.perf_requested);
+        !perf_error.empty()) {
+        state.failure = perf_error;
+        return fail();
+    }
+    if (state.perf_requested) state.set_perf_overlay(true);
     if (state.interactive) {
         UtilityFunctions::print("EAWR galactic mode: pan with WASD or the arrows and right-drag, select with left-click, "
                                 "right-click a planet with a selected fleet to move or invade, double-click toggles focus, wheel controls focus and the advanced-map state, Home restores overview; close the window to exit "
@@ -1029,6 +1187,18 @@ std::optional<int> GalacticMode::process(const double delta) {
                 const auto at = state.production_names.find(id);
                 return at == state.production_names.end() ? std::string{} : info(at->second).name;
             };
+            names.force_icon = [&state](const auto id) {
+                const auto at = state.production_names.find(id);
+                if (at == state.production_names.end()) return std::string{};
+                const auto art = state.production_art.find(at->second);
+                return art == state.production_art.end() ? std::string{} : art->second.icon;
+            };
+            names.force_health = [&state](const auto id) -> std::optional<float> {
+                const auto at = state.production_names.find(id);
+                if (at == state.production_names.end()) return std::nullopt;
+                const auto art = state.production_art.find(at->second);
+                return art == state.production_art.end() ? std::nullopt : art->second.max_health;
+            };
             names.original_type = [&state](const auto id) {
                 const auto at = state.production_names.find(id);
                 return at == state.production_names.end() ? std::string{} : at->second;
@@ -1051,6 +1221,12 @@ std::optional<int> GalacticMode::process(const double delta) {
     }
     state.service_battle_dialog(delta);
     state.service_campaign_score();
+    state.sync_perf_overlay();
+    if (state.leave_requested) {
+        state.completed = true; state.status = "menu-exit";
+        static_cast<void>(state.write_report());
+        return std::nullopt;
+    }
     if (state.score_destination && *state.score_destination != platform::CampaignScoreDestination::none) {
         // The exit/continuation request of #2837's score callback is only published: the
         // mode finishes (inert from the next frame, report written) and keeps running, and the
@@ -1072,6 +1248,9 @@ std::optional<int> GalacticMode::process(const double delta) {
                     for (const auto& entry : queue)
                         if (entry.builder == state.galaxy->local.player) state.local_builds.insert(entry.build_id);
         for (const auto& published : events.events) {
+            if (published.feedback && published.feedback->player == state.galaxy->local.player
+                && published.feedback->kind == sim::galactic::GalacticFeedbackNotice::Kind::enemy_approaching)
+                state.enqueue_approach(published.feedback->planet);
             state.audio->consume(published, state.galaxy->local.player);
             using Kind = sim::galactic::GalacticEventKind;
             const auto& event = published.event;
@@ -1107,6 +1286,7 @@ std::optional<int> GalacticMode::process(const double delta) {
         }
         state.audio_event_cursor = events.through;
     }
+    state.service_approach(delta);
     if (state.game && state.options.synthetic_battle && state.process_handoff(delta)) return std::nullopt;
     if (state.game && !state.options.synthetic_battle && state.process_battle_transition(delta)) return std::nullopt;
     if (!state.options.space_cycle_proof.empty() && state.failure.empty()
@@ -1148,7 +1328,7 @@ std::optional<int> GalacticMode::process(const double delta) {
     }
     if (state.interactive) {
         if (state.map_input.delay) {
-            const auto planets = state.input_planets();
+            const auto planets = state.selection_planets();
             state.apply_selection(state.map_input.service_deferred(planets, state.seat_flight().state()));
         }
         state.seat_flight().service(Time::get_singleton()->get_ticks_msec());
@@ -1204,7 +1384,7 @@ std::optional<int> GalacticMode::process(const double delta) {
     // initial publication may precede discovery; retry through the ordinary
     // discovery gate once the requested simulation publication reaches the HUD.
     if (state.options.focus_planet != 0 && state.map_input.selected != state.options.focus_planet) {
-        const auto planets = state.input_planets();
+        const auto planets = state.selection_planets();
         state.apply_selection(state.map_input.select(planets, state.options.focus_planet, state.seat_flight().state()));
     }
     if (state.warmup > 0) {
@@ -1244,6 +1424,8 @@ std::optional<int> GalacticMode::process(const double delta) {
         state.warmup = 2;
         return std::nullopt;
     }
+    if (state.ai_activity && !state.options.all_ai_capture && state.displayed_snapshot)
+        state.capture_metrics.sample(*state.displayed_snapshot); // end checkpoint
     if (state.options.all_ai_capture) {
         state.capture_metrics.sample(*state.displayed_snapshot);
         state.game->stop();
@@ -1257,6 +1439,15 @@ std::optional<int> GalacticMode::process(const double delta) {
 
 void GalacticMode::input(const Ref<InputEvent>& event) {
     State& state = *state_;
+    // #4031: the performance overlay's key (F3), in any galactic run; nothing else sees it.
+    if (const auto* pressed = Object::cast_to<InputEventKey>(event.ptr());
+        pressed != nullptr && pressed->is_pressed() && !pressed->is_echo() && !pressed->is_shift_pressed()
+        && !pressed->is_ctrl_pressed() && !pressed->is_alt_pressed() && !pressed->is_meta_pressed()
+        && (pressed->get_physical_keycode() != KEY_NONE ? pressed->get_physical_keycode() : pressed->get_keycode())
+            == KEY_F3) {
+        state.set_perf_overlay(state.perf == nullptr || !state.perf->shown());
+        return;
+    }
     if (state.campaign_score && state.campaign_score->visible()) {
         // WGP-37/111: the score is modal and topmost; Escape acts like its button.
         const auto* key = Object::cast_to<InputEventKey>(event.ptr());
@@ -1287,7 +1478,12 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
         if (key->is_pressed()) {
             if (code == KEY_HOME && key->is_ctrl_pressed()) {
                 const auto planets = state.input_planets();
-                state.apply_selection(state.map_input.go_home(planets, 0, flight.state()));
+                galactic_view::ObjectId leader_planet{};
+                if (!state.map_input.home && state.content && state.displayed_snapshot) {
+                    const auto type = galactic_view::home_leader_type(*state.content, state.galaxy->local.player, state.production_names);
+                    leader_planet = galactic_view::first_hero_planet(*state.displayed_snapshot, type);
+                }
+                state.apply_selection(state.map_input.go_home(planets, leader_planet, flight.state()));
             } else if (code == KEY_HOME) {
                 flight = galactic_view::PlanetCamera(state.camera_constants);
                 state.apply_camera(); // GHUDL-11: reset also dismisses the organization shell.
@@ -1309,15 +1505,15 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
             const auto position = button->get_position();
             if (const auto* picked = state.picked_planet(position.x, position.y)) {
                 const auto planets = state.input_planets();
-                if (const auto intent = galactic_view::fleet_destination_intent(*state.displayed_snapshot,
+                if (const auto intent = galactic_view::fleet_destination_intent(*state.published_snapshot,
                         state.galaxy->local.player, state.selected_fleet, picked->id, planets)) {
                     // #3072: a selected whole card moves every fleet of its slot as one stack.
                     std::vector<galactic_view::ObjectId> stack;
                     if (!state.selected_fleet_member && !state.tactical && !state.loading && state.game)
-                        for (const auto& fleet : state.displayed_snapshot->fleets())
+                        for (const auto& fleet : state.published_snapshot->fleets())
                             if (fleet.id == state.selected_fleet) {
                                 const std::array slots{fleet.orbit_slot};
-                                stack = galactic_view::stack_fleets(*state.displayed_snapshot, state.galaxy->local.player, fleet.orbit, slots);
+                                stack = galactic_view::stack_fleets(*state.published_snapshot, state.galaxy->local.player, fleet.orbit, slots);
                             }
                     if (stack.size() > 1 ? state.submit_fleet_stack(*intent, stack) : widget_drop(*intent)) {
                         state.scrolling = state.map_input.held_scroll = false;
@@ -1338,7 +1534,7 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
             return;
         }
         if (index != MOUSE_BUTTON_LEFT && index != MOUSE_BUTTON_WHEEL_UP && index != MOUSE_BUTTON_WHEEL_DOWN) return;
-        const auto planets = index == MOUSE_BUTTON_WHEEL_DOWN ? std::vector<galactic_view::InputPlanet>{} : state.input_planets();
+        const auto planets = index == MOUSE_BUTTON_WHEEL_DOWN ? std::vector<galactic_view::InputPlanet>{} : state.selection_planets();
         const auto position = button->get_position();
         const auto* picked = state.picked_planet(position.x, position.y);
         if (index == MOUSE_BUTTON_LEFT && picked) {
@@ -1420,7 +1616,7 @@ void GalacticMode::input_gates(galactic_view::InputGates gates) {
 
 bool GalacticMode::select_planet(const std::uint64_t planet, const bool delayed) {
     if (!state_->galaxy || state_->tactical || state_->loading) return false;
-    const auto planets = state_->input_planets();
+    const auto planets = state_->selection_planets();
     const auto effect = state_->map_input.select(planets, planet, state_->seat_flight().state(), delayed);
     state_->apply_selection(effect);
     return effect.accepted;
@@ -1428,16 +1624,18 @@ bool GalacticMode::select_planet(const std::uint64_t planet, const bool delayed)
 
 void GalacticMode::navigate(const galactic_view::Navigation direction) {
     if (!state_->galaxy || state_->tactical || state_->loading) return;
-    const auto planets = state_->input_planets();
+    const auto planets = state_->selection_planets();
     state_->apply_selection(state_->map_input.navigate(planets, state_->galaxy->local.player, direction,
         state_->seat_flight().state()));
 }
 
-void GalacticMode::select_hero(const bool nonnull_type, const bool inactive,
-    const std::uint64_t containing_planet, const bool twice) {
-    if (!state_->galaxy || state_->tactical || state_->loading) return;
+void GalacticMode::select_hero(const sim::galactic::TypeId type, const bool inactive, const bool twice) {
+    if (!type || inactive || state_->map_input.gates.selection_locked
+        || !state_->galaxy || state_->tactical || state_->loading) return;
     const auto planets = state_->input_planets();
-    state_->apply_selection(state_->map_input.hero(planets, nonnull_type, inactive, containing_planet,
+    const auto containing_planet = state_->displayed_snapshot
+        ? galactic_view::first_hero_planet(*state_->displayed_snapshot, type) : 0;
+    state_->apply_selection(state_->map_input.hero(planets, type != 0, inactive, containing_planet,
         state_->seat_flight().state(), twice));
 }
 
@@ -1489,6 +1687,8 @@ bool GalacticMode::release_ground_box(const std::span<const galactic_view::Input
 bool GalacticMode::radar_click(const galactic_view::PointerPoint point, const float width, const float height) {
     return state_->request_radar_position(point, width, height);
 }
+
+bool GalacticMode::leave_requested() const { return state_->leave_requested; }
 
 std::optional<platform::CampaignScoreDestination> GalacticMode::score_destination() const {
     return state_->score_destination;

@@ -106,47 +106,34 @@ void encoding() {
     expect(!net::encode_setup_offer(selected), "AI slot cannot be claimed by a human peer");
     selected = offer(); selected.seats[1].peer = 0;
     expect(!net::encode_setup_offer(selected), "duplicate peer index refused");
-    auto single = setup(); single.skirmish->slots[1].human = false;
-    selected = offer(); selected.setup = require(net::encode_skirmish_setup(single));
-    selected.seats[1].player = 1;
-    auto roster = net::encode_setup_offer(selected);
-    expect(static_cast<bool>(roster), "two independent coop seats may bind one human owner against AI");
+    selected = offer(); selected.seats[1].player = 1;
+    expect(!net::encode_setup_offer(selected), "shared owners are refused for skirmish");
     for (const auto count : {3U, 4U, 8U, 9U}) {
-        selected = offer();
+        const auto initial = human_setup(count);
+        selected = offer(); selected.setup = require(net::encode_skirmish_setup(initial));
         selected.seats.clear();
         for (net::PeerIndex peer = 0; peer < count; ++peer)
-            selected.seats.push_back({peer, sim::SeatId{peer + 1}, peer % 2 + 1});
-        expect(static_cast<bool>(net::encode_setup_offer(selected)), "two human sides allow arbitrary seat splits up to nine");
-        auto coop = setup(); coop.skirmish->slots[1].human = false;
-        selected.setup = require(net::encode_skirmish_setup(coop));
-        for (auto& seat : selected.seats) seat.player = 1;
-        expect(static_cast<bool>(net::encode_setup_offer(selected)), "up to nine coop seats share one owner against AI");
+            selected.seats.push_back({peer, sim::SeatId{peer + 1}, peer + 1});
+        const auto bytes = require(net::encode_setup_offer(selected));
+        expect(require(net::decode_setup_offer(bytes)).seats == selected.seats,
+            "up to nine separate human owners on allied teams round trip");
     }
-    selected.seats.push_back({9, sim::SeatId{10}, 1});
+    auto modded = human_setup(9);
+    modded.players.push_back({64, 3, 1234, tactical::player_flag_commandable});
+    modded.skirmish->slots.push_back({64, false, 63, {"mod-fleet"}});
+    selected.setup = require(net::encode_skirmish_setup(modded));
+    expect(static_cast<bool>(net::encode_setup_offer(selected)), "a mod AI owner beyond the human bound stays loadable");
+    selected.seats.push_back({9, sim::SeatId{10}, 10});
     expect(!net::encode_setup_offer(selected), "a tenth human seat is refused");
-    auto three = setup(); three.skirmish->slots[2].human = true;
-    selected = offer(); selected.setup = require(net::encode_skirmish_setup(three));
-    selected.seats.push_back({2, sim::SeatId{12}, 3});
-    const auto three_bytes = require(net::encode_setup_offer(selected));
-    expect(require(net::decode_setup_offer(three_bytes)).seats == selected.seats, "three loaded human sides round trip");
-    // A mod's fourth faction row stays loadable; only a fourth human side is refused.
-    three.players.push_back({4, 4, 3, tactical::player_flag_commandable});
-    three.skirmish->slots.push_back({4, false, 1, {"fleet-mod"}});
-    selected.setup = require(net::encode_skirmish_setup(three));
-    expect(require(net::decode_setup_offer(require(net::encode_setup_offer(selected)))).seats == selected.seats,
-        "three humans with a fourth AI faction row remain loadable");
-    three.skirmish->slots.back().human = true;
-    selected.setup = require(net::encode_skirmish_setup(three));
-    selected.seats.push_back({3, sim::SeatId{13}, 4});
-    expect(!net::encode_setup_offer(selected), "a fourth human side is refused");
     auto allied = setup(); allied.players[1].team_id = allied.players[0].team_id;
     selected = offer(); selected.setup = require(net::encode_skirmish_setup(allied));
-    expect(!net::encode_setup_offer(selected), "coop controllers must share their owner instead of duplicating allied assets");
-    auto unopposed = setup(); unopposed.skirmish->slots[1].human = false;
-    for (auto& player : unopposed.players) player.team_id = unopposed.players[0].team_id;
-    selected = offer(); selected.setup = require(net::encode_skirmish_setup(unopposed));
-    selected.seats[1].player = 1;
-    expect(!net::encode_setup_offer(selected), "coop cannot start without an opposing AI side");
+    expect(static_cast<bool>(net::encode_setup_offer(selected)), "separate allied humans can cooperate against AI");
+    for (auto& player : allied.players) player.team_id = 1;
+    selected.setup = require(net::encode_skirmish_setup(allied));
+    expect(!net::encode_setup_offer(selected), "allied humans require an opposing team");
+    auto unbound = setup(); unbound.skirmish->slots[2].human = true;
+    selected = offer(); selected.setup = require(net::encode_skirmish_setup(unbound));
+    expect(!net::encode_setup_offer(selected), "every human owner needs a seat");
     selected = offer(); selected.seed++;
     expect(!net::encode_setup_offer(selected), "seed must agree with setup");
     selected = offer(); selected.final_tick_count = 0;
@@ -287,11 +274,11 @@ void runtime_maximum_lead() {
         initial.departure_policy.emplace();
         auto selected = offer();
         selected.final_tick_count = 40;
-        for (unsigned peer = 0; peer < 2; ++peer) {
+        for (unsigned peer = 0; peer < peers; ++peer) {
             initial.departure_policy->humans.push_back(peer + 1);
             initial.skirmish->slots[peer].human = true;
         }
-        if (peers == 3) selected.seats.push_back({2, sim::SeatId{15}, 2});
+        if (peers == 3) selected.seats.push_back({2, sim::SeatId{15}, 3});
         selected.setup = require(net::encode_skirmish_setup(initial));
         std::vector<std::unique_ptr<eawr::testing::FakeTransport>> transports;
         std::vector<std::unique_ptr<net::DesyncMonitor>> monitors;
@@ -328,6 +315,21 @@ void runtime_maximum_lead() {
         }
         expect(results[0].adapter().completed_tick() == 4, "setup-created departing peer reaches lead D+1");
         network.open[0] = false;
+        if (peers == 2) {
+            bool lost{};
+            for (unsigned rounds = 0; rounds < 160 && !lost; ++rounds) {
+                const auto result = results[1].session().pump(++network.round);
+                if (!result) {
+                    lost = true;
+                    expect(result.error().code == net::session_errors::stalled,
+                        "maximum-lead setup lone survivor receives connection loss");
+                }
+            }
+            expect(lost && static_cast<net::TacticalSessionAdapter&>(results[1].adapter()).simulation().departure_controls().empty()
+                && !static_cast<net::TacticalSessionAdapter&>(results[1].adapter()).simulation().outcome(),
+                "setup runtime cannot confirm an absent peer from its only remaining vote");
+            continue;
+        }
         std::vector<std::vector<net::DepartureEvent>> departures(peers);
         for (unsigned rounds = 0; rounds < 160; ++rounds) {
             ++network.round;
@@ -366,18 +368,21 @@ void runtime_departure(const std::filesystem::path& directory) {
         require(host.session().pump(pair.network.round)); require(client.session().pump(pair.network.round));
     }
     pair.network.open[1] = false;
-    std::vector<net::DepartureEvent> departures;
-    for (unsigned i = 0; i < 200 && host.adapter().completed_tick() < 90; ++i) {
+    bool lost{};
+    for (unsigned i = 0; i < 200 && !lost; ++i) {
         ++pair.network.round;
-        auto pumped = require(host.session().pump(pair.network.round));
-        departures.insert(departures.end(), pumped.departure_events.begin(), pumped.departure_events.end());
+        const auto pumped = host.session().pump(pair.network.round);
+        if (!pumped) {
+            lost = true;
+            expect(pumped.error().code == net::session_errors::stalled
+                && pumped.error().message.starts_with("Connection lost: the match could not continue"),
+                "setup runtime names the unconfirmed connection loss");
+        }
     }
-    expect(departures.size() == 1 && departures.front().reason == net::DepartureReason::disconnect
-        && departures.front().key.seat == host.offer().seats[1].seat,
-        "setup-created runtime forwards agreed abrupt departure membership");
-    expect(host.adapter().completed_tick() == 90 && pair.host_monitor.agreed_end()
-        && !host.session().failure() && !pair.host_monitor.frozen(),
-        "setup runtime survives abrupt closure through final hash agreement without transport error");
+    expect(lost && static_cast<net::TacticalSessionAdapter&>(host.adapter()).simulation().departure_controls().empty()
+        && !static_cast<net::TacticalSessionAdapter&>(host.adapter()).simulation().outcome()
+        && host.adapter().completed_tick() < 90 && !pair.host_monitor.frozen(),
+        "setup-created runtime ends neutrally on abrupt closure without fabricating Quit or desync");
 }
 
 void agreement(const std::filesystem::path& directory) {

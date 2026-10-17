@@ -473,6 +473,7 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
         particle.velocity=sample(emitter.velocity,emitter.hollow_velocity);
         if(emitter.local_velocity)particle.velocity=transformed(basis_,particle.velocity);
     }
+    if(dynamic_settings_&&!emitter.weather)particle.velocity=particle.velocity*dynamic_energy_;
     if(emitter.creator_id!=35&&parent&&emitter.inherit_parent_velocity){
         const float speed=length(parent->velocity);
         particle.velocity+=normalized(parent->velocity)*std::min(speed*emitter.inherited_velocity_scale,
@@ -513,7 +514,7 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
         // sampled billboard half-extent, along the normalized world normal.
         const float lifetime=particle.death_time-particle.spawn_time;
         const float relative=lifetime>0?saturated((time_-particle.spawn_time)/lifetime):1.0F;
-        const float size=std::max(0.0F,particle.size_scale*sample_track(emitter.size,relative,1));
+        const float size=std::max(0.0F,particle.size_scale*sample_track(emitter.size,relative,1)*dynamic_size_);
         particle.position+=mesh_offset_normal*(emitter.mesh_surface_offset*size*0.5F);
     }
     if(emitter.inward_speed!=0.0F)particle.radial_velocity=normalized(particle.position-origin_)*emitter.inward_speed;
@@ -542,7 +543,7 @@ void CpuSystem::update_particle(Particle& particle,const EmitterDefinition& emit
         particle.color={sample_track(emitter.red,relative,1),sample_track(emitter.green,relative,1),sample_track(emitter.blue,relative,1),sample_track(emitter.alpha,relative,1)};
         if(has(emitter,53)){particle.color.x=saturated(particle.color.x+particle.color_offset.x);particle.color.y=saturated(particle.color.y+particle.color_offset.y);particle.color.z=saturated(particle.color.z+particle.color_offset.z);particle.color.w=saturated(particle.color.w+particle.color_offset.w);}
     }
-    particle.size=std::max(0.0F,particle.size_scale*sample_track(emitter.size,relative,1));
+    particle.size=std::max(0.0F,particle.size_scale*sample_track(emitter.size,relative,1)*dynamic_size_);
     // PS-30: integer square root, including nonsquare authored frame counts.
     const int grid=std::max(1,static_cast<int>(std::sqrt(static_cast<double>(emitter.texture_size))));
     const int uv=safe_truncated_index(sample_track(emitter.uv_index,relative,0));
@@ -576,6 +577,34 @@ core::Result<void> CpuSystem::set_wind_disturbances(const std::span<const WindDi
         "wind disturbances require finite values, positive radii and at most 64 samples",{},{},{},{}});
     if(!disturbances.empty()&&disturbances_.capacity()<64U)disturbances_.reserve(64U);
     disturbances_.assign(disturbances.begin(),disturbances.end());
+    return core::Result<void>::success();
+}
+
+core::Result<void> CpuSystem::set_dynamic(const float size,const float energy){
+    if(!std::isfinite(size)||!std::isfinite(energy)||size<0||energy<0)
+        return core::Result<void>::failure({std::string(diagnostic_codes::invalid_value),core::Severity::error,
+            "dynamic size and energy must be finite and nonnegative",{},{},{},{}});
+    dynamic_energy_=energy;dynamic_settings_=true;
+    if(dynamic_size_==size)return core::Result<void>::success();
+    dynamic_size_=size;
+    for(auto& particle:particles_){
+        const auto& emitter=definition_.emitters[particle.emitter_index];
+        const float lifetime=particle.death_time-particle.spawn_time;
+        const float age=lifetime>0?saturated((time_-particle.spawn_time)/lifetime):1;
+        particle.size=std::max(0.0F,particle.size_scale*sample_track(emitter.size,age,1)*dynamic_size_);
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> CpuSystem::set_pinched_cylinder(const float radius,const float height,const float fraction){
+    if(!std::isfinite(radius)||!std::isfinite(height)||!std::isfinite(fraction)||radius<0||height<0||fraction<0)
+        return core::Result<void>::failure({std::string(diagnostic_codes::invalid_value),core::Severity::error,
+            "pinched cylinder requires finite nonnegative dimensions and fraction",{},{},{},{}});
+    for(auto& emitter:definition_.emitters){
+        emitter.position.shape=Shape::pinched_cylinder;
+        emitter.position.cylinder_radius=radius;emitter.position.cylinder_height_max=height;
+        emitter.position.pinch_fraction=fraction;
+    }
     return core::Result<void>::success();
 }
 
@@ -626,8 +655,14 @@ void CpuSystem::spawn_batch(const std::size_t index,const float spawn_time,const
     const float requested=emitter.bursting?emitter.particles_per_interval:1.0F;
     const std::size_t base_count=requested>=static_cast<float>(std::numeric_limits<std::size_t>::max())?
         std::numeric_limits<std::size_t>::max():static_cast<std::size_t>(requested);
-    const std::size_t count=emitter.creator_id==35&&emitter.mesh_mode==MeshSpawnMode::every_vertex?
+    std::size_t count=emitter.creator_id==35&&emitter.mesh_mode==MeshSpawnMode::every_vertex?
         base_count*mesh_vertex_count_:base_count;
+    const bool every_vertex=emitter.creator_id==35&&emitter.mesh_mode==MeshSpawnMode::every_vertex;
+    if(dynamic_settings_&&every_vertex&&!emitter.weather){
+        const long double scaled=static_cast<long double>(count)*dynamic_energy_;
+        count=scaled>=static_cast<long double>(std::numeric_limits<std::size_t>::max())?
+            std::numeric_limits<std::size_t>::max():static_cast<std::size_t>(scaled);
+    }
     auto& state=emitters_[index];
     const std::size_t available=capacities_[index].reserved-state.live;
     const std::size_t spawn_count=std::min(count,available);
@@ -649,6 +684,7 @@ void CpuSystem::spawn_batch(const std::size_t index,const float spawn_time,const
             position+birth_motion->translation;
     };
     for(std::size_t particle_index=0;particle_index<spawn_count;++particle_index){
+        if(dynamic_settings_&&!every_vertex&&!emitter.weather&&random(0,1)>=dynamic_energy_)continue;
         Particle particle;initialize_particle(particle,emitter,index,spawn_time,parent);
         const float residual=std::max(0.0F,time_-spawn_time);
         if(residual>0){move_particle(particle,emitter,residual,true);update_particle(particle,emitter,residual);}

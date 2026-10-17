@@ -1,12 +1,291 @@
 #include "galactic_support.hpp"
+#include "ability_fixture.hpp"
 #include "eawr/platform/live_game_session.hpp"
+#include "eawr/platform/sim_workers.hpp"
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/presentation/audio/galactic.hpp"
+#include <array>
 #include <chrono>
 
 using namespace galactic_test;
 using eawr::platform::LiveGameSession;
 using namespace std::chrono_literals;
+
+void approach_feedback() {
+    using Notice = galactic::GalacticFeedbackNotice;
+    eawr::platform::GalacticApproachThrottle clock;
+    expect(!clock.admit(1, 4999) && clock.admit(1, 5000), "approach guard admits exactly 5000ms");
+    expect(!clock.admit(1, 9999) && clock.admit(2, 5000) && clock.admit(1, 10000),
+        "approach clocks are per player and stamp only admitted warnings");
+    expect(!clock.admit(0, 20000) && !clock.admit(1, 0), "null recipient and regressed clocks stay silent");
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const auto control : {0, 1, 2, 3, 4}) {
+        auto setup = ability_fixture::base_setup();
+        const auto target = setup.planets[0].id, source = setup.planets[1].id;
+        const auto attacker = setup.fleets[1].id;
+        setup.fleets[1].orbit = source;
+        for (auto& actor : setup.census->objects) if (actor.owner == 2) actor.planet = source;
+        auto& political = ability_fixture::add_control(setup);
+        political.types = {{1000, 0, false, false}};
+        for (const auto& planet : setup.planets) {
+            galactic::ControlPlanet row; row.planet = planet.id; row.type = 1000;
+            row.surface_accessible = row.retains_residual = true; political.planets.push_back(row);
+        }
+        ability_fixture::add_nested_creation(setup, {1000});
+        ability_fixture::add_observer(setup, control == 1 ? 2 : 1, {1000});
+        auto& movement = setup.movement.emplace();
+        movement.mode_modifier = ability_fixture::whole(1);
+        movement.types = {{1000, ability_fixture::whole(10000), ability_fixture::whole(100), 0, true, false, false, false}};
+        for (const auto player : ability_fixture::all_players) movement.players.push_back({player, ability_fixture::whole(1), {}, false});
+        for (const auto& planet : setup.planets) movement.planets.push_back({planet.id, {}, false});
+        for (const auto player : ability_fixture::all_players) for (const auto& planet : setup.planets)
+            movement.access.push_back({player, planet.id, true, false});
+        if (control == 2) for (auto& relation : setup.production->nested_creation->relations) relation.enemy = false;
+        if (control == 3) for (auto& actor : setup.census->objects) if (actor.owner == 2) actor.abilities.combat_skip = true;
+        if (control == 4) {
+            setup.fleets[0].orbit = source;
+            for (auto& actor : setup.census->objects) if (actor.owner == 1) actor.planet = source;
+        }
+        auto made = galactic::GalacticSession::create(setup);
+        expect(bool(made), "approach fixture is valid");
+        if (!made) { std::cerr << eawr::core::format_diagnostic(made.error()) << '\n'; continue; }
+        auto game = std::move(made).value();
+        auto silent = galactic::GalacticSession::create(setup).value();
+        std::vector<Notice> notices;
+        game.set_feedback_notice_handler([&](const auto& notice) { notices.push_back(notice); });
+        const galactic::GameCommand move{{0, galactic::SeatId{2}, 1}, galactic::MoveFleet{attacker, {source, target}, {}}};
+        expect(bool(game.submit(move)) && bool(silent.submit(move)), "approach order queues");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto tick = game.step(executor).value();
+        expect(std::any_of(tick.snapshot->events().begin(), tick.snapshot->events().end(), [](const auto& e) {
+            return e.kind == galactic::GalacticEventKind::movement_begin;
+        }), "approach controls all perform an admitted departure");
+        expect(tick.state_hash.get() == silent.step(executor).value().state_hash.get(), "approach feedback is presentation-free deterministic state");
+        expect(notices.size() == (control == 0 ? 1U : 0U), "approach requires exact local allegiance, enemy, non-skip and local orbit");
+        if (!notices.empty()) expect(notices[0].kind == Notice::Kind::enemy_approaching
+            && notices[0].planet == target && notices[0].player == 1 && notices[0].preceding_events >= 2,
+            "enroute commit carries recipient/final planet after its departure events");
+        if (control == 0) {
+            LiveGameSession::Options options; options.workers = workers; options.pacing = LiveGameSession::Pacing::driven;
+            auto live = LiveGameSession::start(setup, options).value();
+            live->submit(move); live->advance_to(4);
+            expect(live->wait_for(4, 10s), "approach feed advances past skipped presentation frames");
+            const auto batch = live->galactic_events_after(0);
+            std::vector<eawr::platform::LiveGalacticEvent> retained;
+            for (const auto& published : batch.events) if (published.feedback
+                && published.feedback->kind == Notice::Kind::enemy_approaching) retained.push_back(published);
+            expect(retained.size() == 1, "one qualified approach remains retained after arrival");
+            if (!retained.empty()) {
+                const auto suffix = live->galactic_events_after(retained.front().cursor);
+                expect(std::none_of(suffix.events.begin(), suffix.events.end(), [](const auto& e) {
+                    return e.feedback && e.feedback->kind == Notice::Kind::enemy_approaching;
+                }), "exclusive cursor consumes approach without semantic retries");
+            }
+            expect(live->galactic_events_after(batch.through).events.empty(), "approach batch does not repeat");
+            live->stop();
+        }
+        for (int i = 0; i < 4; ++i) (void)game.step(executor).value();
+        expect(notices.size() == (control == 0 ? 1U : 0U), "continued enroute and clearing on arrival do not repeat approach");
+    }
+}
+
+galactic::GalacticSetup feedback_setup(std::uint32_t local) {
+    auto setup = ability_fixture::base_setup();
+    auto& host = *setup.ability_host;
+    host.profiles[0].has_market = false;
+    host.profiles[0].corruption = galactic::CorruptionAbilityProfile{"CUSTOM_CORRUPT", true};
+    host.activated_corruption_abilities = {"CUSTOM_CORRUPT"};
+    setup.economy_corruption->planets[0].corruption = galactic::corruption_fixture::Type::none;
+    setup.economy_corruption->players[1].benefits = true;
+    auto& control = ability_fixture::add_control(setup);
+    control.types = {{1000, 0, false, true}};
+    for (std::size_t i = 0; i < setup.planets.size(); ++i) {
+        const auto& planet = setup.planets[i];
+        const auto type = 3000 + i;
+        setup.census->types.push_back({type, {}, 0});
+        galactic::ControlPlanet row;
+        row.planet = planet.id; row.type = type;
+        row.surface_accessible = true; row.retains_residual = true;
+        row.capture_reward = ability_fixture::whole(17);
+        control.planets.push_back(row);
+        galactic::CorruptionPlanet location;
+        location.planet = planet.id; location.type = type; location.retains_influence = true;
+        location.slots[0].type = galactic::corruption_fixture::Type::piracy;
+        host.corruption_planets.push_back(location);
+    }
+    for (const auto id : ability_fixture::all_players) {
+        galactic::CorruptionPlayer player; player.player = id;
+        host.corruption_players.push_back(player);
+    }
+    if (local) ability_fixture::add_observer(setup, local, {1000, 3000, 3001, 3002, 3003});
+    return setup;
+}
+
+void corruption_feedback() {
+    using Notice = galactic::GalacticFeedbackNotice;
+    using Type = galactic::corruption_fixture::Type;
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const auto local : {0U, 1U, 2U, 3U})
+        for (const bool removed : {false, true}) {
+            auto setup = feedback_setup(local);
+            if (removed) setup.economy_corruption->planets[0].corruption = Type::piracy;
+            auto game = galactic::GalacticSession::create(setup).value();
+            auto silent = galactic::GalacticSession::create(setup).value();
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<Notice> notices;
+            game.set_feedback_notice_handler([&](const auto& notice) { notices.push_back(notice); });
+            const auto target = removed ? Type::none : Type::piracy;
+            expect(game.begin_corruption(setup.planets[0].id, target, {}).value()
+                && silent.begin_corruption(setup.planets[0].id, target, {}).value(), "due corruption transition starts");
+            expect(notices.empty(), "starting a transition does not request completion feedback");
+            for (int i = 0; i < 4; ++i)
+                expect(game.step(executor).value().state_hash.get() == silent.step(executor).value().state_hash.get(),
+                    "feedback subscription changes no deterministic state or continuation");
+            expect(notices.size() == (local == 1 || local == 2 ? 1U : 0U),
+                "only local owner or otherwise local beneficiary hears one completion, never other observers");
+            if (!notices.empty()) {
+                expect(notices[0].player == local && notices[0].planet == setup.planets[0].id
+                    && notices[0].kind == (removed ? Notice::Kind::corruption_removed : Notice::Kind::planet_corrupted),
+                    "completion retains its actual recipient, planet and resulting type");
+            }
+        }
+    // When local owner and beneficiary coincide, precedence still emits once.
+    auto setup = feedback_setup(1);
+    setup.economy_corruption->players[0].benefits = true;
+    setup.economy_corruption->players[1].benefits = false;
+    auto game = galactic::GalacticSession::create(setup).value();
+    std::size_t notices{};
+    game.set_feedback_notice_handler([&](const auto&) { ++notices; });
+    expect(game.begin_corruption(setup.planets[0].id, Type::piracy, {}).value(), "overlapping recipient transition starts");
+    eawr::sim::InlineExecutor executor;
+    (void)game.step(executor).value();
+    expect(notices == 1, "owner/beneficiary overlap is one notification");
+}
+
+void native_staging_feedback() {
+    using Notice = galactic::GalacticFeedbackNotice;
+    using Type = galactic::corruption_fixture::Type;
+    const std::array<galactic::PlayerId, 1> players{2};
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto setup = feedback_setup(2);
+        setup.fleets[0].orbit = setup.planets[1].id;
+        setup.fleet_control->types[0].transport = true;
+        const auto fleet = setup.fleets[1].id;
+        const auto actor = setup.fleets[1].members.front().id;
+        const auto planet = setup.planets[0].id;
+        auto game = galactic::GalacticSession::create(setup).value();
+        std::vector<Notice> notices;
+        game.set_feedback_notice_handler([&](const auto& notice) { notices.push_back(notice); });
+        const auto before = game.canonical_state_bytes();
+        auto barrier = std::move(game.begin_native_barrier(players, 16)).value();
+        barrier->select_player(2).value();
+        expect(game.admit_native_fleet(2, galactic::RemoveFleetMembers{fleet, {actor}}, false).value().admitted,
+            "native capture fixture stages the transport removal");
+        expect(game.land_native_transport(2, actor, planet).value().linked,
+            "native capture fixture stages an actual surface arrival");
+        expect(notices.empty() && game.canonical_state_bytes() == before,
+            "staged surface arrival emits no committed capture notice or world mutation");
+        expect(!game.step(executor) && notices.empty() && game.canonical_state_bytes() == before,
+            "world service cannot publish a capture while native staging is open");
+        barrier->begin_tail().value(); barrier->commit().value(); barrier.reset();
+        expect(notices.empty(), "native action replay itself does not perform political capture service");
+        for (unsigned tick = 0; tick < 4; ++tick) (void)game.step(executor).value();
+        expect(game.snapshot()->planets()[0].owner == 2 && notices.size() == 1
+            && notices[0].kind == Notice::Kind::capture_reward && notices[0].planet == planet,
+            "one committed native-arrival capture emits exactly one reward notice");
+
+        auto corruption = galactic::GalacticSession::create(feedback_setup(2)).value();
+        notices.clear();
+        corruption.set_feedback_notice_handler([&](const auto& notice) { notices.push_back(notice); });
+        expect(corruption.begin_corruption(planet, Type::piracy, {}).value(), "due corruption fixture starts before native staging");
+        const auto due = corruption.canonical_state_bytes();
+        barrier = std::move(corruption.begin_native_barrier(players, 16)).value();
+        barrier->select_player(2).value();
+        (void)corruption.add_credits(2, ability_fixture::whole(1), ability_fixture::whole(1)).value();
+        expect(notices.empty() && !corruption.step(executor) && corruption.canonical_state_bytes() == due,
+            "staged cash cannot run due corruption service or emit its notice");
+        barrier->begin_tail().value(); barrier->commit().value(); barrier.reset();
+        expect(notices.empty(), "closing native staging does not impersonate corruption completion");
+        (void)corruption.step(executor).value();
+        expect(notices.size() == 1 && notices[0].kind == Notice::Kind::planet_corrupted && notices[0].planet == planet,
+            "due corruption emits once after authoritative world service commits");
+    }
+}
+
+void retained_feedback() {
+    namespace audio = eawr::presentation::audio;
+    using Notice = galactic::GalacticFeedbackNotice;
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const auto local : {0U, 1U, 2U, 3U})
+        for (const bool capped : {false, true}) {
+        auto setup = feedback_setup(local);
+        setup.fleets[0].orbit = setup.planets[1].id;
+        // LandFleet admits transport members; the shared corruption fixture's
+        // ordinary actor is not one until this capture scenario supplies it.
+        setup.fleet_control->types[0].transport = true;
+        if (capped) setup.fiscal->credit_cap_per_planet = {};
+        auto live = LiveGameSession::start(setup, {.workers = workers, .pacing = LiveGameSession::Pacing::driven}).value();
+        const auto planet = setup.planets[0].id;
+        live->submit({{0, galactic::SeatId{2}, 1}, galactic::LandFleet{setup.fleets[1].id, planet}});
+        live->advance_to(4); expect(live->wait_for(4, 10s), "first capture reaches retained feedback");
+        expect(live->frame().latest->player_economy()->players[1].credits == ability_fixture::whole(capped ? 0 : 1017),
+            "first capture actually commits its authored credit award");
+        const auto batch = live->galactic_events_after(0);
+        expect(std::any_of(batch.events.begin(), batch.events.end(), [&](const auto& row) {
+            return !row.feedback && row.event.kind == galactic::GalacticEventKind::command_executed
+                && row.event.subject == setup.fleets[1].id && row.event.value == planet;
+        }), "first-capture fixture admits the real transport landing command");
+        expect(live->frame().latest->planets()[0].owner == 2, "the landing actually transfers control before testing reward feedback");
+        const std::vector<audio::Field> reward_audio{{"SFXEvent_Planet_Capture_Bonus_Reward", "custom_capture"}};
+        std::size_t rewards{};
+        std::uint64_t ownership_cursor{};
+        for (const auto& published : batch.events)
+            if (!published.feedback && published.event.kind == galactic::GalacticEventKind::planet_owner_changed
+                && published.event.subject == planet) ownership_cursor = published.cursor;
+        for (const auto& published : batch.events) if (published.feedback) {
+            ++rewards;
+            expect(ownership_cursor && ownership_cursor < published.cursor, "ownership feedback precedes its capture award");
+            expect(published.feedback->kind == Notice::Kind::capture_reward && published.feedback->player == 2,
+                "only the credited first-capture owner is published");
+            const auto cue = audio::galactic_event_sound(published.event, local, {}, {}, false, {}, published.feedback);
+            expect(cue == audio::GalacticSound::capture_bonus, "retained award selects the global capture-bonus cue");
+            expect(cue && audio::galactic_sound_event(*cue, {}, reward_audio) == "custom_capture",
+                "capture sound follows renamed global data");
+        }
+        expect(rewards == (local == 2 ? 1U : 0U), "first-capture feedback is exact-local only");
+        live->advance_to(8); expect(live->wait_for(8, 10s), "captured continuation advances");
+        const auto later = live->galactic_events_after(batch.through);
+        expect(std::none_of(later.events.begin(), later.events.end(), [](const auto& row) { return row.feedback.has_value(); }),
+            "a settled award never repeats, including after skipped presentation frames");
+        live->stop();
+    }
+    // Real prepared corruption -> due completion -> retained recipient -> cue.
+    auto setup = feedback_setup(2);
+    auto live = LiveGameSession::start(setup, {.workers = 2, .pacing = LiveGameSession::Pacing::driven}).value();
+    live->submit({{0, galactic::SeatId{2}, 1}, galactic::PrepareGalacticAbility{
+        setup.fleets[1].members[0].id, setup.planets[0].id, galactic::AbilityKind::corruption}});
+    live->advance_to(1); expect(live->wait_for(1, 10s), "live corruption preparation completes");
+    const auto snapshot = live->frame().latest;
+    const auto* menu = snapshot->corruption_menu();
+    expect(menu && !menu->choices.empty() && menu->choices[0].live_prepared, "prepared corruption is observable");
+    if (menu && !menu->choices.empty() && menu->choices[0].live_prepared) {
+        const auto prepared = *menu->choices[0].live_prepared;
+        live->submit({{1, galactic::SeatId{2}, 2}, galactic::ExecutePreparedAbility{prepared}});
+        live->advance_to(2); expect(live->wait_for(2, 10s), "live corruption starts");
+        const auto before = live->galactic_events_after(0);
+        expect(std::none_of(before.events.begin(), before.events.end(), [](const auto& row) { return row.feedback.has_value(); }),
+            "ability success does not masquerade as due corruption completion");
+        live->advance_to(160); expect(live->wait_for(160, 10s), "live corruption reaches completion");
+        const auto after = live->galactic_events_after(before.through);
+        std::size_t completed{};
+        for (const auto& row : after.events) if (row.feedback) {
+            ++completed;
+            expect(audio::galactic_event_sound(row.event, 2, {}, {}, false, {}, row.feedback) == audio::GalacticSound::planet_corrupted,
+                "retained due completion selects corrupted cue");
+        }
+        expect(completed == 1 && live->galactic_events_after(after.through).events.empty(),
+            "corruption completion is retained once with an exclusive cursor");
+    }
+    live->stop();
+}
 
 void construction_unlock_cues() {
     namespace audio = eawr::presentation::audio;
@@ -189,5 +468,9 @@ int main() {
     expect(retained.events.size() == 1, "event output remains readable after stop");
     frozen_galaxy_control_events(initial);
     construction_unlock_cues();
+    corruption_feedback();
+    approach_feedback();
+    native_staging_feedback();
+    retained_feedback();
     return failures == 0 ? 0 : 1;
 }

@@ -233,7 +233,13 @@ void expanded_router_roster() {
     roster.push_back({{10}, 1, true, false});
     expect(!tactical::SeatRouter::create(roster, players), "ten command seats refuse at routing admission");
     roster.pop_back(); roster.back().player = 4;
-    expect(!tactical::SeatRouter::create(roster, players), "four owners refuse even when two share a team");
+    expect(static_cast<bool>(tactical::SeatRouter::create(roster, players)), "four owners route even when two share a team");
+    players.clear(); roster.clear();
+    for (std::uint32_t id = 1; id <= 9; ++id) {
+        players.push_back({id, id <= 4 ? 1U : 2U, id, tactical::player_flag_commandable});
+        roster.push_back({{id}, id, true, false});
+    }
+    expect(static_cast<bool>(tactical::SeatRouter::create(roster, players)), "nine distinct allied owners route");
 }
 
 void loopback(const Scenario& scenario) {

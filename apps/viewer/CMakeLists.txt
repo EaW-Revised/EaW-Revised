@@ -32,6 +32,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # cache before source-built godot-cpp creates targets or sets its own default;
 # relay TLS targets inherit this and GNS forwards it to its external builds.
 if(MSVC)
+    # The standalone viewer also compiles the core's large translation units.
+    add_compile_options(/bigobj)
     # Dependencies such as Mbed TLS have an older policy baseline: keep runtime
     # selection enabled when their cmake_minimum_required resets policies.
     set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
@@ -295,6 +297,7 @@ add_library(eawr_viewer SHARED
     src/effect_mode_report_probe.cpp
     src/unit_mode.cpp
     src/font_mode.cpp
+    src/font_provision.cpp
     src/input_routing_mode.cpp
     src/ui_gallery_mode.cpp
     src/ui_gallery_controls.cpp

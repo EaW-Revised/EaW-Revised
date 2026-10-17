@@ -18,17 +18,16 @@ namespace eawr::skirmish {
 [[nodiscard]] script::foc::AiSetup ai_setup(
     const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables);
 
-// The goal system's XML (#449, script::foc::required_xml), read from the mounted FoC view into
-// the setup; without it, or without map bounds, only the freestore runs.
+// AI-16: freeze the mounted AI XML directories, constants and converter enum.
+// Without XML or map bounds, only the explicitly configured freestore runs.
 [[nodiscard]] core::Result<void> enable_goal_system(const vfs::Vfs& files, script::foc::AiSetup& setup);
 
-// The Lua files the AI host needs, read from the mounted FoC view by logical path; with
-// `plans`, also the selected plans and their library chain (script::foc::inspect_plans).
+// ML-34: freeze the bounded mounted logical script inventory, keeping winners
+// and source/compiled candidates. With `plans`, require the plan library roots.
 [[nodiscard]] core::Result<std::map<std::string, std::string>> ai_modules(
     const vfs::Vfs& files, const script::foc::AiSetup& setup, bool plans = false);
 
-// Select a session's bounded closure from previously frozen module bytes.
-// Cached paths use the same logical naming as ai_modules; missing dependencies fail.
+// Validate required session roots and retain the previously frozen inventory.
 [[nodiscard]] core::Result<std::map<std::string, std::string>> select_ai_modules(
     const std::map<std::string, std::string>& cached, const script::foc::AiSetup& setup, bool plans = false);
 

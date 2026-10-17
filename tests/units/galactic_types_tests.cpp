@@ -25,16 +25,16 @@ void override_free_identity() {
     eawr::units::GalacticType unchanged;
     unchanged.name = "Unchanged"; unchanged.object_class = "SpaceUnit";
     eawr::units::GalacticTypeTable table; table.types.push_back(unchanged);
-    // Independent BASE v5 fixture digest: no space override was authored.
+    // Independent v6 fixture digest: no space override was authored.
     constexpr std::array<std::uint8_t, 32> baseline{
-        0x47, 0xb9, 0x02, 0xc3, 0x78, 0x3a, 0x4e, 0x5d,
-        0xa2, 0x66, 0xd1, 0x19, 0x2e, 0xe8, 0xd0, 0x1e,
-        0xcc, 0xc5, 0xc8, 0x14, 0x0c, 0x49, 0x3c, 0x69,
-        0xfb, 0x20, 0x92, 0xef, 0x38, 0xb2, 0x11, 0xe8};
-    expect(eawr::units::galactic_content_identity(table) == baseline,
-        "override-free galactic tables retain their BASE content identity");
+        0xe0, 0x68, 0x3d, 0x7b, 0x87, 0x73, 0x3e, 0x97,
+        0x7f, 0x9c, 0x3e, 0x76, 0xa0, 0x62, 0xe8, 0x44,
+        0xd0, 0x76, 0x14, 0x2c, 0x4f, 0xb5, 0xff, 0x89,
+        0x03, 0x6e, 0x17, 0xb3, 0x50, 0x2d, 0xe7, 0x29};
+    const auto current = eawr::units::galactic_content_identity(table);
+    expect(current == baseline, "WR-85 v6 content identity matches the reviewed fixture bytes");
     table.types.front().space_override_population_value = Fixed{};
-    expect(eawr::units::galactic_content_identity(table) != baseline,
+    expect(eawr::units::galactic_content_identity(table) != current,
         "an explicit zero space override contributes to galactic identity");
 }
 void write(const std::filesystem::path& path, const std::string_view text) { std::ofstream out(path); out << text; }
@@ -176,6 +176,8 @@ void synthetic() {
         <Build_Cost_Credits>600</Build_Cost_Credits><Build_Initially_Locked>nope</Build_Initially_Locked></SpaceUnit>
       <Squadron Name="Flight"><Company_Transport_Unit>Variant</Company_Transport_Unit><Squadron_Units>Carrier</Squadron_Units><Squadron_Units>Variant</Squadron_Units></Squadron>
       <Squadron Name="Extra_Flight"><Variant_Of_Existing_Type>Flight</Variant_Of_Existing_Type><Squadron_Units>Carrier</Squadron_Units></Squadron>
+      <Squadron Name="Explicit_No"><Hyperspace>No</Hyperspace><Squadron_Units>Variant Carrier</Squadron_Units></Squadron>
+      <Squadron Name="Explicit_Yes"><Hyperspace>Yes</Hyperspace><Squadron_Units>Carrier Variant</Squadron_Units></Squadron>
       <GroundCompany Name="Company"><Behavior>DUMMY_GROUND_COMPANY</Behavior><Company_Units>Carrier Variant</Company_Units><Population_Value>1</Population_Value><Build_Cost_Credits>30</Build_Cost_Credits><Required_Star_Base_Level>1</Required_Star_Base_Level><Build_Tab_Heroes>Yes</Build_Tab_Heroes></GroundCompany>
       <GroundCompany Name="Renamed_Orbital_Team"><Variant_Of_Existing_Type>Company</Variant_Of_Existing_Type><Build_Tab_Space_Units>Yes</Build_Tab_Space_Units></GroundCompany>
       <StarBase Name="Base"><Base_Level>2</Base_Level><Next_Level_Base>Missing_Base</Next_Level_Base><Additional_Population_Capacity>10</Additional_Population_Capacity></StarBase>
@@ -199,7 +201,7 @@ void synthetic() {
     expect(static_cast<bool>(catalog), "load synthetic GC catalog");
     if (!catalog) return;
     const auto table = eawr::units::galactic_type_table(catalog.value().catalog);
-    expect(table.types.size() == 16 && !table.find("Planet") && !table.find("Shot"), "GC types exclude planets and unrelated projectiles");
+    expect(table.types.size() == 18 && !table.find("Planet") && !table.find("Shot"), "GC types exclude planets and unrelated projectiles");
     for (const auto name : {"Company", "Renamed_Orbital_Team"}) {
         const auto* team = table.find(name);
         expect(team && !eawr::units::built_on_ground(*team), "hero and space category companies inherit an orbital production lane");
@@ -245,6 +247,12 @@ void synthetic() {
     expect(carrier && variant && carrier->can_hyperspace_without_ability == true && variant->can_hyperspace_without_ability == true,
         "WGM-83 original-type flag loads and inherits");
     const auto* flight = table.find("Extra_Flight");
+    expect(table.find("Flight") && table.find("Flight")->hyperspace_capable == false
+        && flight && flight->hyperspace_capable == true,
+        "WR-85 omitted squadron capability follows the last craft after variant composition replacement");
+    expect(table.find("Explicit_No") && table.find("Explicit_No")->hyperspace_capable == true
+        && table.find("Explicit_Yes") && table.find("Explicit_Yes")->hyperspace_capable == false,
+        "WR-85 the last craft replaces both explicit squadron flag values, rather than any/all/first craft");
     expect(carrier && variant && carrier->initial_stealth.size() == 1 && variant->initial_stealth.size() == 1
         && !variant->initial_stealth[0].initially_enabled
         && variant->initial_stealth[0].activation_style == "Galactic_Automatic",
@@ -459,6 +467,8 @@ void installed() {
     if (!catalog) return;
     const auto table = eawr::units::galactic_type_table(catalog.value().catalog);
     const auto* transport = table.find("Imperial_Landing_Craft");
+    expect(table.find("Rebel_X-Wing_Squadron") && table.find("Rebel_X-Wing_Squadron")->hyperspace_capable == true,
+        "WR-85 stock bought X-wing squadron derives hyperspace from its craft");
     expect(transport && transport->hyperspace_speed == Fixed::from_decimal("1.5").value(), "WGM-26 stock transport speed");
     bool movement_flag = false;
     for (const auto& type : table.types) movement_flag = movement_flag || type.can_hyperspace_without_ability.has_value();

@@ -8,6 +8,9 @@
 #include "checkpoint_owner_internal.hpp"
 
 #include <array>
+#include <atomic>
+#include <cstdlib>
+#include <fstream>
 #include <span>
 #include <algorithm>
 #include <exception>
@@ -66,7 +69,7 @@ core::Result<std::string> conflict_hash(const ConflictRecord& record) {
     }
     scalar(record.seats.size());
     for (const auto& seat : record.seats) { scalar(seat.seat.value); scalar(seat.player); }
-    scalar(record.station); scalar(record.superweapon); scalar(record.station_type);
+    scalar(record.station); scalar(record.superweapon); scalar(record.station_owner); scalar(record.station_type);
     scalar(record.station_level); scalar(record.terrain_index);
     scalar(record.structure_markers.size());
     for (const auto& [id, marker] : record.structure_markers) { scalar(id); scalar(marker); }
@@ -247,6 +250,7 @@ public:
         const auto snapshot = world().snapshot();
         return native_ai.battle({kind, tick, conflict, *snapshot, result, automatic});
     }
+    mutable std::optional<std::uint64_t> native_oracle_session;
     core::Result<std::string> native_hash() const {
         if (!native_ai.state) return core::Result<std::string>::success({});
         // Contributors may cache their canonical digest across unchanged
@@ -255,6 +259,36 @@ public:
         if (!digest) return digest;
         if (digest.value().size() != 64 || digest.value().find_first_not_of("0123456789abcdef") != std::string::npos)
             return fail<std::string>("native AI contributor returned an invalid synchronization digest");
+        // Opt-in correctness evidence, deliberately separate from profiling.
+        // Captures full canonical state, so a changed sync format can be checked
+        // against its parent at every tick and across a fresh restore owner.
+        const auto oracle_path = [] {
+#ifdef _MSC_VER
+            char* option{}; std::size_t length{};
+            if (_dupenv_s(&option, &length, "EAWR_GALACTIC_NATIVE_ORACLE") != 0 || !option) return std::string{};
+            std::string path(option); std::free(option); return path;
+#else
+            const auto* option = std::getenv("EAWR_GALACTIC_NATIVE_ORACLE"); return option ? std::string(option) : std::string{};
+#endif
+        }();
+        if (!oracle_path.empty()) {
+            static std::atomic<std::uint64_t> sessions{};
+            if (!native_oracle_session) native_oracle_session = sessions.fetch_add(1, std::memory_order_relaxed);
+            auto captured = native_ai.state->capture(); if (!captured) return core::Result<std::string>::failure(captured.error());
+            auto full = script::foc::galactic_ai::native_state_hash(captured.value()); if (!full) return full;
+            const auto goals = captured.value().components.find("galactic-goals");
+            std::vector<std::uint8_t> events;
+            for (const auto& event : world().snapshot()->events()) {
+                put(events, event.tick, 8); put(events, static_cast<std::uint64_t>(event.kind), 8);
+                put(events, event.producer.value, 8); put(events, event.subject, 8); put(events, event.sequence, 8);
+                put(events, event.value, 8); put(events, static_cast<std::uint64_t>(event.reason), 8);
+            }
+            std::ofstream trace(oracle_path, std::ios::app);
+            trace << *native_oracle_session << ',' << tick << ',' << world().completed_tick() << ',' << full.value() << ',' << world().state_sha256()
+                << ',' << (goals == captured.value().components.end() ? std::string{} : core::sha256_hex(goals->second))
+                << ',' << core::sha256_hex(events) << ',' << digest.value() << '\n';
+            if (!trace) return fail<std::string>("native oracle trace could not be written");
+        }
         return digest;
     }
     static std::string with_native(const std::string& base, const std::string& native) {
@@ -1293,7 +1327,7 @@ core::Result<GameTick> GameSession::step(const sim::PartitionExecutor& executor)
             if (reconciled && impl.world().setup().control && !impl.child->conflict.raid && !impl.child->conflict.corruption_mission) {
                 const auto& conflict = impl.child->conflict;
                 galactic::ControlBattleReturn returned;
-                returned.planet = conflict.planet; returned.invader = conflict.invader; returned.defender = conflict.defender;
+                returned.planet = conflict.planet; returned.invader = conflict.invader; returned.defender = conflict.defender; returned.station_owner = conflict.station_owner;
                 returned.winner = out.result->winner; returned.land = conflict.layer == BattleLayer::land;
                 // WGM-57: a space return without a tactical station clears the stored base.
                 returned.station_level = !returned.land && !conflict.station ? 0 : out.result->station_level;
@@ -1965,6 +1999,9 @@ core::Result<void> GameSession::finish_corruption_mission(std::uint64_t request,
 }
 void GameSession::set_technology_notice_handler(sim::galactic::GalacticSession::TechnologyNoticeHandler handler) {
     impl_->world().set_technology_notice_handler(std::move(handler));
+}
+void GameSession::set_feedback_notice_handler(sim::galactic::GalacticSession::FeedbackNoticeHandler handler) {
+    impl_->world().set_feedback_notice_handler(std::move(handler));
 }
 core::Result<sim::math::Fixed> GameSession::set_technology_price_modifier(const sim::galactic::GalacticSession::TechnologyPriceWrite& write) {
     return impl_->world().set_technology_price_modifier(write);

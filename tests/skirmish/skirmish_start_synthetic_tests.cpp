@@ -1,4 +1,8 @@
 #include "skirmish_start_support.hpp"
+#include "setup_map_reference.hpp"
+#include "setup_map_golden.hpp"
+#include "../../src/skirmish/setup_workers.hpp"
+#include "eawr/core/load_profile.hpp"
 
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/core/build_identity.hpp"
@@ -993,6 +997,60 @@ void replay_round_trip() {
 }
 
 
+// TSW-01: a tactical super weapon is repositioned once from the nearest enemy-owned target, then faces the
+// battlefield centre. The values are those of the debug build's rule: start distance on the line from the target
+// through the object, the target's height when matched, then the authored z adjustment.
+void synthetic_tactical_super_weapon() {
+    eawr::units::UnitType::TacticalSuperWeapon data;
+    data.start_distance = whole(8000); data.attack_distance = whole(5800);
+    data.z_adjust = whole(1200); data.start_pos_match_target_z = true;
+    const std::vector<Vec3> targets{Vec3{whole(0), whole(0), whole(-4300)}, Vec3{whole(30000), whole(0), whole(0)}};
+    const Vec3 current{whole(0), whole(6000), whole(0)};
+    const auto attacker = skirmish::tactical_super_weapon_start(data, current, targets, false);
+    expect(static_cast<bool>(attacker), "TSW-01: the attacker's start computes");
+    if (!attacker) return;
+    expect(attacker.value().position.x == Fixed{} && attacker.value().position.y.raw() / Fixed::scale == 6502
+        && attacker.value().position.z == whole(-3100),
+        "TSW-01: 8000 from the nearest target along the line through the object, at the target's height plus 1200");
+    expect(attacker.value().yaw_degrees == whole(-90), "TSW-01: it then faces the battlefield centre");
+    const auto defender = skirmish::tactical_super_weapon_start(data, current, targets, true);
+    expect(defender && defender.value().position.y.raw() / Fixed::scale == 4714 && defender.value().position.z == whole(-3100),
+        "TSW-01: the defending player's object stands at the attack distance instead");
+    data.start_pos_match_target_z = false;
+    const auto unmatched = skirmish::tactical_super_weapon_start(data, current, targets, false);
+    expect(unmatched && unmatched.value().position.z.raw() / Fixed::scale == 1560,
+        "TSW-01: without the match flag the line's own height carries over, plus the adjustment");
+    const auto alone = skirmish::tactical_super_weapon_start(data, current, {}, false);
+    expect(alone && alone.value().position == current && alone.value().yaw_degrees == whole(-90),
+        "TSW-01: with no target it stays where it is and only faces the centre");
+    const auto nearer = skirmish::tactical_super_weapon_start(data, Vec3{whole(29000), whole(0), whole(0)}, targets, false);
+    expect(nearer && nearer.value().position.x.raw() / Fixed::scale >= 21999 && nearer.value().position.x.raw() / Fixed::scale <= 22000,
+        "TSW-01: the nearest of several targets anchors the start");
+    auto marked = object(41, "Test_Planet", "SpaceProp", 3, "Neutral", at(700, -900), 90);
+    marked.tactical_super_weapon_target = true; marked.layer_z_adjust = whole(-1300);
+    const auto found = skirmish::tactical_super_weapon_targets({marked, object(42, "Other", "SpaceProp", 3, "Neutral", at(0, 0), 0)}, "Empire");
+    expect(found && found.value() == std::vector<Vec3>{Vec3{whole(700), whole(-900), whole(0)}},
+        "TSW-01: a target stands at its authored map position, its Layer_Z_Adjust not added");
+    // Enemy-owned only: a nearer target of the object's own faction is skipped; a target of no mapped faction counts.
+    auto friendly = object(43, "Friendly_Planet", "SpaceProp", 0, "Empire", at(100, 100), 0);
+    friendly.tactical_super_weapon_target = true;
+    auto unmapped = object(44, "Unmapped_Planet", "SpaceProp", 9, "", at(5000, 5000), 0);
+    unmapped.tactical_super_weapon_target = true;
+    const std::vector<skirmish::MapPlacement> mixed{friendly, marked, unmapped};
+    const auto enemy = skirmish::tactical_super_weapon_targets(mixed, "empire");
+    expect(enemy && enemy.value() == std::vector<Vec3>{Vec3{whole(700), whole(-900), whole(0)}, Vec3{whole(5000), whole(5000), whole(0)}},
+        "TSW-01: a target owned by the object's own faction is skipped (case-blind), a neutral or unmapped one is not");
+    const auto anyone = skirmish::tactical_super_weapon_targets(mixed, {});
+    expect(anyone && anyone.value().size() == 3, "TSW-01: without an owner faction nothing is skipped");
+    const Vec3 near_friendly{whole(150), whole(150), whole(0)};
+    const auto anchored = skirmish::tactical_super_weapon_start(data, near_friendly, enemy.value(), false);
+    // 8000 from (700, -900) along the line to (150, 150): x about -3000, y about 6190. Anchored on the friendly (100, 100) it
+    // would be x = y = about 5760.
+    expect(anchored && anchored.value().position.x.raw() / Fixed::scale < 0
+        && anchored.value().position.y.raw() / Fixed::scale > 6100 && anchored.value().position.y.raw() / Fixed::scale < 6300,
+        "TSW-01: the start anchors on the enemy target, not on the nearer friendly one");
+}
+
 // SK-05 (space-movement LZ-01, LZ-02): every created object is raised by its type's
 // Layer_Z_Adjust over the point it is placed on; a squadron's team container is not.
 void synthetic_heights() {
@@ -1040,7 +1098,87 @@ void synthetic_heights() {
     }
 }
 
-void setup_contract() {
+void setup_contract(const std::filesystem::path& fixtures) {
+    {
+        std::vector<unsigned> visits(13);
+        unsigned launches{};
+        const auto worker_errors = eawr::skirmish::detail::run_setup_map_workers(visits.size(), 8,
+            [&](const std::size_t index) {
+                ++visits[index];
+                if (index == 2 || index == 11) throw std::runtime_error(std::to_string(index));
+            }, [&](std::function<void()> work) {
+                if (++launches == 2) throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+                return std::async(std::launch::async, std::move(work));
+            });
+        expect(std::all_of(visits.begin(), visits.end(), [](const auto n) { return n == 1; }),
+            "thread-launch fallback and work exceptions leave no record unprocessed");
+        const auto first = std::find_if(worker_errors.begin(), worker_errors.end(), [](const auto& error) { return error != nullptr; });
+        expect(first == worker_errors.begin() + 2 && worker_errors[11] != nullptr,
+            "worker errors are retained in record order independently of scheduling");
+        if (first != worker_errors.end()) {
+            try { std::rethrow_exception(*first); }
+            catch (const std::runtime_error& error) { expect(std::string_view(error.what()) == "2", "first ordered error propagates"); }
+        }
+    }
+    {
+        const auto directory = std::filesystem::temp_directory_path()
+            / ("eawr-setup-team-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        setup_map_golden::write_team_corpus(directory);
+        const eawr::vfs::MountSpec mount{.layer_id="synthetic-team",.data_root=directory,.loose_logical_prefix="data",.active_archives={}};
+        auto fs=eawr::vfs::Vfs::mount(std::span(&mount,1));
+        expect(static_cast<bool>(fs), "synthetic team map mounts");
+        if (fs) {
+            const eawr::data::Catalog empty;
+            auto catalog=eawr::data::load_catalog(fs.value(),eawr::data::Profile::foc);
+            expect(static_cast<bool>(catalog), "synthetic marker catalog loads");
+            for (const bool populated : {false,true}) {
+                if (populated && !catalog) continue;
+                const auto& selected=populated?catalog.value().catalog:empty;
+                const auto golden=setup_map_golden::read(fixtures/(populated?"setup-map-eager-team.sha256":"setup-map-eager-empty-catalog.sha256"));
+                expect(golden.size()==2, "pre-change synthetic list and fixture/input hashes are available");
+                for (const unsigned workers : {1U,2U,4U,8U}) {
+                    eawr::core::load_profile::Recording profile;
+                    auto* previous=eawr::core::load_profile::active;
+                    eawr::core::load_profile::active=&profile;
+                    const auto maps=skirmish::setup_maps(fs.value(),selected,{},workers);
+                    eawr::core::load_profile::active=previous;
+                    expect(profile.costs[static_cast<std::size_t>(eawr::core::load_profile::Phase::map)].calls==1,
+                        "parallel picker retains one caller-thread map-profile phase");
+                    const auto list=golden.find("@maps");
+                    expect(maps && list!=golden.end() && setup_map_golden::map_digest(maps.value())==list->second.map,
+                        "synthetic map bytes match pre-change code on every worker count");
+                    if (!maps) continue;
+                    for (const auto& map:maps.value()) {
+                        const auto row=golden.find(map.path);
+                        expect(row!=golden.end() && setup_map_golden::row(map,fs.value(),selected)==row->second,
+                            "synthetic chosen fixture, full inputs and diagnostic bytes match frozen pre-change hashes");
+                        if (populated) expect(map.unavailable.empty() && map.teams.size()==2
+                            && map.teams[0].spawn_capacity==1U && map.teams[1].spawn_capacity==1U
+                            && map.teams[0].factions==std::vector<std::string>{"Rebel","Empire"},
+                            "synthetic station/spawn records expose both supported authored teams");
+                    }
+                }
+            }
+            if (catalog) for (const auto capacity : {9U, 8U}) {
+                setup_map_golden::write_team_corpus(directory, capacity);
+                auto network_fs = eawr::vfs::Vfs::mount(std::span(&mount, 1));
+                expect(static_cast<bool>(network_fs), "synthetic network fixture map mounts");
+                if (!network_fs) continue;
+                skirmish::FixtureOptions network_options;
+                network_options.map = "data/art/maps/team_contract.ted";
+                network_options.slots.emplace();
+                for (std::uint32_t owner = 1; owner <= 9; ++owner)
+                    network_options.slots->push_back({owner, "Rebel", owner <= 5 ? 0U : 1U, true, {}, owner - 1});
+                const auto fixture = skirmish::fixture_from_options(network_options, network_fs.value(), catalog.value().catalog);
+                expect(capacity == 9 ? fixture && fixture.value().slots.size() == 9 : !fixture,
+                    "network fixture handoff accepts nine owners only within authored capacity");
+                network_options.slots->push_back({10, "Rebel", 1, true, {}, 0});
+                expect(!skirmish::fixture_from_options(network_options, network_fs.value(), catalog.value().catalog),
+                    "network fixture handoff refuses a tenth owner");
+            }
+        }
+        std::filesystem::remove_all(directory);
+    }
     // WSS-54: six-player capacity is independent of three spawn markers per team.
     {
         auto tables = synthetic_tables();
@@ -1279,6 +1417,8 @@ void setup_contract() {
         write("_mp_space_misleading_land.ted", 1, 4, false);
         write("_mp_space_custom.ted", 2, 4, true);
         write("_mp_space_single.ted", 2, 1, false);
+        write("eligible_bad_body.ted", 2, 4, false);
+        { std::ofstream file(directory / "art/maps/eligible_bad_body.ted", std::ios::binary | std::ios::app); file.put('x'); }
         std::filesystem::create_directories(directory / "xml");
         std::ofstream(directory / "xml/factionfiles.xml")
             << "<Faction_Files><File>factions.xml</File></Faction_Files>";
@@ -1330,6 +1470,28 @@ void setup_contract() {
             auto custom = skirmish::setup_maps(filesystem.value(), catalog, custom_query);
             expect(custom && custom.value().size() == 1 && custom.value()[0].path.ends_with("_mp_space_custom.ted"),
                 "WSS-07: official and custom maps in the same layer are classified only by authored flags");
+            for (const auto query : {skirmish::SetupMapQuery{}, custom_query}) {
+                const auto eager = setup_map_reference::eager_maps(filesystem.value(), catalog, query);
+                expect(static_cast<bool>(eager), "eager synthetic setup reference succeeds");
+                for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+                    const auto parallel = skirmish::setup_maps(filesystem.value(), catalog, query, workers);
+                    expect(eager && parallel && setup_map_reference::bytes(eager.value()) == setup_map_reference::bytes(parallel.value()),
+                        "setup map bytes and diagnostics equal eager reference at every worker count");
+                }
+            }
+            auto shared_fs = std::make_shared<const eawr::vfs::Vfs>(std::move(filesystem).value());
+            auto shared_catalog = std::make_shared<const eawr::data::Catalog>();
+            skirmish::SetupMapCache cache;
+            expect(static_cast<bool>(cache.load(shared_fs, shared_catalog, {})), "setup cache builds loaded snapshot");
+            const auto* cached = cache.find(*shared_fs, *shared_catalog, {});
+            expect(cached && setup_map_reference::bytes(*cached) == setup_map_reference::bytes(official.value()), "setup and lobby share identical map bytes");
+            expect(!cache.find(*shared_fs, *shared_catalog, custom_query), "cache rejects different map query");
+            auto remounted = eawr::vfs::Vfs::mount(std::span<const eawr::vfs::MountSpec>(&mount, 1));
+            expect(remounted && !cache.find(remounted.value(), *shared_catalog, {}), "cache rejects remounted effective content");
+            const eawr::data::Catalog replacement_catalog;
+            expect(!cache.find(*shared_fs, replacement_catalog, {}), "cache rejects replacement catalog");
+            // Keep the rest of this existing corpus on its original mounted view.
+            filesystem = eawr::vfs::Vfs::mount(std::span<const eawr::vfs::MountSpec>(&mount, 1));
             const auto defaults = skirmish::read_match_defaults(filesystem.value());
             expect(defaults && !defaults.value().allow_heroes && !defaults.value().free_starting_units
                 && defaults.value().allow_superweapons && defaults.value().pre_built_base
@@ -1500,6 +1662,25 @@ void setup_contract() {
     roster = selection;
     for (std::uint32_t row = 3; row <= 8; ++row) roster.slots.push_back({row, "Rebel", 2, false, {}});
     expect(static_cast<bool>(skirmish::setup_options(roster, maps)), "WSS-08: capacity nine permits eight local occupied rows");
+    auto network_roster = roster;
+    network_roster.slots.push_back({9, "Rebel", 2, false, {}});
+    expect(!skirmish::setup_options(network_roster, maps), "local controls keep the ninth row hidden");
+    for (auto& row : network_roster.slots) row.human = true;
+    expect(static_cast<bool>(skirmish::setup_options(network_roster, maps, false)),
+        "network controls accept nine separate human rows on a nine-row map");
+    auto eight_rows = maps; eight_rows[0].metadata.capacity = 8;
+    expect(!skirmish::setup_options(network_roster, eight_rows, false),
+        "eight-row maps refuse a ninth network human");
+    auto repaired = network_roster;
+    skirmish::repair_setup_selection(repaired, maps[0], false);
+    expect(repaired.slots.size() == 9 && skirmish::setup_row_count(maps[0], false) == 9,
+        "network map repair preserves the ninth authored row");
+    skirmish::repair_setup_selection(repaired, eight_rows[0], false);
+    expect(repaired.slots.size() == 8, "network map repair obeys an eight-row map");
+    repaired = network_roster;
+    skirmish::repair_setup_selection(repaired, maps[0]);
+    expect(repaired.slots.size() == 8 && skirmish::setup_row_count(maps[0]) == 8,
+        "local map repair still hides the ninth row");
     auto limited = maps;
     limited[0].teams[2].spawn_capacity = 2;
     const auto overflow = skirmish::setup_options(roster, limited);

@@ -6,6 +6,17 @@
 #include <limits>
 
 namespace eawr::script::foc::ai {
+std::optional<std::uint64_t> Engine::active_goal_count(tactical::PlayerId id, std::uint64_t category) const {
+    const auto* selected = player_ai(id);
+    if (!selected) return {};
+    std::uint64_t count{};
+    for (const auto& goal : selected->active) {
+        const auto& name = selected->functions[goal.function].goal->category;
+        const auto found = data_.goal_categories.find(name);
+        if (found != data_.goal_categories.end() && found->second == category) ++count;
+    }
+    return count;
+}
 namespace {
 template<class T> core::Result<T> refuse(std::string message) {
     return core::Result<T>::failure(detail::make_error(authoritative::codes::invalid_request, std::move(message)));
@@ -30,6 +41,8 @@ GalacticGoalIdentity identity(const PlayerAi& player, const Goal& goal, const En
 
 core::Result<std::optional<GalacticGoalIdentity>> Engine::allocate_galactic_goal(
     tactical::PlayerId id, std::size_t function_index, std::uint64_t target_id) {
+    const auto native_record_write = native_record_scope();
+    native_records_changed(id, {1});
     mark_native_state_changed();
     using Answer = std::optional<GalacticGoalIdentity>;
     auto* player = player_ai(id);
@@ -45,18 +58,18 @@ core::Result<std::optional<GalacticGoalIdentity>> Engine::allocate_galactic_goal
     counts.blockers = player->proposal_blocks;
     for (const auto& [name, count] : player->proposal_counts) counts.ordinary[name] = count;
     for (const auto& [name, count] : player->exclusion_counts) counts.exclusions[name] = count;
-    if (!galactic_goals::proposable(counts, function.goal_name)) return core::Result<Answer>::success({});
+    if (!galactic_goals::proposable(counts, function.goal_name)) { player->count_refusal(GalacticRefusal::blocked, function_index); return core::Result<Answer>::success({}); }
     Goal goal; goal.function = function_index; goal.target = target_id;
     for (const auto* goals : {&player->active, &player->proposed}) for (const auto& retained : *goals)
         if (!retained.finished && like(*player, retained, goal)) return core::Result<Answer>::success({});
     const auto value = run_equation(*function.equation, context_of(*player, selected));
-    if (!value) return core::Result<Answer>::success({}); // unqualified perception remains unavailable
+    if (!value) { player->count_refusal(GalacticRefusal::unavailable, function_index); return core::Result<Answer>::success({}); } // unqualified perception remains unavailable
     const auto key = std::pair{function.goal_name, target_id};
     const auto outcomes = player->goal_outcomes.find(key), activations = player->activations.find(key);
     goal.desire = to_single(*value
         + to_single(function.goal->per_failure_desire_adjust * real(recent_failures(outcomes == player->goal_outcomes.end() ? nullptr : &outcomes->second)))
         + to_single(function.goal->per_activation_failure_desire_adjust * real(recent_failures(activations == player->activations.end() ? nullptr : &activations->second))));
-    if (!(Real{} < goal.desire)) return core::Result<Answer>::success({});
+    if (!(Real{} < goal.desire)) { player->count_refusal(GalacticRefusal::desire, function_index); return core::Result<Answer>::success({}); }
     std::vector<std::pair<std::size_t, Real>> candidates;
     Real total{};
     for (std::size_t index = 0; index < plans_.size(); ++index) {
@@ -70,17 +83,19 @@ core::Result<std::optional<GalacticGoalIdentity>> Engine::allocate_galactic_goal
         const auto weight = to_single(rate + real(1));
         candidates.emplace_back(index, weight); total = to_single(total + weight);
     }
-    if (candidates.empty()) return core::Result<Answer>::success({});
-    // Both potential and running plan IDs share this allocator, preventing a
-    // reservation from resolving to a different goal after plan attachment.
+    if (candidates.empty()) { player->count_refusal(GalacticRefusal::no_plan, function_index); return core::Result<Answer>::success({}); }
+    // Both potential and running plan IDs share this player's allocator, preventing a
+    // reservation from resolving to a different goal after plan attachment. The draw comes from
+    // the player's own stream (S9-early).
     if (player->next_goal_id == std::numeric_limits<std::uint64_t>::max()
-        || next_plan_id_ == std::numeric_limits<std::uint64_t>::max()) return refuse<Answer>("galactic goal identity space exhausted");
-    const auto draw = sync_.uniform(Real{}, total);
+        || player->next_plan_local >= galactic_id_counter_limit) return refuse<Answer>("galactic goal identity space exhausted");
+    const auto draw = stream(*player).uniform(Real{}, total);
     auto chosen = candidates.back().first; Real sum{};
     for (const auto& [index, weight] : candidates) { sum = to_single(sum + weight); if (draw < sum) { chosen = index; break; } }
     goal.id = player->next_goal_id++;
-    goal.potential.emplace(); goal.potential->id = next_plan_id_++; goal.potential->plan = chosen;
+    goal.potential.emplace(); goal.potential->id = allocate_plan_id(*player).value(); goal.potential->plan = chosen;
     const auto answer = identity(*player, goal, *this);
+    native_record_changed(id, 2, goal.id);
     player->proposed.push_back(std::move(goal));
     return core::Result<Answer>::success(answer);
 }
@@ -136,6 +151,8 @@ core::Result<std::map<sim::EntityId, std::uint64_t>> Engine::galactic_execution_
     return Result::success(std::move(result));
 }
 core::Result<void> Engine::reserve_galactic_object(tactical::PlayerId id, std::uint64_t goal, sim::EntityId object) {
+    const auto native_record_write = native_record_scope();
+    native_records_changed(id, {13});
     mark_native_state_changed();
     auto* player = player_ai(id);
     if (!galactic_goal(id, goal) || !host_->view) return refuse<void>("reservation has no live galactic goal/view");
@@ -158,6 +175,8 @@ core::Result<void> Engine::reserve_galactic_object(tactical::PlayerId id, std::u
     return core::Result<void>::success();
 }
 core::Result<void> Engine::release_galactic_goal(tactical::PlayerId id, std::uint64_t goal) {
+    const auto native_record_write = native_record_scope();
+    native_records_changed(id, {2, 13});
     mark_native_state_changed();
     auto* player = player_ai(id);
     if (!player || !player->galactic) return refuse<void>("goal release requires a galactic player");
@@ -171,5 +190,19 @@ core::Result<void> Engine::release_galactic_goal(tactical::PlayerId id, std::uin
     std::erase_if(player->reserved, [&](const auto& row) { return row.second == goal; });
     std::erase_if(player->proposed, [&](const auto& row) { return row.id == goal; });
     return core::Result<void>::success();
+}
+std::map<std::pair<tactical::PlayerId, std::string>, std::uint64_t> Engine::galactic_refusals() const {
+    std::map<std::pair<tactical::PlayerId, std::string>, std::uint64_t> out;
+    static constexpr std::array<std::string_view, 8> reasons{"goal:", "alloc:", "alloc:", "alloc:", "alloc:", "alloc:", "alloc:", "budget:"};
+    static constexpr std::array<std::string_view, 8> suffixes{"", ":blocked", ":desire", ":noplan", ":units", ":time", ":funds", ""};
+    for (const auto& player : players_) for (const auto& [row, count] : player.refusals) {
+        const auto why = static_cast<std::size_t>(row.first);
+        std::string name;
+        if (row.first == GalacticRefusal::budget) {
+            for (const auto& [category, id] : data_.goal_categories) if (id == row.second) name = category;
+        } else if (row.second < player.functions.size()) name = player.functions[row.second].goal_name;
+        out[{player.player, std::string(reasons[why]) + name + std::string(suffixes[why])}] += count;
+    }
+    return out;
 }
 } // namespace eawr::script::foc::ai

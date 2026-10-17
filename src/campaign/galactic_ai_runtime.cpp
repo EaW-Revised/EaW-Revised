@@ -61,9 +61,9 @@ private:
         if (!captured) return core::Result<std::string>::failure(captured.error());
         work_->native_bytes = 4 + std::string_view("eawr-galactic-ai-native").size() + 4 + 8;
         for (const auto& [name, bytes] : captured.value().components) work_->native_bytes += 12 + name.size() + bytes.size();
-        auto full = sync ? ga::native_sync_state_hash(captured.value()) : ga::native_state_hash(captured.value());
+        auto full = sync ? owner_->record_sync_hash(true) : ga::native_state_hash(captured.value());
         if (!full) return full;
-        if (full.value() != result.value()) return absent<std::string>("observed native digest differs from full capture");
+        if (full.value() != result.value()) return absent<std::string>("observed native digest differs from cold reconstruction");
         return result;
     }
 private:
@@ -85,6 +85,24 @@ public:
     std::weak_ptr<ga::Manager> manager;
     std::weak_ptr<ComposedGalacticAiState> native_state;
     std::shared_ptr<ga::NativeActions> actions;
+    std::unique_ptr<ga::gc::GalacticSession::NativeActionBarrier> native_actions_barrier;
+    template<class T> core::Result<T> checked_native(core::Result<T> result) {
+        if (!result) native_actions_barrier.reset();
+        return result;
+    }
+    core::Result<void> begin_native_actions_barrier() {
+        if (native_actions_barrier) return absent<void>("completed preceding native action barrier");
+        std::vector<ga::gc::PlayerId> players;
+        for (const auto& selected : setup->lifecycle.players) players.push_back(selected.player);
+        std::sort(players.begin(), players.end());
+        auto begun = galaxy->begin_native_barrier(players, ga::gc::galactic_max_commands);
+        if (!begun) return core::Result<void>::failure(begun.error());
+        native_actions_barrier = std::move(begun).value();
+        return core::Result<void>::success();
+    }
+    core::Result<void> select_native_player(ga::gc::PlayerId player) {
+        return native_actions_barrier ? native_actions_barrier->select_player(player) : core::Result<void>::success();
+    }
     std::shared_ptr<ga::LiveExecutionStateContributor> execution;
     std::shared_ptr<ga::FreestoreInput> pool = std::make_shared<ga::FreestoreInput>();
     std::shared_ptr<const ai::galactic_goals::MaterializedPlanCatalog> plans;
@@ -97,9 +115,17 @@ public:
     std::uint64_t sequence{};
     auth::ScriptScheduler* active_scripts{};
     const sim::PartitionExecutor* active_executor{};
-    ai::GalacticConnectivity connectivity;
+    std::shared_ptr<const ai::GalacticConnectivity> connectivity{std::make_shared<const ai::GalacticConnectivity>()};
+    std::shared_ptr<const ai::GalacticConnectivity> route_source, combined_routes;
+    struct RoutePublication {
+        std::uint64_t revision{};
+        const ai::GalacticExecutionRoute* source{};
+        std::shared_ptr<const std::vector<ai::GalacticExecutionRoute>> rows{};
+    };
+    std::map<ga::gc::PlayerId, RoutePublication> route_publications;
     std::mutex economy_mutex;
-    std::array<std::shared_ptr<ai::GalacticEconomyRuntime>, 2> economy_buffers;
+    std::shared_ptr<const std::vector<ai::GalacticBudgetPlayer>> budget_players;
+    std::optional<std::uint64_t> budget_players_revision;
     std::weak_ptr<const ai::GalacticEconomyRuntime> last_economy;
     std::uint64_t economy_revision{};
     std::uint64_t economy_tick{};
@@ -110,13 +136,14 @@ public:
     std::uint64_t build_engine_revision{}, build_funding_revision{};
     std::optional<std::uint64_t> build_production_revision;
     GalacticAiRuntimeProviders::BuildBudgetPublication copied_build_budgets;
-    std::array<GalacticAiRuntimeProviders::BuildBudgetPublication, 2> buffer_build_budgets;
-    std::array<std::optional<std::uint64_t>, 2> buffer_funding_revisions;
 
     core::Result<std::shared_ptr<const ai::GalacticEconomyRuntime>> copy_economy() {
         using Result = core::Result<std::shared_ptr<const ai::GalacticEconomyRuntime>>;
         if (!galaxy || !world->available()) return absent<std::shared_ptr<const ai::GalacticEconomyRuntime>>("completed economy world");
-        std::scoped_lock lock(economy_mutex);
+        const auto lock = [&] {
+            gc_profile::Scope wait_scope(gc_profile::Phase::economy_lock_wait);
+            return std::unique_lock(economy_mutex);
+        }();
         const auto tick = world->completed_tick(); const auto revision = funding->state_revision();
         const auto engine_revision = engine->native_state_revision();
         const auto production_revision = actions ? actions->state_revision() : std::optional<std::uint64_t>{};
@@ -128,33 +155,44 @@ public:
             && production_revision == economy_production_revision && production_present == economy_production_present
             && build_tasks_ready == economy_build_tasks_ready)
             if (auto previous = last_economy.lock()) return Result::success(std::move(previous));
-        std::shared_ptr<ai::GalacticEconomyRuntime> next;
-        auto buffer_index = economy_buffers.size();
-        for (std::size_t i = 0; i < economy_buffers.size(); ++i) {
-            auto& buffer = economy_buffers[i];
-            if (!buffer) buffer = std::make_shared<ai::GalacticEconomyRuntime>();
-            if (buffer.use_count() == 1) { next = buffer; buffer_index = i; break; }
-        }
-        // Concurrent readers may still hold both buffers; never mutate their copy.
-        if (!next) next = std::make_shared<ai::GalacticEconomyRuntime>();
+        auto next = std::make_shared<ai::GalacticEconomyRuntime>();
         const auto& saved = funding->state();
         next->completed_tick = tick; next->timeline = saved.timeline;
-        // A completed-tick change does not change retained account/category
-        // values. Each reusable buffer copies those maps once per funding write.
-        if (buffer_index == economy_buffers.size() || buffer_funding_revisions[buffer_index] != revision) {
-            next->budgets.resize(setup->perception.players.size());
-            for (std::size_t i = 0; i < next->budgets.size(); ++i) {
-                auto& out = next->budgets[i]; out.player = setup->perception.players[i].player;
+        next->base_credits.clear();
+        const auto& fiscal = galaxy->setup().fiscal;
+        const auto& abilities = galaxy->setup().ability_host;
+        const auto* control = galaxy->snapshot()->control();
+        if (fiscal) for (const auto& at : fiscal->planets) {
+            auto credits = at.credits;
+            if (control && abilities) {
+                const auto surface = std::find_if(control->planets.begin(), control->planets.end(),
+                    [&](const auto& row) { return row.planet == at.planet; });
+                if (surface != control->planets.end() && surface->destroyed) {
+                    const auto ruined = std::find_if(abilities->ruined_income.begin(), abilities->ruined_income.end(),
+                        [&](const auto& row) { return row.planet == at.planet; });
+                    if (ruined != abilities->ruined_income.end()) credits = ruined->credits;
+                }
+            }
+            // WGA-449: copy the existing fiscal/destruction owner's base
+            // getter, before modifiers, and retain its native integer value.
+            next->base_credits.emplace(at.planet, static_cast<std::int32_t>(script::numeric::from_fixed(credits)));
+        }
+        // Clock changes publish only this small header. Retained budget records
+        // and the producer's immutable build heads are shared across boundaries.
+        if (!budget_players || budget_players_revision != revision) {
+            auto rows = std::make_shared<std::vector<ai::GalacticBudgetPlayer>>();
+            rows->reserve(setup->perception.players.size());
+            for (const auto& player : setup->perception.players) {
+                ai::GalacticBudgetPlayer out; out.player = player.player;
                 const auto ledger = saved.find(out.player);
                 out.income = script::numeric::from_fixed(ledger == saved.end() ? saved.constructor_income : ledger->second.last_service_income);
-                if (ledger == saved.end()) { out.categories.clear(); continue; }
-                for (auto at = out.categories.begin(); at != out.categories.end(); )
-                    if (!ledger->second.categories.contains(at->first)) at = out.categories.erase(at); else ++at;
-                for (const auto& [category, values] : ledger->second.categories)
+                if (ledger != saved.end()) for (const auto& [category, values] : ledger->second.categories)
                     out.categories[category] = {script::numeric::from_fixed(values.income), script::numeric::from_fixed(values.cash)};
+                rows->push_back(std::move(out));
             }
-            if (buffer_index != economy_buffers.size()) buffer_funding_revisions[buffer_index] = revision;
+            budget_players = std::move(rows); budget_players_revision = revision;
         }
+        next->budget_publication = budget_players;
         next->build_tasks_complete = false;
         if (build_tasks_ready && actions && providers.build_budgets) {
             if (!build_budgets_cached || build_engine_revision != task_revision
@@ -166,16 +204,10 @@ public:
                 build_engine_revision = task_revision; build_funding_revision = revision;
                 build_production_revision = purchase_revision;
             }
-            // Each reusable DTO buffer copies a new publication once. Clock-only
-            // copies retain its rows; no vector allocation/roster copy on a hit.
-            if (buffer_index == economy_buffers.size() || buffer_build_budgets[buffer_index] != copied_build_budgets) {
-                next->builds = *copied_build_budgets;
-                if (buffer_index != economy_buffers.size()) buffer_build_budgets[buffer_index] = copied_build_budgets;
-            }
+            next->build_publication = copied_build_budgets;
             next->build_tasks_complete = true;
         } else {
-            build_budgets_cached = false; copied_build_budgets.reset(); next->builds.clear();
-            if (buffer_index != economy_buffers.size()) buffer_build_budgets[buffer_index].reset();
+            build_budgets_cached = false; copied_build_budgets.reset();
         }
         economy_revision = revision; economy_tick = tick; last_economy = next;
         economy_engine_revision = engine_revision; economy_production_revision = production_revision;
@@ -187,19 +219,32 @@ public:
         return copied ? world->bind_economy_runtime(std::move(copied).value()) : core::Result<void>::failure(copied.error());
     }
 
+    core::Result<void> publish_freestore() {
+        return providers.publish_freestore
+            ? providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *setup->executor) : core::Result<void>::success();
+    }
+
+    // The execution copy is archival. Readers use their player's native pool and
+    // Engine reservations; copy changed archival rows only after the Lua/native commit.
     core::Result<void> synchronize_reservations() {
-        auto state = retained;
+        gc_profile::Scope profile_scope(gc_profile::Phase::prepare_reservations);
+        std::optional<ga::ExecutionRetainedState> state;
         std::map<sim::EntityId, std::uint64_t> reservations;
+        const bool fixture = !pool->pool->qualified;
         for (const auto& selection : setup->lifecycle.players) {
             // Engine initialization precedes fresh route initialization.
-            if (!state.contains(selection.player)) continue;
+            const auto row = retained.find(selection.player);
+            if (row == retained.end()) continue;
             auto copied = engine->galactic_execution_reservations(selection.player);
             if (!copied) return core::Result<void>::failure(copied.error());
-            state.at(selection.player).reservations = std::move(copied).value();
-            for (const auto& [object, plan] : state.at(selection.player).reservations)
+            if (row->second.reservations != copied.value()) {
+                if (!state) state = retained;
+                state->at(selection.player).reservations = copied.value();
+            }
+            if (fixture) for (const auto& [object, plan] : copied.value())
                 if (!reservations.emplace(object, plan).second) return absent<void>("unique execution reservation owner");
         }
-        if (state != retained) if (auto replaced = execution->replace_retained(std::move(state)); !replaced) return replaced;
+        if (state) if (auto replaced = execution->replace_retained(std::move(*state)); !replaced) return replaced;
         // Qualified membership and reservation lifetime belong to NativeActions.
         // E retains its own Engine associations; its copied map cannot reseed a pool.
         if (!pool->pool->qualified && pool->pool->reservations != reservations) {
@@ -210,32 +255,64 @@ public:
             ? providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *setup->executor) : core::Result<void>::success();
     }
 
-    core::Result<void> publish_routes(const sim::PartitionExecutor& executor) {
-        auto published = connectivity;
-        published.execution_routes.clear(); published.execution_available = !routes.empty();
+    std::shared_ptr<const ai::GalacticConnectivity> route_publication() {
+        bool changed = route_source != connectivity || route_publications.size() != routes.size();
+        for (auto at = route_publications.begin(); at != route_publications.end(); )
+            if (!routes.contains(at->first)) at = route_publications.erase(at); else ++at;
         for (const auto& [player, route] : routes) {
-            static_cast<void>(player);
-            published.execution_available = published.execution_available && route.available;
-            published.revision += route.revision;
-            published.execution_routes.insert(published.execution_routes.end(), route.rows.begin(), route.rows.end());
+            auto& memo = route_publications[player];
+            if (!memo.rows || memo.revision != route.revision || memo.source != route.rows.data()) {
+                memo.revision = route.revision; memo.source = route.rows.data();
+                memo.rows = std::make_shared<const std::vector<ai::GalacticExecutionRoute>>(route.rows);
+                changed = true;
+            }
         }
+        if (!changed && combined_routes) return combined_routes;
+        auto published = std::make_shared<ai::GalacticConnectivity>(*connectivity);
+        published->execution_routes.clear(); published->player_routes.clear();
+        published->execution_available = !routes.empty();
+        for (const auto& [player, route] : routes) {
+            published->execution_available = published->execution_available && route.available;
+            published->revision += route.revision;
+            published->player_routes.emplace(player, route_publications.at(player).rows);
+        }
+        route_source = connectivity; combined_routes = std::move(published);
+        return combined_routes;
+    }
+    core::Result<void> publish_routes(const sim::PartitionExecutor& executor) {
+        gc_profile::Scope profile_scope(gc_profile::Phase::publish_routes);
         const auto lifecycle = manager.lock();
         if (lifecycle) world->set_perception_period(lifecycle->service_periods()[static_cast<std::size_t>(ga::Service::perception)]);
-        return world->bind(galaxy->snapshot(), std::move(published), executor, galaxy->completed_tick(), galaxy->next_entity_id(),
+        return world->bind_publication(galaxy->snapshot(), route_publication(), executor, galaxy->completed_tick(), galaxy->next_entity_id(),
             lifecycle && lifecycle->perception_due(galaxy->completed_tick()));
     }
     core::Result<void> publish_refreshed_routes() {
-        std::vector<ai::GalacticExecutionRoute> published;
-        auto revision = connectivity.revision;
-        bool available = !routes.empty();
-        for (const auto& [player, route] : routes) {
-            static_cast<void>(player); revision += route.revision; available = available && route.available;
-            published.insert(published.end(), route.rows.begin(), route.rows.end());
-        }
-        return world->publish_execution_routes(available, revision, std::move(published));
+        const auto published = route_publication();
+        return world->publish_execution_route_generations(published->execution_available, published->revision, published->player_routes);
     }
-    core::Result<void> update_routes(ga::gc::PlayerId player, std::uint64_t frame, bool initialize) {
-        if (!active_executor) return absent<void>("admitted execution worker adapter");
+    core::Result<std::shared_ptr<const ai::GalacticConnectivity>> prepare_connectivity(
+        const ga::gc::GalacticSession& parent, const sim::PartitionExecutor& executor) {
+        if (providers.prepare_connectivity_publication)
+            return providers.prepare_connectivity_publication(parent, *world, *engine, executor);
+        auto prepared = providers.prepare_connectivity(parent, *world, *engine, executor);
+        using Result = core::Result<std::shared_ptr<const ai::GalacticConnectivity>>;
+        return prepared ? Result::success(std::make_shared<const ai::GalacticConnectivity>(std::move(prepared).value()))
+            : Result::failure(prepared.error());
+    }
+    // Standalone deadline phase: the caller supplies the prepass executor. No
+    // active service/partition is needed; run() uses the same seam in the current
+    // sequential player chain to retain its exact perception-read boundary.
+    core::Result<void> prepare_path_table(ga::gc::PlayerId player, std::uint64_t frame, const sim::PartitionExecutor& executor) {
+        const auto reads = world->owner_reads();
+        const auto route = routes.find(player);
+        if (route == routes.end()) return absent<void>("initialized execution finder");
+        if (route->second.next_refresh > frame) return core::Result<void>::success();
+        return update_routes(player, frame, false, executor);
+    }
+    core::Result<void> update_routes(ga::gc::PlayerId player, std::uint64_t frame, bool initialize, const sim::PartitionExecutor& executor) {
+        // Route writes validate archival reservations against the live Engine.
+        // A goal may have released its holds earlier in this barrier.
+        if (auto synchronized = synchronize_reservations(); !synchronized) return synchronized;
         auto source = providers.execution_input(player, *galaxy->snapshot(), *world, *engine, nullptr);
         if (!source) return core::Result<void>::failure(source.error());
         auto input = std::move(source).value();
@@ -264,11 +341,11 @@ public:
             if (found == players.end()) return absent<void>("execution player index");
             const auto count = static_cast<std::uint32_t>(std::count_if(players.begin(), players.end(), [](const auto& p) { return !p.human; }));
             if (auto initialized = ga::initialize_execution_matrix(staged, frame, count,
-                static_cast<std::uint32_t>(found - players.begin()), *active_executor, producer); !initialized) return initialized;
+                static_cast<std::uint32_t>(found - players.begin()), executor, producer); !initialized) return initialized;
             row.initialized = row.finder_present = true; row.maximum_distance = input.maximum_distance;
             row.node_order.clear(); for (const auto& planet : input.planets) row.node_order.push_back(planet.planet);
         } else {
-            auto refreshed = ga::publish_execution_routes(staged, frame, true, *active_executor, producer);
+            auto refreshed = ga::publish_execution_routes(staged, frame, true, executor, producer);
             if (!refreshed) return core::Result<void>::failure(refreshed.error());
             if (!refreshed.value()) return core::Result<void>::success();
         }
@@ -316,6 +393,7 @@ public:
         return core::Result<std::vector<ai::EvaluatedFundingTemplate>>::success(std::move(result));
     }
     core::Result<void> initialize(ga::gc::PlayerId player) override {
+        if (auto selected = select_native_player(player); !selected) return selected;
         const auto* account = world->account(player);
         if (!account || !initial.contains(player)) return absent<void>("initial template/account");
         auto result = funding->initialize(player, initial.at(player), account->credits);
@@ -323,7 +401,7 @@ public:
             initial.erase(player);
             const auto lifecycle = manager.lock();
             if (!active_scripts || !lifecycle) return absent<void>("fresh freestore host");
-            if (auto initialized = update_routes(player, galaxy->clock().galactic_frame, true); !initialized) return initialized;
+            if (auto initialized = update_routes(player, galaxy->clock().galactic_frame, true, *active_executor); !initialized) return initialized;
             const auto module = lifecycle->freestore(player);
             if (!module.empty()) {
                 // Player identities occupy the freestore instance domain; plans
@@ -339,14 +417,19 @@ public:
         }
         return result;
     }
-    core::Result<void> clear_equations(ga::gc::PlayerId player) override { return funding->clear_equations(player); }
+    core::Result<void> clear_equations(ga::gc::PlayerId player) override {
+        if (auto selected = select_native_player(player); !selected) return selected;
+        return funding->clear_equations(player);
+    }
     core::Result<void> apply_funding_writes(ga::gc::PlayerId player, const ga::TemplatePolicy& policy) override {
+        if (auto selected = select_native_player(player); !selected) return selected;
         auto rows = evaluate(player, policy);
         if (!rows) return core::Result<void>::failure(rows.error());
         for (const auto& row : rows.value()) if (auto applied = funding->apply_template(player, row); !applied) return applied;
         return core::Result<void>::success();
     }
     core::Result<void> apply_policy(ga::gc::PlayerId player, const ga::TemplatePolicy& policy, ga::PolicyWrite write) override {
+        if (auto selected = select_native_player(player); !selected) return selected;
         if (auto applied = engine->apply_galactic_policy(player, policy); !applied) return applied;
         if (write == ga::PolicyWrite::ordinary) return core::Result<void>::success();
         auto rows = evaluate(player, policy);
@@ -356,14 +439,12 @@ public:
         return core::Result<void>::success();
     }
     core::Result<void> run(const ga::ServiceInput& input, auth::ScriptScheduler& scripts) override {
+        if (auto selected = select_native_player(input.player); !selected) return selected;
         const auto reads = world->owner_reads();
-        if (auto synchronized = synchronize_reservations(); !synchronized) return synchronized;
+        if (auto published = publish_freestore(); !published) return published;
         if (input.service == ga::Service::execution) {
-            const auto route = routes.find(input.player);
-            if (route == routes.end()) return absent<void>("initialized execution finder");
-            // WGA-138: no input reads or refresh outside an admitted due service.
-            if (route->second.next_refresh <= input.clocks.mode)
-                if (auto refreshed = update_routes(input.player, input.clocks.mode, false); !refreshed) return refreshed;
+            if (!active_executor) return absent<void>("admitted execution worker adapter");
+            if (auto refreshed = prepare_path_table(input.player, input.clocks.mode, *active_executor); !refreshed) return refreshed;
             // WGA-405: execution assignment precedes cleanup/native landing.
             if (auto assigned = engine->service_galactic_system(input.player, input.service, scripts, sequence); !assigned) return assigned;
             const auto lifecycle = manager.lock();
@@ -392,16 +473,19 @@ public:
         }
         if (input.service != ga::Service::execution)
             if (auto serviced = engine->service_galactic_system(input.player, input.service, scripts, sequence); !serviced) return serviced;
-        return synchronize_reservations();
+        return core::Result<void>::success();
     }
     core::Result<void> finish_barrier(auth::ScriptScheduler& scripts) override {
+        // Deferred attaches and commands inherit every player layer. This is an
+        // explicit serial tail; its final publication follows after_service.
+        if (native_actions_barrier) if (auto tail = native_actions_barrier->begin_tail(); !tail) return tail;
         const auto reads = world->owner_reads();
         if (auto committed = engine->commit_galactic_events(scripts, sequence); !committed) return committed;
-        auto synchronized = synchronize_reservations();
         world->finish_perception_queries();
-        return synchronized;
+        return core::Result<void>::success();
     }
     core::Result<void> after_service(auth::ServiceReport& report) override {
+        if (native_actions_barrier) if (auto tail = native_actions_barrier->begin_tail(); !tail) return tail;
         const auto reads = world->owner_reads();
         if (auto serviced = engine->after_service(report); !serviced) return serviced;
         std::vector<auth::ScriptCommand> kept;
@@ -412,20 +496,30 @@ public:
             if (!committed) return core::Result<void>::failure(committed.error());
         }
         report.commands = std::move(kept);
-        return synchronize_reservations();
+        if (auto synchronized = synchronize_reservations(); !synchronized) return synchronized;
+        if (native_actions_barrier) {
+            auto committed = native_actions_barrier->commit(); native_actions_barrier.reset();
+            if (!committed) return committed;
+        }
+        return core::Result<void>::success();
     }
     core::Result<void> prepare(const sim::PartitionExecutor& executor, const ga::gc::GalacticSession& parent, const ga::gc::GalacticTick& tick) {
         const auto reads = world->owner_reads();
         gc_profile::Scope profile_scope(gc_profile::Phase::runtime_prepare);
-        if (providers.publish_freestore) {
-            if (auto published = providers.publish_freestore(*actions, *pool, *parent.snapshot(), executor); !published) return published;
-        } else {
-            auto copied = ga::copy_freestore(*parent.snapshot(), providers.freestore_types, executor);
-            if (!copied) return core::Result<void>::failure(copied.error());
-            pool->pool = std::make_shared<const ga::FreestorePool>(std::move(copied).value());
+        {
+            gc_profile::Scope freestore_scope(gc_profile::Phase::prepare_freestore);
+            if (providers.publish_freestore) {
+                if (auto published = providers.publish_freestore(*actions, *pool, *parent.snapshot(), executor); !published) return published;
+            } else {
+                auto copied = ga::copy_freestore(*parent.snapshot(), providers.freestore_types, executor);
+                if (!copied) return core::Result<void>::failure(copied.error());
+                pool->pool = std::make_shared<const ga::FreestorePool>(std::move(copied).value());
+            }
         }
-        if (auto synchronized = synchronize_reservations(); !synchronized) return synchronized;
-        auto prepared = providers.prepare_connectivity(parent, *world, *engine, executor);
+        auto prepared = [&] {
+            gc_profile::Scope connectivity_scope(gc_profile::Phase::prepare_connectivity);
+            return prepare_connectivity(parent, executor);
+        }();
         if (!prepared) return core::Result<void>::failure(prepared.error());
         connectivity = std::move(prepared).value();
         static_cast<void>(tick);
@@ -436,15 +530,15 @@ public:
 class Services final : public ga::Services {
 public:
     explicit Services(std::shared_ptr<Runtime> owner) : owner_(std::move(owner)) {}
-    core::Result<void> initialize(ga::gc::PlayerId p) override { return owner_->initialize(p); }
-    core::Result<void> clear_equations(ga::gc::PlayerId p) override { return owner_->clear_equations(p); }
-    core::Result<void> apply_funding_writes(ga::gc::PlayerId p, const ga::TemplatePolicy& v) override { return owner_->apply_funding_writes(p, v); }
-    core::Result<void> apply_policy(ga::gc::PlayerId p, const ga::TemplatePolicy& v, ga::PolicyWrite w) override { return owner_->apply_policy(p, v, w); }
+    core::Result<void> initialize(ga::gc::PlayerId p) override { return owner_->checked_native(owner_->initialize(p)); }
+    core::Result<void> clear_equations(ga::gc::PlayerId p) override { return owner_->checked_native(owner_->clear_equations(p)); }
+    core::Result<void> apply_funding_writes(ga::gc::PlayerId p, const ga::TemplatePolicy& v) override { return owner_->checked_native(owner_->apply_funding_writes(p, v)); }
+    core::Result<void> apply_policy(ga::gc::PlayerId p, const ga::TemplatePolicy& v, ga::PolicyWrite w) override { return owner_->checked_native(owner_->apply_policy(p, v, w)); }
     core::Result<void> run(const ga::ServiceInput& input, auth::ScriptScheduler& scripts) override {
-        return owner_->run(input, scripts);
+        return owner_->checked_native(owner_->run(input, scripts));
     }
-    core::Result<void> finish_barrier(auth::ScriptScheduler& s) override { return owner_->finish_barrier(s); }
-    core::Result<void> after_service(auth::ServiceReport& r) override { return owner_->after_service(r); }
+    core::Result<void> finish_barrier(auth::ScriptScheduler& s) override { return owner_->checked_native(owner_->finish_barrier(s)); }
+    core::Result<void> after_service(auth::ServiceReport& r) override { return owner_->checked_native(owner_->after_service(r)); }
 private:
     std::shared_ptr<Runtime> owner_;
 };
@@ -461,22 +555,62 @@ public:
     core::Result<auth::ServiceOptions> before_service(const sim::PartitionExecutor& executor,
         const ga::gc::GalacticSession& parent, const ga::gc::GalacticTick& tick, auth::ScriptScheduler& scripts) override {
         const auto reads = owner_->world->owner_reads();
+        const auto native_record_write = owner_->engine->native_record_scope();
+        auto cleanup = std::make_shared<NativeBarrierCleanup>(owner_);
         owner_->active_executor = &executor;
         owner_->actions->set_executor(&executor);
         if (auto prepared = owner_->prepare(executor, parent, tick); !prepared) return core::Result<auth::ServiceOptions>::failure(prepared.error());
         const ga::Clocks clocks{tick.completed_tick, parent.clock().galactic_frame};
+        if (auto begun = owner_->checked_native(owner_->begin_native_actions_barrier()); !begun)
+            return core::Result<auth::ServiceOptions>::failure(begun.error());
+        cleanup->barrier = owner_->native_actions_barrier.get();
         owner_->sequence = 0; // EventKey sequence is local to this synchronization barrier.
-        if (auto begun = owner_->engine->begin_galactic_barrier(*owner_->world, clocks, scripts, owner_->sequence,
-            owner_->setup->lifecycle.players, &executor); !begun) return core::Result<auth::ServiceOptions>::failure(begun.error());
+        core::Result<void> begun = [&] {
+            gc_profile::Scope begin_scope(gc_profile::Phase::barrier_begin);
+            return owner_->engine->begin_galactic_barrier(*owner_->world, clocks, scripts, owner_->sequence,
+                owner_->setup->lifecycle.players, &executor);
+        }();
+        if (!begun) {
+            owner_->native_actions_barrier.reset();
+            return core::Result<auth::ServiceOptions>::failure(begun.error());
+        }
         owner_->engine->set_galactic_funding(owner_->funding);
+        owner_->engine->defer_galactic_effects(true); // S9a: the players' engine effects commit once, at finish_barrier
+        if (owner_->native_actions_barrier) {
+            auto started = owner_->checked_native(owner_->native_actions_barrier->begin_players());
+            if (!started) return core::Result<auth::ServiceOptions>::failure(started.error());
+        }
         owner_->active_scripts = &scripts;
-        return manager_->before_service(executor, parent, tick, scripts);
+        auto options = owner_->checked_native(manager_->before_service(executor, parent, tick, scripts));
+        if (!options) return options;
+        // The bridge can return on scheduler refusal without after_service.
+        // Its local options retain this cleanup through both hooks and unwind.
+        // S9a: each AI player's scripts run as a chain of their own over their own immediate-effect shadow.
+        options.value().chain_of = [engine = owner_->engine](std::uint64_t instance) { return engine->galactic_chain_owner(instance); };
+        auto paced = std::move(options.value().host_paced);
+        options.value().host_paced = [paced = std::move(paced), cleanup = std::move(cleanup)](std::uint64_t instance) {
+            static_cast<void>(cleanup);
+            return paced && paced(instance);
+        };
+        return options;
     }
     core::Result<void> after_service(auth::ServiceReport& report) override {
-        auto result = manager_->after_service(report);
+        const auto native_record_write = owner_->engine->native_record_scope();
+        auto result = owner_->checked_native(manager_->after_service(report));
         owner_->active_executor = nullptr; owner_->actions->set_executor(owner_->setup->executor.get()); return result;
     }
 private:
+    struct NativeBarrierCleanup {
+        std::shared_ptr<Runtime> owner;
+        const ga::gc::GalacticSession::NativeActionBarrier* barrier{};
+        explicit NativeBarrierCleanup(std::shared_ptr<Runtime> runtime) : owner(std::move(runtime)) {}
+        ~NativeBarrierCleanup() {
+            if (owner->native_actions_barrier && owner->native_actions_barrier.get() != barrier) return;
+            owner->native_actions_barrier.reset();
+            owner->active_executor = nullptr;
+            owner->actions->set_executor(owner->setup->executor.get());
+        }
+    };
     std::shared_ptr<Runtime> owner_;
     std::shared_ptr<ga::Manager> manager_;
 };
@@ -696,7 +830,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
     using Prepared = checkpoint::GameLoadOptions::PreparedGalacticScripts;
     using Result = core::Result<Prepared>;
     if (!setup || !setup->executor || !setup->content) return absent<Prepared>("campaign content/executor");
-    if (!providers.execution_input || !providers.prepare_connectivity) return absent<Prepared>("B live connectivity and execution route inputs");
+    if (!providers.execution_input || (!providers.prepare_connectivity && !providers.prepare_connectivity_publication)) return absent<Prepared>("B live connectivity and execution route inputs");
     if (!providers.bind_actions) return absent<Prepared>("R2 native action/journal owner");
     if (!providers.prepare_battle || !providers.prepare_child_scripts) return absent<Prepared>("R4 retained listeners and child parent context");
     if (providers.freestore_types.empty()) return absent<Prepared>("original freestore type inventory");
@@ -910,8 +1044,8 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                         // B-U05: a load rebuilds the retained derived connectivity once, at this barrier,
                         // from archived rows. The next admitted service then runs its own producer cadence
                         // instead of spending it on the rebuild.
-                        if (!owner->providers.prepare_connectivity) return core::Result<void>::success();
-                        auto rebuilt = owner->providers.prepare_connectivity(*owner->galaxy, *owner->world, *owner->engine, *owner->setup->executor);
+                        if (!owner->providers.prepare_connectivity && !owner->providers.prepare_connectivity_publication) return core::Result<void>::success();
+                        auto rebuilt = owner->prepare_connectivity(*owner->galaxy, *owner->setup->executor);
                         if (!rebuilt) return core::Result<void>::failure(rebuilt.error());
                         owner->connectivity = std::move(rebuilt).value();
                         return core::Result<void>::success();
@@ -927,7 +1061,11 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
             if (!manager) return absent<void>("retained manager");
             if (auto bound = game.galactic_scripts()->set_ai_engine(std::make_shared<ScriptEngine>(runtime, manager)); !bound) return bound;
             if (runtime->providers.observe) runtime->providers.observe({runtime->engine, runtime->world, runtime->actions, installed.value(), std::move(digest_work), manager,
-                runtime->child_scripts.parent_queries, runtime->funding});
+                runtime->child_scripts.parent_queries, runtime->funding,
+                [weak](auto player, auto frame, const auto& executor) -> core::Result<void> {
+                    const auto owner = weak.lock();
+                    return owner ? owner->prepare_path_table(player, frame, executor) : absent<void>("path-table prepass owner");
+                }});
             return core::Result<void>::success();
         };
         return Result::success({{std::move(scripts).value(), std::move(story).value()}, std::move(install),

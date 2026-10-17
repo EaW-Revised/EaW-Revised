@@ -118,6 +118,9 @@ private:
     void write_report_scene(std::ostream& output);
     void stop(int exit_code);
     void close_active_modes();
+    // The in-game menu's Quit Game (or the campaign score's Main Menu): the running campaign is freed
+    // and the front end shows its main menu.
+    void leave_campaign_to_menu();
     // #1923: the skirmish Start shows the battle loading screen, then prepares the battle behind it
     // once the screen has drawn (EawrLoadingScreen::frames).
     void open_skirmish_loading();
@@ -149,6 +152,8 @@ private:
     std::unique_ptr<LanLobbyMode> lan_lobby_mode_;
     // `--eawr-galactic` (the galactic mode skeleton) is self-contained too.
     std::unique_ptr<GalacticMode> galactic_mode_;
+    // The front end's campaign start puts the mode under this node; it goes with the mode.
+    godot::Node3D* galactic_host_{};
     // `--eawr-options` (the options screen, #2927) is self-contained too.
     std::unique_ptr<OptionsMode> options_mode_;
     // `--eawr-attract` (the main-menu demo battle, #2937) is self-contained too.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/net/session_monitor.hpp"
+#include "eawr/net/mesh_incident.hpp"
 #include "eawr/net/reconnect.hpp"
 #include "eawr/sim/seat.hpp"
 
@@ -9,6 +10,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -91,7 +93,9 @@ inline constexpr std::string_view agreement = "EAWR-NET-0501";
 inline constexpr std::string_view timeout = "EAWR-NET-0502";
 inline constexpr std::string_view reconnect_hold = "EAWR-NET-0503";
 }
-enum class DepartureReason : std::uint8_t { quit, disconnect, timeout };
+// pair_loss: an N-peer room mesh removed the seat because a pair could not be restored (docs/net-online-npeer.md, section 3).
+// Only a confirmed MeshIncident decision may propose it; every survivor must vote it.
+enum class DepartureReason : std::uint8_t { quit, disconnect, timeout, pair_loss };
 struct DepartureEvent {
     sim::SeatCommandKey key{};
     DepartureReason reason{DepartureReason::quit};
@@ -160,6 +164,10 @@ struct SessionOptions {
     std::function<core::Result<void>(std::uint64_t, std::span<const std::uint8_t>)> retain_timing_event;
     std::optional<ReconnectOptions> reconnect;
     std::optional<ResyncOptions> resync;
+    // N-peer room mesh (slice N4). Requires enable_departures. The host is seat 0. Pair losses between three or more
+    // seats go through the single-decider agreement instead of the closed-link scan, and the host's adaptive timing reads
+    // the per-pair minimum of the seats' reports.
+    std::optional<MeshIncidentOptions> mesh;
 };
 
 struct WaitingFor {
@@ -193,6 +201,10 @@ public:
         std::optional<std::uint64_t> input_epoch = std::nullopt);
     // Optional observation only; never changes admission or the sealed frontier.
     [[nodiscard]] std::uint64_t next_seal() const noexcept { return next_seal_; }
+    // Diagnostic frontiers: first unaccepted remote tick and latest locally
+    // sealed batch accepted by send(). A successful send is not a peer ACK.
+    [[nodiscard]] std::uint64_t received_through(PeerIndex peer) const { return received_through_.at(peer); }
+    [[nodiscard]] std::optional<std::uint64_t> last_sent_batch(PeerIndex peer) const { return last_sent_batch_.at(peer); }
     [[nodiscard]] std::uint64_t input_delay() const noexcept { return options_.input_delay; }
     [[nodiscard]] std::uint64_t input_horizon() const noexcept;
     // Trusted verified catch-up log only: apply before the adapter steps the encoded tick.
@@ -215,7 +227,16 @@ public:
         if (options_.reconnect) options_.reconnect->seat_tokens.clear();
         reconnect_available_ = false;
     }
+    [[nodiscard]] std::optional<PeerIndex> connection_lost_peer() const noexcept { return connection_lost_peer_; }
     [[nodiscard]] const std::optional<core::Diagnostic>& reconnect_notice() const noexcept { return reconnect_notice_; }
+    // Pair-loss incidents of the room mesh, oldest first and bounded: restored, departure and leave results. A departure
+    // names the removed seats and, for each, the seats it could not reach; a leave carries the typed EAWR-NET-1778..1782.
+    [[nodiscard]] const std::vector<MeshIncidentResult>& mesh_results() const noexcept { return mesh_results_; }
+    [[nodiscard]] bool mesh_running() const noexcept { return mesh_ && mesh_->running(); }
+    [[nodiscard]] std::uint64_t mesh_incident_id() const noexcept { return mesh_ ? mesh_->incident() : 0; }
+    // Adaptive timing proposals pause while the host is gone or a pair-loss incident is running. Changes already agreed for
+    // future ticks still apply; a returning host resumes the policy (EAWR-NET-1786 is the notice code).
+    [[nodiscard]] bool timing_frozen() const noexcept;
     // Record agreed session-control bytes BEFORE stepping tick. Admission-policy
     // owners retain the original immutable event, including its activation tick.
     [[nodiscard]] core::Result<void> retain_reconnect_control(std::uint64_t tick,
@@ -290,6 +311,16 @@ private:
     void disable_reconnect(std::string message);
     void reconnect_notice(std::string_view code, std::string message);
     [[nodiscard]] core::Result<void> report_replay_progress(std::uint64_t tick);
+    [[nodiscard]] core::Result<void> service_mesh(std::uint64_t now_ms, bool receive_drained);
+    [[nodiscard]] core::Result<void> send_mesh_control(PeerIndex peer, const std::vector<std::uint8_t>& frame);
+    [[nodiscard]] core::Result<void> restore_mesh_controls(PeerIndex peer);
+    [[nodiscard]] core::Result<void> queue_mesh_departure(const Received& received, bool& queued);
+    [[nodiscard]] MeshSeats mesh_voters() const noexcept;
+    // The agreed active set of the pair-loss incident: the voters minus every seat that is leaving by an ordinary departure
+    // (its quit batch arrived, or a timeout/disconnect agreement names it). Every seat has received a quitter's batch before
+    // it can see the quitter's link close, so all seats leave it out at the same point of their own streams.
+    [[nodiscard]] MeshSeats mesh_active() const noexcept;
+    [[nodiscard]] bool mesh_excluded(PeerIndex peer) const noexcept { return (mesh_removed_ & mesh_seat(peer)) != 0; }
     [[nodiscard]] core::Result<void> receive_resync(const Received& received);
     [[nodiscard]] core::Result<bool> service_resync();
     [[nodiscard]] core::Result<void> start_resync(std::uint64_t epoch, std::uint64_t tick);
@@ -333,8 +364,10 @@ private:
         std::optional<std::uint64_t> cutoff;
         std::uint64_t since_ms{};
         bool reconnect_expired{};
+        bool pair_loss{};
         std::uint64_t reconnect_epoch{};
     };
+    [[nodiscard]] core::Diagnostic connection_loss(PeerIndex peer, std::string_view cause);
     [[nodiscard]] core::Result<PumpResult> fail(core::Diagnostic diagnostic);
     SessionAdapter* adapter_{};
     std::unique_ptr<SessionAdapter> owned_adapter_;
@@ -342,9 +375,27 @@ private:
     std::vector<PeerSeat> seats_;
     SessionOptions options_;
     PeerIndex self_{};
+    std::vector<std::optional<std::uint64_t>> last_sent_batch_;
     std::uint64_t next_seal_{}, next_sequence_{};
     StageObserver stage_observer_;
     std::vector<std::uint64_t> received_through_;
+    std::size_t mesh_tail_bytes_{};
+    bool mesh_tail_unavailable_{};
+    std::uint64_t mesh_monitor_retry_ms_{};
+    std::map<PeerIndex, std::uint64_t> mesh_monitor_generation_;
+    struct MeshReplay {
+        MeshReplay(std::uint64_t edge, std::uint64_t tick) : initial_generation(edge), generation(edge), cursor(tick) {}
+        std::uint64_t initial_generation{}, generation{}, cursor{};
+        std::deque<std::vector<std::uint8_t>> controls;
+        std::size_t bytes{};
+    };
+    std::map<PeerIndex, MeshReplay> mesh_replay_;
+    std::optional<std::pair<PeerIndex, std::uint64_t>> mesh_departure_ack_;
+    struct SettledMeshVotes {
+        std::vector<std::optional<std::uint64_t>> frontiers;
+        std::vector<DepartureReason> reasons;
+    };
+    std::map<PeerIndex, SettledMeshVotes> mesh_settled_votes_; // At most the roster's departed seats.
     std::vector<std::optional<std::uint64_t>> command_cursors_;
     std::map<std::uint64_t, std::vector<SeatInput>> pending_;
     std::map<std::uint64_t, std::map<PeerIndex, SealedBatch>> ready_;
@@ -353,6 +404,7 @@ private:
     std::optional<WaitingFor> monitor_wait_;
     std::optional<std::uint64_t> last_now_;
     std::optional<core::Diagnostic> failure_;
+    std::optional<PeerIndex> connection_lost_peer_;
     std::function<core::Result<void>(Received)> handler_;
     std::function<core::Result<void>(std::span<const sim::SeatCommandKey>)> departure_handler_;
     SessionMonitor* monitor_{};
@@ -365,6 +417,7 @@ private:
     std::size_t deferred_departure_bytes_{}, deferred_departure_frames_{};
     std::vector<bool> departed_;
     std::vector<bool> quit_in_batch_;
+    std::vector<bool> quit_seen_; // a received batch of this seat carries a departure command
     std::vector<std::map<std::uint64_t, SealedBatch>> recovery_;
     std::map<PeerIndex, DepartureEvent> agreed_departures_;
     std::optional<TimingAgreement> timing_;
@@ -398,6 +451,14 @@ private:
     std::vector<std::vector<std::uint8_t>> reconnect_log_;
     std::map<std::uint64_t, std::vector<std::vector<std::uint8_t>>> reconnect_controls_;
     std::optional<ResyncIncident> resync_;
+    std::unique_ptr<MeshIncident> mesh_;
+    MeshSeats mesh_removed_{};
+    std::deque<PeerIndex> mesh_pending_;
+    std::deque<Received> mesh_early_;
+    std::set<PeerIndex> mesh_early_senders_;
+    std::size_t mesh_early_bytes_{};
+    std::uint64_t mesh_early_since_ms_{};
+    std::vector<MeshIncidentResult> mesh_results_;
     std::uint64_t resync_epoch_{}, initial_input_delay_{};
     std::optional<std::uint64_t> refused_resync_epoch_;
     bool resync_staging_{};

@@ -357,6 +357,7 @@ GodotRenderer::LightingState MapMode::State::lighting_state(
     if (which == lighting::Policy::sh) {
         matrices = lighting::source_to_render(lighting::sph_light_all(environment));
         fill = lighting::source_to_render(lighting::sph_light_fill(environment));
+        state.ambient = {environment.ambient.r * environment.ambient.a, environment.ambient.g * environment.ambient.a, environment.ambient.b * environment.ambient.a};
         state.sun_diffuse = lighting::sun_diffuse(environment);
         const lighting::Vec3 sun = environment.lights[0].direction;
         toward = lighting::source_to_render(lighting::Vec3{-sun.x, -sun.y, -sun.z});

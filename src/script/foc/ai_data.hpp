@@ -76,6 +76,7 @@ struct Template {
 
 struct PlayerType {
     std::string name;
+    std::int32_t goal_set_extension{2}; // GS-30: authored GoalSetExtensionSize, engine default
     std::vector<std::string> function_sets; // upper case, in order
     std::vector<std::string> space_templates;
     std::vector<std::string> galactic_templates;

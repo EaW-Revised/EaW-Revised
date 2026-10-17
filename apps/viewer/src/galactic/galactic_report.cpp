@@ -71,7 +71,8 @@ bool GalacticMode::State::write_report() const {
     output << "}";
     output << ",\n  \"live_session\": {\"snapshots_presented\": " << snapshots_presented
            << ", \"native_ai_installed_at_start\": " << (options.restore_save ? "null" : native_ai_installed ? "true" : "false")
-           << ", \"submitted_orders\": " << submitted_orders;
+           << ", \"submitted_orders\": " << submitted_orders
+           << ", \"galactic_reveal\": " << (options.galactic_reveal ? "true" : "false");
     if (displayed_snapshot) {
         const auto& clock = displayed_snapshot->clock();
         output << ", \"session_tick\": " << clock.session_tick << ", \"galactic_frame\": " << clock.galactic_frame
@@ -79,7 +80,7 @@ bool GalacticMode::State::write_report() const {
                << ", \"fiscal_end\": " << clock.fiscal_end
                << ", \"pause_depth\": " << clock.pause_depth
                << ", \"strategic_speed_raw\": " << clock.strategic_speed.raw()
-               << ", \"snapshot_sha256\": " << json(displayed_snapshot->sha256());
+               << ", \"snapshot_sha256\": " << json(published_snapshot->sha256());
     }
     // Events belong to this displayed immutable snapshot, not a render-frame counter.
     output << ", \"snapshot_events\": [";
@@ -91,6 +92,14 @@ bool GalacticMode::State::write_report() const {
                << ", \"reason\": " << json(sim::galactic::to_string(event.reason)) << "}";
     }
     output << "]}";
+    output << ",\n  \"perf_overlay\": " << perf_report_json();
+    // Log-only: what the runtime installed, and its per-player activity counters.
+    output << ",\n  \"native_ai_players\": [";
+    for (std::size_t i = 0; i < native_ai_players.size(); ++i)
+        output << (i ? ", " : "") << "{\"player\": " << native_ai_players[i].player << ", \"faction\": "
+               << json(native_ai_players[i].faction) << ", \"player_type\": " << json(native_ai_players[i].player_type) << "}";
+    output << "]";
+    if (ai_activity && !options.all_ai_capture) output << ",\n  \"ai_activity\": " << capture_metrics.json();
     if (options.all_ai_capture) {
         output << ",\n  \"ai_proof\": " << capture_metrics.json() << ",\n  \"proof_capture_frames\": [";
         for (std::size_t i = 0; i < ai_capture_frames.size(); ++i) output << (i ? "," : "") << ai_capture_frames[i];
@@ -122,12 +131,38 @@ bool GalacticMode::State::write_report() const {
            << ", \"fact_rebuilds\": " << hud_fact_rebuilds
            << ", \"label_updates\": " << hud_label_updates
            << ", \"command_updates\": " << hud_command_updates << "}";
+    std::size_t corruption_effects{}, corruption_resources{}, corruption_reserved{}, corruption_refused{};
+    std::uint64_t corruption_particle_count{};
+    for (const auto& particles : corruption_particles) if (particles) {
+        corruption_effects += particles->live_effects(); corruption_resources += particles->resources();
+        corruption_particle_count += particles->particle_count();
+        corruption_reserved += particles->reserved_particles(); corruption_refused += particles->refused_effects();
+    }
     output << ",\n  \"corruption\": {\"attachments\": " << corruption_visuals.attachments.size()
            << ", \"connections\": " << corruption_visuals.connections.size()
-           << ", \"effects\": " << (corruption_particles ? corruption_particles->live_effects() : 0)
-           << ", \"resources\": " << (corruption_particles ? corruption_particles->resources() : 0)
-           << ", \"particles\": " << (corruption_particles ? corruption_particles->particle_count() : 0)
-           << ", \"mapping\": \"U-06: authored emitter, level mapping unavailable\"}";
+           << ", \"route_visits\": " << corruption_visuals.work().route_visits
+           << ", \"neighbor_visits\": " << corruption_visuals.work().neighbor_visits
+           << ", \"adjacency_rebuilds\": " << corruption_visuals.work().adjacency_rebuilds
+           << ", \"effects\": " << corruption_effects << ", \"resources\": " << corruption_resources
+           << ", \"particles\": " << corruption_particle_count
+           << ", \"reserved_particles\": " << corruption_reserved << ", \"refused_effects\": " << corruption_refused
+           << ", \"budget_per_owner\": 262144"
+           << ", \"line_effects\": " << (corruption_lines ? corruption_lines->live_effects() : 0)
+           << ", \"line_resources\": " << (corruption_lines ? corruption_lines->resources() : 0)
+           << ", \"line_particles\": " << (corruption_lines ? corruption_lines->particle_count() : 0)
+           << ", \"line_reserved_particles\": " << (corruption_lines ? corruption_lines->reserved_particles() : 0)
+           << ", \"line_refused_effects\": " << (corruption_lines ? corruption_lines->refused_effects() : 0)
+           << ", \"path_quads\": " << corruption_path_quads << ", \"mapping\": \"WGP-47..49\", \"parameters\": [";
+    for (std::size_t i = 0; content && i < corruption_visuals.attachments.size(); ++i) {
+        const auto& fact = corruption_visuals.attachments[i].fact;
+        if (i) output << ',';
+        const auto colour = galactic_view::corruption_path_colour(content->corruption_style, fact);
+        output << "{\"planet\":" << fact.planet << ",\"fraction\":" << fact.fraction
+            << ",\"brightness\":" << fact.brightness.value_or(1) << ",\"size\":" << fact.scale.value_or(1)
+            << ",\"energy\":" << fact.energy.value_or(1) << ",\"path_rgb\":["
+            << colour[0] << ',' << colour[1] << ',' << colour[2] << "]}";
+    }
+    output << "]}";
     output << ",\n  \"production_queues\": [";
     std::size_t queue_entries{};
     if (displayed_snapshot && displayed_snapshot->production()) for (const auto& planet : displayed_snapshot->production()->planets) {
@@ -366,6 +401,32 @@ bool GalacticMode::State::write_report() const {
            << ",\n  \"animation_time\": " << animation_time
            << ",\n  \"animation_updates\": " << animation_updates
            << ",\n  \"active_planet_alternate\": " << active_planet_alternate
+           << ",\n  \"alternate2_planets\": [";
+    for (std::size_t index = 0; index < undiscovered_planets.size(); ++index)
+        output << (index ? ", " : "") << undiscovered_planets[index];
+    output << "]"
+           << ",\n  \"shell_models\": [";
+    for (auto it = shell_planets.begin(); it != shell_planets.end(); ++it)
+        output << (it == shell_planets.begin() ? "" : ", ") << *it;
+    output << "]"
+           << ",\n  \"shell_drawn_planets\": [";
+    // Read back from each renderer's own applied visibility, not from the submit() decision.
+    std::set<galactic_view::ObjectId> drawn_shell;
+    const auto collect_shell = [&](const GodotRenderer& target) {
+        for (const auto& evidence : target.instance_evidence()) {
+            if (!evidence.visible) continue;
+            const auto alternate = asset_alternates.find(evidence.asset_id);
+            const auto object = instance_planets.find(evidence.entity_id);
+            if (alternate == asset_alternates.end() || alternate->second != 2 || object == instance_planets.end()
+                || !galaxy_planet_ids.contains(object->second)) continue;
+            drawn_shell.insert(object->second);
+        }
+    };
+    if (renderer) collect_shell(*renderer);
+    for (std::size_t index = 1; index < scenes.size(); ++index) if (scenes[index].renderer) collect_shell(*scenes[index].renderer);
+    for (auto it = drawn_shell.begin(); it != drawn_shell.end(); ++it)
+        output << (it == drawn_shell.begin() ? "" : ", ") << *it;
+    output << "]"
            << ",\n  \"animate_during_pause\": " << (content && content->animate_during_pause ? "true" : "false")
            << ",\n  \"scene_layers\": [";
     for (std::size_t index = 0; index < scenes.size(); ++index) {

@@ -84,6 +84,14 @@ class GalacticGroundRuntime(unittest.TestCase):
             # empty third orbit slot (q3). The press, move and release are the real native events.
             cell = "q1_0001" if action == "launch" else "q3_0001"
             end = self.center(next(row for row in initial["fleet_hud"]["controls"] if row["name"] == cell))
+        if action == "launch-move":
+            try:
+                from .test_viewer_galactic_fleet_drag_runtime import GalacticFleetDragRuntime
+            except ImportError:
+                from test_viewer_galactic_fleet_drag_runtime import GalacticFleetDragRuntime
+            destination = next(row for row in initial["planets"] if row["id"] == 102)
+            end = GalacticFleetDragRuntime.project(initial["camera"], destination["position"])
+            self.assertTrue(0 < end[0] < 1280 and 0 < end[1] < 720, end)
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-ground-native-"))
         report, capture, driver = [directory / name for name in ["report.json", "capture.png", "driver.gd"]]
         driver.write_text('''extends SceneTree
@@ -165,7 +173,7 @@ func _process(delta):
                 "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
                 "--eawr-font-cache", str(self.font_cache),
                 "--eawr-game-root", support.GAME_ROOT, "--eawr-report", str(report)]
-        if action not in {"land", "land-drag", "launch", "launch-slot"}:
+        if action not in {"land", "land-drag", "launch", "launch-slot", "launch-move"}:
             args += ["--eawr-galactic-paused", "yes"]
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--", *args],
@@ -356,6 +364,21 @@ func _process(delta):
                 self.assertNotIn(8001, objects, "the launched company stayed in the surface roster")
                 self.assertIn(8002, objects)
                 self.assertFalse(any(row["selected"] for row in ground["widgets"]))
+
+    def test_native_ground_drag_to_world_launches_then_moves(self):
+        data, initial = self.native("launch-move", "ground-launch-move")
+        ground = data["ground_hud"]
+        self.assertEqual(ground["launch_orders"], 1)
+        self.assertEqual(ground["launch"]["command"], "launch_fleet opcode 22")
+        self.assertEqual(ground["launch"]["units"], [8001])
+        self.assertEqual(ground["launch"]["path"], [101, 102])
+        self.assertEqual(ground["boxes"], 0)
+        self.assertEqual(data["live_session"]["submitted_orders"], 1)
+        self.assertNotIn(8001, [row["object"] for row in ground["widgets"]])
+        before = {row["fleet"] for row in initial["fleets"]}
+        created = [row for row in data["fleets"] if row["fleet"] not in before and row["owner"] == 1]
+        self.assertEqual(len(created), 1)
+        self.assertTrue((created[0]["transit"] and created[0]["destination"] == 102) or created[0]["planet"] == 102)
 
     def test_ground_drag_released_over_the_surface_or_rejected_target_issues_no_launch(self):
         # The same press and drag ending over a ground slot is the ordinary rectangle, not a launch.

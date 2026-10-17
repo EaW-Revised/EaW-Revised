@@ -432,6 +432,7 @@ void run_workers() {
         const eawr::sim::PartitionExecutor& delegate;
         mutable std::size_t save_phases{};
         mutable std::size_t save_partitions{};
+        mutable std::size_t sync_phases{};
         explicit SaveExecutor(const eawr::sim::PartitionExecutor& source) : delegate(source) {}
         std::size_t worker_count() const noexcept override { return delegate.worker_count(); }
         eawr::core::Result<void> execute(std::size_t count,
@@ -441,10 +442,20 @@ void run_workers() {
         eawr::core::Result<void> execute_phase(std::string_view name, std::size_t count,
             const std::function<void(std::size_t)>& partition) const override {
             if (name == "script-save") { ++save_phases; save_partitions += count; }
+            if (name == "script-sync-graphs") {
+                ++sync_phases;
+                expect(count == eawr::sim::tick_partition_count, "sync graph partitions are fixed");
+            }
             return delegate.execute_phase(name, count, partition);
         }
     };
     const auto serial_hash = first.scheduler->state_hash();
+    const auto serial_sync = first.scheduler->sync_hash();
+    const auto restore_scenario = [&] {
+        Session session = make();
+        expect(session.scheduler->load(bytes.value()).has_value(), "restore matching sync scenario");
+        return session;
+    };
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
         const eawr::platform::ThreadWorkerAdapter pool(workers);
         const SaveExecutor capture(pool);
@@ -457,11 +468,47 @@ void run_workers() {
         expect(capture.save_phases == (workers == 1 ? 0U : 2U)
             && capture.save_partitions == (workers == 1 ? 0U : 2U * eawr::sim::tick_partition_count),
             "24-instance parallel save: one partitioned phase per capture");
+        Session restored = restore_scenario();
+        const auto sync = restored.scheduler->sync_hash(capture);
+        expect(serial_sync && sync && sync.value() == serial_sync.value(),
+            "cold parallel sync equals serial bytes on " + std::to_string(workers) + " workers");
+        expect(restored.scheduler->sync_graph_encodes() == 24,
+            "joined sync captured every dirty sandbox before returning");
+        const auto warm = restored.scheduler->sync_hash(capture);
+        expect(warm && sync && warm.value() == sync.value() && restored.scheduler->sync_graph_encodes() == 24,
+            "warm parallel sync reuses every clean graph");
+        expect(capture.sync_phases == (workers == 1 ? 0U : 1U), "clean sync dispatches no phase");
+        const auto oracle = restored.scheduler->sync_hash(capture, true);
+        expect(oracle && sync && oracle.value() == sync.value() && restored.scheduler->sync_graph_encodes() == 48,
+            "parallel full graph oracle agrees with cached digest");
+        expect(capture.sync_phases == (workers == 1 ? 0U : 2U), "oracle partitions independent graphs");
+        Session serial = restore_scenario();
+        step(serial, inline_executor);
+        step(restored, pool);
+        const auto next = restored.scheduler->sync_hash(capture);
+        const auto serial_next = serial.scheduler->sync_hash();
+        expect(next && serial_next && next.value() == serial_next.value(),
+            "Lua mutation immediately after joined capture remains identical");
+        expect(restored.scheduler->save().value() == serial.scheduler->save().value(),
+            "save immediately after joined sync retains canonical bytes");
     }
+    struct ReverseExecutor final : eawr::sim::PartitionExecutor {
+        std::size_t worker_count() const noexcept override { return 8; }
+        eawr::core::Result<void> execute(std::size_t count,
+            const std::function<void(std::size_t)>& partition) const override {
+            while (count != 0) partition(--count);
+            return eawr::core::Result<void>::success();
+        }
+    };
+    Session reverse = restore_scenario();
+    const auto reverse_sync = reverse.scheduler->sync_hash(ReverseExecutor{});
+    expect(reverse_sync && serial_sync && reverse_sync.value() == serial_sync.value(),
+        "reverse partition order retains sync digest");
     struct RefusingExecutor final : eawr::sim::PartitionExecutor {
         std::size_t worker_count() const noexcept override { return 8; }
-        eawr::core::Result<void> execute(std::size_t,
-            const std::function<void(std::size_t)>&) const override {
+        eawr::core::Result<void> execute(std::size_t count,
+            const std::function<void(std::size_t)>& partition) const override {
+            if (count != 0) partition(count - 1);
             eawr::core::Diagnostic reason;
             reason.code = auth::codes::invalid_request;
             reason.message = "capture executor failed";
@@ -471,6 +518,11 @@ void run_workers() {
     const auto refused = first.scheduler->save(RefusingExecutor{});
     expect(!refused && refused.error().message == "capture executor failed",
         "parallel save propagates executor refusal");
+    Session cold = restore_scenario();
+    const auto refused_sync = cold.scheduler->sync_hash(RefusingExecutor{});
+    expect(!refused_sync && refused_sync.error().message == "capture executor failed"
+        && cold.scheduler->sync_graph_encodes() == 0, "sync executor refusal publishes no graph caches");
+    expect(cold.scheduler->sync_hash().value() == serial_sync.value(), "sync retry after refused phase is identical");
     const auto unchanged = first.scheduler->save();
     expect(bytes && unchanged && bytes.value() == unchanged.value(),
         "executor refusal leaves the scheduler unchanged");

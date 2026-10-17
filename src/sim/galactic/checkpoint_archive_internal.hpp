@@ -87,14 +87,15 @@ public:
     template <class A, class B> void value(std::pair<A, B>& output) { (*this)(output.first, output.second); }
     template <class T, std::size_t N> void value(std::array<T, N>& output) { for (auto& v : output) value(v); }
     template <class T, std::size_t N> void value(T (&output)[N]) { for (auto& v : output) value(v); }
-    std::uint64_t count() { std::uint64_t n{}; value(n); if (n > remaining() || n > byte_limit / 8U) throw Invalid("state count exceeds remaining byte budget"); return n; }
-    template <class T> void value(std::vector<T>& output) { const auto n = count(); allocation(n, sizeof(T)); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { T v{}; value(v); output.push_back(std::move(v)); } }
+    // Byte-wide elements (u8 blobs, strings) may use the whole byte budget; wider rows are bounded by an eighth of it.
+    std::uint64_t count(std::size_t limit = byte_limit / 8U) { std::uint64_t n{}; value(n); if (n > remaining() || n > limit) throw Invalid("state count exceeds remaining byte budget"); return n; }
+    template <class T> void value(std::vector<T>& output) { const auto n = count(sizeof(T) == 1U ? byte_limit : byte_limit / 8U); allocation(n, sizeof(T)); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { T v{}; value(v); output.push_back(std::move(v)); } }
     template <class K, class V> void value(std::map<K, V>& output) { const auto n = count(); allocation(n, sizeof(K) + sizeof(V) + 32U); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { K k{}; V v{}; (*this)(k, v); if (!output.empty() && !(output.rbegin()->first < k)) throw Invalid("unordered state map"); output.emplace(std::move(k), std::move(v)); } }
     template <class K, class V> void value(std::multimap<K, V>& output) { const auto n = count(); allocation(n, sizeof(K) + sizeof(V) + 32U); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { K k{}; V v{}; (*this)(k, v); if (!output.empty() && k < output.rbegin()->first) throw Invalid("unordered state multimap"); output.emplace(std::move(k), std::move(v)); } }
     template <class T> void value(std::set<T>& output) { const auto n = count(); allocation(n, sizeof(T) + 32U); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { T v{}; value(v); if (!output.empty() && !(*output.rbegin() < v)) throw Invalid("unordered state set"); output.insert(std::move(v)); } }
     template <std::size_t I = 0, class... T> void alternative(std::uint32_t tag, std::variant<T...>& output) { if constexpr (I < sizeof...(T)) { if (tag == I) { output.template emplace<I>(); value(std::get<I>(output)); } else alternative<I + 1>(tag, output); } else throw Invalid("unknown state variant"); }
     template <class... T> void value(std::variant<T...>& output) { std::uint32_t tag{}; value(tag); alternative(tag, output); }
-    void value(std::string& output) { const auto n = count(); allocation(n, sizeof(char)); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { std::uint8_t c{}; value(c); output.push_back(static_cast<char>(c)); } }
+    void value(std::string& output) { const auto n = count(byte_limit); allocation(n, sizeof(char)); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { std::uint8_t c{}; value(c); output.push_back(static_cast<char>(c)); } }
     template <class T> requires (!std::integral<T> && !std::is_enum_v<T>) void value(T& output) {
         // Host values permit 64 list levels; their containing owner records also
         // contribute archive frames. Keep the outer envelope separately bounded.

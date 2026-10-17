@@ -160,6 +160,7 @@ void Loader::link() {
             if (unit.cluster_bomb) unit.cluster_bomb->projectile_index = projectile_index(unit.cluster_bomb->bomb_type);
             for (const auto& projectile : unit.death_projectiles)
                 unit.death_projectile_indices.push_back(projectile_index(projectile));
+            if (!unit.retreat_self_destruct.empty()) unit.retreat_self_destruct_index = projectile_index(unit.retreat_self_destruct);
             for (auto& member : unit.members) member.craft_index = unit_index(member.craft);
             if (unit.spawner) {
                 for (auto& entry : unit.spawner->starting) entry.squadron_index = unit_index(entry.squadron);
@@ -290,6 +291,45 @@ core::Result<UnitTables> load_unit_tables(const LoadInput& input) {
         }
     }
     Loader(input, tables, report).run(types, obstacles);
+    for (auto& unit : tables.units) {
+        // WAB-36: a named target handler is resolved when activated; an unresolved row
+        // must not reject its whole unit. Keep every independently valid handler/profile.
+        std::erase_if(unit.abilities, [&](const auto& ability) {
+            using Kind = sim::tactical::AbilityKind;
+            using Special = sim::tactical::SpecialAbilityKind;
+            std::optional<Special> expected;
+            switch (sim::tactical::ability_kind(ability.type)) {
+            case Kind::energy_weapon: expected = Special::energy_weapon; break;
+            case Kind::tractor_beam: expected = Special::tractor_beam; break;
+            case Kind::leech_shields: expected = Special::leech_shields; break;
+            case Kind::concentrate_fire: expected = Special::concentrate_fire; break;
+            default: return false;
+            }
+            const auto handler = std::find_if(unit.special_abilities.begin(), unit.special_abilities.end(), [&](const auto& special) {
+                return special.kind == *expected && special.name == ability.gui_activated_ability_name;
+            });
+            if (handler != unit.special_abilities.end()) {
+                if (handler->style != sim::tactical::SpecialActivationStyle::user_input)
+                    report.note(unit.id, "GUI_Activated_Ability_Name", ability.gui_activated_ability_name,
+                        "WAB-36: named handler retained with its authored activation style");
+                return false;
+            }
+            report.note(unit.id, "GUI_Activated_Ability_Name", ability.gui_activated_ability_name,
+                "WAB-36: targeted ability row skipped because its named handler is unresolved (" + ability.type + ")");
+            return true;
+        });
+        for (const auto& ability : unit.abilities) {
+            if (!iequals(ability.type, "FOW_REVEAL_PING") || ability.spawned_projectile_index >= tables.projectiles.size()) continue;
+            const auto& spawned = tables.projectiles[ability.spawned_projectile_index];
+            if (!spawned.reveal_range) report.note(unit.id, "Spawned_Object_Type", spawned.id,
+                "WFP-02: spawn admitted without a bound REVEAL range");
+        }
+        for (const auto& special : unit.special_abilities) {
+            if (special.kind == sim::tactical::SpecialAbilityKind::concentrate_fire && special.target_speed_decrease.raw() != 0)
+                report.note(unit.id, "Target_Speed_Decrease_Percent", std::to_string(special.target_speed_decrease.raw()),
+                    "WHE-25: concentrate-fire speed contribution retained (Q24)");
+        }
+    }
     tables.unresolved = std::move(report.unresolved);
     tables.notes = std::move(report.notes);
     for (auto& [path, file] : report.inputs) tables.inputs.push_back(std::move(file));

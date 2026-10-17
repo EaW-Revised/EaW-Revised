@@ -1,4 +1,6 @@
 #pragma once
+#include "native_income_projection.hpp"
+#include "native_population_projection.hpp"
 
 #include "eawr/sim/galactic/session.hpp"
 #include "eawr/sim/galactic/income.hpp"
@@ -6,6 +8,7 @@
 #include "../../../third_party/entt/single_include/entt/entt.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -59,6 +62,9 @@ struct GatheredObject {
 class GalacticSession::Impl {
 public:
     GalacticSetup setup;
+    std::shared_ptr<const session_detail::NativePopulationSchema> native_population_schema;
+    std::shared_ptr<const IncomeSetup> native_income_schema;
+    std::shared_ptr<const FiscalSetup> native_fiscal_schema;
     std::optional<VictoryState> victory;
     bool victory_tail_deferred{}; // runtime owning mode dependency, never serialized
     void service_victory_tail(std::uint64_t tick, std::vector<GalacticEvent>& events);
@@ -70,6 +76,7 @@ public:
     std::optional<PlayerEconomySetup> economy; // live ledger; setup remains tick zero
     std::optional<ProductionSetup> production;
     TechnologyNoticeHandler technology_notice_handler;
+    FeedbackNoticeHandler feedback_notice_handler;
     [[nodiscard]] core::Result<std::int64_t> assign_technology(const TechnologyWrite&);
     std::optional<IncomeState> income;
     std::optional<EconomyCorruptionState> economy_corruption;
@@ -93,8 +100,9 @@ public:
     std::shared_ptr<const CorruptionMenu> publish_corruption_menu() const;
     core::Result<bool> begin_corruption(PlanetId, corruption_fixture::Type, math::Fixed);
     core::Result<void> finish_corruption_mission(std::uint64_t, CorruptionMissionState);
-    core::Result<void> service_corruption(const PartitionExecutor&);
-    core::Result<void> apply_corruption_completion(PlanetId, corruption_fixture::Type, corruption_fixture::Type, std::optional<PlayerId> = {});
+    core::Result<void> service_corruption(const PartitionExecutor&, std::size_t preceding_events);
+    core::Result<void> apply_corruption_completion(PlanetId, corruption_fixture::Type, corruption_fixture::Type,
+        std::optional<PlayerId> = {}, std::optional<std::size_t> preceding_events = {});
     core::Result<void> initialize_corruption();
     // WGCH-67/140..142: the shared live ruins owner; native effect 17 journals the public request.
     PlanetRuinsStoryHandler planet_ruins_story_handler;
@@ -153,7 +161,7 @@ public:
     mutable std::uint64_t income_gather_generation{}, income_sources_gathered{};
     mutable std::optional<IncomeSetup> gathered_income_inputs;
     std::uint64_t income_control_generation{1}; // derived; separate from physical source gather
-    struct IncomeSourceCandidate { EconomicSource source; bool fallback{}; };
+    using IncomeSourceCandidate = session_detail::NativeIncomeSourceCandidate;
     mutable std::vector<IncomeSourceCandidate> income_source_candidates;
     void invalidate_income_inputs() noexcept { ++income_input_generation; }
     [[nodiscard]] const IncomeSetup& live_income_inputs() const;
@@ -193,6 +201,7 @@ public:
     mutable std::shared_ptr<const std::vector<CensusObject>> published_production_originals;
     [[nodiscard]] std::span<const CensusObject> actor_inputs() const;
     void refresh_fleet_combat_skip(FleetId);
+    void notify_fleet_approach(FleetId, PlanetId, bool notify, std::size_t preceding_events);
     void refresh_containing_fleet_combat_skip(EntityId);
     std::vector<PopulationTotal> population;
     bool population_stale{true};
@@ -319,11 +328,19 @@ public:
     [[nodiscard]] StateHash refresh_hash(GalacticTick::Work* work = nullptr);
     void verify_hash() const;
     std::shared_ptr<const GalacticSnapshot> snapshot;
+    // Diagnostic ownership flag, never a simulation input or archive field.
+    std::atomic<bool> native_barrier_active{};
+    // Only the ordered replay of a fully prepared AI barrier may substitute
+    // logical publications. Callbacks already consumed their staged views.
+    std::shared_ptr<const GalacticSnapshot> native_commit_publication;
+    mutable std::uint64_t native_commit_publications{};
     mutable std::shared_ptr<const EconomyInputGeneration> economy_input_generation =
         std::make_shared<const EconomyInputGeneration>();
     mutable std::shared_ptr<const EconomyInputGeneration> published_economy_input_generation;
     mutable std::shared_ptr<const std::vector<ObservedBlackMarketMenu>> published_black_market_menus;
     mutable std::shared_ptr<const std::vector<AbilityResult>> published_ability_results;
+    mutable std::shared_ptr<const std::vector<LiveCorruptionTransition>> published_corruption_transitions;
+    mutable std::array<std::uint64_t, 3> corruption_publication_key{};
     mutable std::shared_ptr<const CorruptionMenu> published_corruption_menu;
     mutable std::shared_ptr<const HeroActionMenus> published_hero_action_menus;
     mutable std::array<std::uint64_t, 5> black_market_publication_key{};
@@ -360,6 +377,8 @@ public:
         bool& admission_ran);
     void execute_launch(const GameCommand& command, std::uint64_t tick, std::vector<GalacticEvent>& events,
         bool pending_local_conflict);
+    void execute_launch_fleet(const GameCommand& command, std::uint64_t tick, std::vector<GalacticEvent>& events,
+        bool pending_local_conflict);
     MovementAccessProvider movement_access_provider;
     std::uint64_t movement_access_generation{std::numeric_limits<std::uint64_t>::max()};
     [[nodiscard]] core::Result<void> service_movement(std::span<const session_detail::GatheredObject> gathered,
@@ -378,6 +397,7 @@ public:
     [[nodiscard]] std::vector<std::uint8_t> encode_section(StateSection section) const;
     // Owner-thread publication only: const authoritative reads may rebuild the
     // mutable derived projection cache. Never call from partition workers.
+    [[nodiscard]] std::shared_ptr<const GalacticSnapshot> publish_native_snapshot(std::vector<GalacticEvent> events) const;
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> make_snapshot(std::vector<GalacticEvent> events,
         const PartitionExecutor* executor = nullptr) const;
 };

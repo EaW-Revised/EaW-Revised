@@ -74,6 +74,7 @@ void SpacePopulation::write_report(std::ostream& output) const {
            << map_placements_ << ", \"composed\": " << roles[scene::SpaceRole::drawn]
            << ", \"scene_sha256\": " << json(scene_ ? scene_->scene_sha256 : "");
     if (!options_.placed_ships.empty()) output << ", \"placed_ships\": " << options_.placed_ships.size();
+    if (!options_.placed_ships.empty()) output << ", \"backdrop_ships\": " << std::count(backdrop_ships_.begin(), backdrop_ships_.end(), true);
     if (!live_decisions_.empty() && std::any_of(options_.placed_ships.begin(), options_.placed_ships.end(),
             [](const Options::PlacedShip& ship) { return ship.live_entity != 0; })) {
         // Auxiliary models are live ships too, counted apart from

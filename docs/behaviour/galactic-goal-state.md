@@ -21,8 +21,10 @@ little-endian integer words; Fixed and Number values retain their raw words.
 Strings, vectors and maps are length framed, with strictly ascending map keys.
 The component retains:
 
-- initialization, seed and synchronized RNG; frame/event/order sequences and
-  next goal, target, potential/running plan, TaskForce and instance IDs;
+- initialization, seed and the engine's synchronized RNG; frame/event/order sequences and
+  the engine-wide ID counters. Each galactic player also retains its own synchronized
+  stream, its identity slot and its next target, TaskForce, plan (potential and running share
+  one counter) and instance numbers (GFS-A21/A23, component payload version 13);
 - selected player/type, raw difficulty values, policy priorities, ordered
   functions/targets, proposal cursor/quota/sleep/maintenance, proposal/exclusion
   counts and blockers, proposed/active goals and potential selections;

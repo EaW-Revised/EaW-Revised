@@ -188,7 +188,7 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
         if (!plan.conflict.station) {
             const auto id = allocate(); if (!id) return fail<SpaceEntryPlan>("station allocator exhausted");
             plan.conflict.station = *id; plan.conflict.station_type = station->galactic;
-            append(*station, record.defender, stations[station_index]->record, *id, true);
+            append(*station, station_side(record), stations[station_index]->record, *id, true);
         } else plan.placements.push_back({record.station, stations[station_index]->record, true, ++creation});
     }
     auto orbitals = markers(input.map, "Orbital Special Structure Position");
@@ -755,6 +755,25 @@ core::Result<SpaceFormationResult> form_space_entry(skirmish::SkirmishStart& sce
                 for (std::size_t col = 0; col < count; ++col) place(*transports[index++], math.add(start, math.mul(math.number(static_cast<std::int64_t>(col)), width)), depth);
                 depth = math.sub(depth, math.add(spacing.y, math.number(20)));
             }
+        }
+    }
+    // TSW-01: a tactical super weapon is repositioned once, at its first service, from the nearest enemy-owned
+    // target, wherever formation put it; the defending player's one stands at its attack distance.
+    {
+        for (const auto& placement : plan.placements) {
+            const auto force = std::find_if(plan.conflict.forces.begin(), plan.conflict.forces.end(), [&](const auto& f) { return f.id == placement.force; });
+            auto* object = force == plan.conflict.forces.end() ? nullptr : find(force->id);
+            const auto* type = object ? input.map.tables->find(object->type) : nullptr;
+            if (!type || !type->tactical_super_weapon) continue;
+            const auto side = std::find_if(input.sides.begin(), input.sides.end(), [&](const auto& s) { return s.player == force->owner; });
+            const auto targets = skirmish::tactical_super_weapon_targets(plan.map.placements, side == input.sides.end() ? std::string_view{} : std::string_view{side->faction});
+            if (!targets) return Result::failure(targets.error());
+            const auto started = skirmish::tactical_super_weapon_start(*type->tactical_super_weapon, object->state.position,
+                targets.value(), force->owner == plan.conflict.defender);
+            if (!started) return Result::failure(started.error());
+            object->state.position = started.value().position;
+            object->state.rotation = math.take(tt::yaw_rotation(started.value().yaw_degrees));
+            object->yaw_degrees = started.value().yaw_degrees;
         }
     }
     if (math.error) return Result::failure(*math.error);

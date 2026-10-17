@@ -1,4 +1,10 @@
 // WGA-25/38/42: stock definition/pacing data, independent of live world actions.
+#if defined(_MSC_VER) && __has_include(<hash_map>)
+#define _SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS
+#include <hash_map>
+#define EAWR_CATEGORY_MAP_ORACLE 1
+#endif
+
 #include "galactic_ai_plans.hpp"
 #include "galactic_ai.hpp"
 #include "ai_goal_state_stock.hpp"
@@ -32,7 +38,47 @@ const g::PlanDefinitionData& plan(const g::PlanCatalog& catalog, std::string_vie
     if (found == catalog.plans.end()) throw std::runtime_error("Missing plan " + std::string(name));
     return *found;
 }
+void category_order_contracts() {
+    const std::array<std::uint64_t, 7> collisions{16, 1, 8, 32, 2, 64, 16};
+    expect(g::galactic_contrast_category_order(collisions) == std::vector<std::uint64_t>{8, 16, 32, 64, 1, 2},
+        "native category collisions sort within first-encounter buckets and duplicates retain the first key");
+    constexpr auto wide = UINT64_C(0x8000000000000001);
+    const std::array<std::uint64_t, 9> growth{9, wide, 8, 16, 2, 3, 4, 32, 1};
+    expect(g::galactic_contrast_category_order(growth) == std::vector<std::uint64_t>{9, 1, wide, 8, 16, 32, 2, 3, 4},
+        "ninth unique category regroups the retained map and compares full unsigned 64-bit keys");
+    expect(g::galactic_contrast_category_order({}).empty(), "empty authored category map remains empty");
+#ifdef EAWR_CATEGORY_MAP_ORACLE
+    // A separate library implementation checks the portable ordering at
+    // collisions and multiple growth boundaries. The original policy itself
+    // is qualified by WGA-448, not inferred from this compiler's library.
+    std::vector<std::uint64_t> extended(growth.begin(), growth.end());
+    for (std::uint64_t index = 0; index < 617; ++index) extended.push_back((index * 37) % 617);
+    for (const auto& keys : {std::vector<std::uint64_t>(collisions.begin(), collisions.end()), extended}) {
+        stdext::hash_map<std::uint64_t, bool> reference;
+        for (const auto key : keys) reference.emplace(key, true);
+        std::vector<std::uint64_t> expected;
+        for (const auto& [key, value] : reference) { (void)value; expected.push_back(key); }
+        expect(g::galactic_contrast_category_order(keys) == expected,
+            "portable category iteration agrees with an independent native container oracle across growth boundaries");
+    }
+#endif
+    eawr::script::foc::detail::Host host;
+    eawr::script::foc::AiType unit; unit.type_id = 10; unit.name = "UNIT";
+    host.setup.content.types = {unit}; host.types_by_name.emplace("UNIT", &host.setup.content.types.front());
+    g::PlanDefinitionData authored; authored.name = "ORDERED"; authored.module = "ordered.lua";
+    authored.goals = {"ONE"}; authored.teams = {{"Main", {"Unit = 1"}}};
+    for (const auto key : collisions) {
+        const auto name = "K" + std::to_string(key); host.setup.content.categories.emplace(name, key);
+        authored.contrast.push_back({name, {{"UNIT", ai::real(authored.contrast.empty() ? 1 : 9)}}});
+    }
+    g::PlanCatalog catalog; catalog.plans = {authored};
+    const auto materialized = must(g::materialize_plan_catalog(host, catalog));
+    expect(materialized.plans.front().galactic_contrast_order == g::galactic_contrast_category_order(collisions)
+        && materialized.plans.front().galactic_contrast.at(16).front().weight == ai::real(1),
+        "materialization resolves authored keys to retained map order and preserves the first duplicate's weighted list");
+}
 void fixture() {
+    category_order_contracts();
     goal_state_contracts();
     const std::string script = R"LUA(
 function Base_Definitions()
@@ -43,6 +89,9 @@ function Base_Definitions()
  AdditionalCost = 3
  MinPlanCost = 99
  MaxPlanCost = 99
+ EnemyContrastTypes = {"Ground"}
+ FriendlyContrastTypes = {WeightedTypeList.Create()}
+ FriendlyContrastTypes[1].Parse({"Infantry", "Unit"}, {1, 3})
 end
 function DifficultyBasedMinPause(difficulty)
  if difficulty == "Easy" then return 11 end
@@ -59,6 +108,15 @@ function main() error("definition loading must not run a plan thread") end
     expect(definition.minimum_cost == ai::real(17) && definition.additional_cost == ai::real(3),
         "source plan globals MinimumCost and AdditionalCost are retained; invented MinPlanCost/MaxPlanCost globals are ignored");
     expect(definition.magic == false && !definition.allow_freestore && !definition.minimum_contrast, "absent differs from false/default data");
+    expect(definition.contrast.size() == 1 && definition.contrast.front().first == "GROUND"
+        && definition.contrast.front().second == std::vector<std::pair<std::string, ai::Real>>{{"INFANTRY", ai::real(1)}, {"UNIT", ai::real(3)}},
+        "definition retains its own ordered weighted list including exact-type overrides");
+    auto varied = modules;
+    varied.emplace("data/scripts/ai/other.lua", script + "\nlocal base = Base_Definitions\nfunction Base_Definitions() base(); FriendlyContrastTypes[1].Parse({'Vehicle'}, {7}) end");
+    const auto independent = must(g::load_plan_catalog({}, varied));
+    expect(plan(independent, "EXAMPLE").contrast == definition.contrast
+        && plan(independent, "OTHER").contrast.front().second == std::vector<std::pair<std::string, ai::Real>>{{"VEHICLE", ai::real(7)}},
+        "separate definition VMs preserve each plan's custom matrix without global fallback");
     expect(catalog.minimum_pause_seconds.at("Easy") == ai::real(11)
         && catalog.minimum_pause_seconds.at("Normal") == ai::real(9)
         && catalog.minimum_pause_seconds.at("Hard") == ai::real(7), "pause table comes from executed Lua, not production literals");

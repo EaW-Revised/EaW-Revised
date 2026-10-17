@@ -183,8 +183,22 @@ void test_menu_limits() {
         "WPR-63: a queued prerequisite does not expose the option");
     research.queued_allies = 0;
     const auto allied_prerequisite = ui::build_option_state(successor, read_counts);
-    expect(allied_prerequisite.visible && !allied_prerequisite.enabled,
-        "WPR-63: allied prerequisite exposes the card while preserving the existing own-only purchase gate");
+    expect(allied_prerequisite.visible && allied_prerequisite.enabled,
+        "WPR-33/63: a teammate who owns no copy may buy against an allied prerequisite");
+    // #3924: the shared station's level-up is one at a time for the whole team (Build_Limit_Current_For_All_Allies 1).
+    auto level_up = successor;
+    level_up.requirements.current_allies = 1;
+    tactical::ProductionCounts level_counts;
+    const auto read_level = [&](const tactical::TypeId type) {
+        return type == upgrade ? research : type == level_up.type ? level_counts : tactical::ProductionCounts{};
+    };
+    expect(ui::build_option_state(level_up, read_level).enabled, "#3924: teammate B may start the idle level-up");
+    level_counts.current_allies = level_counts.queued_allies = 1;
+    auto queued_level = ui::build_option_state(level_up, read_level);
+    expect(queued_level.visible && !queued_level.enabled,
+        "#3924: teammate A's queued level-up shows teammate B the card disabled");
+    level_counts = {};
+    expect(ui::build_option_state(level_up, read_level).enabled, "#3924: cancel releases the team reservation");
 }
 
 void test_pool() {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/data/xml.hpp"
+#include "eawr/data/ui/command_bar.hpp"
 #include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/audio/galactic.hpp"
 #include "eawr/presentation/renderer.hpp"
@@ -41,6 +42,15 @@ public:
     void build(audio::GalacticBuildCue cue, std::string_view type, bool local_builder);
     // An authored GUI SFX event by name (command-bar Click_SFX / Mouse_Over_SFX).
     void ui_sound(std::string_view name) { play_event(name); }
+    void advisor_urgent();
+    // WGP-182: presenter seams; the caller owns rebuild/reveal admission,
+    // including GFC-40 tutorial/cinematic suppression. Live publication: #2042.
+    void objectives_rebuilt(const data::ui::CommandBarComponent& icon, bool announce) {
+        if (announce) ui_sound(icon.text(data::ui::Field::click_sfx));
+    }
+    void teletype_revealed(const data::ui::CommandBarComponent& text) {
+        ui_sound(text.text(data::ui::Field::mouse_over_sfx));
+    }
     // WGP-181: an accepted local fleet move; member_types are the fleet's member type names.
     void fleet_move(std::span<const std::string> member_types);
     void outcome(bool exact_local_winner, bool participants_present,

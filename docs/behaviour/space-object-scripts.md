@@ -237,7 +237,7 @@ script runs. Library functions are Lua code, not missing engine bindings.
 | FoC API or library facility | Status at comparison base | Consumers / qualification |
 |---|---|---|
 | `Get_Game_Mode`, `Object.Get_Owner`, `Player.Is_Human`, `Player.Is_Enemy`, `Object.Is_Valid`, `Object.Get_Type`, `Object.Get_Position`, `Object.Get_Distance` | B | shared guards and object/owner queries |
-| `Object.Has_Ability`, `Object.Is_Ability_Ready`, `Object.Is_Ability_Active`, `Object.Is_Ability_Autofire`, `Object.Activate_Ability` | B; activation queues a world command | every ability script; next-world-step command boundary differs from direct original object-turn activation |
+| `Object.Has_Ability`, `Object.Is_Ability_Ready`, `Object.Is_Ability_Active`, `Object.Is_Ability_Autofire`, `Object.Activate_Ability` | B; activation produces a recorded use committed in the same object turn | every ability script; immutable staged rows replace per-object traversal (SOS-42) |
 | `Object.Get_Hull`, `Object.Get_Shield` | B | Falcon, Krayt, IG-2000 |
 | `FindDeadlyEnemy` | B with tactical AI goal host; otherwise diagnostic/nil | Falcon, missile shield, point defence, IG-2000 |
 | `Object.Get_Rate_Of_Damage_Taken` | P: returns constant zero | shield script; native damage-rate consumer is not this Lua binding |
@@ -319,7 +319,7 @@ existence without claiming those wider ties.
 |---|---|---|
 | SOS-40 | Add an object-script registry to the authoritative session, keyed by stable object identity and generation, with a distinct script-instance ID namespace. Attach one isolated instance for an admitted resolved per-object `Lua_Script`; make the additional type-script declarations a separate metadata registry. Load gameobject/library modules through the existing logical manifest and include their bytes/dependencies in the content digest. | actual stock space units attach once at start, reinforcement and spawn; absent/empty tags attach none; explicit diagnostics identify unsupported modules/APIs |
 | SOS-41 | On fresh start, load/initialize definitions, bind `Object`, and create `main` without running it until its first admitted pump. Retain service rate/reference time and Lua state. Preserve each script's actual ownership guards, not a blanket human-only or AI-only filter. | synthetic module checks globals at definitions versus main; AI/human, pause, completion and destruction cases; no duplicate main on restore |
-| SOS-42 | Reuse partitioned ScriptScheduler instances with immutable copied world inputs and disjoint staging output. Specify deterministic instance/event/command order using stable IDs and existing canonical keys, then ordered commit. Keep the current host/world phase as a named accepted seam until the frame-service programme supplies any separately approved replacement. Never add a serial per-object simulation loop to imitate original traversal. | identical effects and state hashes on 1/2/4/8 workers; work-count budget proportional to attached/due instances and indexed proximity candidates |
+| SOS-42 | Reuse partitioned ScriptScheduler instances with immutable copied world inputs and disjoint staging output. Specify deterministic instance/event/command order using stable IDs and existing canonical keys, then ordered commit. The object turn follows ability expiry/recharge, the damage-rate close and special-ability handlers, then precedes tracking and late impacts (WFO-22, FD-47). Due instances read one staged view; other objects observe their activations from the next tick, preserving the accepted staged-view seam. Due admission is prepared at the preceding barrier; initialized objects receive callbacks only in their next turn. Ability uses commit in the current tick; other verbs merge with barrier output by (issuer, sequence) and route next tick. Never add a serial per-object simulation loop to imitate original traversal. | identical effects and state hashes on 1/2/4/8 workers; work-count budget proportional to attached/due instances and indexed proximity candidates |
 | SOS-43 | Reuse same-instance callback references and proximity state. Supply real parent/count/type-rating, damage-rate and threat-centre APIs only for the scripts admitted in a slice. Put callback lists, sample sets, coroutine slots, service reference and pending commands into existing canonical persistence/hash state. | interrupted versus uninterrupted save/load before due pump, after sample and before command application; stable callback identity and no extra event/use |
 | SOS-44 | Retire a native substitute only in the same slice that makes its Lua replacement equivalent. Maintain one active consumer per effect. Object retirement stops service and drops callbacks/events before releasing its state; stale-generation handles cannot address a replacement object. | no double DEFEND/bomb/AI command; despawn/reinforcement identity reuse and pending deletion cases |
 | SOS-45 | Start with Falcon's guarded invulnerability and Vader's replenishment (plus real contained-count API), then the shared proximity family after parent/type-rating and squadron collection are qualified. Migrate existing substitutes independently; defer hero metadata, land markers, campaign props and unplaced power-ups. | stock Falcon/Vader owner-visible automation contracts; later MC30/Slave I/Krayt previous-sample contracts; retain FS-29/FD-47/UFS-27 seams |
@@ -426,3 +426,39 @@ errors still fault the attachment. Installed-chunk contracts cover this first
 empty sample followed by an IG-2000 request, and a renamed Krayt chunk attaches
 and acts with the same effects and hashes on 1/2/4/8 workers. These are lifecycle
 prerequisite witnesses, not retirement of the native consumers.
+
+### Object-turn host boundary
+
+The production host installs the provider when binding an engine, including a fresh live session,
+a retained campaign battle and a rebuilt checkpoint owner. The due set is derived from restored
+`ServiceRate`/`LastService`; it adds no continuation bytes. A failed bridge step is terminal for
+both the world and provider: further steps, script saves and script hashes refuse continuation.
+
+Both barrier publications and staged rows use the same unit-row projection. Turn proximity
+queries use the post-movement collection boxes and the existing three-axis overlap filter
+(FC-58/UFS-27); they read no fog. Ordinary squadron uses fan out to the actual ability holders,
+with all current holders gated before any are changed (AB-15). Ion-team and droid-team
+handlers remain unadmitted.
+Replenishment allocates in the turn; sparse births join the ordered unit commit after the existing
+indexed tracking inputs, before later impacts and commands, and first move the following tick.
+
+Completed-world dynamic-read audit: `EvaluatePerception`, `Evaluate_In_Galactic_Context`,
+`FindTarget` (including the reachable form), `Fire_Special_Weapon`, `Get_Build_Pad_Contents`,
+`Get_Credits`, `Get_Tech_Level`, player-filtered `Find_Nearest` (raw fog), and the plan-only
+`Withdraw_Units` fail with an object-turn
+tripwire diagnostic before entering their completed-world readers. Static type/profile/player
+configuration remains readable. The underlying tactical-world capability also guards every
+dynamic accessor independently of API names; a rejected transitive read aborts the
+provider before any effect commits. Position, health, damage rate, hardpoints, ability slots,
+formation state and proximity queries use staged rows. A binding fault discards that instance's
+entire turn output through the scheduler transaction. Engine ability kinds whose command
+handlers have not been admitted at the turn seam report an unsupported-API diagnostic for
+any module that calls them; no fixed module-name list hides that gap.
+
+The SOS-15/19/16/17/11 scripts now request their effects at the in-tick seam rather than the
+following command phase: Falcon invulnerability, Vader replenishment, Slave I bombs, Sundered
+Heart weakening and the Interdictor shield respectively. Native DEFEND, self-destruct, cluster
+bomb, point-defence and corrupt-systems ownership gates remain until their separate retirements
+(SOS-44). The production witness pins the first activation at tick 1 instead of tick 2, and checks
+1/2/4/8 plus reverse partitions, a checkpoint continued on a different worker count, deferred
+non-ability commands and world-only replay of the recorded uses.

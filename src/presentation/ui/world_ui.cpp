@@ -6,6 +6,7 @@
 #include <cmath>
 #include <charconv>
 #include <limits>
+#include <utility>
 
 namespace eawr::presentation::ui {
 
@@ -395,30 +396,64 @@ Rgb hardpoint_reticle_tint(const float health_fraction, const bool disabled) noe
     return {255, 32, 32};
 }
 
-std::string_view hardpoint_reticle_texture(const std::string_view hardpoint_type) noexcept {
-    struct Row {
-        std::string_view type;
-        std::string_view texture;
+HardpointReticleArtTable hardpoint_reticle_art(const vfs::Vfs& filesystem) {
+    HardpointReticleArtTable result;
+    const auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
+    if (!document) return result;
+    const auto trim = [](std::string_view text) {
+        const auto first = text.find_first_not_of(" \t\r\n");
+        if (first == std::string_view::npos) return std::string{};
+        return std::string(text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1));
     };
-    static constexpr Row rows[] = {
-        {"HARD_POINT_ENGINE", "i_hard_point_reticle_engines"},
-        {"HARD_POINT_SHIELD_GENERATOR", "i_hard_point_reticle_shield_gen"},
-        {"HARD_POINT_GRAVITY_WELL", "i_hard_point_reticle_generic"},
-        {"HARD_POINT_FIGHTER_BAY", "i_hard_point_reticle_docking_bay"},
-        {"HARD_POINT_TRACTOR_BEAM", "i_hard_point_reticle_generic"},
-        {"HARD_POINT_WEAPON_LASER", "i_hard_point_reticle_weapons"},
-        {"HARD_POINT_WEAPON_MISSILE", "i_hard_point_reticle_weapons"},
-        {"HARD_POINT_WEAPON_TORPEDO", "i_hard_point_reticle_weapons"},
-        {"HARD_POINT_WEAPON_ION_CANNON", "i_hard_point_reticle_weapons"},
-        {"HARD_POINT_WEAPON_MASS_DRIVER", "i_hard_point_reticle_weapons"},
-        {"HARD_POINT_WEAPON_SPECIAL", "i_hard_point_reticle_weapons"},
-        {"HARD_POINT_ENABLE_SPECIAL_ABILITY", "i_hard_point_reticle_generic"},
-        {"HARD_POINT_DUMMY_ART", "i_hard_point_reticle_generic"},
+    const auto upper = [](std::string text) {
+        for (char& c : text) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        return text;
     };
-    for (const Row& row : rows) {
-        if (row.type == hardpoint_type) return row.texture;
+    for (const auto& node : document.value().root.children) {
+        std::vector<std::string> HardpointReticleArt::* member{};
+        const auto name = upper(node.name);
+        if (name == "HARDPOINT_TARGET_RETICLE_ENEMY_TEXTURE") member = &HardpointReticleArt::enemy;
+        else if (name == "HARDPOINT_TARGET_RETICLE_ENEMY_TRACKED_TEXTURE") member = &HardpointReticleArt::enemy_tracked;
+        else if (name == "HARDPOINT_TARGET_RETICLE_FRIENDLY_TEXTURE") member = &HardpointReticleArt::friendly;
+        else if (name == "HARDPOINT_TARGET_RETICLE_FRIENDLY_TRACKED_TEXTURE") member = &HardpointReticleArt::friendly_tracked;
+        else if (name == "HARDPOINT_TARGET_RETICLE_FRIENDLY_REPAIRING_TEXTURE") member = &HardpointReticleArt::repairing;
+        else if (name == "HARDPOINT_TARGET_RETICLE_FRIENDLY_DISABLED_TEXTURE") member = &HardpointReticleArt::disabled;
+        else if (name == "HARDPOINT_TARGET_RETICLE_FRIENDLY_DISABLED_TRACKED_TEXTURE") member = &HardpointReticleArt::disabled_tracked;
+        if (member == nullptr) continue;
+        data::tag_trace::used(node);
+        const auto comma = node.raw_text.find(',');
+        if (comma == std::string::npos) continue;
+        const auto type = upper(trim(std::string_view(node.raw_text).substr(0, comma)));
+        if (type.empty()) continue;
+        std::vector<std::string> textures;
+        std::string_view rest(node.raw_text);
+        rest.remove_prefix(comma + 1);
+        while (true) {
+            const auto first = rest.find_first_not_of(", \t\r\n");
+            if (first == std::string_view::npos) break;
+            rest.remove_prefix(first);
+            const auto end = rest.find_first_of(", \t\r\n");
+            textures.emplace_back(rest.substr(0, end));
+            if (end == std::string_view::npos) break;
+            rest.remove_prefix(end);
+        }
+        result[type].*member = std::move(textures);
     }
-    return {};
+    return result;
+}
+
+std::string_view hardpoint_reticle_texture(const HardpointReticleArt& art, const float health,
+    const bool hostile, const bool tracked, const bool disabled, const bool repairing, const bool repair_phase) noexcept {
+    const auto& textures = hostile ? (tracked ? art.enemy_tracked : art.enemy)
+        : tracked ? (health < 1.0F && !repairing ? art.disabled_tracked : art.friendly_tracked)
+        : repairing ? (repair_phase ? art.repairing : art.friendly)
+        : disabled ? art.disabled : art.friendly;
+    if (textures.empty()) return {};
+    const bool single = !hostile && (tracked ? health < 1.0F && !repairing : !repairing && disabled);
+    const float fraction = std::isfinite(health) ? std::clamp(health, 0.0F, 1.0F) : 0.0F;
+    const auto index = single ? std::size_t{} : std::min(textures.size() - 1,
+        static_cast<std::size_t>(static_cast<double>(fraction) * static_cast<double>(textures.size())));
+    return textures[index];
 }
 
 std::optional<HardpointReticleSizes> hardpoint_reticle_sizes(const vfs::Vfs& filesystem) {

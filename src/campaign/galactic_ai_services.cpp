@@ -41,8 +41,11 @@ public:
         std::function<core::Result<void>()> publish)
         : funding_(std::move(funding)), validator_(std::move(validator)), publish_(std::move(publish)) {}
     std::optional<std::uint64_t> state_revision() const noexcept override { return funding_->state_revision(); }
+    core::Result<std::string> record_sync_hash(bool cold = false) const override { return core::Result<std::string>::success(funding_->record_sync_hash(cold)); }
+    std::size_t record_byte_upper_bound() const noexcept override { return funding_->record_byte_upper_bound(); }
     core::Result<void> validate_current() const { return validate(funding_->state()); }
     core::Result<ai::NativeState> capture() const override {
+        if (auto verified = verify_record_sync_hash(); !verified) return core::Result<ai::NativeState>::failure(verified.error());
         if (auto valid = validate(funding_->state()); !valid) return core::Result<ai::NativeState>::failure(valid.error());
         auto bytes = ai::encode_funding_state(funding_->state());
         if (!bytes) return core::Result<ai::NativeState>::failure(bytes.error());
@@ -180,10 +183,32 @@ core::Result<std::string> ComposedGalacticAiState::sync_hash() const {
     if (failure_) return core::Result<std::string>::failure(*failure_);
     ++digest_requests_;
     ai::NativeDigests digests;
-    std::size_t total_bytes{};
+    std::size_t total_bytes = 4 + std::string_view("eawr-galactic-ai-native").size() + 4 + 8;
+    const auto account_bytes = [&](std::size_t bytes, std::string_view name) {
+        const auto overhead = name.size() + 12;
+        if (total_bytes > ai::native_state_max_bytes || bytes > ai::native_state_max_bytes
+            || overhead > ai::native_state_max_bytes - bytes || total_bytes > ai::native_state_max_bytes - bytes - overhead)
+            total_bytes = ai::native_state_max_bytes + 1;
+        else total_bytes += bytes + overhead;
+    };
     const auto append = [&](std::string name, const Contributor& owner) -> core::Result<void> {
         auto& cache = sync_cache_[name];
         const auto revision = owner->state_revision();
+        auto records = owner->record_sync_hash();
+        if (!records) return core::Result<void>::failure(records.error());
+        if (!records.value().empty()) {
+            if (full_verification_enabled()) {
+                auto cold = owner->record_sync_hash(true);
+                if (!cold) return core::Result<void>::failure(cold.error());
+                if (records.value() != cold.value()) return fail<void>("native record sum differs from cold recompute: " + name);
+            }
+            if ((name == components[2] || name == components[3]) && cache.digest != records.value()) sync_validation_pending_ = true;
+            const auto upper = owner->record_byte_upper_bound();
+            account_bytes(upper ? upper : ai::native_state_max_bytes + 1, name);
+            cache.digest = std::move(records).value(); cache.revision = revision;
+            digests.emplace(std::move(name), cache.digest);
+            return core::Result<void>::success();
+        }
         if (!revision || cache.revision != revision || cache.digest.empty()) {
             auto saved = owner->capture();
             if (!saved) return core::Result<void>::failure(saved.error());
@@ -195,8 +220,13 @@ core::Result<std::string> ComposedGalacticAiState::sync_hash() const {
             cache.digest = core::sync_state_digest(bytes); cache.bytes = std::move(bytes); cache.revision = revision;
             ++cache.encodes;
         }
-        if (cache.bytes.size() > ai::native_state_max_bytes - total_bytes) return fail<void>("native sync byte budget exceeded");
-        total_bytes += cache.bytes.size();
+        if (full_verification_enabled()) {
+            auto saved = owner->capture(); if (!saved) return core::Result<void>::failure(saved.error());
+            if (saved.value().components.size() != 1 || !saved.value().components.contains(name)
+                || core::sync_state_digest(saved.value().components.at(name)) != cache.digest)
+                return fail<void>("external native sync digest differs from cold capture: " + name);
+        }
+        account_bytes(cache.bytes.size(), name);
         digests.emplace(std::move(name), cache.digest);
         return core::Result<void>::success();
     };
@@ -204,6 +234,9 @@ core::Result<std::string> ComposedGalacticAiState::sync_hash() const {
         if (auto copied = append(std::string(components[i]), owners_[i]); !copied) return core::Result<std::string>::failure(copied.error());
     for (const auto& [name, owner] : external_)
         if (auto copied = append(name, owner); !copied) return core::Result<std::string>::failure(copied.error());
+    if (total_bytes > ai::native_state_max_bytes) {
+        auto exact = capture(); if (!exact) return core::Result<std::string>::failure(exact.error());
+    }
     if (sync_validation_pending_) {
         if (auto valid = static_cast<const FundingContributor&>(*owners_[3]).validate_current(); !valid)
             return core::Result<std::string>::failure(valid.error());
@@ -212,13 +245,32 @@ core::Result<std::string> ComposedGalacticAiState::sync_hash() const {
     const auto result = ai::compose_native_sync_digests(digests);
     if (cached_sync_digest_ != result) { cached_sync_digest_ = result; ++sync_generations_; }
     if (full_verification_enabled()) {
-        auto saved = capture(); if (!saved) return core::Result<std::string>::failure(saved.error());
-        auto oracle = ai::native_sync_state_hash(saved.value()); if (!oracle) return oracle;
-        if (result != oracle.value()) return fail<std::string>("incremental native sync digest differs from full capture");
-        // The expensive canonical native oracle stays behind the existing switch.
+        // Independently rebuilt owner sums were compared above. Canonical
+        // checkpoint SHA remains a separate oracle behind the same switch.
         if (auto full = state_hash(); !full) return full;
     }
     return core::Result<std::string>::success(result);
+}
+core::Result<std::string> ComposedGalacticAiState::record_sync_hash(bool cold) const {
+    if (!cold) return sync_hash();
+    if (failure_) return core::Result<std::string>::failure(*failure_);
+    ai::NativeDigests digests;
+    const auto append = [&](std::string name, const Contributor& owner) -> core::Result<void> {
+        auto records = owner->record_sync_hash(true); if (!records) return core::Result<void>::failure(records.error());
+        if (records.value().empty()) {
+            auto saved = owner->capture(); if (!saved) return core::Result<void>::failure(saved.error());
+            if (saved.value().version != ai::native_state_version || saved.value().components.size() != 1 || !saved.value().components.contains(name))
+                return fail<void>("unexpected cold sync component: " + name);
+            records = core::Result<std::string>::success(core::sync_state_digest(saved.value().components.at(name)));
+        }
+        digests.emplace(std::move(name), std::move(records).value());
+        return core::Result<void>::success();
+    };
+    for (std::size_t i = 0; i < owners_.size(); ++i)
+        if (auto rebuilt = append(std::string(components[i]), owners_[i]); !rebuilt) return core::Result<std::string>::failure(rebuilt.error());
+    for (const auto& [name, owner] : external_)
+        if (auto rebuilt = append(name, owner); !rebuilt) return core::Result<std::string>::failure(rebuilt.error());
+    return core::Result<std::string>::success(ai::compose_native_sync_digests(digests));
 }
 core::Result<std::string> ComposedGalacticAiState::state_hash() const {
     ++digest_requests_;

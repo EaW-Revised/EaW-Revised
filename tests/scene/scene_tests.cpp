@@ -150,6 +150,26 @@ void write_catalog(const std::filesystem::path& root) {
 <GroundBuildable Name="EAWR_SCENE_DERIVED">
   <Variant_Of_Existing_Type>EAWR_SCENE_PROP</Variant_Of_Existing_Type>
 </GroundBuildable>
+<GroundBuildable Name="EAWR_SCENE_LAND_BASE">
+  <Land_Model_Name>Eawr_Scene_Prop.alo</Land_Model_Name>
+  <LandBehavior>REVEAL, CAPTURE_POINT</LandBehavior>
+</GroundBuildable>
+<GroundBuildable Name="EAWR_SCENE_LAND_BLANK">
+  <Variant_Of_Existing_Type>EAWR_SCENE_LAND_BASE</Variant_Of_Existing_Type>
+  <LandBehavior></LandBehavior>
+</GroundBuildable>
+<GroundBuildable Name="EAWR_SCENE_LAND_TBD">
+  <Variant_Of_Existing_Type>EAWR_SCENE_LAND_BLANK</Variant_Of_Existing_Type>
+  <LandBehavior>TBD</LandBehavior>
+</GroundBuildable>
+<GroundBuildable Name="EAWR_SCENE_LAND_REPLACED">
+  <Variant_Of_Existing_Type>EAWR_SCENE_LAND_TBD</Variant_Of_Existing_Type>
+  <LandBehavior>REVEAL</LandBehavior>
+</GroundBuildable>
+<GroundBuildable Name="EAWR_SCENE_LAND_ONLY_BLANK">
+  <Land_Model_Name>Eawr_Scene_Prop.alo</Land_Model_Name>
+  <LandBehavior></LandBehavior>
+</GroundBuildable>
 <GroundBuildable Name="EAWR_SCENE_PLAIN">
   <Model_Name>eawr_scene_plain.alo</Model_Name>
 </GroundBuildable>

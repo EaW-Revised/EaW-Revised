@@ -134,6 +134,27 @@ const EffectiveValue* EffectiveObject::value(const std::string_view tag_name) co
     return result;
 }
 
+std::optional<EffectiveValue> EffectiveObject::single(const std::string_view tag_name) const {
+    const EffectiveValue* last = nullptr;
+    for (const auto& item : values) if (ascii_iequals(item.value.name, tag_name)) last = &item;
+    if (last == nullptr) return std::nullopt;
+    if (!last->value.children.empty() || !retail::is_placeholder(last->value.raw_text)) {
+        tag_trace::used(last->value);
+        return *last;
+    }
+    // The loader read this occurrence to learn it is a placeholder; value() would mark it too.
+    tag_trace::used(last->value);
+    if (!last->inherited_real) return std::nullopt;
+    EffectiveValue result{last->inherited_real->value, ValueProvenance::inherited, last->inherited_real->source_object_id, std::nullopt, std::nullopt};
+    tag_trace::used(result.value);
+    return result;
+}
+
+std::string EffectiveObject::single_text(const std::string_view tag_name) const {
+    const auto result = single(tag_name);
+    return result ? trim(result->value.raw_text) : std::string{};
+}
+
 namespace {
 
 // #628: every definition of a resolved object's variant chain is part of what the loaders touch,
@@ -228,7 +249,7 @@ core::Result<EffectiveObject> Catalog::resolve_in(const std::string_view object_
             }
             auto& occurrences = groups[found->second].occurrences;
             if (tag.merge_mode == MergeMode::merge && tag.multiple_allowed) {
-                EffectiveValue value{tag, ValueProvenance::inherited, definition.id, std::nullopt};
+                EffectiveValue value{tag, ValueProvenance::inherited, definition.id, std::nullopt, std::nullopt};
                 if (chain.size() == 1) {
                     value.provenance = ValueProvenance::own;
                 } else if (&definition == &top) {
@@ -240,7 +261,16 @@ core::Result<EffectiveObject> Catalog::resolve_in(const std::string_view object_
             }
             XmlNode effective = tag;
             std::optional<XmlNode> displaced;
+            std::optional<InheritedValue> inherited_real;
             if (existed) displaced = occurrences.back().value;
+            if (existed && tag.merge_mode != MergeMode::merge && tag.children.empty() && retail::is_placeholder(tag.raw_text)) {
+                const auto& previous = occurrences.back();
+                if (!previous.value.children.empty() || !retail::is_placeholder(previous.value.raw_text)) {
+                    inherited_real = InheritedValue{previous.value, previous.source_object_id};
+                } else {
+                    inherited_real = previous.inherited_real;
+                }
+            }
             if (tag.merge_mode == MergeMode::merge && existed) {
                 effective.raw_text = token_merge(occurrences.back().value.raw_text, tag.raw_text);
             }
@@ -254,7 +284,7 @@ core::Result<EffectiveObject> Catalog::resolve_in(const std::string_view object_
             occurrences.assign(1, EffectiveValue{
                 std::move(effective), provenance, definition.id,
                 provenance == ValueProvenance::overridden || provenance == ValueProvenance::merged
-                    ? std::move(displaced) : std::nullopt});
+                    ? std::move(displaced) : std::nullopt, std::move(inherited_real)});
         }
     }
 

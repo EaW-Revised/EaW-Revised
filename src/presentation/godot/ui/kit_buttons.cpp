@@ -16,6 +16,13 @@ void EawrUiButton::set_text(const String& text) {
     queue_redraw();
 }
 
+void EawrUiButton::set_fit_to_rect(const bool enabled) {
+    if (fit_to_rect_ == enabled) return;
+    fit_to_rect_ = enabled;
+    update_minimum_size();
+    queue_redraw();
+}
+
 void EawrUiButton::set_forced_state(const KitState state) {
     forced_ = state;
     queue_redraw();
@@ -30,9 +37,10 @@ void EawrUiButton::_draw() {
     const Ref<Texture2D> left = state_icon(*this, "Button_Left", current);
     const Ref<Texture2D> middle = state_icon(*this, "Button_Middle", current);
     const Ref<Texture2D> right = state_icon(*this, "Button_Right", current);
-    // As retail draws it: the pieces keep their (scaled) texture height from
-    // the rect's top, whatever the `.rc` height (FoC in-game menu, 1280x720).
-    const float height = std::max({size_of(left).y, size_of(middle).y, size_of(right).y});
+    // Most controls retain their texture height. Bounded dialogs scale the strip
+    // into the assigned rectangle, including the end caps' aspect ratio.
+    const float height = fit_to_rect_ ? get_size().y
+        : std::max({size_of(left).y, size_of(middle).y, size_of(right).y});
     const Strip strip = strip_layout(Vector2(get_size().x, height > 0.0F ? height : get_size().y), left, right);
     draw_piece(*this, left, strip.left);
     draw_piece(*this, middle, strip.middle);
@@ -45,7 +53,7 @@ void EawrUiButton::_draw() {
 }
 
 Vector2 EawrUiButton::_get_minimum_size() const {
-    const float height = size_of(icon(*this, "Button_Middle")).y;
+    const float height = fit_to_rect_ ? 0.0F : size_of(icon(*this, "Button_Middle")).y;
     const KitTextStyle style = kit_text_style(*this, "Push_Button");
     if (style.font.is_null()) return {0.0F, height};
     const Vector2 text = style.font->get_string_size(text_, HORIZONTAL_ALIGNMENT_LEFT, -1.0F, style.size);

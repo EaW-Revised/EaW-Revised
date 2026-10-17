@@ -24,8 +24,8 @@ constexpr std::array<std::pair<std::string_view, std::string_view>, 9> original_
 
 void registry_contracts() {
     const auto registry = legacy::registry();
-    check(registry.size() == 12,
-        "the registry has the four WP-43 families, Tree, Grass, the bump colorize pair and the three DX8 mesh families");
+    check(registry.size() == 20,
+        "the registry includes skinned families and the missing-effect placeholder");
     const std::vector<std::tuple<std::string_view, std::string_view, std::string_view, bool, bool, bool>> expected{
         {"MeshAdditive.fx", "t0", "t0_p0", false, true, false},
         {"MeshAdditiveOffset.fx", "t0", "t0_p0", false, true, false},
@@ -39,6 +39,14 @@ void registry_contracts() {
         {"BatchMeshGloss.fx", "sph_t0", "sph_t0_p0", true, false, true},
         {"BatchMeshAlpha.fx", "sph_t0", "sph_t0_p0", false, true, true},
         {"MeshAlphaGloss.fx", "sph_t0", "sph_t0_p0", false, true, true},
+        {"eawr_missing_effect", "fallback", "opaque", true, false, true},
+        {"MeshAdditive2x.fx", "t0", "t0_p0", false, true, false},
+        {"MeshBumpSpecGlowColorize.fx", "sph_t2", "sph_t2_p0", true, false, true},
+        {"RSkinAdditive.fx", "t0", "t0_p0", false, true, false},
+        {"RSkinAlpha.fx", "sph_t0", "sph_t0_p0", false, true, true},
+        {"MeshShield.fxo", "t0", "t0_p0", false, true, false},
+        {"MeshShieldFarseer.fxo", "sph_t3", "sph_t3_p0", false, true, false},
+        {"Planet_Deathstar.fx", "sph_t3", "sph_t3_p0", true, false, true},
     };
     for (std::size_t index = 0; index < expected.size() && index < registry.size(); ++index) {
         const auto& [program, technique, pass_name, opaque, transparent, shadows] = expected[index];
@@ -79,6 +87,13 @@ void registry_contracts() {
     original.program = "MeshGloss.fx";
     check(legacy::receives_shadows(original), "original selectors keep the shadow-receiving rule");
     check(legacy::uniforms(original).empty(), "original selectors get no legacy/ uniforms");
+    auto missing = selector(legacy::missing_effect::family, RenderPass::opaque);
+    missing.bindings.push_back({"Color", eawr::assets::Vec4f{1.0F, 0.0F, 1.0F, 0.0F}});
+    missing.bindings.push_back({"BaseTexture", std::string("invented-not-loaded.dds")});
+    const auto fallback_uniforms = legacy::uniforms(missing);
+    check(fallback_uniforms.size() == 1
+              && std::get<std::array<float, 3>>(fallback_uniforms[0].value) == std::array<float, 3>{0.0F, 1.0F, 0.0F},
+          "ALDEFAULT-01 uses green independently of authored colour, alpha and texture names");
 }
 
 void source_contracts() {
@@ -105,7 +120,7 @@ void source_contracts() {
                 && source.find("eawr_compatibility_") == std::string::npos,
             name + " samples stored texels and writes a stored ALBEDO on every backend");
         const std::size_t writer = source.find(godot_backend::stored_albedo_writer);
-        const bool stored_product = source.find("ALBEDO = eawr_stored_albedo(stored_rgb);") != std::string::npos;
+        const bool stored_product = source.find("ALBEDO = eawr_stored_albedo(") != std::string::npos;  // MeshShieldFarseer scales the argument
         check(stored_product == (writer != std::string::npos)
                 && (writer == std::string::npos
                     || source.find(godot_backend::stored_albedo_writer, writer + 1) == std::string::npos),
@@ -117,12 +132,14 @@ void source_contracts() {
                 : fallback == source,
             name + " differs on the Compatibility fallback only by the compensated ALBEDO writer");
         // Grass draws its engine-billboarded cards as authored, so both sides.
-        const std::string_view cull = family.program == "Grass.fx" ? "cull_disabled" : "cull_back";
+        const std::string_view cull = (family.program == "Grass.fx" || family.program == "MeshShield.fxo")
+            ? "cull_disabled" : "cull_back";
         check(source.find(cull) != std::string::npos && source.find("depth_test_default") != std::string::npos,
             name + " keeps the renderer-baseline cull (Grass: none) and depth test");
         const bool lit = source.find("eawr_sph_r") != std::string::npos
             || source.find("eawr_sph_fill_r") != std::string::npos;
-        check(lit == family.receives_shadows, name + " receives shadows exactly when it reads engine light");
+        check((lit || family.program == legacy::missing_effect::family.program) == family.receives_shadows,
+            name + " receives shadows for engine lighting or the sourced missing-effect placeholder");
         const auto uniforms = family.uniforms(selector(family, admitted_pass(family)));
         check(!uniforms.empty(), name + " binds typed uniforms");
         for (const legacy::Uniform& item : uniforms) {
@@ -143,6 +160,66 @@ void source_contracts() {
             && additive.find("clamp(eawr_color * eawr_light_scale.rgb * eawr_unit_light_scale * eawr_light_scale.a, 0.0, 1.0)")
                 != std::string_view::npos,
         "MeshAdditive scrolls the first UV by TIME and saturates the per-vertex colour");
+    const std::string_view doubled = legacy::mesh_additive_2x::shader(RenderPass::transparent);
+    check(doubled.find("clamp(2.0 * eawr_vertex_color * texture(BaseTexture, eawr_scrolled_uv).rgb, 0.0, 1.0)")
+              != std::string_view::npos,
+        "doubled additive saturates the sampled product after vertex saturation");
+    auto scrolling = selector(legacy::mesh_additive_2x::family, RenderPass::transparent);
+    check(!legacy::reads_effect_time(scrolling), "zero-rate doubled additive needs no effect-clock writes");
+    scrolling.bindings.push_back({"UVScrollRate", eawr::assets::Vec4f{0.5F, 0.0F, 0.0F, 0.0F}});
+    check(legacy::reads_effect_time(scrolling), "scrolling doubled additive reads the existing scene clock");
+    const auto& glow_family = legacy::mesh_bump_spec_glow_colorize::family;
+    const auto glow = glow_family.shader(RenderPass::opaque);
+    check(glow.find("32.0 * specular_texel.a") != std::string_view::npos
+              && glow.find("eawr_emissive * normal_texel.a") != std::string_view::npos
+              && glow.find(" + eawr_emissive,") == std::string_view::npos,
+        "specular map alpha controls exponent, normal alpha controls pixel emission, fill has no emission");
+    auto glow_material = selector(glow_family, RenderPass::opaque);
+    check(legacy::binding_textures(glow_material).size() == 2,
+        "glow samples its own normal and specular texture bindings");
+    glow_material.bindings = {{"NormalTexture", std::string("normal.tga")},
+        {"SpecularTexture", std::string("specular.tga")}};
+    check(rejection(glow_material).empty(), "glow accepts both distinct sampler bindings");
+    glow_material.bindings.back().value = 0.5F;
+    check(!rejection(glow_material).empty(), "glow rejects a scalar specular texture");
+    auto skin_additive = selector(legacy::rskin::additive_family, RenderPass::transparent);
+    skin_additive.bindings = {{"UVScrollRate", eawr::assets::Vec4f{0.25F, 0.0F, 7.0F, 9.0F}},
+        {"eawr_effect_time", 2.5F}};
+    check(rejection(skin_additive).empty() && legacy::reads_effect_time(skin_additive)
+              && value_of<float>(legacy::uniforms(skin_additive), "eawr_effect_time") == 2.5F,
+        "skinned scrolling additive reads the supplied scene clock with the shared bindings");
+    auto skin_alpha = selector(legacy::rskin::alpha_family, RenderPass::transparent);
+    skin_alpha.bindings = {{"Diffuse", eawr::assets::Vec4f{0.25F, 0.5F, 0.75F, 0.375F}}};
+    check(rejection(skin_alpha).empty()
+              && value_of<std::array<float, 4>>(legacy::uniforms(skin_alpha), "eawr_diffuse")[3] == 0.375F
+              && !legacy::reads_effect_time(skin_alpha), "skinned alpha preserves authored material alpha");
+    auto shield = selector(legacy::mesh_shield::family, RenderPass::transparent);
+    check(!rejection(shield).empty(), "compiled shield diagnoses absent required texture bindings");
+    shield.bindings = {{"BaseTexture", std::string("energy.tga")},
+        {"WaveTexture", std::string("wave.tga")}, {"DistortionTexture", std::string("distortion.tga")}};
+    check(rejection(shield).empty() && legacy::reads_effect_time(shield),
+        "compiled shield has its three samplers and default scrolling subscribes to the scene clock");
+    for (const std::string_view rate : {"BaseUVScrollRate", "WaveUVScrollRate", "DistortUVScrollRate"}) {
+        shield.bindings.push_back({std::string(rate), 0.0F});
+    }
+    check(!legacy::reads_effect_time(shield), "three zero scroll rates require no clock writes");
+    shield.bindings[2].value = 0.5F;
+    check(!rejection(shield).empty(), "compiled shield rejects a scalar distortion sampler");
+    auto farseer = selector(legacy::mesh_shield::farseer_family, RenderPass::transparent);
+    farseer.bindings = {{"Atmosphere", eawr::assets::Vec4f{0.1F, 0.2F, 0.3F, 0.5F}},
+        {"AtmospherePower", 2.0F}};
+    check(rejection(farseer).empty() && !legacy::reads_effect_time(farseer)
+              && legacy::binding_textures(farseer).empty(), "texture-free rim has no scene-clock input");
+    auto planet = selector(legacy::planet_deathstar::family, RenderPass::opaque);
+    check(!rejection(planet).empty(), "Death Star requires all three auxiliary sampler bindings");
+    planet.bindings = {{"NormalTexture", std::string("normal.tga")},
+        {"CloudTexture", std::string("cloud.tga")}, {"CloudNormalTexture", std::string("cloud-normal.tga")}};
+    check(rejection(planet).empty() && legacy::reads_effect_time(planet),
+        "Death Star defaults to a scrolling cloud layer with distinct sampler bindings");
+    planet.bindings.push_back({"CloudScrollRate", 0.0F});
+    check(!legacy::reads_effect_time(planet), "zero cloud scroll requires no effect-clock writes");
+    planet.bindings.back().value = std::string("invalid.tga");
+    check(!rejection(planet).empty(), "cloud scroll is a finite scalar rather than a sampler");
     const auto& offset = legacy::mesh_additive_offset::shader_source;
     check(offset.find("render_mode unshaded, fog_disabled, blend_add, depth_draw_never,") != std::string_view::npos
             && offset.find("eawr_offset_uv = UV + eawr_uv_offset;") != std::string_view::npos
@@ -171,7 +248,18 @@ void selector_contracts() {
     for (const legacy::Family& family : legacy::registry()) {
         const std::string name(family.program);
         const RenderPass pass = admitted_pass(family);
-        const MaterialDescription exact = admissible(family, pass);
+        MaterialDescription exact = admissible(family, pass);
+        if (family.program == "MeshShield.fxo") {
+            exact.bindings = {{"BaseTexture", std::string("energy.tga")},
+                {"WaveTexture", std::string("wave.tga")}, {"DistortionTexture", std::string("distortion.tga")}};
+        }
+        if (family.program == "MeshBumpSpecGlowColorize.fx") {
+            exact.bindings.push_back({"SpecularTexture", std::string("specular.tga")});
+        }
+        if (family.program == "Planet_Deathstar.fx") {
+            exact.bindings.push_back({"CloudTexture", std::string("cloud.tga")});
+            exact.bindings.push_back({"CloudNormalTexture", std::string("cloud-normal.tga")});
+        }
         check(rejection(exact).empty(), name + " exact selector validates with its minimal bindings");
         check(legacy::shader_source(exact).has_value(), name + " exact selector selects its adapter source");
 

@@ -64,6 +64,10 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
         return core::Result<TacticalTick>::failure(detail::diagnostic(
             diagnostic_codes::worker_failure, "executor reports no workers"));
     }
+    if (impl_->object_turn_running) {
+        return core::Result<TacticalTick>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            "step during an object-turn provider call"));
+    }
     const auto tick = impl_->completed_tick;
     // Stopping at the replay tick limit keeps record() a valid replay v2.
     if (tick >= max_ticks) {

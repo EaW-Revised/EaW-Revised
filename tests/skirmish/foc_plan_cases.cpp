@@ -771,6 +771,7 @@ std::optional<Run> focused_goal(const Content& content, const std::string& goal,
 
 
 int native_continuation(const Content& content) {
+  for (const bool campaign : {false, true}) {
     std::vector<std::string> reference;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -783,33 +784,15 @@ int native_continuation(const Content& content) {
         auto world = make_world(initial);
         if (!world) { expect(false, world.error().message); return 1; }
         auto setup = content.ai; setup.journal = std::make_shared<foc::AiJournal>();
-        setup.perception.campaign_game = true;
+        setup.perception.campaign_game = campaign;
         if (workers == 1) {
-            auto skirmish_setup = setup; skirmish_setup.perception.campaign_game = false;
-            skirmish_setup.journal = std::make_shared<foc::AiJournal>();
-            auto skirmish_world = make_world(initial);
-            if (!skirmish_world) { expect(false, skirmish_world.error().message); return 1; }
-            auto skirmish = foc::create_session(std::move(skirmish_world).value(), skirmish_setup, content.modules);
-            if (!skirmish) { expect(false, skirmish.error().message); return 1; }
-            for (unsigned i = 0; i < 600; ++i) {
-                auto tick = skirmish.value().step(executor);
-                if (!tick) { expect(false, tick.error().message); return 1; }
-            }
-            auto skirmish_saved = skirmish.value().save_scripts();
-            auto base = foc::prepare_session(skirmish_setup, content.modules);
-            if (!skirmish_saved || !base) { expect(false, "skirmish save and base scheduler prepare"); return 1; }
-            const auto loaded = base.value().scripts.load(skirmish_saved.value().scheduler);
-            if (!loaded) { expect(false, loaded.error().message); return 1; }
-            expect(!skirmish_saved.value().native
-                && skirmish.value().script_state_hash().value() == base.value().scripts.state_hash().value(),
-                "skirmish with goals retains the base Lua-only save and hash");
             auto freestore_setup = setup; freestore_setup.bounds.reset(); freestore_setup.xml.clear();
             auto freestore_world = make_world(initial);
             if (!freestore_world) { expect(false, freestore_world.error().message); return 1; }
             auto freestore = foc::create_session(std::move(freestore_world).value(), freestore_setup, content.modules);
             if (!freestore) { expect(false, freestore.error().message); return 1; }
             expect(!freestore.value().save_scripts().value().native,
-                "campaign freestore without a goals owner retains its base save");
+                "goal-free freestore retains its base save in either mode");
         }
         auto running = foc::create_session(std::move(world).value(), setup, content.modules);
         if (!running) { expect(false, running.error().message); return 1; }
@@ -823,7 +806,7 @@ int native_continuation(const Content& content) {
         auto state = running.value().world().save_checkpoint_state();
         auto saved = running.value().save_scripts();
         if (!state || !saved) { expect(false, !state ? state.error().message : saved.error().message); return 1; }
-        expect(saved.value().native && saved.value().native->size() > 65, "WGS-66 archives the live tactical Engine beside freestore Lua");
+        expect(saved.value().native && saved.value().native->size() > 65, "GFS-A24 archives a live goal owner in standalone and campaign modes");
         const auto log = running.value().record();
         auto restore = [&](const auth::TacticalScriptSave& input, const std::map<std::string, std::string>& modules)
             -> eawr::core::Result<auth::ScriptedTacticalSession> {
@@ -844,9 +827,9 @@ int native_continuation(const Content& content) {
             return child;
         };
         if (workers == 1) {
-            setup.perception.campaign_game = false;
-            expect(!restore(saved.value(), content.modules), "campaign native state refuses a skirmish owner");
-            setup.perception.campaign_game = true;
+            setup.perception.campaign_game = !campaign;
+            expect(!restore(saved.value(), content.modules), "native state refuses a different tactical mode configuration");
+            setup.perception.campaign_game = campaign;
             auto missing = saved.value(); missing.native.reset();
             expect(!restore(missing, content.modules), "missing tactical native state refuses a fresh engine");
             auto malformed = saved.value(); malformed.native->pop_back();
@@ -871,9 +854,10 @@ int native_continuation(const Content& content) {
         }
         if (reference.empty()) reference = hashes;
         else expect(reference == hashes, "tactical native continuation agrees on 1/2/4/8 workers");
-        std::cout << "native continuation " << workers << " workers: " << saved.value().native->size()
+        std::cout << "native continuation " << (campaign ? "campaign " : "standalone ") << workers << " workers: " << saved.value().native->size()
             << " bytes at tick 600, 300 identical resumed ticks\n";
     }
+  }
     return failures == 0 ? 0 : 1;
 }
 

@@ -263,11 +263,14 @@ void WorldUiView::draw_reticles(const Frame& frame, const RID canvas_item) {
             const bool flashing = flash_ && flash_->entity == unit.entity && flash_->hardpoint == index;
             if (entry_unit.only_flash && !flashing) continue;
             // WU-30: every targetable hardpoint that still stands.
-            if (!hardpoint.targetable || hardpoint.texture.empty()
+            if (!hardpoint.targetable
                 || statuses[index].state == sim::tactical::HardpointState::destroyed
                 || (unit.hostile && !statuses[index].enabled)) {
                 continue;
             }
+            const auto& art = hardpoint.art;
+            if (art.enemy.empty() && art.enemy_tracked.empty() && art.friendly.empty() && art.friendly_tracked.empty()
+                && art.repairing.empty() && art.disabled.empty() && art.disabled_tracked.empty()) continue;
             // WU-34: on the attachment point as the ship is drawn, bank and pitch included.
             const Vec3 world = ui::hardpoint_reticle_anchor(position, static_cast<float>(view->yaw_degrees),
                                                             static_cast<float>(view->pitch_degrees),
@@ -299,9 +302,14 @@ void WorldUiView::draw_reticles(const Frame& frame, const RID canvas_item) {
         for (const Placed& entry : placed) {
             const HardpointUi& hardpoint = type->second.hardpoints[entry.index];
             const bool is_tracked = (tracked && *tracked == entry.index) || entry.flashing;
-            const auto texture = reticles_.find(is_tracked ? hardpoint.texture + "_tracked" : hardpoint.texture);
+            const auto& status = statuses[entry.index];
+            const float health = hardpoint.max_health > 0.0F ? to_float(status.health) / hardpoint.max_health : 1.0F;
+            const bool repairing = std::find(status.repairing_players.begin(), status.repairing_players.end(),
+                frame.live->local_player()) != status.repairing_players.end();
+            const auto name = ui::hardpoint_reticle_texture(hardpoint.art, health, unit.hostile,
+                is_tracked, !status.enabled, repairing);
+            const auto texture = reticles_.find(std::string(name));
             if (texture == reticles_.end() || texture->second.is_null()) continue;
-            const float health = hardpoint.max_health > 0.0F ? to_float(statuses[entry.index].health) / hardpoint.max_health : 1.0F;
             rendering->canvas_item_add_texture_rect(canvas_item, entry.rect, texture->second->get_rid(), false,
                                                     colour(ui::hardpoint_reticle_tint(health, !statuses[entry.index].enabled)));
             ++reticles_drawn_;

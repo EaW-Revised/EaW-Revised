@@ -1,5 +1,7 @@
 #include "galactic_ai.hpp"
 #include "galactic_ai_funding.hpp"
+#include "galactic_ai_goal_state.hpp"
+#include "galactic_ai_world.hpp"
 #include "eawr/script/foc/galactic_ai_state.hpp"
 #include "tactical_ai_internal.hpp"
 #include "eawr/script/numeric/q24_boundary.hpp"
@@ -12,6 +14,17 @@
 #include <iostream>
 #include <set>
 #include <stdexcept>
+
+namespace eawr::script::foc::ai {
+struct EngineContractAccess {
+    static void observe(Engine& engine, std::uint64_t tick) {
+        engine.frame_ = static_cast<std::int64_t>(tick);
+        engine.record(nullptr, 2, "observation", std::string(96, 'x'));
+    }
+    static void clear_diagnostics(Engine& engine) { engine.records_.clear(); engine.costs_.clear(); }
+    static auto choice(Engine& engine) { return engine.sync_.range(0, 1000); }
+};
+}
 
 namespace {
 using namespace eawr;
@@ -405,6 +418,121 @@ void contributor_state() {
     expect(must(failed.manager->state_hash()) == hash, "explicit restore recovers only a validated completed state");
 }
 
+// This is a fast-forward of observer traffic through the actual append owners,
+// not a million-tick retail campaign. Native learning remains authored state.
+void bounded_diagnostics(std::size_t workers) {
+    constexpr std::uint64_t ticks = 1000000;
+    constexpr auto capacity = script::foc::ai_diagnostic_capacity;
+    struct WindowServices final : Services {
+        std::uint64_t count{};
+        core::Result<void> run(const a::ServiceInput& input, auth::ScriptScheduler& scripts) override {
+            ++count;
+            calls.clear(); // the test observer must not itself grow with time
+            return Services::run(input, scripts);
+        }
+    };
+    const auto rig = [] {
+        auto result = std::make_unique<Rig>();
+        result->services = std::make_shared<WindowServices>();
+        result->manager = must(a::Manager::create(fixture(), {result->queries, {}, {}, result->services, {}, {}, {}}));
+        return result;
+    };
+    auto live = rig(), reference = rig();
+    platform::ThreadWorkerAdapter executor(workers);
+    const auto host = [&] {
+        auto result = std::make_shared<script::foc::detail::Host>();
+        auto world = std::make_shared<ai::GalacticWorld>(ai::GalacticPerceptionSetup{});
+        const auto snapshot = std::make_shared<a::gc::GalacticSnapshot>(0, a::gc::GalacticClock{},
+            std::vector<a::gc::GalacticPlayer>{}, std::vector<a::gc::Planet>{}, std::vector<a::gc::Route>{},
+            std::vector<a::gc::Fleet>{}, std::vector<a::gc::GalacticEvent>{}, std::nullopt, std::nullopt, nullptr);
+        must(world->bind(snapshot, {}, executor, 0, 1000));
+        result->ai_world = world;
+        result->view = world->view();
+        result->setup.journal = std::make_shared<script::foc::AiJournal>();
+        return result;
+    };
+    auto live_host = host(), reference_host = host();
+    auto engine = std::make_shared<ai::Engine>(live_host, ai::AiData{}, std::vector<ai::PlanDef>{});
+    auto reference_engine = std::make_shared<ai::Engine>(reference_host, ai::AiData{}, std::vector<ai::PlanDef>{});
+    const std::string identity(64, '0');
+    ai::GoalStateContributor native(engine, identity), reference_native(reference_engine, identity);
+    std::array<std::size_t, 6> plateau{};
+    const auto storage = [&] {
+        const auto& journal = *live_host->setup.journal;
+        return std::array<std::size_t, 6>{live->manager->trace().capacity(), engine->records().capacity(),
+            engine->costs().capacity(), journal.plans.capacity(), journal.costs.capacity(), journal.services.capacity()};
+    };
+    for (std::uint64_t tick = 1; tick <= ticks; ++tick) {
+        for (auto* current : {live.get(), reference.get()}) {
+            // Exercise template activation/reversal decisions while logs wrap.
+            current->queries->values["TriggerA"] = a::Number((tick / 64) % 2);
+            current->queries->values["LeaveA"] = a::Number(1 - (tick / 64) % 2);
+            current->step(tick, tick);
+        }
+        expect(live->services->calls.back().service == reference->services->calls.back().service
+            && *live->services->calls.back().policy == *reference->services->calls.back().policy,
+            "diagnostic retention leaves the service decision/policy unchanged");
+        expect(ai::EngineContractAccess::choice(*engine) == ai::EngineContractAccess::choice(*reference_engine),
+            "diagnostic retention leaves the next synchronized choice unchanged");
+        for (const auto& current : {engine, reference_engine}) {
+            ai::EngineContractAccess::observe(*current, tick);
+            auth::ServiceReport report; report.tick = tick;
+            must(current->after_service(report));
+            expect(report.commands.empty(), "diagnostics do not introduce commands");
+        }
+        for (const auto& current : {live_host, reference_host})
+            current->setup.journal->append_service({tick, 2, true, true, true});
+        const auto& journal = *live_host->setup.journal;
+        expect(engine->records().size() + engine->records_dropped() == tick
+            && engine->costs().size() + engine->costs_dropped() == tick
+            && journal.plans.size() + journal.plans_dropped == tick
+            && journal.costs.size() + journal.costs_dropped == tick
+            && journal.services.size() + journal.services_dropped == tick,
+            "every retained or dropped diagnostic is accounted for");
+        expect(engine->costs().back().tick == tick && journal.costs.back().tick == tick
+            && journal.plans.back().tick == tick && journal.services.back().frame == tick,
+            "the newest diagnostic remains available after compaction");
+        if (tick == 2 * capacity) plateau = storage();
+        if (tick >= 2 * capacity) expect(storage() == plateau, "all six vector allocations stay flat after warm-up");
+        if (tick % 1024 == 0 || tick == ticks) {
+            std::array<std::string, 2> lifecycle_hashes, native_hashes;
+            must(executor.execute_phase("bounded-ai-diagnostic-checkpoint", 2, [&](std::size_t index) {
+                lifecycle_hashes[index] = must((index == 0 ? live : reference)->manager->state_hash());
+                native_hashes[index] = must((index == 0 ? native : reference_native).state_hash());
+            }));
+            expect(lifecycle_hashes[0] == lifecycle_hashes[1] && native_hashes[0] == native_hashes[1],
+                "different retained diagnostic histories leave canonical hashes unchanged");
+            expect(must(native.capture()).components == must(reference_native.capture()).components,
+                "diagnostics and dropped counters remain outside saved native bytes");
+            const auto& trace = live->manager->trace();
+            expect(trace.size() <= capacity && trace.size() + live->manager->trace_dropped()
+                == static_cast<WindowServices&>(*live->services).count, "trace retention/drop accounting");
+            expect(std::is_sorted(trace.begin(), trace.end(), [](const auto& left, const auto& right) {
+                return left.clocks.synchronization < right.clocks.synchronization;
+            }), "compaction preserves chronological service order");
+            // Independent reference: discard observations, retain all native state.
+            must(reference->manager->restore_lifecycle(reference->manager->lifecycle()));
+            ai::EngineContractAccess::clear_diagnostics(*reference_engine);
+            reference_host->setup.journal->plans.clear(); reference_host->setup.journal->costs.clear();
+            reference_host->setup.journal->services.clear();
+        }
+    }
+    expect(reference->manager->trace_dropped() == 0 && reference_engine->records_dropped() == 0
+        && reference_engine->costs_dropped() == 0, "the drained reference never overflows");
+    expect(std::all_of(plateau.begin(), plateau.end(), [](auto value) { return value >= capacity; }),
+        "the million-tick test actually saturates every diagnostic container");
+    for (const auto size : storage()) expect(size <= 2 * capacity, "bounded diagnostic storage envelope");
+    const auto checkpoint = must(native.capture());
+    auto restored = std::make_shared<ai::Engine>(host(), ai::AiData{}, std::vector<ai::PlanDef>{});
+    ai::GoalStateContributor restored_native(restored, identity);
+    must(restored_native.restore(checkpoint));
+    expect(must(restored_native.state_hash()) == must(native.state_hash())
+        && ai::EngineContractAccess::choice(*restored) == ai::EngineContractAccess::choice(*engine),
+        "fresh-owner restore continues the same native hash and synchronized choices");
+    std::cout << "bounded diagnostics: " << ticks << " ticks, " << workers
+        << " workers, six flat storage capacities, unchanged native/lifecycle hashes\n";
+}
+
 std::optional<std::string> game_root() {
 #if defined(_MSC_VER)
     char* value{}; std::size_t size{};
@@ -471,7 +599,7 @@ void installed_loading() {
 } // namespace
 
 int main(int argc, char** argv) {
-    try { if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { category_width(); cadence(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { category_width(); cadence(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); } }
     catch (const std::exception& error) { ++failures; std::cerr << error.what() << '\n'; }
     return failures ? 1 : 0;
 }

@@ -109,6 +109,8 @@ public:
     // BE-02: the local player's result (true: victory); nullopt hides the message.
     void show_message(std::optional<bool> won);
     void show_paused(bool paused);
+    // RP-06..RP-08: the retreat countdown line at the tactical countdown position; an empty text hides it.
+    void show_countdown(const godot::String& text, const godot::Color& colour, double x_share, double y_share);
     void show_begin(bool ready);
     void _input(const godot::Ref<godot::InputEvent>& event) override;
     [[nodiscard]] bool paused_shown() const { return paused_; }
@@ -128,6 +130,7 @@ protected:
 
 private:
     void relayout();
+    void layout_countdown();
     void layout_results();
     void scroll_your(double value);
     void scroll_enemy(double value);
@@ -141,6 +144,12 @@ private:
     std::optional<bool> ended_;
     KitText message_text_;
     KitText banner_text_;
+    KitText countdown_text_;
+    godot::String countdown_;
+    godot::Color countdown_colour_;
+    double countdown_x_{}, countdown_y_{};
+    godot::Rect2 countdown_rect_;
+    int countdown_pixels_{};
     KitText title_text_;
     godot::Rect2 message_rect_;
     godot::Rect2 banner_rect_;

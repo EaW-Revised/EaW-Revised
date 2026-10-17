@@ -102,6 +102,10 @@ struct Assets final {
         files.insert("data/art/models/eawr_scene_prop_idle_00.ala");
         files.insert("data/art/textures/eawr_scene_prop.dds");
         files.insert("data/art/textures/eawr_scene_plain.dds");
+        // These fixtures exercise adapters, independently of missing-effect routing.
+        files.insert("data/art/shaders/meshgloss.fxo");
+        files.insert("data/art/shaders/rskingloss.fxo");
+        files.insert("data/art/shaders/eawrunlisted.fxo");
     }
 
     eawr::scene::AssetAccess access() const {

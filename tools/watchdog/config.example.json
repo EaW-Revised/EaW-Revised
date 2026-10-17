@@ -1,0 +1,29 @@
+{
+  "_note": "Copy to config.local.json (ignored by git) and adjust. Every key is optional; these are the defaults.",
+  "poll_seconds": 600,
+  "coord_dir": "",
+  "registry": "",
+  "state_file": "",
+  "out_dir": "",
+  "pool_journal_dir": "",
+  "waiter_script": "wait_real.py",
+  "min_waiters": 1,
+  "max_pages_per_worker": 30,
+  "thresholds": {
+    "silent_minutes": 45,
+    "pr_ready_minutes": 60,
+    "failed_minutes": 30,
+    "coordinator_quiet_minutes": 30,
+    "pool_wait_target_minutes": 30,
+    "pool_oldest_wait_minutes": 90,
+    "pool_min_samples": 2,
+    "dedupe_minutes": 30,
+    "escalate_after_polls": 3,
+    "chief_renotify_minutes": 60,
+    "unread_mail_minutes": 15,
+    "background_stale_minutes": 60,
+    "read_fail_red_polls": 3
+  },
+  "mail_limit": 300,
+  "mail_subject_regex": "\\b(?:FIX|RESUME|ACTION|REBASE|CONFLICT|NEEDED)\\b"
+}

@@ -202,8 +202,8 @@ struct ScriptedGalacticSession::Impl {
         return report;
     }
 
-    core::Result<std::string> script_hash(bool sync_ai = false) {
-        auto a = sync_ai ? ai.sync_hash(ai_engine && ai_engine->verifies_sync_hash()) : ai.state_hash();
+    core::Result<std::string> script_hash(bool sync_ai = false, const sim::PartitionExecutor& executor = sim::InlineExecutor{}) {
+        auto a = sync_ai ? ai.sync_hash(executor, ai_engine && ai_engine->verifies_sync_hash()) : ai.state_hash();
         auto s = story.state_hash();
         if (!a) return core::Result<std::string>::failure(a.error());
         if (!s) return core::Result<std::string>::failure(s.error());
@@ -356,7 +356,7 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
             return std::pair(a.issuer, a.sequence) < std::pair(b.issuer, b.sequence);
         });
         gc_profile::Scope profile_scope(gc_profile::Phase::scripted_hash_wall);
-        auto scripts = impl.script_hash(impl.ai_engine && impl.ai_engine->uses_sync_hash());
+        auto scripts = impl.script_hash(impl.ai_engine && impl.ai_engine->uses_sync_hash(), executor);
         if (!scripts) return abort(scripts.error());
         const auto derive = [tick = completed_tick(), script = std::move(scripts).value()](const std::string& world_hash) {
             return authoritative_state_sha256(tick, world_hash, script);

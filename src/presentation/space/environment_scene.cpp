@@ -146,13 +146,17 @@ using Rigid = std::array<float, 12>;
 }
 
 [[nodiscard]] SceneRoute route_of(const std::string_view shader) noexcept {
-    if (ieq(shader, "MeshGloss.fx")) return SceneRoute::meshgloss;
-    if (ieq(shader, "MeshAdditive.fx")) return SceneRoute::meshadditive;
+    // CEM-01..03: explicit compiled names; unknown suffixes stay unsupported.
+    if (ieq(shader, "MeshGloss.fx") || ieq(shader, "MeshGloss.fxo")
+        || ieq(shader, "MeshGlossForStarfields.fxo")) return SceneRoute::meshgloss;
+    if (ieq(shader, "MeshAdditive.fx") || ieq(shader, "MeshAdditive.fxo")) return SceneRoute::meshadditive;
+    if (ieq(shader, "MeshAdditive2x.fxo")) return SceneRoute::meshadditive2x;
     if (ieq(shader, "MeshAdditiveVColor.fx")) return SceneRoute::meshadditive_vcolor;
+    if (ieq(shader, "Skydome.fx")) return SceneRoute::skydome;
     if (ieq(shader, "Planet.fx")) return SceneRoute::planet;
     if (ieq(shader, "Nebula.fx")) return SceneRoute::nebula;
     // The alpha companion of the planet model stays with that model's owner.
-    if (ieq(shader, "MeshAlpha.fx")) return SceneRoute::legacy_mesh;
+    if (ieq(shader, "MeshAlpha.fx") || ieq(shader, "Planet_Deathstar.fx")) return SceneRoute::legacy_mesh;
     return SceneRoute::unsupported;
 }
 
@@ -307,7 +311,9 @@ EnvironmentFamily environment_family(const assets::Model& model) noexcept {
     for (const assets::Mesh& mesh : model.meshes) {
         if (!mesh.visible) continue;
         for (const assets::Submesh& submesh : mesh.submeshes) {
-            if (ieq(submesh.shader, "Planet.fx")) return EnvironmentFamily::planet;
+            if (ieq(submesh.shader, "Planet.fx") || ieq(submesh.shader, "Planet_Deathstar.fx")) {
+                return EnvironmentFamily::planet;
+            }
             if (ieq(submesh.shader, "Nebula.fx")) nebula = true;
         }
     }
@@ -318,16 +324,20 @@ std::string_view to_string(const SceneRoute route) noexcept {
     switch (route) {
     case SceneRoute::meshgloss: return "meshgloss";
     case SceneRoute::meshadditive: return "meshadditive";
+    case SceneRoute::meshadditive2x: return "meshadditive2x";
     case SceneRoute::meshadditive_vcolor: return "meshadditive_vcolor";
+    case SceneRoute::skydome: return "skydome";
     case SceneRoute::planet: return "planet";
     case SceneRoute::nebula: return "nebula";
     case SceneRoute::legacy_mesh: return "legacy_mesh";
+    case SceneRoute::missing_effect: return "missing_effect";
     case SceneRoute::unsupported: return "unsupported";
     }
     return "unknown";
 }
 
-std::vector<SceneSurface> scene_surfaces(const assets::Model& model) {
+std::vector<SceneSurface> scene_surfaces(const assets::Model& model,
+                                       const std::function<bool(std::string_view)>& effect_missing) {
     std::vector<SceneSurface> result;
     for (std::size_t mesh_index = 0; mesh_index < model.meshes.size(); ++mesh_index) {
         const assets::Mesh& mesh = model.meshes[mesh_index];
@@ -339,7 +349,8 @@ std::vector<SceneSurface> scene_surfaces(const assets::Model& model) {
             surface.submesh_index = submesh_index;
             surface.mesh_name = mesh.name;
             surface.shader = submesh.shader;
-            surface.route = route_of(submesh.shader);
+            surface.route = effect_missing && effect_missing(submesh.shader)
+                ? SceneRoute::missing_effect : route_of(submesh.shader);
             surface.mesh_bone = mesh.bone;
             const auto note = [&](std::string problem) {
                 if (surface.problem.empty()) surface.problem = std::move(problem);
@@ -364,7 +375,9 @@ std::vector<SceneSurface> scene_surfaces(const assets::Model& model) {
                 if (const auto* name = std::get_if<std::string>(&base->value)) surface.base_texture = *name;
             }
             if ((surface.route == SceneRoute::meshgloss || surface.route == SceneRoute::meshadditive
-                 || surface.route == SceneRoute::meshadditive_vcolor) && surface.base_texture.empty()) {
+                 || surface.route == SceneRoute::meshadditive2x
+                 || surface.route == SceneRoute::meshadditive_vcolor
+                 || surface.route == SceneRoute::skydome) && surface.base_texture.empty()) {
                 note("the surface declares no single BaseTexture");
             }
             if (surface.route == SceneRoute::meshgloss) {
@@ -384,10 +397,11 @@ std::vector<SceneSurface> scene_surfaces(const assets::Model& model) {
                     surface.meshgloss = values;
                 }
             }
-            if (surface.route == SceneRoute::meshadditive || surface.route == SceneRoute::meshadditive_vcolor) {
+            if (surface.route == SceneRoute::meshadditive || surface.route == SceneRoute::meshadditive2x
+                || surface.route == SceneRoute::meshadditive_vcolor) {
                 MeshAdditiveMaterial values;
                 values.color = {1.0F, 1.0F, 1.0F, 1.0F};
-                if (surface.route == SceneRoute::meshadditive) {
+                if (surface.route != SceneRoute::meshadditive_vcolor) {
                     const auto* colour = parameter(submesh, "Color");
                     const auto value = vector4(colour);
                     if (!value) {
@@ -400,6 +414,20 @@ std::vector<SceneSurface> scene_surfaces(const assets::Model& model) {
                 // An absent scroll rate does not scroll; the capture is at time 0.
                 if (const auto rate = vector4(parameter(submesh, "UVScrollRate"))) values.uv_scroll_rate = *rate;
                 surface.meshadditive = values;
+            }
+            if (surface.route == SceneRoute::skydome) {
+                const auto* cloud = parameter(submesh, "CloudTexture");
+                const auto* scale = parameter(submesh, "CloudScale");
+                const auto* scroll = parameter(submesh, "CloudScrollRate");
+                const auto nonzero = [](const assets::MaterialParameter* item) {
+                    if (item == nullptr) return false;
+                    const auto* value = std::get_if<float>(&item->value);
+                    return value == nullptr || *value != 0.0F;
+                };
+                if (cloud != nullptr || nonzero(scale) || nonzero(scroll)) {
+                    surface.skipped = "Skydome.fx cloud layer (CloudTexture, CloudScale, CloudScrollRate) is not drawn; "
+                                      "only BaseTexture is";
+                }
             }
             assets::Submesh geometry_copy = submesh;
             geometry_copy.skin_bones.clear();

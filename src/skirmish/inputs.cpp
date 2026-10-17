@@ -7,6 +7,7 @@
 #include "eawr/scene/scene.hpp"
 #include "eawr/scene/space_population.hpp"
 #include "eawr/sim/math/math.hpp"
+#include "eawr/sim/seat.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/numeric/backend.hpp"
 #include "skirmish_internal.hpp"
@@ -46,7 +47,7 @@ sim::MatchIdentity match_identity(const StartInputs& inputs) {
     return sim::compute_match_identity(std::move(identity));
 }
 
-core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem) {
+static core::Result<DataIdentity> read_data_identity_impl(const vfs::Vfs& filesystem, const bool hash_content) {
     using Result = core::Result<DataIdentity>;
     DataIdentity identity;
     // Conservative effective closure: all mounted Lua and XML, including future
@@ -60,7 +61,7 @@ core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem) {
         const std::string text(reinterpret_cast<const char*>(source.value().data()), source.value().size());
         if (auto added = manifest.add(script.canonical_path, text); !added) return Result::failure(added.error());
     }
-    identity.script_manifest_digest = manifest.digest();
+    if (hash_content) identity.script_manifest_digest = manifest.digest();
     auto xml = filesystem.enumerate("data/xml/", ".xml");
     if (!xml) return Result::failure(xml.error());
     std::sort(xml.value().begin(), xml.value().end(), [](const auto& a, const auto& b) {
@@ -70,15 +71,20 @@ core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem) {
     for (const auto& record : xml.value()) {
         auto source = filesystem.open(record.canonical_path);
         if (!source) return Result::failure(source.error());
+        if (!hash_content) continue;
         const auto size = static_cast<std::uint32_t>(record.canonical_path.size());
         for (unsigned shift = 0; shift < 32; shift += 8) listing.push_back(static_cast<std::uint8_t>(size >> shift));
         listing.insert(listing.end(), record.canonical_path.begin(), record.canonical_path.end());
         const auto digest = core::sha256(std::span(reinterpret_cast<const std::uint8_t*>(source.value().data()), source.value().size()));
         listing.insert(listing.end(), digest.begin(), digest.end());
     }
-    identity.ai_data_digest = core::sha256_hex(listing);
+    if (hash_content) identity.ai_data_digest = core::sha256_hex(listing);
 
     return Result::success(std::move(identity));
+}
+
+core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem) {
+    return read_data_identity_impl(filesystem, true);
 }
 
 namespace {
@@ -164,6 +170,7 @@ constexpr std::string_view colour_prefix = "MP_Color_";
     placement.marker = scene::space_object_tags(object).marker;
     for (const auto tag : {"Behavior", "SpaceBehavior"}) for (const auto& behavior : detail::tokens(text_of(object, tag))) {
         if (detail::iequals(behavior, "DUMMY_SPECIAL_WEAPON_SOURCE")) placement.special_weapon_source = true;
+        if (detail::iequals(behavior, "DUMMY_TACTICAL_SUPER_WEAPON_TARGET")) placement.tactical_super_weapon_target = true;
         if (detail::iequals(tag, "Behavior") && detail::iequals(behavior, "MARKER")) placement.marker_behavior = true;
     }
     placement.victory_relevant = detail::boolean(text_of(object, "Victory_Relevant")).value_or(false);
@@ -342,6 +349,216 @@ std::optional<std::pair<std::uint32_t, std::uint32_t>> declared_extent_bits(
     return std::pair{*first, *second};
 }
 
+namespace {
+core::Result<void> validate_fixture_lobby(const std::string& map_path,
+    const std::span<const LobbySlot> slots, const data::Catalog& catalog) {
+    using Result = core::Result<void>;
+    if (!map_path.starts_with("data/art/maps/") || !map_path.ends_with(".ted")
+        || map_path.find('/', 14) != std::string::npos || map_path.find("..") != std::string::npos) {
+        return Result::failure(detail::error(diagnostic_codes::fixture,
+            "skirmish map must be a logical data/art/maps/*.ted path"));
+    }
+    // ADR-023: fixture handoff also serves network matches. The local dialog
+    // keeps its eight-row limit; the loaded map capacity is checked below.
+    if (slots.size() < 2 || slots.size() > sim::max_match_seats) {
+        return Result::failure(detail::error(diagnostic_codes::fixture,
+            "space skirmish requires two to nine players within the authored map capacity"));
+    }
+    for (const auto& slot : slots) {
+        if (slot.slot == 0 || slot.slot > sim::tactical::max_players || slot.team >= sim::tactical::max_players) {
+            return Result::failure(detail::error(diagnostic_codes::fixture, "skirmish slot or team is out of range"));
+        }
+        const auto* faction = faction_definition(catalog, slot.faction);
+        if (!faction) return Result::failure(detail::error(diagnostic_codes::fixture,
+            "skirmish faction is not defined: " + slot.faction));
+        bool playable = false;
+        for (const auto& child : faction->root.children) {
+            if (detail::iequals(child.name, "Is_Playable")) {
+                data::tag_trace::used(child);
+                playable = detail::retail_flag(child.raw_text, playable);
+            }
+        }
+        if (!playable) return Result::failure(detail::error(diagnostic_codes::fixture,
+            "skirmish slot faction must be playable: " + slot.faction));
+    }
+    return Result::success();
+}
+
+core::Result<void> read_start_factions(StartInputs& inputs, const data::Catalog& catalog) {
+    using Result = core::Result<void>;
+    for (const std::string& name : scene::faction_order(catalog)) {
+        StartFaction faction;
+        faction.name = name;
+        if (const auto* definition = faction_definition(catalog, name)) {
+            const auto flag = [&](const std::string_view tag) {
+                bool value = false;
+                for (const auto& child : definition->root.children) {
+                    if (!detail::iequals(child.name, tag)) continue;
+                    data::tag_trace::used(child);
+                    value = detail::retail_flag(child.raw_text, value);
+                }
+                return value;
+            };
+            faction.playable = flag("Is_Playable");
+            faction.multiplayer_player = flag("Create_Player_In_Multiplayer_Games");
+            faction.neutral = flag("Is_Neutral");
+            faction.can_control_planets = flag("Can_Control_Planets");
+            for (const auto& child : definition->root.children) {
+                for (std::size_t index = 0; index < 2; ++index) {
+                    const auto tag = index == 0 ? "Standalone_Space_Maps_Special_Weapon_A" : "Standalone_Space_Maps_Special_Weapon_B";
+                    if (detail::iequals(child.name, tag)) {
+                        data::tag_trace::used(child);
+                        faction.standalone_special_weapons[index] = detail::trim(child.raw_text);
+                    }
+                }
+                if (detail::iequals(child.name, "Basic_AI")) {
+                    data::tag_trace::used(child);
+                    faction.basic_ai = detail::trim(child.raw_text);
+                }
+                if (!detail::iequals(child.name, "Space_Tactical_Unit_Cap")) continue;
+                const auto value = detail::number(child.raw_text);
+                if (value && value->raw() >= 0 && value->raw() % sim::math::Fixed::scale == 0) {
+                    faction.space_unit_cap = static_cast<std::uint32_t>(value->raw() / sim::math::Fixed::scale);
+                }
+            }
+        }
+        const auto resolved = catalog.resolve(name, data::Category::faction);
+        const auto* mapping = resolved ? resolved.value().value("Multiplayer_Beacon_Type") : nullptr;
+        if (mapping) {
+            data::tag_trace::used(mapping->value);
+            const auto beacon_name = detail::trim(mapping->value.raw_text);
+            auto beacon = catalog.resolve(beacon_name, data::Category::game_object);
+            const auto* lifetime = beacon ? beacon.value().value("Beacon_Lifetime_In_Secs") : nullptr;
+            if (!lifetime) return Result::failure(detail::error(diagnostic_codes::input,
+                "faction beacon has no resolved lifetime: " + beacon_name));
+            data::tag_trace::used(lifetime->value);
+            const auto seconds = detail::number(lifetime->value.raw_text);
+            const auto frames = seconds ? sim::math::multiply(*seconds,
+                sim::math::Fixed::from_raw(sim::tactical::logical_frames_per_second * sim::math::Fixed::scale))
+                : core::Result<sim::math::Fixed>::failure(detail::error(diagnostic_codes::input, "invalid beacon lifetime"));
+            if (!frames || frames.value().raw() < 0 || frames.value().raw()
+                > static_cast<std::int64_t>(sim::tactical::max_ticks) * sim::math::Fixed::scale)
+                return Result::failure(detail::error(diagnostic_codes::input, "invalid faction beacon lifetime"));
+            const auto rounded = (frames.value().raw() + sim::math::Fixed::scale / 2) / sim::math::Fixed::scale;
+            if (rounded == 0) return Result::failure(detail::error(diagnostic_codes::input, "beacon lifetime rounds to zero"));
+            faction.beacon = sim::tactical::TacticalSetup::BeaconRule{0, type_id(beacon_name), static_cast<std::uint32_t>(rounded)};
+        }
+        inputs.factions.push_back(std::move(faction));
+    }
+    return Result::success();
+}
+
+core::Result<void> read_start_rules(StartInputs& inputs, const std::span<const LobbySlot> slots,
+    const vfs::Vfs& filesystem, const data::Catalog& catalog) {
+    using Result = core::Result<void>;
+    for (const auto& slot : slots) {
+        bool known = false;
+        for (const auto& entry : inputs.faction_forces) known = known || detail::iequals(entry.faction, slot.faction);
+        if (known) continue;
+        const auto* definition = faction_definition(catalog, slot.faction);
+        if (definition == nullptr) {
+            return Result::failure(detail::error(diagnostic_codes::input, "faction " + slot.faction + " is not defined"));
+        }
+        FactionForces forces;
+        forces.faction = definition->id;
+        for (const auto& child : definition->root.children) {
+            if (detail::iequals(child.name, "Space_Skirmish_AI_Default_Forces")) {
+                data::tag_trace::used(child);
+                forces.space_skirmish_default_forces = detail::tokens(child.raw_text);
+            }
+            if (detail::iequals(child.name, "Garrison_Reinforcement_Delay_Seconds")) {
+                data::tag_trace::used(child);
+                const auto seconds = detail::number(child.raw_text);
+                const auto frames = seconds ? sim::math::multiply(*seconds,
+                    sim::math::Fixed::from_raw(30 * sim::math::Fixed::scale))
+                    : core::Result<sim::math::Fixed>::failure(detail::error(diagnostic_codes::input, "invalid garrison delay"));
+                if (!frames || frames.value().raw() < 0
+                    || frames.value().raw() / sim::math::Fixed::scale > std::numeric_limits<std::uint32_t>::max()) {
+                    return Result::failure(detail::error(diagnostic_codes::input, "invalid faction garrison reinforcement delay"));
+                }
+                forces.garrison_delay_frames = static_cast<std::uint32_t>(frames.value().raw() / sim::math::Fixed::scale);
+            }
+        }
+        inputs.faction_forces.push_back(std::move(forces));
+    }
+
+    auto constants = data::load_document(filesystem, constants_path);
+    if (!constants) return Result::failure(constants.error());
+    data::tag_trace::document(constants.value().root);
+    auto palette = palette_from_constants(constants.value().root);
+    if (!palette) return Result::failure(palette.error());
+    inputs.lobby_colours = std::move(palette).value();
+    auto defaults = defaults_from_constants(constants.value().root);
+    if (!defaults) return Result::failure(defaults.error());
+    inputs.match_defaults = std::move(defaults).value();
+    purchase_policy_facts(inputs, catalog);
+    for (const auto& child : constants.value().root.children) {
+        // WBF-08: the authored space default selects the installed condition.
+        if (detail::iequals(child.name, "MP_Default_Space_Tactical_Win_Condition")) {
+            data::tag_trace::used(child);
+            const auto selected = sim::tactical::parse_victory_condition(detail::trim(child.raw_text));
+            if (!selected) return Result::failure(selected.error());
+            inputs.space_victory_condition = selected.value();
+            continue;
+        }
+        // #495: the fog grid's constants; the last entry wins, as the game reads them.
+        if (detail::iequals(child.name, "DesiredSpaceFOWCellSize") || detail::iequals(child.name, "SpaceFOWRegrowTime")) {
+            data::tag_trace::used(child);
+            const auto value = detail::number(child.raw_text);
+            if (!value || value->raw() <= 0) {
+                return Result::failure(detail::error(diagnostic_codes::input, child.name + " is not a positive number"));
+            }
+            (detail::iequals(child.name, "DesiredSpaceFOWCellSize") ? inputs.fog_cell_size : inputs.fog_regrow_seconds) =
+                *value;
+            continue;
+        }
+    }
+    return Result::success();
+}
+} // namespace
+
+// Setup retains the same admission diagnostics, but validates content-wide
+// facts once. Full fixtures, data identities and start inputs remain per launch.
+detail::SetupContentChecks detail::inspect_setup_content(const vfs::Vfs& filesystem, const data::Catalog& catalog) {
+    SetupContentChecks checks;
+    StartInputs common;
+    // Validate the same effective reads and module names once; launch alone
+    // hashes the full script/XML closure. No identity is needed by a map picker.
+    auto identity = read_data_identity_impl(filesystem, false);
+    if (!identity) checks.before_placements = identity.error();
+    else if (auto factions = read_start_factions(common, catalog); !factions) checks.before_placements = factions.error();
+    if (!checks.before_placements) {
+        if (auto rules = read_start_rules(common, m2_fixture().slots, filesystem, catalog); !rules)
+            checks.after_placements = rules.error();
+    }
+    return checks;
+}
+
+core::Result<std::vector<MapPlacement>> detail::inspect_setup_placements(const assets::Map& map,
+    const std::span<const std::byte> bytes, const std::string& path, const data::Catalog& catalog,
+    const SetupContentChecks& checks) {
+    using Result = core::Result<std::vector<MapPlacement>>;
+    const auto& slots = m2_fixture().slots;
+    if (auto valid = validate_fixture_lobby(path, slots, catalog); !valid) return Result::failure(valid.error());
+    if (map.kind != assets::MapKind::space) return Result::failure(error(diagnostic_codes::fixture,
+        "skirmish map must be a space map"));
+    if (auto valid = validate_setup_slots(slots, map.lobby, false); !valid) return Result::failure(valid.error());
+    if (path == m2_fixture().map && core::sha256_hex(std::span(
+            reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size())) != m2_fixture().map_sha256)
+        return Result::failure(error(diagnostic_codes::fixture, "pinned M2 map SHA-256 differs"));
+    if (checks.before_placements) return Result::failure(*checks.before_placements);
+    std::vector<MapPlacement> placements;
+    // The picker consumes marker facts, never owner-faction or combat state.
+    const std::vector<StartFaction> factions;
+    for (const auto& source : map.placements) {
+        auto placement = placement_facts(source, catalog, factions);
+        if (!placement) return Result::failure(placement.error());
+        placements.push_back(std::move(placement).value());
+    }
+    if (checks.after_placements) return Result::failure(*checks.after_placements);
+    return Result::success(std::move(placements));
+}
+
 core::Result<Fixture> fixture_from_options(
     const FixtureOptions& options, const vfs::Vfs& filesystem, const data::Catalog& catalog) {
     using Result = core::Result<Fixture>;
@@ -363,32 +580,8 @@ core::Result<Fixture> fixture_from_options(
         fixture.victory_condition = options.victory_condition;
     }
     fixture.match = options.match;
-    if (!fixture.map.starts_with("data/art/maps/") || !fixture.map.ends_with(".ted")
-        || fixture.map.find('/', 14) != std::string::npos || fixture.map.find("..") != std::string::npos) {
-        return Result::failure(detail::error(diagnostic_codes::fixture,
-            "skirmish map must be a logical data/art/maps/*.ted path"));
-    }
-    if (fixture.slots.size() < 2 || fixture.slots.size() > local_setup_rows) {
-        return Result::failure(detail::error(diagnostic_codes::fixture,
-            "space skirmish requires two to eight players within the authored map capacity"));
-    }
-    for (const auto& slot : fixture.slots) {
-        if (slot.slot == 0 || slot.slot > sim::tactical::max_players || slot.team >= sim::tactical::max_players) {
-            return Result::failure(detail::error(diagnostic_codes::fixture, "skirmish slot or team is out of range"));
-        }
-        const auto* faction = faction_definition(catalog, slot.faction);
-        if (!faction) return Result::failure(detail::error(diagnostic_codes::fixture,
-            "skirmish faction is not defined: " + slot.faction));
-        bool playable = false;
-        for (const auto& child : faction->root.children) {
-            if (detail::iequals(child.name, "Is_Playable")) {
-                data::tag_trace::used(child);
-                playable = detail::retail_flag(child.raw_text, playable);
-            }
-        }
-        if (!playable) return Result::failure(detail::error(diagnostic_codes::fixture,
-            "skirmish slot faction must be playable: " + slot.faction));
-    }
+    if (auto valid = validate_fixture_lobby(fixture.map, fixture.slots, catalog); !valid)
+        return Result::failure(valid.error());
     auto record = filesystem.stat(fixture.map);
     if (!record) return Result::failure(record.error());
     auto bytes = filesystem.open(fixture.map);
@@ -478,65 +671,8 @@ core::Result<StartInputs> read_start_inputs(
     if (!map) return Result::failure(map.error());
     inputs.map_extents = declared_extent_bits(octets, map.value());
 
-    for (const std::string& name : scene::faction_order(catalog)) {
-        StartFaction faction;
-        faction.name = name;
-        if (const auto* definition = faction_definition(catalog, name)) {
-            const auto flag = [&](const std::string_view tag) {
-                bool value = false;
-                for (const auto& child : definition->root.children) {
-                    if (!detail::iequals(child.name, tag)) continue;
-                    data::tag_trace::used(child);
-                    value = detail::retail_flag(child.raw_text, value);
-                }
-                return value;
-            };
-            faction.playable = flag("Is_Playable");
-            faction.multiplayer_player = flag("Create_Player_In_Multiplayer_Games");
-            faction.neutral = flag("Is_Neutral");
-            faction.can_control_planets = flag("Can_Control_Planets");
-            for (const auto& child : definition->root.children) {
-                for (std::size_t index = 0; index < 2; ++index) {
-                    const auto tag = index == 0 ? "Standalone_Space_Maps_Special_Weapon_A" : "Standalone_Space_Maps_Special_Weapon_B";
-                    if (detail::iequals(child.name, tag)) {
-                        data::tag_trace::used(child);
-                        faction.standalone_special_weapons[index] = detail::trim(child.raw_text);
-                    }
-                }
-                if (detail::iequals(child.name, "Basic_AI")) {
-                    data::tag_trace::used(child);
-                    faction.basic_ai = detail::trim(child.raw_text);
-                }
-                if (!detail::iequals(child.name, "Space_Tactical_Unit_Cap")) continue;
-                const auto value = detail::number(child.raw_text);
-                if (value && value->raw() >= 0 && value->raw() % sim::math::Fixed::scale == 0) {
-                    faction.space_unit_cap = static_cast<std::uint32_t>(value->raw() / sim::math::Fixed::scale);
-                }
-            }
-        }
-        const auto resolved = catalog.resolve(name, data::Category::faction);
-        const auto* mapping = resolved ? resolved.value().value("Multiplayer_Beacon_Type") : nullptr;
-        if (mapping) {
-            data::tag_trace::used(mapping->value);
-            const auto beacon_name = detail::trim(mapping->value.raw_text);
-            auto beacon = catalog.resolve(beacon_name, data::Category::game_object);
-            const auto* lifetime = beacon ? beacon.value().value("Beacon_Lifetime_In_Secs") : nullptr;
-            if (!lifetime) return Result::failure(detail::error(diagnostic_codes::input,
-                "faction beacon has no resolved lifetime: " + beacon_name));
-            data::tag_trace::used(lifetime->value);
-            const auto seconds = detail::number(lifetime->value.raw_text);
-            const auto frames = seconds ? sim::math::multiply(*seconds,
-                sim::math::Fixed::from_raw(sim::tactical::logical_frames_per_second * sim::math::Fixed::scale))
-                : core::Result<sim::math::Fixed>::failure(detail::error(diagnostic_codes::input, "invalid beacon lifetime"));
-            if (!frames || frames.value().raw() < 0 || frames.value().raw()
-                > static_cast<std::int64_t>(sim::tactical::max_ticks) * sim::math::Fixed::scale)
-                return Result::failure(detail::error(diagnostic_codes::input, "invalid faction beacon lifetime"));
-            const auto rounded = (frames.value().raw() + sim::math::Fixed::scale / 2) / sim::math::Fixed::scale;
-            if (rounded == 0) return Result::failure(detail::error(diagnostic_codes::input, "beacon lifetime rounds to zero"));
-            faction.beacon = sim::tactical::TacticalSetup::BeaconRule{0, type_id(beacon_name), static_cast<std::uint32_t>(rounded)};
-        }
-        inputs.factions.push_back(std::move(faction));
-    }
+    if (auto factions = read_start_factions(inputs, catalog); !factions)
+        return Result::failure(factions.error());
     for (const auto& source : map.value().placements) {
         auto placement = placement_facts(source, catalog, inputs.factions);
         if (!placement) return Result::failure(placement.error());
@@ -551,68 +687,8 @@ core::Result<StartInputs> read_start_inputs(
         inputs.placements.push_back(std::move(placement).value());
     }
 
-    for (const auto& slot : fixture.slots) {
-        bool known = false;
-        for (const auto& entry : inputs.faction_forces) known = known || detail::iequals(entry.faction, slot.faction);
-        if (known) continue;
-        const auto* definition = faction_definition(catalog, slot.faction);
-        if (definition == nullptr) {
-            return Result::failure(detail::error(diagnostic_codes::input, "faction " + slot.faction + " is not defined"));
-        }
-        FactionForces forces;
-        forces.faction = definition->id;
-        for (const auto& child : definition->root.children) {
-            if (detail::iequals(child.name, "Space_Skirmish_AI_Default_Forces")) {
-                data::tag_trace::used(child);
-                forces.space_skirmish_default_forces = detail::tokens(child.raw_text);
-            }
-            if (detail::iequals(child.name, "Garrison_Reinforcement_Delay_Seconds")) {
-                data::tag_trace::used(child);
-                const auto seconds = detail::number(child.raw_text);
-                const auto frames = seconds ? sim::math::multiply(*seconds,
-                    sim::math::Fixed::from_raw(30 * sim::math::Fixed::scale))
-                    : core::Result<sim::math::Fixed>::failure(detail::error(diagnostic_codes::input, "invalid garrison delay"));
-                if (!frames || frames.value().raw() < 0
-                    || frames.value().raw() / sim::math::Fixed::scale > std::numeric_limits<std::uint32_t>::max()) {
-                    return Result::failure(detail::error(diagnostic_codes::input, "invalid faction garrison reinforcement delay"));
-                }
-                forces.garrison_delay_frames = static_cast<std::uint32_t>(frames.value().raw() / sim::math::Fixed::scale);
-            }
-        }
-        inputs.faction_forces.push_back(std::move(forces));
-    }
-
-    auto constants = data::load_document(filesystem, constants_path);
-    if (!constants) return Result::failure(constants.error());
-    data::tag_trace::document(constants.value().root);
-    auto palette = palette_from_constants(constants.value().root);
-    if (!palette) return Result::failure(palette.error());
-    inputs.lobby_colours = std::move(palette).value();
-    auto defaults = defaults_from_constants(constants.value().root);
-    if (!defaults) return Result::failure(defaults.error());
-    inputs.match_defaults = std::move(defaults).value();
-    purchase_policy_facts(inputs, catalog);
-    for (const auto& child : constants.value().root.children) {
-        // WBF-08: the authored space default selects the installed condition.
-        if (detail::iequals(child.name, "MP_Default_Space_Tactical_Win_Condition")) {
-            data::tag_trace::used(child);
-            const auto selected = sim::tactical::parse_victory_condition(detail::trim(child.raw_text));
-            if (!selected) return Result::failure(selected.error());
-            inputs.space_victory_condition = selected.value();
-            continue;
-        }
-        // #495: the fog grid's constants; the last entry wins, as the game reads them.
-        if (detail::iequals(child.name, "DesiredSpaceFOWCellSize") || detail::iequals(child.name, "SpaceFOWRegrowTime")) {
-            data::tag_trace::used(child);
-            const auto value = detail::number(child.raw_text);
-            if (!value || value->raw() <= 0) {
-                return Result::failure(detail::error(diagnostic_codes::input, child.name + " is not a positive number"));
-            }
-            (detail::iequals(child.name, "DesiredSpaceFOWCellSize") ? inputs.fog_cell_size : inputs.fog_regrow_seconds) =
-                *value;
-            continue;
-        }
-    }
+    if (auto rules = read_start_rules(inputs, fixture.slots, filesystem, catalog); !rules)
+        return Result::failure(rules.error());
     return Result::success(std::move(inputs));
 }
 

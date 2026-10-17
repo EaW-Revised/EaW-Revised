@@ -371,7 +371,21 @@ core::Result<void> session_detail::Tick::station_upgrades() {
                     ++next_hangar.entries[mind.entry].alive;
                 }
             }
-            if (const auto prior = spawners.find(held.station); prior != spawners.end()) spawners.erase(prior);
+            if (const auto prior = spawners.find(held.station); prior != spawners.end()) {
+                // WSL-19: launched single ships stay linked to the replacement station's matching ship entry.
+                if (new_hangar != nullptr) for (const auto& ship : prior->second.ships) {
+                    const auto live = std::find_if(survivors.begin(), survivors.end(),
+                        [&](const LiveUnit& unit) { return unit.state.entity_id == ship.id; });
+                    if (live == survivors.end()) continue;
+                    const auto match = std::find_if(new_hangar->entries.begin(), new_hangar->entries.end(),
+                        [&](const SpawnEntryProfile& entry) { return entry.ship && entry.squadron == live->state.type_id; });
+                    if (match == new_hangar->entries.end()) continue;
+                    const auto slot = static_cast<std::uint32_t>(match - new_hangar->entries.begin());
+                    next_hangar.ships.push_back({ship.id, slot});
+                    ++next_hangar.entries[slot].alive;
+                }
+                spawners.erase(prior);
+            }
             if (new_hangar != nullptr) spawners.emplace(replacement_id, std::move(next_hangar));
             // 6. The presentation event moves selection and provides the faction sound trigger.
             events.push_back(Event{tick, EventKind::station_replaced, old.state.owner, replacement_id, held.station});
@@ -490,7 +504,7 @@ core::Result<void> session_detail::Tick::economy() {
     // Ordered ledger commit over the few players and admitted sources, not world entities.
     for (std::size_t index = 0; index < earners.size(); ++index) earners[index].second = payments[index].owner;
     for (auto& ledger : ledgers) {
-        const auto* player = impl_->economy.player(ledger.player);
+        const auto player = impl_->economy.player_at(ledger.player, tick);
         for (const auto& payment : payments) {
             if (payment.owner != ledger.player && (!payment.split || !impl_->allied(payment.owner, ledger.player))) continue;
             const auto balance = change_credits(ledger, *player, math::Fixed::from_raw(payment.amount));

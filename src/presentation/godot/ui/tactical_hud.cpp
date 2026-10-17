@@ -40,6 +40,7 @@ std::string TacticalHud::localized_text(std::string_view key, std::string_view f
 
 void TacticalHud::set_time_handlers(TimeHandlers handlers) { state_->time_handlers = std::move(handlers); }
 void TacticalHud::set_movie_handler(std::function<void()> handler) { state_->movie_handler = std::move(handler); }
+void TacticalHud::set_options_handler(std::function<void()> handler) { state_->options_handler = std::move(handler); }
 void TacticalHud::set_beacon_handler(std::function<void()> handler) { state_->beacon_handler = std::move(handler); }
 void TacticalHud::set_beacon(const bool enabled, const bool targeting) {
     if (auto* button = state_->beacon_button) {
@@ -141,6 +142,13 @@ void TacticalHud::set_battle(const std::optional<bool> won, const bool ended) {
     state_->overlay->show_end(ended ? won : std::nullopt);
 }
 
+void TacticalHud::set_retreat_countdown(const std::string& line, const std::array<std::uint8_t, 4>& colour) {
+    if (state_->overlay == nullptr) return;
+    const auto& looks = state_->message_looks;
+    state_->overlay->show_countdown(tactical_hud_detail::text(line), Color(colour[0] / 255.0F, colour[1] / 255.0F, colour[2] / 255.0F, colour[3] / 255.0F),
+        looks.countdown_x, looks.countdown_y);
+}
+
 void TacticalHud::set_begin(const bool ready) {
     if (state_->overlay != nullptr) state_->overlay->show_begin(ready);
 }
@@ -165,6 +173,7 @@ std::optional<std::array<float, 2>> TacticalHud::control_point(const std::string
         return centre(Rect2(button->get_global_position() + button->hit_rect().position, button->hit_rect().size));
     };
     if (name == "pause") return button_centre(state.pause_button);
+    if (name == "options" || name == "b_option_t") return button_centre(state.options_button);
     if (name == "movie_camera" || name == "b_camera_t") return button_centre(state.movie_button);
     if (name == "beacon" || name == "b_special_weapon2") return button_centre(state.beacon_button);
     if (name == "special_weapon" || name == "b_special_weapon") return button_centre(state.special_button);

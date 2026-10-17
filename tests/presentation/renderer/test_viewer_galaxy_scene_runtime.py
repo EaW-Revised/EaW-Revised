@@ -236,6 +236,85 @@ func _close_preview() -> void:
         self.assertEqual(paused["animation_updates"], 1)
         self.assertGreater(paused["frames"], 10)
 
+    def test_maw_additive_animation_advances_and_pauses(self):
+        import xml.etree.ElementTree as ET
+        from tools.inventory.census_catalog import Catalog
+        from space_map_test_support import decode_png
+
+        xml = self.directory / "maw-mod" / "Data" / "XML"
+        xml.mkdir(parents=True)
+        (xml.parent / "MegaFiles.xml").write_text(
+            "<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+        (xml / "CampaignFiles.xml").write_text(
+            "<Campaign_Files><File>MawMotion.xml</File></Campaign_Files>", encoding="utf-8")
+        planets, _ = Catalog(GAME_ROOT).read("data/xml/planets.xml")
+        maw = next(row for row in planets if row.get("Name", "").lower() == "the_maw")
+        self.assertEqual(maw.findtext("Loop_Idle_Anim_00").strip().lower(), "yes")
+        maw.find("Galactic_Position").text = "0, 0, 0"
+        maw.find("Show_Name").text = "No"
+        (xml / "Planets.xml").write_text(ET.tostring(planets, encoding="unicode"), encoding="utf-8")
+        (xml / "MawMotion.xml").write_text(
+            '<Campaigns><Campaign Name="MawMotion"><Locations>The_Maw</Locations>'
+            '<Starting_Active_Player>Underworld</Starting_Active_Player></Campaign></Campaigns>',
+            encoding="utf-8")
+        for paused in (False, True):
+            name = "maw-paused" if paused else "maw-moving"
+            images = [self.directory / f"{name}-{frame}.png" for frame in (60, 120, 180)]
+            driver = self.directory / (name + ".gd")
+            # Capture successive presented frames in one process: camera,
+            # resources and startup phase are identical across the samples.
+            paths = json.dumps([str(path).replace("\\", "/") for path in images])
+            driver.write_text('''extends SceneTree
+var frames: int = 0
+var paths = PATHS
+func _initialize() -> void:
+    call_deferred("_start")
+func _start() -> void:
+    var scene: PackedScene = load(ProjectSettings.get_setting("application/run/main_scene"))
+    var viewer := scene.instantiate()
+    root.add_child(viewer)
+    current_scene = viewer
+    RenderingServer.frame_post_draw.connect(_drawn)
+func _drawn() -> void:
+    frames += 1
+    if frames == 60 or frames == 120 or frames == 180:
+        root.get_texture().get_image().save_png(paths[int(frames / 60) - 1])
+    if frames == 180:
+        RenderingServer.frame_post_draw.disconnect(_drawn)
+        call_deferred("_close")
+func _close() -> void:
+    current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+    quit()
+'''.replace("PATHS", paths), encoding="utf-8")
+            report = self.directory / (name + ".json")
+            result = subprocess.run([
+                os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720", "--fixed-fps", "30",
+                "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+                "--eawr-galactic", "MawMotion", "--eawr-game-root", GAME_ROOT,
+                "--eawr-mod-root", str(xml.parent.parent), "--eawr-galactic-paused", "yes" if paused else "no",
+                "--eawr-report", str(report)], cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
+            log = result.stdout + result.stderr
+            (self.directory / (name + ".log")).write_text(log, encoding="utf-8")
+            self.assertEqual(result.returncode, 0, log)
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(data["status"], "closed", data.get("failure"))
+            self.assertEqual(data["paused"], paused)
+            model = next(model for model in data["models"] if model["logical_path"].endswith("w_black_hole_small.alo"))
+            self.assertEqual(model["status"], "drawn")
+            self.assertTrue(any(surface["shader"] == "MeshAdditiveVColor.fx" and surface["status"] == "drawn"
+                                for surface in model["surfaces"]), model)
+            frames = [decode_png(path.read_bytes())[2] for path in images]
+            # The isolated Maw is centred. Exclude the command bar and day HUD.
+            crops = [[pixel for row in frame[160:480] for pixel in row[400:880]] for frame in frames]
+            self.assertGreater(sum(max(pixel[:3]) > 20 for pixel in crops[0]), 100,
+                               "the additive black-hole surface must remain visible")
+            for first, last in zip(crops, crops[1:]):
+                changed = sum(any(abs(a[c] - b[c]) > 3 for c in range(3)) for a, b in zip(first, last))
+                if paused:
+                    self.assertLessEqual(changed, 4, "paused Maw material clock advances")
+                else:
+                    self.assertGreater(changed, 30, "Maw animation does not advance between presented frames")
+
     def test_camera_focus_selects_the_authored_planet_alternate(self):
         focused, _ = self.capture("campaign-focused", True,
                                   "--eawr-galactic-focus", "28", "--eawr-galactic-flight-ms", "750")

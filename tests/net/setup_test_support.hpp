@@ -69,6 +69,20 @@ inline net::SetupOffer offer() {
     value.identity = identity(); value.seats = {{0, sim::SeatId{7}, 1}, {1, sim::SeatId{11}, 2}};
     return value;
 }
+// Separate skirmish owners, split into two allied teams; faction IDs are data.
+inline tactical::TacticalSetup human_setup(unsigned count) {
+    auto value = setup();
+    value.players.clear(); value.units.clear(); value.skirmish->slots.clear();
+    for (unsigned owner = 1; owner <= count; ++owner) {
+        const unsigned team = owner <= (count + 1) / 2 ? 1U : 2U;
+        value.players.push_back({owner, team, team, tactical::player_flag_commandable});
+        auto unit = setup().units.front(); unit.entity_id = owner; unit.owner = owner;
+        unit.position = {units(static_cast<std::int64_t>(owner) * 1000), units(team * 1000), {}};
+        value.units.push_back(unit);
+        value.skirmish->slots.push_back({owner, true, owner - 1, {}});
+    }
+    return value;
+}
 inline tactical::TacticalContent content() {
     tactical::TacticalContent value;
     value.sensors = {{1, units(1000)}};

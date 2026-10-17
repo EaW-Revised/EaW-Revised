@@ -67,7 +67,7 @@ std::vector<PlacementDecision> classify(const scene::Scene& scene,
         }
         for (std::size_t index = 0; index < placement.surfaces.size(); ++index) {
             const scene::Surface& surface = placement.surfaces[index];
-            if (!surface.supported || scene::find_legacy_selector(surface.shader) == nullptr) {
+            if (!surface.supported || scene::material_selector(surface) == nullptr) {
                 entry.reasons.push_back("surface " + std::to_string(index) + " shader " + surface.shader
                                         + " has no supported legacy selector");
             }

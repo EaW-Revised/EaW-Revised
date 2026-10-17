@@ -5,6 +5,11 @@
 namespace eawr::presentation::godot_backend {
 namespace {
 std::string connection_message(const LanView& view) {
+    // A final room decision has its own curated cause, including the named unreachable player. Recovery's generic copy
+    // must not hide it after a held connection ends.
+    if (!view.message.empty() && ((view.diagnostic_code >= "EAWR-NET-1778" && view.diagnostic_code <= "EAWR-NET-1784")
+        || (view.diagnostic_code >= "EAWR-NET-1790" && view.diagnostic_code <= "EAWR-NET-1794"))) return view.message;
+    if (view.online_capacity >= 3 && view.phase == LanPhase::reconnecting && !view.message.empty()) return view.message;
     switch (view.recovery) {
     case LanRecovery::waiting: {
         auto name = net::sanitize_lobby_text(view.peer_name, 64);
@@ -70,13 +75,14 @@ std::string lan_message(const LanView& source) {
     if (view.phase == LanPhase::ended && view.recovery != LanRecovery::failed && view.recovery != LanRecovery::rejoin_failed
         && view.recovery != LanRecovery::desync) {
         view.recovery = LanRecovery::none;
-        if (view.reason == LanReason::timeout || (view.reason == LanReason::peer_left
+        if ((view.reason == LanReason::timeout && !lan_connection_loss(view.diagnostic_code)) || (view.reason == LanReason::peer_left
             && (view.message.starts_with("Waiting for ") || view.message.starts_with("Reconnect is unavailable")))) view.message.clear();
     }
     auto message = connection_message(view);
     if (view.grace_remaining_ms && view.recovery == LanRecovery::held)
         message += "\nInitial grace remaining: " + std::to_string((*view.grace_remaining_ms + 999) / 1000) + " s";
-    if (view.recovery == LanRecovery::held || view.recovery == LanRecovery::catching_up || view.recovery == LanRecovery::proving)
+    if (!(view.online_capacity >= 3 && !view.reconnect_enabled)
+        && (view.recovery == LanRecovery::held || view.recovery == LanRecovery::catching_up || view.recovery == LanRecovery::proving))
         message += "\nGrace " + std::to_string(view.grace_ms / 1000) + " s | Progress timeout "
             + std::to_string(view.progress_timeout_ms / 1000) + " s | Incident cap " + std::to_string(view.hard_cap_ms / 1000) + " s";
     if (view.recovery == LanRecovery::resyncing)
@@ -97,6 +103,7 @@ std::string lan_message(const LanView& source) {
 std::string lan_incident_message(const LanView& view) {
     std::string text = view.reconnect_warning;
     if (!view.service_notice.empty()) { if (!text.empty()) text += "\n"; text += view.service_notice; }
+    if (!view.mesh_notice.empty()) { if (!text.empty()) text += "\n"; text += view.mesh_notice; }
     if (view.desync_tick) {
         if (!text.empty()) text += "\n";
         text += "Previous synchronization incident at tick " + std::to_string(*view.desync_tick) + ". ";
@@ -111,6 +118,7 @@ namespace {
 class FakeLanMatch final : public LanMatch {
 public:
     explicit FakeLanMatch(std::string_view state) {
+        online_nine_ = state == "online-nine";
         view_.phase = LanPhase::setup;
         view_.connected = true;
         view_.start_enabled = true;
@@ -120,6 +128,11 @@ public:
         else if (state == "review") { view_.host = false; view_.read_only = true; view_.start_enabled = false; view_.accept_enabled = true;
             view_.setup_summary = "Host setup: Coruscant\nSeed 42 | Victory: eliminate opponents | Credits 10000 | Tech 1/5\nHeroes on | Superweapons on | Starting units on | Base on | Events off\nSlot 1 Rebel Human | Team 1 | Red | Fleet: X-Wing\nSlot 2 Empire Human | Team 2 | Blue | Fleet: TIE Fighter\nSlot 3 Rebel AI | Team 1 | Green | Fleet: Z-95\nBuild: presentation fixture\nContent: fixture identity"; }
         else if (state == "refused") { view_.phase = LanPhase::ended; view_.reason = LanReason::build; view_.start_enabled = false; }
+        else if (state == "online-refused") {
+            view_.phase = LanPhase::ended; view_.reason = LanReason::refused; view_.start_enabled = false;
+            view_.diagnostic_code = "EAWR-NET-1762";
+            view_.message = net::mesh_newcomer_refusal_text("Echo", true) + "\nEAWR-NET-1762";
+        }
         else if (state == "waiting") { view_.phase = LanPhase::running; view_.recovery = LanRecovery::waiting; view_.message = "Waiting for Opponent..."; }
         else if (state == "reconnecting" || state == "held" || state == "catching_up" || state == "proving" || state == "recovery_barrier") {
             view_.phase = LanPhase::reconnecting;
@@ -157,10 +170,37 @@ public:
     void configure_seats(std::vector<sim::tactical::PlayerId> owners) override {
         view_.human_owners = std::move(owners);
         view_.connected_seats = view_.connected ? static_cast<std::uint32_t>(view_.human_owners.size()) : 1U;
+        if (online_nine_) {
+            view_.online_capacity = static_cast<std::uint32_t>(view_.human_owners.size());
+            view_.online_connected = view_.online_capacity > 2 ? view_.online_capacity - 2 : 1;
+            view_.start_enabled = false;
+            view_.message = "Waiting for connections between players. Every pair must connect before Start; My connections shows only your own links.";
+            view_.online_connections.clear();
+            for (net::PeerIndex peer = 0; peer < view_.online_capacity; ++peer) {
+                net::GnsPairDiagnostic pair;
+                pair.phase = peer == view_.online_capacity - 1 ? net::GnsPairPhase::failed
+                    : peer == view_.online_capacity - 2 ? net::GnsPairPhase::signalling : net::GnsPairPhase::open;
+                pair.route = net::GnsRoute::direct; pair.relay_offered = true;
+                view_.online_connections.push_back("Seat " + std::to_string(peer + 1) + " - Player " + std::to_string(peer + 1)
+                    + (peer == 0 ? " (you): Connected" : ": " + online_pair_message(pair)));
+            }
+        }
     }
     void host(std::uint16_t) override {}
-    void join(std::string) override {}
-    void cancel() override { view_ = {}; }
+    void join(std::string) override {
+        if (!online_nine_) return;
+        configure_seats({1, 2, 3, 4, 5, 6, 7, 8, 9});
+        view_.host = false; view_.read_only = true; view_.player = 2;
+        const auto& fixture = skirmish::m2_fixture();
+        offered_.emplace(); offered_->map = fixture.map; offered_->slots.emplace();
+        offered_->match = fixture.match.value_or(skirmish::MatchOptions{});
+        for (std::uint32_t peer = 0; peer < view_.online_capacity; ++peer) {
+            auto row = fixture.slots.at(peer < 5 ? 0 : 1);
+            row.slot = peer + 1; row.colour_index = peer; row.human = true;
+            offered_->slots->push_back(std::move(row));
+        }
+    }
+    void cancel() override { view_ = {}; offered_.reset(); }
     bool request_abort() override { return lan_can_abort(view_); }
     void complete_abort() override {
         if (view_.phase != LanPhase::ended) cancel();
@@ -178,7 +218,7 @@ public:
     void accept() override { view_.accept_enabled = false; }
     void start(const skirmish::FixtureOptions&) override {}
     std::optional<skirmish::FixtureOptions> take_start() override { return {}; }
-    std::optional<skirmish::FixtureOptions> offered_setup() const override { return {}; }
+    std::optional<skirmish::FixtureOptions> offered_setup() const override { return offered_; }
     LanView view() const override { return view_; }
     sim::tactical::PlayerId local_player() const override { return view_.host ? 1U : 2U; }
     platform::LiveStepDriver driver(const sim::tactical::TacticalSetup&) override {
@@ -192,7 +232,9 @@ public:
     }
 private:
     LanView view_;
+    std::optional<skirmish::FixtureOptions> offered_;
     bool failed_driver_{};
+    bool online_nine_{};
 };
 }
 std::shared_ptr<LanMatch> make_fake_lan_match(std::string_view state) { return std::make_shared<FakeLanMatch>(state); }

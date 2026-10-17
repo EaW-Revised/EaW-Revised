@@ -146,6 +146,7 @@ def write_fixture_root(root: pathlib.Path, *, idle: bool = False,
                        effect_texture=None, mesh_effect: bool = False,
                        host_mesh: bool = True, mixed_effect: bool = False) -> pathlib.Path:
     data = root / "GameData" / "Data"
+    scene_fixture.write_effect_presence(data, ["BatchMeshGloss.fx"])
     maps, models, textures, xml = (data / "Art" / "Maps", data / "Art" / "Models",
                                    data / "Art" / "Textures", data / "XML")
     for directory in (maps, models, textures, xml):

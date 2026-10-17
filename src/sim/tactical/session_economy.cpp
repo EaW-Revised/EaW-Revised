@@ -893,8 +893,8 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
             return Void::success();
         };
         auto* ledger = ledger_of(stage.ledgers, issuer);
-        const auto* player = economy.player(issuer);
-        if (ledger == nullptr || player == nullptr) return finish(RejectReason::no_economy);
+        const auto player = economy.player_at(issuer, tick);
+        if (ledger == nullptr || !player) return finish(RejectReason::no_economy);
         if (const auto* release = std::get_if<CampaignCreditReleasePayload>(&command.payload)) {
             if (!economy.campaign || !player->ai || !player->strategic_credits)
                 return finish(RejectReason::cannot_produce);

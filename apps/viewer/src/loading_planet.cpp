@@ -224,6 +224,7 @@ void fragment() {
     GodotRenderer::LightingState light;
     light.sph = lighting::source_to_render(lighting::sph_light_all(environment)).rgb;
     light.sph_fill = lighting::source_to_render(lighting::sph_light_fill(environment)).rgb;
+    light.ambient = {environment.ambient.r * environment.ambient.a, environment.ambient.g * environment.ambient.a, environment.ambient.b * environment.ambient.a};
     light.sun_diffuse = {0.5F,0.5F,0.5F}; light.specular = {0,0,0};
     const auto travel = lighting::source_to_render(environment.lights[0].direction);
     light.toward_light = {-travel.x,-travel.y,-travel.z}; state.renderer->set_lighting(light);
@@ -238,7 +239,10 @@ void fragment() {
         matrix.rows[row][column] = sim::math::Fixed::from_raw(static_cast<std::int64_t>(std::round(raw)));
     }
     std::vector<sim::RenderInstance> instances;
-    for (const auto& surface : space::scene_surfaces(model)) {
+    const scene::AssetAccess effect_access{.exists = [&fs](const std::string_view path) {
+        return static_cast<bool>(fs.stat(path)); }};
+    for (const auto& surface : space::scene_surfaces(model, [&](const std::string_view program) {
+             return scene::missing_material_effect(effect_access, program); })) {
         if (std::none_of(selected.begin(), selected.end(), [&](const auto& choice) { return choice.mesh == surface.mesh_index && choice.submesh == surface.submesh_index; })) continue;
         assets::Model geometry = model; geometry.meshes = {model.meshes[surface.mesh_index]};
         geometry.meshes.front().submeshes = {model.meshes[surface.mesh_index].submeshes[surface.submesh_index]};
@@ -250,14 +254,17 @@ void fragment() {
             if (plan.status != space::EnvironmentEffectStatus::ready) return fail(plan.detail);
             material = std::move(plan.material); declared = std::move(plan.textures);
         } else {
-            const auto* selector = scene::find_legacy_selector(surface.shader);
+            const auto* selector = scene::material_selector(surface.shader, surface.route == space::SceneRoute::missing_effect);
             if (!selector) return fail("unsupported loading surface material");
             material.program = std::string(selector->program); material.technique = std::string(selector->technique); material.pass_name = std::string(selector->pass);
             material.pass = selector->transparent ? RenderPass::transparent : RenderPass::opaque;
-            for (const auto& parameter : geometry.meshes.front().submeshes.front().parameters) material.bindings.push_back({parameter.name,parameter.value});
-            declared.emplace_back("BaseTexture",surface.base_texture);
+            if (surface.route != space::SceneRoute::missing_effect) {
+                for (const auto& parameter : geometry.meshes.front().submeshes.front().parameters) material.bindings.push_back({parameter.name,parameter.value});
+                declared.emplace_back("BaseTexture",surface.base_texture);
+            }
         }
         std::optional<assets::Texture> primary;
+        if (surface.route == space::SceneRoute::missing_effect) primary = family_placeholder_texture(legacy::TexturePlaceholder::black);
         std::vector<GodotRenderer::BindingTexture> extra;
         for (const auto& [binding,name] : declared) {
             auto image = texture(fs,name); if (!image) return fail("missing loading planet texture");

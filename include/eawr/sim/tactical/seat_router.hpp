@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <limits>
-#include <set>
 #include <vector>
 
 namespace eawr::sim::tactical {
@@ -19,7 +18,6 @@ public:
     [[nodiscard]] static core::Result<SeatRouter> create(std::span<const SeatBinding> bindings,
         std::span<const Player> players) {
         SeatRouter router;
-        std::set<PlayerId> sides;
         if (bindings.empty() || bindings.size() > sim::max_match_seats) return refused<SeatRouter>("expected one to nine human seats");
         for (const auto& binding : bindings) {
             const auto player = std::find_if(players.begin(), players.end(), [&](const auto& row) {
@@ -28,9 +26,9 @@ public:
             if (binding.seat.value == 0 || player == players.end() || !player->commandable()
                 || !router.bindings_.emplace(binding.seat, binding).second)
                 return refused<SeatRouter>("invalid or duplicate seat binding");
-            sides.insert(player->player_id);
         }
-        if (sides.size() > sim::max_match_human_sides) return refused<SeatRouter>("a fourth human side is not supported");
+        // Shared-owner bindings remain available for Galactic Conquest. Skirmish
+        // setup admission requires a distinct owner for every human seat.
         return core::Result<SeatRouter>::success(std::move(router));
     }
 

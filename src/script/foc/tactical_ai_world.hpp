@@ -7,6 +7,47 @@
 #include <array>
 
 namespace eawr::script::foc::detail {
+// SOS-42: one row projection for completed publications and in-tick copies.
+inline ViewUnit build_view_row(const tactical::UnitState& unit, const tactical::TacticalInstance* instance,
+    math::Fixed damage_rate = {}, std::optional<math::Fixed> time_till_dead = {}) {
+    const auto fraction = [](math::Fixed part, math::Fixed whole) {
+        if (whole.raw() <= 0) return LuaNumber(0);
+        return numeric::from_fixed(part) / numeric::from_fixed(whole);
+    };
+    ViewUnit entry;
+    entry.id = unit.entity_id;
+    entry.type = unit.type_id;
+    entry.purchase_type = tactical::purchase_identity(unit);
+    entry.purchase_token = unit.purchase_token;
+    entry.owner = unit.owner;
+    entry.position = unit.position;
+    entry.rotation = unit.rotation;
+    entry.order = unit.order.kind;
+    entry.order_target = unit.order.target;
+    if (instance != nullptr) {
+        entry.team = instance->team;
+        entry.visible_to = instance->visible_to;
+        entry.abilities = instance->abilities;
+        entry.planetary_weapon = instance->planetary_weapon;
+        if (const auto& durability = instance->durability) {
+            entry.hull = durability->hull;
+            entry.max_hull = durability->max_hull;
+            entry.health = fraction(durability->hull, durability->max_hull);
+            entry.max_shields = durability->max_shields;
+            if (durability->shields && durability->max_shields) {
+                entry.shield = fraction(*durability->shields, *durability->max_shields);
+            }
+            entry.engines_online = durability->engines_online;
+            for (const auto& hardpoint : durability->hardpoints) {
+                entry.hardpoint_destroyed.push_back(hardpoint.state == tactical::HardpointState::destroyed);
+            }
+            entry.damage_rate = damage_rate;
+            entry.time_till_dead = time_till_dead;
+        }
+    }
+    return entry;
+}
+
 inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSession& world, const tactical::TacticalSnapshot& snapshot,
     const sim::PartitionExecutor* executor = nullptr) {
     auto view = std::make_shared<WorldView>();
@@ -66,10 +107,6 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
                 [](const Member& left, const Member& right) { return left.first < right.first; });
         }
     }
-    const auto fraction = [](math::Fixed part, math::Fixed whole) {
-        if (whole.raw() <= 0) return LuaNumber(0);
-        return numeric::from_fixed(part) / numeric::from_fixed(whole);
-    };
     view->units.resize(units.size());
     view->capture_candidates.resize(units.size());
     const auto prepared = preparation_executor.execute_phase("ai-world-view",
@@ -79,16 +116,7 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
         const auto current_unit = world.unit_state(units[index].entity_id);
         if (!current_unit) throw std::runtime_error("AI world view identity is not live");
         const tactical::UnitState& unit = *current_unit;
-        ViewUnit entry;
-        entry.id = unit.entity_id;
-        entry.type = unit.type_id;
-        entry.purchase_type = tactical::purchase_identity(unit);
-        entry.purchase_token = unit.purchase_token;
-        entry.owner = unit.owner;
-        entry.position = unit.position;
-        entry.rotation = unit.rotation;
-        entry.order = unit.order.kind;
-        entry.order_target = unit.order.target;
+        ViewUnit entry = build_view_row(unit, nullptr);
         const auto squadron = std::lower_bound(squadrons.begin(), squadrons.end(), unit.entity_id,
             [](const tactical::Squadron& row, sim::EntityId id) { return row.container < id; });
         if (squadron != squadrons.end() && squadron->container == unit.entity_id) {
@@ -104,33 +132,26 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
         const auto instance = std::lower_bound(instances.begin(), instances.end(), unit.entity_id,
             [](const tactical::TacticalInstance& row, sim::EntityId id) { return row.entity_id < id; });
         if (instance != instances.end() && instance->entity_id == unit.entity_id) {
-            entry.team = instance->team;
-            entry.visible_to = instance->visible_to;
-            entry.abilities = instance->abilities;
-            entry.planetary_weapon = instance->planetary_weapon;
-            if (const auto& durability = instance->durability) {
-                entry.hull = durability->hull;
-                entry.max_hull = durability->max_hull;
-                entry.health = fraction(durability->hull, durability->max_hull);
-                entry.max_shields = durability->max_shields;
-                if (durability->shields && durability->max_shields) {
-                    entry.shield = fraction(*durability->shields, *durability->max_shields);
-                }
-                entry.engines_online = durability->engines_online;
-                for (const auto& hardpoint : durability->hardpoints) {
-                    entry.hardpoint_destroyed.push_back(hardpoint.state == tactical::HardpointState::destroyed);
-                }
-                const auto* profile = world.durability().find(unit.type_id);
-                if (profile != nullptr && profile->damage_tracking) {
-                    if (const auto state = world.durability_state(unit.entity_id)) {
-                        entry.damage_rate = state->damage_rate;
-                        entry.time_till_dead = tactical::time_to_death(*profile, *state);
-                    }
-                }
-            }
+            const auto* profile = world.durability().find(unit.type_id);
+            const auto state = profile && profile->damage_tracking ? world.durability_state(unit.entity_id) : std::nullopt;
+            auto projected = build_view_row(unit, &*instance, state ? state->damage_rate : math::Fixed{},
+                state ? tactical::time_to_death(*profile, *state) : std::nullopt);
+            projected.container = entry.container;
+            projected.members = std::move(entry.members);
+            projected.craft = entry.craft;
+            projected.squadron = entry.squadron;
+            entry = std::move(projected);
         }
         if (const auto combat = world.combat_state(unit.entity_id)) entry.attack_target = combat->attack_target;
         if (const auto motion = world.motion_state(unit.entity_id)) entry.moving = motion->kind != tactical::MotionKind::none;
+        // EX-57: team members cannot join formations independently. Use admitted
+        // motion profiles, rather than an XML locomotor declaration on a skipped type.
+        entry.can_move = !entry.craft && (world.motion().find(unit.type_id) != nullptr
+            || (entry.container && world.motion().squadrons.find_squadron(unit.type_id) != nullptr));
+        if (const auto* ability = world.abilities().find(unit.type_id)) {
+            if (const auto state = world.ability_state(unit.entity_id))
+                entry.can_move = entry.can_move && !tactical::ability_movement_disabled(*ability, *state);
+        }
         // FH-23: a squadron (and its craft) reports the formation target before a weapon
         // target. Its container travels through the formation, without a ship motion state.
         const auto formation_owner = entry.craft ? squadrons.begin() + static_cast<std::ptrdiff_t>(member->second) : squadron;
@@ -147,6 +168,37 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
       }
     });
     if (!prepared) throw std::runtime_error("AI world view preparation failed: " + prepared.error().message);
+    return view;
+}
+
+inline std::shared_ptr<const WorldView> build_turn_view(const sim::PartitionExecutor& executor,
+    const tactical::ObjectTurnView& turn, const WorldView& previous) {
+    auto view = std::make_shared<WorldView>();
+    view->tick = turn.tick;
+    view->players = previous.players;
+    view->units.resize(turn.rows.size());
+    view->capture_candidates.resize(turn.rows.size());
+    const auto prepared = executor.execute_phase("ai-world-view", sim::tick_partition_count,
+        [&](const std::size_t partition) {
+            const auto range = sim::partition_range(partition, turn.rows.size());
+            for (auto index = range.begin; index < range.end; ++index) {
+                const auto& row = turn.rows[index];
+                auto entry = build_view_row(row.state, &row.published, row.damage_rate, row.time_till_dead);
+                entry.attack_target = row.attack_target;
+                entry.moving = row.moving;
+                entry.formation_target = row.formation_target;
+                entry.formation_moving = row.formation_moving;
+                entry.container = row.container;
+                entry.members = row.members;
+                entry.squadron = row.squadron_parent;
+                entry.craft = row.squadron_parent != 0;
+                entry.proximity_bounds = row.proximity_bounds;
+                view->units[index] = std::move(entry);
+                view->capture_candidates[index] = {{row.state.entity_id, row.state.owner, row.state.position},
+                    row.state.type_id, !row.arriving};
+            }
+        });
+    if (!prepared) throw std::runtime_error("object turn view preparation failed: " + prepared.error().message);
     return view;
 }
 
@@ -187,24 +239,26 @@ public:
         return host_.world ? host_.world->economy() : empty;
     }
     const tactical::EconomyView* account(tactical::PlayerId id) const override {
+        if (!host_.allow_dynamic_read()) return nullptr;
         if (host_.snapshot) for (const auto& entry : host_.snapshot->economy()) if (entry.player == id) return &entry;
         return nullptr;
     }
     const std::map<sim::EntityId, tactical::PadState>& pads() const noexcept override {
         static const std::map<sim::EntityId, tactical::PadState> empty;
-        return host_.world ? host_.world->pads() : empty;
+        return host_.allow_dynamic_read() && host_.world ? host_.world->pads() : empty;
     }
-    bool arriving(sim::EntityId id) const override { return host_.world && host_.world->arrivals().contains(id); }
+    bool arriving(sim::EntityId id) const override { return host_.allow_dynamic_read() && host_.world && host_.world->arrivals().contains(id); }
     bool build_allowed(tactical::PlayerId player, sim::EntityId producer, tactical::TypeId type) const override {
-        return host_.world && host_.world->build_allowed(player, producer, type);
+        return host_.allow_dynamic_read() && host_.world && host_.world->build_allowed(player, producer, type);
     }
     const tactical::BuildOption* build_option(tactical::PlayerId player, sim::EntityId producer, tactical::TypeId type) const override {
-        return host_.world ? host_.world->build_option(player, producer, type) : nullptr;
+        return host_.allow_dynamic_read() && host_.world ? host_.world->build_option(player, producer, type) : nullptr;
     }
     tactical::ProductionCounts production_counts(tactical::PlayerId player, tactical::TypeId type) const override {
-        return host_.world ? host_.world->production_counts(player, type) : tactical::ProductionCounts{};
+        return host_.allow_dynamic_read() && host_.world ? host_.world->production_counts(player, type) : tactical::ProductionCounts{};
     }
     bool construction_allowed(tactical::PlayerId player, sim::EntityId id) const override {
+        if (!host_.allow_dynamic_read()) return false;
         const auto state = pads().find(id);
         const auto* unit = host_.view ? host_.view->find(id) : nullptr;
         const auto* profile = unit ? economy().pads.point(unit->type) : nullptr;
@@ -212,21 +266,21 @@ public:
             player, players(), host_.view->capture_candidates, economy().pads, id, unit->position);
     }
     bool constructing_for(sim::EntityId id, tactical::PlayerId player) const override {
-        if (!host_.world) return false;
+        if (!host_.allow_dynamic_read() || !host_.world) return false;
         const auto found = host_.world->construction().find(id);
         return found != host_.world->construction().end() && found->second.builder == player;
     }
-    sim::EntityId next_entity_id() const noexcept override { return host_.world ? host_.world->next_entity_id() : 0; }
+    sim::EntityId next_entity_id() const noexcept override { return host_.allow_dynamic_read() && host_.world ? host_.world->next_entity_id() : 0; }
     std::optional<ReinforcementResult> reinforcement_search_result(tactical::PlayerId player, std::uint64_t token) const override {
-        if (host_.world) if (const auto result = host_.world->reinforcement_search_result(player, token))
+        if (host_.allow_dynamic_read() && host_.world) if (const auto result = host_.world->reinforcement_search_result(player, token))
             return ReinforcementResult{result->next_attempt, result->candidates, result->nanoseconds};
         return std::nullopt;
     }
     std::span<const tactical::Event> events() const noexcept override {
-        return host_.snapshot ? host_.snapshot->events() : std::span<const tactical::Event>{};
+        return host_.allow_dynamic_read() && host_.snapshot ? host_.snapshot->events() : std::span<const tactical::Event>{};
     }
     std::span<const tactical::CombatEvent> combat_events() const noexcept override {
-        return host_.snapshot ? host_.snapshot->combat_events() : std::span<const tactical::CombatEvent>{};
+        return host_.allow_dynamic_read() && host_.snapshot ? host_.snapshot->combat_events() : std::span<const tactical::CombatEvent>{};
     }
 private:
     static std::int64_t ceiling(Real value) {
@@ -245,7 +299,7 @@ inline Context TacticalWorld::goal_context(const PlayerAi& player, const Target*
     context.target = target;
     for (const AiPlayer& other : host_.setup.players) {
         if (!context.enemy && !other.neutral && !host_.allied(other.player, player.player)) context.enemy = other.player;
-        if (!context.human && !other.ai && !other.neutral) context.human = other.player;
+        if (!context.human && !host_.ai(other.player) && !other.neutral) context.human = other.player;
     }
     return context;
 }

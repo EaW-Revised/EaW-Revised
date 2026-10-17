@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/presentation/renderer.hpp"
+#include "eawr/presentation/skin_pose_profile.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/fog/fog.hpp"
 #include "eawr/presentation/lighting/scene_bloom.hpp"
@@ -176,6 +177,11 @@ public:
         sim::EntityId entity_id,
         sim::AssetId asset_id,
         std::span<const animation::BonePose> bones);
+    // Serial idle pose batch: each source span stays immutable until end.
+    // End forgets source addresses; surface-owned immutable palettes survive.
+    // Attribution is optional and never controls whether preparation is shared.
+    void begin_skin_batch(bool enabled);
+    [[nodiscard]] SkinPoseWork end_skin_batch();
     // Ends the entity's stored pose; a live skinned instance returns to its
     // rest palette. A pose survives the entity's absence from a snapshot (a
     // caller may pose once and resubmit later), so the renderer cannot tell
@@ -276,6 +282,8 @@ public:
         std::int64_t skeleton_bones{};
         // Any skeleton bone transform differs from identity.
         bool skeleton_posed{};
+        // The visibility the adapter last applied through set_instance_visible (RenderingServer has no getter).
+        bool visible{true};
     };
     [[nodiscard]] std::vector<InstanceEvidence> instance_evidence() const;
     // GPU qualification: the live skeleton palette, read from RenderingServer.
@@ -327,8 +335,13 @@ public:
         // LIGHT_PARAM_SHADOW_BLUR. RenderingServer's default of 0 turns off
         // the soft filter and the depth bias, which Godot scales by it.
         std::optional<float> shadow_blur;
+        // Independent ambient RGB, before spherical fill contributions (CEM-12).
+        std::array<float, 3> ambient{0.08F, 0.08F, 0.10F};
     };
     void set_lighting(const LightingState& lighting);
+    // Environment-only input for families that read independent ambient.
+    // Preserves the current SH, sun, shadow policy and global atlas settings.
+    void set_ambient_light(const std::array<float, 3>& rgb);
     // The state of the last set_lighting call; empty before the first. Viewer
     // adapters outside the renderer (bump-mapped particles) follow it.
     [[nodiscard]] const std::optional<LightingState>& lighting() const noexcept;

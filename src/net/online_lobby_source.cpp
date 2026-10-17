@@ -84,6 +84,7 @@ struct OnlineLobbyGameSource::Impl {
     std::optional<core::Diagnostic> failure;
     std::vector<core::Diagnostic> notices;
     OnlineHostingState hosting{OnlineHostingState::idle};
+    std::optional<OnlineHostedRoom> room_handle;
     std::string active_name;
     std::jthread worker;
     Impl(std::unique_ptr<OnlineLobbyService> s, OnlineRoomMetadata t, bool bridge) : service(std::move(s)), tags(std::move(t)), require_bridge(bridge) {}
@@ -95,6 +96,7 @@ struct OnlineLobbyGameSource::Impl {
     }
     void success() { std::lock_guard lock(mutex); failure.reset(); }
     void state(OnlineHostingState value) { std::lock_guard lock(mutex); hosting = value; }
+    void forget_room() { std::lock_guard lock(mutex); room_handle.reset(); }
     void run(std::stop_token stop) {
         std::optional<OnlineRoomPublication> publication;
         OnlineRoomMetadata hosted;
@@ -118,7 +120,7 @@ struct OnlineLobbyGameSource::Impl {
             } else {
                 error(result.error());
                 if (result.error().code == "EAWR-NET-1540" || result.error().code == "EAWR-NET-1541") {
-                    publication.reset(); clear_admission(); state(OnlineHostingState::retrying); next_publish = Clock::now() + std::chrono::milliseconds(50);
+                    publication.reset(); forget_room(); clear_admission(); state(OnlineHostingState::retrying); next_publish = Clock::now() + std::chrono::milliseconds(50);
                 }
             }
             next_heartbeat = Clock::now() + std::chrono::seconds(10);
@@ -160,7 +162,7 @@ struct OnlineLobbyGameSource::Impl {
                 if (!sends.empty()) { text = std::move(sends.front()); sends.pop_front(); }
             }
             if (leaving || (announced && announced->place == LobbyPlace::lobby)) {
-                if (publication) { auto result = service->remove(*publication); if (!result) error(result.error()); else success(); publication.reset(); }
+                if (publication) { auto result = service->remove(*publication); if (!result) error(result.error()); else success(); publication.reset(); forget_room(); }
                 else if (admitted) { auto result = service->leave(); if (!result) error(result.error()); else success(); }
                 wants_host = false; clear_admission(); state(OnlineHostingState::idle);
                 invitation.clear(); invitation_owner.clear();
@@ -183,6 +185,8 @@ struct OnlineLobbyGameSource::Impl {
                     publication = std::move(result).value(); admitted = true; chat_sequence = 0;
                     next_heartbeat = Clock::now() + std::chrono::seconds(10); success(); state(OnlineHostingState::hosted);
                     std::lock_guard lock(mutex); active_name = hosted.name;
+                    // The match opens the room's signalling scope with these; the worker keeps the directory connection.
+                    room_handle = OnlineHostedRoom{*publication, service->principal()};
                 }
             }
             if (join && join->generation == generation.load()) {
@@ -249,6 +253,7 @@ struct OnlineLobbyGameSource::Impl {
         }
         if (publication) (void)service->remove(*publication);
         else if (admitted) (void)service->leave();
+        forget_room();
     }
 
 };
@@ -320,6 +325,11 @@ std::vector<OnlineLobbyJoinCompletion> OnlineLobbyGameSource::take_join_results(
 }
 std::optional<core::Diagnostic> OnlineLobbyGameSource::last_error() const { std::lock_guard lock(impl_->mutex); return impl_->failure; }
 OnlineHostingState OnlineLobbyGameSource::hosting_state() const { std::lock_guard lock(impl_->mutex); return impl_->hosting; }
+void OnlineLobbyGameSource::close() {
+    impl_->worker.request_stop(); impl_->condition.notify_all();
+    if (impl_->worker.joinable()) impl_->worker.join();
+}
+std::optional<OnlineHostedRoom> OnlineLobbyGameSource::hosted_room() const { std::lock_guard lock(impl_->mutex); return impl_->room_handle; }
 std::vector<core::Diagnostic> OnlineLobbyGameSource::take_notices() { std::lock_guard lock(impl_->mutex); auto result = std::move(impl_->notices); impl_->notices.clear(); return result; }
 void OnlineLobbyGameSource::send_chat(LobbyChatScope scope, const std::string& game, const std::string&, const std::string& text) {
     std::lock_guard lock(impl_->mutex);

@@ -80,6 +80,7 @@ class it lists:
 | `todo` | FoC applies it and we do not. | a ticket: the tracking issue of the mechanic or subsystem (movement, combat, fighter, AI, presentation and economy tag coverage, a `[Walk]` or logic-review issue), one issue per missing mechanic, not per tag |
 | `foc-ignores` | FoC's parsers do not read it. | evidence citing the debug build (an id of the table at the top of the file) |
 | `land-or-galactic`, `multiplayer`, `presentation-later`, `deferred` | Out of scope for now. | a ticket, or the reason as evidence |
+| `by-design` | Our implementation intentionally replaces this mechanism. | evidence citing the rule ID that says so (checked to exist in `docs/behaviour`) |
 
 A tag we parse but do not apply is `todo` or `partial`, never covered. `area` is the subsystem. `types` are the unit kinds of
 `include/eawr/units/unit_tables.hpp` (`station`, `ship`, `squadron`, `craft`) where the sim splits by kind, otherwise
@@ -112,6 +113,19 @@ For example, ignored ship thrust in ordinary flight does not cover optional atta
 - **`land-or-galactic`, `presentation-later`** by class or tag-name family, with a scope reason (ground classes, planets,
   campaigns and story, cinematics, graphics settings, menus). These are scope decisions (M2 is the space skirmish), not
   claims about FoC.
+- A tag name's scope word (`Hyperspace`, `Land_`, `Piracy`, `Galactic`) labels `land-or-galactic` only for classes that are not
+  fought in a tactical battle. On the classes of `TACTICAL_CLASSES` (`tools/inventory/tag_registry.py`: `SpaceUnit`, `UniqueUnit`,
+  `TransportUnit`, `Container`, `Squadron`, `StarBase`, the space and special structures and the heroes) such a tag stays `todo`
+  until someone has read what a tactical battle does with it (legacy EAWR-4002), as for the `Hyperspace`
+  arrival (legacy EAWR-3956); only pure ground words (`Garrison`, `Ground`, `Infantry`) still scope those classes out. Fields only the galactic map reads (`GalacticBehavior`, `Piracy_Value_Credits`,
+  `Galactic_Fleet_Override_*`, `Disallows_Hyperspace_Retreat`) stay `land-or-galactic` on every class.
+- A constant that FoC reads but whose consumer our code replaces on purpose (the path finder's grid and look-ahead constants) is
+  `by-design` with the rule that says so (PC-10 for the grid cull sizes); a tag whose retail effect is on a model we do not draw
+  (`Select_Box_Z_Adjust`, WSU-66) is `by-design` with that rule as evidence. A constant no note covers yet stays `todo`.
+- An `applied` or `partial` row of a tactical class (`TACTICAL_CLASSES`) must cite code outside `src/campaign/auto_resolve_*` and
+  `include/eawr/campaign/auto_resolve_*`: galactic auto-resolve applying a value does not apply it in the battle (the 2026-10-16
+  tag audit) (legacy EAWR-4002). The gate does not check that the other location is more than a loader's table; reviewing that is part of
+  `basis: reviewed`.
 - **`applied`, `partial`, `todo` for a tag we parse** come from `tools/inventory/tag_apply_scan.py`: it finds where each
   loader parses a tag literal, the field it stores the value in, and where else the code uses that field. A use outside the
   loader that is not the identity hash or a test counts as applying it. `partial` rows come from the per-kind split of

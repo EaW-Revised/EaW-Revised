@@ -1,6 +1,8 @@
 #include "particle_adapter.hpp"
 #include "particle_texture.hpp"
 #include "particle_prewarm.hpp"
+#include "particle_reuse.hpp"
+#include "particle_spawn_trace.hpp"
 #include "gpu_memory_ledger.hpp"
 #include "texture_budget.hpp"
 #include <godot_cpp/classes/engine.hpp>
@@ -11,6 +13,7 @@
 
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/world3d.hpp>
 #include <godot_cpp/variant/array.hpp>
@@ -19,12 +22,14 @@
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_color_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/projection.hpp>
 #include <godot_cpp/variant/rid.hpp>
 #include <godot_cpp/variant/string_name.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
+#include <godot_cpp/variant/variant.hpp>
 
 #include <algorithm>
 #include <array>
@@ -44,6 +49,16 @@ using UploadClock = std::chrono::steady_clock;
 thread_local bool measure_uploads{};
 thread_local GodotParticleBackend::FrameWork upload_work;
 std::atomic<bool> measure_preparations{};
+
+[[nodiscard]] bool spawn_trace_requested() {
+    OS* const os = OS::get_singleton();
+    if (os == nullptr) return false;
+    const PackedStringArray arguments = os->get_cmdline_user_args();
+    for (int64_t i = 0; i < arguments.size(); ++i) {
+        if (String(arguments[i]) == String("--eawr-particle-spawn-trace")) return true;
+    }
+    return false;
+}
 
 class UploadTimer final {
 public:
@@ -276,8 +291,11 @@ public:
         RID instance;
         std::uint64_t fog_handle{};
         std::size_t emitter_index{};
+        std::int32_t priority{};
         std::size_t quads{};
         bool bump{};
+        bool owns_textures{true};
+        bool reuse_allowed{};
         std::vector<std::pair<float, float>> source_points;
         detail::ParticleSurfaceShape shape;
         detail::ParticleSurfaceShape prepared_shape;
@@ -299,15 +317,19 @@ public:
     };
 
     Impl(Node3D& host, TextureResolver resolver, GodotParticleBackend::FogCallbacks fog)
-        : resolver_(std::move(resolver)), fog_(std::move(fog)) {
+        : resolver_(std::move(resolver)), fog_(std::move(fog)), spawn_journal_(spawn_trace_requested()) {
         if (host.get_world_3d().is_valid()) scenario_ = host.get_world_3d()->get_scenario();
     }
 
     ~Impl() {
+        set_reuse(false);
+        release_warm();
         while (!emitters_.empty()) destroy(emitters_.begin()->first);
     }
 
     std::uint64_t create(const particles::EmitterRenderPlan& plan) {
+        detail::ParticleSpawnTrace trace(spawn_journal_.enabled() ? &spawn_journal_ : nullptr,
+            spawn_effect_, spawn_tick_, plan.texture, plan.emitter_index);
         failure_.clear();
         RenderingServer* rendering = RenderingServer::get_singleton();
         if (rendering == nullptr || !scenario_.is_valid()) {
@@ -334,12 +356,16 @@ public:
             failure_ = valid.error().message;
             return 0;
         }
+        trace.lap(detail::ParticleSpawnTrace::validation);
         const assets::Texture* texture = resolver_ ? resolver_(plan.texture) : nullptr;
+        trace.lap(detail::ParticleSpawnTrace::texture_resolve);
         if (texture == nullptr) {
             failure_ = "colour texture '" + plan.texture + "' did not resolve";
             return 0;
         }
+        if (trace.enabled()) trace.texture_cold = !textures_.contains(plan.texture);
         const std::optional<RID> texture_rid = acquire_texture(*rendering, plan.texture, *texture);
+        trace.lap(detail::ParticleSpawnTrace::texture_setup_upload);
         if (!texture_rid) {
             failure_ = "colour texture '" + plan.texture + "': " + failure_;
             return 0;
@@ -350,6 +376,8 @@ public:
         const bool bump = plan.blend == particles::Blend::bump_alpha;
         if (bump && !plan.normal_texture.empty()) {
             const assets::Texture* normal = resolver_ ? resolver_(plan.normal_texture) : nullptr;
+            trace.lap(detail::ParticleSpawnTrace::normal_resolve);
+            if (trace.enabled()) trace.normal_cold = !textures_.contains(plan.normal_texture);
             if (normal != nullptr) normal_rid = acquire_texture(*rendering, plan.normal_texture, *normal);
             if (!normal_rid) {
                 failure_ = "normal texture '" + plan.normal_texture + "' did not resolve"
@@ -358,23 +386,60 @@ public:
                 return 0;
             }
         }
+        trace.lap(detail::ParticleSpawnTrace::normal_setup_upload);
         const std::string normal_key = normal_rid ? plan.normal_texture : std::string{};
         const auto release_textures = [&] {
             release_texture(*rendering, plan.texture);
             if (!normal_key.empty()) release_texture(*rendering, normal_key);
         };
         const std::string shader_key = material.program;
+        if (trace.enabled()) trace.shader_cold = !shaders_.contains(shader_key);
         const std::optional<RID> shader = acquire_shader(*rendering, shader_key);
+        trace.lap(detail::ParticleSpawnTrace::shader_compile);
         if (!shader) {
             release_textures();
             failure_ = "Godot rejected the particle program (EAWR-RENDER-0007)";
             return 0;
+        }
+        const auto priority = render_pass_priority(material.pass)
+            + static_cast<std::int32_t>(std::min<std::uint32_t>(plan.order_in_phase, 7U));
+        // Opaque draws may sort by resource identity. Keep their ordinary fresh
+        // resources; transparent draws use the same priority and current depth.
+        const bool reuse_allowed = plan.blend != particles::Blend::opaque;
+        if (reuse_enabled_ && reuse_allowed) {
+            if (auto retained = reuse_.take({plan.texture, normal_key, shader_key, priority})) {
+                // The retained emitter holds its program, but releases texture
+                // residency on retirement. This create keeps its new texture refs.
+                release_shader(*rendering, shader_key);
+                Emitter emitter = std::move(*retained);
+                emitter.owns_textures = true;
+                rendering->material_set_param(emitter.material, StringName("eawr_particle_texture"), *texture_rid);
+                if (normal_rid) rendering->material_set_param(emitter.material,
+                    StringName("eawr_particle_normal"), *normal_rid);
+                emitter.emitter_index = plan.emitter_index;
+                emitter.quads = 0;
+                emitter.prepared = emitter.replace_surface = emitter.changed_indices = false;
+                emitter.prepared_shape = {};
+                emitter.preparation_ms = 0.0;
+                emitter.source_points.clear();
+                emitter.arrays.clear();
+                emitter.bounds = AABB{};
+                rendering->instance_set_scenario(emitter.instance, scenario_);
+                // Cached bump materials missed intervening lighting updates.
+                if (emitter.bump) apply_lighting(*rendering, emitter.material);
+                const std::uint64_t id = next_id_++;
+                emitters_.emplace(id, std::move(emitter));
+                trace.resource = id;
+                return id;
+            }
         }
         Emitter emitter;
         emitter.texture_key = plan.texture;
         emitter.normal_key = normal_key;
         emitter.shader_key = shader_key;
         emitter.emitter_index = plan.emitter_index;
+        emitter.priority = priority;
+        emitter.reuse_allowed = reuse_allowed;
         emitter.material = rendering->material_create();
         if (!emitter.material.is_valid()) {
             release_shader(*rendering, shader_key);
@@ -385,9 +450,7 @@ public:
         rendering->material_set_shader(emitter.material, *shader);
         // Emitters are ordered inside the public pass range; the spacing of
         // eight between pass priorities keeps them from crossing a boundary.
-        rendering->material_set_render_priority(emitter.material,
-            render_pass_priority(material.pass)
-                + static_cast<std::int32_t>(std::min<std::uint32_t>(plan.order_in_phase, 7U)));
+        rendering->material_set_render_priority(emitter.material, priority);
         rendering->material_set_param(emitter.material, StringName("eawr_particle_texture"), *texture_rid);
         if (bump) {
             if (normal_rid) {
@@ -397,6 +460,7 @@ public:
             apply_lighting(*rendering, emitter.material);
             emitter.bump = true;
         }
+        trace.lap(detail::ParticleSpawnTrace::material_setup);
         emitter.mesh = rendering->mesh_create();
         emitter.instance = rendering->instance_create();
         if (!emitter.mesh.is_valid() || !emitter.instance.is_valid()) {
@@ -412,6 +476,7 @@ public:
         rendering->instance_set_scenario(emitter.instance, scenario_);
         rendering->instance_geometry_set_cast_shadows_setting(
             emitter.instance, RenderingServer::SHADOW_CASTING_SETTING_OFF);
+        trace.lap(detail::ParticleSpawnTrace::mesh_instance_create);
         if (fog_.register_material) {
             const auto registered = fog_.register_material(emitter.material, *shader);
             if (!registered || registered.value() == 0) {
@@ -427,8 +492,10 @@ public:
             }
             emitter.fog_handle = registered.value();
         }
+        trace.lap(detail::ParticleSpawnTrace::fog_registration);
         const std::uint64_t id = next_id_++;
         emitters_.emplace(id, std::move(emitter));
+        trace.resource = id;
         return id;
     }
 
@@ -457,9 +524,34 @@ public:
         warm_budget_.commit(policy,charges);
         return true;
     }
-    void release_warm(){
-        for(const auto id:warm_ids_)destroy(id);
-        warm_ids_.clear();warm_budget_.clear();
+    bool prewarm_program(const particles::EmitterRenderPlan& plan) {
+        ++warm_program_work_.requested;
+        const auto refuse = [this] { ++warm_program_work_.refused; return false; };
+        if (!plan.drawable) return refuse();
+        if (static_cast<bool>(fog_.register_material) != static_cast<bool>(fog_.unregister_material)) return refuse();
+        if (fog_.register_material && (plan.blend == particles::Blend::heat_distortion || !plan.depth_test)) return refuse();
+        const auto material = GodotParticleBackend::material_for(plan, static_cast<bool>(fog_.register_material));
+        if (!validate_material(material)) return refuse();
+        // Program identity is independent of texture bindings and render priority.
+        if (warm_program_budget_.contains(material.program)) {
+            ++warm_program_work_.duplicate_requests;
+            return true;
+        }
+        if (!warm_program_budget_.admits(material.program)) return refuse();
+        RenderingServer* const rendering = RenderingServer::get_singleton();
+        if (rendering == nullptr || !acquire_shader(*rendering, material.program)) return refuse();
+        warm_program_budget_.commit(material.program);
+        warm_program_work_.programs = std::max(warm_program_work_.programs, warm_program_budget_.size());
+        return true;
+    }
+    void release_warm() {
+        for (const auto id : warm_ids_) destroy(id);
+        warm_ids_.clear();
+        warm_budget_.clear();
+        if (RenderingServer* const rendering = RenderingServer::get_singleton()) {
+            for (const auto& program : warm_program_budget_.programs()) release_shader(*rendering, program);
+        }
+        warm_program_budget_.clear();
     }
 
     void prepare(const std::uint64_t id, const particles::VertexStream& stream) {
@@ -595,21 +687,68 @@ public:
     }
 
     void destroy(const std::uint64_t id) {
+        UploadTimer timer(upload_work.retirement_ms);
         const auto found = emitters_.find(id);
         if (found == emitters_.end()) return;
         RenderingServer* rendering = RenderingServer::get_singleton();
-        if (found->second.fog_handle && fog_.unregister_material)
-            fog_.unregister_material(found->second.fog_handle);
+        if (reuse_enabled_ && found->second.reuse_allowed && rendering != nullptr) {
+            Emitter& emitter = found->second;
+            const auto bytes = detail::particle_reuse_charge(emitter.shape.vertices, emitter.vertex_stride,
+                emitter.attribute_stride, emitter.shape.indices, emitter.index_stride, 0, 0);
+            rendering->instance_set_visible(emitter.instance, false);
+            rendering->instance_set_scenario(emitter.instance, RID{});
+            // Cached RIDs keep geometry, not texture residency. Unbind before
+            // releasing refs so the adaptive texture budget follows live demand.
+            rendering->material_set_param(emitter.material, StringName("eawr_particle_texture"), Variant{});
+            if (!emitter.normal_key.empty()) rendering->material_set_param(emitter.material,
+                StringName("eawr_particle_normal"), Variant{});
+            release_texture(*rendering, emitter.texture_key);
+            if (!emitter.normal_key.empty()) release_texture(*rendering, emitter.normal_key);
+            emitter.owns_textures = false;
+            // CPU packing shadows are rebuilt from the new owner's stream. The
+            // GPU surface/strides survive, and the empty topology forces index
+            // upload (including zeroing its unused tail) before visibility.
+            emitter.vertex_bytes = PackedByteArray{};
+            emitter.attribute_bytes = PackedByteArray{};
+            emitter.index_bytes = PackedByteArray{};
+            std::vector<std::uint32_t>{}.swap(emitter.topology);
+            std::vector<std::pair<float, float>>{}.swap(emitter.source_points);
+            emitter.arrays.clear();
+            // No eviction: a full cache uses ordinary destruction instead of
+            // adding another synchronous free to a successful cache admission.
+            // Refusals are reported, so persistent policy starvation is visible.
+            if (reuse_.retain({emitter.texture_key, emitter.normal_key, emitter.shader_key, emitter.priority},
+                bytes, emitter)) {
+                emitters_.erase(found);
+                return;
+            }
+        }
+        release_emitter(found->second, rendering);
+        emitters_.erase(found);
+    }
+
+    void set_reuse(const bool enabled) {
+        // Fog consumer ownership remains on the immediate-destruction path.
+        reuse_enabled_ = enabled && !fog_.register_material;
+        if (!reuse_enabled_) {
+            RenderingServer* const rendering = RenderingServer::get_singleton();
+            reuse_.drain([&](Emitter& emitter) { release_emitter(emitter, rendering); });
+        }
+    }
+
+    void release_emitter(const Emitter& emitter, RenderingServer* rendering) {
+        if (emitter.fog_handle && fog_.unregister_material)
+            fog_.unregister_material(emitter.fog_handle);
         if (rendering != nullptr) {
-            const Emitter& emitter = found->second;
             if (emitter.instance.is_valid()) rendering->free_rid(emitter.instance);
             if (emitter.mesh.is_valid()) rendering->free_rid(emitter.mesh);
             if (emitter.material.is_valid()) rendering->free_rid(emitter.material);
             release_shader(*rendering, emitter.shader_key);
-            release_texture(*rendering, emitter.texture_key);
-            if (!emitter.normal_key.empty()) release_texture(*rendering, emitter.normal_key);
+            if (emitter.owns_textures) {
+                release_texture(*rendering, emitter.texture_key);
+                if (!emitter.normal_key.empty()) release_texture(*rendering, emitter.normal_key);
+            }
         }
-        emitters_.erase(found);
     }
 
     void set_lighting(const GodotParticleBackend::BumpLighting& lighting) {
@@ -623,7 +762,7 @@ public:
     }
 
     [[nodiscard]] std::size_t live_rids() const noexcept {
-        return emitters_.size() * 3 + textures_.size() + shaders_.size();
+        return (emitters_.size() + reuse_.size()) * 3 + textures_.size() + shaders_.size();
     }
     [[nodiscard]] std::size_t live_emitters() const noexcept { return emitters_.size(); }
     [[nodiscard]] std::vector<GodotParticleBackend::FogEmitterEvidence> fog_emitter_evidence() const {
@@ -750,9 +889,16 @@ private:
     GodotParticleBackend::FogCallbacks fog_;
     RID scenario_;
     std::map<std::uint64_t, Emitter> emitters_;
+    detail::ParticleReuseCache<Emitter> reuse_;
+    bool reuse_enabled_{};
     std::vector<std::uint64_t> warm_ids_;
     detail::ParticleWarmBudget warm_budget_;
+    detail::ParticleProgramWarmBudget warm_program_budget_;
+    ProgramPrewarmWork warm_program_work_;
     std::map<std::string, Shared> textures_;
+    std::string_view spawn_effect_;
+    std::uint64_t spawn_tick_{};
+    detail::ParticleSpawnJournal spawn_journal_;
     std::map<std::string, Shared> shaders_;
     std::uint64_t next_id_{1};
     std::string failure_;
@@ -774,8 +920,35 @@ GodotParticleBackend::FrameWork GodotParticleBackend::frame_work() { return uplo
 std::uint64_t GodotParticleBackend::create_emitter(const particles::EmitterRenderPlan& plan) {
     return impl_->create(plan);
 }
+void GodotParticleBackend::set_spawn_context(const std::string_view effect, const std::uint64_t tick) noexcept {
+    if (!impl_->spawn_journal_.enabled()) return;
+    impl_->spawn_effect_ = effect;
+    impl_->spawn_tick_ = tick;
+}
 bool GodotParticleBackend::prewarm_emitter(const particles::EmitterRenderPlan& plan){return impl_->prewarm(plan);}
+bool GodotParticleBackend::prewarm_program(const particles::EmitterRenderPlan& plan) { return impl_->prewarm_program(plan); }
 void GodotParticleBackend::release_prewarm(){impl_->release_warm();}
+std::size_t GodotParticleBackend::peak_prewarmed_programs() const noexcept { return impl_->warm_program_work_.programs; }
+std::size_t GodotParticleBackend::prewarm_program_limit() noexcept { return detail::ParticleProgramWarmBudget::max_programs; }
+bool GodotParticleBackend::begin_prewarm_reference() {
+    ++impl_->warm_program_work_.references;
+    if (!impl_->warm_program_budget_.full()) return true;
+    ++impl_->warm_program_work_.skipped_references;
+    return false;
+}
+void GodotParticleBackend::record_prewarm_lookup(const double milliseconds, const bool decoded) {
+    impl_->warm_program_work_.lookup_ms += milliseconds;
+    if (decoded) ++impl_->warm_program_work_.decoded_systems;
+}
+void GodotParticleBackend::finish_program_prewarm(const double milliseconds) {
+    impl_->warm_program_work_.prepare_ms = milliseconds;
+    impl_->warm_program_work_.prepared_shaders = impl_->shaders_.size();
+}
+GodotParticleBackend::ProgramPrewarmWork GodotParticleBackend::program_prewarm_work() const noexcept {
+    auto work = impl_->warm_program_work_;
+    work.live_shaders = impl_->shaders_.size();
+    return work;
+}
 std::size_t GodotParticleBackend::prewarmed_emitters() const noexcept {return impl_->warm_budget_.emitters();}
 std::uint64_t GodotParticleBackend::prewarmed_texture_bytes() const noexcept {return impl_->warm_budget_.texture_bytes();}
 void GodotParticleBackend::prepare_emitter(const std::uint64_t resource, const particles::VertexStream& stream) {
@@ -785,6 +958,12 @@ void GodotParticleBackend::update_emitter(const std::uint64_t resource, const pa
     impl_->update(resource, stream);
 }
 void GodotParticleBackend::destroy_emitter(const std::uint64_t resource) { impl_->destroy(resource); }
+void GodotParticleBackend::set_emitter_reuse(const bool enabled) { impl_->set_reuse(enabled); }
+GodotParticleBackend::ReuseWork GodotParticleBackend::reuse_work() const noexcept {
+    const auto& cache = impl_->reuse_;
+    return {cache.size(), cache.bytes(), cache.peak_emitters(), cache.peak_bytes(),
+        cache.hits(), cache.misses(), cache.refusals(), impl_->live_rids()};
+}
 std::string GodotParticleBackend::failure_cause() const { return impl_->failure(); }
 particles::CullingFrame GodotParticleBackend::culling_frame() const {
     return particle_culling::frame(impl_->scenario_);

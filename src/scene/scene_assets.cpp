@@ -65,6 +65,30 @@ std::vector<AttachedEffect> model_proxy_effects(const AssetAccess& access, const
     return effects;
 }
 
+bool missing_material_effect(const AssetAccess& access, const std::string_view program) {
+    if (!access.exists || program.empty()) return false;
+    std::string stem = canonical(program);
+    const std::size_t slash = stem.find_last_of('/');
+    const std::size_t extension = stem.find('.', slash == std::string::npos ? 0 : slash + 1);
+    if (extension != std::string::npos) stem.resize(extension);
+    // ALDEFAULT-01: lookup checks the supplied path and the effect search
+    // directory for each extension. This is a VFS query, never a name allowlist.
+    for (const std::string_view suffix : {".fx", ".fxo"}) {
+        const std::string path = stem + std::string(suffix);
+        if (access.exists(path) || access.exists("data/art/shaders/" + path)) return false;
+    }
+    return true;
+}
+
+const LegacySelector& missing_effect_selector() noexcept {
+    static constexpr LegacySelector selector{"eawr_missing_effect", "fallback", "opaque", false, true};
+    return selector;
+}
+
+const LegacySelector* material_selector(const std::string_view program, const bool effect_missing) noexcept {
+    return effect_missing ? &missing_effect_selector() : find_legacy_selector(program);
+}
+
 [[nodiscard]] ModelFacts model_facts(const AssetAccess& access, const std::string& path, const bool construction) {
     ModelFacts facts;
     facts.logical_path = path;
@@ -88,10 +112,15 @@ std::vector<AttachedEffect> model_proxy_effects(const AssetAccess& access, const
             surface.submesh_index = static_cast<std::uint32_t>(submesh_index);
             surface.mesh_name = mesh.name;
             surface.shader = submesh.shader;
-            if (const LegacySelector* selector = find_legacy_selector(submesh.shader)) {
+            surface.effect_missing = missing_material_effect(access, submesh.shader);
+            if (const LegacySelector* selector = material_selector(submesh.shader, surface.effect_missing)) {
                 surface.supported = true;
                 surface.technique = std::string(selector->technique);
                 surface.pass = std::string(selector->pass);
+            }
+            if (surface.effect_missing) {
+                facts.surfaces.push_back(std::move(surface));
+                continue;
             }
             for (const assets::MaterialParameter& parameter : submesh.parameters) {
                 if (parameter.kind != assets::ParameterKind::texture) continue;

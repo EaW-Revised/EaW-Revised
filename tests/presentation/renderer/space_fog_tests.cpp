@@ -112,6 +112,19 @@ int main() {
         assert(decision.decision == D::not_admitted || decision.decision == D::uncatalogued);
     }
 
+    // ALDEFAULT-01: the built-in missing material is supported. A present
+    // but unsupported effect still blocks admission.
+    auto missing = placement(0, "UNIT_MISSING", true,
+                             {{"BatchMeshGloss.fx", true}, {"InventedAbsent.fx", true}});
+    missing.surfaces.back().effect_missing = true;
+    scene::Scene missing_scene;
+    missing_scene.placements.push_back(missing);
+    const auto skipped = sf::classify(missing_scene, type_of, unit);
+    assert(skipped.size() == 1 && skipped[0].decision == D::admitted && skipped[0].reasons.empty());
+    missing_scene.placements[0].surfaces.back().effect_missing = false;
+    const auto unsupported_effect = sf::classify(missing_scene, type_of, unit);
+    assert(unsupported_effect[0].decision == D::admitted_blocked);
+
     // Visibility: half-open cells from origin (-150, 100), 100 x 100, 3 x 2.
     constexpr std::int64_t q = 1LL << 24;
     const sim::fog::FogGridDesc desc{.team_id = 2, .width = 3, .height = 2,

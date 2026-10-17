@@ -125,12 +125,7 @@ core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture
     return core::Result<PreparedSkirmish>::success({std::move(tables), std::move(inputs), std::move(start).value()});
 }
 core::Result<skirmish::FixtureOptions> validated_lan_options(const skirmish::SetupSelection& selection, std::span<const skirmish::SetupMap> maps) {
-    // The shared local-dialog validator checks authored rows/teams/options. LAN human flags are independent command-seat ownership.
-    auto local = selection;
-    for (auto& row : local.slots) row.human = row.slot == 1;
-    auto result = skirmish::setup_options(local, maps);
-    if (result) result.value().slots = selection.slots;
-    return result;
+    return skirmish::setup_options(selection, maps, false);
 }
 core::Result<void> append_lan_ai_row(skirmish::SetupSelection& selection, const skirmish::SetupMap& map,
     std::uint32_t slot, std::size_t palette_size, bool prefer_unused_team) {
@@ -175,7 +170,7 @@ sim::tactical::TacticalSetup lan_recording_setup(const skirmish::Fixture& fixtur
     return setup;
 }
 core::Result<net::LobbyGame> encode_lan_lobby_game(const skirmish::FixtureOptions& options, std::uint64_t input_delay) {
-    if (!options.map || !options.slots || !options.match || options.slots->size() > skirmish::local_setup_rows || input_delay == 0 || input_delay > net::max_input_delay) {
+    if (!options.map || !options.slots || !options.match || options.slots->size() > net::max_match_seats || input_delay == 0 || input_delay > net::max_input_delay) {
         return core::Result<net::LobbyGame>::failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice, "Incomplete staging options."));
     }
     std::ostringstream out; out.imbue(std::locale::classic());
@@ -210,7 +205,7 @@ core::Result<skirmish::FixtureOptions> decode_lan_lobby_game(const net::LobbySna
         >> m.allow_random_events >> credits >> m.start_tech >> m.max_tech >> m.game_timer >> m.win_integer >> m.auto_resolve >> win
         >> std::quoted(m.win_condition) >> std::quoted(m.space_win_condition) >> count)
         || version != 1 || delay == 0 || delay > net::max_input_delay || victory > static_cast<unsigned>(sim::tactical::VictoryCondition::all_enemy_units_destroyed)
-        || count < 2 || count > skirmish::local_setup_rows) return bad();
+        || count < 2 || count > net::max_match_seats) return bad();
     if (seed_given) result.seed = seed;
     if (victory_given) result.victory_condition = static_cast<sim::tactical::VictoryCondition>(victory);
     m.credits = sim::math::Fixed::from_raw(credits); m.win_float = sim::math::Fixed::from_raw(win);

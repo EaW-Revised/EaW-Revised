@@ -491,7 +491,7 @@ std::optional<Terrain> extract_terrain(Map& map, const Chunk& bundle) {
 
 } // namespace
 
-core::Result<Map> load_map(const std::span<const std::byte> bytes, Source source, const ObjectTypeCatalog& catalog) {
+core::Result<Map> load_map_header(const std::span<const std::byte> bytes, Source source) {
     if (bytes.size() > detail::max_file_size) return core::Result<Map>::failure(detail::error(source, diagnostic_codes::limit, "TED exceeds 512 MiB safety limit"));
     if (source.stored_size != 0 && source.stored_size != bytes.size()) return core::Result<Map>::failure(detail::error(source, diagnostic_codes::source_mismatch, "provenance size does not match supplied TED bytes"));
     Reader root_reader(bytes);
@@ -502,8 +502,6 @@ core::Result<Map> load_map(const std::span<const std::byte> bytes, Source source
     if (!root_reader.bytes(root_size, root_payload)) return fail<Map>(source, "TED special root payload crosses file bound", 0, diagnostic_codes::bounds);
     Chunk special{0, false, 0, 8, root_payload, {}};
     auto root_minis = detail::parse_minis(special, source); if (!root_minis) return core::Result<Map>::failure(root_minis.error());
-    auto chunks = detail::parse_chunks(root_reader.rest(), source, root_reader.absolute());
-    if (!chunks) return core::Result<Map>::failure(chunks.error());
     Map map; map.source = std::move(source);
     std::array<unsigned, 256> occurrences{};
     std::array<bool, 256> reported{};
@@ -567,6 +565,25 @@ core::Result<Map> load_map(const std::span<const std::byte> bytes, Source source
         issue(map, MapIssue::declared_extents_invalid, "root", 8, root_size,
               "root extent pair 0x10/0x11 is incomplete, malformed or nonfinite; body bounds apply");
     }
+    return core::Result<Map>::success(std::move(map));
+}
+
+core::Result<Map> load_map(const std::span<const std::byte> bytes, Source source, const ObjectTypeCatalog& catalog) {
+    if (bytes.size() > detail::max_file_size) return core::Result<Map>::failure(detail::error(source, diagnostic_codes::limit, "TED exceeds 512 MiB safety limit"));
+    if (source.stored_size != 0 && source.stored_size != bytes.size()) return core::Result<Map>::failure(detail::error(source, diagnostic_codes::source_mismatch, "provenance size does not match supplied TED bytes"));
+    Reader root_reader(bytes);
+    std::uint32_t root_id{}, root_size{};
+    if (!root_reader.u32(root_id) || !root_reader.u32(root_size)) return fail<Map>(source, "TED is missing special root header", 0, diagnostic_codes::truncated);
+    if (root_id != 0) return fail<Map>(source, "TED special root ID must be zero", 0);
+    std::span<const std::byte> root_payload;
+    if (!root_reader.bytes(root_size, root_payload)) return fail<Map>(source, "TED special root payload crosses file bound", 0, diagnostic_codes::bounds);
+    Chunk special{0, false, 0, 8, root_payload, {}};
+    auto root_minis = detail::parse_minis(special, source); if (!root_minis) return core::Result<Map>::failure(root_minis.error());
+    auto chunks = detail::parse_chunks(root_reader.rest(), source, root_reader.absolute());
+    if (!chunks) return core::Result<Map>::failure(chunks.error());
+    auto header = load_map_header(bytes, std::move(source));
+    if (!header) return core::Result<Map>::failure(header.error());
+    Map map = std::move(header).value();
     for (const auto& chunk : chunks.value()) map.chunks.push_back(raw_chunk(chunk));
     // WSS-05: capacity and team starts are separate authored quantities.
     const auto starts = std::count_if(chunks.value().begin(), chunks.value().end(),

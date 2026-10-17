@@ -257,7 +257,9 @@ void RoomService::attach(std::uint64_t connection, const std::string& prefix, Re
                 const auto old = slot.connection; bound_.erase(old); slot.connection = 0;
                 sink_.close(old, closed_frame(room_capability));
             }
-            revoke_issued(slot);
+            // The credentials issued so far stay valid until the seat ends (they are all revoked then, and expire on their
+            // own): this seat's pair links keep refreshing their TURN allocation and permissions with them, and a provider
+            // that stops forwarding for a revoked credential would cut every other live link of a re-attaching seat (#4021).
             if (slot.refreshed && !slot.refreshed->username.empty()) sink_.revoke(slot.refreshed->username);
             slot.refresh_key.clear(); slot.refreshed.reset();
             slot.state = State::held; slot.deadline = now + options_.hold_timeout;

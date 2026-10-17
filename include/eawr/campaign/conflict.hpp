@@ -49,6 +49,7 @@ struct ConflictRecord {
     std::vector<ConflictForce> forces; // ascending persistent ID
     std::vector<BattleSeat> seats; // ascending seat ID; effective conflict-scoped assignment
     sim::EntityId station{}, superweapon{};
+    sim::galactic::PlayerId station_owner{}; // owner of the planet starbase the station stands for; zero means the defender (WGM-202)
     sim::galactic::TypeId station_type{};
     std::uint32_t station_level{}, terrain_index{};
     std::string map_identity, story_plot;
@@ -59,6 +60,11 @@ struct ConflictRecord {
     std::uint64_t corruption_request{}; // live host request; zero for ordinary conflict
     friend bool operator==(const ConflictRecord&, const ConflictRecord&) = default;
 };
+
+// WGM-202: the tactical station fights for its starbase owner when that is a battle side, otherwise for the defender.
+[[nodiscard]] constexpr sim::galactic::PlayerId station_side(const ConflictRecord& record) noexcept {
+    return record.station_owner == record.invader || record.station_owner == record.defender ? record.station_owner : record.defender;
+}
 
 enum class ForceDisposition { survived, destroyed, retreated, destroy_after_tactical };
 struct ForceResult {

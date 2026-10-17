@@ -696,10 +696,17 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
     for (std::uint32_t index = 0; index < pending_count; ++index) {
         if (!in.charge(sizeof(ScriptEvent) + sizeof(EventKey))) return detail::reject("pending event");
         ScriptEvent event;
-        if (!detail::read_event(in, event) || !detail::valid_producer(event.key.producer)
-            || event.key.tick <= (shared.config.query_clock && event.key.producer == producer_script_timer ? galactic_frame : completed_tick)) {
+        if (!detail::read_event(in, event) || !detail::valid_producer(event.key.producer) || event.key.tick == 0)
             return detail::reject("pending event");
-        }
+        const auto deadline = shared.config.query_clock && event.key.producer == producer_script_timer
+            ? galactic_frame : completed_tick;
+        // A default-profile object owner can defer callbacks until a later
+        // subset turn. Keep their original ordering keys in the existing
+        // pending encoding; other profiles and targets retain the old guard.
+        const bool object_deferred = !shared.config.galactic_clock && !shared.config.query_clock
+            && objects.contains(event.target);
+        if (event.key.tick <= deadline && !object_deferred)
+            return detail::reject("pending event");
         const EventKey key = event.key;
         if (!pending.emplace(key, std::move(event)).second) return detail::reject("duplicate pending event key");
     }
@@ -715,6 +722,11 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
         instances.emplace(id, std::move(instance).value());
     }
     if (!in.ok() || !in.at_end()) return detail::reject("truncated save or trailing bytes");
+    if (!shared.config.galactic_clock && !shared.config.query_clock) {
+        for (const auto& [key, event] : pending)
+            if (key.tick <= completed_tick && !instances.contains(event.target))
+                return detail::reject("overdue object event has no live instance");
+    }
     // Timer accounting: staged timers plus pending timer events per instance.
     for (const auto& [id, instance] : instances) {
         std::uint64_t timers = instance->staging.timers.size();
@@ -742,14 +754,73 @@ std::uint64_t ScriptScheduler::sync_graph_encodes() const noexcept {
     return count;
 }
 core::Result<std::string> ScriptScheduler::sync_hash(bool verify_graphs) {
+    const sim::InlineExecutor executor;
+    return sync_hash(executor, verify_graphs);
+}
+
+core::Result<std::string> ScriptScheduler::sync_hash(const sim::PartitionExecutor& executor, bool verify_graphs) {
     gc_profile::Scope profile_scope(gc_profile::Phase::lua_sync);
     if (auto usable = impl_->check_usable(); !usable) return core::Result<std::string>::failure(usable.error());
     const auto refuse = [](std::string message) {
         return core::Result<std::string>::failure(detail::make_error(codes::save_refused, std::move(message)));
     };
+    if (executor.worker_count() == 0) return refuse("executor reports no workers");
     std::string error;
     const auto* functions = detail::function_table(error);
     if (!functions) return refuse(error);
+    struct Graph {
+        detail::Instance* instance{};
+        std::array<std::uint64_t, 3> sandbox_key{};
+        bool changed{};
+        std::string digest;
+        std::string error;
+        bool valid{};
+    };
+    std::vector<Graph> graphs;
+    for (const auto& [id, owned] : impl_->instances) {
+        static_cast<void>(id);
+        auto& instance = *owned;
+        if (!instance.inbox.empty() || instance.current_thread != -1 || instance.exit_requested
+            || instance.outcome != InstanceOutcome::running) return refuse("sync digest needs a completed script barrier");
+        const std::array sandbox_key{instance.sandbox->identity_count(), instance.sandbox->memory_measured(), instance.sandbox->memory_charged()};
+        const bool changed = instance.sync_graph_dirty || instance.sync_graph_digest.empty() || instance.sync_graph_sandbox_key != sandbox_key;
+        if (changed || verify_graphs) graphs.push_back(Graph{&instance, sandbox_key, changed, {}, {}, false});
+    }
+    const auto encode = [&](Graph& graph) {
+        detail::ByteWriter writer;
+        if (!detail::sf::save_graph(*graph.instance->sandbox, *functions, writer, graph.error)) return;
+        if (!writer.ok()) { graph.error = "sync graph exceeds its canonical value bounds"; return; }
+        const auto& bytes = writer.bytes();
+        graph.digest = core::sync_state_digest(std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
+        if (!graph.changed && graph.digest != graph.instance->sync_graph_digest) {
+            graph.error = "cached Lua graph digest differs from full graph oracle";
+            return;
+        }
+        graph.valid = true;
+    };
+    if (executor.worker_count() == 1 || graphs.size() < 2) {
+        for (auto& graph : graphs) encode(graph);
+    } else {
+        // ADR-009: each sandbox and output slot has one owner; the function
+        // table is frozen. execute_phase joins every tick, before metadata is
+        // folded or any caller can mutate Lua, save, or publish the tick hash.
+        const auto prepared = executor.execute_phase("script-sync-graphs", sim::tick_partition_count,
+            [&](const std::size_t partition) {
+                const auto range = sim::partition_range(partition, graphs.size());
+                for (auto index = range.begin; index < range.end; ++index) encode(graphs[index]);
+            });
+        if (!prepared) return core::Result<std::string>::failure(prepared.error());
+    }
+    // Refusals and cache publication follow instance order, independent of the
+    // worker schedule. A failed phase publishes no new cache entries.
+    for (const auto& graph : graphs) if (!graph.valid) return refuse(graph.error);
+    for (auto& graph : graphs) {
+        auto& instance = *graph.instance;
+        instance.sync_graph_digest = std::move(graph.digest);
+        ++instance.sync_graph_encodes;
+        instance.sync_graph_sandbox_key = graph.sandbox_key;
+        instance.sync_graph_dirty = false;
+    }
     detail::ByteWriter out;
     out.text("eawr-script-sync-state-v1");
     detail::write_identity(out, impl_->shared->config, impl_->managed_handles); detail::write_config(out, impl_->shared->config);
@@ -765,21 +836,7 @@ core::Result<std::string> ScriptScheduler::sync_hash(bool verify_graphs) {
     out.u32(static_cast<std::uint32_t>(impl_->instances.size()));
     for (const auto& [id, owned] : impl_->instances) {
         static_cast<void>(id); auto& instance = *owned;
-        if (!instance.inbox.empty() || instance.current_thread != -1 || instance.exit_requested
-            || instance.outcome != InstanceOutcome::running) return refuse("sync digest needs a completed script barrier");
         detail::write_instance(out, instance);
-        const std::array sandbox_key{instance.sandbox->identity_count(), instance.sandbox->memory_measured(), instance.sandbox->memory_charged()};
-        const bool changed = instance.sync_graph_dirty || instance.sync_graph_digest.empty() || instance.sync_graph_sandbox_key != sandbox_key;
-        if (changed || verify_graphs) {
-            detail::ByteWriter graph;
-            if (!detail::sf::save_graph(*instance.sandbox, *functions, graph, error)) return refuse(error);
-            if (!graph.ok()) return refuse("sync graph exceeds its canonical value bounds");
-            const auto& bytes = graph.bytes();
-            const auto digest = core::sync_state_digest(std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
-            if (!changed && digest != instance.sync_graph_digest) return refuse("cached Lua graph digest differs from full graph oracle");
-            instance.sync_graph_digest = digest; ++instance.sync_graph_encodes;
-            instance.sync_graph_sandbox_key = sandbox_key; instance.sync_graph_dirty = false;
-        }
         out.text(instance.sync_graph_digest);
     }
     if (!out.ok()) return refuse("sync metadata exceeds its canonical value bounds");

@@ -1,4 +1,5 @@
 #include "options_screen.hpp"
+#include "dialog_rectangles.hpp"
 
 #include "render_profile_viewport.hpp"
 #include "viewer_path.hpp"
@@ -7,6 +8,7 @@
 #include "ui/font_provider.hpp"
 #include "ui/input_routing.hpp"
 #include "ui/kit.hpp"
+#include "ui/message_box_view.hpp"
 #include "ui/theme_builder.hpp"
 
 #include "eawr/assets/assets.hpp"
@@ -27,6 +29,7 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
 #include <array>
@@ -82,6 +85,7 @@ constexpr PageInfo pages[] = {
     {EawrOptionsScreen::Page::gameplay, "gameplay", "IDD_GAMEPLAY_OPTIONS_DIALOG"},
     {EawrOptionsScreen::Page::keyboard, "keyboard", "IDD_KEYBOARD_OPTIONS_DIALOG"},
     {EawrOptionsScreen::Page::network, "network", "IDD_NETWORK_OPTIONS_DIALOG"},
+    {EawrOptionsScreen::Page::game_menu, "game", "IDD_GAME_OPTIONS_DIALOG"},
 };
 
 [[nodiscard]] std::string keyboard_dialog(const int number) {
@@ -270,6 +274,8 @@ void EawrOptionsScreen::show(Node& parent, const Page start) {
     set_process_input(true);
     draft_ = committed_;
     page_ = start;
+    menu_root_ = start == Page::game_menu;
+    quit_requested_ = false;
     rebuild_page();
 }
 
@@ -284,6 +290,13 @@ void EawrOptionsScreen::clear_page() {
 
 void EawrOptionsScreen::close_screen() {
     if (!shown_) return;
+    if (confirm_open()) {
+        if (Node* box = Object::cast_to<Node>(UtilityFunctions::instance_from_id(confirm_id_))) {
+            remove_child(box);
+            box->queue_free();
+        }
+    }
+    confirm_id_ = 0;
     shown_ = false;
     set_process_input(false);
     clear_page();
@@ -402,12 +415,50 @@ void EawrOptionsScreen::rebuild_page() {
         service.controls.back().class_name = "Button";
         service.controls.back().style.push_back("BS_AUTOCHECKBOX");
         add("LTEXT", "IDC_ONLINE_SERVICE_ERROR", "", row, true);
+        service.controls.back().rect.height = height / 6;
     }
-    state.dialog.emplace(build_dialog(service, *resources.theme_model, resources.text ? &*resources.text : nullptr, placement));
+    state.dialog.emplace(build_dialog(service, *resources.theme_model, resources.text ? &*resources.text : nullptr, placement, page_ == Page::network));
     root->add_child(state.dialog->frame);
     for (BuiltGadget& gadget : state.dialog->gadgets) {
         if (gadget.control == nullptr) continue;
         state.controls[gadget.id] = gadget.control;
+        if (page_ == Page::network && gadget.kind == "label") {
+            // Preserve authored label rectangles. Fit each caption to its row so wrapping cannot
+            // paint the next row; service validation alone has an explicitly multiline area.
+            if (auto* label = Object::cast_to<EawrUiLabel>(gadget.control)) {
+                const bool multiline = gadget.id == "IDC_ONLINE_SERVICE_ERROR";
+                label->set_wrap(multiline);
+                if (!multiline) {
+                    const auto index = static_cast<std::size_t>(&gadget - state.dialog->gadgets.data());
+                    const std::string role(data::to_string(data::font_role(service.controls[index])));
+                    const KitTextStyle style = kit_text_style(*label, role);
+                    if (style.font.is_valid() && style.size > 0) {
+                        const Vector2 bounds = label->get_size();
+                        int caption_size = style.size;
+                        while (caption_size > 1) {
+                            const Vector2 measured = style.font->get_string_size(label->get_text(), HORIZONTAL_ALIGNMENT_LEFT, -1, caption_size);
+                            if (measured.x <= bounds.x && measured.y <= bounds.y) break;
+                            --caption_size;
+                        }
+                        label->add_theme_font_size_override(text(role), caption_size);
+                        label->add_theme_constant_override(text(role + "_cell_ascent"), style.cell_ascent * caption_size / style.size);
+                        label->add_theme_constant_override(text(role + "_cell_descent"), style.cell_descent * caption_size / style.size);
+                    }
+                }
+                label->set_clip_contents(true);
+            }
+        }
+        if (page_ == Page::network && gadget.kind == "edit") {
+            // Native edits otherwise retain a font-driven minimum taller than a compact
+            // authored row. Fit the edit to that row; neighbouring labels stay untouched.
+            const KitTextStyle style = kit_text_style(*gadget.control, "Edit_Box");
+            for (int caption_size = style.size - 1; caption_size > 0; --caption_size) {
+                if (gadget.control->get_combined_minimum_size().y <= gadget.rect.height) break;
+                gadget.control->add_theme_font_size_override("Edit_Box", caption_size);
+                gadget.control->update_minimum_size();
+            }
+            gadget.control->set_size(Vector2(static_cast<float>(gadget.rect.width), static_cast<float>(gadget.rect.height)));
+        }
         if (hidden_gadget(gadget.id)) gadget.control->set_visible(false);
         // A group box is a backdrop: the kit paints its background, so one declared after the
         // controls it holds would cover them. Drawn first, it sits behind them as retail's does.
@@ -478,6 +529,13 @@ void EawrOptionsScreen::wire_page() {
             // executable's built-in "Mods"; the page itself is a separate feature, so it is disabled.
             if (resources_->catalog->script.find("IDD_SELECT_MOD_DIALOG") == nullptr) mods->set_visible(false);
             else disable(*mods, "IDC_MAIN_OPTIONS_MODS", "The mods page is not built yet.");
+        }
+        break;
+    case Page::game_menu:
+        // MNU-19: retail enables Save and Load in a single-player skirmish; no skirmish player save exists
+        // here yet, so they stay on the dialog disabled (and carry no caption of their own).
+        for (const char* id : {"IDC_SAVE_GAME", "IDC_LOAD_GAME"}) {
+            if (has(id)) disable(*state.controls[id], id, "");
         }
         break;
     case Page::audio: {
@@ -909,13 +967,77 @@ void EawrOptionsScreen::leave_to_hub() {
     rebuild_page();
 }
 
+void EawrOptionsScreen::leave_hub() {
+    if (!menu_root_) {
+        close_screen();
+        return;
+    }
+    page_ = Page::game_menu;
+    rebuild_page();
+}
+
+bool EawrOptionsScreen::confirm_open() const {
+    return confirm_id_ != 0 && UtilityFunctions::is_instance_id_valid(confirm_id_);
+}
+
+// MNU-42, WGS-165: Quit Game asks TEXT_QUIT_SURE with Yes / No; Esc or No keeps the menu.
+void EawrOptionsScreen::ask_quit() {
+    if (confirm_open() || !resources_ || !resources_->theme_model) return;
+    Resources& resources = *resources_;
+    model::MessageBoxRequest request;
+    request.kind = model::BoxKind::quit_confirm;
+    request.caption = "TEXT_QUIT_SURE";
+    request.buttons = {model::BoxButton{"TEXT_BUTTON_YES", 1, false}, model::BoxButton{"TEXT_BUTTON_NO", 0, true}};
+    const MessageBoxContext context{&*resources.catalog, &*resources.theme_model,
+                                    resources.text ? &*resources.text : nullptr, resources.theme,
+                                    get_viewport()->get_visible_rect().size};
+    auto* box = memnew(EawrMessageBox);
+    if (!box->open(*this, context, request)) {
+        notes_.push_back("quit confirmation: " + box->failure());
+        memdelete(box);
+        return;
+    }
+    confirm_id_ = static_cast<int64_t>(box->get_instance_id());
+    box->connect("result_chosen", callable_mp(this, &EawrOptionsScreen::on_confirm_result));
+}
+
+void EawrOptionsScreen::on_confirm_result(const int64_t result) {
+    // The box frees itself when a button is chosen (EawrMessageBox::choose), so the id is just forgotten here.
+    confirm_id_ = 0;
+    if (result != 1) return;
+    quit_requested_ = true;
+    close_screen();
+}
+
+std::optional<Vector2> EawrOptionsScreen::control_point(const std::string& name) const {
+    if (!shown_) return std::nullopt;
+    if (confirm_open()) {
+        const auto* box = Object::cast_to<EawrMessageBox>(UtilityFunctions::instance_from_id(confirm_id_));
+        if (box == nullptr || (name != "yes" && name != "no")) return std::nullopt;
+        for (const auto& button : box->plan().buttons) {
+            if ((button.result == 1) != (name == "yes")) continue;
+            if (const Control* control = box->button(button.control)) return control->get_global_rect().get_center();
+        }
+        return std::nullopt;
+    }
+    if (!state_) return std::nullopt;
+    const auto found = state_->controls.find(name);
+    if (found == state_->controls.end() || found->second == nullptr || !found->second->is_visible_in_tree()) return std::nullopt;
+    return found->second->get_global_rect().get_center();
+}
+
 void EawrOptionsScreen::handle_button(const std::string& id) {
     if (!shown_ || !state_) return;
     const auto reason = state_->reasons.find(id);
     if (reason != state_->reasons.end()) return;
     switch (page_) {
+    case Page::game_menu:
+        if (id == "IDC_GAME_OPTIONS_RESUME") close_screen();
+        else if (id == "IDC_INGAME_OPTIONS") leave_to_hub();
+        else if (id == "IDC_GAME_OPTIONS_QUIT") ask_quit();
+        break;
     case Page::hub:
-        if (id == "IDC_OK_MAIN" || id == "IDC_OK_IN_GAME") close_screen();
+        if (id == "IDC_OK_MAIN" || id == "IDC_OK_IN_GAME") leave_hub();
         else if (id == "IDC_MAIN_OPTIONS_AUDIO" || id == "IDC_IN_GAME_OPTIONS_AUDIO") open_page(Page::audio);
         else if (id == "IDC_MAIN_OPTIONS_VIDEO" || id == "IDC_IN_GAME_OPTIONS_VIDEO") open_page(Page::video);
         else if (id == "IDC_MAIN_OPTIONS_KEYBOARD" || id == "IDC_IN_GAME_OPTIONS_KEYBOARD") open_page(Page::keyboard);
@@ -966,8 +1088,10 @@ void EawrOptionsScreen::_input(const Ref<InputEvent>& event) {
     if (!shown_) return;
     const Ref<InputEventKey> key = event;
     if (key.is_null() || !key->is_pressed() || key->is_echo() || key->get_keycode() != KEY_ESCAPE) return;
+    if (confirm_open()) return; // the confirmation box answers Esc itself
     get_viewport()->set_input_as_handled();
-    if (page_ == Page::hub) close_screen();
+    if (page_ == Page::game_menu) close_screen();
+    else if (page_ == Page::hub) leave_hub();
     else cancel_page();
 }
 
@@ -1022,6 +1146,10 @@ bool EawrOptionsScreen::press(const std::string& id) {
     if (button == nullptr || button->is_disabled() || !button->is_visible()) return false;
     handle_button(id);
     return true;
+}
+
+std::string EawrOptionsScreen::rectangles() const {
+    return state_ && state_->dialog ? dialog_rectangles(*state_->dialog) : "{}";
 }
 
 std::vector<EawrOptionsScreen::ControlState> EawrOptionsScreen::control_states() const {

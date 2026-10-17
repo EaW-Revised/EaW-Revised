@@ -25,6 +25,8 @@ inline constexpr std::uint32_t object_weapon = 0xffffffffU;
 inline constexpr std::uint32_t no_hardpoint = 0xffffffffU;
 // WNO-29: presentation resolves these slots against the death-projectile list.
 inline constexpr std::uint32_t death_projectile_slot_flag = 0x40000000U;
+// RP-09: presentation resolves this weapon slot against the type's retreat explosion.
+inline constexpr std::uint32_t retreat_explosion_slot_flag = 0x20000000U;
 inline constexpr std::uint32_t death_projectile_selection_slot = 0xfffe0007U; // coordinator-reserved
 inline constexpr std::uint32_t projectile_damage_delay_slot = 0xfffe0008U; // coordinator-reserved
 
@@ -270,6 +272,7 @@ struct CombatProfile {
     std::optional<PlanetaryWeaponProfile> planetary_weapon{};
     bool star_base{}; // DUMMY_STAR_BASE behavior, independent of XML class
     std::vector<ShotProfile> death_projectiles{}; // WNO-29: one choice per ordinary death
+    std::optional<ShotProfile> retreat_explosion{}; // RP-09: the station's created blast when a retreat destroys it
     bool target_stealth{}; // WST-07: Target_Stealth_Units; sees and shoots stealthed enemies
     math::Fixed stealth_detection_range{}; // WST-08: Space_FOW_Reveal_Range of a target_stealth type, else 0
     std::uint64_t attack_category_restrictions{}; // WTA-29: unit-level category refusal

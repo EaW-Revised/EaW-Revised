@@ -15,6 +15,7 @@
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/viewport.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 #include "eawr/skirmish/start.hpp"
 
@@ -185,10 +186,87 @@ std::string MapMode::State::perf_report_json() const {
     return std::string("{\"key\": \"") + EawrPerfOverlay::key_name + "\", \"shown\": false}";
 }
 
+// MNU-19: the in-game menu opens while the battle runs and pauses it (UI-S1); a multiplayer battle
+// cannot pause, so its menu opens over the running game. Resume and Esc close it.
+bool MapMode::State::open_game_menu() {
+    if (options.attract || !live_session) return false;
+    if (live_session->phase() != LiveSessionView::Phase::running || live_session->time().ended()) return false;
+    if (loading != nullptr && loading->shown()) return false;
+    if (menu_handler) {
+        menu_handler();
+        return true;
+    }
+    if (menu_host == nullptr || !filesystem) return false;
+    if (game_menu != nullptr && !UtilityFunctions::is_instance_id_valid(game_menu_id)) game_menu = nullptr;
+    if (game_menu != nullptr && game_menu->shown()) return true;
+    if (game_menu == nullptr) {
+        auto* screen = memnew(EawrOptionsScreen);
+        EawrOptionsScreen::Options screen_options;
+        screen_options.filesystem = filesystem;
+        screen_options.game_root = options.game_root;
+        screen_options.mod_root = options.mod_root;
+        screen_options.context = EawrOptionsScreen::Context::in_game;
+        screen_options.apply_window = options.capture_path.empty();
+        if (!screen->build(std::move(screen_options))) {
+            UtilityFunctions::printerr("EAWR in-game menu: ", String::utf8(screen->failure().c_str()));
+            memdelete(screen);
+            return false;
+        }
+        game_menu = screen;
+        game_menu_id = static_cast<int64_t>(screen->get_instance_id());
+    }
+    menu_paused = false;
+    if (!options.lan && !live_session->time().paused()) {
+        live_session->press_pause();
+        menu_paused = live_session->time().paused();
+    }
+    game_menu->show(*menu_host, EawrOptionsScreen::Page::game_menu);
+    menu_open = game_menu->shown();
+    UtilityFunctions::print("EAWR in-game menu opened: paused ", live_session->time().paused(), "; by menu ", menu_paused);
+    return true;
+}
+
+void MapMode::State::service_game_menu() {
+    if (!menu_open) return;
+    if (game_menu != nullptr && !UtilityFunctions::is_instance_id_valid(game_menu_id)) game_menu = nullptr;
+    if (game_menu != nullptr && game_menu->shown()) return;
+    menu_open = false;
+    const bool resumed = menu_paused && live_session;
+    if (resumed) live_session->resume();
+    menu_paused = false;
+    const bool quit = game_menu != nullptr && game_menu->quit_requested();
+    UtilityFunctions::print("EAWR in-game menu closed: resumed ", resumed, "; quit ", quit);
+    if (!quit) return;
+    // Quit Game confirmed: leave the battle for the main menu. A multiplayer battle leaves through
+    // its abort route (the other peers are told); the host then follows the battle's exit.
+    if (live_session && live_session->leave()) leave_to_menu = true;
+}
+
+void MapMode::State::free_game_menu() {
+    if (game_menu != nullptr && UtilityFunctions::is_instance_id_valid(game_menu_id)) {
+        if (Node* parent = game_menu->get_parent()) parent->remove_child(game_menu);
+        memdelete(game_menu);
+    }
+    game_menu = nullptr;
+    menu_open = false;
+}
+
+std::optional<std::array<float, 2>> MapMode::State::game_menu_point(const std::string& name) const {
+    if (game_menu == nullptr || !UtilityFunctions::is_instance_id_valid(game_menu_id)) return std::nullopt;
+    const char* gadget = name == "menu_resume" ? "IDC_GAME_OPTIONS_RESUME" : name == "menu_options" ? "IDC_INGAME_OPTIONS"
+        : name == "menu_quit" ? "IDC_GAME_OPTIONS_QUIT" : name == "menu_yes" ? "yes" : name == "menu_no" ? "no"
+        : name == "menu_back" ? "IDC_OK_IN_GAME" : nullptr;
+    if (gadget == nullptr) return std::nullopt;
+    const auto point = game_menu->control_point(gadget);
+    if (!point) return std::nullopt;
+    return std::array<float, 2>{point->x, point->y};
+}
+
 bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& context_name) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::hud);
     // #558: the overlay's parent; `--eawr-perf-overlay on` shows it from the first frame.
     perf_host = &host;
+    menu_host = &host;
     if (perf_requested) set_perf_overlay(true);
     if (!hud_options) return true;
     if (live_session && !hud_faction_given) {
@@ -217,6 +295,8 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
         hud->set_movie_handler([this] { if (space) set_movie_mode(!space->live_camera_movie()); });
         hud->set_time_handlers({[live] { live->press_pause(); }, [live] { live->press_fast_forward(); },
                                 [live] { live->resume(); }, [live] { live->quit(); }});
+        // The options button (tooltip TEXT_BUTTON_MAIN_MENU) opens the in-game menu, as Escape does.
+        hud->set_options_handler([this] { static_cast<void>(open_game_menu()); });
         if (battle) {
             TacticalHud* named = hud.get();
             // #1923: while the loading screen shows, its own Begin button is the "begin" a hand reaches.
@@ -227,6 +307,7 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
                         return std::array<float, 2>{centre.x, centre.y};
                     }
                 }
+                if (name.starts_with("menu_")) return game_menu_point(name);
                 return named->control_point(name);
             });
             BattleInput* input = battle.get();
@@ -773,10 +854,7 @@ void MapMode::State::sync_minimap() {
             blip.radar.model_present = space_population->live_ship_model_present(*ship);
         }
         if (hud->minimap_looks(blip.type).draw_to_scale && box) {
-            for (std::size_t row = 0; row < 2; ++row) for (std::size_t axis = 0; axis < 3; ++axis) {
-                blip.world_half_size[row] += std::abs(to_double(box->model_to_world.rows[row][axis]))
-                    * static_cast<double>(box->high[axis] - box->low[axis]) * 0.5;
-            }
+            blip.world_half_size = presentation::ui::minimap_world_half_size(box->model_to_world, box->low, box->high);
         }
         view.units.push_back(std::move(blip));
     }
@@ -991,13 +1069,8 @@ void MapMode::State::sync_battle_hud() {
             if (view.diagnostic_available && options.lan) (void)options.lan->save_diagnostic_details();
         }
         const auto size = perf_host->get_viewport()->get_visible_rect().size;
-        const float scale = std::min(size.x / 1280.0F, size.y / 720.0F);
-        lan_incident->set_scale(Vector2(scale, scale));
-        lan_overlay->set_position(((size - Vector2(820, 280) * scale) * 0.5F).round());
-        if (lan_overlay->get_scale() != Vector2(scale, scale)) {
-            lan_overlay->set_scale(Vector2(scale, scale));
-            refresh_text_oversampling(*lan_overlay);
-        }
+        const auto layout = fit_letterbox_canvas(*lan_overlay, size, Vector2(1280, 720));
+        lan_incident->set_scale(Vector2(layout.scale, layout.scale));
         static_cast<EawrUiLabel*>(lan_overlay->get_node<Node>("LanStatus"))->set_text(String::utf8(message.c_str()));
 
     }

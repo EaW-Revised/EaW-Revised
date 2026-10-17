@@ -226,12 +226,15 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
     turret_bindings_.assign(options_.placed_ships.size(), std::nullopt);
     live_alternate_clips_.assign(options_.placed_ships.size(), std::nullopt);
     live_retired_.assign(options_.placed_ships.size(), false);
+    live_death_clone_.assign(options_.placed_ships.size(), false);
     live_alternates_.assign(options_.placed_ships.size(), 0);
     live_alternate_counts_.assign(options_.placed_ships.size(), 0);
     live_bounds_.assign(options_.placed_ships.size(), std::nullopt);
     live_transforms_.assign(options_.placed_ships.size(), std::nullopt);
+    backdrop_ships_.assign(options_.placed_ships.size(), false);
     for (std::size_t ship_index = 0; ship_index < options_.placed_ships.size(); ++ship_index) {
         const auto& ship = options_.placed_ships[ship_index];
+        live_death_clone_[ship_index] = ship.death_clone;
         const bool live = ship.live_entity != 0;
         const std::string live_name = "live unit " + std::to_string(ship.live_entity) + " (" + ship.object_id + ")";
         const data::Definition* definition = catalog.find(ship.object_id, data::Category::game_object);
@@ -298,7 +301,17 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         auto decision = scene::classify_space_placements(only_ship, [&](const std::string_view object_id)
             -> std::optional<scene::SpaceObjectTags> {
             auto object = resolve(object_id, data::Category::game_object);
-            return object ? std::optional(scene::space_object_tags(*object, resolve)) : std::nullopt;
+            if (!object) return std::nullopt;
+            auto tags = scene::space_object_tags(*object, resolve);
+            // #3935 BP-75: a placed ship is a live simulated object, never map environment, so it stays drawn
+            // and registered. An In_Background type (the Death Star authors it for its tactical unit) is a
+            // background-scene object in the game: drawn at its simulated pose and authored Scale_Factor like
+            // any unit. This build draws it in the ordinary world scene (tags.background is cleared below); the
+            // background-scene pass, depth clear and far plane are not implemented. backdrop_ships_ only counts
+            // them for the report and the tests.
+            backdrop_ships_[ship_index] = tags.background;
+            tags.background = false;
+            return tags;
         }, ship.ability_proxy_owner).front();
         decision.scene_ordinal = scene_->placements.size() - 1;
         if (decision.role != scene::SpaceRole::drawn) {
@@ -484,11 +497,11 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
                 if (ieq(binding.parameter, "BaseTexture")) texture_path = binding.resolved;
             }
             const SurfaceUpload* upload = shared_upload(placement.model_path, *model, surface.mesh_index,
-                surface.submesh_index, *scene::find_legacy_selector(surface.shader), texture_path);
+                surface.submesh_index, *scene::material_selector(surface), texture_path);
             if (upload != nullptr) {
                 pieces.push_back({upload, placement.transform->matrix, std::nullopt, gate, live_ship,
                                   sim::math::identity_matrix()});
-                if (scene::colorizes(surface.shader)) pieces.back().colour = colour;
+                if (!surface.effect_missing && scene::colorizes(surface.shader)) pieces.back().colour = colour;
                 pieces.back().cloak_hidden = cloak_ship && ieq(surface.mesh_name, cloak_base_mesh_name);
                 if (ieq(surface.mesh_name, "buildup") || ieq(surface.mesh_name, "charged")) {
                     pieces.back().blast_charged = ieq(surface.mesh_name, "charged");
@@ -524,13 +537,14 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
             })) continue;
             for (std::uint32_t submesh_index = 0; submesh_index < mesh.submeshes.size(); ++submesh_index) {
                 const auto& submesh = mesh.submeshes[submesh_index];
-                const auto* selector = scene::find_legacy_selector(submesh.shader);
+                const bool effect_missing = scene::missing_material_effect(cache.access(), submesh.shader);
+                const auto* selector = scene::material_selector(submesh.shader, effect_missing);
                 if (selector == nullptr) {
                     decision.missing.push_back("charge mesh " + mesh.name + " unsupported shader " + submesh.shader);
                     continue;
                 }
                 std::string texture_path;
-                for (const auto& parameter : submesh.parameters) {
+                if (!effect_missing) for (const auto& parameter : submesh.parameters) {
                     if (!ieq(parameter.name, "BaseTexture")) continue;
                     if (const auto* name = std::get_if<std::string>(&parameter.value))
                         texture_path = probe(cache, "data/art/textures/", *name, texture_suffixes);
@@ -550,14 +564,14 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
             add_surface(decal.surface, HardpointGate{decision_index, decal.hardpoint, HardpointGate::Art::damage_decal});
         }
         // #427: the SHIELD sub-object of a live ship with a DEFEND ability, drawn while the
-        // ability runs (BP-22). The ALO hides it; only MeshShield.fx submeshes are drawn.
+        // ability runs (BP-22). The ALO hides it; qualified shield submeshes are drawn.
         if (live_ship && options_.placed_ships[*live_ship].defend_shell) {
             std::string& status = shield_shells_[decision.object_id];
             const std::optional<std::uint32_t> shield = shield_mesh_index(*model);
             if (!shield) status = "no SHIELD sub-object";
             for (std::uint32_t submesh = 0; shield && submesh < model->meshes[*shield].submeshes.size(); ++submesh) {
                 const std::string& shader = model->meshes[*shield].submeshes[submesh].shader;
-                if (!ieq(shader, meshshield_program)) {
+                if (!shield_program(shader)) {
                     status = "SHIELD submesh " + std::to_string(submesh) + " shader " + shader + " not drawn";
                     continue;
                 }
@@ -577,14 +591,14 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
             }
         }
         // WST-12: the STEALTH sub-object of a live ship with a STEALTH ability, drawn with its
-        // MeshShield.fx material while the cloak is on; only MeshShield.fx submeshes are drawn.
+        // qualified shield material while the cloak is on.
         if (cloak_ship) {
             std::string& status = stealth_shells_[decision.object_id];
             const std::optional<std::uint32_t> cloak = stealth_mesh_index(*model);
             if (!cloak) status = "no STEALTH sub-object";
             for (std::uint32_t submesh = 0; cloak && submesh < model->meshes[*cloak].submeshes.size(); ++submesh) {
                 const std::string& shader = model->meshes[*cloak].submeshes[submesh].shader;
-                if (!ieq(shader, meshshield_program)) {
+                if (!shield_program(shader)) {
                     status = "STEALTH submesh " + std::to_string(submesh) + " shader " + shader + " not drawn";
                     continue;
                 }
@@ -723,13 +737,14 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
                 for (std::uint32_t submesh_index = 0; submesh_index < mesh.submeshes.size(); ++submesh_index) {
                     const assets::Submesh& submesh = mesh.submeshes[submesh_index];
                     if (scene::is_shadow_volume_shader(submesh.shader)) continue;
-                    const scene::LegacySelector* selector = scene::find_legacy_selector(submesh.shader);
+                    const bool effect_missing = scene::missing_material_effect(cache.access(), submesh.shader);
+                    const scene::LegacySelector* selector = scene::material_selector(submesh.shader, effect_missing);
                     if (selector == nullptr) {
                         decision.missing.push_back(who + "shader_unsupported " + submesh.shader);
                         continue;
                     }
                     std::string texture_path;
-                    for (const assets::MaterialParameter& parameter : submesh.parameters) {
+                    if (!effect_missing) for (const assets::MaterialParameter& parameter : submesh.parameters) {
                         const auto* name = std::get_if<std::string>(&parameter.value);
                         if (!ieq(parameter.name, "BaseTexture") || name == nullptr) continue;
                         texture_path = probe(cache, "data/art/textures/", *name, texture_suffixes);
@@ -749,7 +764,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
                                       HardpointGate{decision_index, hardpoint_index, HardpointGate::Art::attached_model},
                                       live_ship, *frame});
                     pieces.back().cloak_hidden = cloak_ship; // WST-12: the cloak hides the hardpoints
-                    if (scene::colorizes(submesh.shader)) pieces.back().colour = colour;
+                    if (!effect_missing && scene::colorizes(submesh.shader)) pieces.back().colour = colour;
                 }
             }
         }

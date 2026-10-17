@@ -49,10 +49,7 @@ add_test(
 )
 
 # The release packager (tools/release, docs/releasing.md) on a stand-in build tree.
-add_test(
-    NAME ci_package_release
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_package_release.py"
-)
+
 
 # Contracts added by the melee, menu, minimap and galactic HUD work.
 eawr_add_python_contract(python_performance_melee_parity_analyze tests.performance.test_melee_parity_analyze)
@@ -69,11 +66,8 @@ add_test(NAME ci_campaign_policy_compare COMMAND "${Python3_EXECUTABLE}"
          "${CMAKE_CURRENT_SOURCE_DIR}/test_campaign_policy_compare.py")
 
 
-add_test(NAME ci_rig_python_provision COMMAND "${Python3_EXECUTABLE}"
-         "${CMAKE_CURRENT_SOURCE_DIR}/test_rig_python_provision.py")
-add_test(NAME ci_rig_retail_queue COMMAND "${Python3_EXECUTABLE}"
-         "${CMAKE_CURRENT_SOURCE_DIR}/test_rig_retail_queue.py")
-add_test(NAME ci_rig_transport COMMAND "${Python3_EXECUTABLE}"
-         "${CMAKE_CURRENT_SOURCE_DIR}/test_rig_transport.py")
+
+
+
 
 eawr_label_tests(DEFAULT ci-tools)

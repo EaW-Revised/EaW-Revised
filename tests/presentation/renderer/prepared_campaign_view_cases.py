@@ -96,7 +96,7 @@ struct LiveSessionView {
  bool prepare_replay(std::string& failure) {
  __DISPATCH__
  auto refused=validate_setup_slots(std::vector<LobbySlot>{{1,"Rebel",0,true},{2,"Empire",1,false}},
-     assets::MapLobbyMetadata{1,true,std::vector<unsigned>{0,1}},false);
+     assets::MapLobbyMetadata{1,true,std::vector<unsigned>{0,1}},false,true);
  if (!refused) failure=refused.error().message;
  return static_cast<bool>(refused);
  }
@@ -143,13 +143,14 @@ class PreparedCampaignViewContracts(unittest.TestCase):
         dispatch = replay[:replay.index(admission) + len(admission)]
         setup = (ROOT / 'src/skirmish/setup.cpp').read_text(encoding='utf-8')
         validator = extract_function(setup, 'core::Result<void> validate_setup_slots(')
+        seats = (ROOT / 'include/eawr/sim/seat.hpp').read_text(encoding='utf-8').replace('#pragma once', '')
         loading = (ROOT / 'apps/viewer/src/loading_screen.cpp').read_text(encoding='utf-8')
         ownerkey = extract_function(loading, '[[nodiscard]] std::string_view loading_owner_text_key(')
         with tempfile.TemporaryDirectory(prefix='eawr-prepared-view-') as temp:
             directory = Path(temp)
             cpp = directory / 'contract.cpp'
             exe = directory / ('contract.exe' if os.name == 'nt' else 'contract')
-            cpp.write_text(HARNESS.replace('__METHOD__', method).replace('__VALIDATE__', validator).replace('__DISPATCH__', dispatch).replace('__OWNERKEY__', ownerkey), encoding='utf-8')
+            cpp.write_text(seats + '\nnamespace sim { using eawr::sim::max_match_seats; }\n' + HARNESS.replace('__METHOD__', method).replace('__VALIDATE__', validator).replace('__DISPATCH__', dispatch).replace('__OWNERKEY__', ownerkey), encoding='utf-8')
             compile_fixture(toolchain, cpp, exe)
             ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)

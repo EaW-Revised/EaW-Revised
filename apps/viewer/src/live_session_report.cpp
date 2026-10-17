@@ -66,7 +66,10 @@ std::vector<std::uint8_t> LiveSessionView::finished_replay_bytes(std::string& er
 void LiveSessionView::save_failure_replay() {
     if (failure_replay_tried_ || !session_ || !session_->failure()) return;
     failure_replay_tried_ = true;
-    const tactical::TacticalReplay replay = session_->failure_record();
+    const auto failure = session_->failure();
+    const bool connection_loss = failure && lan_connection_loss(failure->code);
+    // A connection loss records only executed input, never the held/future tick.
+    const tactical::TacticalReplay replay = connection_loss ? session_->record() : session_->failure_record();
     auto bytes = tactical::write_replay(replay);
     if (!bytes) {
         failure_replay_error_ = core::format_diagnostic(bytes.error());
@@ -88,10 +91,32 @@ void LiveSessionView::save_failure_replay() {
            + "-usec" + std::to_string(usec) + "-tick" + std::to_string(replay.final_tick_count) + ".eawr-replay");
     std::error_code error;
     std::filesystem::create_directories(directory, error);
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    output.write(reinterpret_cast<const char*>(bytes.value().data()), static_cast<std::streamsize>(bytes.value().size()));
-    output.close();
-    if (!output) {
+    // Each final file appears only after its complete temporary file closes.
+    // Publish the companion first; the final replay is the pair's commit marker.
+    const auto publish = [](const std::filesystem::path& target, std::string_view data) {
+        auto temporary = target; temporary += ".tmp";
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        output.write(data.data(), static_cast<std::streamsize>(data.size()));
+        output.flush(); output.close();
+        std::error_code publish_error;
+        if (output) std::filesystem::rename(temporary, target, publish_error);
+        if (output && !publish_error) return true;
+        std::filesystem::remove(temporary, publish_error);
+        return false;
+    };
+    auto reason_path = path; reason_path += ".connection-loss.json";
+    bool saved = true;
+    if (connection_loss) {
+        std::ostringstream reason;
+        reason << "{\"end_reason\":\"connection-loss\",\"winner\":null,\"completed_tick\":" << replay.final_tick_count
+            << ",\"local_player\":" << player_ << ",\"code\":" << json(failure->code)
+            << ",\"reason\":" << json(failure->message)
+            << ",\"peer\":" << json(options_.lan ? options_.lan->view().peer_name : std::string{}) << "}\n";
+        saved = publish(reason_path, reason.str());
+    }
+    if (saved) saved = publish(path, std::string_view(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size()));
+    if (!saved) {
+        if (connection_loss) std::filesystem::remove(reason_path, error);
         failure_replay_error_ = "could not write " + ViewerPath::utf8(path);
         godot::UtilityFunctions::printerr(godot::String(("live session: " + failure_replay_error_).c_str()));
         return;
@@ -106,6 +131,23 @@ std::vector<platform::LiveTickCost> LiveSessionView::tick_costs_after(const std:
 
 std::shared_ptr<const tactical::TacticalSnapshot> LiveSessionView::snapshot_at(const std::uint64_t tick) const {
     return session_ ? session_->snapshot_at(tick) : nullptr;
+}
+
+std::string LiveSessionView::slotless_report_rows() const {
+    // #3957: live units that found no launch slot (squadron containers draw nothing by design).
+    std::string rows;
+    for (const auto& [key, entities] : slotless_hits_) {
+        std::string name = "?";
+        bool container = false;
+        if (tables_) for (const auto& type : tables_->units) if (skirmish::type_id(type.id) == key.second) {
+            name = type.id;
+            container = type.kind == units::UnitKind::squadron && !type.members.empty();
+        }
+        if (container) continue;
+        rows += (rows.empty() ? "" : ", ") + std::string("{\"owner\": ") + std::to_string(key.first)
+            + ", \"type\": " + json(name) + ", \"units\": " + std::to_string(entities.size()) + "}";
+    }
+    return rows;
 }
 
 void LiveSessionView::write_report(std::ostream& output) const {
@@ -198,6 +240,7 @@ void LiveSessionView::write_report(std::ostream& output) const {
            << ", \"launch_slots\": " << launch_slots_.size()
            << ", \"launched_drawn\": " << launched_ship_of_entity_.size()
            << ", \"slots_released\": " << slots_released_
+           << ", \"slotless\": [" << slotless_report_rows() << "]"
            << ", \"squadrons\": [" << [&] {
                   // #518: every registered squadron, the setup's and the launched, as first seen.
                   std::string rows;

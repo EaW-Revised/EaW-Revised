@@ -12,7 +12,7 @@ RUNTIME = bool(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST"))
 
 @unittest.skipUnless(RUNTIME, "requires the GPU route")
 class GalaxyInputRuntime(unittest.TestCase):
-    def run_input(self, events, campaign="synthetic", game_root=None):
+    def run_input(self, events, campaign="synthetic", game_root=None, fixture=None):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-galaxy-input-"))
         report = directory / "input.json"
         capture = directory / "input.png"
@@ -25,13 +25,15 @@ func _start():
     var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
     root.add_child(instance)
     current_scene = instance
-func key(code):
+func key(code, ctrl=false):
     var event = InputEventKey.new()
     event.keycode = code
+    event.ctrl_pressed = ctrl
     event.pressed = true
     Input.parse_input_event(event)
     event = InputEventKey.new()
     event.keycode = code
+    event.ctrl_pressed = ctrl
     event.pressed = false
     Input.parse_input_event(event)
 func button(index, down, position, twice = false):
@@ -59,6 +61,8 @@ func _finish():
                 str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
                 "--eawr-galactic", campaign, "--eawr-galactic-paused", "yes",
                 "--eawr-report", str(report), "--input-capture", str(capture)]
+        if fixture:
+            args += ["--eawr-galactic-hud-fixture", fixture]
         if game_root:
             args += ["--eawr-game-root", game_root]
         result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
@@ -119,6 +123,16 @@ func _finish():
         self.assertIn(data["flights"][0]["state"], ("inward", "focused"))
         self.assertEqual(data["flights"][0]["planet"], data["map_input"]["selected"])
         self.assertEqual(data["map_input"]["selection_invalidations"], 0)
+    @unittest.skipUnless(os.environ.get("EAWR_EAW_GAME_ROOT"), "requires installed FoC data")
+    def test_home_resolves_live_authored_leader_when_configured_home_is_missing(self):
+        # Drive the existing project binding; retail profile remapping is separate from this producer.
+        data = self.run_input("    if frame == 30: key(KEY_HOME, true)\n    if frame == 40: key(KEY_HOME, true)",
+                              game_root=os.environ["EAWR_EAW_GAME_ROOT"], fixture="fleet-drag-home")
+        self.assertEqual(data["map_input"]["selected"], 102)
+        beta = next(row for row in data["planets"] if row["id"] == 102)
+        x, y, z = beta["position"]
+        self.assertEqual(data["camera"]["target"], [x, z, -y])
+        self.assertEqual(data["map_input"]["discovery_source"], "published-local-faction-observer")
 
 
 if __name__ == "__main__":

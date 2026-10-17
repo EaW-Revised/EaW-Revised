@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/core/tick_profile.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include "eawr/sim/tactical/formation.hpp"
@@ -657,6 +658,7 @@ core::Result<void> session_detail::Tick::commit() {
         impl_->executed.push_back(std::move(iterator->second));
     }
     impl_->pending.erase(impl_->pending.begin(), due_end);
+    commit_object_turn();
     ++impl_->completed_tick;
     return core::Result<void>::success();
 }
@@ -693,12 +695,18 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
     }
     std::string hash;
     StateHash state_hash;
-    if (impl_->hasher) {
-        state_hash = impl_->hasher->hash(impl_->canonical_bytes());
-    } else {
-        hash = session_.state_sha256();
-        state_hash = StateHash(hash);
+    {
+        auto bytes = impl_->canonical_bytes(executor);
+        // A threaded hasher measures submission/backpressure here; its digest stays off-thread.
+        core::tick_profile::Scope hash_profile_scope("serial.tactical.finish.hash");
+        if (impl_->hasher) {
+            state_hash = impl_->hasher->hash(std::move(bytes));
+        } else {
+            hash = sim::sha256_hex(bytes);
+            state_hash = StateHash(hash);
+        }
     }
+    core::tick_profile::Scope publication_profile("serial.tactical.finish.publication");
     // #424: the squadrons' targets for the world UI (presentation only, not hashed).
     std::vector<SquadronTarget> squadron_targets;
     for (const auto& [container, mind] : impl_->minds) {
@@ -744,6 +752,7 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
         asteroid_queries,
         asteroid_candidates,
         std::move(deaths),
+        std::move(object_turn_outcomes_),
     });
 }
 

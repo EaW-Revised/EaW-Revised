@@ -188,7 +188,7 @@ bool OptionsMode::State::run_action(const std::string& action) {
     if (verb == "snapshot") {
         std::ostringstream output;
         output << "{\"page\": " << json(EawrOptionsScreen::page_name(screen->page())) << ", \"controls\": "
-               << controls_json(screen->control_states()) << "}";
+               << controls_json(screen->control_states()) << ", \"rectangles\": " << screen->rectangles() << "}";
         snapshots.push_back(output.str());
         return true;
     }
@@ -286,7 +286,8 @@ bool OptionsMode::State::write_report() const {
                << ",\n  \"session\": " << session_json()
                << ",\n  \"buses\": " << buses_json()
                << ",\n  \"shown\": " << (screen->shown() ? "true" : "false")
-               << ",\n  \"controls\": " << controls_json(screen->control_states());
+               << ",\n  \"controls\": " << controls_json(screen->control_states())
+               << ",\n  \"rectangles\": " << screen->rectangles();
     }
     output << ",\n  \"snapshots\": [";
     for (std::size_t index = 0; index < snapshots.size(); ++index) output << (index ? ",\n    " : "\n    ") << snapshots[index];

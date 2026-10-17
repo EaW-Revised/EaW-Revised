@@ -91,7 +91,9 @@ std::string canonical_text(const Scene& scene) {
             out << " surface " << surface.mesh_index << ' ' << surface.submesh_index << ' '
                 << escape(surface.mesh_name) << ' ' << escape(surface.shader) << ' '
                 << (surface.supported ? 1 : 0) << ' ' << escape(surface.technique) << ' '
-                << escape(surface.pass) << '\n';
+                << escape(surface.pass);
+            if (surface.effect_missing) out << " missing_effect_fallback";
+            out << '\n';
             for (const TextureBinding& texture : surface.textures) {
                 out << "  texture " << escape(texture.parameter) << ' ' << escape(texture.declared)
                     << ' ' << escape(texture.resolved) << '\n';

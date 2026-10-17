@@ -73,6 +73,9 @@ public:
     // True while a menu, the campaign staging screen or the settings screen is the frame; false while the setup screen (or a
     // battle behind it) is, and its own process() runs.
     [[nodiscard]] bool owns_frame() const;
+    // A battle or campaign the player left from the in-game menu is gone: the shell shows its main menu
+    // again, whichever screen started the game (the setup screen is left, the campaign shell restored).
+    void return_to_main_menu();
     // The host's input and window focus, for the attract's idle clock (MAT-06).
     void input(const godot::Ref<godot::InputEvent>& event);
     void window_activated();

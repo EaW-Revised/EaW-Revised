@@ -129,7 +129,10 @@ class SpaceFogStructure(unittest.TestCase):
         units = (ROOT / "apps/viewer/src/space_fog_units_compose.cpp").read_text(encoding="utf-8")
         self.assertIn("MaterialRoute::legacy_effect", units)
         self.assertIn("declare_fog_consumer(renderer_asset)", units)
-        self.assertNotIn("placeholder", units.lower())
+        # ALDEFAULT-01: the built-in fallback texture family is the one allowed use of the word.
+        self.assertNotIn("placeholder", units.lower().replace("family_placeholder_texture", "")
+                         .replace("legacy::textureplaceholder", "")
+                         .replace("aldefault-01: the placeholder samples no texture stages", ""))
         pure = (ROOT / "apps/viewer/src/space_fog.cpp").read_text(encoding="utf-8")
         for token in ("godot_cpp", "#include <godot", "RenderingServer", "GodotRenderer"):
             self.assertNotIn(token, pure)

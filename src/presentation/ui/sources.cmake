@@ -7,6 +7,7 @@ set(EAWR_UI_MODEL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/layout.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/command_bar_placement.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/fonts.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/font_extract.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/front_end.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/hud.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/hud_shell.cpp"

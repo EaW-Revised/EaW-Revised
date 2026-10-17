@@ -2,6 +2,7 @@
 
 #include "attract_camera.hpp"
 #include "map_mode_assets.hpp"
+#include "options_screen.hpp"
 #include <chrono>
 
 namespace eawr::presentation::godot_backend {
@@ -60,6 +61,16 @@ struct MapMode::State final {
     // #84: the live battle's sound; `--eawr-audio on|off` (default on when interactive).
     std::unique_ptr<BattleAudio> battle_audio;
     std::string audio_argument;
+    // RP-06/RP-07: the retreat countdown line is rebuilt only when the faction, the phase or the tick changes;
+    // the parsed faction presentation and its localized text are read once per faction.
+    struct RetreatCountdownCache {
+        std::string faction;
+        ui::RetreatFactionPresentation presentation;
+        std::string text;
+        bool shown{};
+        sim::tactical::RetreatPhase phase{};
+        std::uint64_t tick{};
+    } retreat_countdown;
     std::unique_ptr<UnitEmitters> unit_emitters;
     std::optional<PerfTrace> perf_trace;  // --eawr-perf-trace (#601)
     // #638: the main thread's ms in this frame's unit emitters, battle effects and breakoff props.
@@ -157,6 +168,21 @@ struct MapMode::State final {
     std::map<sim::EntityId, AttractSample> attract_baseline;
     bool hud_faction_given{};
     std::unique_ptr<TacticalHud> hud;
+    // The in-game menu (MNU-19): built on first use under the battle's host, as a game_menu page of
+    // the options screen. The pointer is only trusted while its instance id is valid.
+    EawrOptionsScreen* game_menu{};
+    int64_t game_menu_id{};
+    godot::Node3D* menu_host{};
+    std::function<void()> menu_handler;
+    bool menu_open{};
+    bool menu_paused{}; // the menu paused the battle and resumes it when it closes
+    bool leave_to_menu{};
+    // Escape / the options button. False when the battle is not in a state that has a menu.
+    bool open_game_menu();
+    // Once per frame: a closed menu resumes the battle, and a confirmed Quit Game leaves it.
+    void service_game_menu();
+    void free_game_menu();
+    [[nodiscard]] std::optional<std::array<float, 2>> game_menu_point(const std::string& name) const;
     godot::Control* lan_overlay{};
     godot::Control* lan_incident{};
     LanRecoveredNotice lan_recovered_notice;

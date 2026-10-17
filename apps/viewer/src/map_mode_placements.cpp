@@ -195,7 +195,7 @@ bool MapMode::State::compose_placements(const assets::Map& map,
         if (placement.team_colour) team_colour_factions.try_emplace(placement.owner_faction, *placement.team_colour);
     }
     const auto surface_colour = [](const scene::Placement& placement, const scene::Surface& surface) {
-        return scene::colorizes(surface.shader) ? placement.team_colour : Colour{};
+        return !surface.effect_missing && scene::colorizes(surface.shader) ? placement.team_colour : Colour{};
     };
     std::map<std::string, assets::Texture> textures;
     std::map<std::tuple<sim::AssetId, std::size_t, Colour>, SurfaceUpload> uploads;
@@ -210,7 +210,7 @@ bool MapMode::State::compose_placements(const assets::Map& map,
         std::optional<std::vector<lighting::wind::Matrix>> wind_bones;
         for (std::size_t index = 0; index < surfaces.size(); ++index) {
             const scene::Surface& surface = surfaces[index];
-            const scene::LegacySelector* selector = scene::find_legacy_selector(surface.shader);
+            const scene::LegacySelector* selector = scene::material_selector(surface);
             if (!surface.supported || selector == nullptr) {
                 ++surfaces_unsupported;
                 // Never uploaded or drawn, so it cannot show unattenuated
@@ -249,7 +249,7 @@ bool MapMode::State::compose_placements(const assets::Map& map,
                 .pass_name = std::string(selector->pass),
                 .bindings = {},
             };
-            for (const assets::MaterialParameter& parameter : submesh.parameters) {
+            if (!surface.effect_missing) for (const assets::MaterialParameter& parameter : submesh.parameters) {
                 authored.bindings.push_back({parameter.name, parameter.value});
             }
             if (legacy::reads_effect_time(authored)) {
@@ -306,7 +306,7 @@ bool MapMode::State::compose_placements(const assets::Map& map,
                     return std::nullopt;
                 });
             const std::set<Colour> uncoloured{Colour{}};
-            const std::set<Colour>& colours = scene::colorizes(surface.shader)
+            const std::set<Colour>& colours = !surface.effect_missing && scene::colorizes(surface.shader)
                 ? asset_colours[asset.asset_id] : uncoloured;
             for (const Colour& colour : colours) {
                 MaterialDescription material = authored;
@@ -324,7 +324,7 @@ bool MapMode::State::compose_placements(const assets::Map& map,
                 }
                 SurfaceUpload upload;
                 upload.renderer_asset = next_asset++;
-                if (fog) {
+                if (fog && !surface.effect_missing) {
                     const auto declared = renderer->declare_fog_consumer(upload.renderer_asset);
                     if (!declared) fog_unsupported.push_back(asset.logical_path + " surface "
                         + std::to_string(index) + " asset " + std::to_string(upload.renderer_asset)

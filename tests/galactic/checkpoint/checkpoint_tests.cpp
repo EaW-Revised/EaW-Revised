@@ -1023,11 +1023,53 @@ void test_tactical_seat_limits() {
         checkpoint::diagnostic_codes::inconsistent, "ten human seats are refused at load");
     auto seats = checkpoint::default_seats(replay.setup);
     for (auto& seat : seats) seat.kind = checkpoint::SeatKind::human;
+    expect(static_cast<bool>(checkpoint::save_tactical_checkpoint(session, replay.commands, seats, build)),
+        "four human owners on three teams are accepted");
+
+    // Skirmish retains distinct owner rows even when humans are allied.
+    for (std::uint32_t id = 5; id <= 9; ++id)
+        replay.setup.players.push_back({id, id <= 6 ? 1U : 2U, id, tactical::player_flag_commandable});
+    replay.setup.skirmish.emplace();
+    replay.setup.skirmish->map = "data/art/maps/checkpoint.ted";
+    replay.setup.skirmish->map_sha256 = std::string(64, 'a');
+    replay.setup.skirmish->victory_condition = 1;
+    for (const auto& player : replay.setup.players)
+        replay.setup.skirmish->slots.push_back({player.player_id, true, player.player_id - 1, {}});
+    session = factory(replay).value();
+    seats = checkpoint::default_seats(replay.setup);
+    const auto separate = checkpoint::save_tactical_checkpoint(session, replay.commands, seats, build);
+    expect(separate && checkpoint::load_tactical_checkpoint(separate.value(), build, factory, executor),
+        "nine separate skirmish human owners round trip");
+    container = checkpoint::parse_checkpoint(separate.value()).value();
+    seats.back().player_id = seats.front().player_id;
     expect_code(checkpoint::save_tactical_checkpoint(session, replay.commands, seats, build),
-        checkpoint::diagnostic_codes::invalid_save, "four human owners on three teams are refused at save");
+        checkpoint::diagnostic_codes::invalid_save, "shared skirmish owner refused at save");
     container.sections[0].bytes = checkpoint::encode_seats(seats).value();
     expect_code(checkpoint::load_tactical_checkpoint(checkpoint::write_checkpoint(container).value(), build, factory, executor),
-        checkpoint::diagnostic_codes::inconsistent, "four human owners on three teams are refused at load");
+        checkpoint::diagnostic_codes::inconsistent, "shared skirmish owner refused at load");
+
+    // A GC child has campaign ownership and the same SKSU map metadata.
+    replay.setup.players.resize(2); replay.setup.skirmish->slots.resize(2);
+    replay.setup.skirmish->slots[1].human = false;
+    seats.resize(2); seats[1].player_id = 1;
+    replay.setup.first_free_entity_id = 1000;
+    replay.setup.campaign.emplace();
+    for (const auto& player : replay.setup.players) {
+        tactical::EconomyPlayer account;
+        account.player = player.player_id; account.credits = units(500); account.credit_cap = units(1000);
+        replay.setup.campaign->players.push_back(account);
+    }
+    const checkpoint::TacticalSessionFactory campaign_factory = [content = battle_content()](const tactical::TacticalReplay& log) {
+        tactical::EconomyRules economy; economy.campaign = true; economy.players = log.setup.campaign->players;
+        return tactical::TacticalSession::from_replay(log, content.sensors, content.durability, content.motion,
+            std::nullopt, content.combat, {}, {}, economy);
+    };
+    auto campaign = campaign_factory(replay);
+    expect(static_cast<bool>(campaign), "combined campaign and SKSU fixture starts");
+    if (!campaign) { std::cerr << eawr::core::format_diagnostic(campaign.error()) << '\n'; return; }
+    const auto shared = checkpoint::save_tactical_checkpoint(campaign.value(), replay.commands, seats, build);
+    expect(shared && checkpoint::load_tactical_checkpoint(shared.value(), build, campaign_factory, executor),
+        "GC shared-owner seats round trip with SKSU metadata present");
 }
 
 // --- Corpus ------------------------------------------------------------------------------------

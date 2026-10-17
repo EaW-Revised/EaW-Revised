@@ -42,9 +42,9 @@ namespace skirmish_start_test_support {
 
 
 // The tick-zero state hash of the committed m2-start replay (FoC data, fixture seed 67).
-constexpr std::string_view m2_tick_zero_state = "78697a3cd28322cd6f19b659de3b131a7cb8d6cf312e7dcfb684d63689cdaeda";
+constexpr std::string_view m2_tick_zero_state = "38a8d8870dc82ea2e435b7ca5d6a568caa7603b0f2b88e5ddb031068b2908854";
 // docs/unit-data.md: the FoC fleet's unit-table identity, the replay's content identity.
-constexpr std::string_view m2_content_identity = "86cc028edddd02a1805cd1f89d5f73d9ad511f61baecfbf7d1042d722ecad496";
+constexpr std::string_view m2_content_identity = "b0cbd796a46c6ae654ebcb18453feea16b9859fa1467e596295883f021549d74";
 
 int failures{};
 
@@ -171,9 +171,10 @@ int main(const int argc, char** argv) {
         foc_start(fixtures);
         return failures == 0 ? 0 : 1;
     }
-    setup_contract();
+    setup_contract(fixtures);
     synthetic_start();
     synthetic_special_sources();
+    synthetic_tactical_super_weapon();
     synthetic_placed_start();
     synthetic_roster_gate();
     synthetic_placement();

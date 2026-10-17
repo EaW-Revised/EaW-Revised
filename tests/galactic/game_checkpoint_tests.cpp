@@ -4,6 +4,7 @@
 #include "eawr/sim/galactic/victory.hpp"
 #include "eawr/sim/galactic/observer.hpp"
 #include "../../src/campaign/checkpoint_owner_internal.hpp"
+#include "../../src/sim/tactical/checkpoint_archive_internal.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -750,6 +751,42 @@ void child_roundtrip() {
     expect(!cp::load_game_checkpoint(saved, identities, {}, serial), "missing child content resolver refused");
 }
 
+// GC #4056: a Quick Save of Equal Footing with galactic AI on holds a world blob over 8 MiB inside
+// the galactic-owner section. The reader bounded every count by an eighth of the byte budget, so the
+// blob was refused ("state count exceeds remaining byte budget") while shorter saves restored.
+template <class Archive> void large_blob_contracts(const char* label) {
+    constexpr std::size_t big = (Archive::byte_limit / 8U) + 1000U;
+    Bytes blob(big); std::string text(big, 'x');
+    for (std::size_t i = 0; i < blob.size(); ++i) blob[i] = static_cast<std::uint8_t>(i * 31U);
+    typename Archive::Writer out; out(blob, text, std::optional(blob));
+    typename Archive::Reader in(out.bytes);
+    Bytes restored_blob; std::string restored_text; std::optional<Bytes> restored_optional;
+    in(restored_blob, restored_text, restored_optional);
+    expect(restored_blob == blob && restored_text == text && restored_optional == blob && in.remaining() == 0,
+        std::string(label) + " byte blobs and strings above an eighth of the budget round trip");
+    // Wider rows keep the tighter count bound: more rows than the eighth cannot be real state.
+    typename Archive::Writer wide; wide(static_cast<std::uint64_t>(Archive::byte_limit / 8U + 1U));
+    wide.bytes.resize(wide.bytes.size() + Archive::byte_limit / 8U + 1U);
+    typename Archive::Reader wide_in(wide.bytes); std::vector<std::uint16_t> decoded;
+    bool refused = false;
+    try { wide_in(decoded); } catch (const typename Archive::Invalid&) { refused = true; }
+    expect(refused, std::string(label) + " wide row counts above an eighth of the budget stay refused");
+    // A count that outruns the remaining bytes is still refused for byte blobs.
+    typename Archive::Writer lie; lie(static_cast<std::uint64_t>(1000), std::uint8_t{1});
+    typename Archive::Reader lie_in(lie.bytes); Bytes lied; refused = false;
+    try { lie_in(lied); } catch (const typename Archive::Invalid&) { refused = true; }
+    expect(refused, std::string(label) + " byte blob count beyond the remaining bytes stays refused");
+}
+struct GalacticArchive {
+    static constexpr std::size_t byte_limit = galactic::checkpoint_detail::byte_limit;
+    using Writer = galactic::checkpoint_detail::Writer; using Reader = galactic::checkpoint_detail::Reader;
+    using Invalid = galactic::checkpoint_detail::Invalid;
+};
+struct TacticalArchive {
+    static constexpr std::size_t byte_limit = tactical::checkpoint_detail::byte_limit;
+    using Writer = tactical::checkpoint_detail::Writer; using Reader = tactical::checkpoint_detail::Reader;
+    using Invalid = tactical::checkpoint_detail::Invalid;
+};
 // Mutate the private owner payload directly, bypassing outer digest checks, so
 // refusal tests exercise the import invariant rather than a checksum mismatch.
 void direct_child_refusals() {
@@ -1204,7 +1241,7 @@ void timeline_contracts() {
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--timeline") { timeline_contracts(); return failures == 0 ? 0 : 1; }
-        nested_child_commands(); direct_child_refusals(); direct_restore_equality(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals();
+        nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals();
         admission_and_fixups(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();
         scripted_child_barriers(); child_casualty_return();
         if (argc != 2) throw std::runtime_error("expected corpus directory");

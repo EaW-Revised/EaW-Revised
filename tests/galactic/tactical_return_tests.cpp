@@ -1,6 +1,7 @@
 #include "galactic_support.hpp"
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/campaign/tactical_return_live.hpp"
+#include "eawr/campaign/auto_resolve_outcome.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/admission.hpp"
@@ -11,6 +12,8 @@
 #include <filesystem>
 #include <chrono>
 #include <fstream>
+#include <set>
+#include <tuple>
 
 namespace {
 namespace gc = eawr::sim::galactic;
@@ -375,6 +378,45 @@ void cinematic_authority() {
         else expect(hashes == reference, "seat authority and no-playback completion hashes match at 1/2/4/8");
     }
 }
+// RP-09 / FS-R06: the station's authored retreat explosion is a projectile created at the station boundary
+// (k181), once, by the station itself; a type without it creates none.
+void station_explosion() {
+    std::vector<std::string> reference;
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (const bool authored : {false, true}) {
+            const auto c = conflict(galaxy()); auto setup = c.tactical; auto binding = content(c);
+            std::erase_if(setup.units, [&](const auto& unit) {
+                return unit.entity_id != 20 && unit.entity_id != 40 && unit.entity_id != c.station;
+            });
+            setup.cinematic_seats = {{1, true}};
+            if (authored) {
+                tactical::CombatProfile profile; profile.type_id = 3;
+                tactical::ShotProfile shot; shot.speed = f(1); shot.blast.damage = f(1200); shot.blast.radius = f(1200);
+                shot.blast.dropoff = true; profile.retreat_explosion = shot;
+                binding.combat.profiles.push_back(profile);
+            }
+            binding.economy.players = {{1, {}, 10, true}, {2, {}, 10, true}};
+            auto session = checked(tactical::TacticalSession::create(setup, binding));
+            std::uint64_t sequence{};
+            okay(session.submit({{0, 1, ++sequence}, {}, tactical::RetreatPayload{tactical::RetreatAction::start}}));
+            std::set<std::uint64_t> created;
+            for (unsigned guard = 0; guard < 700 && session.retreat_state().phase != tactical::RetreatPhase::escaped; ++guard) {
+                const auto stepped = checked(session.step(executor));
+                hashes.push_back(stepped.state_hash.get());
+                for (const auto& projectile : stepped.snapshot->projectiles()) {
+                    if (projectile.weapon != tactical::retreat_explosion_slot_flag || !created.insert(projectile.id).second) continue;
+                    expect(projectile.shooter == c.station && projectile.owner == 1 && session.retreat_state().station_destroyed
+                        && session.retreat_state().cinematic_frame == 181, "RP-09 the station creates its explosion at k181");
+                }
+            }
+            expect(created.size() == (authored ? 1U : 0U), "RP-09 the explosion is created once, and only for a type that authors one");
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "RP-09 explosion hashes match at 1/2/4/8 workers");
+    }
+}
 void parent_return(const bool nonadjacent = false) {
     auto setup = galaxy();
     if (nonadjacent) {
@@ -513,6 +555,99 @@ void selected_recording() {
     while (replay.completed_tick() < game.completed_tick()) again.push_back(checked(replay.step(executor)).state_hash.get());
     expect(again == hashes, "admission/choice/save barrier parent replay hashes agree");
 }
+void squadron_return(const campaign::StockTacticalReturnServices* stock = nullptr,
+    const gc::TypeId squadron_type = 3, const gc::TypeId ship_type = 1) {
+    auto setup = galaxy();
+    setup.fleets = {{10, 1, 1, {{20, ship_type}, {21, squadron_type}}}, {12, 2, 1, {{40, ship_type}}}};
+    setup.fleet_control->types = {{ship_type, false, true, false}, {squadron_type, false, true, false}, {4, false, true, false}};
+    std::sort(setup.fleet_control->types.begin(), setup.fleet_control->types.end(), [](const auto& a, const auto& b) { return a.type < b.type; });
+    setup.movement->types = {{ship_type, f(2), f(100), 0, true, false, false, false},
+        {squadron_type, f(2), f(10), 0, true, true, false, false}, {4, f(2), {}, 0, true, false, false, false}};
+    std::sort(setup.movement->types.begin(), setup.movement->types.end(), [](const auto& a, const auto& b) { return a.type < b.type; });
+    setup.movement->contents = {{21, {{50, 4}, {51, 4}}}};
+    campaign::ConflictRecord c; c.id = checked(gc::GalacticSession::create(setup)).next_entity_id();
+    c.planet = 1; c.invader = 1; c.defender = 2; c.seats = {{{1}, 1}, {{2}, 2}};
+    c.forces = {{20, ship_type, 1, 10}, {21, squadron_type, 1, 10}, {40, ship_type, 2, 12}};
+    c.forces[0].tactical_type = c.forces[2].tactical_type = 1; c.forces[1].tactical_type = 3;
+    c.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+    c.tactical.first_free_entity_id = 103;
+    c.tactical.cinematic_seats = {{1, false}, {2, false}};
+    for (const auto& [id, type, owner] : {std::tuple{20ULL, 1ULL, 1U}, {21ULL, 3ULL, 1U},
+        {40ULL, 1ULL, 2U}, {50ULL, 4ULL, 1U}, {51ULL, 4ULL, 1U},
+        {100ULL, 3ULL, 1U}, {101ULL, 4ULL, 1U}, {102ULL, 4ULL, 1U}}) {
+        tactical::UnitState unit; unit.entity_id = id; unit.type_id = type; unit.owner = owner;
+        c.tactical.units.push_back(unit);
+    }
+    c.tactical.squadrons = {{21, {50, 51}}, {100, {101, 102}}};
+    auto binding = content(c); binding.retreat->prevention.clear();
+    binding.retreat->actors.push_back({21, 1, true, true, true, true});
+    binding.retreat->actors.back().persistent = true;
+    tactical::CraftProfile craft; craft.type_id = 4; craft.max_speed = f(10); craft.min_speed = f(1);
+    craft.rate_of_turn = craft.lift = craft.thrust = craft.roll_rate = f(1);
+    binding.motion.squadrons.craft = {craft};
+    tactical::SquadronProfile team; team.type_id = 3; team.members = {4, 4}; team.offsets = {{}, {}};
+    binding.motion.squadrons.squadrons = {team};
+    std::erase_if(binding.durability.profiles, [](const auto& p) { return p.type_id == 3; });
+    tactical::DurabilityProfile health; health.type_id = 4; health.max_hull = f(100); binding.durability.profiles.push_back(health);
+    if (stock) {
+        okay(stock->bind(c, binding));
+        const auto actor = std::find_if(binding.retreat->actors.begin(), binding.retreat->actors.end(), [](const auto& a) { return a.id == 21; });
+        expect(actor != binding.retreat->actors.end() && actor->hyperspace,
+            "WR-85 installed X-wing metadata reaches the live retreat binder");
+    }
+    binding.retreat->rules.lockout_frames = 0;
+    for (auto& player : binding.retreat->rules.players) player.countdown_frames = 2;
+    binding.retreat->attrition_factor = {};
+    std::vector<std::string> reference;
+    for (const auto count : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter executor(count);
+        auto trapped_binding = binding;
+        for (auto& actor : trapped_binding.retreat->actors) if (actor.id == 21) actor.hyperspace = false;
+        auto trapped = checked(tactical::TacticalSession::create(c.tactical, trapped_binding));
+        okay(trapped.submit({{0, 1, 1}, {}, tactical::RetreatPayload{tactical::RetreatAction::start}}));
+        while (!trapped.outcome() && trapped.completed_tick() < 10) checked(trapped.step(executor));
+        const auto trapped_live = trapped.units();
+        expect(std::none_of(trapped_live.begin(), trapped_live.end(), [](const auto& u) {
+            return u.entity_id == 21 || u.entity_id == 50 || u.entity_id == 51;
+        }) && std::any_of(trapped_live.begin(), trapped_live.end(), [](const auto& u) { return u.entity_id == 20; }),
+            "a nonescaping squadron loses its craft while the same fleet's eligible frigate escapes");
+        auto session = checked(tactical::TacticalSession::create(c.tactical, binding));
+        okay(session.submit({{0, 1, 1}, {}, tactical::RetreatPayload{tactical::RetreatAction::start}}));
+        while (!session.outcome() && session.completed_tick() < 10) checked(session.step(executor));
+        const auto live = session.units();
+        expect(session.retreat_state().phase == tactical::RetreatPhase::escaped
+            && std::count_if(live.begin(), live.end(), [](const auto& u) { return u.entity_id == 50 || u.entity_id == 51; }) == 2,
+            "WR-85 completion preserves every live craft of an escaped bought squadron");
+        expect(std::none_of(live.begin(), live.end(), [](const auto& u) { return u.entity_id >= 100; }),
+            "temporary carrier fighters do not become persistent retreat survivors");
+        auto game = checked(campaign::GameSession::create(setup)); okay(game.stage_battle(c, binding));
+        checked(game.step(executor));
+        okay(game.submit({{game.completed_tick(), {1}, 1}, envelope(c, {{0, 1, 1}, {}, tactical::RetreatPayload{tactical::RetreatAction::start}})}));
+        std::optional<campaign::BattleResult> returned;
+        std::vector<std::string> hashes;
+        for (unsigned step = 0; game.mode() == campaign::SessionMode::battle && step < 10; ++step) {
+            const auto tick = checked(game.step(executor)); hashes.push_back(tick.state_hash.get());
+            if (tick.result) returned = tick.result;
+        }
+        expect(returned && returned->forces[1].id == 21 && returned->forces[1].disposition == campaign::ForceDisposition::retreated,
+            "bought squadron retains its galactic identity through tactical return");
+        for (unsigned step = 0; step < 400; ++step) {
+            const auto snap = game.galaxy().snapshot();
+            const auto fleet = std::find_if(snap->fleets().begin(), snap->fleets().end(), [](const auto& row) { return row.id == 10; });
+            if (fleet == snap->fleets().end() || !fleet->motion.transit) break;
+            checked(game.step(executor));
+        }
+        const auto snap = game.galaxy().snapshot();
+        const auto fleet = std::find_if(snap->fleets().begin(), snap->fleets().end(), [](const auto& row) { return row.id == 10; });
+        expect(fleet != snap->fleets().end() && fleet->orbit == 2 && !fleet->motion.transit
+            && std::any_of(fleet->members.begin(), fleet->members.end(), [](const auto& m) { return m.id == 21; }),
+            "frigate and bought squadron arrive together with the original squadron id");
+        const auto contents = std::find_if(snap->movement()->contents.begin(), snap->movement()->contents.end(), [](const auto& row) { return row.container == 21; });
+        expect(contents != snap->movement()->contents.end() && contents->children == setup.movement->contents.front().children,
+            "retreat preserves the bought squadron craft roster");
+        if (reference.empty()) reference = hashes; else expect(hashes == reference, "squadron retreat is equal on 1/2/4/8 workers");
+    }
+}
 void deployed_reserve() {
     auto c = conflict(galaxy()); c.tactical.first_free_entity_id = 51;
     c.tactical.campaign.emplace();
@@ -578,6 +713,105 @@ void deployed_reserve() {
     const auto survivors = session.units();
     expect(std::any_of(survivors.begin(), survivors.end(), [](const auto& unit) { return unit.entity_id == 22; }),
         "the deployed reserve escapes and its current named passenger protects it from attrition");
+}
+void land_return_keeps_orbit() {
+    for (const bool automatic : {false, true}) for (const bool raid : {false, true})
+        for (const bool no_survivors : {false, true}) {
+        auto setup = galaxy();
+        setup.fleets = {{10, 1, 1, {{20, 1}}}, {12, 2, 1, {{40, 1}}}};
+        setup.fleet_control->types[1] = {2, true, true, false};
+        setup.players.push_back({3, 3, 0});
+        setup.movement->players.push_back({3, f(1), f(1), false});
+        for (const auto& planet : setup.planets) setup.movement->access.push_back({3, planet.id, true, false});
+        setup.movement->contents = {{30, {}}, {31, {}}, {32, {}}};
+        setup.movement->types[1].hyperspace_speed = f(2);
+        setup.movement->types[1].hyperspace_eligible = true;
+        setup.movement->types[1].squadron = false;
+        setup.movement->types[1].transport = true;
+        setup.control.emplace(); auto& control = *setup.control;
+        control.change_seconds = f(7); control.max_ground_forces = 10;
+        control.players = {{1, false, true, 1}, {2, false, true, 2}, {3, true, false, 3}};
+        for (const auto& a : control.players) for (const auto& b : control.players)
+            control.relations.push_back({a.player, b.player, a.player == b.player});
+        control.types = {{1, 0, false, false}, {2, 0, false, true}};
+        for (const auto& planet : setup.planets) {
+            gc::ControlPlanet row; row.planet = planet.id; row.type = 100 + planet.id; row.surface_accessible = true;
+            row.ground_base = {planet.owner, 1}; control.planets.push_back(row);
+        }
+        control.routes = {{4, f(1)}};
+        control.planets[0].landed = {{30, 2, 1}, {31, 2, 1}, {32, 2, 2}};
+        campaign::ConflictRecord c; c.id = 90; c.planet = 1; c.invader = 1; c.defender = 2;
+        c.layer = campaign::BattleLayer::land; c.raid = raid;
+        c.forces = {{30, 2, 1, 1}, {31, 2, 1, 1}};
+        campaign::BattleResult result; result.conflict = c.id; result.winner = 2; result.retreat_player = 1;
+        result.forces = {{30, campaign::ForceDisposition::retreated}, {31, campaign::ForceDisposition::destroyed, 2}};
+        if (raid) result.retreat_player.reset(); // WAR-57 also applies without a tactical escape flag.
+        if (no_survivors) result.forces.front() = {30, campaign::ForceDisposition::destroyed, 2};
+        campaign::AutoResolveRoster roster; roster.planet.id = 1; roster.planet.landed = {30, 31, 32};
+        roster.orbit_fleets = {10, 12};
+        for (const auto& fleet : setup.fleets) roster.fleets.push_back({fleet, {}, true, false});
+        for (const auto& force : c.forces) {
+            campaign::AutoResolveObject row; row.id = force.id; row.owner = force.owner;
+            row.original_type = row.current_type = "ModTransport"; row.kind = campaign::AutoResolveObjectKind::transport;
+            roster.objects.push_back(row);
+        }
+        campaign::AutoResolveRoundOutcome outcome; outcome.winner = 2; outcome.retreating_player = 1;
+        if (raid) outcome.retreating_player = 0;
+        campaign::AutoResolveAllocation death; death.id = 31; death.owner = 1; death.killed = true; death.final_blow_player = 2;
+        outcome.allocations.push_back(death);
+        if (no_survivors) { death.id = 30; outcome.allocations.push_back(death); }
+        campaign::AutoResolveOutcomeInputs inputs; inputs.planet_type = "ModWorld";
+        inputs.lethal_closure = [](const auto& loss) { return eawr::core::Result<std::vector<eawr::sim::EntityId>>::success({loss.id}); };
+        inputs.post_delivery_record = [](const auto&) { return eawr::core::Result<std::vector<campaign::AutoResolveRecordEntry>>::success({}); };
+        std::vector<std::string> reference;
+        for (const auto count : eawr::platform::determinism_worker_counts()) {
+            eawr::platform::ThreadWorkerAdapter executor(count);
+            auto world = checked(gc::GalacticSession::create(setup));
+            if (automatic) {
+                const auto plan = checked(campaign::plan_auto_resolve_outcome(c, roster, outcome, inputs));
+                expect(plan.retreat_fleets == (raid ? std::vector<gc::FleetId>{10} : std::vector<gc::FleetId>{}),
+                    "WGM-201 auto-resolve includes orbit fleets only for WAR-57 raid loss");
+                campaign::AutoResolveOutcomeServices services;
+                services.control = [](auto& galaxy, const auto& a) {
+                    gc::ControlBattleReturn returned; returned.planet = a.planet; returned.invader = a.invader;
+                    returned.defender = a.defender; returned.winner = a.result.winner; returned.land = a.land; returned.destroyed = a.destroyed;
+                    return galaxy.apply_control_battle(returned);
+                };
+                services.retreat = [](auto& galaxy, const auto& a) {
+                    return galaxy.apply_retreat_return(*a.result.retreat_player, a.planet, 2, a.land, a.retreat_fleets, a.destroyed);
+                };
+                okay(campaign::apply_auto_resolve_outcome(world, plan, services));
+            } else {
+                const auto plan = checked(campaign::plan_tactical_return(c, result, *world.snapshot()));
+                expect(plan.retreat_fleets == (raid ? std::vector<gc::FleetId>{10} : std::vector<gc::FleetId>{}),
+                    "WGM-201 tactical land return includes orbit fleets only for raid loss");
+                // The return API requires its caller's control result first,
+                // as GameSession does before committing ordinary losses/retreat.
+                gc::ControlBattleReturn controlled; controlled.planet = c.planet;
+                controlled.invader = c.invader; controlled.defender = c.defender;
+                controlled.winner = plan.result.winner; controlled.land = true; controlled.destroyed = plan.destroyed;
+                okay(world.apply_control_battle(controlled));
+                campaign::TacticalReturnState state;
+                okay(campaign::apply_tactical_return(world, c, plan, state, executor));
+            }
+            const auto snapshot = world.snapshot();
+            const auto orbit = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [](const auto& f) { return f.id == 10; });
+            expect(orbit != snapshot->fleets().end() && (raid ? orbit->motion.transit.has_value() : orbit->orbit == 1 && !orbit->motion.transit),
+                "ordinary land loss keeps the space fleet in orbit; raid loss leaves orbit");
+            const auto surface = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [](const auto& f) {
+                return std::any_of(f.members.begin(), f.members.end(), [](const auto& m) { return m.id == 30; });
+            });
+            if (no_survivors) expect(surface == snapshot->fleets().end(), "zero landed survivors create no departing surface fleet");
+            else expect(surface != snapshot->fleets().end() && surface->id != 10 && surface->motion.transit
+                    && surface->members == std::vector<gc::FleetMember>{{30, 2}},
+                    "only living landed transports form a new departing fleet");
+            expect(snapshot->control()->planets.front().landed == std::vector<gc::SurfaceForce>{{32, 2, 2}},
+                "surface return removes casualties and survivors while retaining the other owner");
+            std::vector<std::string> hashes{world.state_sha256()};
+            for (unsigned tick = 0; tick < 3; ++tick) hashes.push_back(checked(world.step(executor)).state_sha256);
+            if (reference.empty()) reference = hashes; else expect(hashes == reference, "land returns agree on 1/2/4/8 workers");
+        }
+    }
 }
 void stock_interdiction() {
     namespace dg = eawr::data::galactic;
@@ -750,10 +984,11 @@ void installed() {
         && binding.retreat->actors.front().carries_named_hero,
         "stock binder includes reserve roots, excludes passengers and protects their recorded named heroes");
     expect(binding.retreat && binding.retreat->prevention.empty(), "types without authored INTERDICT have no prevention sources");
+    squadron_return(&services, eawr::assets::object_type_crc("Rebel_X-Wing_Squadron"), eawr::assets::object_type_crc("Nebulon_B_Frigate"));
 }
 }
 int main(int argc, char** argv) {
-    try { if (argc > 1 && std::string_view(argv[1]) == "--nonadjacent-retreat") parent_return(true); else if (argc > 1) installed(); else { pure_policy(); hero_fallback(); cinematic_authority(); parent_return(); parent_return(true); selected_recording(); deployed_reserve(); stock_interdiction(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--nonadjacent-retreat") parent_return(true); else if (argc > 1) installed(); else { pure_policy(); hero_fallback(); cinematic_authority(); station_explosion(); parent_return(); parent_return(true); selected_recording(); squadron_return(); deployed_reserve(); land_return_keeps_orbit(); stock_interdiction(); } }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

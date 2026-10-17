@@ -33,3 +33,4 @@ config/build-hosts.local.json
 
 # Private relay configuration and locally generated certificate/key files.
 tools/relay/*.local.*
+tools/watchdog/config.local.json

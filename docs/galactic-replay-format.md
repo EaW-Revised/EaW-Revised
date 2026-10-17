@@ -524,6 +524,22 @@ uncontested branch; defended and special hero invasions remain conflict-service
 inputs. Ownership uses existing event kind **3**, `planet_owner_changed`, after
 political service, never an unconditional assignment from the battle winner.
 
+Galactic opcode **22** is `LaunchFleet` (WGM-199): uint32 unit count,
+that many uint64 unit identities, uint32 path count, that many uint64 planet
+identities, then a uint8 destination-slot presence flag and, when present,
+a uint8 slot. Units are nonzero and unique; the path contains 2..4096 nonzero
+unique planets; presence is 0 or 1 and a supplied slot is 0..2. Trailing bytes
+are invalid. The sim creates the orbit fleet through the surface launch owner,
+resolves its generated identity and rechecks the source orbit before ordinary
+movement. The path must start at the units' actual source; a wrong source
+rejects before launch. A source conflict suppresses movement. A denied qualified
+human destination entry removes the temporary fleet and re-lands the leading
+unit and followers in order; other movement refusals retain the launch. The
+prequalified per-player result is the existing movement access input (WGM-200).
+An unavailable recheck owner cancels only travel after the committed launch.
+No new checkpoint section is needed: existing fleet,
+surface, motion and pending command records retain the result/continuation.
+
 Galactic opcode **18** is `LaunchFromSurface` (WGM-13, WGUI-55): uint32 unit count
 (at least one), that many nonzero distinct uint64 surface identities in launch
 order, uint64 target fleet (zero creates a fleet), uint8 creation slot (0..2,

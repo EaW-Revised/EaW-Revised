@@ -116,26 +116,32 @@ bool SpaceFogUnits::compose(GodotRenderer& renderer, const assets::Map& map, con
         const sim::math::Mat3x4 render_matrix = source_to_render(placement.transform->matrix);
         for (std::size_t index = 0; index < placement.surfaces.size(); ++index) {
             const scene::Surface& surface = placement.surfaces[index];
-            const scene::LegacySelector* selector = scene::find_legacy_selector(surface.shader);
+            const scene::LegacySelector* selector = scene::material_selector(surface);
             std::optional<std::string> texture_path;
             for (const scene::TextureBinding& binding : surface.textures) {
                 if (ieq(binding.parameter, "BaseTexture") && !binding.resolved.empty()) texture_path = binding.resolved;
             }
             const std::string where = identity + " surface " + std::to_string(index) + " shader " + surface.shader;
-            if (selector == nullptr || !texture_path) {
+            if (selector == nullptr || (!texture_path && !surface.effect_missing)) {
                 unsupported_.push_back(where + (selector == nullptr ? ": no legacy selector" : ": no resolved BaseTexture"));
                 return fail("fog-enabled space capture has an admitted surface it cannot compose: " + unsupported_.back());
             }
+            if (surface.effect_missing) texture_path = "";
             auto found = textures.find(*texture_path);
             if (found == textures.end()) {
-                auto decoded = assets::load_texture(filesystem, *texture_path);
-                if (!decoded) {
-                    unsupported_.push_back(where + ": BaseTexture did not decode: "
-                                           + core::format_diagnostic(decoded.error()));
-                    return fail("fog-enabled space capture has an admitted surface it cannot compose: "
-                                + unsupported_.back());
+                if (surface.effect_missing) {
+                    found = textures.emplace(*texture_path,
+                        family_placeholder_texture(legacy::TexturePlaceholder::black)).first;
+                } else {
+                    auto decoded = assets::load_texture(filesystem, *texture_path);
+                    if (!decoded) {
+                        unsupported_.push_back(where + ": BaseTexture did not decode: "
+                                               + core::format_diagnostic(decoded.error()));
+                        return fail("fog-enabled space capture has an admitted surface it cannot compose: "
+                                    + unsupported_.back());
+                    }
+                    found = textures.emplace(*texture_path, std::move(decoded.value())).first;
                 }
-                found = textures.emplace(*texture_path, std::move(decoded.value())).first;
             }
             const assets::Mesh& source_mesh = model->meshes[surface.mesh_index];
             assets::Model single;
@@ -154,7 +160,7 @@ bool SpaceFogUnits::compose(GodotRenderer& renderer, const assets::Map& map, con
                 .pass_name = std::string(selector->pass),
                 .bindings = {},
             };
-            for (const assets::MaterialParameter& parameter : submesh.parameters) {
+            if (!surface.effect_missing) for (const assets::MaterialParameter& parameter : submesh.parameters) {
                 material.bindings.push_back({parameter.name, parameter.value});
             }
             const std::vector<GodotRenderer::BindingTexture> family_textures = family_binding_textures(material,
@@ -178,7 +184,10 @@ bool SpaceFogUnits::compose(GodotRenderer& renderer, const assets::Map& map, con
                 return fail("fog-enabled space capture could not upload an admitted surface: " + unsupported_.back());
             }
             uploaded_.push_back(renderer_asset);
-            const auto declared = renderer.declare_fog_consumer(renderer_asset);
+            // ALDEFAULT-01: the placeholder samples no texture stages. Unit
+            // visibility still gates it with the rest of this object's art.
+            const auto declared = surface.effect_missing ? core::Result<void>::success()
+                                                        : renderer.declare_fog_consumer(renderer_asset);
             if (!declared) {
                 unsupported_.push_back(where + " asset " + std::to_string(renderer_asset) + ": "
                                        + core::format_diagnostic(declared.error()));

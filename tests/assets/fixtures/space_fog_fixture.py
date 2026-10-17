@@ -93,6 +93,7 @@ def write_fixture_root(root: pathlib.Path, variant: str = "baseline") -> pathlib
     # production environment route. Use the reviewed MeshGloss sky fixture.
     base.write_fixture_root(root, "meshgloss")
     data = root / "GameData" / "Data"
+    scene_fixture.write_effect_presence(data, ["BatchMeshGloss.fx", "MeshShadowVolume.fx"])
     (data / "Art" / "Maps" / "EAWR_SPACE_SYNTHETIC.TED").write_bytes(ted_bytes())
     shader = "MeshGloss.fx" if variant == "no_fog_material" else "BatchMeshGloss.fx"
     unit = [(shader, UNIT_TEXTURE, *UNIT_HALF)]

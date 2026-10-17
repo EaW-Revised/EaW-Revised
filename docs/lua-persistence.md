@@ -228,3 +228,14 @@ readiness](multiplayer-readiness.md), tick agreement).
 The optional WGA-471/472 ownership policy adds its managed kind, private inventory/release operation names and deterministic invocation interval to session identity. A default scheduler writes none of these bytes. The completed invocation counter already supplies interval phase; galactic markup uses completed invocations 64, 128, and so on, including after load. No wall clock or allocator state participates.
 
 Saving and hashing remain read-only, and loading never runs native release callbacks. The native component stores contributions/IDs while script graphs and queued host values store aliases. Private caches may still contain old userdata, but they do not provide ownership before or after restore. Replacing a VM, rejecting a partial load or discarding a shadow cannot subtract from the live/restored native owner. An orphan after explicit removal or a rolled-back invocation remains until the next eligible successful service in both uninterrupted and restored runs.
+
+### Deferred object turns
+
+A default-profile object owner can defer a VM and its callbacks to a later subset
+turn. The barrier still advances its serialized tick, time and random-stream
+metadata without running Lua. Held callbacks remain in the existing pending-event
+encoding with their original ordering keys; they can therefore be overdue at a
+checkpoint. The loader accepts such keys only for live attached object instances.
+The GC/query profiles and unattached targets keep their existing deadline checks.
+This adds no fields or encoding version, and the next subset service delivers each
+held callback once in its original key order.

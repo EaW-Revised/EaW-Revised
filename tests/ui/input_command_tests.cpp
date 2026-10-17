@@ -505,6 +505,12 @@ void paused_reservation_contracts() {
     expect(static_cast<bool>(lan.issue(request)), "cleared LAN action can be retried");
     lan.present_event_gap(100);
     expect(lan.consumed(request), "lost gap preserves a newly queued command");
+    static_cast<void>(lan.take(3));
+    lan.note_execution(2, 120);
+    lan.present_snapshot(120);
+    expect(lan.consumed(request), "LAN snapshot at execution tick still predates its effect");
+    lan.present_snapshot(121);
+    expect(!lan.consumed(request), "LAN snapshot releases after execution without filtered command results");
 
     tactical::EconomyView ledger; ledger.credits = sim::math::Fixed::from_raw(1000 * sim::math::Fixed::scale);
     ledger.pool = {11, 11}; ledger.pool_tokens = {40, 41}; ledger.population_cap = 3;
@@ -518,6 +524,13 @@ void paused_reservation_contracts() {
     expect(projected.credits.raw() == 500 * sim::math::Fixed::scale && projected.queues[0].size() == 1,
         "pending buy consumes money and queue capacity");
     expect(projected.queues[0][0].entry_id == 0, "pending buy cannot forge an authoritative cancel identity");
+    auto executed_rows = rows;
+    for (auto& row : executed_rows) row.execution_tick = 5;
+    const auto before_execution = ui::pending_economy(ledger, executed_rows, option_of, 5);
+    expect(before_execution.queues[0] == projected.queues[0], "execution tick alone does not prematurely remove the preview");
+    const auto after_execution = ui::pending_economy(projected, executed_rows, option_of, 6);
+    expect(after_execution.queues == projected.queues && after_execution.credits == projected.credits
+        && after_execution.population == projected.population, "snapshot projection never repeats an already executed purchase or reinforcement");
     auto campaign_ledger = ledger;
     campaign_ledger.pool = {11, 11, 11};
     campaign_ledger.pool_tokens = {40, 41, 42};

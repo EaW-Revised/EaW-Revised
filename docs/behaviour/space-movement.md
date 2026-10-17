@@ -883,6 +883,9 @@ tick.
   it, a group member whose frame came while a neighbour of its layer waited for its landing
   planned around that neighbour as if it would stay where it stood (group-move formation fallback). A search that has
   not ended when a later search of its layer starts is still read as holding there (FM-U12).
+- **PC-10** (project, by design) The remake has no culling grid of collidable objects: its collision queries go through the
+  tracking layers (PC-03, AV-03). `Space_Collidable_Grid_Cull_Size` and `Space_Large_Ship_Grid_Cull_Size`, which size FoC's
+  grid and its large-ship layer, are read by no code of ours; the tracking layers answer those queries instead.
 
 <a id="against-focs-search-520"></a>
 

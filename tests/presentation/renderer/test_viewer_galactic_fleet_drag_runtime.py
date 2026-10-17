@@ -178,7 +178,7 @@ func _process(delta):
     def native_drag(self, action, fixture=None, ctrl=False, save_order=False):
         focused = action not in {"world", "radar", "hidden-radar", "world-slot", "enemy-world"}
         if fixture is None:
-            fixture = "fleet-slot" if action in {"first-fleet-radar", "second-fleet-radar"} else "fleet-drag"
+            fixture = "fleet-drag-slot" if action in {"first-fleet-radar", "second-fleet-radar"} else "fleet-drag"
         initial, _ = self.capture(fixture, focused=focused)
         rows = {row["name"]: row for row in initial["fleet_hud"]["controls"]}
         # The aggregate controls stay parked off-screen in the live view: every
@@ -548,7 +548,7 @@ func _process(delta):
         self.assertEqual(created["groups"][0]["representative"], 7001)
 
     def test_ctrl_drag_transfers_every_member_of_the_displayed_type(self):
-        data = self.native_drag("slot", fixture="fleet-slot", ctrl=True)
+        data = self.native_drag("slot", fixture="fleet-drag-slot", ctrl=True)
         cards = [card for card in data["fleet_hud"]["cards"] if card["local"]]
         created = next(card for card in cards if card["slot"] == 2)
         self.assertEqual(created["count"], 3, "both duplicate members and the second fleet's matching type move")

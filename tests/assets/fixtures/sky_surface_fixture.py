@@ -44,7 +44,7 @@ import struct
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from scene_fixture import _chunk, _cstring, _mini, _vertex, dds_bytes  # noqa: E402
+from scene_fixture import _chunk, _cstring, _mini, _vertex, dds_bytes, write_effect_presence  # noqa: E402
 
 IDENTITY = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0)
 TRANSLATED = (1, 0, 0, 30, 0, 1, 0, -12, 0, 0, 1, 5)
@@ -210,6 +210,7 @@ def write_fixture_root(root: pathlib.Path, variant: str = "baseline") -> pathlib
         (data / "Art" / "Maps" / name).write_bytes(ted_bytes(kind, skies))
     for name, (bones, meshes) in MODELS.items():
         (data / "Art" / "Models" / name).write_bytes(alo_bytes(bones, meshes))
+        write_effect_presence(data, (surface[0] for _, _, _, submeshes in meshes for surface in submeshes))
     for name in TEXTURE_FILES:
         payload = dds_bytes((40, 80, 160, 255)) if name.endswith(".dds") else tga_bytes()
         (data / "Art" / "Textures" / name).write_bytes(payload)

@@ -144,6 +144,7 @@ void BattleDialog::scroll(std::size_t side, double value) {
 }
 void BattleDialog::rebuild() {
     summary_rows_dirty_ = true;
+    graph_state_.clear(); // the graph controls are rebuilt
     using namespace viewer::galactic;
     if (dialog_ && dialog_->frame) {
         dialog_->frame->hide(); dialog_->frame->queue_free();
@@ -303,6 +304,46 @@ void BattleDialog::refresh() {
                     list->set_item_custom_fg_color(index, Color(colour[0], colour[1], colour[2]));
                 }
             }
+        }
+        if (id == "graph_left" || id == "graph_right") {
+            // WGUI-176: left = the local side, right = its opponent. sides are {defender, invader}.
+            const std::size_t local_side = view_.local_invader ? 1U : 0U;
+            const auto& side = view_.sides[id == "graph_left" ? local_side : 1U - local_side];
+            // Only a changed graph state is applied again (no per-refresh string, texture and layout work).
+            const auto graph_size = control->get_size();
+            const std::string graph_key = std::to_string(view_.involved) + '|' + std::to_string(side.units) + '|' + side.best_icon
+                + '|' + std::to_string(side.colour[0]) + ',' + std::to_string(side.colour[1]) + ',' + std::to_string(side.colour[2])
+                + '|' + std::to_string(graph_size.x) + 'x' + std::to_string(graph_size.y);
+            if (auto& applied = graph_state_[id]; applied == graph_key) continue;
+            else applied = graph_key;
+            const PackedStringArray stacks = control->get_meta("graph_stacks", PackedStringArray());
+            const bool shown = view_.involved && side.units > 0 && !stacks.is_empty();
+            control->set_visible(shown);
+            if (!shown) continue;
+            const float scale = control->get_meta("graph_scale", 1.0F);
+            const float icon_scale = control->get_meta("graph_icon_scale", 1.0F);
+            const float layer = control->get_meta("graph_layer", 0.0F);
+            const auto index = stack_texture_index(side.units, static_cast<std::size_t>(stacks.size()));
+            auto* stack = control->get_child_count() > 1 ? Object::cast_to<TextureRect>(control->get_child(0)) : nullptr;
+            auto* ship = control->get_child_count() > 1 ? Object::cast_to<TextureRect>(control->get_child(1)) : nullptr;
+            if (!stack || !ship) continue;
+            const auto stack_texture = style_.texture(std::string(stacks[static_cast<int64_t>(index)].utf8().get_data()));
+            stack->set_texture(stack_texture);
+            const Vector2 stack_size = stack_texture.is_valid() ? stack_texture->get_size() * scale : Vector2{};
+            const Vector2 centre = control->get_size() * 0.5F;
+            stack->set_size(stack_size); stack->set_position(centre - stack_size * 0.5F);
+            // The side's faction colour tints the stack; the ship stays natural colour.
+            stack->set_self_modulate(Color(side.colour[0], side.colour[1], side.colour[2]));
+            const auto ship_texture = side.best_icon.empty() ? Ref<Texture2D>{} : style_.texture(side.best_icon);
+            ship->set_texture(ship_texture);
+            ship->set_visible(ship_texture.is_valid());
+            if (ship_texture.is_valid()) {
+                const Vector2 ship_size = ship_texture->get_size() * icon_scale * scale;
+                // Each stack layer lifts the ship by Offset X, as on the galaxy stack icons.
+                ship->set_size(ship_size);
+                ship->set_position(centre - ship_size * 0.5F - Vector2(0, layer * static_cast<float>(index) * scale));
+            }
+            continue;
         }
         if (id == "IDC_STATIC_MEDIUM") caption(gadget, view_.involved ? view_.planet : "");
         if (id == "pending_title") caption(gadget, viewer::galactic::pending_battle_title(view_, style_.text));

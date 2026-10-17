@@ -5,6 +5,8 @@
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/core/sync_digest.hpp"
+#include "eawr/core/record_digest.hpp"
+#include "eawr/core/build_identity.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "galactic_ai.hpp"
 #include "galactic_ai_actions.hpp"
@@ -21,6 +23,8 @@ namespace eawr::script::foc::ai {
 // This stages codec workload only, never claims live plan/task admission.
 struct EngineContractAccess {
     static std::size_t enlarge(Engine& e, tactical::PlayerId player) {
+        const auto native_record_write = e.native_record_scope();
+        e.native_records_replaced();
         auto& p = *e.player_ai(player);
         const auto prototype = p.proposed.front();
         const auto definition = prototype.potential->plan;
@@ -28,17 +32,20 @@ struct EngineContractAccess {
         if (e.plans_[definition].taskforces.empty()) e.plans_[definition].taskforces.emplace_back();
         for (unsigned i = 0; i < 32; ++i) {
             auto g = prototype; g.id = p.next_goal_id++;
-            g.potential->id = e.next_plan_id_++;
-            Plan plan; plan.id = e.next_plan_id_++; plan.instance = e.next_instance_++;
+            g.potential->id = *e.allocate_plan_id(p);
+            Plan plan; plan.id = *e.allocate_plan_id(p); plan.instance = *e.allocate_instance_id(p);
             plan.definition = definition; plan.goal = g.id; plan.player = player; plan.target = g.target;
-            TaskForce tf; tf.id = e.next_taskforce_id_++; tf.plan = plan.id;
+            TaskForce tf; tf.id = *e.allocate_taskforce_id(p); tf.plan = plan.id;
             plan.taskforces = {tf.id}; g.plan = plan.id; g.active = true;
             BuildTask task; task.taskforce = tf.id; task.source = 2;
             p.tasks.push_back(task); p.active.push_back(g);
-            e.taskforces_.emplace(tf.id, tf); e.plan_of_instance_.emplace(plan.instance, plan.id);
-            e.running_.emplace(plan.id, plan);
+            p.taskforces.emplace(tf.id, tf); p.plan_of_instance.emplace(plan.instance, plan.id);
+            p.running.emplace(plan.id, plan);
         }
-        e.mark_native_state_changed(); return p.tasks.size();
+        e.mark_native_state_changed();
+
+        e.rebuild_runtime_index();
+        return p.tasks.size();
     }
 };
 }
@@ -104,6 +111,48 @@ struct Slots {
     }
     cp::GalacticAiContributors contributors() const { return {owners[0], owners[1], owners[2], funding, owners[3], owners[4], {}, {}, {}, {}}; }
 };
+std::string cold_native_sync(const cp::GalacticAiContributors& contributors) {
+    ga::NativeDigests digests{{"funding", contributors.funding->record_sync_hash(true)}};
+    const auto append = [&](std::string name, const std::shared_ptr<ga::StateContributor>& owner) {
+        auto records = must(owner->record_sync_hash(true));
+        if (records.empty()) records = core::sync_state_digest(must(owner->capture()).components.at(name));
+        digests.emplace(std::move(name), std::move(records));
+    };
+    append("galactic-ai-lifecycle", contributors.lifecycle); append("GALACTIC_PERCEPTION", contributors.perception);
+    append("galactic-goals", contributors.goals); append("galactic-execution", contributors.execution); append("galactic-production", contributors.production);
+    for (const auto& [name, owner] : contributors.external) append(name, owner);
+    return ga::compose_native_sync_digests(digests);
+}
+void record_sum_contracts() {
+    expect(ga::native_sync_digest_version == 2, "record-sum format has its assigned sync version");
+    expect(eawr::core::build_identity().ends_with("+gcsync2"), "TCP, lobby and match admission share the sync version identity");
+    core::RecordDigest forward, reverse;
+    for (std::uint64_t id = 1; id <= 64; ++id) {
+        core::RecordDigest::Bytes bytes; core::RecordDigest::append(bytes, id); core::RecordDigest::append(bytes, id * 3);
+        forward.set(static_cast<std::uint32_t>(id % 4), 1, id, bytes);
+    }
+    for (std::uint64_t id = 64; id; --id) {
+        core::RecordDigest::Bytes bytes; core::RecordDigest::append(bytes, id); core::RecordDigest::append(bytes, id * 3);
+        reverse.set(static_cast<std::uint32_t>(id % 4), 1, id + 1000, bytes);
+    }
+    expect(forward.shards() == reverse.shards() && forward.digest("test") == reverse.digest("test"), "record sums ignore local storage and insertion order");
+    expect(forward.byte_size() == 64 * 16, "record byte accounting covers the complete keyed payloads");
+    const auto original = forward.digest("test");
+    const auto writes = forward.writes();
+    forward.relocate(0, 1, 4, 900);
+    expect(forward.digest("test") == original && forward.byte_size() == 64 * 16 && forward.writes() == writes,
+        "storage compaction retains hashes, byte accounting and sums without encoding a record");
+    forward.relocate(0, 1, 900, 4);
+    core::RecordDigest::Bytes changed; core::RecordDigest::append(changed, 4); core::RecordDigest::append(changed, 13);
+    forward.set(0, 1, 4, changed);
+    expect(forward.digest("test") != original, "replacing one retained value subtracts its old record hash");
+    changed.clear(); core::RecordDigest::append(changed, 4); core::RecordDigest::append(changed, 12); forward.set(0, 1, 4, changed);
+    expect(forward.digest("test") == original, "reverting a record restores the exact sums");
+    forward.erase(0, 1, 4); forward.set(0, 1, 700, changed);
+    expect(forward.digest("test") == original, "erase and reinsert retain semantic identity independently of local slot");
+    changed[0] = 8; forward.set(0, 1, 700, changed);
+    expect(forward.digest("test") != original, "record semantic keys participate in both hash lanes");
+}
 void sync_contracts() {
     expect(core::sync_fingerprint({}) == 0xef46db3751d8e999ULL, "XXH64 empty published algorithm vector");
     const std::array<std::uint8_t, 3> abc{'a', 'b', 'c'};
@@ -112,14 +161,14 @@ void sync_contracts() {
     auto state = must(cp::ComposedGalacticAiState::create(slots.contributors()));
     const auto saved = must(state->capture());
     const auto original = must(state->sync_hash());
-    expect(original == must(ga::native_sync_state_hash(saved)), "incremental sync includes every actual native component");
+    expect(original == cold_native_sync(slots.contributors()), "incremental sync includes every actual native component");
     const auto counts = state->sync_encodes();
     for (unsigned i = 0; i < 10; ++i) expect(must(state->sync_hash()) == original, "unchanged sync state is stable");
     expect(counts == state->sync_encodes(), "unchanged sync state serializes no native owners");
     for (const auto& owner : slots.owners) {
         owner->bytes[0] = 2; owner->mark_state_changed();
         expect(must(state->sync_hash()) != original, "sync detects actual native owner mutation");
-        expect(must(state->sync_hash()) == must(ga::native_sync_state_hash(must(state->capture()))), "sync equals independent full capture after mutation");
+        expect(must(state->sync_hash()) == cold_native_sync(slots.contributors()), "sync equals independent cold owner reconstruction after mutation");
         owner->bytes[0] = 1; owner->mark_state_changed();
         expect(must(state->sync_hash()) == original, "restored bytes give same sync digest with a different local epoch");
     }
@@ -289,6 +338,12 @@ void real_boundaries() {
             owners = std::make_shared<RealOwners>(world, fixture_lifecycle(), fixture_perception(world.setup()), std::vector<ai::PlanDef>{}, executor);
             return core::Result<cp::GalacticAiContributors>::success(owners->contributors());
         }));
+        const auto check_records = [&] {
+            for (const auto& owner : std::array<std::shared_ptr<ga::StateContributor>, 5>{owners->lifecycle, owners->world, owners->goals, owners->execution, owners->production})
+                expect(must(owner->record_sync_hash()) == must(owner->record_sync_hash(true)), "real owner writes equal independently rebuilt record sums");
+            expect(owners->funding->record_sync_hash() == owners->funding->record_sync_hash(true), "funding writes equal independently rebuilt record sums");
+        };
+        check_records();
         auto duplicate = cp::install_composed_galactic_ai(game, owners->contributors());
         expect(!duplicate, "native owner cannot be installed twice");
         const auto prepared = must(state->capture());
@@ -333,21 +388,29 @@ void real_boundaries() {
         expect(owners->funding->state_revision() != funding_revision, "immediate funding publication owns its revision bump");
         expect(must(state->state_hash()) != before_rows, "published funding rows invalidate the cached digest");
         expect(must(state->state_hash()) == must(ga::native_state_hash(must(state->capture()))), "published funding rows match full oracle");
+        check_records();
         const auto hint_revision = owners->world->state_revision();
         expect(owners->world->insert_hint({1, "P1", "test", ai::real(3)}), "retained hint inserted");
         expect(owners->world->state_revision() != hint_revision, "perception mutation bumps its own epoch");
         expect(must(state->state_hash()) == must(ga::native_state_hash(must(state->capture()))), "real perception mutation matches full oracle");
+        check_records();
+        owners->world->set_story_flag(1, 1, "first"); owners->world->set_story_flag(2, 1, "second"); check_records();
+        expect(owners->world->check_story_flag(1, 1, "first", true), "story flag erase moves a surviving record across player shards"); check_records();
+        owners->world->visibility_changed(1, 1, true); check_records();
         const auto manager_revision = owners->lifecycle->state_revision();
         owners->lifecycle->set_admission({ga::Mode::space, true, false});
         expect(owners->lifecycle->state_revision() != manager_revision, "lifecycle entry owns admission bump");
         expect(must(state->state_hash()) == must(ga::native_state_hash(must(state->capture()))), "real lifecycle mutation matches full oracle");
+        check_records();
         const auto execution_revision = owners->execution->state_revision();
         must(owners->execution->replace({}));
         expect(owners->execution->state_revision() != execution_revision, "execution replacement owns bump even for same bytes");
+        check_records();
         const auto production_revision = owners->production->state_revision();
         must(owners->production->restore(prepared));
         expect(owners->production->state_revision() != production_revision, "production restore owns epoch bump");
-        must(state->restore(prepared));
+        check_records();
+        must(state->restore(prepared)); check_records();
         expect(must(state->state_hash()) == must(ga::native_state_hash(prepared)), "restore returns exact hash despite differing process epochs");
     }
 }
@@ -496,6 +559,9 @@ void installed(bool measure = false) {
         std::vector<double> times;
         std::vector<std::string> frame_hashes;
         constexpr unsigned frames = 120;
+        // A frame requests the sync digest; full verification also requests
+        // the canonical digest before the explicit measurement below.
+        const unsigned game_requests_per_frame = state->full_verification_enabled() ? 2U : 1U;
         const auto request_start = state->digest_requests();
         for (unsigned i = 0; i < frames; ++i) {
             // Real stock world progression with verification on every tick;
@@ -507,13 +573,15 @@ void installed(bool measure = false) {
         }
         std::sort(times.begin(), times.end());
         const auto requests = state->digest_requests() - request_start;
-        expect(requests == 2 * frames, "one native request per game frame plus one measurement request");
+        expect(requests == (game_requests_per_frame + 1) * frames,
+            "sync and optional canonical verification requests per game frame plus one measurement request");
         if (frame_reference.empty()) frame_reference = frame_hashes; else expect(frame_reference == frame_hashes, "stock world progression hashes equal on 1/2/4/8 with full hash verification");
         expect(state->digest_generations() == 1, "stock unchanged requests hash once");
         must(state->restore(saved));
         expect(must(state->state_hash()) == hash, "all six real stock owners restore exact prepared state");
         std::cout << "composed stock prepared boundary: workers=" << count << " goals=" << owners->engine->galactic_goals(empire).size()
-            << " bytes=" << saved_bytes << " game_requests_per_frame=1 measurement_requests_per_frame=1 median_capture_encode_compare_ms=" << times[times.size() / 2]
+            << " bytes=" << saved_bytes << " game_requests_per_frame=" << game_requests_per_frame
+            << " measurement_requests_per_frame=1 median_capture_encode_compare_ms=" << times[times.size() / 2]
             << " digest_generations=" << state->digest_generations() << '\n';
         if (measure) {
             expect(ai::EngineContractAccess::enlarge(*owners->engine, empire) >= 32, "larger synthetic state has several goals and tasks");
@@ -526,7 +594,7 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
         else if (argc == 2 && std::string_view(argv[1]) == "--benchmark") installed(true);
-        else { sync_contracts(); contracts(); real_boundaries(); world_hash_boundaries(); }
+        else { record_sum_contracts(); sync_contracts(); contracts(); real_boundaries(); world_hash_boundaries(); }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures ? 1 : 0;
 }

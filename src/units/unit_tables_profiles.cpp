@@ -959,9 +959,21 @@ void Loader::load_body(Object& object, UnitType& unit) {
         movement.acceleration = object.fixed("OverrideAcceleration", report_, false);
         movement.deceleration = object.fixed("OverrideDeceleration", report_, false);
         movement.space_layer = object.text("Space_Layer");
-        if (input_.campaign_scene) unit.campaign_ship_class = trim(object.text("Ship_Class"));
+        if (input_.campaign_scene) {
+            unit.campaign_ship_class = trim(object.text("Ship_Class"));
+            unit.campaign_hyperspace = flag(object, "Hyperspace", false).value_or(false);
+        }
         unit.footprint = read_footprint(object, model);
         movement.layer_z_adjust = object.fixed("Layer_Z_Adjust", report_, false);
+        if (has_behavior(object, "TACTICAL_SUPER_WEAPON")) {
+            // TSW-01: the debug build's type constructor leaves each of these at zero or off.
+            UnitType::TacticalSuperWeapon weapon;
+            weapon.start_distance = object.fixed("TSW_Start_Distance_From_Target", report_, false).value_or(Fixed{});
+            weapon.attack_distance = object.fixed("TSW_Attack_Distance_From_Target", report_, false).value_or(Fixed{});
+            weapon.z_adjust = object.fixed("TSW_Z_Adjust_Relative_To_Target_Pos", report_, false).value_or(Fixed{});
+            weapon.start_pos_match_target_z = flag(object, "TSW_Start_Pos_Match_Targets_Z", false).value_or(false);
+            unit.tactical_super_weapon = weapon;
+        }
 
         unit.targeting_priority_set = object.text("Targeting_Priority_Set");
         if (unit.targeting_priority_set.empty()) {

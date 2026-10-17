@@ -1,7 +1,9 @@
 #include "eawr/core/load_profile.hpp"
 #include "battle_effects.hpp"
+#include "frame_timer.hpp"
 #include "eawr/presentation/particles/contact_frame.hpp"
 #include "eawr/presentation/space/debris.hpp"
+#include "eawr/presentation/space/event_snapshot_cache.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
 
 #include "eawr/presentation/space/space.hpp"
@@ -61,13 +63,8 @@ constexpr std::size_t shield_sample_limit = 64;
 } // namespace
 
 const std::string* BattleEffects::hit_pick(const std::vector<std::string>& list, const space::HitParticleList kind,
-                                           const tactical::CombatEvent& event, const SnapshotAt& snapshot_at) {
+                                           const tactical::CombatEvent& event, const std::optional<std::uint64_t> projectile) {
     if (list.empty()) return nullptr;
-    std::optional<std::uint64_t> projectile;
-    if (snapshot_at) {
-        // A hit's tick names the snapshot before its simulation step; the result is published at tick + 1.
-        if (const auto before = snapshot_at(event.tick)) projectile = space::hit_projectile(before->projectiles(), event);
-    }
     ++(projectile ? hit_picks_by_projectile_ : hit_picks_by_event_);
     return &list[space::hit_particle_pick(projectile.value_or(space::hit_event_key(event)), kind, list.size())];
 }
@@ -94,7 +91,9 @@ bool BattleEffects::spawn(const std::string& particle, const std::array<double, 
         ++effects_dropped_;
         return true;
     }
+    backend_->set_spawn_context(particle, tick);
     auto handle = registry_->spawn(*type->system, seed_++, effect_capacity);
+    backend_->set_spawn_context({}, 0);
     if (!handle) {
         ++spawn_failed_[key];
         return true;
@@ -244,6 +243,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                           const double alpha, const UnitLookup& units, const FixedCamera& camera,
                           const double presented_tick, const SnapshotAt& snapshot_at, const BoneLookup& bones,
                           const FixedCamera* laser_camera) {
+    FrameTimer owner_setup(measure_owner_ ? &owner_timings_[0] : nullptr);
     terminal_sounds_.clear();
     healing_presented_tick_ = presented_tick;
     if (released_) return true;
@@ -268,6 +268,8 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
     const auto due = static_cast<std::uint64_t>(std::max(0.0, std::floor(presented_tick - *clock_start_ + 1.0e-9)));
     due_ = due;
     note_types(previous, latest);
+    owner_setup.finish();
+    FrameTimer owner_lookup(measure_owner_ ? &owner_timings_[1] : nullptr);
     // Where each unit stood the last frame the local player saw it; one that is in the session
     // but hidden now is forgotten, so what stays for a unit that left is its last visible frame.
     for (const tactical::TacticalInstance& instance : latest.instances()) {
@@ -280,6 +282,8 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
         if (const auto unit = units(craft.entity_id)) last_seen_[craft.entity_id] = *unit;
         else last_seen_.erase(craft.entity_id);
     }
+    owner_lookup.finish();
+    FrameTimer owner_abilities(measure_owner_ ? &owner_timings_[2] : nullptr);
     note_ability_shots(reached, latest, snapshot_at);
     // WHE-33/34: one following recipient effect, refreshed in place and removed with its status.
     for (auto effect = effects_.begin(); effect != effects_.end();) {
@@ -423,7 +427,18 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             effects_.back().lifetime = std::numeric_limits<std::uint32_t>::max();
         }
     }
-    if (!follow_contacts(latest)) return false;
+    owner_abilities.finish();
+    {
+        FrameTimer contacts(measure_owner_ ? &owner_timings_[3] : nullptr, true);
+        if (!follow_contacts(latest)) return false;
+    }
+    FrameTimer owner_events(measure_owner_ ? &owner_timings_[4] : nullptr);
+    // The admitted frame already owns the normal event's pre/post-step pair.
+    // Catch-up records retain older successful history reads for this frame.
+    space::EventSnapshotCache event_snapshots(previous, latest);
+    const auto snapshot_for = [&](const std::uint64_t tick) {
+        return snapshot_at ? event_snapshots.get(tick, snapshot_at) : nullptr;
+    };
     // Events fire on the frame that first reaches their tick, oldest tick first; the effects
     // already live are aged up to each tick's birth before its effects are born.
     for (const platform::LiveTickEvents& record : reached) {
@@ -431,7 +446,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
         if (!advance_until(std::min(birth_, due))) return false;
         // WHE-63: successful refill emits the authored particle on every current team member.
         // A full-team no-op leaves started_tick/recharge unchanged and emits nothing.
-        const auto after_refill = snapshot_at ? snapshot_at(record.tick) : nullptr;
+        const auto* after_refill = snapshot_for(record.tick);
         if (after_refill) for (const auto& instance : after_refill->instances()) {
             if (!units(instance.entity_id)) continue;
             const auto type = types_.find(instance.type_id);
@@ -464,7 +479,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             }
         }
         // WHE-62/BP-70: retain bomb death effects; WAD-07 supplies the weaken fallback.
-        const auto before_spawn = snapshot_at && record.tick > 0 ? snapshot_at(record.tick - 1) : nullptr;
+        const auto* before_spawn = record.tick > 0 ? snapshot_for(record.tick - 1) : nullptr;
         std::erase_if(seen_deaths_, [&](const auto& death) { return death.second + 8 < record.tick; });
         if (before_spawn) for (const auto& spawn_state : before_spawn->ability_spawns()) {
             if (spawn_state.kind == tactical::AbilityKind::cluster_bomb || spawn_state.kind == tactical::AbilityKind::fow_reveal_ping) continue;
@@ -482,6 +497,10 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             if (!spawn(terminal, position, {}, "hero_detonation", record.tick)) return false;
         }
         for (const tactical::CombatEvent& event : record.combat_events) {
+            if (measure_owner_) {
+                ++owner_counts_[0];
+                if (event.kind == tactical::CombatEventKind::projectile_hit) ++owner_counts_[1];
+            }
             if (event.kind == tactical::CombatEventKind::heal_pulse) {
                 const auto source = last_seen_.find(event.shooter), target = last_seen_.find(event.target);
                 if (source == last_seen_.end() || target == last_seen_.end()) continue;
@@ -565,16 +584,16 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             bool retained_profile = false;
             // #862 (AB-66): an ability shot's hit shows the ability shot's own particles.
             std::optional<std::uint64_t> hit;
-            if (snapshot_at) {
-                if (const auto before = snapshot_at(event.tick)) {
-                    hit = space::hit_projectile(before->projectiles(), event);
-                    if (hit) for (const auto& projectile : before->projectiles()) {
-                        // WRB-08: terminal particles retain the launcher's type, slot and override after reflection.
-                        if (projectile.id == *hit) {
-                            found = look_of(projectile);
-                            retained_profile = found != nullptr;
-                            break;
-                        }
+            // A combat event names its pre-step snapshot, while record.tick
+            // names the completed tick. Reuse this match for the hit-particle pick.
+            if (const auto* before = snapshot_for(event.tick)) {
+                hit = space::hit_projectile(before->projectiles(), event);
+                if (hit) for (const auto& projectile : before->projectiles()) {
+                    // WRB-08: terminal particles retain the launcher's type, slot and override after reflection.
+                    if (projectile.id == *hit) {
+                        found = look_of(projectile);
+                        retained_profile = found != nullptr;
+                        break;
                     }
                 }
             }
@@ -612,6 +631,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                 if (target_looks != types_.end() && !target_looks->second.collision.triangles.empty()) {
                     const space::LivePose pose{target.position, target.yaw_degrees, target.roll_degrees,
                                                target_looks->second.scale, target.pitch_degrees};
+                    FrameTimer owner_cast(measure_owner_ ? &owner_timings_[8] : nullptr, true);
                     if (const auto met = space::shield_flight_hit(target_looks->second.collision, pose,
                                                                   dvec(vec(event.origin)), dvec(flight),
                                                                   look.step_length, &shield_casts_)) {
@@ -641,7 +661,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                 // place and facing.
                 if (target_looks != types_.end()) {
                     if (const std::string* pick = hit_pick(target_looks->second.shield_hits, space::HitParticleList::shield,
-                                                           event, snapshot_at);
+                                                           event, hit);
                         pick != nullptr && !spawn(*pick, place, basis, "shield_hit", record.tick, event.target,
                             shield_hit && shield_hit->triangle < target_looks->second.collision_bones.size()
                                 ? target_looks->second.collision_bones[shield_hit->triangle] : 0U)) {
@@ -658,7 +678,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             // BP-63: then one of the target type's Damage_Hit_Particles at the contact.
             if (const auto target_looks = types_.find(last_seen_.at(event.target).type); target_looks != types_.end()) {
                 if (const std::string* pick = hit_pick(target_looks->second.damage_hits, space::HitParticleList::damage,
-                                                       event, snapshot_at);
+                                                       event, hit);
                     pick != nullptr && !spawn(*pick, at, {}, "damage_hit", record.tick, event.target,
                         event.target_hardpoint < target_looks->second.hardpoint_contact_bones.size()
                             ? target_looks->second.hardpoint_contact_bones[event.target_hardpoint] : 0U)) {
@@ -707,6 +727,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             if (!spawn(particle_name, place, {vec(axes.x), vec(axes.y), vec(axes.z)}, "asteroid", record.tick)) return false;
         }
         for (const tactical::Event& event : record.events) {
+            if (measure_owner_) ++owner_counts_[2];
             if (event.kind != tactical::EventKind::unit_destroyed && event.kind != tactical::EventKind::hardpoint_destroyed
                 && event.kind != tactical::EventKind::spin_away_ended) {
                 continue;
@@ -720,8 +741,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             const bool killed = std::any_of(record.events.begin(), record.events.end(), [&](const tactical::Event& other) {
                 return other.kind == tactical::EventKind::unit_destroyed && other.unit == event.unit;
             });
-            const auto event_pose = snapshot_at
-                ? snapshot_at(killed && record.tick > 0 ? record.tick - 1 : record.tick) : nullptr;
+            const auto* event_pose = snapshot_for(killed && record.tick > 0 ? record.tick - 1 : record.tick);
             if (const auto* instance = event_pose ? space::find_instance(*event_pose, event.unit) : nullptr) {
                 for (std::size_t axis = 0; axis < 3; ++axis) {
                     unit.position[axis] = static_cast<double>(instance->fixed_transform.rows[axis][3].raw())
@@ -749,9 +769,9 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                 // WCC-71 (BP-37): the kill self-destructs every destroyable hardpoint before the
                 // unit's own explosion: a standing one is destroyed, one already destroyed
                 // explodes again. The kill tick's snapshot no longer lists the unit.
-                const auto before = record.tick > 0 && snapshot_at ? snapshot_at(record.tick - 1) : nullptr;
+                const auto* before = record.tick > 0 ? snapshot_for(record.tick - 1) : nullptr;
                 for (const space::SelfDestructHardpoint& hardpoint :
-                     space::self_destruct_hardpoints(before.get(), event.unit, record.events)) {
+                     space::self_destruct_hardpoints(before, event.unit, record.events)) {
                     if (!hardpoint_explosion(hardpoint.hardpoint, "self_destruct")) return false;
                 }
             }
@@ -774,8 +794,15 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             if (!hardpoint_explosion(event.hardpoint, "hardpoint")) return false;
         }
     }
+    owner_events.finish();
+    FrameTimer owner_projectiles(measure_owner_ ? &owner_timings_[5] : nullptr);
     if (!draw_projectiles(previous, latest, alpha, units, depth_camera)) return false;
-    if (!follow_contacts(latest)) return false;
+    owner_projectiles.finish();
+    {
+        FrameTimer contacts(measure_owner_ ? &owner_timings_[3] : nullptr, true);
+        if (!follow_contacts(latest)) return false;
+    }
+    FrameTimer owner_advance(measure_owner_ ? &owner_timings_[6] : nullptr);
     if (!advance_until(due)) return false;
     batch_handles_.clear();
     for (const LiveEffect& effect : effects_) {
@@ -785,6 +812,8 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
         failure_ = "battle contact particles could not be presented";
         return false;
     }
+    owner_advance.finish();
+    FrameTimer owner_finish(measure_owner_ ? &owner_timings_[7] : nullptr);
     // What this frame draws: each new effect's age now is the one it is first seen at.
     for (LiveEffect& effect : effects_) {
         if (effect.drawn) continue;

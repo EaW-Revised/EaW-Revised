@@ -1,11 +1,13 @@
 #include "setup_test_support.hpp"
 #include "lan_match.hpp"
+#include "lan_diagnostics.hpp"
 #include "skirmish_prepare.hpp"
 #include "../../src/net/platform_socket.hpp"
 #include "eawr/core/build_identity.hpp"
 #include "eawr/net/tcp_transport.hpp"
 #include "eawr/net/lan_credentials.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
+#include "eawr/presentation/ui/ability_buttons.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "fake_transport.hpp"
 #include <chrono>
@@ -15,6 +17,7 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <string_view>
 
 namespace viewer = eawr::presentation::godot_backend;
 using namespace setup_test;
@@ -27,6 +30,59 @@ std::shared_ptr<viewer::LanMatch> make_match(std::filesystem::path root = {}, st
     auto match = viewer::make_lan_match(std::move(root), delay, progress, std::move(trace));
     match->configure_factions({"Rebel", "Empire", "Underworld", "Mod_Fleet_C"});
     return match;
+}
+void diagnostic_contract() {
+    stage = "bounded normal-log diagnostics";
+    viewer::LanDiagnostics log;
+    std::vector<std::string> lines;
+    log.sink = [&](std::string_view line) { lines.emplace_back(line); };
+    log.seat = 0; log.tick = 7314;
+    const std::array<net::PeerIndex, 1> peers{1};
+    log.stall(true, 0, peers); log.stall(true, 999, peers);
+    expect(lines.empty(), "subsecond lockstep gaps do not spam the log");
+    log.stall(true, 1000, peers);
+    for (std::uint64_t now = 1001; now < 1100; ++now) log.stall(true, now, peers);
+    log.stall(false, 1100); log.stall(false, 1999);
+    expect(lines.size() == 1 && lines[0].find("event=stall-start") != std::string::npos
+        && lines[0].find("peer=1 tick=7314") != std::string::npos, "sustained stall identifies missing peer and tick exactly once");
+    log.tick = 7315; log.stall(false, 2000);
+    expect(lines.size() == 2 && lines[1].find("event=stall-end") != std::string::npos
+        && lines[1].find("duration_ms=1100") != std::string::npos, "quick resume is logged at the one-second rate boundary with actual duration");
+    for (std::uint64_t now = 2100; now < 2200; ++now) { log.stall(true, now, peers); log.stall(false, now); }
+    expect(lines.size() == 2, "ordinary input gaps do not create per-tick traffic");
+    viewer::LanView view; view.phase = viewer::LanPhase::reconnecting;
+    view.recovery = viewer::LanRecovery::held; view.reconnect_seat = 1; view.recovery_epoch = 9;
+    log.view(view); log.view(view);
+    expect(lines.size() == 3 && lines.back().find("reason=held epoch=9") != std::string::npos, "held-seat incident logs once per transition");
+    view.phase = viewer::LanPhase::ended; view.reason = viewer::LanReason::timeout;
+    view.recovery = viewer::LanRecovery::rejoin_failed; view.diagnostic_code = "EAWR-NET-1005";
+    log.view(view); const auto count = lines.size(); log.view(view);
+    expect(lines.size() == count && lines.back().find("event=battle-end") != std::string::npos
+        && lines.back().find("code=EAWR-NET-1005") != std::string::npos, "terminal diagnostics retain reason code without repeated frame logs");
+    struct Transport final : net::MessageTransport {
+        net::LinkState state{net::LinkState::open};
+        eawr::core::Result<void> send(net::PeerIndex, std::span<const std::uint8_t>) override { return eawr::core::Result<void>::success(); }
+        std::optional<net::Received> poll() override { return {}; }
+        net::LinkState link(net::PeerIndex) const override { return state; }
+        net::PeerIndex self() const override { return 0; }
+        std::uint32_t peer_count() const override { return 2; }
+    } transport;
+    const auto before_links = lines.size();
+    const auto reason = [](net::PeerIndex) { return std::string("EAWR-NET-1769"); };
+    log.links(transport, reason); log.links(transport, reason);
+    transport.state = net::LinkState::closed; log.links(transport, reason); log.links(transport, reason);
+    expect(lines.size() == before_links + 3 && lines[before_links + 1].find("event=link-lost") != std::string::npos
+        && lines.back().find("reason=EAWR-NET-1769 state=closed") != std::string::npos,
+        "pair-specific closure code survives transition deduplication without a fatal whole-room error");
+    viewer::LanView loss; loss.phase = viewer::LanPhase::ended; loss.reason = viewer::LanReason::timeout;
+    loss.diagnostic_code = "EAWR-NET-0106"; loss.message = "Connection lost: the match could not continue.\nNamed opponent\nEAWR-NET-0106";
+    expect(viewer::lan_message(loss) == loss.message && !loss.victory,
+        "terminal timeout keeps named connection-loss text instead of generic timeout or victory copy");
+    for (const auto code : {net::mesh_errors::no_majority, net::mesh_errors::no_decision, net::mesh_errors::overlap}) {
+        expect(!viewer::lan_connection_loss(code), "mesh decisions retain their own curated failure text");
+    }
+    log.sink = [](std::string_view) { throw std::runtime_error("unavailable log sink"); };
+    log.emit("test", "none", 1);
 }
 void player_row_parser() {
     expect(require(viewer::skirmish_player_ids("1,2,3,4,5,6,7,8")).size() == 8, "eight local faction rows parse");
@@ -181,7 +237,10 @@ void transport_failure_copy() {
         net::TcpOptions options; options.build_identity = eawr::core::build_identity();
         if (version) ++options.protocol_version; else options.build_identity += "-different";
         auto host = require(net::TcpTransport::host("127.0.0.1", 0, options));
-        auto join = make_match(); join->join("127.0.0.1:" + std::to_string(host->port()));
+        auto join = make_match();
+        std::vector<std::string> diagnostics;
+        join->set_diagnostic_logger([&](std::string_view line) { diagnostics.emplace_back(line); });
+        join->join("127.0.0.1:" + std::to_string(host->port()));
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (join->view().phase != viewer::LanPhase::ended) {
             expect(std::chrono::steady_clock::now() < deadline, "failure copy handshake deadline");
@@ -189,6 +248,14 @@ void transport_failure_copy() {
         }
         expect(viewer::lan_message(join->view()) == (version ? "The other player uses a different network version." :
             "The other player uses a different game build."), "existing mismatch copy remains curated");
+        expect(std::any_of(diagnostics.begin(), diagnostics.end(), [&](const auto& line) {
+            return line.find(version ? "reason=EAWR-NET-0201" : "reason=EAWR-NET-0202") != std::string::npos;
+        }), "real transport refusal reaches the caller logger without losing its reason code");
+        expect(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& line) {
+            return line.find("event=battle-end") != std::string::npos;
+        }), "setup failure has a normal-log terminal reason");
+        // The collector must outlive cancellation and any terminal transport drain.
+        join->set_diagnostic_logger({});
         auto viewing_host = make_match(); viewing_host->host(0);
         auto client = require(net::TcpTransport::connect("127.0.0.1", viewing_host->view().port, options));
         while (viewing_host->view().reason == viewer::LanReason::none) {
@@ -353,11 +420,11 @@ struct StagingIngress {
     std::unique_ptr<net::TcpTransport> source;
     const std::chrono::steady_clock::time_point deadline{std::chrono::steady_clock::now() + std::chrono::seconds(20)};
     StagingIngress() {
-        host->configure_seats({1, 2, 1}); host->host(0);
+        host->configure_seats({1, 2, 3}); host->host(0);
         net::TcpOptions options; options.build_identity = identity().build; options.peers = 3; options.seat = 1;
         source = require(net::TcpTransport::connect("127.0.0.1", host->view().port, options));
         wait([&] { host->pump_setup({}); (void)source->poll(); return source->self() == 1; });
-        client->configure_seats({1, 2, 1}); client->join("127.0.0.1:" + std::to_string(host->view().port));
+        client->configure_seats({1, 2, 3}); client->join("127.0.0.1:" + std::to_string(host->view().port));
         wait([&] { pump(); return host->view().connected && client->view().connected && source->link(2) == net::LinkState::open; });
     }
     ~StagingIngress() { client->cancel(); host->cancel(); }
@@ -402,7 +469,8 @@ void staging_ingress_bounds() {
     }
     stage = "untrusted offer does not change viewer owner";
     StagingIngress ingress;
-    auto selected = offer(); selected.seats.push_back({2, sim::SeatId{15}, 1});
+    auto selected = offer(); selected.setup = require(net::encode_skirmish_setup(human_setup(3)));
+    selected.seats.push_back({2, sim::SeatId{15}, 3});
     const auto before = ingress.client->view();
     ingress.send(require(net::encode_setup_offer(selected)));
     ingress.wait([&] { ingress.pump(); return ingress.client->view().phase == viewer::LanPhase::ended; });
@@ -413,27 +481,37 @@ void staging_ingress_bounds() {
 void refused_rosters() {
     stage = "unsupported command-seat roster";
     for (const auto& owners : std::vector<std::vector<tactical::PlayerId>>{
-        std::vector<tactical::PlayerId>(10, 1), {1, 2, 3, 4}}) {
+        std::vector<tactical::PlayerId>(10, 1), {1, 1}, {0, 2}}) {
         auto match = make_match();
         match->configure_seats(owners); match->host(0);
         expect(match->view().phase == viewer::LanPhase::ended && match->view().diagnostic_code == "EAWR-NET-1300",
-            "ten seats and a fourth human owner fail before transport admission");
+            "ten seats, shared owners and zero owners fail before transport admission");
     }
 }
-void shared_mesh(std::uint32_t count, bool coop) {
-    stage = "shared-owner viewer mesh";
-    auto initial = setup();
+void separate_mesh(std::uint32_t count, bool coop, bool ability_triage = false, unsigned workers = 1) {
+    stage = "separate-owner viewer mesh";
+    auto initial = ability_triage ? setup() : human_setup(count);
     initial.players[0].faction_id = eawr::skirmish::faction_id("Rebel");
     initial.players[1].faction_id = eawr::skirmish::faction_id("Empire");
-    initial.players[2].faction_id = eawr::skirmish::faction_id("Underworld");
-    if (coop) initial.skirmish->slots[1].human = false;
-    const auto sides = count == 9 && !coop ? 3U : 2U;
-    if (sides == 3) {
-        initial.skirmish->slots[2].human = true;
-        initial.players[2].faction_id = eawr::skirmish::faction_id("Mod_Fleet_C");
+    if (!ability_triage) {
+        for (auto& player : initial.players) {
+            if (coop) player.team_id = 1;
+            player.faction_id = eawr::skirmish::faction_id(player.team_id == 1 ? "Rebel" : "Empire");
+        }
+        if (coop) {
+            initial.players.push_back({count + 1, 2, eawr::skirmish::faction_id("Empire"), tactical::player_flag_commandable});
+            initial.skirmish->slots.push_back({count + 1, false, count, {}});
+            auto unit = initial.units.back(); unit.entity_id = count + 1; unit.owner = count + 1;
+            unit.position = {units(10000), units(10000), {}};
+            initial.units.push_back(unit);
+        }
     }
-    std::vector<tactical::PlayerId> owners(count, 1);
-    if (!coop) for (std::uint32_t peer = 1; peer < count; ++peer) owners[peer] = peer % sides + 1;
+    if (ability_triage) {
+        initial.players.resize(2); initial.units.resize(2); initial.skirmish->slots.resize(2);
+        initial.queue_identities = true;
+    }
+    std::vector<tactical::PlayerId> owners;
+    for (std::uint32_t peer = 0; peer < count; ++peer) owners.push_back(peer + 1);
     std::vector<std::shared_ptr<viewer::LanMatch>> matches;
     for (std::uint32_t peer = 0; peer < count; ++peer) {
         auto match = make_match(); match->configure_seats(owners); matches.push_back(std::move(match));
@@ -443,12 +521,15 @@ void shared_mesh(std::uint32_t count, bool coop) {
         matches[peer]->join("127.0.0.1:" + std::to_string(matches[0]->view().port));
     eawr::skirmish::FixtureOptions selected;
     selected.map = initial.skirmish->map;
-    selected.slots = std::vector<eawr::skirmish::LobbySlot>{
-        {1, "Rebel", 1, true, {"fleet-a"}}, {2, "Empire", 2, !coop, {"fleet-b"}}, {3, sides == 3 ? "Mod_Fleet_C" : "Underworld", 3, sides == 3, {"fleet-ai"}}};
+    selected.slots.emplace();
+    for (const auto& player : initial.players)
+        selected.slots->push_back({player.player_id,
+            player.faction_id == eawr::skirmish::faction_id("Rebel") ? "Rebel" : "Empire",
+            player.team_id, player.player_id <= count, {}, player.player_id - 1});
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
     const auto wait = [&](const auto& predicate) {
         while (!predicate()) {
-            expect(std::chrono::steady_clock::now() < deadline, "shared viewer mesh deadline");
+            expect(std::chrono::steady_clock::now() < deadline, "separate viewer mesh deadline");
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     };
@@ -457,22 +538,91 @@ void shared_mesh(std::uint32_t count, bool coop) {
         return std::all_of(matches.begin(), matches.end(), [](const auto& match) { return match->view().connected; });
     });
     matches[0]->start(selected);
-    expect(matches[0]->take_start().has_value(), "mesh host hands over one shared-faction setup");
-    sim::InlineExecutor executor;
+    expect(matches[0]->take_start().has_value(), "mesh host hands over separate owner rows");
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    auto rules = content();
+    if (ability_triage) {
+        tactical::AbilityProfile ability;
+        ability.kind = tactical::AbilityKind::spoiler_lock;
+        tactical::UnitAbilityProfile unit;
+        unit.type_id = 1; unit.abilities = {ability};
+        rules.abilities.profiles = {unit};
+        rules.abilities.humans = {1, 2};
+        auto ship_motion = rules.motion.profiles.front(); ship_motion.type_id = 2;
+        rules.motion.profiles.push_back(ship_motion);
+        rules.sensors.push_back({2, units(1000)});
+        tactical::BuildOption ship;
+        ship.type = 2; ship.price = units(100); ship.build_frames = 12; ship.ai_build_frames = 12;
+        ship.population = 1; ship.available = true;
+        for (const auto& player : initial.players) {
+            tactical::EconomyPlayer economy;
+            economy.player = player.player_id; economy.credits = units(1000); economy.population_cap = 20;
+            rules.economy.players.push_back(economy);
+            tactical::StationMenu menu;
+            menu.station = 1; menu.faction = player.faction_id; menu.options = {ship};
+            rules.economy.menus.push_back(menu);
+        }
+        std::sort(rules.economy.menus.begin(), rules.economy.menus.end(), [](const auto& a, const auto& b) {
+            return std::pair{a.station, a.faction} < std::pair{b.station, b.faction};
+        });
+    }
     std::vector<tactical::TacticalSession> worlds;
     std::vector<eawr::platform::LiveStepContext> contexts(count);
     std::vector<eawr::platform::LiveStepDriver> drivers(count);
-    for (std::uint32_t peer = 0; peer < count; ++peer) worlds.push_back(require(tactical::TacticalSession::create(initial, content())));
+    std::vector<std::shared_ptr<eawr::presentation::ui::CommandScheduler>> schedulers(count);
+    std::vector<eawr::platform::LiveEventLog> event_logs;
+    for (std::uint32_t peer = 0; peer < count; ++peer) event_logs.emplace_back(eawr::platform::LiveEventLog::Bounds{});
+    for (std::uint32_t peer = 0; peer < count; ++peer) worlds.push_back(require(tactical::TacticalSession::create(initial, rules)));
+    if (ability_triage) for (std::uint32_t peer = 0; peer < count; ++peer) {
+        schedulers[peer] = std::make_shared<eawr::presentation::ui::CommandScheduler>(owners[peer], 0, 0,
+            [&, peer] { return worlds[peer].completed_tick(); });
+        schedulers[peer]->present_snapshot(0);
+        matches[peer]->set_input_epoch_provider([&, peer] { return schedulers[peer]->pending_intent_epoch(); });
+        matches[peer]->set_submission_observer([&, peer](std::uint64_t sequence, std::uint64_t tick) {
+            schedulers[peer]->note_execution(sequence, tick);
+            std::cout << "SUBMIT shared=" << coop << " workers=" << workers << " peer=" << peer
+                << " local_sequence=" << sequence << " execution_tick=" << tick << '\n';
+        });
+    }
     for (std::uint32_t peer = 0; peer < count; ++peer) {
         auto& context = contexts[peer]; context.advance_allowed = false;
         context.completed_tick = [&, peer] { return worlds[peer].completed_tick(); };
         context.state_hash = [&, peer] { return worlds[peer].state_sha256(); };
         context.canonical_state = [&, peer] { return worlds[peer].canonical_state_bytes(); };
         context.install = [&, peer](std::span<const tactical::PlayerCommand> commands) {
-            for (const auto& command : commands) require(worlds[peer].submit(command));
+            for (const auto& command : commands) {
+                if (ability_triage) std::cout << "INSTALL shared=" << coop << " workers=" << workers
+                    << " peer=" << peer << " tick=" << command.key.tick << " owner=" << command.key.player_id
+                    << " owner_sequence=" << command.key.sequence << " ability="
+                    << std::holds_alternative<tactical::AbilityPayload>(command.payload) << '\n';
+                require(worlds[peer].submit(command));
+            }
             return eawr::core::Result<void>::success();
         };
-        context.step = [&, peer] { require(worlds[peer].step(executor)); return eawr::core::Result<void>::success(); };
+        context.step = [&, peer] {
+            require(worlds[peer].step(executor));
+            if (ability_triage) {
+                const auto snapshot = worlds[peer].snapshot();
+                // Use the actual filtered platform log, not snapshot command results.
+                event_logs[peer].record(*snapshot);
+                for (const auto& record : event_logs[peer].after(0, snapshot->completed_tick()).ticks)
+                    for (const auto& event : record.events) expect(event.kind != tactical::EventKind::order_accepted
+                        && event.kind != tactical::EventKind::order_rejected, "platform result events are intentionally filtered");
+                schedulers[peer]->present_snapshot(snapshot->completed_tick());
+                for (const auto& event : snapshot->events()) {
+                    std::cout << "EVENT shared=" << coop << " workers=" << workers << " peer=" << peer
+                        << " tick=" << event.tick << " owner=" << event.player << " owner_sequence="
+                        << event.sequence << " kind=" << tactical::to_string(event.kind) << '\n';
+                }
+                for (const auto& instance : snapshot->instances()) for (const auto& ability : instance.abilities)
+                    std::cout << "STATE shared=" << coop << " workers=" << workers << " peer=" << peer
+                        << " completed=" << snapshot->completed_tick() << " unit=" << instance.entity_id
+                        << " active=" << ability.active << " ready=" << ability.ready
+                        << " remaining=" << ability.remaining_frames << " pending="
+                        << schedulers[peer]->reservations().size() << '\n';
+            }
+            return eawr::core::Result<void>::success();
+        };
         context.snapshot = [&, peer] { return worlds[peer].snapshot(); };
     }
     std::uint64_t now{};
@@ -489,43 +639,153 @@ void shared_mesh(std::uint32_t count, bool coop) {
         }
         return std::all_of(drivers.begin(), drivers.end(), [](const auto& driver) { return !!driver; });
     });
-    if (sides == 3) for (std::uint32_t peer = 1; peer < count; ++peer) {
-        const auto offered = matches[peer]->offered_setup();
-        expect(offered && offered->slots && offered->slots->at(2).faction == "Mod_Fleet_C",
-            "joiners decode the third human faction from locally configured mod data");
-    }
     for (auto& context : contexts) context.advance_allowed = true;
+    if (ability_triage) {
+        namespace ui = eawr::presentation::ui;
+        const auto advance = [&](std::uint64_t target) {
+            wait([&] {
+                ++now;
+                for (std::uint32_t peer = 0; peer < count; ++peer) if (worlds[peer].completed_tick() < target) {
+                    auto commands = schedulers[peer]->take(worlds[peer].completed_tick());
+                    require(drivers[peer](contexts[peer], commands, now));
+                }
+                return std::all_of(worlds.begin(), worlds.end(), [target](const auto& world) { return world.completed_tick() == target; });
+            });
+            expect(worlds[0].state_sha256() == worlds[1].state_sha256(), "ability repro peers agree on every script boundary");
+        };
+        ui::TacticalIntent first;
+        first.verb = ui::TacticalVerb::ability; first.units = {1}; first.unit_ability = tactical::AbilityKind::spoiler_lock;
+        require(schedulers[0]->issue(first));
+        advance(8);
+        expect(!schedulers[0]->consumed(first), "first sole-issuer activation clears on its own owner");
+        auto second = first; second.units = {owners[1]};
+        second.ability_action = tactical::AbilityAction::activate;
+        require(schedulers[1]->issue(second));
+        advance(16);
+        expect(!schedulers[1]->consumed(second), "joiner releases its completed ability without filtered results");
+        first.ability_action = tactical::AbilityAction::deactivate;
+        require(schedulers[0]->issue(first));
+        advance(24);
+        expect(!schedulers[0]->consumed(first), "host releases its later ability despite owner sequence remapping");
+        advance(32);
+        // Test-only scalar adapter for a singleton button; mirrors the production pending override.
+        struct ButtonState final : ui::AbilityState {
+            ui::UnitAbilityState current;
+            std::optional<ui::UnitAbilityState> state(sim::EntityId, std::uint32_t) const override { return current; }
+        };
+        for (std::uint32_t peer = 0; peer < count; ++peer) {
+            const auto& intent = peer == 0 ? first : second;
+            const auto snapshot = worlds[peer].snapshot();
+            const auto instance = std::find_if(snapshot->instances().begin(), snapshot->instances().end(),
+                [&](const auto& unit) { return unit.entity_id == intent.units.front(); });
+            expect(instance != snapshot->instances().end() && instance->abilities.size() == 1, "synthetic ability is published");
+            const auto& status = instance->abilities.front();
+            ButtonState state;
+            state.current.status = schedulers[peer]->consumed(intent) ? ui::AbilityStatus::disabled
+                : status.active ? ui::AbilityStatus::active : ui::AbilityStatus::ready;
+            ui::AbilityButton button; button.ability = ui::ability_index("SPOILER_LOCK"); button.units = intent.units;
+            const auto click = ui::ability_click(button, false, state);
+            const bool clickable = click.has_value();
+            expect(clickable, "each owner button accepts a re-click");
+            expect(worlds[peer].record().commands.size() == 3, "three gestures are installed exactly once, never duplicated or deduped away");
+            std::cout << "RESULT shared=" << coop << " workers=" << workers << " peer=" << peer
+                << " pending=" << schedulers[peer]->reservations().size() << " clickable=" << clickable
+                << " sim_active=" << status.active << " sim_ready=" << status.ready
+                << " commands=" << worlds[peer].record().commands.size() << " hash=" << worlds[peer].state_sha256() << '\n';
+            auto retry = intent;
+            retry.ability_action = click->kind == ui::AbilityRequest::Kind::deactivate
+                ? tactical::AbilityAction::deactivate : tactical::AbilityAction::activate;
+            require(schedulers[peer]->issue(retry));
+        }
+        advance(40);
+        for (const auto& scheduler : schedulers) expect(scheduler->reservations().empty(), "both real re-clicks finish without pending abilities");
+        const auto ledger = [&](std::uint32_t peer) -> tactical::EconomyView {
+            const auto snapshot = worlds[peer].snapshot();
+            for (const auto& view : snapshot->economy()) if (view.player == 1) return view;
+            throw std::runtime_error("missing synthetic player economy");
+        };
+        const auto* option = rules.economy.menu(1, initial.players[0].faction_id)->find(2);
+        const auto option_of = [&](sim::EntityId, tactical::TypeId) { return option; };
+        ui::TacticalIntent buy; buy.verb = ui::TacticalVerb::buy; buy.units = {1}; buy.type = 2;
+        require(schedulers[0]->issue(buy));
+        const auto preview = ui::pending_economy(ledger(0), schedulers[0]->reservations(), option_of, worlds[0].completed_tick());
+        expect(preview.queues[0].size() == 1 && preview.queues[0].front().entry_id == 0, "only unexecuted purchase has one preview without cancel authority");
+        ui::TacticalIntent cancel; cancel.verb = ui::TacticalVerb::cancel;
+        expect(!schedulers[0]->issue(cancel), "a preview entry cannot issue a cancellation");
+        advance(44);
+        for (std::uint32_t peer = 0; peer < count; ++peer) {
+            const auto view = ledger(peer);
+            const auto shown = ui::pending_economy(view, schedulers[peer]->reservations(), option_of, worlds[peer].completed_tick());
+            expect(view.queues[0].size() == 1 && shown.queues[0] == view.queues[0]
+                && view.queues[0].front().entry_id != 0 && view.credits == units(900), "purchase executes once and has no ghost preview on either peer");
+        }
+        cancel.queue_entry_id = ledger(0).queues[0].front().entry_id;
+        require(schedulers[0]->issue(cancel)); advance(48);
+        expect(ledger(0).queues[0].empty() && ledger(1).queues[0].empty() && ledger(0).credits == units(1000), "authoritative cancellation removes one purchase and refunds once");
+        require(schedulers[0]->issue(buy)); advance(68);
+        expect(ledger(0).queues[0].empty() && ledger(1).queues[0].empty()
+            && ledger(0).pool == std::vector<tactical::TypeId>{2} && ledger(1).pool == ledger(0).pool,
+            "second purchase completes once without a tile stuck at 100 percent");
+        // The previous viewer attached a skirmish token to this campaign-only wire route.
+        const tactical::SeatBinding bound{sim::SeatId{1}, 1, true, false};
+        tactical::ReinforcePayload identity_drop{2, {units(1000), {}, {}}, ledger(0).pool_tokens.front()};
+        const auto old_input = net::encode_tactical_input({68, bound.seat, 0}, bound, {{}, identity_drop});
+        expect(!old_input && old_input.error().code == net::session_errors::admission,
+            "ordinary skirmish identity token reproduces the misleading synchronization refusal");
+        ui::TacticalIntent reinforce; reinforce.verb = ui::TacticalVerb::reinforce;
+        reinforce.type = 2; reinforce.destination = {units(1000), {}, {}};
+        // The producer may wait for peer synchronization after a click; its reservation survives the hold.
+        for (auto& context : contexts) context.advance_allowed = false;
+        viewer::LanCommandSink sink(*schedulers[0], matches[0]);
+        require(sink.issue(reinforce));
+        for (std::uint32_t peer = 0; peer < count; ++peer) {
+            const auto commands = schedulers[peer]->take(worlds[peer].completed_tick());
+            expect(!require(drivers[peer](contexts[peer], commands, ++now)), "held synchronization pump cannot advance the world");
+        }
+        expect(!schedulers[0]->reservations().empty(), "unexecuted reinforcement remains reserved during synchronization hold");
+        for (auto& context : contexts) context.advance_allowed = true;
+        advance(240);
+        for (std::uint32_t peer = 0; peer < count; ++peer) {
+            const auto snapshot = worlds[peer].snapshot();
+            const auto arrived = std::find_if(snapshot->instances().begin(), snapshot->instances().end(),
+                [](const auto& unit) { return unit.type_id == 2 && unit.owner == 1; });
+            expect(arrived != snapshot->instances().end() && !arrived->arrival
+                && ledger(peer).pool.empty() && ledger(peer).population == 1,
+                "MP skirmish reinforcement is admitted once and finishes arrival on both peers");
+            expect(schedulers[peer]->reservations().empty(), "reinforcement reservation clears after synchronized execution");
+            expect(matches[peer]->view().input_feedback.empty(), "valid skirmish reinforcement produces no synchronization-cancel notice");
+        }
+        static std::map<bool, std::string> first_hash;
+        const auto [baseline, inserted] = first_hash.emplace(coop, worlds[0].state_sha256());
+        expect(inserted || baseline->second == worlds[0].state_sha256(), "ability repro is identical across 1/2/4/8 workers");
+        for (auto& match : matches) match->cancel();
+        return;
+    }
+    // Every owner submits its own unit order through the real setup/router/lockstep path.
+    for (std::uint32_t peer = 0; peer < count; ++peer) {
+        const auto owner = matches[peer]->local_player();
+        const tactical::PlayerCommand move{{0, owner, 0}, {owner},
+            tactical::MovePayload{{units(static_cast<std::int64_t>(owner) * 1000 + 100), units(3000), {}}}};
+        require(drivers[peer](contexts[peer], std::span(&move, 1), ++now));
+    }
     wait([&] {
         ++now;
         for (std::uint32_t peer = 0; peer < count; ++peer)
-            if (worlds[peer].completed_tick() < 20) require(drivers[peer](contexts[peer], {}, now));
-        return std::all_of(worlds.begin(), worlds.end(), [](const auto& world) { return world.completed_tick() == 20; });
+            if (worlds[peer].completed_tick() < 120) require(drivers[peer](contexts[peer], {}, now));
+        return std::all_of(worlds.begin(), worlds.end(), [](const auto& world) { return world.completed_tick() == 120; });
     });
     for (std::uint32_t peer = 0; peer < count; ++peer) {
         expect(matches[peer]->local_player() == owners[matches[peer]->view().seat], "local fog and asset owner come from the assigned offer seat");
         expect(matches[peer]->view().human_owners == owners && matches[peer]->view().connected_seats == count,
-            "all viewers present the complete human seat roster");
+            "all viewers present the complete separate-owner roster");
+        expect(worlds[peer].state_sha256() == worlds.front().state_sha256()
+            && worlds[peer].record().commands.size() == count, "separate owners install every order exactly once and agree at 120 ticks");
     }
-    std::uint32_t leaving = count - 1;
-    for (std::uint32_t peer = 1; peer < count; ++peer)
-        if (std::count(owners.begin(), owners.end(), matches[peer]->local_player()) > 1) { leaving = peer; break; }
-    const tactical::PlayerCommand quit{{20, matches[leaving]->local_player(), 0}, {}, tactical::QuitPayload{}};
-    require(drivers[leaving](contexts[leaving], std::span(&quit, 1), ++now));
-    wait([&] {
-        ++now;
-        for (std::uint32_t peer = 0; peer < count; ++peer)
-            if (peer == leaving || worlds[peer].completed_tick() < 50) require(drivers[peer](contexts[peer], {}, now));
-        bool complete = matches[leaving]->view().phase == viewer::LanPhase::ended;
-        for (std::uint32_t peer = 0; peer < count; ++peer) if (peer != leaving)
-            complete = complete && worlds[peer].completed_tick() == 50;
-        return complete;
-    });
-    for (std::uint32_t peer = 0; peer < count; ++peer) if (peer != leaving) {
-        expect(matches[peer]->view().phase == viewer::LanPhase::running && !matches[peer]->view().victory,
-            "a shared controller leaving does not end its faction's battle");
-        expect(worlds[peer].state_sha256() == worlds[0].state_sha256() && worlds[peer].record().commands.empty(),
-            "surviving shared-owner viewer worlds agree without a faction quit");
-    }
+    static std::map<std::pair<unsigned, bool>, std::string> first_hash;
+    const auto [baseline, inserted] = first_hash.emplace(std::pair{count, coop}, worlds[0].state_sha256());
+    expect(inserted || baseline->second == worlds[0].state_sha256(), "allied human match equals across 1/2/4/8 workers");
+    std::cout << "separate owners=" << count << " coop=" << coop << " workers=" << workers
+        << " ticks=120 hash=" << worlds[0].state_sha256() << '\n';
     for (auto& match : matches) match->cancel();
 }
 
@@ -564,7 +824,11 @@ void shared_builder_matches_former_live_encoding() {
         former_offer.identity = {std::string(eawr::core::build_identity()), *former_setup.match_identity};
         former_offer.seats = {{0, sim::SeatId{1}, 1}, {1, sim::SeatId{2}, opponent_human ? 2U : 1U}};
         auto shared_offer = former_offer; shared_offer.setup = require(net::encode_skirmish_setup(shared_setup)); shared_offer.identity.content = *shared_setup.match_identity;
-        expect(require(net::encode_setup_offer(former_offer)) == require(net::encode_setup_offer(shared_offer)), "production shared builder matches former live SetupOffer bytes and digest");
+        if (opponent_human)
+            expect(require(net::encode_setup_offer(former_offer)) == require(net::encode_setup_offer(shared_offer)), "production shared builder matches former live SetupOffer bytes and digest");
+        else
+            expect(!net::encode_setup_offer(former_offer) && !net::encode_setup_offer(shared_offer),
+                "both builders refuse a shared-owner skirmish offer");
     }
 }
 
@@ -757,7 +1021,7 @@ void missing_planned_owner_is_refused() {
     eawr::skirmish::SetupMap map; map.path = *selected.map;
     map.metadata.capacity = 2; map.metadata.new_markers = true; map.metadata.start_positions.emplace(3);
     map.teams = {{1, {"Rebel"}, 1}, {2, {"Empire"}, 1}};
-    auto host = make_match(); host->configure_seats({1, 1, 1, 2, 2, 2, 3, 3, 3});
+    auto host = make_match(); host->configure_seats({1, 2, 3});
     host->configure_lobby("H_host", 0, {map}, [initial](const auto&) {
         return eawr::core::Result<tactical::TacticalSetup>::success(initial);
     });
@@ -770,21 +1034,23 @@ void missing_planned_owner_is_refused() {
 
 void nine_seat_staging(const std::vector<tactical::PlayerId>& owners) {
     stage = "nine-seat loaded-map production staging";
-    auto initial = setup();
+    const auto rows = std::max(3U, *std::max_element(owners.begin(), owners.end()));
+    auto initial = human_setup(rows);
     const std::vector<std::string> factions{"H_mod_A", "H_mod_B", "H_mod_C"};
     eawr::skirmish::FixtureOptions selected;
     selected.map = initial.skirmish->map; selected.match = initial.skirmish->match; selected.seed = initial.seed;
     selected.slots.emplace();
     eawr::skirmish::SetupMap map; map.path = *selected.map;
-    map.metadata.capacity = 3; map.metadata.new_markers = true; map.metadata.start_positions.emplace(4);
+    map.metadata.capacity = rows; map.metadata.new_markers = true; map.metadata.start_positions.emplace(rows + 1);
     initial.departure_policy.emplace(); initial.queue_identities = true;
-    for (unsigned row = 0; row < 3; ++row) {
+    for (unsigned row = 0; row < rows; ++row) {
         const bool human = std::find(owners.begin(), owners.end(), row + 1) != owners.end();
-        selected.slots->push_back({row + 1, factions[row], row + 1, human, {}, row});
-        map.teams.push_back({row + 1, {factions[row]}, 1});
-        initial.players[row].faction_id = eawr::skirmish::faction_id(factions[row]);
+        const auto& faction = factions[row % factions.size()];
+        selected.slots->push_back({row + 1, faction, row + 1, human, {}, row});
+        map.teams.push_back({row + 1, {faction}, 1});
+        initial.players[row].faction_id = eawr::skirmish::faction_id(faction);
         initial.players[row].team_id = row + 1;
-        initial.skirmish->slots[row].human = human; initial.skirmish->slots[row].fleet.clear();
+        initial.skirmish->slots[row].human = human;
         if (human) initial.departure_policy->humans.push_back(row + 1);
     }
     const viewer::LanLobbyBuilder builder = [initial](const auto&) {
@@ -845,8 +1111,8 @@ void nine_seat_staging(const std::vector<tactical::PlayerId>& owners) {
     for (auto& match : matches) expect(match->lobby_ready(true), "all command seats explicitly ready");
     milestone = "all controllers ready";
     wait([&] { return host.view().start_enabled; });
-    auto invalid = selected; invalid.slots->push_back({4, "H_mod_A", 1, true, {}, 4});
-    expect(!host.lobby_game(invalid), "loaded map capacity of three refuses a fourth owner row");
+    auto invalid = selected; invalid.slots->push_back({rows + 1, "H_mod_A", 1, true, {}, 0});
+    expect(!host.lobby_game(invalid), "loaded map capacity refuses an extra owner row");
     expect(host.view().start_enabled, "refused map edit preserves readiness");
     host.start(selected);
     milestone = "Start announcement";
@@ -861,6 +1127,188 @@ void nine_seat_staging(const std::vector<tactical::PlayerId>& owners) {
     for (auto& match : matches) match->cancel();
 }
 
+void editable_staging_team_rules() {
+    stage = "editable team and faction staging";
+    const auto initial = setup();
+    eawr::skirmish::FixtureOptions selected;
+    selected.map = initial.skirmish->map; selected.match = initial.skirmish->match;
+    selected.slots = std::vector<eawr::skirmish::LobbySlot>{{1, "Rebel", 0, true, {}, 0}, {2, "Empire", 1, true, {}, 1}};
+    eawr::skirmish::SetupMap map; map.path = *selected.map; map.metadata.capacity = 2;
+    map.metadata.new_markers = true; map.metadata.start_positions.emplace(2);
+    map.teams = {{0, {"Rebel", "Empire"}, 1}, {1, {"Rebel", "Empire"}, 1}};
+    auto structural = *selected.slots;
+    structural[1].slot = structural[0].slot;
+    expect(!eawr::skirmish::validate_setup_slots(structural, map.metadata, false, false), "editable staging still refuses duplicate rows");
+    structural = *selected.slots; structural[1].team = 2;
+    expect(!eawr::skirmish::validate_setup_slots(structural, map.metadata, false, false), "editable staging still requires an authored team");
+    const viewer::LanLobbyBuilder builder = [initial](const auto&) { return eawr::core::Result<tactical::TacticalSetup>::success(initial); };
+    auto host = make_match(), join = make_match();
+    host->configure_lobby("Host", 0, {map}, builder); join->configure_lobby("Guest", 1, {map}, builder);
+    host->host(0); host->pump_setup(selected);
+    join->join("127.0.0.1:" + std::to_string(host->view().port));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    const auto wait = [&](const auto& predicate) {
+        while (true) {
+            host->pump_setup(selected); join->pump_setup({});
+            if (predicate()) return;
+            expect(std::chrono::steady_clock::now() < deadline, "editable staging deadline");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    wait([&] { return host->lobby_state() && host->lobby_state()->snapshot.seats.size() == 2
+        && join->lobby_state() && join->lobby_state()->snapshot == host->lobby_state()->snapshot
+        && !join->lobby_state()->identity_pending; });
+    auto edited = require(viewer::decode_lan_lobby_game(host->lobby_state()->snapshot));
+    edited.slots->at(1).team = 0;
+    expect(host->lobby_game(edited), "host can publish mixed-faction teammates");
+    wait([&] { return join->lobby_state()->snapshot == host->lobby_state()->snapshot; });
+    expect(!host->lobby_state()->notice && !join->lobby_state()->notice, "team edit emits no lobby error");
+    {   // #4041: a row holding a human cannot be retyped (dropped to AI/Closed/Open); the refusal names its reason.
+        const auto guest_slot = join->lobby_state()->snapshot.seats.back().selection.slot;
+        auto retyped = edited;
+        retyped.slots->erase(std::remove_if(retyped.slots->begin(), retyped.slots->end(), [&](const auto& row) { return row.slot == guest_slot; }), retyped.slots->end());
+        const auto before = host->lobby_state()->snapshot;
+        expect(!host->lobby_game(retyped), "host cannot retype a row holding a human");
+        expect(host->lobby_state()->notice && host->lobby_state()->notice->reason == net::LobbyReason::invalid_choice
+            && host->lobby_state()->notice->message.find("held by a human") != std::string::npos, "retype refusal names its reason");
+        expect(host->lobby_state()->snapshot == before, "refused retype leaves the lobby unchanged");
+        // The host's own row is held by a human too.
+        auto host_retyped = edited;
+        host_retyped.slots->erase(std::remove_if(host_retyped.slots->begin(), host_retyped.slots->end(), [&](const auto& row) { return row.slot == host->lobby_state()->snapshot.seats.front().selection.slot; }), host_retyped.slots->end());
+        expect(!host->lobby_game(host_retyped), "host cannot retype its own row");
+        expect(host->lobby_state()->snapshot == before, "refused host-row retype leaves the lobby unchanged");
+        // Joiner side stays identical after the refusals, and a publish keeping every human row is still accepted.
+        wait([&] { return join->lobby_state()->snapshot == before; });
+        expect(host->lobby_game(edited), "a publish keeping every human row is accepted after a refusal");
+        wait([&] { return join->lobby_state()->snapshot == host->lobby_state()->snapshot; });
+    }
+    for (const auto& match : {host, join}) {
+        const auto state = match->lobby_state();
+        expect(!state->ready_enabled && !state->start_enabled
+            && state->ready_reason == "Players sharing a team must choose the same faction.", "invalid teams disable Ready and Start with a stable reason");
+        expect(!match->lobby_ready(true) && !match->lobby_state()->local_ready, "illegal staging cannot Ready");
+    }
+    auto choice = join->lobby_state()->snapshot.seats.back().selection; choice.faction = "Rebel";
+    expect(join->lobby_select(choice), "remote faction correction is allowed while setup remains one team");
+    wait([&] { return host->lobby_state()->snapshot.seats.back().selection.faction == "Rebel"
+        && join->lobby_state()->snapshot == host->lobby_state()->snapshot; });
+    expect(host->lobby_state()->ready_reason == "Choose at least two different teams."
+        && !host->lobby_state()->ready_enabled, "one-team intermediate edit stays visible with its own Ready reason");
+    choice.team = 1;
+    expect(join->lobby_select(choice), "remote team correction is accepted");
+    wait([&] { return host->lobby_state()->snapshot.seats.back().selection.team == 1
+        && join->lobby_state()->snapshot == host->lobby_state()->snapshot; });
+    expect(host->lobby_state()->ready_reason.empty() && join->lobby_state()->ready_reason.empty()
+        && host->lobby_state()->ready_enabled && join->lobby_state()->ready_enabled, "corrected setup clears reason and enables Ready");
+    expect(host->lobby_ready(true) && join->lobby_ready(true), "both players Ready after correcting teams");
+    wait([&] { return host->lobby_state()->start_enabled; });
+    host->cancel(); join->cancel();
+}
+
+// #4041: three peers stage through the real lobby, the host picks the advanced options, and every peer's
+// Start hands over the same match, which the production builder turns into the same applied match policy.
+void advanced_options_three_peers() {
+    stage = "advanced options on three peers";
+    const std::vector<std::string> factions{"Parity_A", "Parity_B", "Parity_C"};
+    const std::vector<tactical::PlayerId> owners{1, 2, 3};
+    auto initial = human_setup(3);
+    eawr::skirmish::FixtureOptions plain;
+    plain.map = initial.skirmish->map; plain.match = initial.skirmish->match; plain.seed = initial.seed;
+    // The synthetic map has no station markers and no unit tables, so starting units and the base stay off.
+    plain.match->allow_heroes = plain.match->allow_superweapons = true;
+    plain.match->pre_built_base = plain.match->free_starting_units = false;
+    plain.slots.emplace();
+    eawr::skirmish::SetupMap map; map.path = *plain.map;
+    map.metadata.capacity = 3; map.metadata.new_markers = true; map.metadata.start_positions.emplace(4);
+    for (unsigned row = 0; row < 3; ++row) {
+        plain.slots->push_back({row + 1, factions[row], row, true, {}, row});
+        map.teams.push_back({row, {factions[row]}, 1});
+    }
+    auto chosen = plain;
+    chosen.match->allow_heroes = false; chosen.match->allow_superweapons = false;
+    // The production chain: lobby options -> Fixture -> skirmish::build_start -> lan_recording_setup.
+    const viewer::LanLobbyBuilder builder = [factions](const eawr::skirmish::FixtureOptions& options) {
+        eawr::units::UnitTables tables;
+        eawr::skirmish::Fixture fixture;
+        fixture.map = *options.map; fixture.map_sha256 = std::string(64, 'a'); fixture.seed = options.seed.value_or(0);
+        fixture.match = options.match; fixture.slots = *options.slots;
+        eawr::skirmish::StartInputs inputs; inputs.map = fixture.map; inputs.map_sha256 = fixture.map_sha256;
+        inputs.tables = &tables; inputs.lobby_colours.resize(9);
+        for (unsigned team = 0; team < factions.size(); ++team) {
+            eawr::skirmish::StartFaction faction; faction.name = factions[team]; faction.playable = true;
+            inputs.factions.push_back(std::move(faction));
+            eawr::skirmish::MapPlacement marker; marker.record = team;
+            marker.type = "Team_0" + std::to_string(team) + "_Spawn_Point_Marker";
+            marker.marker = true; marker.position = sim::math::Vec3{}; marker.orientation_degrees = sim::math::Vec3{};
+            inputs.placements.push_back(std::move(marker));
+        }
+        auto start = eawr::skirmish::build_start(fixture, inputs);
+        if (!start) return eawr::core::Result<tactical::TacticalSetup>::failure(start.error());
+        return eawr::core::Result<tactical::TacticalSetup>::success(viewer::lan_recording_setup(fixture, start.value()));
+    };
+    const auto plain_policy = require(builder(plain)).match_policy;
+    expect(plain_policy && plain_policy->allow_heroes && plain_policy->allow_superweapons, "the production builder keeps the enabled options");
+    const auto chosen_setup = require(builder(chosen));
+    expect(chosen_setup.match_policy && !chosen_setup.match_policy->allow_heroes && !chosen_setup.match_policy->allow_superweapons,
+        "the production builder applies the disabled heroes and super weapons");
+    expect(require(net::encode_skirmish_setup(chosen_setup)) != require(net::encode_skirmish_setup(require(builder(plain)))),
+        "the setup bytes cover the advanced options");
+    std::vector<std::shared_ptr<viewer::LanMatch>> matches;
+    for (unsigned peer = 0; peer < 3; ++peer) {
+        auto match = make_match(); match->configure_factions(factions); match->configure_seats(owners);
+        match->configure_lobby("Adv_" + std::to_string(peer), peer, {map}, builder);
+        matches.push_back(std::move(match));
+    }
+    auto& host = *matches.front(); host.host(0);
+    const eawr::skirmish::FixtureOptions* current = &plain;
+    host.pump_setup(*current);
+    for (unsigned peer = 1; peer < 3; ++peer) matches[peer]->join("127.0.0.1:" + std::to_string(host.view().port));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    const auto wait = [&](const auto& predicate) {
+        while (true) {
+            for (auto& match : matches) match->pump_setup(*current);
+            if (predicate()) return;
+            expect(std::chrono::steady_clock::now() < deadline, "advanced options staging deadline");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    const auto synced = [&] {
+        return std::all_of(matches.begin(), matches.end(), [&](const auto& match) {
+            return match->lobby_state() && match->lobby_state()->snapshot == host.lobby_state()->snapshot && !match->lobby_state()->identity_pending;
+        });
+    };
+    wait([&] { return host.lobby_state() && host.lobby_state()->snapshot.seats.size() == 3 && synced(); });
+    const auto game_before = host.lobby_state()->snapshot.game;
+    expect(!matches[1]->lobby_game(chosen) && !matches[2]->lobby_game(chosen), "a guest cannot publish advanced options");
+    wait([&] { return synced(); });
+    expect(host.lobby_state()->snapshot.game == game_before, "a refused guest edit leaves the room's game blob unchanged");
+    current = &chosen;
+    expect(host.lobby_game(chosen), "the host publishes the advanced options");
+    wait([&] { return synced() && host.lobby_state()->snapshot.game != game_before; });
+    for (const auto& match : matches) {
+        const auto offered = match->offered_setup();
+        expect(offered && offered->match && !offered->match->allow_heroes && !offered->match->allow_superweapons,
+            "every peer sees the host's options before Ready");
+    }
+    for (auto& match : matches) expect(match->lobby_ready(true), "each peer readies the revision that carries the options");
+    wait([&] { return host.view().start_enabled; });
+    host.start(chosen);
+    wait([&] { return std::all_of(matches.begin(), matches.end(), [](const auto& match) {
+        return match->lobby_state()->snapshot.phase == net::LobbyPhase::starting;
+    }); });
+    std::vector<std::vector<std::uint8_t>> bytes;
+    for (auto& match : matches) {
+        const auto start = match->take_start();
+        expect(start.has_value() && start->match && !start->match->allow_heroes && !start->match->allow_superweapons,
+            "each peer's Start hands over the host's advanced options");
+        const auto setup = require(builder(*start));
+        expect(setup.match_policy && !setup.match_policy->allow_heroes && !setup.match_policy->allow_superweapons,
+            "each peer's started match applies the options");
+        bytes.push_back(require(net::encode_skirmish_setup(setup)));
+    }
+    expect(bytes[0] == bytes[1] && bytes[1] == bytes[2], "all three peers start from identical setup bytes");
+    for (auto& match : matches) match->cancel();
+}
 void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during_start = {}) {
     stage = "authoritative viewer staging";
     auto initial = setup();
@@ -889,7 +1337,9 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
         return eawr::core::Result<tactical::TacticalSetup>::success(std::move(built));
     };
     auto host = make_match(), join = make_match();
-    host->configure_lobby("Alice", 4, {map}, builder); join->configure_lobby("Bob", 5, {map}, builder);
+    map.name = "Staging test map";
+    const std::vector loaded_maps{map};
+    host->configure_lobby("Alice", 4, loaded_maps, builder); join->configure_lobby("Bob", 5, loaded_maps, builder);
     expect(host->lobby_enabled() && join->lobby_enabled(), "authoritative chat capability exists before admission");
     expect(!join->lobby_chat("early line"), "room chat is refused until the first admitted snapshot");
     expect(!viewer::make_fake_lan_match("joined")->lobby_enabled(), "legacy presentation fixture retains source-specific chat");
@@ -911,6 +1361,13 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
     wait([&] { pump(); const auto state = host->lobby_state(); return state && state->snapshot.seats.size() == 2 && state->snapshot.seats[1].selection.name == "Bob" && join->lobby_state() && join->lobby_state()->snapshot == state->snapshot; });
     expect(!host->view().start_enabled, "open links never imply readiness");
     expect(join->offered_setup() && join->offered_setup()->map == selected.map, "joiner sees live map before Start");
+    const auto offered = join->offered_setup();
+    expect(!join->lobby_state()->local_ready && offered->match == selected.match,
+        "joiner receives the host map and all selected options before Accept");
+    const auto loaded_map = std::find_if(loaded_maps.begin(), loaded_maps.end(),
+        [&](const auto& candidate) { return candidate.path == *offered->map; });
+    expect(loaded_map != loaded_maps.end() && loaded_map->name == map.name,
+        "received map id resolves to the loaded display name before Accept");
     const auto distinct_revision = host->lobby_state()->snapshot.revision;
     auto duplicate_colour = host->lobby_state()->snapshot.seats.front().selection;
     duplicate_colour.colour = host->lobby_state()->snapshot.seats.back().selection.colour;
@@ -927,15 +1384,38 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
     wait([&] { pump(); return host->lobby_state()->chat.size() == 1 && join->lobby_state()->chat.size() == 1; });
     expect(host->lobby_state()->chat.front().name == "Bobby", "host stamps the authoritative sender label");
     auto edited = selected; edited.match->allow_heroes = !edited.match->allow_heroes;
+    // #4041: every Advanced Options field the lobby dialog edits travels in the one host-owned game blob.
+    edited.match->free_starting_units = !edited.match->free_starting_units;
+    edited.match->allow_superweapons = !edited.match->allow_superweapons;
+    auto all_enabled = require(builder(selected)); all_enabled.match_policy.reset(); // all-enabled uses the legacy encoding
+    const auto selected_bytes = require(net::encode_skirmish_setup(all_enabled));
+    auto forged = edited; forged.match->allow_heroes = selected.match->allow_heroes;
+    const auto host_game_before = host->lobby_state()->snapshot.game;
+    expect(!join->lobby_game(forged), "a guest cannot publish advanced options");
+    pump();
+    expect(host->lobby_state()->snapshot.game == host_game_before && join->lobby_state()->snapshot.game == host_game_before,
+        "a refused guest options edit leaves every peer's game blob unchanged");
     expect(host->lobby_game(edited), "host changes loaded application options");
     wait([&] { pump(); return !join->lobby_state()->local_ready; });
     expect(!host->view().start_enabled, "consequential options clear both ready icons and Start");
+    expect(join->offered_setup()->match == edited.match,
+        "options-only host edit reaches the joiner without a map or roster edit");
+    expect(join->lobby_state()->snapshot.game == host->lobby_state()->snapshot.game,
+        "advanced options round-trip host to guest byte for byte");
+    expect(require(net::encode_skirmish_setup(require(builder(*join->offered_setup())))) != selected_bytes,
+        "the setup bytes every peer agrees on cover the advanced options");
+    {
+        const auto policy = require(builder(*join->offered_setup())).match_policy;
+        expect(policy && policy->allow_heroes == edited.match->allow_heroes && policy->allow_superweapons == edited.match->allow_superweapons
+            && policy->free_starting_units == edited.match->free_starting_units, "the joiner's built match applies the host's options");
+    }
     if (!play) {
         expect(!join->lobby_kick(0), "joiner cannot kick host");
         expect(host->lobby_kick(1), "host kicks admitted joiner");
         wait([&] { pump(); return join->view().phase == viewer::LanPhase::ended; });
         expect(join->lobby_state()->notice && join->lobby_state()->notice->reason == net::LobbyReason::kicked, "typed kick reaches the removed player");
         expect(host->lobby_state()->snapshot.seats.size() == 1 && !host->view().start_enabled, "kick clears readiness and removes exactly one seat");
+        expect(host->lobby_game(edited), "after the kick the freed row no longer blocks a publish");
         host->pump_setup(edited); host->pump_setup(edited);
         auto fresh = make_match(); fresh->configure_lobby("Carol", 4, {map}, builder);
         fresh->join("127.0.0.1:" + std::to_string(host->view().port));
@@ -1643,32 +2123,30 @@ void loopback(bool abrupt, bool departed_ahead = false, bool closed_before_launc
         if (abrupt) {
             stage = "abrupt disconnect recovery";
             if (speed_during_departure) {
-                // With two peers a detected close can settle in the same pump.
-                // Expiry leaves agreement pending until the next pump; close the
-                // stream during that agreement and drain a simultaneous UI request.
+                expect(host->request_speed(3), "UI queues speed just before the loss deadline");
                 clock += 30'001;
-                require(drivers[0](contexts[0], {}, clock++));
-                expect(host->view().phase == viewer::LanPhase::running && !host->view().departure,
-                    "departure agreement holds admission while match remains running");
-                expect(host->request_speed(3), "UI queues speed during departure agreement");
+                const auto result = drivers[0](contexts[0], {}, clock++);
+                expect(!result && result.error().code == net::session_errors::stalled,
+                    "expired missing input ends as connection loss even with an optional speed request");
+                expect(host->view().phase == viewer::LanPhase::ended && !host->view().victory && !host->view().departure,
+                    "speed admission cannot turn an expired wait into a departure win");
+                expect(host->view().options.tactical_speed == 4 && rates[0] == rates[1],
+                    "unexecuted speed request never changes local pacing");
+                join->cancel();
+                return;
             }
             join->cancel(); // Abort the real ordered TCP stream without a quit frame.
-            while (!host->view().departure) {
+            while (host->view().phase != viewer::LanPhase::ended) {
                 expect(std::chrono::steady_clock::now() < deadline, "disconnect result deadline");
-                require(drivers[0](contexts[0], {}, clock++));
+                const auto result = drivers[0](contexts[0], {}, clock++);
+                if (!result) expect(result.error().code == net::session_errors::stalled, "lone survivor receives typed connection loss");
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            expect(host->view().departure->event.reason == (speed_during_departure ? net::DepartureReason::timeout
-                : net::DepartureReason::disconnect), "typed opponent departure retains its agreed reason");
-            if (speed_during_departure) {
-                expect(host->view().reason != viewer::LanReason::refused && host->view().options.tactical_speed == 4,
-                    "refused speed admission is dropped without ending departure recovery");
-                expect(rates[0] == rates[1], "dropped request never changes local pacing");
-            }
-            expect(host->view().departure->state == net::DepartureState::won_by_departure && host->view().victory == true,
-                "the remaining human wins even when an AI slot exists");
-            if (departed_ahead) expect(host->view().departure->event.key.tick == 130,
-                "maximum-lead LAN departure recovers the full 2D sealed-input frontier");
+            expect(!host->view().departure && !host->view().victory
+                && viewer::lan_message(host->view()).starts_with("Connection lost: the match could not continue"),
+                "unconfirmed two-peer close shows connection loss, never a fabricated opponent quit or win");
+            if (departed_ahead) expect(worlds[0].completed_tick() <= 130,
+                "maximum-lead loss never executes beyond the validated receive frontier");
             return;
         }
         stage = "intentional quit agreement";
@@ -1710,6 +2188,98 @@ void loopback(bool abrupt, bool departed_ahead = false, bool closed_before_launc
 
 // Ticket E: long sessions. Synthetic tick counts only; nothing here waits for real hours.
 static void long_session_contracts() {
+    {
+        viewer::LanView online;
+        online.phase = viewer::LanPhase::running;
+        viewer::LanDepartureNotices notices;
+        notices.push("Rex left: their connection to Echo failed.", 0);
+        online.mesh_notice = notices.text(0);
+        const auto incident = viewer::lan_incident_message(online);
+        expect(incident == online.mesh_notice, "the battle shows the confirmed named pair-loss notice exactly once");
+        expect(notices.text(viewer::LanDepartureNotices::display_ms - 1) == incident, "the departure notice remains readable briefly");
+        online.mesh_notice = notices.text(viewer::LanDepartureNotices::display_ms);
+        expect(viewer::lan_incident_message(online).empty(), "a later frame has no expired departure banner");
+        expect(notices.text(viewer::LanDepartureNotices::display_ms + 1).empty(), "the incident history cannot republish an expired notice");
+        notices.push("Quinn left: their connection to Echo failed.", 20000);
+        expect(notices.text(20000).find("Quinn") != std::string::npos && notices.text(20000).find("Rex") == std::string::npos,
+            "a later departure shows only its new notice");
+        online.phase = viewer::LanPhase::ended;
+        online.recovery = viewer::LanRecovery::rejoin_failed;
+        online.diagnostic_code = "EAWR-NET-1778";
+        online.message = "Connection to Echo could not be restored. You have left the match.";
+        const auto ended = viewer::lan_message(online);
+        expect(ended.starts_with(online.message), "a final named mesh decision is not hidden by generic recovery text");
+        const auto code_at = ended.find(online.diagnostic_code);
+        expect(code_at != std::string::npos && ended.find(online.diagnostic_code, code_at + 1) == std::string::npos,
+            "the final mesh code is shown once");
+        net::GnsPairDiagnostic pair;
+        pair.phase = net::GnsPairPhase::signalling;
+        expect(viewer::online_pair_message(pair) == "Connecting", "a forming pair is not called connected");
+        pair.phase = net::GnsPairPhase::open; pair.route = net::GnsRoute::relayed;
+        expect(viewer::online_pair_message(pair) == "Connected through relay", "an established relay is explained");
+        pair.phase = net::GnsPairPhase::failed; pair.relay_offered = true;
+        expect(viewer::online_pair_message(pair).find("relay was offered") != std::string::npos, "a failed pair says whether relay was offered");
+        pair.relay_offered = false;
+        expect(viewer::online_pair_message(pair).find("no relay was available") != std::string::npos, "an unoffered relay is never claimed attempted");
+        const std::array repair_phases{
+            std::pair{net::GnsPairPhase::refreshing, "Refreshing room credentials"},
+            std::pair{net::GnsPairPhase::repairing, "Restoring connection"},
+            std::pair{net::GnsPairPhase::authenticating, "Checking restored connection"}};
+        for (const auto& [phase, expected] : repair_phases) {
+            pair.phase = phase;
+            expect(viewer::online_pair_message(pair) == expected, "each repair phase has its exact curated text");
+        }
+        const std::array repair_causes{"Connection repair is unavailable", "Room credentials could not be refreshed",
+            "Restored connection could not be authenticated", "Connection repair timed out", "Retained game data could not be restored"};
+        const std::array terminal_causes{"Connection repair is unavailable. You have left the match.",
+            "The online service could not restore your connection. You have left the match.",
+            "The returning connection could not be authenticated. You have left the match.",
+            "The connection could not be restored in time. You have left the match.",
+            "The connection could not catch up within the recovery limit. You have left the match."};
+        for (unsigned code = 1790; code <= 1794; ++code) {
+            pair.phase = net::GnsPairPhase::lost; pair.code = code;
+            expect(viewer::online_pair_message(pair) == repair_causes[code - 1790], "each pair repair failure has its exact curated cause");
+            expect(viewer::online_mesh_failure_text("EAWR-NET-" + std::to_string(code)) == terminal_causes[code - 1790],
+                "each terminal repair failure has its exact cause, including unavailable 1790");
+        }
+        eawr::testing::FakeNetwork failed_delivery(3);
+        failed_delivery.fail_send = [](auto, auto, auto) { return true; };
+        eawr::testing::FakeTransport delivery_stream(failed_delivery, 0);
+        auto repair_offer = offer(); repair_offer.recovery.reconnect = false;
+        repair_offer.setup = require(net::encode_skirmish_setup(human_setup(3)));
+        repair_offer.seats.push_back({2, sim::SeatId{12}, 3});
+        net::LanReconnectCredentials credentials;
+        const auto delivery = credentials.provide_mesh_repair(repair_offer, delivery_stream);
+        expect(!delivery && delivery.error().code == "EAWR-NET-1022", "a real admitted-stream send failure reports transient credential delivery");
+        bool room_open = true;
+        std::vector<std::string> start_actions;
+        const auto feedback = [&](const eawr::core::Diagnostic& error) { start_actions.push_back("feedback:" + error.code); };
+        const auto end_room = [&](const eawr::core::Diagnostic& error) { room_open = false; start_actions.push_back("end:" + error.code); };
+        viewer::handle_online_start_failure(delivery.error(), feedback, end_room);
+        expect(room_open && start_actions == std::vector<std::string>{"feedback:EAWR-NET-1022"},
+            "transient Start delivery failure keeps the host room open and reaches lobby feedback");
+        start_actions.clear();
+        eawr::core::Diagnostic entropy_failure; entropy_failure.code = "EAWR-NET-1021";
+        viewer::handle_online_start_failure(entropy_failure, feedback, end_room);
+        expect(!room_open && start_actions == std::vector<std::string>{"feedback:EAWR-NET-1021", "end:EAWR-NET-1021"},
+            "OS entropy failure reaches feedback before terminal cleanup");
+        online.phase = viewer::LanPhase::reconnecting; online.recovery = viewer::LanRecovery::held;
+        online.online_capacity = 9; online.reconnect_enabled = false; online.diagnostic_code.clear();
+        online.message = "Connection to Echo: Checking restored connection. Play is paused.";
+        const auto repairing = viewer::lan_message(online);
+        expect(repairing == online.message && repairing.find("Incident cap") == std::string::npos,
+            "the named mesh hold keeps its message without unrelated returning-seat policy timers");
+        expect(!viewer::lan_gameplay_enabled(online) && viewer::lan_recovery_audio_suppressed(online), "a mesh hold gates inputs and audio");
+        expect(viewer::online_refusal_text({}, {}, 8, true) != viewer::online_refusal_text({}, {}, 8, false),
+            "newcomer refusals preserve whether relay was offered at nine seats");
+        net::LobbyChat posted; posted.text = "Rex could not connect to Echo and was not admitted.";
+        net::LobbyNotice notice; notice.reason = net::LobbyReason::pair_unreachable;
+        notice.message = posted.text + " " + net::lobby_diagnostic(notice.reason, "").code;
+        expect(viewer::lan_notice_in_chat(notice, {posted}), "the host's pair refusal already in chat is not shown twice");
+        expect(!viewer::lan_notice_in_chat(notice, {}), "a notice without its broadcast remains visible");
+        notice.reason = net::LobbyReason::kicked;
+        expect(!viewer::lan_notice_in_chat(notice, {posted}), "ordinary removal notices are not suppressed");
+    }
     constexpr std::uint64_t rate = tactical::logical_frames_per_second;
     const auto ticks_after = [](std::uint64_t hours) { return hours * 3600U * rate; };
     // The net cap equals the simulation's own cap: one agreed final tick count bounds both, so a session can
@@ -1732,6 +2302,45 @@ static void long_session_contracts() {
     expect(warning.find("15 min") != std::string::npos && warning.find("EAWR-NET-1738") != std::string::npos, "length warning names minutes and the code");
     expect(viewer::match_length_notice(end - 1, end).find("1 min") != std::string::npos, "last tick rounds up to one minute");
     expect(viewer::match_length_notice(end, end).empty() && viewer::match_length_notice(0, 0).empty(), "no warning at or after the end");
+    // A refused newcomer's own text names the player it could not reach (owner decision 1): the host's closed notice cannot
+    // reach a seat whose transport is already fatal, so the newcomer composes it from the roster it saw.
+    {
+        std::vector<net::LobbySeat> seats(3);
+        seats[0].peer = 0; seats[0].selection.name = "Host";
+        seats[1].peer = 2; seats[1].selection.name = "Rex";
+        expect(viewer::online_refusal_name(seats, 2) == "Rex", "the unreachable player is named from the newcomer's roster");
+        expect(viewer::online_refusal_name(seats, 5) == "another player in this room", "an unknown slot falls back to the generic name");
+        expect(net::mesh_newcomer_refusal_text(viewer::online_refusal_name(seats, 2), true).find("Rex") != std::string::npos,
+            "the refusal text carries the name");
+        // A refusal that overtakes the admission snapshot: the newcomer holds no roster, the host stream still queues one.
+        net::LobbySnapshot snapshot; snapshot.room = "room"; snapshot.capacity = 4;
+        snapshot.seats.resize(2);
+        snapshot.seats[0].peer = 0; snapshot.seats[0].seat = sim::SeatId{1}; snapshot.seats[0].player = 1; snapshot.seats[0].selection.name = "Host";
+        snapshot.seats[1].peer = 2; snapshot.seats[1].seat = sim::SeatId{2}; snapshot.seats[1].player = 2; snapshot.seats[1].selection.name = "Rex";
+        const auto snapshot_frame = net::encode_lobby_frame(snapshot);
+        expect(snapshot_frame.has_value(), "the snapshot frame encodes");
+        const std::vector<net::Received> queued_snapshot{{0, snapshot_frame.value()}};
+        expect(viewer::online_refusal_text(queued_snapshot, {}, 2, true).find("Rex") != std::string::npos,
+            "a newcomer without a roster still names the player from the queued admission snapshot");
+        expect(viewer::online_refusal_text({}, {}, 2, true).find("another player in this room") != std::string::npos,
+            "nothing queued and no roster: the generic name");
+        expect(viewer::online_refusal_text({}, seats, 2, true).find("Rex") != std::string::npos, "a roster seen earlier names the player");
+        // The frame the host really sends: LobbySession::refuse_unreachable removes the newcomer with a LobbyClosed whose text is
+        // mesh_newcomer_refusal_text (lobby_session_tests pins that); the newcomer shows the host's words verbatim.
+        net::LobbyClosed closed; closed.room = "room"; closed.revision = 2; closed.reason = net::LobbyReason::pair_unreachable;
+        closed.message = net::mesh_newcomer_refusal_text("Quinn", true);
+        const auto closed_frame = net::encode_lobby_frame(closed);
+        expect(closed_frame.has_value(), "the host's refusal frame encodes");
+        const std::vector<net::Received> queued_notice{{0, snapshot_frame.value()}, {0, closed_frame.value()}};
+        const auto from_host = viewer::online_refusal_text(queued_notice, {}, 2, true);
+        expect(from_host == closed.message && from_host.find("Quinn") != std::string::npos && from_host.find("Rex") == std::string::npos,
+            "the host's own closed notice wins over the roster");
+        expect(viewer::online_refusal_text({{1, closed_frame.value()}}, {}, 2, true).find("another player in this room") != std::string::npos,
+            "a notice that did not come from the host is not trusted");
+        net::LobbyClosed other_reason = closed; other_reason.reason = net::LobbyReason::host_closed;
+        expect(viewer::online_refusal_text({{0, net::encode_lobby_frame(other_reason).value()}}, {}, 2, true).find("Quinn") == std::string::npos,
+            "only a pair-unreachable notice is shown as the refusal");
+    }
     // Service lease warning: a renewable lease is silent until its last two minutes; a final lease warns earlier.
     const auto now = std::chrono::steady_clock::now();
     net::GnsSessionLease lease; lease.renewable = true; lease.ends = now + std::chrono::minutes(30);
@@ -1779,8 +2388,16 @@ static void long_session_contracts() {
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--pending-inputs") {
+            for (const auto workers : {1U, 2U, 4U, 8U}) {
+                separate_mesh(2, false, true, workers);
+            }
+            viewer::shutdown_lan_drains();
+            std::cout << "pending input contracts passed on two peers and 1/2/4/8 workers\n";
+            return 0;
+        }
         long_session_contracts();
         viewer::LanView measured;
         measured.connected = true; measured.remote_endpoint = "127.0.0.1:47624";
@@ -1829,15 +2446,16 @@ int main() {
             invalid->view().message.find("hostname") != std::string::npos, "invalid endpoint has clear corrective error text");
         recovery_presentation_contract();
         lan_ai_defaults_follow_authored_constraints(); lan_overflow_human_keeps_its_seat(); lobby_refusal_and_placeholder_contracts(); shared_builder_matches_former_live_encoding(); terminal_lobby_commands_are_inert();
-        close_one_mesh_edge(); authoritative_staging(false); authoritative_staging(true);
+        close_one_mesh_edge(); editable_staging_team_rules(); advanced_options_three_peers(); authoritative_staging(false); authoritative_staging(true);
         authoritative_staging(true, net::LobbyReason::kicked); authoritative_staging(true, net::LobbyReason::host_closed);
         missing_planned_owner_is_refused();
-        nine_seat_staging({1, 1, 1, 2, 2, 2, 3, 3, 3});
-        nine_seat_staging({1, 1, 2});
-        nine_seat_staging({1, 1, 1, 1, 1, 1, 1, 1, 1});
+        nine_seat_staging({1, 2, 3, 4, 5, 6, 7, 8, 9});
+        nine_seat_staging({1, 2});
         staging_ingress_bounds();
-        player_row_parser(); refused_rosters();
-        for (const auto count : {3U, 4U, 8U, 9U}) { shared_mesh(count, false); shared_mesh(count, true); }
+        diagnostic_contract(); player_row_parser(); refused_rosters();
+        for (const auto count : {3U, 4U, 9U}) separate_mesh(count, false);
+        for (const auto workers : {1U, 2U, 4U, 8U}) separate_mesh(8, false, false, workers);
+        separate_mesh(4, true);
         canonical_join_ping_key(); transport_failure_copy(); connect_failure_copy();
         threaded_loading_pair();
         expect(viewer::live_begin_barrier(false) && !viewer::live_begin_barrier(true), "SP Begin, LAN readiness");

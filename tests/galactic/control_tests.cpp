@@ -9,6 +9,7 @@
 #include "eawr/vfs/vfs.hpp"
 #include "galactic/planet_hud.hpp"
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <cstdlib>
@@ -114,6 +115,105 @@ void payload_ground_capability() {
         expect(landed.size() == 1 && landed[0].id == 21 && snapshot->fleets()[0].members == std::vector<gc::FleetMember>{{31, 2}},
             "hostile uncontested landing admits capable company and keeps same-carrier incapable company in orbit");
         if (workers == 1) reference = actual; else expect(actual == reference, "direct payload landing has 1/2/4/8 canonical equality");
+    }
+}
+void authored_mixed_surface_owners() {
+    auto initial = setup();
+    initial.control->planets[0].ground_base = {};
+    const std::vector<gc::SurfaceForce> expected{{30, 3, 1}, {31, 3, 2}, {32, 3, 3}};
+    initial.control->planets[0].landed = expected;
+    initial.player_economy.emplace(); initial.fiscal.emplace(); initial.fiscal->credit_cap_per_planet = f(1000);
+    for (const auto& player : initial.players) {
+        initial.player_economy->players.push_back({player.player_id, f(100), f(1000), 0, 5});
+        initial.fiscal->players.push_back({player.player_id, true, f(1)});
+    }
+    for (const auto& planet : initial.planets) initial.fiscal->planets.push_back({planet.id, f(1)});
+    enable_production(initial);
+    expect(bool(gc::validate_setup(initial)), "WGS-181 admits authored mixed surface owners");
+    auto bad = initial; bad.control->planets[0].landed.back().owner = 99;
+    expect(!gc::validate_setup(bad), "mixed-owner admission still rejects an unknown owner");
+    bad = initial; bad.control->planets[0].landed.back().id = 30;
+    expect(!gc::validate_setup(bad), "mixed-owner admission still rejects duplicate identities");
+    bad = initial; bad.control->max_ground_forces = 1;
+    expect(!gc::validate_setup(bad), "mixed-owner admission still enforces shared surface capacity");
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto created = eawr::campaign::GameSession::create(initial);
+        if (!created) throw std::runtime_error(created.error().message);
+        auto game = std::move(created).value();
+        const auto identities = cp::game_identities(initial);
+        const auto saved = cp::save_game_checkpoint(game, identities).value();
+        auto restored = cp::load_game_checkpoint(saved, identities, {}, executor).value();
+        expect(restored.session.galaxy().snapshot()->control()->planets[0].landed == expected,
+            "mixed surface owners and authored order survive checkpoint restore");
+        std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 3; ++tick) {
+            const auto step = game.step(executor).value();
+            hashes.push_back(step.state_sha256);
+            expect(restored.session.step(executor).value().state_sha256 == step.state_sha256,
+                "mixed-owner restored continuation matches live control");
+        }
+        expect(game.galaxy().snapshot()->control()->planets[0].landed == expected,
+            "ordinary control preserves each authored surface owner");
+        expect(game.galaxy().snapshot()->control()->state[0].controller == 1
+            && game.galaxy().snapshot()->production()->planets[0].ground_occupier == 1,
+            "WGS-186 mixed list controller and ground occupation select the first owner");
+        if (baseline.empty()) baseline = hashes;
+        else expect(hashes == baseline, "mixed-owner surface continuation equals on 1/2/4/8 workers");
+    }
+    auto control = *initial.control;
+    std::vector<gc::CensusObject> actors(3);
+    actors[0].id = 30; actors[0].delete_pending = true; actors[1].id = 31; actors[2].id = 32;
+    const auto calculate = [&] {
+        return gc::calculate_planet_control(control, control.planets[0], {}, {},
+            &*initial.movement, {}, 0, actors).value().state;
+    };
+    expect(calculate().controller == 2, "WGS-186 political controller skips the deleting first owner in a mixed list");
+    actors[0].delete_pending = false;
+    expect(calculate().controller == 1, "WGS-186 first live entry wins rather than the last or political owner");
+    for (auto& actor : actors) actor.delete_pending = true;
+    expect(calculate().controller == 0 && calculate().target == Fixed{},
+        "WGS-186 all-deleting mixed transports contribute neither controller nor military presence");
+    for (auto& force : control.planets[0].landed) force.owner = 1;
+    expect(calculate().controller == 0 && calculate().target == Fixed{},
+        "WGS-186 all-deleting single-owner transports also contribute no military presence");
+    control.planets[0].landed = expected;
+    for (auto& actor : actors) actor.delete_pending = false;
+    std::swap(control.planets[0].landed[0], control.planets[0].landed[1]);
+    expect(calculate().controller == 2, "WGS-186 mixed political controller follows authored list order");
+    control.planets[0].ground_base = {1, 2};
+    expect(calculate().controller == 1, "WGS-186 nonzero ground base precedes the mixed surface list");
+    auto admission = initial;
+    admission.control = eawr::campaign::prepare_initial_control(admission, *admission.control).value();
+    for (const auto target : {0U, 1U, 2U, 3U}) {
+        admission.control->state[0].target_player = target;
+        auto world = gc::GalacticSession::create(admission).value();
+        world.enable_native_invasions(true);
+        const auto receipt = world.admit_native_invasion(1, 10).value();
+        expect(receipt.admitted && world.native_invasion(receipt.request)->defender == (target == 0 || target == 3 ? 1U : target),
+            "WGS-186 native defender uses target over current owner, with first-owner fallback for a neutral target");
+    }
+    admission.control->state[0].target_player = 99;
+    expect(!gc::GalacticSession::create(admission), "unknown target identities refuse before native defender selection");
+    for (const auto target : {0U, 1U, 2U, 3U}) for (const bool base : {false, true}) {
+        auto input = admission; input.control->state[0].target_player = target;
+        input.control->planets[0].ground_base = base ? gc::ControlBase{3, 1} : gc::ControlBase{};
+        input.production->planets[0].ground_occupier = base ? 3U : 0U;
+        input.production->planets[0].ground_level = base ? 1U : 0U;
+        auto staged = gc::GalacticSession::create(input).value(); auto direct = gc::GalacticSession::create(input).value();
+        staged.enable_native_invasions(true); direct.enable_native_invasions(true);
+        const auto initial_bytes = staged.canonical_state_bytes();
+        const std::array<gc::PlayerId, 1> players{1};
+        auto barrier = std::move(staged.begin_native_barrier(players, 16)).value(); barrier->select_player(1).value();
+        const auto actual = staged.admit_native_invasion(1, 10).value(); const auto oracle = direct.admit_native_invasion(1, 10).value();
+        const auto expected_defender = base ? 3U : (target == 0 || target == 3 ? 1U : target);
+        expect(actual == oracle && actual.admitted && staged.native_invasion(actual.request)->defender == expected_defender,
+            "WGS-186 staged defender follows target allegiance, with mixed-prefix fallback only without a base");
+        expect(staged.canonical_state_bytes() == initial_bytes, "mixed-owner invasion reader leaves the live owner unchanged before commit");
+        barrier->commit().value(); barrier.reset();
+        expect(staged.canonical_state_bytes() == direct.canonical_state_bytes() && staged.record() == direct.record(),
+            "mixed-owner invasion shadow commits the live owner's exact state and journal");
     }
 }
 void initial_control_provider() {
@@ -578,6 +678,24 @@ void station_production_presence() {
         && direct.snapshot()->production()->planets[0].space_level == 0
         && direct.snapshot()->production()->planets[0].starbase_owner == 0,
         "WGM-57 space return refreshes production prerequisites before next command admission");
+    {
+        // #3958: the planet owner counterattacks (invader) into an orbit held by the defender; the station that fought
+        // stands for the planet owner's own starbase, so its loss reduces that starbase rather than being skipped.
+        auto counter = gc::GalacticSession::from_replay(input).value();
+        (void)counter.step(serial).value();
+        gc::ControlBattleReturn counter_return;
+        counter_return.planet = 1; counter_return.invader = 1; counter_return.defender = 2; counter_return.winner = 2;
+        counter_return.station_owner = 1;
+        expect(bool(counter.apply_control_battle(counter_return)), "counterattack space return reconciles");
+        expect(counter.snapshot()->control()->planets[0].starbase.level == 0
+            && counter.snapshot()->production()->planets[0].starbase_owner == 0,
+            "#3958 a destroyed station reduces the starbase of the owner it stood for, not the orbit holder's");
+        auto kept = gc::GalacticSession::from_replay(input).value();
+        (void)kept.step(serial).value();
+        counter_return.station_owner = 0;
+        expect(bool(kept.apply_control_battle(counter_return)) && kept.snapshot()->control()->planets[0].starbase.level == 1,
+            "a return without a station owner falls back to the defender, which does not own this starbase");
+    }
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         eawr::platform::ThreadWorkerAdapter pool(workers);
         auto game = eawr::campaign::GameSession::from_replay(input).value();
@@ -1088,6 +1206,131 @@ void captured_planet_observer_facts() {
     }
 }
 // #2970: every surface add publishes to the observer roster and every surface removal un-publishes from it.
+void native_action_barrier_control() {
+    const auto require = [](const auto& result) { if (!result) throw std::runtime_error(result.error().message); };
+    const auto same = [](const auto& a, const auto& b) { return a.admitted == b.admitted && a.object == b.object && a.reason == b.reason; };
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto config = setup(); config.planets[1].owner = 1;
+        config.movement->types[1].transport = true;
+        config.fleets[0].orbit = 2; config.fleets[0].members = {{20, 1}, {21, 2}, {31, 2}};
+        config.fleets[1].members = {{22, 2}}; config.control->planets[1].ground_base = {1, 1};
+        config.player_economy.emplace(); config.fiscal.emplace(); config.fiscal->credit_cap_per_planet = f(1000);
+        config.census.emplace(); config.census->types = {{1, f(1), 0}, {2, {}, 0}, {3, f(1), 0}};
+        for (const auto& player : config.players) {
+            config.player_economy->players.push_back({player.player_id, f(100), f(1000), 0, 5});
+            config.fiscal->players.push_back({player.player_id, true, f(1)});
+            config.census->players.push_back({player.player_id, 100, true, {}});
+        }
+        for (const auto& planet : config.planets) config.fiscal->planets.push_back({planet.id, f(1)});
+        enable_production(config);
+        config.control->planets[1].landed = {{50, 2, 2}, {51, 2, 1}, {52, 2, 3}};
+        for (const auto& force : config.control->planets[1].landed) {
+            gc::CensusObject actor; actor.id = force.id; actor.original_type = actor.current_type = force.type;
+            actor.owner = force.owner; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::transport;
+            config.census->objects.push_back(actor); config.movement->contents.push_back({actor.id, {}});
+        }
+        for (const auto& fleet : config.fleets) for (const auto& member : fleet.members) {
+            gc::CensusObject actor; actor.id = member.id; actor.original_type = actor.current_type = member.type;
+            actor.owner = fleet.owner; actor.planet = fleet.orbit; actor.container = fleet.id;
+            actor.combat_role = member.type == 2 ? gc::ActorCombatRole::transport : gc::ActorCombatRole::ordinary;
+            config.census->objects.push_back(actor);
+            if (member.type == 2) config.movement->contents.push_back({member.id, {}});
+        }
+        std::sort(config.census->objects.begin(), config.census->objects.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        std::sort(config.movement->contents.begin(), config.movement->contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
+        gc::ObserverSetup observer; observer.local_player = 1; observer.reveal_delay_seconds = f(1); observer.automatic_reveal_range = f(1);
+        observer.players = {{1, false, false, 0, 0, {}}, {2, false, false, 0, 0, {}}, {3, false, false, 0, 0, {}}};
+        for (const auto& planet : config.planets) {
+            observer.planets.push_back({planet.id, planet.owner, planet.owner, 0, 0, 0, 0, false, false, false, false, {}});
+            observer.planets.back().current_owner = observer.planets.back().current_controller = planet.owner;
+            for (const auto& surface : config.control->planets) if (surface.planet == planet.id)
+                for (const auto& force : surface.landed) observer.planets.back().landed_transports.push_back({force.id, force.owner, false, false});
+        }
+        observer.types = {{1, false, false, false}, {2, false, false, false}, {3, false, false, false}};
+        for (const auto& player : config.players) for (const auto& planet : config.planets)
+            observer.records.push_back({player.player_id, planet.id, false, 0, 0, 0, {}});
+        config.observer = std::move(observer);
+        auto staged_result = gc::GalacticSession::create(config); auto direct_result = gc::GalacticSession::create(config);
+        require(staged_result); require(direct_result);
+        auto staged = std::move(staged_result).value(); auto direct = std::move(direct_result).value();
+        staged.enable_native_invasions(true); direct.enable_native_invasions(true);
+        const auto initial = staged.canonical_state_bytes(); const auto record = staged.record();
+        const std::array<gc::PlayerId, 2> players{1, 2};
+        auto opened = staged.begin_native_barrier(players, 256); require(opened); auto barrier = std::move(opened).value();
+        require(barrier->select_player(1));
+        const auto check = [&] {
+            expect(staged.snapshot()->canonical_bytes() == direct.snapshot()->canonical_bytes(), "native control read publication matches the live oracle");
+            expect(staged.canonical_state_bytes() == initial && staged.record() == record, "native control decisions leave the galaxy and journal unchanged before commit");
+        };
+        auto left = staged.land_native_transports(1, 10); auto right = direct.land_native_transports(1, 10);
+        require(left); require(right); expect(same(left.value(), right.value()) && left.value().admitted, "staged fleet landing has the live receipt"); check();
+        left = staged.launch_native_transport(1, 31, 10); right = direct.launch_native_transport(1, 31, 10);
+        require(left); require(right); expect(same(left.value(), right.value()) && left.value().admitted, "staged launch has the live receipt"); check();
+        left = staged.admit_native_fleet(1, gc::RemoveFleetMembers{10, {31}}, false);
+        right = direct.admit_native_fleet(1, gc::RemoveFleetMembers{10, {31}}, false);
+        require(left); require(right); expect(same(left.value(), right.value()), "staged detachment has the live receipt"); check();
+        const auto gate = staged.native_transport_landing_available(1, 2); const auto oracle_gate = direct.native_transport_landing_available(1, 2);
+        require(gate); require(oracle_gate); expect(gate.value() == oracle_gate.value(), "landing availability reads the current staged surface");
+        auto landed = staged.land_native_transport(1, 31, 2); auto oracle_landed = direct.land_native_transport(1, 31, 2);
+        require(landed); require(oracle_landed);
+        expect(same(landed.value().event, oracle_landed.value().event) && landed.value().linked == oracle_landed.value().linked && landed.value().linked,
+            "direct actor landing keeps its event and actual-link result"); check();
+        left = staged.launch_native_transport(1, 31, 10); right = direct.launch_native_transport(1, 31, 10);
+        require(left); require(right); expect(same(left.value(), right.value()), "relaunch reads the staged actor link"); check();
+        auto invasion = staged.admit_native_invasion(1, 10); auto oracle_invasion = direct.admit_native_invasion(1, 10);
+        require(invasion); require(oracle_invasion); expect(invasion.value() == oracle_invasion.value() && invasion.value().admitted,
+            "same-owner invasion completion reserves the same retained identity"); check();
+        const auto completed = invasion.value().request; const auto frozen = staged.snapshot();
+        require(barrier->select_player(2));
+        left = staged.admit_native_fleet(2, gc::SetFleetOrbitSlot{11, 1}, false);
+        right = direct.admit_native_fleet(2, gc::SetFleetOrbitSlot{11, 1}, false);
+        require(left); require(right); expect(same(left.value(), right.value()), "higher player inherits the lower player frontier"); check();
+        invasion = staged.admit_native_invasion(2, 11); oracle_invasion = direct.admit_native_invasion(2, 11);
+        require(invasion); require(oracle_invasion); expect(invasion.value() == oracle_invasion.value() && invasion.value().queued,
+            "queued invasion records stay private with the exact ordered identity");
+        const auto pending = invasion.value().request;
+        expect(staged.pending_native_invasion() && direct.pending_native_invasion()
+            && *staged.pending_native_invasion() == *direct.pending_native_invasion(), "pending invasion reader sees staged records");
+        require(staged.retire_native_invasion(pending)); require(direct.retire_native_invasion(pending));
+        expect(staged.native_invasion(pending) && *staged.native_invasion(pending) == *direct.native_invasion(pending),
+            "retiring a pending reader keeps its queued transport inventory"); check();
+        for (unsigned transaction = 0; transaction < 40; ++transaction) {
+            auto empty = staged.begin_native_actions(1); auto oracle_empty = direct.begin_native_actions(1);
+            require(empty); require(oracle_empty);
+            require(staged.commit_native_actions(empty.value())); require(direct.commit_native_actions(oracle_empty.value()));
+        }
+        expect(barrier->work().read_checkpoints > 0 && staged.pending_native_invasion()
+            && *staged.pending_native_invasion() == *direct.pending_native_invasion(),
+            "sparse checkpoints retain the earliest queue entry and released reader state");
+        require(barrier->begin_tail());
+        left = staged.admit_native_fleet(1, gc::SetFleetOrbitSlot{10, 2}, false);
+        right = direct.admit_native_fleet(1, gc::SetFleetOrbitSlot{10, 2}, false);
+        require(left); require(right); expect(same(left.value(), right.value()), "serial tail accepts an earlier player's deferred command"); check();
+        require(staged.retire_native_invasion(completed)); require(direct.retire_native_invasion(completed));
+        expect(!staged.native_invasion(completed) && !direct.native_invasion(completed), "completed invasion reader disappears at release");
+        for (unsigned transaction = 0; transaction < 40; ++transaction) {
+            auto empty = staged.begin_native_actions(1); auto oracle_empty = direct.begin_native_actions(1);
+            require(empty); require(oracle_empty);
+            require(staged.commit_native_actions(empty.value())); require(direct.commit_native_actions(oracle_empty.value()));
+        }
+        expect(!staged.native_invasion(completed) && staged.pending_native_invasion()
+            && *staged.pending_native_invasion() == *direct.pending_native_invasion(),
+            "later checkpoints preserve invasion tombstones and the pending transport inventory");
+        expect(frozen->canonical_bytes() != staged.snapshot()->canonical_bytes(), "tail updates do not mutate the frozen player publication");
+        require(barrier->commit()); barrier.reset();
+        expect(staged.canonical_state_bytes() == direct.canonical_state_bytes() && staged.record() == direct.record()
+            && staged.snapshot()->canonical_bytes() == direct.snapshot()->canonical_bytes(), "ordered control commit matches live state, publication and replay bytes");
+        std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 12; ++tick) {
+            auto actual = staged.step(executor); auto oracle = direct.step(executor); require(actual); require(oracle);
+            expect(actual.value().state_sha256 == oracle.value().state_sha256, "native control continuation matches the live oracle");
+            hashes.push_back(actual.value().state_sha256);
+        }
+        if (workers == 1) reference = hashes; else expect(reference == hashes, "native control barrier continuation is equal at 1/2/4/8 workers");
+    }
+}
 void surface_roster_paths() {
     using Roster = std::vector<std::pair<eawr::sim::EntityId, gc::PlayerId>>;
     std::vector<std::string> reference;
@@ -1149,6 +1392,29 @@ void surface_roster_paths() {
             if (!receipt.admitted) std::cerr << what << " reason=" << static_cast<int>(receipt.reason) << '\n';
             return receipt.admitted;
         };
+        {   // WGS-187: the command retains a mixed allied prefix before appending.
+            auto world = build([](auto& s) {
+                s.control->planets[1].landed = {{50, 2, 2}, {51, 2, 1}, {52, 2, 3}};
+                for (auto& relation : s.control->relations)
+                    if (relation.player == 1 && relation.other == 2) relation.allied = true;
+            });
+            world.submit({{0, gc::SeatId{1}, 1}, gc::LandFleet{10, 2}}).value();
+            (void)world.step(executor).value();
+            check(world, {{50, 2}, {51, 1}, {52, 3}, {21, 1}, {31, 1}},
+                "WGS-187 seat landing preserves mixed allied owners and appends in command order");
+            hashes.push_back(world.state_sha256());
+        }
+        {   // WGS-187: TaskForce-style fleet landing visits members backwards.
+            auto world = build([](auto& s) {
+                s.control->planets[1].landed = {{50, 2, 2}, {51, 2, 1}, {52, 2, 3}};
+                for (auto& relation : s.control->relations)
+                    if (relation.player == 1 && relation.other == 2) relation.allied = true;
+            });
+            expect(world.land_native_transports(1, 10).value().admitted, "mixed-owner native fleet landing is admitted");
+            check(world, {{50, 2}, {51, 1}, {52, 3}, {31, 1}, {21, 1}},
+                "WGS-187 native fleet landing appends without replacing a different first owner");
+            hashes.push_back(world.state_sha256());
+        }
         {   // land_native_transports -> launch -> land_native_transport
             auto world = build([](auto& s) { s.control->planets[1].ground_base = {1, 1}; });
             check(world, {}, "no surface roster before native landing");
@@ -1175,16 +1441,20 @@ void surface_roster_paths() {
                      {20, 1, 1, 2, 10, false, false, 1, 0, gc::ActorCombatRole::ordinary},
                      {21, 2, 1, 2, 10, false, false, 2, 0, gc::ActorCombatRole::ordinary},
                      {22, 1, 2, 3, 11, false, false, 1, 0, gc::ActorCombatRole::ordinary},
-                     {31, 2, 1, 2, 10, false, false, 2, 0, gc::ActorCombatRole::ordinary}}};
+                     {31, 2, 1, 2, 10, false, false, 2, 0, gc::ActorCombatRole::ordinary},
+                     {50, 2, 2, 2, 2, false, false, 2, 0, gc::ActorCombatRole::transport},
+                     {51, 2, 1, 2, 2, false, false, 2, 0, gc::ActorCombatRole::transport},
+                     {52, 2, 3, 2, 2, false, false, 2, 0, gc::ActorCombatRole::transport}}};
+                s.control->planets[1].landed = {{50, 2, 2}, {51, 2, 1}, {52, 2, 3}};
             });
             expect(world.admit_native_fleet(1, gc::RemoveFleetMembers{10, {31}}).value().admitted, "direct removal detaches the transport");
             const auto direct = world.land_native_transport(1, 31, 2).value();
             if (!direct.linked) std::cerr << "direct landing admitted=" << direct.event.admitted
                 << " reason=" << static_cast<int>(direct.event.reason) << '\n';
             expect(direct.linked, "direct landing links the detached transport");
-            check(world, {{31, 1}}, "direct landing publishes the linked transport");
+            check(world, {{50, 2}, {51, 1}, {52, 3}, {31, 1}}, "WGS-187 direct landing retains mixed owners and appends the detached transport");
             expect(launched(world.launch_native_transport(1, 31, 10).value(), "direct relaunch"), "relaunch is admitted");
-            check(world, {}, "relaunch un-publishes the directly landed transport");
+            check(world, {{50, 2}, {51, 1}, {52, 3}}, "relaunch un-publishes only the directly landed transport");
             hashes.push_back(world.state_sha256());
         }
         {   // launch -> native fleet landing again: the relanded transport joins at the tail
@@ -1196,17 +1466,17 @@ void surface_roster_paths() {
             check(world, {{21, 1}, {31, 1}}, "native fleet reland publishes at the tail");
             hashes.push_back(world.state_sha256());
         }
-        {   // undefended invasion erases non-invaders and lands the invaders
+        {   // WGS-188: undefended invasion keeps the defender, then appends invaders.
             auto world = build([](auto& s) {
                 s.planets[1].owner = 2; s.fleets[0].members = {{21, 2}, {31, 2}};
-                s.control->planets[1].landed = {{50, 2, 2}};
+                s.control->planets[1].landed = {{50, 2, 2}, {51, 2, 1}, {52, 2, 3}};
             });
-            check(world, {{50, 2}}, "defender surface roster starts published");
+            check(world, {{50, 2}, {51, 1}, {52, 3}}, "three-owner surface roster starts published");
             world.enable_native_invasions(true);
             const auto receipt = world.admit_native_invasion(1, 10).value();
             expect(receipt.admitted && receipt.queued, "invasion of a defender-held surface queues");
             expect(bool(world.dispatch_native_invasion(receipt.request, 0)), "undefended completion dispatches");
-            check(world, {{21, 1}, {31, 1}}, "undefended invasion un-publishes the defenders and publishes the invaders");
+            check(world, {{50, 2}, {21, 1}, {31, 1}}, "WGS-188 undefended invasion keeps defender ownership, removes other owners and appends invaders");
             hashes.push_back(world.state_sha256());
         }
         {   // land victory: non-invaders leave, survivors arrive
@@ -1456,7 +1726,8 @@ int main(int argc, const char* const argv[]) {
         if (argc == 2 && std::string_view(argv[1]) == "--capture-build-list") {
             capture_build_and_ground_views(); return galactic_test::failures == 0 ? 0 : 1;
         }
-        capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); capture_structure_cleanup(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
+        authored_mixed_surface_owners();
+        native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); capture_structure_cleanup(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;
 }

@@ -35,6 +35,18 @@ shipped with project binaries.
   integer outputs are checked in with their reproduction method) and psutil
   (BSD-3-Clause).
 
+## GameNetworkingSockets and protobuf (optional online transport)
+
+With `EAWR_ENABLE_GNS` the build fetches Valve's GameNetworkingSockets v1.6.1
+(`d534c19aa760df3fb75fd20db13ba1932b8a5463`, BSD-3-Clause,
+<https://github.com/ValveSoftware/GameNetworkingSockets>) and protobuf 3.21.12
+(`f502b8e9c831bda0bea57d9cbeefca3eb76e4254`, BSD-3-Clause,
+<https://github.com/protocolbuffers/protobuf>), and links both statically into the
+online-enabled `eawr_net`. EAWR carries one change to GameNetworkingSockets,
+`cmake/EawrGnsTurnPermissionRefresh.cmake`: it re-sends the TURN CreatePermission request
+and retries a Refresh or CreatePermission answered with a stale nonce, so a relayed
+connection survives past five minutes (docs/gns-transport.md, "TURN permission refresh").
+
 ## Godot and godot-cpp
 
 The production viewer (`apps/viewer`) links godot-cpp 10.0.0-stable

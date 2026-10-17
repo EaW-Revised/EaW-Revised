@@ -22,6 +22,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <set>
 #include <stdexcept>
 
 namespace ai = eawr::script::foc::ai;
@@ -210,13 +211,101 @@ struct Owner {
         // Lua instances service in partitions and EvaluatePerception queries the
         // world: refresh its copied economy input once, before the fan-out (#2971).
         auto result = [&] { const auto reads = world->partitioned_reads(); return must(scripts.service(executor)); }();
-        for (const auto& diagnostic : result.diagnostics) throw std::runtime_error(diagnostic.message);
+        if (!result.diagnostics.empty()) throw std::runtime_error(result.diagnostics.front().message);
         must(engine->after_service(result));
     }
 };
 }
 namespace eawr::script::foc::ai {
 struct EngineContractAccess {
+    static std::string starbase_stock_facts(Engine& e, const Owner& owner, gc::GalacticSession& galaxy) {
+        const auto& content = *owner.selection_content;
+        const auto marker = std::find_if(content.types.begin(), content.types.end(),
+            [](const auto& row) { return row.second.name == "REBEL_STAR_BASE_1"; });
+        expect(marker != content.types.end(), "installed station plan marker is bound");
+        const auto first = content.initial_starbase_types.find(owner.empire);
+        expect(first != content.initial_starbase_types.end() && content.types.at(first->second).name == "EMPIRE_STAR_BASE_1",
+            "WGA-481 content publishes the sourced Empire initial-station lookup independently of the Rebel marker");
+        auto initial = gc::PlanetProduction{}; initial.target_owner = owner.empire; initial.maximum_space_level = 5;
+        expect(must(galactic_starbase_proposal(content, &initial, marker->first)) == first->second,
+            "WGA-481 a Rebel marker at an empty Empire target resolves to an Empire station");
+        const auto plan_at = std::find_if(e.plans_.begin(), e.plans_.end(), [](const auto& row) { return row.name == "UPGRADESTARBASEPLAN"; });
+        expect(plan_at != e.plans_.end(), "installed upgrade plan is registered");
+        auto plan = *plan_at; plan.allow_free_store = false;
+        auto provider = stock_selection_provider(owner.selection_content, owner.selection_plans, owner.world, owner.engine,
+            [&galaxy] { return galaxy.snapshot(); });
+        const auto snapshot = galaxy.snapshot();
+        std::shared_ptr<const GalacticSelectionInput> facts;
+        gc::TypeId expected{};
+        gc::PlanetId selected_target{};
+        for (const auto& target : snapshot->production()->planets) {
+            if (target.target_owner != owner.empire || !target.starbase_type) continue;
+            const auto next = must(galactic_starbase_proposal(content, &target, marker->first));
+            if (next == marker->first) continue;
+            auto candidate = must(provider(owner.empire, target.planet, e.data_.goals.at("UPGRADE_STARBASE"), plan));
+            if (!candidate->complete || !candidate->types.contains(next) || !candidate->types.at(next).target_cost) continue;
+            expect(content.types.at(next).original->base_level == target.space_level + 1,
+                "WGA-481 current station follows its authored next type rather than the marker's faction or level");
+            expected = next; selected_target = target.planet; facts = std::move(candidate); break;
+        }
+        expect(facts != nullptr, "installed campaign has an admitted next Empire station quote");
+        expect(facts->complete && facts->proposal_substitutions.at(marker->first) == expected
+            && facts->types.contains(expected) && !facts->types.contains(marker->first),
+            "WGA-481 actual content provider substitutes before demanding producer/type facts");
+        const auto& base = facts->types.at(expected);
+        expect(base.base && !base.structure && base.target_cost && base.target_build_seconds,
+            "WGA-58/481 next station has an admitted target quote without special-structure slot classification");
+        const auto ground = std::find_if(content.types.begin(), content.types.end(),
+            [](const auto& row) { return row.second.ground_base && row.second.name == "EMPIRE_GROUND_BASE_1"; });
+        expect(ground != content.types.end(), "installed ground-base proposal type is bound");
+        auto ground_plan = plan; ground_plan.ignore_target = true;
+        for (auto& force : ground_plan.taskforces) for (auto& team : force.teams) team.types = {ground->first};
+        const auto ground_facts = must(provider(owner.empire, selected_target, e.data_.goals.at("UPGRADE_STARBASE"), ground_plan));
+        const auto& ground_base = ground_facts->types.at(ground->first);
+        expect(ground_facts->complete && ground_base.base && !ground_base.structure
+            && ground_base.contrast_fallback_channel == gc::ProductionDomain::ground,
+            "WGA-482 actual ground-base content takes the base production path, independently of special structures");
+        const auto admitted = std::find_if(ground_facts->producers.begin(), ground_facts->producers.end(), [&](const auto& producer) {
+            return producer.type == ground->first && producer.planet == selected_target && producer.admission == gc::ProductionAdmission::allowed;
+        });
+        expect(ground_base.target_cost.has_value() == (admitted != ground_facts->producers.end())
+            && ground_base.target_build_seconds.has_value() == ground_base.target_cost.has_value(),
+            "WGA-482 ground-base quote exists only for admitted target production; stock dummy bases do not invent a quote");
+        if (admitted != ground_facts->producers.end()) expect(ground_base.target_cost == numeric::from_fixed(admitted->cost)
+            && ground_base.target_build_seconds == numeric::from_fixed(admitted->build_seconds),
+            "WGA-482 ground-base selection publishes the target's actual cost and time");
+        {
+            // WGA-489 through the stock provider: a generic hero company that authors no object script is an ordinary
+            // unit (no hero stage); a named hero keeps the hero stage, scripted or not. The Empire/Rebel plans that
+            // list named heroes (Remove_Corruption) therefore see the same hero candidates as before.
+            const auto find_type = [&](std::string_view name) {
+                const auto at = std::find_if(content.types.begin(), content.types.end(), [&](const auto& row) { return row.second.name == name; });
+                expect(at != content.types.end(), "WGA-489 installed hero company type is bound");
+                return at->first;
+            };
+            const auto saboteur = find_type("UNDERWORLD_SABOTEUR_TEAM"), smuggler = find_type("SMUGGLER_TEAM_E"), mothma = find_type("MON_MOTHMA_TEAM");
+            expect(content.types.at(saboteur).value.hero && content.types.at(saboteur).lua_script.empty() && !content.types.at(saboteur).named_hero
+                && content.types.at(mothma).value.hero && content.types.at(mothma).lua_script.empty() && content.types.at(mothma).named_hero,
+                "WGA-489 installed content: the saboteur is a generic unscripted hero, Mon Mothma a named unscripted hero");
+            // A company with no script of its own takes the hero stage when a member unit authors one (the generic
+            // fleet commanders); the saboteur and smuggler companies have neither, so their members are ordinary units.
+            const auto fleet_empire = find_type("FLEET_COM_EMPIRE_TEAM"), fleet_rebel = find_type("FLEET_COM_REBEL_TEAM");
+            expect(content.types.at(fleet_empire).lua_script.empty() && content.types.at(fleet_empire).member_script
+                && content.types.at(fleet_rebel).lua_script.empty() && content.types.at(fleet_rebel).member_script
+                && !content.types.at(saboteur).member_script && !content.types.at(smuggler).member_script,
+                "WGA-489 installed content: fleet commander companies author their script on the member unit, saboteur and smuggler have none");
+            auto hero_plan = plan; hero_plan.ignore_target = true;
+            for (auto& force : hero_plan.taskforces) for (auto& team : force.teams) team.types = {saboteur, smuggler, mothma, fleet_empire, fleet_rebel};
+            const auto hero_facts = must(provider(owner.empire, selected_target, e.data_.goals.at("UPGRADE_STARBASE"), hero_plan));
+            expect(hero_facts->types.contains(saboteur) && hero_facts->types.contains(smuggler) && hero_facts->types.contains(mothma)
+                && hero_facts->types.contains(fleet_empire) && hero_facts->types.contains(fleet_rebel)
+                && !hero_facts->types.at(saboteur).hero && !hero_facts->types.at(smuggler).hero && hero_facts->types.at(mothma).hero
+                && hero_facts->types.at(fleet_empire).hero && hero_facts->types.at(fleet_rebel).hero,
+                "WGA-489 stock provider: generic heroes with no company or member script skip the hero stage; named heroes and member-scripted fleet commanders keep it");
+        }
+        return std::to_string(expected) + ":" + std::to_string(base.target_cost->repr) + ":" + std::to_string(base.target_build_seconds->repr)
+            + ":" + std::to_string(ground->first) + ":" + std::to_string(ground_base.target_cost.has_value());
+    }
     static void running_maintenance(Engine& e, tactical::PlayerId player) {
         auto& p = *e.player_ai(player);
         p.sleep_frames = 0; p.maintenance_due = true;
@@ -239,8 +328,8 @@ struct EngineContractAccess {
         result.potential_found = true;
         result.contrast_disabled = retained->potential->target_contrast_disabled;
         for (const auto& task : p.tasks) {
-            const auto force = e.taskforces_.find(task.taskforce);
-            if (task.source != 2 || force == e.taskforces_.end() || force->second.plan != retained->plan) continue;
+            const auto force = p.taskforces.find(task.taskforce);
+            if (task.source != 2 || force == p.taskforces.end() || force->second.plan != retained->plan) continue;
             ++result.paid_tasks;
             result.staged_paid_tasks += task.staging != 0 ? 1 : 0;
         }
@@ -252,10 +341,54 @@ struct EngineContractAccess {
         const auto& p = *e.player_ai(player);
         expect(!p.functions.empty() && !p.targets.empty(), "stock qualification test has authored functions and real planets");
         Goal goal; goal.function = 0; goal.target = p.targets.front();
-        for (const auto& plan : e.plans_) if (plan.magic || plan.allow_free_store || !plan.ignore_target) {
+        for (const auto& plan : e.plans_) if (plan.magic || plan.allow_free_store) {
             const auto input = e.galactic_selection(p, goal, plan);
             expect(input && !input->complete && !input->missing_facts.empty(), "unsupported stock plan names and refuses its missing live qualifications");
         }
+    }
+    static std::string targeted_stock_facts(Engine& e, tactical::PlayerId player,
+        const galactic_goals::MaterializedPlanCatalog& catalog) {
+        auto& p = *e.player_ai(player);
+        std::string trace; std::set<std::string> plans; std::size_t classified{};
+        for (std::size_t function = 0; function < p.functions.size(); ++function) {
+            const auto& entry = p.functions[function];
+            if (!e.proposable(p, entry) || entry.goal->application.contains("GLOBAL")) continue;
+            for (const auto target : p.targets) {
+                if (!e.applies(p, *entry.goal, e.target(target))) continue;
+                const auto allocated = must(e.allocate_galactic_goal(player, function, target));
+                if (!allocated) continue;
+                const auto& goal = p.proposed.back();
+                const auto& definition = e.plans_.at(goal.potential->plan);
+                if (definition.ignore_target || definition.magic
+                    || catalog.constraints.at(definition.name).additional_cost.value_or(Real{}) != Real{}) {
+                    must(e.release_galactic_goal(player, allocated->goal)); continue;
+                }
+                expect(definition.galactic_contrast_qualified, "installed targeted plan retains its own contrast definition");
+                plans.insert(definition.name);
+                const auto input = e.galactic_selection(p, goal, definition);
+                expect(input && input->complete && input->missing_facts.empty() && input->unscaled_domain_totals,
+                    "installed ordinary targeted plan composes qualified target/garrison facts through the production provider");
+                expect(input->contrast.size() == 2 + 2 * definition.galactic_contrast_order.size()
+                    && !input->contrast[0].category && !input->contrast[1].category,
+                    "installed target facts retain unscaled domain totals before plan-authored categories");
+                trace += definition.name + ':' + std::to_string(target) + ':';
+                for (const auto& row : input->contrast) {
+                    classified += row.category != 0;
+                    trace += std::to_string(row.category) + ':' + std::to_string(row.force.repr) + ';';
+                }
+                for (const auto& [type, facts] : input->types) for (const auto& garrison : facts.garrisons) {
+                    expect(garrison.all_main_domains, "installed proposal garrisons admit either classified main domain");
+                    trace += std::to_string(type) + ':' + std::to_string(garrison.type) + ':' + std::to_string(garrison.power.repr) + ';';
+                }
+                must(e.release_galactic_goal(player, allocated->goal));
+            }
+        }
+        // Day-one desire/policy can legitimately allocate no ordinary targeted
+        // proposal. Record the actual sample across workers; natural engagement
+        // is witnessed by the full campaign, not forced into this paid fixture.
+        trace += "day-one-plans:" + std::to_string(plans.size()) + ":classified:" + std::to_string(classified);
+        std::cout << "day-one targeted plan facts plans=" << plans.size() << " classified=" << classified << '\n';
+        return trace;
     }
     static std::optional<std::uint64_t> reserve_stock(Engine& e, tactical::PlayerId player) {
         auto& p = *e.player_ai(player);
@@ -307,6 +440,19 @@ int main(int argc, char** argv) {
         const auto planned = must(cp::plan_live_campaign_setup(fs, data, types, campaign_name, options, "Normal_Default"));
         const auto services = must(cp::prepare_live_campaign_services(fs, loaded.catalog, data, types, planned, "Normal_Default"));
         const auto content = must(cp::prepare_ai_selection_content(fs, loaded.catalog, data, types, planned));
+        const auto station = std::find_if(content->types.begin(), content->types.end(),
+            [](const auto& row) { return row.second.starbase && row.second.next_base; });
+        expect(station != content->types.end(), "installed station chain available for missing-link boundary");
+        const auto dangling_catalog = must(eawr::data::with_overrides(loaded.catalog,
+            std::array{eawr::data::ValueOverride{station->second.name, "Next_Level_Base", {"UNRESOLVED_NEXT_BASE"}}}));
+        const auto dangling_content = must(cp::prepare_ai_selection_content(fs, dangling_catalog, data, types, planned));
+        expect(dangling_content->types.at(station->first).next_base == 0
+            && dangling_content->types.at(station->first).original->next_level_base == "UNRESOLVED_NEXT_BASE",
+            "WGA-483 actual content preparation retains an unknown next-level name as a null resolved link");
+        gc::PlanetProduction dangling_target; dangling_target.target_owner = dangling_target.starbase_owner = 1;
+        dangling_target.starbase_type = station->first; dangling_target.space_level = 1; dangling_target.maximum_space_level = 5;
+        expect(must(ai::galactic_starbase_proposal(*dangling_content, &dangling_target, station->first)) == station->first,
+            "WGA-483 actual prepared unknown link preserves the original proposal");
         ga::LifecycleSetup selected;
         for (const auto& path : ga::required_xml()) selected.xml.emplace(path, read(fs, path));
         const auto ai_data = must(ga::load_data(selected));
@@ -395,6 +541,8 @@ int main(int argc, char** argv) {
                 continue;
             }
             control.qualify(galaxy, executor, normal_runtime, normal_usability);
+            const auto starbase_trace = ai::EngineContractAccess::starbase_stock_facts(*control.engine, control, galaxy);
+            const auto targeted_trace = ai::EngineContractAccess::targeted_stock_facts(*control.engine, control.empire, *control.selection_plans);
             const auto goal = ai::EngineContractAccess::reserve_stock(*control.engine, control.empire);
             expect(goal.has_value(), "Normal Empire positive authored goal selects and reserves real paid proposal");
             ai::GoalStateContributor saved(control.engine, identity);
@@ -483,7 +631,7 @@ int main(int argc, char** argv) {
             const auto trace = replacement.state_sha256() + must(restored.state_hash()) + must(resumed.actions->state_hash()) + resumed.scripts.state_digest();
             expect(trace == galaxy.state_sha256() + must(saved.state_hash()) + must(control.actions->state_hash()) + control.scripts.state_digest()
                 && resumed.funding->state() == control.funding->state(), "fresh restored owner preserves next authored decisions, funding, Lua and paid admissions");
-            if (baseline.empty()) baseline = trace; else expect(trace == baseline, "Normal stock selection/reservation/Lua paid admission equals on 1/2/4/8");
+            if (baseline.empty()) baseline = starbase_trace + targeted_trace + trace; else expect(starbase_trace + targeted_trace + trace == baseline, "Normal targeted facts/selection/reservation/Lua paid admission equal on 1/2/4/8");
             std::cout << "Normal Empire live paid plan " << resumed.engine->plan(running->running_plan)->definition << ", builds=" << resumed.actions->purchases().size() << ", workers=" << count << '\n';
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

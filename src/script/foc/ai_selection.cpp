@@ -105,6 +105,8 @@ bool contrast_met(const std::vector<Contrast>& target, const std::vector<Contras
 
 // PL-20 to PL-35: the marshallers select units for the goal's plan one at a time.
 bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& potential) {
+    const auto native_record_write = native_record_scope();
+    native_record_changed(player.player, 2, goal.id); native_record_changed(player.player, 3, goal.id);
     core::tick_profile::Scope scope("serial.goal.unit-selection");
     mark_native_state_changed();
     if (player.galactic) return select_galactic_units(player, goal, potential);
@@ -117,6 +119,7 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
     potential.cost = Real{};
     potential.taskforce_of_unit.clear();
     potential.team_of_unit.clear();
+    potential.contrast_indices.clear();
     potential.valid = false;
     const Target* target = this->target(goal.target);
     Real target_x{}, target_y{};
@@ -211,7 +214,7 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
         }
         if (!teams.empty()) {
             core::tick_profile::Scope draw("serial.goal.ordered-rng");
-            starts[index] = static_cast<std::size_t>(sync_.range(0, static_cast<std::int32_t>(teams.size()) - 1));
+            starts[index] = static_cast<std::size_t>(stream(player).range(0, static_cast<std::int32_t>(teams.size()) - 1));
         }
     }
     std::vector<std::int32_t> tf_size(plan.taskforces.size());
@@ -326,7 +329,7 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
                 if (plan.ignore_target) {
                     contrast_weight = [&] {
                         core::tick_profile::Scope draw("serial.goal.ordered-rng");
-                        return sync_.uniform(Real{}, to_single(type_power(type) / real(500)));
+                        return stream(player).uniform(Real{}, to_single(type_power(type) / real(500)));
                     }();
                 } else if (contrast && info != nullptr) {
                     Real top{};
@@ -382,6 +385,7 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
         const tactical::TypeId type = proposals[pick];
         const std::size_t object = allocation[pick];
         potential.units.push_back(type);
+        potential.contrast_indices.push_back(contrast_index[pick]);
         potential.freestore.push_back(object == store.size() ? 0 : store[object]->id);
         const std::uint8_t source = object != store.size() ? 0 : (plan.allow_free_store ? 1 : 2);
         potential.sources.push_back(source);
@@ -454,9 +458,11 @@ bool Engine::production_time_allowed(const PlayerAi& player, const Goal& goal) c
 
 // GS-21: a potential plan is still valid when its units are still there for it.
 bool Engine::test_valid(PlayerAi& player, Goal& goal) {
+    const auto native_record_write = native_record_scope();
+    native_record_changed(player.player, 2, goal.id); native_record_changed(player.player, 3, goal.id);
     mark_native_state_changed();
     if (!goal.potential || !goal.potential->valid) return false;
-    if (goal.plan != 0) return running_.contains(goal.plan);
+    if (goal.plan != 0) return player.running.contains(goal.plan);
     if (player.galactic) return select_units(player, goal, *goal.potential)
         && production_time_allowed(player, goal) && galactic_fundable(player, goal, true);
     if (!goal.potential->reserved && !goal.potential->funded)
@@ -472,13 +478,75 @@ bool Engine::test_valid(PlayerAi& player, Goal& goal) {
 
 // GS-22: the contrast test of an active goal.
 bool Engine::test_target_contrast(PlayerAi& player, Goal& goal) {
+    const auto native_record_write = native_record_scope();
+    native_record_changed(player.player, 2, goal.id); native_record_changed(player.player, 3, goal.id);
     mark_native_state_changed();
     if (!goal.potential || !goal.potential->valid) return false;
     if (goal.plan != 0) {
-        // A running plan keeps its goal while its target lives (fidelity list: the retail test
-        // recomputes the contrast of the TaskForce units).
+        if (player.galactic) {
+            // Galactic allocations have separate channel, escort and garrison contrast.
+            const Target* target = this->target(goal.target);
+            return target == nullptr || target->object == 0 || host_->view->find(target->object) != nullptr;
+        }
+        if (!player.running.contains(goal.plan)) return false;
         const Target* target = this->target(goal.target);
-        return target == nullptr || target->object == 0 || host_->view->find(target->object) != nullptr;
+        if (target && target->object != 0 && !host_->view->find(target->object)) return false;
+        auto& potential = *goal.potential;
+        // GS-22: an allocated object may have left the free store. Only a competing
+        // reservation invalidates it; absence does not select a replacement unit.
+        for (std::size_t i = 0; i < potential.units.size(); ++i) {
+            const auto object = potential.freestore[i];
+            const auto* unit = object ? host_->view->find(object) : nullptr;
+            if (unit && unit->owner == player.player) {
+                const auto held = player.reserved.find(object);
+                if (held != player.reserved.end() && held->second != goal.id) return potential.valid = false;
+            }
+            if (potential.sources[i] == 1) {
+                const auto token = potential.pool_tokens[i];
+                const auto* account = host_->economy(player.player);
+                if (account && std::find(account->pool_tokens.begin(), account->pool_tokens.end(), token) != account->pool_tokens.end()) {
+                    const auto held = player.reserved_pool_tokens.find(token);
+                    if (held == player.reserved_pool_tokens.end() || held->second != goal.id) return potential.valid = false;
+                }
+            }
+            // Completed/released build allocations no longer own a pad. The retained
+            // live pad list is shortened by the execution completion/release path.
+            const auto& pads = player.running.at(goal.plan).reserved_pads;
+            if (potential.sources[i] == 2
+                && std::find(pads.begin(), pads.end(), potential.producers[i]) != pads.end()) {
+                const auto* held = pad_claim(potential.producers[i]);
+                if (held == nullptr || held->player != player.player || held->goal != goal.id)
+                    return potential.valid = false;
+            }
+        }
+        const PlanDef& definition = plans_[potential.plan];
+        if (definition.ignore_target || potential.target_contrast_disabled) return true;
+        const auto history = player.plan_outcomes.find({potential.plan, goal.target});
+        const Real failures = real(recent_failures(history == player.plan_outcomes.end() ? nullptr : &history->second));
+        const Real adjustment = to_single(failures * definition.per_failure_contrast_adjust);
+        const Real maximum = to_single(definition.max_contrast + adjustment);
+        const Real minimum = to_single(definition.min_contrast + adjustment);
+        potential.threshold = Real{} < maximum ? to_single(real(1) - minimum / maximum) : Real{};
+        potential.target_contrast = contrast_list(player, goal, definition,
+            to_single(maximum * player.difficulty.space_contrast_multiplier));
+        potential.current_contrast = potential.target_contrast;
+        if (potential.current_contrast.empty()) return true;
+        // PL-32/GS-22: apply the retained categories, using the live object's type
+        // and health when still owned. An absent allocation retains its authored type.
+        for (std::size_t i = 0; i < potential.units.size(); ++i) {
+            const auto* unit = potential.freestore[i] ? host_->view->find(potential.freestore[i]) : nullptr;
+            if (unit && unit->owner != player.player) unit = nullptr;
+            const auto* type = host_->type(unit ? unit->type : potential.units[i]);
+            if (!type) continue;
+            const Real power = to_single(type->combat_power * (unit ? unit->health : real(1)));
+            potential.current_contrast.front().force = to_single(potential.current_contrast.front().force - power);
+            const auto category = potential.contrast_indices.at(i);
+            if (category > 0 && category < potential.current_contrast.size()) {
+                const Real factor = average_contrast(*host_, *type, potential.current_contrast[category].category);
+                potential.current_contrast[category].force = to_single(potential.current_contrast[category].force - power * factor);
+            }
+        }
+        return potential.valid = contrast_met(potential.target_contrast, potential.current_contrast, potential.threshold);
     }
     if (!goal.potential->reserved) return test_valid(player, goal);
     if (!test_valid(player, goal)) return false;

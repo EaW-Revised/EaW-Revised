@@ -22,6 +22,12 @@ struct MeshFormationResult {
     // EAWR-NET-1762 denotes pair-unreachable, with the remote seat for curated text.
     bool rejoin_allowed{};
 };
+// A failed pair needs a report from both ends, but the unreachable end may never send one. After the grace (five
+// seconds, at most half the pair deadline) with one end's failure reported and the other's not, the silent end counts as
+// failed too. Nothing is inferred for a pair nobody reported on. Pure; the caller supplies the wait.
+std::chrono::milliseconds mesh_report_grace(std::chrono::milliseconds pair_timeout);
+MeshRelayFailure mesh_silent_end_failed(MeshRelayFailure reported, std::chrono::milliseconds waited,
+    std::chrono::milliseconds pair_timeout);
 std::string mesh_newcomer_refusal_text(std::string_view unreachable_name, bool relay_configured = true);
 class MeshFormation final {
 public:

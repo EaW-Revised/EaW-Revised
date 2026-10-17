@@ -145,8 +145,8 @@ ViewResult build_live_view(const sim::galactic::GalacticSnapshot& snapshot,
         if (!fleet.motion.transit) {
             // WGUI-28: the same presence admission as the cards, then choose
             // a visible representative so an all-stealth sibling cannot leak.
-            if (!presence.contains({fleet.orbit, fleet.owner})
-                || (!allies.contains(fleet.owner) && (!traits.resolved || !traits.nonstealth))) continue;
+            if (!visibility.reveal_orbit && (!presence.contains({fleet.orbit, fleet.owner})
+                || (!allies.contains(fleet.owner) && (!traits.resolved || !traits.nonstealth)))) continue;
         } else {
             // WGUI-30/31: own/view-all, immediate own destination, superweapon,
             // then stealth rejection and the explicit WGUI-31/32 range/path seam.
@@ -166,7 +166,7 @@ ViewResult build_live_view(const sim::galactic::GalacticSnapshot& snapshot,
         StubFleet row;
         row.id = fleet.id; row.owner = fleet.owner;
         // Presence alone must not expose member counts in map reports.
-        row.members = fleet.owner == local || counted.contains(fleet.id)
+        row.members = fleet.owner == local || visibility.reveal_orbit || counted.contains(fleet.id)
             ? static_cast<std::uint32_t>(fleet.members.size()) : 0;
         if (fleet.motion.transit) {
             const auto& transit = *fleet.motion.transit;

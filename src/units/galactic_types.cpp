@@ -374,6 +374,10 @@ GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool i
             }
             type.ai_combat_power = valid ? std::optional<Fixed>{power} : std::nullopt;
             type.category_mask = std::move(categories);
+            // WR-85: squadron post-load capability is the last authored craft's
+            // resolved value, replacing even an explicit squadron Hyperspace tag.
+            if (valid && members == &type.squadron_units)
+                type.hyperspace_capable = table.find(members->back())->hyperspace_capable.value_or(false);
         }
         ready[index] = 2;
         return valid;
@@ -384,7 +388,7 @@ GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool i
 
 std::array<std::uint8_t, 32> galactic_content_identity(const GalacticTypeTable& table) {
     Encoder out;
-    out.text("eawr-galactic-types-v5");
+    out.text("eawr-galactic-types-v6");
     out.integer(static_cast<std::int64_t>(table.types.size()));
     for (const auto& type : table.types) {
         out.text(type.name);

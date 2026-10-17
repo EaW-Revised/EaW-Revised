@@ -77,6 +77,8 @@ struct SpawnEntryProfile {
     TypeId squadron{};
     std::int32_t starting{}; // Starting_Spawned_Units_Tech_0 count: the most alive at once
     std::int32_t reserve{};  // Reserve_Spawned_Units_Tech_0 count, or unlimited_reserve
+    bool ship{};             // WSL-16: a type with no squadron members launches as one single ship (campaign stations)
+    bool arrival{};          // WSL-16a: the ship's own Hyperspace tag: it arrives by hyperspace, not from the bay
     friend constexpr bool operator==(const SpawnEntryProfile&, const SpawnEntryProfile&) noexcept = default;
 };
 
@@ -325,12 +327,20 @@ struct SpawnEntryState {
     friend constexpr bool operator==(const SpawnEntryState&, const SpawnEntryState&) noexcept = default;
 };
 
+// WSL-16/19: a single ship an authored entry launched; the hangar frees its slot when the ship is gone.
+struct SpawnedShip {
+    EntityId id{};
+    std::uint32_t entry{};
+    friend constexpr bool operator==(const SpawnedShip&, const SpawnedShip&) noexcept = default;
+};
+
 // A spawner's hangar (FL-01): hashed state.
 struct SpawnerState {
     std::uint64_t next_service_frame{}; // the SPAWN_SQUADRON behaviour's next service
     std::uint64_t next_spawn_frame{};
     bool ready{};                       // the first service built the entries (FL-02)
     std::vector<SpawnEntryState> entries;
+    std::vector<SpawnedShip> ships;     // single ships of ship entries alive now, ascending ID
     friend bool operator==(const SpawnerState&, const SpawnerState&) = default;
 };
 

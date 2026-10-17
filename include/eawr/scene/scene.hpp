@@ -163,7 +163,17 @@ struct Surface final {
     std::string technique;
     std::string pass;
     std::vector<TextureBinding> textures;
+    // ALDEFAULT-01: effect lookup failed; use the built-in green material.
+    bool effect_missing{};
 };
+
+// The renderer-owned selector used only after mounted-file lookup establishes
+// absence. The authored effect name remains on Surface for evidence.
+[[nodiscard]] const LegacySelector& missing_effect_selector() noexcept;
+[[nodiscard]] const LegacySelector* material_selector(std::string_view program, bool effect_missing) noexcept;
+[[nodiscard]] inline const LegacySelector* material_selector(const Surface& surface) noexcept {
+    return material_selector(surface.shader, surface.effect_missing);
+}
 
 struct AttachedEffect final {
     std::string proxy_name;
@@ -196,6 +206,11 @@ struct AssetAccess final {
     std::function<std::string(std::string_view logical_path)> sha256;
     std::function<bool(std::string_view logical_path)> particle_system;
 };
+
+// ALDEFAULT-01: only absence of both source and compiled effects selects the
+// built-in fallback. A present but unsupported effect stays unsupported.
+// With no existence provider, absence has not been established.
+[[nodiscard]] bool missing_material_effect(const AssetAccess& access, std::string_view program);
 
 // Resolve each model proxy in ordinal order, including the documented ALT-number fallback.
 // Shared by scene construction and runtime hardpoint attachments (BP-67).

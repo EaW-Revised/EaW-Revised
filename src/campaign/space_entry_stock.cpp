@@ -133,6 +133,7 @@ core::Result<units::UnitTables> reachable_tables(const units::UnitTables& raw,
             if (key(ability.type) == "BARRAGE") append("Dummy_Barrage_Target");
         }
         for (const auto index : unit.death_projectile_indices) projectile(index);
+        projectile(unit.retreat_self_destruct_index);
         if (check_capabilities && unit.collision) for (const auto& mesh : unit.collision_meshes)
             for (const auto& triangle : mesh.triangles) for (const auto& point : triangle)
                 for (const auto coordinate : {point.x, point.y, point.z}) {
@@ -175,6 +176,7 @@ core::Result<units::UnitTables> reachable_tables(const units::UnitTables& raw,
             remap(ability.projectile_index, projectile_remap); remap(ability.spawned_projectile_index, projectile_remap);
         }
         for (auto& index : unit.death_projectile_indices) remap(index, projectile_remap);
+        remap(unit.retreat_self_destruct_index, projectile_remap);
         for (auto& member : unit.members) remap(member.craft_index, unit_remap);
         if (unit.spawner) {
             for (auto* rows : {&unit.spawner->starting, &unit.spawner->reserves}) for (auto& row : *rows) remap(row.squadron_index, unit_remap);

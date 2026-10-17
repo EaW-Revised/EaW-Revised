@@ -1,4 +1,5 @@
 #include "space_environment_internal.hpp"
+#include "family_textures.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "render_profile_viewport.hpp"
 #include "shutdown_trace.hpp"
@@ -6,6 +7,20 @@
 
 namespace eawr::presentation::godot_backend {
 namespace {
+
+// CEM-03: double the sampled product before the legacy fragment saturation.
+// Keep the stock adapter byte-identical for its existing pixel controls.
+[[nodiscard]] const std::string& meshadditive2x_sky_shader() {
+    static const std::string source = [] {
+        std::string text(meshadditive_sky_shader);
+        constexpr std::string_view from = "eawr_vertex_color * texture(BaseTexture, eawr_scrolled_uv).rgb";
+        constexpr std::string_view to = "clamp(2.0 * eawr_vertex_color * texture(BaseTexture, eawr_scrolled_uv).rgb, 0.0, 1.0)";
+        const std::size_t at = text.find(from);
+        if (at != std::string::npos) text.replace(at, from.size(), to);
+        return text;
+    }();
+    return source;
+}
 
 // MeshAdditiveVColor.fx: the MeshAdditive adapter with the authored vertex
 // colour as a further factor (the effect has no Color field; Color is bound
@@ -79,11 +94,19 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
         textures.emplace_back("BaseTexture", surface.base_texture);
         break;
     case space::SceneRoute::meshadditive:
+    case space::SceneRoute::meshadditive2x:
     case space::SceneRoute::meshadditive_vcolor:
         material.pass = RenderPass::transparent;
-        material.program = surface.route == space::SceneRoute::meshadditive
-            ? std::string(meshadditive_sky_shader) : meshadditive_vcolor_sky_shader();
+        material.program = surface.route == space::SceneRoute::meshadditive2x
+            ? meshadditive2x_sky_shader()
+            : surface.route == space::SceneRoute::meshadditive
+                ? std::string(meshadditive_sky_shader) : meshadditive_vcolor_sky_shader();
         material.bindings = meshadditive_bindings(*surface.meshadditive, space::meshadditive_default_inputs());
+        textures.emplace_back("BaseTexture", surface.base_texture);
+        break;
+    case space::SceneRoute::skydome:
+        material.program = std::string(skydome_sky_shader);
+        material.bindings.push_back({"eawr_diffuse", std::string{"asset"}});
         textures.emplace_back("BaseTexture", surface.base_texture);
         break;
     case space::SceneRoute::planet:
@@ -118,14 +141,34 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
         for (const auto& parameter : planned_from->meshes[surface.mesh_index].submeshes[surface.submesh_index].parameters) {
             material.bindings.push_back({parameter.name, parameter.value});
         }
+        if (legacy::reads_effect_time(material)) {
+            material.bindings.push_back({"eawr_effect_time", 0.0F});
+        }
         textures.emplace_back("BaseTexture", surface.base_texture);
+        for (const legacy::TextureBinding& sampled : legacy::binding_textures(material)) {
+            const auto* binding = legacy::bindings::find(material, sampled.name);
+            const auto* declared = binding == nullptr ? nullptr : std::get_if<std::string>(&binding->value);
+            if (declared) textures.emplace_back(std::string(sampled.name), *declared);
+        }
+        break;
+    }
+    case space::SceneRoute::missing_effect: {
+        const auto& selector = scene::missing_effect_selector();
+        material.route = MaterialRoute::legacy_effect;
+        material.program = std::string(selector.program);
+        material.technique = std::string(selector.technique);
+        material.pass_name = std::string(selector.pass);
         break;
     }
     case space::SceneRoute::unsupported:
         return skip(surface.problem);
     }
-    if (textures.empty() || textures.front().first != "BaseTexture") return skip("the surface binds no BaseTexture");
+    if (surface.route != space::SceneRoute::missing_effect
+        && (textures.empty() || textures.front().first != "BaseTexture")) return skip("the surface binds no BaseTexture");
     std::optional<assets::Texture> primary;
+    if (surface.route == space::SceneRoute::missing_effect) {
+        primary = family_placeholder_texture(legacy::TexturePlaceholder::black);
+    }
     std::vector<GodotRenderer::BindingTexture> extra;
     for (const auto& [binding, declared] : textures) {
         std::string logical;
@@ -149,6 +192,8 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
     // routes the opaque sky into its transparent pass because depth_draw_never
     // disables depth writes. Order that sky before the additive nebula layers,
     // or its later opaque colour replaces the clouds already drawn.
+    // -128 is the renderer's lowest priority, so an opaque Skydome.fx sky ties with another
+    // opaque sky (MeshGloss); the stock maps pair it only with the additive layers above it.
     const std::int32_t priority = material.pass == RenderPass::transparent ? -127 : -128;
     if (auto ordered = renderer_->set_material_priority(asset, priority); !ordered) {
         static_cast<void>(renderer_->release(asset));
@@ -162,7 +207,8 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
     // backdrop objects sit far outside any shadow the scene would use.
     renderer_->set_casts_shadows(asset, false);
     assets_.push_back(asset);
-    if (surface.route == space::SceneRoute::planet || surface.route == space::SceneRoute::nebula) {
+    if (surface.route == space::SceneRoute::planet || surface.route == space::SceneRoute::nebula
+        || legacy::reads_effect_time(material)) {
         effect_clock_assets_.push_back(asset);
     }
     instances_.push_back({static_cast<sim::EntityId>(asset), asset, *matrix});
@@ -199,6 +245,7 @@ void EnvironmentView::compose_object(const Placed& placed, const std::vector<spa
             items_.push_back(std::move(item));
             continue;
         }
+        if (!surface.skipped.empty()) not_rendered_.push_back(placed.role + " " + placed.object + ": " + surface.skipped);
         if (surface.billboard == 0) {
             if (placed.idle) {
                 // Retain the rigid mesh's bone and local vertices for the existing

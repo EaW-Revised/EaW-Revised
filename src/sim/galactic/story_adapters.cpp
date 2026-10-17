@@ -178,7 +178,7 @@ RewardResult apply_to(FixtureState& s, Player owner, const Reward& reward) {
         } else if constexpr (std::is_same_v<T, DeferredReward>) {
             if (r.name == "DISABLE_AUTORESOLVE" || r.name == "ENABLE_AUTORESOLVE") return {RewardStatus::inert, "WST-42 inert reward", {}};
             if (r.name == "SET_SPAWN" || r.name == "ENABLE_OVERWHELMING_ODDS") return {RewardStatus::inert, "WST-42 recognised without dispatch", {}};
-            return {RewardStatus::unverified, "WST-U09 or owning-service seam: " + r.name, {}};
+            out = {RewardStatus::unverified, "WST-U09 or owning-service seam: " + r.name, {}};
         }
         return out;
     }, reward);
@@ -208,6 +208,7 @@ std::string_view event_name(const Payload& payload) {
     // Public XML names mapped from WST-31..39; this is not the shared engine name table (WST-08).
     return std::visit([](const auto& n) -> std::string_view {
         using T = std::decay_t<decltype(n)>;
+        std::string_view name;
         if constexpr (std::is_same_v<T, TravelNotice>) {
             switch (n.kind) {
             case Travel::enter: return "STORY_ENTER"; case Travel::move_hero: return "STORY_MOVE";
@@ -237,10 +238,10 @@ std::string_view event_name(const Payload& payload) {
             }
         } else if constexpr (std::is_same_v<T, ViewNotice>) {
             switch (n.kind) { case View::select_planet: return "STORY_SELECT_PLANET"; case View::zoom_in: return "STORY_ZOOM_INTO_PLANET"; case View::zoom_out: return "STORY_ZOOM_OUT_PLANET"; }
-        } else if constexpr (std::is_same_v<T, ElapsedNotice>) return "STORY_ELAPSED";
-        else if constexpr (std::is_same_v<T, MovieDoneNotice>) return "STORY_MOVIE_DONE";
-        else if constexpr (std::is_same_v<T, ConquestNotice>) return "STORY_CONQUER";
-        else if constexpr (std::is_same_v<T, ConquestCountNotice>) return "STORY_CONQUER_COUNT";
+        } else if constexpr (std::is_same_v<T, ElapsedNotice>) name = "STORY_ELAPSED";
+        else if constexpr (std::is_same_v<T, MovieDoneNotice>) name = "STORY_MOVIE_DONE";
+        else if constexpr (std::is_same_v<T, ConquestNotice>) name = "STORY_CONQUER";
+        else if constexpr (std::is_same_v<T, ConquestCountNotice>) name = "STORY_CONQUER_COUNT";
         else if constexpr (std::is_same_v<T, TacticalNotice>) {
             switch (n.kind) {
             case Tactical::destroy: return "STORY_TACTICAL_DESTROY";
@@ -263,7 +264,7 @@ std::string_view event_name(const Payload& payload) {
             case Tactical::load_map: return "STORY_LOAD_TACTICAL_MAP";
             }
         }
-        return {};
+        return name;
     }, payload);
 }
 std::string_view notification_seam(const Payload& payload) {

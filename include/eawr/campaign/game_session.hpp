@@ -254,6 +254,7 @@ public:
     void set_story_identities(std::map<sim::galactic::PlanetId, std::string> planets,
         std::map<sim::galactic::PlayerId, std::string> factions);
     void set_technology_notice_handler(sim::galactic::GalacticSession::TechnologyNoticeHandler);
+    void set_feedback_notice_handler(sim::galactic::GalacticSession::FeedbackNoticeHandler);
     [[nodiscard]] core::Result<sim::math::Fixed> set_technology_price_modifier(const sim::galactic::GalacticSession::TechnologyPriceWrite&);
     // WGEP-05/163..165 native credit-halt sabotage writer and explicit source removal.
     [[nodiscard]] core::Result<sim::galactic::GalacticSession::IncomeBlockerReceipt> halt_planet_credits(

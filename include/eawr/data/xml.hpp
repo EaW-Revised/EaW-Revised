@@ -62,11 +62,19 @@ struct Definition {
     bool namespace_winner{false}; // strongest definition within category
 };
 
+// ML-24: the real value a blank or `TBD` occurrence leaves in place.
+struct InheritedValue {
+    XmlNode value;
+    std::string source_object_id;
+};
+
 struct EffectiveValue {
     XmlNode value;
     ValueProvenance provenance{ValueProvenance::own};
     std::string source_object_id;
     std::optional<XmlNode> displaced_value;
+    // Set when `value` is a placeholder over an earlier real occurrence in the chain.
+    std::optional<InheritedValue> inherited_real;
 };
 
 // WGA-363/364: derived state at the end of the XML parse timeline.
@@ -85,6 +93,11 @@ struct EffectiveObject {
     std::uint64_t catalog_generation{0};
 
     [[nodiscard]] const EffectiveValue* value(std::string_view tag_name) const noexcept;
+    // ML-24: the retail single value of a tag. A blank or `TBD` occurrence leaves the inherited real value
+    // in place (nested records stay values); nullopt when no layer authors a real value.
+    [[nodiscard]] std::optional<EffectiveValue> single(std::string_view tag_name) const;
+    // ML-24: the whitespace-trimmed raw text of single(), empty when the tag has no real value.
+    [[nodiscard]] std::string single_text(std::string_view tag_name) const;
 };
 
 struct InventoryFile {

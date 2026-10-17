@@ -86,6 +86,8 @@ void ViewerHost::read_host_options(const PackedStringArray& arguments) {
             options_->skirmish_setup = true;
         } else if (argument == "--eawr-front-end") {
             options_->front_end = true;
+        } else if (argument == "--eawr-allow-unknown-build") {
+            options_->allow_unknown_build = true;
         } else if (argument == "--eawr-setup-test") {
             options_->skirmish_setup_test = true;
         } else if (argument == "--eawr-live-begin") {

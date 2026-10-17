@@ -8,13 +8,19 @@ namespace eawr::presentation::audio {
 // WGP-27 owns the mapping. The services owning movement/economy/corruption
 // decide when these semantic notifications are emitted for the local player.
 enum class GalacticSound {
-    planet_gained, planet_lost, planet_corrupted, enemy_approaching,
+    planet_gained, planet_lost, planet_corrupted, corruption_removed, enemy_approaching,
     planet_revealed, capture_bonus, population_cap, credit_cap, mission_added,
     construction_options, starbase_upgraded, enemy_starbase_upgraded,
     ally_starbase_upgraded, blockade, space_battle_pending, land_battle_pending,
 };
 [[nodiscard]] std::string_view galactic_sound_tag(GalacticSound cue) noexcept;
 [[nodiscard]] bool galactic_sound_uses_audio_table(GalacticSound cue) noexcept;
+// WGP-55/59: an admitted local strategic observation. Caller owns the previous
+// usage baseline and must store current even when the returned request is silent.
+// Current includes queued production; baseline initialization/reset/load is a named seam.
+[[nodiscard]] bool galactic_population_warning(std::uint32_t serviced_player,
+    std::uint32_t local_player, bool strategic, sim::math::Fixed previous,
+    sim::math::Fixed current, sim::math::Fixed capacity) noexcept;
 [[nodiscard]] std::string galactic_sound_event(GalacticSound cue,
     std::span<const Field> faction, std::span<const Field> audio);
 [[nodiscard]] std::optional<GalacticSound> galactic_owner_sound(std::uint32_t local_player,
@@ -29,7 +35,8 @@ struct GalacticPendingAlert {
     const sim::galactic::GalacticEvent&, std::uint32_t local_player,
     std::optional<std::uint32_t> previous_owner,
     std::optional<GalacticPendingAlert> pending, bool new_owner_playable,
-    std::optional<std::uint32_t> construction_options_player = {}) noexcept;
+    std::optional<std::uint32_t> construction_options_player = {},
+    std::optional<sim::galactic::GalacticFeedbackNotice> feedback = {}) noexcept;
 
 // WGEP-96/97, WGP-63: strategic production feedback of one object type. An
 // authored speech event wins; otherwise the type's strategic SFX names the cue.

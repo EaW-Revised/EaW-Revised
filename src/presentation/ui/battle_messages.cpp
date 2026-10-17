@@ -3,6 +3,7 @@
 
 #include <array>
 #include <charconv>
+#include <cstdlib>
 #include <optional>
 
 namespace eawr::presentation::ui {
@@ -88,6 +89,21 @@ BattleMessageLooks battle_message_looks(const data::XmlNode& root) {
         } else {
             fallback(tag, "is not r, g, b, a");
         }
+    }
+    // RP-06: where the retreat countdown line starts, as shares of the screen.
+    const std::array<std::pair<std::string_view, double*>, 2> shares{
+        {{"GUI_Tactical_Countdown_Timers_Screen_X", &looks.countdown_x}, {"GUI_Tactical_Countdown_Timers_Screen_Y", &looks.countdown_y}}};
+    for (const auto& [tag, target] : shares) {
+        const data::XmlNode* node = last_child(root, tag);
+        if (node == nullptr) {
+            fallback(tag, "is absent");
+            continue;
+        }
+        const std::string text(trim(node->raw_text));
+        double value = 0.0;
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (text.empty() || parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || !(value >= 0.0 && value <= 1.0)) fallback(tag, "is not a screen share");
+        else *target = value;
     }
     return looks;
 }

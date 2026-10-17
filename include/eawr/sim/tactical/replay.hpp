@@ -4,6 +4,7 @@
 #include "eawr/sim/match_identity.hpp"
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/sim/tactical/economy.hpp"
+#include "eawr/sim/tactical/object_turn.hpp"
 
 #include <array>
 #include <cstddef>
@@ -25,6 +26,7 @@ inline constexpr std::uint16_t replay_format_version_extensions = 4;
 inline constexpr std::uint16_t replay_format_version_squadron_extensions = 5;
 inline constexpr std::size_t replay_header_size = 104;
 inline constexpr std::size_t replay_policy_header_size = 116;
+inline constexpr std::size_t replay_object_turn_record_size = 64; // #3644 OBJT record, after the last command
 inline constexpr std::uint16_t replay_extension_match_policy = 1;
 inline constexpr std::uint16_t replay_extension_skirmish_setup = 2; // coordinator-reserved SKSU
 inline constexpr std::uint16_t replay_extension_garrison_disabled = 3; // coordinator-reserved GSPN
@@ -39,17 +41,8 @@ inline constexpr std::uint16_t replay_extension_match_identity = 7; // coordinat
 inline constexpr std::uint16_t replay_extension_beacon_rules = 9; // HCB-12f, coordinator-reserved
 inline constexpr std::uint16_t replay_extension_attract_pool = 13; // MAT-15 ATRC, coordinator-reserved
 inline constexpr std::uint16_t replay_extension_native_scene = 15; // optional native campaign content selection
+inline constexpr std::uint16_t replay_extension_object_turn = 16; // #3644: object-turn uses follow the commands
 inline constexpr std::size_t replay_max_bytes = 256U * 1024U * 1024U;
-
-// A fighter squadron (#271, docs/behaviour/space-visibility.md V-03): its team container,
-// a unit of its own that carries the squadron's sensor, and its craft in strictly increasing
-// ID. The container sits at the centre of its live craft's bounding box and leaves the
-// session with its last craft.
-struct Squadron {
-    EntityId container{};
-    std::vector<EntityId> members;
-    friend bool operator==(const Squadron&, const Squadron&) = default;
-};
 
 // Recorded lobby settings are load-time metadata, never part of canonical simulation state.
 struct ReplayMatchOptions final {
@@ -181,6 +174,10 @@ struct TacticalReplay {
     TacticalSetup setup;
     std::uint64_t final_tick_count{};
     std::vector<PlayerCommand> commands;
+    // #3644: every ability use the object-turn provider issued, applied or refused, in strictly increasing
+    // (tick, unit, sequence) order, each tick below final_tick_count. Written as the OBJT header extension followed by the
+    // fixed-size records after the last command; empty keeps every other replay byte.
+    std::vector<ObjectTurnRecord> object_turns{};
     friend bool operator==(const TacticalReplay&, const TacticalReplay&) = default;
 };
 

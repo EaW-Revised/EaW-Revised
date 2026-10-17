@@ -13,6 +13,8 @@
 #include <memory>
 #include <vector>
 
+namespace eawr::script::foc { struct AiJournal; }
+
 namespace eawr::platform {
 class BattleScoring;
 
@@ -23,8 +25,10 @@ struct LiveAi {
 
 // The retail freestore of each non-human lobby player (skirmish::ai_setup), its Lua files read
 // from the mounted FoC view (skirmish::ai_modules).
+// The optional journal observes the same production host; normal callers leave it null.
 [[nodiscard]] core::Result<LiveAi> live_ai(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs,
     const units::UnitTables& tables, const vfs::Vfs& files,
-    std::shared_ptr<const BattleScoring> scoring = {});
+    std::shared_ptr<const BattleScoring> scoring = {},
+    std::shared_ptr<script::foc::AiJournal> journal = {});
 
 } // namespace eawr::platform

@@ -1,5 +1,6 @@
 #include "galactic_save.hpp"
 #include "save_input.hpp"
+#include "options_screen.hpp"
 #include "galactic_mode_internal.hpp"
 #include "ui/kit.hpp"
 #include "ui/battle_overlay.hpp"
@@ -16,6 +17,7 @@
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/text_server.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 #include <chrono>
 #include <algorithm>
@@ -87,6 +89,10 @@ GalacticSaveControls::~GalacticSaveControls() {
     // Async readers retain the old live pointer until they finish; join before its teardown.
     if (listing_.valid()) listing_.wait();
     if (loading_.valid()) loading_.wait();
+    if (options_ != nullptr && UtilityFunctions::is_instance_id_valid(options_id_)) {
+        if (Node* parent = options_->get_parent()) parent->remove_child(options_);
+        memdelete(options_);
+    }
     if (layer_) { layer_->queue_free(); layer_ = nullptr; root_ = nullptr; }
 }
 bool GalacticSaveControls::visible() const noexcept { return root_ && root_->is_visible(); }
@@ -252,7 +258,11 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     state_.fleet_gui_indices = hints.fleet_indices; state_.fleet_layout_dirty = true;
     state_.map_input.selected = hints.selected; state_.selected_planet = hints.selected; state_.selected_hud = {};
     state_.held.clear(); state_.orbiting = false; state_.scrolling = false; state_.pointer_warp.reset();
-    state_.displayed_snapshot.reset(); state_.snapshot_events.clear(); state_.pause_guard = {};
+    state_.displayed_snapshot.reset(); state_.published_snapshot.reset(); state_.snapshot_events.clear(); state_.pause_guard = {};
+    state_.corruption_visuals.reset(); state_.corruption_publication.reset();
+    for (auto& particles : state_.corruption_particles) particles.reset();
+    state_.corruption_lines.reset(); state_.corruption_paths.reset(); state_.corruption_path_quads = 0;
+    state_.corruption_uploaded_quads.clear(); state_.corruption_quads.clear(); state_.corruption_particle_layers.clear();
     state_.economy_hud_snapshot.reset(); state_.hud_facts_snapshot.reset(); state_.hud_command_key.reset(); state_.hud_label_key.reset();
     state_.income_labels_snapshot.reset();
     if (!state_.refresh_game()) { message(state_.failure); return false; }
@@ -330,7 +340,7 @@ void GalacticSaveControls::service() {
         else if (name == "IDC_SAVE_GAME_BUTTON") disabled |= !enabled.save;
         else if (name == "IDC_LOAD_GAME_BUTTON") disabled |= !enabled.load || !has_selection;
         else if (name == "IDC_DELETE_GAME_BUTTON") disabled |= !has_selection;
-        else if (name == "IDC_INGAME_OPTIONS" || name == "IDC_GAME_OPTIONS_QUIT") disabled = true;
+        else if (name == "IDC_INGAME_OPTIONS" || name == "IDC_GAME_OPTIONS_QUIT") disabled |= screen_ != Screen::escape;
         button->set_disabled(disabled);
     }
 }
@@ -346,7 +356,7 @@ std::string GalacticSaveControls::report_json() const {
         << ",\"world_leaks\":" << (world_leaks_ + (visible() && state_.map_input.selected != menu_selection_ ? 1 : 0))
         << ",\"requests_after_fade\":" << requests_after_fade_
         << ",\"quick_load_queued\":" << (queued_quick_load_ ? "true" : "false")
-        << ",\"provider_seams\":[\"save-owner tutorial/movie/letterbox admission\",\"recording repository/admission\",\"GHUD-S44/S47 options/quit\"]"
+        << ",\"provider_seams\":[\"save-owner tutorial/movie/letterbox admission\",\"recording repository/admission\"]"
         << ",\"widget_failure\":" << galactic_detail::json(widget_failure_)
         << ",\"message\":" << galactic_detail::json(text_) << ",\"controls\":[";
     bool first = true;

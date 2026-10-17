@@ -171,11 +171,13 @@ static core::Result<StartingForcePlacement> place_starting_force_once(const Star
     if (behaves(*type, "DUMMY_GROUND_BASE"))
         return refuse<StartingForcePlacement>("CGS-03 direct ground-base dispatch asserts in the debug build");
     if (behaves(*type, "DUMMY_STAR_BASE")) {
-        if (!type->base_level || *type->base_level <= planet->starbase.level || *type->base_level > 5)
-            return refuse<StartingForcePlacement>("missing or nonincreasing authored starbase level");
+        if (!type->base_level || *type->base_level < 1 || *type->base_level > 5)
+            return refuse<StartingForcePlacement>("missing or invalid authored starbase level");
         if (*type->base_level < 2 && std::any_of(production->objects.begin(), production->objects.end(),
             [](const auto& object) { return object.domain == gc::ProductionDomain::space; }))
             return refuse<StartingForcePlacement>("space-structure removal needs its owning lifecycle service");
+        // WGS-180: every admitted record overwrites the base, including equal or
+        // lower levels and a different supplied owner. Authored order wins.
         out.starbase = gc::ControlBase{request.owner, static_cast<std::uint32_t>(*type->base_level)};
         out.starbase_type = request.type;
         return core::Result<StartingForcePlacement>::success(std::move(out));

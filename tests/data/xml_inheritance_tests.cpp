@@ -1,5 +1,6 @@
 #include "data_test_support.hpp"
 
+#include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"
 
 #include <algorithm>
@@ -76,6 +77,45 @@ void inheritance_contracts(const eawr::data::Catalog& catalog, const eawr::core:
                "ignored mode does not add a derived-only tag");
         const auto* empty = effective.value().value("Empty");
         expect(empty && empty->value.raw_text.empty(), "explicit empty derived value overrides the base");
+        // ML-24 (#3631): single() skips blank and TBD occurrences, whichever layer they sit in.
+        const auto select = effective.value().single("SFXEvent_Select");
+        expect(select && select->value.raw_text == "Unit_Select_Base" && select->source_object_id == "BASE"
+                   && select->provenance == eawr::data::ValueProvenance::inherited,
+               "single: a TBD then blank variant value inherits the real base value with its source");
+        const auto empty_single = effective.value().single("Empty");
+        expect(empty_single && empty_single->value.raw_text == "base", "single: a blank variant value inherits the base");
+        expect(!effective.value().single("SFXEvent_Lone") && !effective.value().single("Absent_Tag"),
+               "single: a lone placeholder and an absent tag have no value");
+        const auto own = effective.value().single("ReplaceTag");
+        expect(own && own->value.raw_text == "top", "single: a real variant value wins");
+        {
+            // The trace marks the variant's placeholder element and the inherited real element it falls back to.
+            std::vector<std::uint64_t> select_lines;
+            for (const auto& item : effective.value().values)
+                if (item.value.name == "SFXEvent_Select") select_lines.push_back(item.value.source.line);
+            eawr::data::tag_trace::Recording recording;
+            const auto traced = effective.value().single("SFXEvent_Select");
+            const auto lone = effective.value().single("SFXEvent_Lone");
+            const auto entries = recording.finish();
+            const auto marked = [&](const std::uint64_t line, const std::string_view element) {
+                return std::any_of(entries.begin(), entries.end(), [&](const eawr::data::tag_trace::Entry& entry) {
+                    return entry.kind == eawr::data::tag_trace::Kind::used && entry.element == element && entry.line == line;
+                });
+            };
+            expect(traced && !select_lines.empty() && marked(select_lines.back(), "SFXEvent_Select")
+                       && marked(traced->value.source.line, "SFXEvent_Select") && traced->value.source.line != select_lines.back(),
+                   "single: the trace marks the variant's blank element and the inherited element it reads");
+            expect(!lone && std::any_of(entries.begin(), entries.end(), [](const eawr::data::tag_trace::Entry& entry) {
+                       return entry.element == "SFXEvent_Lone";
+                   }),
+                   "single: a lone placeholder is still marked as read");
+        }
+        // The battle-audio tag() reader is single_text(): trimmed, inherited over blank/TBD, lowercase tbd is a value.
+        expect(effective.value().single_text("SFXEvent_Select") == "Unit_Select_Base"
+                   && effective.value().single_text("SFXEvent_Lone").empty()
+                   && effective.value().single_text("Absent_Tag").empty()
+                   && effective.value().single_text("SFXEvent_Lower") == "tbd",
+               "single_text: placeholders inherit the real base text; a lone placeholder is empty; lowercase tbd stays a value");
         const auto* ignored = effective.value().value("Ignored");
         expect(ignored && ignored->value.raw_text == "base-only", "ignored mode refuses derived writes");
         const auto* nested = effective.value().value("Nested");

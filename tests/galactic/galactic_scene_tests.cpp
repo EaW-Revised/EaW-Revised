@@ -112,9 +112,13 @@ void campaign_art_is_data_driven() {
       <SpaceUnit Name="Modded_Ship"><Text_ID>TEXT_MISSING</Text_ID></SpaceUnit>
       <SpaceUnit Name="Modded_Variant"><Variant_Of_Existing_Type>Crusader_Gunship</Variant_Of_Existing_Type>
       <Icon_Name>i_variant.tga</Icon_Name><GUI_Row>7</GUI_Row></SpaceUnit>
+      <Particle Name="Mod_Base"><In_Midground>Yes</In_Midground></Particle>
+      <Particle Name="Mod_Line"><Variant_Of_Existing_Type>Mod_Base</Variant_Of_Existing_Type>
+      <In_Midground>No</In_Midground><In_Midforeground>Yes</In_Midforeground></Particle>
     </Planets>)XML");
     write(root, "Data/XML/FactionFiles.xml", "<Faction_Files><File>Factions.xml</File></Faction_Files>");
     write(root, "Data/XML/Factions.xml", R"XML(<Factions><Faction Name="Test">
+      <Faction_Leader>Modded_Ship</Faction_Leader>
       <Color>64,128,192,255</Color><Display_Font_Color>32,96,160,255</Display_Font_Color><Icon_Name>icon.tga</Icon_Name>
     </Faction><Faction Name="Neutral"><Color>100,100,100,255</Color></Faction></Factions>)XML");
     write(root, "Data/XML/CampaignFiles.xml", "<Campaign_Files><File>Campaigns.xml</File></Campaign_Files>");
@@ -127,6 +131,14 @@ void campaign_art_is_data_driven() {
     write(root, "Data/XML/TradeRouteFiles.xml", "<Trade_Route_Files/>");
     write(root, "Data/XML/GameConstants.xml", R"XML(<GameConstants>
       <Galactic_Zoom_Out_Light_Angle>999,120,30</Galactic_Zoom_Out_Light_Angle>
+      <Particle_Brightness_Per_Corruption_Level>0.2,1.4,99</Particle_Brightness_Per_Corruption_Level>
+      <Particle_Scale_Per_Corruption_Level>2,4</Particle_Scale_Per_Corruption_Level>
+      <Particle_Energy_Per_Corruption_Level>0,0.8</Particle_Energy_Per_Corruption_Level>
+      <Corruption_Particle_Line_Name>Mod_Line</Corruption_Particle_Line_Name>
+      <Corruption_Line_Radius>17</Corruption_Line_Radius><Corruption_Line_Start_End_Offset>23</Corruption_Line_Start_End_Offset>
+      <Corruption_Line_Grow_Seconds>11</Corruption_Line_Grow_Seconds><Corruption_Path_Width>19</Corruption_Path_Width>
+      <Corruption_Path_Color>37,53,11,0</Corruption_Path_Color><Corruption_Path_Offset>1,2,3</Corruption_Path_Offset>
+      <Fleet_Hyperspace_Band_Texture_Name>mod_band.tga</Fleet_Hyperspace_Band_Texture_Name>
       <Animate_During_Galactic_Mode_Pause>No</Animate_During_Galactic_Mode_Pause></GameConstants>)XML");
     vfs::MountSpec mount;
     mount.layer_id = "test";
@@ -136,6 +148,8 @@ void campaign_art_is_data_driven() {
     assert(filesystem);
     auto catalog = data::load_catalog_strict(filesystem.value(), data::Profile::foc);
     assert(catalog);
+    assert(galactic_particle_layer(catalog.value().catalog, "Mod_Base") == SceneLayer::midground);
+    assert(galactic_particle_layer(catalog.value().catalog, "Mod_Line") == SceneLayer::midforeground);
     production_names_localize_once(catalog.value().catalog);
     auto tables = data::galactic::load_galactic_data(filesystem.value(), catalog.value().catalog);
     assert(tables);
@@ -147,8 +161,21 @@ void campaign_art_is_data_driven() {
     if (!content) std::cerr << core::format_diagnostic(content.error()) << std::endl;
     assert(content);
     const auto& scene = content.value();
+    assert(std::abs(scene.corruption_parameters.brightness[0]-0.2F) < 0.00001F
+        && std::abs(scene.corruption_parameters.brightness[1]-1.4F) < 0.00001F);
+    assert(scene.corruption_parameters.scale[1] == 4 && scene.corruption_parameters.energy[0] == 0);
+    assert(scene.corruption_style.line_particle == "Mod_Line" && scene.corruption_style.radius == 17);
+    assert(scene.corruption_style.endpoint_offset == 23 && scene.corruption_style.grow_seconds == 11);
+    assert(scene.corruption_style.path_width == 19 && scene.corruption_style.path_colour[1] == 53);
+    assert((scene.corruption_style.path_offset == Vec3{1,2,3}));
+    assert(scene.corruption_style.path_texture == "mod_band.tga");
     assert(initial_home(scene, PlayerId{1}) && initial_home(scene, PlayerId{1})->name == "Alpha");
     assert(!initial_home(scene, PlayerId{999}));
+    assert(scene.leader_types.at(1) == "Modded_Ship");
+    const std::map<sim::galactic::TypeId, std::string> type_names{{7, "mOdDeD_sHiP"}, {9, "Other"}};
+    assert(home_leader_type(scene, 1, type_names) == 7);
+    assert(home_leader_type(scene, 999, type_names) == 0);
+    assert(home_leader_type(scene, 1, {}) == 0);
     auto homes = scene;
     homes.home_types.at(1) = "aLpHa";
     assert(initial_home(homes, PlayerId{1}) == &homes.snapshot.planets[1]);

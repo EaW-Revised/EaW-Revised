@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -44,6 +45,11 @@ public:
     [[nodiscard]] bool campaign_briefing(std::string_view event_name);
     // The live battle's command bar, for a campaign parent's controls (HCB-15); null without one.
     [[nodiscard]] TacticalHud* tactical_hud() const noexcept;
+    // RP-05: the campaign parent's retreat press was refused; plays the local faction's not-allowed cue.
+    void retreat_refused(sim::tactical::RetreatRefusal refusal);
+    // RP-06..RP-08: the campaign parent publishes the battle's retreat state each frame; the countdown line
+    // of the retreating player's faction shows on the command bar's overlay.
+    void update_retreat_countdown(const sim::tactical::RetreatState& state, std::uint64_t tick, bool cinematic_playing);
     struct Options final {
         std::filesystem::path game_root;
         std::filesystem::path mod_root;
@@ -149,6 +155,13 @@ public:
     void focus(bool focused);
     void pointer_left();
     void viewport_changed(float width, float height);
+
+    // The in-game menu (MNU-19): Escape and the HUD's options button open it. A parent that has a
+    // menu of its own (the campaign) hands its opener here and the battle builds none.
+    void set_menu_handler(std::function<void()> handler);
+    // Quit Game was confirmed in the battle's own menu: the host closes the battle and shows the
+    // main menu instead of the screen the battle came from. Valid once process() has returned.
+    [[nodiscard]] bool leave_to_menu() const noexcept;
 
     // The demo attract (Options::attract): what the runner and its test read from the battle.
     struct AttractStatus final {

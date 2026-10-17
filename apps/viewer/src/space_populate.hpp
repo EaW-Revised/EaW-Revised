@@ -178,6 +178,9 @@ public:
     [[nodiscard]] double idle_frame_ms() const noexcept { return idle_frame_ms_; }
     [[nodiscard]] double idle_sample_ms() const noexcept { return idle_sample_ms_; }
     [[nodiscard]] double idle_upload_ms() const noexcept { return idle_upload_ms_; }
+    [[nodiscard]] const SkinPoseWork& idle_skin_work() const noexcept { return idle_skin_work_; }
+    [[nodiscard]] std::size_t idle_placement_count() const noexcept { return idle_placements_.size(); }
+    [[nodiscard]] std::size_t idle_surface_count() const noexcept { return animated_instances_.size(); }
     // #81: the clip a live ship with PlacedShip::clip bound at compose; null
     // when it has none or it did not bind (the report says why).
     [[nodiscard]] const animation::Player* live_clip(std::size_t ship, bool alternate = false) const noexcept;
@@ -201,6 +204,10 @@ public:
     // The placed ships that compose drew; the others are listed with a reason
     // in the report.
     [[nodiscard]] bool live_ship_drawn(std::size_t ship) const noexcept;
+    // Whether the unit emitters have anything to do for this slot besides stopping what it runs:
+    // it is drawn and not retired, and is posed this frame or is a death clone (which they step
+    // on its clip). A slot that fails this and runs nothing needs no visit (5000+ pooled slots).
+    [[nodiscard]] bool live_ship_emitter_visit(std::size_t ship) const noexcept;
     // #82: a drawn live ship's pick volume this frame: the box of its composed
     // pieces in its model space (source basis) and the model transform the
     // last pose_live() gave it. Empty when it is not drawn or not posed.
@@ -234,6 +241,9 @@ public:
     // ship is not drawn or retired, or the transform leaves the Q24 range.
     [[nodiscard]] std::optional<sim::math::Mat3x4> live_transform(const LivePose& pose) const;
     [[nodiscard]] std::size_t live_ship_count() const noexcept { return live_decisions_.size(); }
+    // Composed asset references, including unshown reinforcement/death/projectile
+    // slots. Loading consumers may prepare immutable data without posing owners.
+    [[nodiscard]] std::optional<LiveShipEmitterView> live_ship_emitter_assets(std::size_t ship) const;
     [[nodiscard]] std::optional<LiveShipEmitterView> live_ship_emitter_view(std::size_t ship) const;
     struct LiveBoneFrame final { sim::math::Mat3x4 transform; bool visible{}; };
     // PS-02: the same posed bone and model transform as the drawn hull.
@@ -356,6 +366,7 @@ private:
     double idle_frame_ms_{};
     double idle_sample_ms_{};
     double idle_upload_ms_{};
+    SkinPoseWork idle_skin_work_{};
     std::optional<scene::Scene> scene_;
     std::vector<scene::SpacePlacementDecision> decisions_;
     // Every composed piece, and those the hardpoint states show.
@@ -426,6 +437,7 @@ private:
     std::vector<std::optional<std::size_t>> live_decisions_;
     std::vector<std::optional<bool>> live_models_;
     std::vector<bool> live_shown_;
+    std::vector<bool> live_death_clone_;  // per placed ship, PlacedShip::death_clone (fixed at compose)
     // #427: per placed ship, whether the last pose_live() gave it an active DEFEND; the
     // shield shell uploads and, per object id, what became of its shell.
     std::vector<bool> live_defend_;
@@ -443,6 +455,7 @@ private:
     // #82: each live ship's model-space box (min, max) and last pose transform.
     std::vector<std::optional<std::pair<std::array<float, 3>, std::array<float, 3>>>> live_bounds_;
     std::vector<std::optional<sim::math::Mat3x4>> live_transforms_;
+    std::vector<bool> backdrop_ships_;
     std::vector<std::string> live_undrawn_;
     std::vector<std::string> launch_slots_undrawn_;
     std::vector<std::string> projectile_slots_undrawn_;

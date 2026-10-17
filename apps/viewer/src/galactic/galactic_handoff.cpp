@@ -28,7 +28,9 @@ std::uint64_t video_memory() {
 }
 
 GalacticMode::State::~State() {
-    corruption_particles.reset(); // Particle resources precede their scene hosts.
+    for (auto& particles : corruption_particles) particles.reset(); // Resources precede scene hosts.
+    corruption_lines.reset(); corruption_paths.reset();
+    corruption_uploaded_quads.clear(); corruption_quads.clear(); corruption_particle_layers.clear();
     save_controls.reset();
     if (retreat_layer) memdelete(retreat_layer);
     campaign_score.reset();
@@ -541,6 +543,8 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         tactical_instance = tactical_host->get_instance_id();
         tactical = std::make_shared<MapMode>(std::move(map));
         scene_lifetime = tactical;
+        // The battle's options button opens the campaign's menu, the one Escape opens.
+        tactical->set_menu_handler([this] { if (save_controls) save_controls->open_menu(); });
         const auto began = std::chrono::steady_clock::now();
         if (!tactical->ready(*tactical_host)) {
             const auto diagnostic = std::string(tactical->failure());
@@ -809,6 +813,7 @@ bool GalacticMode::State::process_handoff(double delta) {
         tactical_instance = tactical_host->get_instance_id();
         tactical = std::make_shared<MapMode>(std::move(map));
         scene_lifetime = tactical;
+        tactical->set_menu_handler([this] { if (save_controls) save_controls->open_menu(); });
         const auto began = std::chrono::steady_clock::now();
         if (!tactical->ready(*tactical_host)) { failure = "retained-child tactical presentation failed to prepare"; return false; }
         if (audio) audio->tactical();

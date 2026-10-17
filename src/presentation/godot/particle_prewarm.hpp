@@ -2,10 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -53,6 +55,25 @@ private:
     std::set<ParticleWarmPolicy> policies_;
     std::map<std::string,std::uint64_t> textures_;
     std::uint64_t bytes_{};
+};
+
+// Shader-only holds do not consume the texture-bearing emitter allowance.
+class ParticleProgramWarmBudget final {
+public:
+    static constexpr std::size_t max_programs = 32;
+    using Programs = std::set<std::string, std::less<>>;
+    [[nodiscard]] bool contains(const std::string_view program) const { return programs_.contains(program); }
+    [[nodiscard]] bool admits(const std::string_view program) const {
+        return contains(program) || !full();
+    }
+    [[nodiscard]] bool full() const { return programs_.size() >= max_programs; }
+    // Call only after an admitted backend acquisition succeeds.
+    void commit(const std::string& program) { programs_.insert(program); }
+    void clear() { programs_.clear(); }
+    [[nodiscard]] std::size_t size() const { return programs_.size(); }
+    [[nodiscard]] const Programs& programs() const { return programs_; }
+private:
+    Programs programs_;
 };
 
 } // namespace eawr::presentation::godot_backend::detail

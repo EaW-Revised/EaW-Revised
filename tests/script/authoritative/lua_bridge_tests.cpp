@@ -5,6 +5,8 @@
 //   lua_bridge_tests routing | workers
 
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/sim/tactical/abilities.hpp"
+#include "eawr/sim/tactical/replay.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/script/authoritative/tactical_bridge.hpp"
 #include "eawr/script/numeric/q24_boundary.hpp"
@@ -318,6 +320,85 @@ void run_engine_preparation() {
         "a failed preparation stays terminal rather than servicing Lua on retry");
 }
 
+void run_object_turn_routing() {
+    struct Turn final : auth::ScriptEngine, tactical::ObjectTurnService, std::enable_shared_from_this<Turn> {
+        unsigned calls{};
+        Result<std::shared_ptr<tactical::ObjectTurnService>> object_turn_service(
+            const tactical::TacticalSession&, auth::ScriptScheduler&) override {
+            return Result<std::shared_ptr<tactical::ObjectTurnService>>::success(shared_from_this());
+        }
+        bool due(std::uint64_t tick) override { return tick == 1; }
+        Result<std::vector<tactical::ObjectTurnUse>> run(const eawr::sim::PartitionExecutor&, const tactical::ObjectTurnView&) override {
+            ++calls;
+            return Result<std::vector<tactical::ObjectTurnUse>>::success({{1,0,tactical::AbilityKind::invulnerability}});
+        }
+        Result<auth::ServiceOptions> before_service(const tactical::TacticalSession&, const tactical::TacticalTick&, auth::ScriptScheduler&) override {
+            return Result<auth::ServiceOptions>::success({});
+        }
+    };
+    tactical::AbilityProfile ability;
+    ability.kind = tactical::AbilityKind::invulnerability;
+    ability.expiration_frames = 10;
+    tactical::AbilityTable abilities;
+    abilities.profiles = {{100,{ability},false}};
+    auto scripts = make_session({{"Empty.lua",""}});
+    auto world = tactical::TacticalSession::create(battle_setup(), {}, {}, {}, std::nullopt, {}, {}, abilities);
+    expect(world.has_value(), "object-turn bridge fixture creates");
+    if (!world) return;
+    auto session = auth::ScriptedTacticalSession::create(std::move(world).value(), std::move(*scripts.scheduler));
+    auto engine = std::make_shared<Turn>();
+    expect(session && session.value().set_engine(engine), "engine installation installs its turn provider");
+    if (!session) return;
+    const eawr::sim::InlineExecutor executor;
+    std::vector<std::string> hashes;
+    for (unsigned at=0; at<4; ++at) {
+        auto tick = session.value().step(executor);
+        expect(tick.has_value(), "object-turn scripted bridge steps");
+        if (!tick) return;
+        hashes.push_back(tick.value().world.state_sha256);
+    }
+    // The world is atomic but the provider has already serviced Lua. A later
+    // failure must poison both owners instead of offering a second turn.
+    struct FailAfterTurn final : eawr::sim::PartitionExecutor {
+        const Turn& turn;
+        explicit FailAfterTurn(const Turn& value) : turn(value) {}
+        std::size_t worker_count() const noexcept override { return 1; }
+        Result<void> execute(std::size_t count, const std::function<void(std::size_t)>& run) const override {
+            for (std::size_t at=0; at<count; ++at) run(at);
+            return Result<void>::success();
+        }
+        Result<void> execute_phase(std::string_view, std::size_t count, const std::function<void(std::size_t)>& run) const override {
+            if (turn.calls != 0) return Result<void>::failure(translation_error("failure after provider turn"));
+            return execute(count, run);
+        }
+    };
+    auto failing_scripts = make_session({{"Empty.lua",""}});
+    auto failing_world = tactical::TacticalSession::create(battle_setup(), {}, {}, {}, std::nullopt, {}, {}, abilities);
+    auto failing = auth::ScriptedTacticalSession::create(std::move(failing_world).value(), std::move(*failing_scripts.scheduler));
+    auto failing_engine = std::make_shared<Turn>();
+    expect(bool(failing.value().set_engine(failing_engine)) && bool(failing.value().step(executor)), "failed-turn fixture reaches the due frame");
+    const FailAfterTurn refusal(*failing_engine);
+    expect(!failing.value().step(refusal) && failing_engine->calls == 1 && failing.value().completed_tick() == 1,
+        "later phase failure leaves the world barrier unchanged after provider state advanced");
+    expect(!failing.value().step(executor) && !failing.value().save_scripts() && !failing.value().script_state_hash()
+        && failing_engine->calls == 1 && failing.value().record().object_turns.empty(),
+        "failed scripted owner refuses continuation or a save of uncommitted provider state");
+    const auto recording = session.value().record();
+    expect(engine->calls == 1 && recording.object_turns.size() == 1 && recording.commands.empty(),
+        "object-turn-only replay retains a single use without player commands");
+    const auto encoded = tactical::write_replay(recording);
+    auto decoded = encoded ? tactical::parse_replay(encoded.value()) : Result<tactical::TacticalReplay>::failure(translation_error("encode"));
+    expect(decoded.has_value(), "object-turn bridge replay bytes round trip");
+    if (!decoded) return;
+    auto replay = tactical::TacticalSession::from_replay(decoded.value(), {}, {}, {}, std::nullopt, {}, {}, abilities);
+    expect(replay.has_value(), "object-turn bridge replay needs no engine");
+    if (!replay) return;
+    for (const auto& hash : hashes) {
+        auto tick = replay.value().step(executor);
+        expect(tick && tick.value().state_sha256 == hash, "world-only record replay reproduces turn uses at their seam");
+    }
+}
+
 void run_routing() {
     const eawr::sim::InlineExecutor inline_executor;
     const Run run = run_battle(inline_executor);
@@ -492,6 +573,7 @@ int main(int argc, char** argv) {
     const std::string_view mode = argc > 1 ? argv[1] : "";
     if (mode == "routing") {
         run_engine_preparation();
+        run_object_turn_routing();
         run_routing();
         run_malformed();
     } else if (mode == "workers") {

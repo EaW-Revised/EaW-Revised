@@ -160,7 +160,7 @@ struct SkirmishSetupMode::State final {
     // The advanced dialog's Escape: edge detection, and whether the win-condition list was open before.
     bool options_escape_was_down{}, win_list_was_open{};
     std::vector<skirmish::SetupMap> maps;
-    std::vector<skirmish::SetupMap> all_maps;
+    skirmish::SetupMapCache all_maps;
     std::vector<skirmish::LobbyColour> palette;
     bool custom_maps{};
     skirmish::SetupSelection selection;
@@ -307,9 +307,8 @@ bool SkirmishSetupMode::State::load() {
     selection.match = defaults;
     skirmish::SetupMapQuery query;
     query.custom.reset();
-    auto found = skirmish::setup_maps(*filesystem, *catalog, query);
+    auto found = all_maps.load(filesystem, catalog, query);
     if (!found) { failure = found.error().message; return false; }
-    all_maps = std::move(found).value();
     for (const auto& map : all_maps) if (map.metadata.custom == false) maps.push_back(map);
     auto skin = data::ui::load_dialog_catalog(*filesystem);
     if (!skin) { failure = skin.error().message; return false; }
@@ -1016,6 +1015,9 @@ void SkirmishSetupMode::State::process_lan() {
     if (frames == 0 && (lan_host_port || !lan_join_endpoint.empty())) {
         connection->select(1);
         lan = make_lan_match(ViewerPath{utf8(OS::get_singleton()->get_user_data_dir())}.native() / "lan-desync", lan_delay, lan_smoke, lan_trace);
+        lan->set_diagnostic_logger([](std::string_view line) {
+            UtilityFunctions::print(String::utf8(line.data(), static_cast<std::int64_t>(line.size())));
+        });
         lan->configure_factions(scene::faction_order(*catalog));
         if (lan_host_port) lan->host(*lan_host_port); else lan->join(lan_join_endpoint);
         if (lan_smoke && lan_host_port) {
@@ -1052,6 +1054,9 @@ void SkirmishSetupMode::State::process_lan() {
     controller[1]->select(1);
     if (!lan) {
         lan = make_lan_match(ViewerPath{utf8(OS::get_singleton()->get_user_data_dir())}.native() / "lan-desync");
+        lan->set_diagnostic_logger([](std::string_view line) {
+            UtilityFunctions::print(String::utf8(line.data(), static_cast<std::int64_t>(line.size())));
+        });
         lan->configure_factions(scene::faction_order(*catalog));
     }
     if (lan_host->is_pressed()) {
@@ -1285,12 +1290,7 @@ void SkirmishSetupMode::process() {
         return;
     }
     const auto size = state.host->get_viewport()->get_visible_rect().size;
-    const float scale = std::min(size.x / 1280.0F, size.y / 720.0F);
-    state.root->set_position(((size - Vector2(1280, 720) * scale) * 0.5F).round());
-    if (state.root->get_scale() != Vector2(scale, scale)) {
-        state.root->set_scale(Vector2(scale, scale));
-        refresh_text_oversampling(*state.root);
-    }
+    static_cast<void>(fit_letterbox_canvas(*state.root, size, Vector2(1280, 720)));
     state.process_map_kind();
     const auto selected = state.list->get_selected_items();
     if (!selected.is_empty() && selected[0] != state.selected) state.refresh_map(selected[0]);
@@ -1590,7 +1590,7 @@ void SkirmishSetupMode::enter_online(model::NetworkSettings settings) {
     options.online_settings = std::move(settings);
     options.player_name = model::effective_network_name(state.player_profile, state.platform_name);
     options.player_colour = static_cast<std::uint32_t>(std::max(0, state.player_profile.lobby_colour));
-    if (!state.online_screen->build(std::move(options))) {
+    if (!state.online_screen->build(std::move(options), &state.all_maps)) {
         state.notice = "The online lobby could not be opened."; memdelete(state.online_screen); state.online_screen = nullptr; state.online_id = 0;
         state.cancel_requested = true; return;
     }

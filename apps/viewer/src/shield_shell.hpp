@@ -4,6 +4,7 @@
 // ship's SHIELD sub-object drawn with its MeshShield.fx material while its DEFEND ability runs.
 
 #include "eawr/assets/assets.hpp"
+#include "legacy/mesh_shield.hpp"
 #include "eawr/presentation/renderer.hpp"
 
 #include <algorithm>
@@ -79,6 +80,13 @@ inline constexpr std::string_view meshshield_time_binding = "eawr_shield_time";
     });
 }
 
+// Qualified compiled identities share the existing ability visibility gate.
+[[nodiscard]] inline bool shield_program(const std::string_view program) {
+    return shield_name_equal(program, meshshield_program)
+        || shield_name_equal(program, legacy::mesh_shield::family.program)
+        || shield_name_equal(program, legacy::mesh_shield::farseer_family.program);
+}
+
 // The first sub-object named SHIELD, case ignored (BP-17, the debug build), or nullopt.
 [[nodiscard]] inline std::optional<std::uint32_t> shield_mesh_index(const assets::Model& model) {
     for (std::uint32_t index = 0; index < model.meshes.size(); ++index) {
@@ -101,6 +109,23 @@ inline constexpr std::string_view stealth_mesh_name = "stealth";
 // A MeshShield submesh's material: its authored parameters (the three textures by name, bound
 // by the caller) and the clock at 0.
 [[nodiscard]] inline MaterialDescription meshshield_material(const assets::Submesh& submesh, const bool cloak = false) {
+    if (shield_name_equal(submesh.shader, legacy::mesh_shield::farseer_family.program)) {
+        const auto& family = legacy::mesh_shield::farseer_family;
+        MaterialDescription rim{
+            .schema_version = MaterialDescription::current_schema_version,
+            .route = MaterialRoute::legacy_effect,
+            .pass = RenderPass::transparent,
+            .program = std::string(family.program),
+            .technique = std::string(family.technique),
+            .pass_name = std::string(family.pass_name),
+            .bindings = {},
+        };
+        for (const assets::MaterialParameter& parameter : submesh.parameters) {
+            rim.bindings.push_back({parameter.name, parameter.value});
+        }
+        if (cloak) rim.bindings.push_back({"eawr_cloak_tint_enabled", 1.0F});
+        return rim;
+    }
     MaterialDescription material{
         .schema_version = MaterialDescription::current_schema_version,
         .route = MaterialRoute::modern_spatial,

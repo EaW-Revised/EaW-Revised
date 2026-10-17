@@ -3,6 +3,8 @@
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/fleets.hpp"
+#include "eawr/core/gc_profile.hpp"
+#include "../../src/sim/galactic/native_victory_projection.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -39,6 +41,162 @@ gc::GalacticReplay replay() {
 const gc::Fleet* fleet(const gc::GalacticSnapshot& s, const gc::FleetId id) {
     for (const auto& row : s.fleets()) if (row.id == id) return &row;
     return nullptr;
+}
+void native_snapshot_inheritance() {
+    auto created = gc::GalacticSession::create(setup());
+    expect(bool(created), "snapshot adapter fixture constructs"); if (!created) return;
+    auto world = std::move(created).value();
+    const auto base = world.snapshot();
+    expect(!gc::GalacticSnapshot::native_view({}, {}), "native snapshot adapter requires a base publication");
+    const auto empty = gc::GalacticSnapshot::native_view(base, {});
+    expect(empty->canonical_bytes() == base->canonical_bytes() && empty->fleets().data() == base->fleets().data()
+        && empty->players().data() == base->players().data(), "empty native adapter borrows all rows without changing bytes");
+    expect(bool(world.admit_native_fleet(1, gc::SetFleetOrbitSlot{10, 1}, false)), "snapshot adapter source effect commits");
+    gc::NativeSnapshotChanges first;
+    first.fleets.emplace(world.snapshot()->fleets().begin(), world.snapshot()->fleets().end());
+    first.events.emplace(world.snapshot()->events().begin(), world.snapshot()->events().end());
+    const auto layer = gc::GalacticSnapshot::native_view(base, std::move(first));
+    expect(layer->canonical_bytes() == world.snapshot()->canonical_bytes()
+        && layer->routes().data() == base->routes().data() && fleet(*base, 10)->orbit_slot == 0,
+        "native adapter replaces only changed columns and keeps its predecessor immutable");
+    expect(bool(world.admit_native_fleet(1, gc::SetFleetOrbitSlot{10, 2}, false)), "second snapshot source effect commits");
+    gc::NativeSnapshotChanges second;
+    second.fleets.emplace(world.snapshot()->fleets().begin(), world.snapshot()->fleets().end());
+    second.events.emplace(world.snapshot()->events().begin(), world.snapshot()->events().end());
+    const auto stacked = gc::GalacticSnapshot::native_view(layer, std::move(second));
+    expect(stacked->canonical_bytes() == world.snapshot()->canonical_bytes() && fleet(*layer, 10)->orbit_slot == 1
+        && fleet(*stacked, 10)->orbit_slot == 2, "native column adapters compose through immutable predecessors");
+    auto deep = stacked;
+    for (std::size_t generation = 0; generation < 50'000; ++generation) {
+        gc::NativeSnapshotChanges changed;
+        changed.events.emplace(stacked->events().begin(), stacked->events().end());
+        deep = gc::GalacticSnapshot::native_view(std::move(deep), std::move(changed));
+    }
+    expect(deep->canonical_bytes() == stacked->canonical_bytes()
+        && deep->fleets().data() == stacked->fleets().data() && deep->players().data() == base->players().data()
+        && deep->routes().data() == base->routes().data(),
+        "deep native projections retain written columns and borrow unchanged rows directly");
+    deep.reset(); // Releasing a long effect history must not recurse through predecessor snapshots.
+
+}
+void native_victory_projection() {
+    namespace detail = gc::session_detail;
+    gc::VictoryState victory{};
+    gc::VictoryPlayer player{}; player.player = 1; player.leader_company = 8; player.leader_unit_type = 77; player.leader_unit = "SyntheticLeader";
+    victory.context.players.push_back(player);
+    gc::CensusObject actor{}; actor.id = 99; actor.owner = 1; actor.current_type = 77;
+    expect(detail::update_native_victory_actor(victory, actor) && victory.context.leaders.size() == 1,
+        "sparse actor projection recognizes the configured literal leader type");
+    victory.context.leaders.front().killer = 2; victory.context.leaders.front().marked_for_death = true;
+    actor.dead = true;
+    expect(detail::update_native_victory_actor(victory, actor) && victory.context.leaders.front().dead
+        && victory.context.leaders.front().killer == 2 && victory.context.leaders.front().marked_for_death,
+        "sparse leader refresh preserves historical attribution for the same owner and company");
+    auto scheduled = victory.context.leaders.front(); scheduled.scheduled_return = true;
+    victory.context.leaders.push_back(scheduled);
+    actor.current_type = 78;
+    expect(detail::update_native_victory_actor(victory, actor) && victory.context.leaders.size() == 1
+        && victory.context.leaders.front().scheduled_return && !detail::remove_native_victory_actor(victory, actor.id),
+        "current representation changes remove only the active leader projection");
+}
+void native_shadow_layers() {
+    const bool previous_profile = eawr::gc_profile::enabled.exchange(true);
+    struct RestoreProfile {
+        bool previous{};
+        ~RestoreProfile() { eawr::gc_profile::enabled.store(previous); }
+    } restore_profile{previous_profile};
+    std::vector<std::string> reference;
+    auto source = setup();
+    for (std::uint64_t i = 0; i < 100; ++i) source.fleets.push_back({1000 + i, 2, 2, {{2000 + i, 1}}});
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto staged_result = gc::GalacticSession::create(source);
+        auto direct_result = gc::GalacticSession::create(source);
+        expect(staged_result && direct_result, "native layer fixture constructs");
+        if (!staged_result || !direct_result) return;
+        auto staged = std::move(staged_result).value();
+        auto direct = std::move(direct_result).value();
+        const auto initial = staged.snapshot();
+        const auto initial_hash = staged.state_sha256();
+        auto read_only_result = staged.begin_native_actions(1, 8);
+        expect(bool(read_only_result), "read-only fleet layer opens"); if (!read_only_result) return;
+        auto read_only = std::move(read_only_result).value();
+        auto unchanged = read_only.admit_fleet(1, gc::SetFleetOrbitSlot{10, 0}, false);
+        expect(unchanged && unchanged.value().admitted && read_only.snapshot()->fleets().data() == initial->fleets().data(),
+            "unchanged fleet admission borrows the original fleet publication column");
+        auto refused = read_only.admit_fleet(1, gc::SetFleetOrbitSlot{12, 1}, false);
+        expect(refused && !refused.value().admitted && read_only.snapshot()->fleets().data() == initial->fleets().data(),
+            "read-only refusal does not copy the complete fleet publication column");
+        expect(!staged.begin_native_actions(0, 8) && !staged.begin_native_actions(3, 8),
+            "native layers require an actual player identity");
+        auto root_result = staged.begin_native_actions(1, 16);
+        expect(bool(root_result), "first native player layer opens"); if (!root_result) return;
+        auto root = std::move(root_result).value();
+        expect(!root.add_credits(1, {}, {}) && !root.create_force({}, {}, executor),
+            "unenabled producer writes refuse rather than exposing an incomplete player view");
+        const auto apply = [&](gc::GalacticSession::NativeActionShadow& layer, gc::PlayerId player, const gc::CommandPayload& payload) {
+            const auto before = eawr::gc_profile::snapshot();
+            auto prepared = layer.admit_fleet(player, payload, false);
+            const auto after = eawr::gc_profile::snapshot();
+            constexpr auto snapshot_phase = static_cast<std::size_t>(eawr::gc_profile::Phase::make_snapshot);
+            expect(after[snapshot_phase].calls == before[snapshot_phase].calls,
+                "staging native effects never publishes a full world snapshot");
+            auto applied = direct.admit_native_fleet(player, payload, false);
+            expect(prepared && applied && prepared.value().admitted == applied.value().admitted
+                && prepared.value().object == applied.value().object && prepared.value().reason == applied.value().reason,
+                "sparse layer and live fleet admission produce identical receipts");
+            expect(layer.snapshot()->canonical_bytes() == direct.snapshot()->canonical_bytes(),
+                "native snapshot adapter exposes the exact staged rows and event frontier before commit");
+        };
+        apply(root, 1, gc::RemoveFleetMembers{10, {20}});
+        apply(root, 1, gc::AddFleetMembers{11, {20}});
+        const auto first_new = root.next_entity_id();
+        apply(root, 1, gc::CreateFleet{1, {40, 41}, 0});
+        expect(!root.for_player(1, 8) && !root.for_player(3, 8) && !root.for_player(2, 0),
+            "native predecessor forks enforce order, membership and request bounds");
+        auto child_result = root.for_player(2, 16);
+        expect(bool(child_result), "higher player forks from lower player's immutable frontier"); if (!child_result) return;
+        auto child = std::move(child_result).value();
+        expect(child.fleet(11) && child.fleet(11)->members.size() == 2 && child.fleet(first_new)
+            && child.next_entity_id() == root.next_entity_id(), "higher player reads all lower-player writes and identities");
+        apply(child, 2, gc::RemoveFleetMembers{12, {30}});
+        const auto second_new = child.next_entity_id();
+        apply(child, 2, gc::CreateFleet{1, {30}, 2});
+        apply(child, 2, gc::SetFleetOrbitSlot{10, 1}); // unauthorized refusal is retained too
+        expect(!child.fleet(12) && child.fleet(second_new) && root.fleet(12) && !root.fleet(second_new),
+            "higher player's removals and creations do not mutate its predecessor");
+        auto changed_root = root;
+        expect(bool(changed_root.admit_fleet(1, gc::SetFleetOrbitSlot{10, 1}, false)) && root.fleet(10)->orbit_slot == 0,
+            "forked lower-player writes detach without altering the frozen chain");
+        const std::array wrong_chain{changed_root, child};
+        const std::array reversed{child, root};
+        expect(!staged.commit_native_actions(wrong_chain) && !staged.commit_native_actions(reversed)
+            && staged.state_sha256() == initial_hash && staged.snapshot() == initial,
+            "all layer predecessors are checked before any world write");
+        expect(root.work().copied_fleet_rows <= 8 && child.work().copied_fleet_rows <= 8
+            && root.work().copied_scene_objects == 0 && child.work().copied_scene_objects == 0,
+            "native mutable copies stay within the command frontier despite unrelated fleets");
+        const std::array layers{root, child};
+        expect(staged.snapshot() == initial && staged.state_sha256() == initial_hash,
+            "staged admissions leave the completed world and canonical state untouched");
+        expect(bool(staged.commit_native_actions(layers)), "complete player chain commits in ascending player order");
+        expect(staged.canonical_state_bytes() == direct.canonical_state_bytes()
+            && staged.snapshot()->canonical_bytes() == direct.snapshot()->canonical_bytes()
+            && staged.record() == direct.record(), "ordered player commit keeps state, events and native replay bytes identical");
+        const auto committed = staged.state_sha256();
+        expect(!staged.commit_native_actions(layers) && staged.state_sha256() == committed,
+            "a consumed layer chain cannot commit twice");
+        std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 8; ++tick) {
+            auto a = staged.step(executor), b = direct.step(executor);
+            expect(a && b && a.value().state_hash.get() == b.value().state_hash.get(),
+                "staged and live fleet writes continue with identical hashes");
+            if (!a || !b) return;
+            hashes.push_back(a.value().state_hash.get());
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "native player layer continuation is equal at 1/2/4/8 workers");
+    }
 }
 void contracts() {
     const auto r = replay();
@@ -238,5 +396,5 @@ int main(const int argc, const char* const argv[]) {
         out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
         return out && hashes ? 0 : 1;
     }
-    contracts(); adapter(); member_transfer_contracts(); return galactic_test::failures == 0 ? 0 : 1;
+    native_snapshot_inheritance(); native_victory_projection(); native_shadow_layers(); contracts(); adapter(); member_transfer_contracts(); return galactic_test::failures == 0 ? 0 : 1;
 }

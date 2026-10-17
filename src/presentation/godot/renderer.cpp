@@ -124,21 +124,46 @@ GodotRenderer::Impl::~Impl() {
 }
 
 void GodotRenderer::Impl::apply_lighting_params(RenderingServer& rendering, const RID& material) const {
-    if (!lighting_) return;
-    rendering.material_set_param(material, StringName("eawr_sph_r"), godot_matrix(lighting_->sph[0]));
-    rendering.material_set_param(material, StringName("eawr_sph_g"), godot_matrix(lighting_->sph[1]));
-    rendering.material_set_param(material, StringName("eawr_sph_b"), godot_matrix(lighting_->sph[2]));
-    rendering.material_set_param(material, StringName("eawr_sph_fill_r"), godot_matrix(lighting_->sph_fill[0]));
-    rendering.material_set_param(material, StringName("eawr_sph_fill_g"), godot_matrix(lighting_->sph_fill[1]));
-    rendering.material_set_param(material, StringName("eawr_sph_fill_b"), godot_matrix(lighting_->sph_fill[2]));
-    rendering.material_set_param(material, StringName("eawr_light_diffuse"),
-        Vector3(lighting_->sun_diffuse[0], lighting_->sun_diffuse[1], lighting_->sun_diffuse[2]));
-    rendering.material_set_param(material, StringName("eawr_light_direction"),
-        Vector3(lighting_->toward_light[0], lighting_->toward_light[1], lighting_->toward_light[2]));
-    rendering.material_set_param(material, StringName("eawr_light_specular"),
-        Vector3(lighting_->specular[0], lighting_->specular[1], lighting_->specular[2]));
-    rendering.material_set_param(material, StringName("eawr_shadow_floor"),
-        Vector3(lighting_->shadow_floor[0], lighting_->shadow_floor[1], lighting_->shadow_floor[2]));
+    if (lighting_) {
+        rendering.material_set_param(material, StringName("eawr_sph_r"), godot_matrix(lighting_->sph[0]));
+        rendering.material_set_param(material, StringName("eawr_sph_g"), godot_matrix(lighting_->sph[1]));
+        rendering.material_set_param(material, StringName("eawr_sph_b"), godot_matrix(lighting_->sph[2]));
+        rendering.material_set_param(material, StringName("eawr_sph_fill_r"), godot_matrix(lighting_->sph_fill[0]));
+        rendering.material_set_param(material, StringName("eawr_sph_fill_g"), godot_matrix(lighting_->sph_fill[1]));
+        rendering.material_set_param(material, StringName("eawr_sph_fill_b"), godot_matrix(lighting_->sph_fill[2]));
+        rendering.material_set_param(material, StringName("eawr_light_ambient"),
+            Vector3(lighting_->ambient[0], lighting_->ambient[1], lighting_->ambient[2]));
+        rendering.material_set_param(material, StringName("eawr_light_diffuse"),
+            Vector3(lighting_->sun_diffuse[0], lighting_->sun_diffuse[1], lighting_->sun_diffuse[2]));
+        rendering.material_set_param(material, StringName("eawr_light_direction"),
+            Vector3(lighting_->toward_light[0], lighting_->toward_light[1], lighting_->toward_light[2]));
+        rendering.material_set_param(material, StringName("eawr_light_specular"),
+            Vector3(lighting_->specular[0], lighting_->specular[1], lighting_->specular[2]));
+        rendering.material_set_param(material, StringName("eawr_shadow_floor"),
+            Vector3(lighting_->shadow_floor[0], lighting_->shadow_floor[1], lighting_->shadow_floor[2]));
+    }
+    apply_ambient_params(rendering, material);
+}
+
+
+void GodotRenderer::Impl::apply_ambient_params(RenderingServer& rendering, const RID& material) const {
+    if (ambient_) rendering.material_set_param(material, StringName("eawr_light_ambient"),
+        Vector3((*ambient_)[0], (*ambient_)[1], (*ambient_)[2]));
+}
+
+void GodotRenderer::Impl::set_ambient_light(const std::array<float, 3>& rgb) {
+    if (!std::all_of(rgb.begin(), rgb.end(), [](const float value) { return std::isfinite(value); })) return;
+    RenderingServer* rendering = RenderingServer::get_singleton();
+    if (!rendering || ambient_ == rgb) return;
+    ambient_ = rgb;
+    for (const auto& [asset, resource] : resources_) {
+        static_cast<void>(asset);
+        if (resource.material.is_valid()) apply_ambient_params(*rendering, resource.material);
+    }
+    for (const auto& [asset, consumer] : fog_consumers_) {
+        static_cast<void>(asset);
+        if (consumer.material.is_valid()) apply_ambient_params(*rendering, consumer.material);
+    }
 }
 
 void GodotRenderer::Impl::apply_wind_params(
@@ -438,6 +463,14 @@ core::Result<void> GodotRenderer::release(const sim::AssetId asset_id) {
 
 std::vector<ResourceReference> GodotRenderer::resources() const { return impl_->resources(); }
 
+void GodotRenderer::begin_skin_batch(const bool enabled) {
+    impl_->begin_skin_batch(enabled);
+}
+
+SkinPoseWork GodotRenderer::end_skin_batch() {
+    return impl_->end_skin_batch();
+}
+
 core::Result<void> GodotRenderer::set_skin_pose(
     const sim::EntityId entity_id,
     const sim::AssetId asset_id,
@@ -517,6 +550,7 @@ void GodotRenderer::set_instance_visible(const sim::EntityId entity, const bool 
 void GodotRenderer::set_camera(const FixedCamera& camera) { impl_->set_camera(camera); }
 
 void GodotRenderer::set_lighting(const LightingState& lighting) { impl_->set_lighting(lighting); }
+void GodotRenderer::set_ambient_light(const std::array<float, 3>& rgb) { impl_->set_ambient_light(rgb); }
 const std::optional<GodotRenderer::LightingState>& GodotRenderer::lighting() const noexcept {
     return impl_->lighting();
 }

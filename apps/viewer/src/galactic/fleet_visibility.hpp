@@ -26,6 +26,8 @@ struct FleetMapVisibility {
     std::span<const sim::galactic::FleetDisplayVisibility> planets;
     std::span<const TransitVisibility> transit;
     bool view_everything{};
+    // #3931 reveal: orbiting fleets show with their counts even when stealthed or unknown to the observer.
+    bool reveal_orbit{};
 };
 
 } // namespace eawr::viewer::galactic

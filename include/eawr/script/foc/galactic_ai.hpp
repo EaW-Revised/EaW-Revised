@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdlib>
+
 // WGA-01..05, GFD-A01..08: the retained manager consumes copied campaign
 // inputs; queries never advance it. Action admission and world progress have
 // separate boundaries. Missing capabilities fail explicitly.
@@ -224,6 +226,34 @@ public:
     [[nodiscard]] virtual core::Result<std::string> state_hash() const = 0;
     // Cheap per-tick composition. Unqualified contributors retain the full path.
     [[nodiscard]] virtual core::Result<std::string> sync_hash() const { return state_hash(); }
+    // Empty opts an external contributor into canonical payload fingerprinting.
+    // Native owners maintain record sums at their write boundaries. The cold
+    // option reconstructs those sums independently for the per-tick oracle.
+    [[nodiscard]] virtual core::Result<std::string> record_sync_hash(bool cold = false) const {
+        static_cast<void>(cold); return core::Result<std::string>::success({});
+    }
+    // A conservative canonical payload size. Crossing the estimate triggers
+    // exact capture validation; it never narrows the archive's accepted limit.
+    [[nodiscard]] virtual std::size_t record_byte_upper_bound() const noexcept { return 0; }
+    [[nodiscard]] core::Result<void> verify_record_sync_hash() const {
+        bool verify{};
+#ifndef NDEBUG
+        verify = true;
+#elif defined(_MSC_VER)
+        char* option{}; std::size_t length{};
+        if (_dupenv_s(&option, &length, "EAWR_VERIFY_GALACTIC_HASH") == 0 && option) verify = std::string_view(option) == "1";
+        std::free(option);
+#else
+        const auto* option = std::getenv("EAWR_VERIFY_GALACTIC_HASH"); verify = option && std::string_view(option) == "1";
+#endif
+        if (!verify) return core::Result<void>::success();
+        auto warm = record_sync_hash(); if (!warm) return core::Result<void>::failure(warm.error());
+        if (warm.value().empty()) return core::Result<void>::success();
+        auto cold = record_sync_hash(true); if (!cold) return core::Result<void>::failure(cold.error());
+        if (warm.value() == cold.value()) return core::Result<void>::success();
+        core::Diagnostic error; error.code = "EAWR-GCAI-STATE-0001"; error.message = "native record sum differs from independent cold reconstruction";
+        return core::Result<void>::failure(std::move(error));
+    }
     // Absent means external/untracked writes: the compositor must recapture.
     // Epochs are process-local work metadata, excluded from saves and hashes.
     [[nodiscard]] virtual std::optional<std::uint64_t> state_revision() const noexcept { return {}; }
@@ -316,6 +346,12 @@ struct LifecycleState {
     ServicePeriods service_periods{retail_service_periods};
     bool operator==(const LifecycleState&) const = default;
 };
+// Process-local work counters for the immutable per-player policy snapshots that
+// service inputs share. Never saved or hashed.
+struct PolicySnapshotStats {
+    std::uint64_t builds{}, reuses{};
+    bool operator==(const PolicySnapshotStats&) const = default;
+};
 struct ServiceTrace {
     gc::PlayerId player{};
     Service service{};
@@ -343,9 +379,13 @@ public:
     [[nodiscard]] core::Result<void> restore_lifecycle(const LifecycleState&);
     [[nodiscard]] core::Result<std::string> lifecycle_hash() const;
     [[nodiscard]] core::Result<NativeState> capture() const override;
+    [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override;
     [[nodiscard]] core::Result<void> restore(const NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
     [[nodiscard]] const std::vector<ServiceTrace>& trace() const noexcept;
+    [[nodiscard]] std::uint64_t trace_dropped() const noexcept;
+    [[nodiscard]] PolicySnapshotStats policy_snapshot_stats() const noexcept;
     [[nodiscard]] std::string_view freestore(gc::PlayerId) const noexcept;
     [[nodiscard]] std::vector<std::pair<std::string, std::string>> goal_functions(gc::PlayerId) const;
     [[nodiscard]] bool goal_enabled(gc::PlayerId, std::string_view category, std::string_view type) const;

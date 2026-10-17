@@ -126,7 +126,7 @@ class CampaignFromMenuGpu(unittest.TestCase):
     def test_native_ai_switch_from_the_menu(self):
         # Exercise real menu selection and Start, without the all-AI capture override.
         output = pathlib.Path(tempfile.mkdtemp(prefix="front-end-native-ai-")).resolve()
-        for flag, installed in ((None, False), ("off", False), ("on", True)):
+        for flag, installed in ((None, True), ("off", False), ("on", True)):
             with self.subTest(flag=flag):
                 label = flag or "default"
                 report = output / (label + ".json")
@@ -142,10 +142,34 @@ class CampaignFromMenuGpu(unittest.TestCase):
                 self.assertEqual(data["mode"], "galactic")
                 self.assertEqual(data["failure"], "")
                 self.assertIs(data["live_session"]["native_ai_installed_at_start"], installed)
+                self.assertEqual(bool(data["native_ai_players"]), installed)
+                self.assertEqual("ai_activity" in data, installed)
+                for row in data["native_ai_players"]:
+                    self.assertTrue(row["faction"] and row["player_type"])
                 if installed:
                     self.assertRegex(result.stdout, r"EAWR galactic: native AI on for [1-9][0-9]* AI players \(.+\)")
                 else:
                     self.assertIn("EAWR galactic: native AI off", result.stdout)
+
+    def test_galactic_reveal_switch_from_the_menu(self):
+        # #3931: the draw-only fog reveal reaches a campaign started from the menu.
+        output = pathlib.Path(tempfile.mkdtemp(prefix="front-end-galactic-reveal-")).resolve()
+        for flag, revealed in ((None, False), ("off", False), ("on", True)):
+            with self.subTest(flag=flag):
+                label = flag or "default"
+                report = output / (label + ".json")
+                extra = ("--eawr-front-end-test-campaign", "start", "--eawr-attract", "off",
+                         "--eawr-audio", "off", "--eawr-galactic-paused", "yes",
+                         "--eawr-report", str(report), "--eawr-save-dir", str(output / label / "saves"))
+                if flag is not None:
+                    extra += ("--eawr-galactic-reveal", flag)
+                result, _ = front.run_front_end(output, label, extra)
+                self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+                self.assertIsNotNone(STARTED.search(result.stdout), result.stdout[-6000:])
+                data = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(data["mode"], "galactic")
+                self.assertEqual(data["failure"], "")
+                self.assertIs(data["live_session"]["galactic_reveal"], revealed)
 
 
 @unittest.skipUnless(RUNTIME and GAME_ROOT, "requires the viewer GPU lane and installed game data")

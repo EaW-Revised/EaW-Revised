@@ -2,6 +2,7 @@
 
 #include "encoding.hpp"
 #include "session_impl.hpp"
+#include "native_victory_projection.hpp"
 #include "../replay_internal.hpp"
 
 #include <algorithm>
@@ -425,40 +426,12 @@ core::Result<void> GalacticSession::restore_victory_state(const VictoryState& sa
 }
 
 void GalacticSession::Impl::update_victory_actor(const CensusObject& actor) {
-    if (!victory) return;
-    auto& rows = victory->context.leaders;
-    auto existing = std::find_if(rows.begin(), rows.end(), [&](const auto& row) {
-        return !row.scheduled_return && row.object == actor.id;
-    });
-    const auto* owner = player(victory->context, actor.owner);
-    const bool matches_leader = owner && owner->leader_company && owner->leader_unit_type
-        && !owner->leader_unit.empty() && actor.current_type == owner->leader_unit_type;
-    if (!matches_leader) {
-        if (existing != rows.end()) { rows.erase(existing); dirty[16] = true; }
-        return;
-    }
-    VictoryLeader current{actor.owner, owner->leader_company, owner->leader_unit,
-        false, actor.dead, false, actor.delete_pending, 0, actor.id};
-    if (existing != rows.end()) {
-        if (existing->owner == current.owner && existing->company == current.company) {
-            current.killer = existing->killer;
-            current.marked_for_death = existing->marked_for_death;
-        }
-        if (*existing != current) { *existing = std::move(current); dirty[16] = true; }
-    } else {
-        // Active census order is ascending persistent identity. Only sparse
-        // births/current-type changes touch this projection, never a frame scan.
-        const auto position = std::find_if(rows.begin(), rows.end(), [&](const auto& row) {
-            return !row.scheduled_return && row.object > actor.id;
-        });
-        rows.insert(position, std::move(current)); dirty[16] = true;
-    }
+    if (victory && session_detail::update_native_victory_actor(*victory, actor)) dirty[16] = true;
 }
 void GalacticSession::Impl::remove_victory_actor(EntityId object) {
-    if (!victory) return;
-    auto& rows = victory->context.leaders;
-    if (std::erase_if(rows, [&](const auto& row) { return !row.scheduled_return && row.object == object; })) dirty[16] = true;
+    if (victory && session_detail::remove_native_victory_actor(*victory, object)) dirty[16] = true;
 }
+
 void GalacticSession::sync_victory_hero_returns(std::span<const HeroReturnRecord> records) {
     auto& impl = *impl_;
     if (!impl.victory) return;

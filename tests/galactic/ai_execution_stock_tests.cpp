@@ -23,10 +23,12 @@ struct EngineContractAccess {
         PlayerAi owner; owner.player = player; engine.players_.push_back(std::move(owner));
         Plan plan; plan.id = plan.goal = 7; plan.instance = instance; plan.player = player;
         plan.definition = 0; plan.taskforces = {1}; plan.target_object = planet;
-        engine.running_.emplace(plan.id, plan); engine.plan_of_instance_[instance] = plan.id;
+        engine.players_.back().running.emplace(plan.id, plan); engine.players_.back().plan_of_instance[instance] = plan.id;
         TaskForce force; force.id = 1; force.plan = plan.id; force.name = "MainForce"; force.types = {type};
-        engine.taskforces_.emplace(force.id, std::move(force));
+        engine.players_.back().taskforces.emplace(force.id, std::move(force));
         Target target; target.id = 1; target.object = planet; engine.targets_.emplace(target.id, std::move(target));
+
+        engine.rebuild_runtime_index();
     }
     static void complete_native(Engine& engine) { engine.service_execution(engine.players_.front()); }
 };

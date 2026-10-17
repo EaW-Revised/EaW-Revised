@@ -5,7 +5,6 @@
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/economy.hpp"
-#include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/sim/tactical/retreat.hpp"
 #include "eawr/sim/tactical/victory.hpp"

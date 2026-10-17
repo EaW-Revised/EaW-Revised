@@ -3,7 +3,9 @@
 // retail faces are never committed. tests/ui/test_extract_eaw_fonts.py covers
 // the extraction tool and the real executable.
 
+#include "eawr/core/sha256.hpp"
 #include "eawr/data/ui/sfnt.hpp"
+#include "eawr/presentation/ui/font_extract.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
 
 #include "eawr/vfs/vfs.hpp"
@@ -12,6 +14,10 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
@@ -409,6 +415,156 @@ void command_label_cell_contracts() {
     expect(fonts::gdi_text_cell(empty, engine, 11).ascent == 0, "a face outside the cache has no GDI cell");
 }
 
+// #3963: native extraction from a synthetic "executable" that embeds four synthetic faces.
+std::string as_text(const Bytes& bytes) {
+    return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+std::string sha_of(const std::string& text) {
+    return core::sha256_hex(
+        std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+}
+
+std::string synthetic_executable(const std::vector<std::string>& names, const bool damage_first = false) {
+    std::string exe(0x80U, '\0');
+    exe[0] = 'M';
+    exe[1] = 'Z';
+    exe[0x3C] = 0x40;
+    exe.replace(0x40U, 4U, std::string("PE\0\0", 4U));
+    for (const std::string& name : names) {
+        exe += std::string(13U, '\x7f'); // unaligned filler, as in a real image
+        Bytes font = face(name);
+        if (damage_first && name == names.front()) font[table_offset(font, "glyf") + 1U] ^= std::byte{0x10};
+        exe += as_text(font);
+    }
+    exe += std::string(64U, '\0');
+    return exe;
+}
+
+void write_text(const std::filesystem::path& path, const std::string& text) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream(path, std::ios::binary).write(text.data(), static_cast<std::streamsize>(text.size()));
+}
+
+std::string read_text(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+}
+
+void extraction_contracts() {
+    namespace fs = std::filesystem;
+    const std::vector<std::string> names(fonts::embedded_faces.begin(), fonts::embedded_faces.end());
+    const fs::path root = fs::temp_directory_path() / ("eawr-font-extract-" + std::to_string(std::rand()));
+    fs::remove_all(root);
+    const fs::path game = root / "Game";
+    const fs::path cache = root / "user" / "fonts";
+    const std::string exe = synthetic_executable(names);
+    write_text(game / "Corruption" / "STARWARSG.EXE", exe);
+
+    expect(!fonts::locate_foc_executable(game).empty(), "the executable is found whatever the folder's case");
+    expect(!fonts::locate_foc_executable(game / "Corruption").empty(),
+           "a corruption folder is also accepted");
+    expect(fonts::locate_foc_executable(root / "nowhere").empty(), "a missing install has no executable");
+
+    // An unpinned build is refused with a readable message that names the opt-in.
+    const auto refused = fonts::ensure_font_cache(game, cache, false);
+    expect(refused.status == fonts::FontExtractStatus::failed
+               && refused.failure == fonts::FontExtractFailure::unknown_build,
+           "an unverified build is refused");
+    expect(refused.message.find("--eawr-allow-unknown-build") != std::string::npos
+               && refused.message.find(sha_of(exe)) != std::string::npos,
+           "the refusal names the build and the opt-in");
+    expect(!fs::exists(cache), "a refused build writes nothing");
+
+    // A synthetic policy that knows this build and its faces.
+    const std::string digest = sha_of(exe);
+    std::vector<std::string> face_hashes;
+    for (const std::string& name : names) face_hashes.push_back(sha_of(as_text(face(name))));
+    const std::vector<fonts::KnownFontBuild> builds{{digest, "synthetic build"}};
+    std::vector<fonts::PinnedFontFace> pins;
+    for (std::size_t index = 0; index < names.size(); ++index) {
+        pins.push_back({fonts::embedded_faces[index], face(names[index]).size(), face_hashes[index]});
+    }
+    const fonts::FontExtractPolicy policy{builds, pins};
+
+    const auto first = fonts::ensure_font_cache(game, cache, false, policy);
+    expect(first.status == fonts::FontExtractStatus::extracted && first.build == "synthetic build"
+               && first.executable_sha256 == digest && first.warnings.empty(),
+           "a pinned build extracts");
+    for (const std::string& name : names) {
+        expect(read_text(cache / (name + ".ttf")) == as_text(face(name)),
+               "an extracted face is byte-identical to the embedded one");
+    }
+    const std::string manifest = read_text(cache / "fonts.json");
+    expect(manifest.find("eawr-font-cache/1") != std::string::npos && manifest.find(digest) != std::string::npos
+               && manifest.find("\"pinned\": true") != std::string::npos,
+           "the manifest records the schema, the source digest and the pins");
+
+    // A valid cache for this executable is reused; a damaged face is replaced.
+    expect(fonts::ensure_font_cache(game, cache, false, policy).status == fonts::FontExtractStatus::cached,
+           "valid fonts already in the cache are not extracted again");
+    write_text(cache / "EmpireAtWar-Light.ttf", "not a font");
+    expect(fonts::ensure_font_cache(game, cache, false, policy).status == fonts::FontExtractStatus::extracted
+               && read_text(cache / "EmpireAtWar-Light.ttf") == as_text(face("EmpireAtWar-Light")),
+           "a damaged cache is rebuilt from the executable");
+    fs::remove(cache / "fonts.json");
+    expect(fonts::ensure_font_cache(game, cache, false, policy).status == fonts::FontExtractStatus::extracted,
+           "a cache without its manifest is not trusted");
+
+    // A changed executable is no longer the pinned build; the opt-in still extracts from it.
+    write_text(game / "corruption" / "STARWARSG.EXE", exe + "tail");
+    expect(fonts::ensure_font_cache(game, cache, false, policy).failure == fonts::FontExtractFailure::unknown_build,
+           "a changed executable is not the pinned build");
+    const auto opted = fonts::ensure_font_cache(game, cache, true, policy);
+    expect(opted.status == fonts::FontExtractStatus::extracted && !opted.warnings.empty(),
+           "the opt-in extracts from an unverified build with a warning");
+
+    // An unpinned build's cache is reused only while each face still matches the digest the manifest recorded:
+    // a different but valid face of the right name is replaced, not taken.
+    expect(fonts::ensure_font_cache(game, cache, true, policy).status == fonts::FontExtractStatus::cached,
+           "valid fonts for an opted-in unknown build are reused");
+    Tables altered = face_tables("EmpireAtWar-Light");
+    altered["glyf"] = Bytes(16U, std::byte{0x5A});
+    const std::string swapped = as_text(assemble(altered));
+    expect(swapped != as_text(face("EmpireAtWar-Light")), "the swapped face differs");
+    write_text(cache / "EmpireAtWar-Light.ttf", swapped);
+    expect(fonts::ensure_font_cache(game, cache, true, policy).status == fonts::FontExtractStatus::extracted
+               && read_text(cache / "EmpireAtWar-Light.ttf") == as_text(face("EmpireAtWar-Light")),
+           "a valid face that differs from the recorded digest is re-extracted");
+
+    // Faces that are missing, damaged or not an executable fail with a message and write nothing.
+    const fs::path other_game = root / "Other";
+    const fs::path other_cache = root / "other-cache";
+    std::vector<std::string> three = names;
+    three.pop_back();
+    write_text(other_game / "corruption" / "StarWarsG.exe", synthetic_executable(three));
+    const auto missing = fonts::ensure_font_cache(other_game, other_cache, true);
+    expect(missing.failure == fonts::FontExtractFailure::faces
+               && missing.message.find("missing faces: EmpireAtWar-Stencil") != std::string::npos,
+           "a missing face is reported by name");
+    write_text(other_game / "corruption" / "StarWarsG.exe", synthetic_executable(names, true));
+    const auto damaged = fonts::ensure_font_cache(other_game, other_cache, true);
+    expect(damaged.failure == fonts::FontExtractFailure::faces
+               && damaged.message.find("failed validation") != std::string::npos,
+           "a face failing its checksums is rejected and counted");
+    write_text(other_game / "corruption" / "StarWarsG.exe", "MZ not a pe");
+    expect(fonts::ensure_font_cache(other_game, other_cache, true).failure == fonts::FontExtractFailure::unreadable,
+           "a file that is not a Windows executable is refused");
+    expect(!fs::exists(other_cache), "failures leave no cache directory behind");
+
+    // A face that differs from a pinned build's pins is an error.
+    std::vector<fonts::PinnedFontFace> wrong = pins;
+    wrong[0].sha256 = "00";
+    const fonts::FontExtractPolicy wrong_policy{builds, wrong};
+    write_text(game / "corruption" / "STARWARSG.EXE", exe);
+    fs::remove_all(cache);
+    const auto mismatch = fonts::ensure_font_cache(game, cache, false, wrong_policy);
+    expect(mismatch.failure == fonts::FontExtractFailure::faces
+               && mismatch.message.find("differs from the pinned face") != std::string::npos,
+           "a pinned build must reproduce its pinned faces");
+    fs::remove_all(root);
+}
+
 } // namespace
 
 void font_contracts() {
@@ -417,4 +573,5 @@ void font_contracts() {
     system_face_contracts();
     fallback_contracts();
     command_label_cell_contracts();
+    extraction_contracts();
 }

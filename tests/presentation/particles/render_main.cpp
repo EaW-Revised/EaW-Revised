@@ -19,6 +19,8 @@ int main() {
     test_particle_detail_batch();
     test_release_and_replacement_lifecycle();
     test_effect_brightness();
+    test_corruption_registry_settings();
+    test_corruption_actual_reservation_budget();
     test_emitter_glow_follows_turning_pose();
     test_present_allocates_nothing();
     test_camera_and_attachment_frames();

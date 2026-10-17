@@ -110,9 +110,10 @@ void EawrGroundInput::_notification(int what) {
 bool GalacticMode::State::open_object_sale(sim::EntityId object, Vector2 point) {
     ground_hud.sale_object = 0;
     if (ground_hud.sale) ground_hud.sale->hide();
-    if (!object || !selectable(*this) || !displayed_snapshot || !galaxy || !ground_hud.sale
-        || !displayed_snapshot->production()) return false;
-    const auto& snapshot = *displayed_snapshot;
+    // The sale gates a command, so it reads the truth publication, never the reveal view.
+    if (!object || !selectable(*this) || !published_snapshot || !galaxy || !ground_hud.sale
+        || !published_snapshot->production()) return false;
+    const auto& snapshot = *published_snapshot;
     const auto sale = sim::galactic::object_sale(*snapshot.production(), snapshot.sale_types(), snapshot.actor_records(),
         snapshot.fleets(), snapshot.control(), snapshot.movement(), galaxy->local.player, selected_planet, object);
     if (sale.admission != sim::galactic::ProductionAdmission::allowed
@@ -260,8 +261,8 @@ bool GalacticMode::State::build_ground_hud() {
                 sim::galactic::SellObject{selected_planet, ground_hud.sale_object}, {}});
             if (audio) {
                 audio->ui_sound("GUI_Structure_Sold");
-                if (displayed_snapshot) {
-                    const auto type = displayed_snapshot->current_type(ground_hud.sale_object);
+                if (published_snapshot) {
+                    const auto type = published_snapshot->current_type(ground_hud.sale_object);
                     const auto name = type ? production_names.find(type.value()) : production_names.end();
                     const auto art = name == production_names.end() ? production_art.end() : production_art.find(name->second);
                     if (art != production_art.end() && !art->second.sold_sound.empty()) audio->ui_sound(art->second.sold_sound);
@@ -391,13 +392,20 @@ void GalacticMode::State::ground_pointer(int kind, Vector2 point, bool control, 
     }
 }
 
+// #3931: launch and land gating reads the truth roster; with the reveal off the draw roster is the truth roster.
+const galactic_view::GroundRoster* GalacticMode::State::command_roster(galactic_view::ObjectId planet) const {
+    const auto& source = ground_hud.command_rosters.empty() ? ground_hud.rosters : ground_hud.command_rosters;
+    const auto found = source.find(planet);
+    return found == source.end() ? nullptr : &found->second;
+}
+
 bool GalacticMode::State::request_ground_land(bool submit, galactic_view::ObjectId id) {
     if (!id) id = selected_fleet;
-    if (!selectable(*this) || !game || !galaxy || !displayed_snapshot || !id
-        || displayed_snapshot->clock().pause_depth || !selected_planet) return false;
-    const auto found = ground_hud.rosters.find(selected_planet);
-    if (found == ground_hud.rosters.end() || !found->second.accessible) return false;
-    const auto fleets = displayed_snapshot->fleets();
+    if (!selectable(*this) || !game || !galaxy || !published_snapshot || !id
+        || published_snapshot->clock().pause_depth || !selected_planet) return false;
+    const auto* found = command_roster(selected_planet);
+    if (!found || !found->accessible) return false;
+    const auto fleets = published_snapshot->fleets();
     const auto fleet = std::find_if(fleets.begin(), fleets.end(), [this,id](const auto& row) {
         return row.id == id && row.owner == galaxy->local.player && row.orbit == selected_planet && !row.motion.transit;
     });
@@ -418,10 +426,10 @@ bool GalacticMode::State::request_ground_land(bool submit, galactic_view::Object
 // press already crossed. A release elsewhere keeps the ordinary rectangle selection.
 bool GalacticMode::State::ground_launch_drop(Vector2 point) {
     if (!ground_hud.pressed || !ground_hud.pressed_object || !map_input.box_end || !selectable(*this) || !game || !galaxy
-        || !displayed_snapshot || !fleet_organize || !fleet_organize->is_visible_in_tree() || !selected_planet
-        || displayed_snapshot->clock().pause_depth) return false;
-    const auto roster = ground_hud.rosters.find(selected_planet);
-    if (roster == ground_hud.rosters.end() || !roster->second.accessible || !roster->second.allied) return false;
+        || !published_snapshot || !fleet_organize || !fleet_organize->is_visible_in_tree() || !selected_planet
+        || published_snapshot->clock().pause_depth) return false;
+    const auto* roster = command_roster(selected_planet);
+    if (!roster || !roster->accessible || !roster->allied) return false;
     for (const auto& [name, button] : ground_hud.buttons)
         if (name.starts_with("Pad_") && button->is_visible_in_tree() && button->get_global_rect().has_point(point)) return false;
     galactic_view::ObjectId target{};
@@ -430,18 +438,33 @@ bool GalacticMode::State::ground_launch_drop(Vector2 point) {
     for (std::size_t index = 0; index < fleet_drop_rects.size() && !over_target; ++index) {
         if (!fleet_drop_rects[index].has_point(point)) continue;
         over_target = true;
-        const auto* card = shown_fleet_cards[index];
-        if (!card || !card->fleet) { slot = static_cast<std::uint8_t>(index); continue; }
-        const auto fleets = displayed_snapshot->fleets();
+        const auto* card = shown_panel_cards[index];
+        if (!fleet_panels.drop_slot[index]) return false; // WGUI-175: the other owner's panel takes no drop.
+        if (!card || !card->fleet) { slot = *fleet_panels.drop_slot[index]; continue; }
+        const auto fleets = published_snapshot->fleets();
         const auto live = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) {
             return row.id == *card->fleet && row.owner == galaxy->local.player && row.orbit == selected_planet && !row.motion.transit;
         });
         if (live == fleets.end()) return false;
         target = *card->fleet;
     }
-    if (!over_target) return false;
+    // WGM-199: releasing a surface unit on another planet launches then moves.
+    // HUD surfaces consume their own drops; only a picked world planet enters here.
+    std::vector<sim::galactic::PlanetId> path;
+    if (!over_target) {
+        for (const auto* shell : {command_bar, fleet_organize, advanced_map_shell})
+            if (shell && shell->is_visible_in_tree() && shell->hit(point.x, point.y)) return false;
+        const auto* destination = picked_planet(point.x, point.y);
+        if (!destination || destination->id == selected_planet) return false;
+        const auto planets = input_planets();
+        auto planned = galactic_view::destination_path(*published_snapshot, galaxy->local.player,
+            selected_planet, destination->id, planets);
+        if (!planned) return false;
+        path = std::move(*planned);
+        slot = 2; // WGM-199: surface-to-world submission creates in the third source orbit slot.
+    }
     const auto enabled = [&](galactic_view::ObjectId object) {
-        return std::any_of(roster->second.companies.begin(), roster->second.companies.end(),
+        return std::any_of(roster->companies.begin(), roster->companies.end(),
             [object](const auto& company) { return company.id == object && company.enabled; });
     };
     if (!enabled(ground_hud.pressed_object)) return false;
@@ -454,12 +477,13 @@ bool GalacticMode::State::ground_launch_drop(Vector2 point) {
         units.push_back(widget->object);
     }
     const auto planets = input_planets();
-    const galactic_view::DropIntent intent{galactic_view::DropKind::launch, units.front(), target, selected_planet, {}, slot, units};
+    const galactic_view::DropIntent intent{galactic_view::DropKind::launch, units.front(), target, selected_planet, std::move(path), slot, units};
     const auto command = map_input.command(intent, planets);
     if (!command) return false;
     game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, *command, {}});
     ++submitted_orders; ++ground_hud.launch_orders;
     ground_hud.last_launch_units = units; ground_hud.last_launch_target = target; ground_hud.last_launch_slot = slot;
+    ground_hud.last_launch_path = intent.path;
     map_input.multiselection.clear();
     return true;
 }
@@ -531,9 +555,13 @@ void GalacticMode::State::update_ground_hud() {
         || ground_hud.layout_dirty;
     ground_hud.layout_dirty = false;
     if (ground_hud.publication != displayed_snapshot) {
-        ground_hud.publication = displayed_snapshot; ground_hud.rosters.clear();
+        ground_hud.publication = displayed_snapshot; ground_hud.rosters.clear(); ground_hud.command_rosters.clear();
         for (const auto& planet : displayed_snapshot->planets())
             ground_hud.rosters.emplace(planet.id, galactic_view::ground_roster(*displayed_snapshot, galaxy->local.player, planet.id));
+        if (published_snapshot && published_snapshot != displayed_snapshot)
+            for (const auto& planet : published_snapshot->planets())
+                ground_hud.command_rosters.emplace(planet.id,
+                    galactic_view::ground_roster(*published_snapshot, galaxy->local.player, planet.id));
         ++ground_hud.rebuilds;
     }
     if (changed) {
@@ -558,10 +586,10 @@ void GalacticMode::State::update_ground_hud() {
     const galactic_view::GroundRoster empty;
     const auto& roster = found == ground_hud.rosters.end() ? empty : found->second;
     if (ground_hud.sale && ground_hud.sale_object) {
-        const auto sale = displayed_snapshot && displayed_snapshot->production() && galaxy
-            ? sim::galactic::object_sale(*displayed_snapshot->production(), displayed_snapshot->sale_types(),
-                displayed_snapshot->actor_records(), displayed_snapshot->fleets(), displayed_snapshot->control(),
-                displayed_snapshot->movement(), galaxy->local.player, selected_planet, ground_hud.sale_object)
+        const auto sale = published_snapshot && published_snapshot->production() && galaxy
+            ? sim::galactic::object_sale(*published_snapshot->production(), published_snapshot->sale_types(),
+                published_snapshot->actor_records(), published_snapshot->fleets(), published_snapshot->control(),
+                published_snapshot->movement(), galaxy->local.player, selected_planet, ground_hud.sale_object)
             : sim::galactic::ObjectSale{};
         const bool available = sale.admission == sim::galactic::ProductionAdmission::allowed
             || sale.admission == sim::galactic::ProductionAdmission::locked;
@@ -669,11 +697,14 @@ void GalacticMode::State::write_ground_report(std::ostream& output) const {
     output << ",\"rect\":[" << sale_rect.position.x << ',' << sale_rect.position.y << ',' << sale_rect.size.x << ',' << sale_rect.size.y << "]}"
         << ",\"boxes\":" << ground_hud.boxes << ",\"land_orders\":" << ground_hud.land_orders
         << ",\"launch_orders\":" << ground_hud.launch_orders << ",\"reorders\":" << ground_hud.reorders
-        << ",\"launch\":{\"command\":\"launch_from_surface opcode 18\""
+        << ",\"launch\":{\"command\":" << json(ground_hud.last_launch_path.empty() ? "launch_from_surface opcode 18" : "launch_fleet opcode 22")
         << ",\"target\":" << ground_hud.last_launch_target << ",\"slot\":" << static_cast<unsigned>(ground_hud.last_launch_slot)
         << ",\"units\":[";
     for (std::size_t i = 0; i < ground_hud.last_launch_units.size(); ++i)
         output << (i ? "," : "") << ground_hud.last_launch_units[i];
+    output << "],\"path\":[";
+    for (std::size_t i = 0; i < ground_hud.last_launch_path.size(); ++i)
+        output << (i ? "," : "") << ground_hud.last_launch_path[i];
     output << "]},\"raid\":\"provider seam #2263/#1156\",\"controls\":[";
     std::size_t n{};
     for (const auto& [name,button] : ground_hud.buttons) {

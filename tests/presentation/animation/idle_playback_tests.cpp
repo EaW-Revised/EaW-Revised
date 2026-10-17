@@ -378,6 +378,70 @@ void test_environment_idle_budget() {
     expect(allocated == 0 && reset, "billboard scratch resets fully without allocation across pose and skeleton switches");
 }
 
+void test_shared_skin_batch() {
+    using namespace eawr::presentation;
+    std::vector<idle::BonePose> bones(8);
+    for (std::size_t bone = 0; bone < bones.size(); ++bone) {
+        bones[bone].skin_asset = bones[bone].model_asset = idle::Player::identity_matrix();
+        bones[bone].skin_asset[12] = static_cast<float>(bone);
+        bones[bone].model_asset[13] = static_cast<float>(bone + 1);
+        bones[bone].visible = bone != 3;
+    }
+    SkinPosePalette<idle::Matrix> reference;
+    const auto identity = [](const idle::Matrix& matrix) { return matrix; };
+    store_skin_pose(bones, reference.palette, reference.model_transforms, identity);
+    SkinPoseBatch<idle::Matrix> batch;
+    SkinPoseWork work;
+    std::size_t conversions = 0;
+    const auto convert = [&](const idle::Matrix& matrix) { ++conversions; return matrix; };
+    const auto prepared = batch.prepare(bones, convert, &work);
+    bool shared = bool(prepared);
+    for (std::size_t surface = 0; surface < 572; ++surface)
+        shared = shared && batch.prepare(bones, convert, &work) == prepared;
+    expect(shared && work.validations == 1 && work.builds == 1 && conversions == bones.size(),
+        "572 surface consumers validate and convert one immutable placement palette");
+    if (!prepared) return;
+    const auto exact = [](const auto& left, const auto& right) {
+        if (left.size() != right.size()) return false;
+        for (std::size_t bone = 0; bone < left.size(); ++bone)
+            if (std::bit_cast<std::array<std::uint32_t, 16>>(left[bone])
+                    != std::bit_cast<std::array<std::uint32_t, 16>>(right[bone])) return false;
+        return true;
+    };
+    expect(exact(prepared->palette, reference.palette)
+        && exact(prepared->model_transforms, reference.model_transforms),
+        "shared preparation preserves all matrix bytes and hidden-bone collapse");
+    std::vector<std::uint8_t> changes;
+    skin_palette_changes({}, prepared->palette, changes, false);
+    expect(std::count(changes.begin(), changes.end(), 1) == 8, "a fresh consumer writes every bone");
+    skin_palette_changes(prepared->palette, prepared->palette, changes, false);
+    expect(std::count(changes.begin(), changes.end(), 1) == 0, "an unchanged consumer writes no bone");
+    auto signed_zero = prepared->palette;
+    auto& zero = signed_zero[0][1];
+    zero = std::copysign(0.0F, std::signbit(zero) ? 1.0F : -1.0F);
+    skin_palette_changes(signed_zero, prepared->palette, changes, false);
+    expect(std::count(changes.begin(), changes.end(), 1) == 1 && changes[0],
+        "shared consumers compare signed-zero bytes");
+    skin_palette_changes(prepared->palette, prepared->palette, changes, true);
+    expect(std::count(changes.begin(), changes.end(), 1) == 8, "an asset switch restores every shared bone");
+    batch.clear();
+    bones[1].visible = false;
+    const auto changed = batch.prepare(bones, convert, &work);
+    expect(bool(changed) && changed != prepared && work.validations == 2 && work.builds == 2,
+        "a new batch forgets reused source-buffer addresses");
+    expect(exact(prepared->palette, reference.palette) && exact(prepared->model_transforms, reference.model_transforms),
+        "retained consumers keep the prior immutable pose across a later batch");
+    if (changed) {
+        skin_palette_changes(prepared->palette, changed->palette, changes, false);
+        expect(std::count(changes.begin(), changes.end(), 1) == 1 && changes[1],
+            "visibility changes reach every consumer of the new shared pose");
+    }
+    batch.clear();
+    bones[0].model_asset[0] = std::numeric_limits<float>::quiet_NaN();
+    expect(!batch.prepare(bones, convert, &work) && work.validations == 3 && work.builds == 2
+        && exact(prepared->palette, reference.palette), "a non-finite shared pose is rejected before build and retention");
+}
+
 void test_skin_palette_changes() {
     struct Pending final {
         unsigned asset_id{};
@@ -469,6 +533,7 @@ int main() {
     test_sample_idle();
     test_environment_idle_budget();
     test_skin_palette_changes();
+    test_shared_skin_batch();
     if (failures != 0) return EXIT_FAILURE;
     std::cout << "idle playback contracts passed\n";
     return EXIT_SUCCESS;

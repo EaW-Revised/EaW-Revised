@@ -18,7 +18,7 @@ bool destroyed(const ForceResult& row) {
     return row.disposition == ForceDisposition::destroyed || row.disposition == ForceDisposition::destroy_after_tactical;
 }
 core::Result<gc::PlanetId> destination(const gc::GalacticSnapshot& snapshot, const gc::PlanetId source,
-    const gc::PlayerId owner) {
+    const gc::PlayerId owner, const bool surface) {
     const auto src = std::find_if(snapshot.planets().begin(), snapshot.planets().end(), [&](const auto& row) { return row.id == source; });
     if (src == snapshot.planets().end()) return fail<gc::PlanetId>("retreat source is absent");
     const auto orbital = [&](const auto id) { return std::any_of(snapshot.fleets().begin(), snapshot.fleets().end(),
@@ -30,7 +30,8 @@ core::Result<gc::PlanetId> destination(const gc::GalacticSnapshot& snapshot, con
     for (unsigned tier = 0; tier < 4; ++tier) {
         std::optional<sim::math::Fixed> nearest; gc::PlanetId selected{}; bool tied{};
         for (const auto& planet : snapshot.planets()) {
-            if (planet.id == source || (tier == 0 && !orbital(planet.id)) || (tier == 1 && !base(planet.id))
+            if (planet.id == source || (tier == 0 && !(surface ? base(planet.id) : orbital(planet.id)))
+                || (tier == 1 && !(surface ? orbital(planet.id) : base(planet.id)))
                 || (tier == 2 && !neutral(planet.owner))) continue;
             const auto x = sim::math::subtract(planet.position.x, src->position.x);
             const auto y = sim::math::subtract(planet.position.y, src->position.y);
@@ -147,7 +148,11 @@ core::Result<TacticalReturnPlan> plan_tactical_return(const ConflictRecord& conf
         }
         for (const auto& [id, killer] : blows) out.killers.push_back({id, killer});
     }
-    if (out.result.retreat_player) for (auto at = snapshot.fleets().rbegin(); at != snapshot.fleets().rend(); ++at)
+    const bool losing_raid = conflict.layer == BattleLayer::land && conflict.raid && out.result.winner != conflict.invader;
+    if (losing_raid) out.result.retreat_player = conflict.invader;
+    // WGM-201 / WAR-57: a surface loss leaves unrelated space fleets in orbit.
+    if (out.result.retreat_player && (conflict.layer == BattleLayer::space || losing_raid))
+        for (auto at = snapshot.fleets().rbegin(); at != snapshot.fleets().rend(); ++at)
         if (at->owner == *out.result.retreat_player && at->orbit == conflict.planet && !at->motion.transit)
             out.retreat_fleets.push_back(at->id);
     return core::Result<TacticalReturnPlan>::success(std::move(out));
@@ -162,12 +167,13 @@ core::Result<void> apply_tactical_return(gc::GalacticSession& galaxy, const Conf
     if (plan.result.retreat_player) {
         if (auto refreshed = galaxy.refresh_movement_access(executor); !refreshed) return refreshed;
         const auto snapshot = galaxy.snapshot();
-        const auto selected = destination(*snapshot, conflict.planet, *plan.result.retreat_player);
+        const bool surface = conflict.layer == BattleLayer::land;
+        const auto selected = destination(*snapshot, conflict.planet, *plan.result.retreat_player, surface);
         if (!selected) return core::Result<void>::failure(selected.error());
         std::vector<gc::FleetId> live;
         for (const auto id : plan.retreat_fleets)
             if (std::any_of(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& fleet) { return fleet.id == id; })) live.push_back(id);
-        applied = galaxy.apply_retreat_return(*plan.result.retreat_player, conflict.planet, selected.value(), false, live);
+        applied = galaxy.apply_retreat_return(*plan.result.retreat_player, conflict.planet, selected.value(), surface, live);
         if (!applied) return applied;
     }
     if (conflict.tactical.campaign) {

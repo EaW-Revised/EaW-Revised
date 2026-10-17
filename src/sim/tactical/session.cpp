@@ -57,6 +57,10 @@ core::Result<AdmittedSeatCommand> TacticalSession::submit_human(const SeatBindin
 }
 
 core::Result<void> TacticalSession::submit(const PlayerCommand& command) {
+    if (impl_->object_turn_running) {
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            "submit during an object-turn provider call"));
+    }
     const auto context = command_context(command.key);
     const auto shape = detail::validate_command_shape(command, impl_->setup.players, context, {});
     if (!shape) {
@@ -226,6 +230,7 @@ const FogCells* TacticalSession::fog_cells() const noexcept { return impl_->fog 
 std::span<const Projectile> TacticalSession::projectiles() const noexcept { return impl_->projectiles; }
 
 bool TacticalSession::request_projectile_explosion(const std::uint64_t id) noexcept {
+    if (impl_->object_turn_running) return false;
     const auto found = std::lower_bound(impl_->projectiles.begin(), impl_->projectiles.end(), id,
         [](const Projectile& projectile, const std::uint64_t value) { return projectile.id < value; });
     if (found == impl_->projectiles.end() || found->id != id) return false;
@@ -316,15 +321,20 @@ std::shared_ptr<const TacticalSnapshot> TacticalSession::snapshot() const noexce
 }
 
 TacticalReplay TacticalSession::record() const {
-    return TacticalReplay{impl_->setup, impl_->completed_tick, impl_->executed};
+    return TacticalReplay{impl_->setup, impl_->completed_tick, impl_->executed, impl_->object_turns_executed};
 }
 
 TacticalReplay TacticalSession::record_through_next_tick() const {
-    TacticalReplay replay{impl_->setup, impl_->completed_tick + 1, impl_->executed};
+    TacticalReplay replay{impl_->setup, impl_->completed_tick + 1, impl_->executed, impl_->object_turns_executed};
     // The next step executes the commands keyed to the completed tick, in the queue's canonical order.
     for (const auto& [key, command] : impl_->pending) {
         if (key.tick > impl_->completed_tick) break;
         replay.commands.push_back(command);
+    }
+    // The uses recorded for the next tick's seam; a provider's own uses exist only once that tick has run.
+    for (const auto& [key, record] : impl_->object_turn_pending) {
+        if (std::get<0>(key) > impl_->completed_tick) break;
+        replay.object_turns.push_back(record);
     }
     return replay;
 }

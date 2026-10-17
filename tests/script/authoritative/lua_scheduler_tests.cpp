@@ -1,4 +1,5 @@
 #include "lua_sandbox_support.hpp"
+#include "../../support/reverse_partition_executor.hpp"
 
 namespace lua_sandbox_test_support {
 
@@ -29,8 +30,10 @@ struct WalletShadow final : auth::ImmediateEffectState {
 struct WalletHost final : auth::ImmediateEffectHost {
     WalletShadow state;
     unsigned publications{};
+    mutable unsigned captures{};
     bool refuse{};
     eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>> capture() const override {
+        ++captures;
         return eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>>::success(state.clone());
     }
     eawr::core::Result<void> publish(std::unique_ptr<auth::ImmediateEffectState> shadow) override {
@@ -143,6 +146,80 @@ Register_Event('Bad', DispatchFailure)
         expect(saved && static_cast<bool>(session.scheduler->load(saved.value())), "load retains runtime immediate host");
         expect(static_cast<bool>(session.scheduler->service(executor)) && host->state.balance == 5, "restored coroutine has the same native rollback");
     }
+    // S9a: chains. Instances of one owner run in ID order over a shadow of their own, the chains run in ascending
+    // owner order, and every chain publishes before the next one captures. The worker count and the order the
+    // partitions run in never show: the inline run, 1/2/4/8 workers and a highest-first executor agree.
+    struct ChainRun {
+        std::vector<std::string> commands;
+        unsigned publications{}, captures{};
+        std::int64_t balance{};
+        bool operator==(const ChainRun&) const = default;
+    };
+    const auto run_chains = [&](const eawr::sim::PartitionExecutor& executor, bool chained, const std::string& chain_source) {
+        Session session = make_session({{"Main.lua", chain_source}});
+        auto host = std::make_shared<WalletHost>();
+        expect(static_cast<bool>(session.scheduler->register_binding("Self", [](auth::BindingContext& context, const auth::ValueList&) {
+            return eawr::core::Result<auth::ValueList>::success({auth::Value::number(LuaNumber(context.instance()))});
+        })), "register chain identity");
+        expect(static_cast<bool>(session.scheduler->set_immediate_effect_host(host, 4)), "chain host");
+        expect(static_cast<bool>(session.scheduler->register_binding("Add", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.apply_immediate("add", args);
+        })), "register chain action");
+        expect(static_cast<bool>(session.scheduler->register_binding("Read", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.query_immediate("credits", args);
+        })), "register chain query");
+        for (const std::uint64_t id : {1U, 2U, 3U}) {
+            expect(static_cast<bool>(session.scheduler->create_instance(id, "Main.lua")), "create chain instance");
+            auth::ScriptEvent event; event.key = {1, auth::first_simulation_producer, id, 0};
+            event.target = id; event.kind = auth::ScriptEvent::Kind::call; event.name = "Good";
+            expect(static_cast<bool>(session.scheduler->submit_event(std::move(event))), "post chain event");
+        }
+        auth::ServiceOptions options;
+        if (chained) options.chain_of = [](std::uint64_t instance) -> std::uint64_t { return instance == 2 ? 10 : 20; };
+        // Creating an instance captures too; only the service's own captures count.
+        const unsigned captured_before = host->captures, published_before = host->publications;
+        auto result = session.scheduler->service(executor, options);
+        expect(static_cast<bool>(result), "chained immediate service completes");
+        ChainRun run;
+        run.publications = host->publications - published_before; run.captures = host->captures - captured_before;
+        run.balance = host->state.balance;
+        if (result) for (const auto& command : result.value().commands) run.commands.push_back(text(command));
+        return run;
+    };
+    {
+        const std::string chain_source = "function Good() local before = Read() Add(Self()) Test_Report(before, Read()) end";
+        const eawr::sim::InlineExecutor inline_executor;
+        const auto plain = run_chains(inline_executor, false, chain_source);
+        const auto chained = run_chains(inline_executor, true, chain_source);
+        expect(plain.commands == std::vector<std::string>{"1#0 report 0 1", "2#0 report 1 3", "3#0 report 3 6"}, "one chain runs in ID order: " + joined(plain.commands));
+        // Owner 10 (instance 2) runs first; owner 20 (instances 1 and 3) captures after its publication.
+        expect(chained.commands == std::vector<std::string>{"1#0 report 2 3", "2#0 report 0 2", "3#0 report 3 6"}, "chains run per owner in owner order: " + joined(chained.commands));
+        expect(plain.balance == 6 && chained.balance == 6, "both orders end with every write");
+        expect(plain.publications == 1 && chained.publications == 2, "a chain publishes once, before the next chain captures");
+        expect(plain.captures == 1 && chained.captures == 2, "a chain captures once, after the previous chain published");
+        for (const std::size_t workers : eawr::platform::determinism_worker_counts()) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(run_chains(executor, false, chain_source) == plain, "the plain chain equals the inline run on every determinism worker count");
+            expect(run_chains(executor, true, chain_source) == chained, "the owner chains equal the inline run on every determinism worker count");
+        }
+        for (const std::size_t reported : {std::size_t{1}, std::size_t{8}}) {
+            eawr::test_support::ReverseOrderExecutor reverse(reported);
+            expect(run_chains(reverse, true, chain_source) == chained, "running every partition highest-first changes no chain");
+            // Every partitioned phase the service ran visited its partitions highest first.
+            bool descending = true;
+            for (const auto& phase : reverse.phases) descending = descending && phase.descending();
+            expect(descending, "the reverse executor visited every phase's partitions highest first");
+        }
+        // Chains that change nothing publish nothing and share the one capture.
+        const std::string readonly_source = "function Good() Test_Report(Read(), Self()) end";
+        const auto readonly = run_chains(inline_executor, true, readonly_source);
+        expect(readonly.publications == 0 && readonly.captures == 1 && readonly.balance == 0,
+            "owner chains that change nothing neither publish nor capture again");
+        for (const std::size_t workers : eawr::platform::determinism_worker_counts()) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(run_chains(executor, true, readonly_source) == readonly, "the read-only chains equal the inline run on every determinism worker count");
+        }
+    }
     {
         Session session = script_session("Immediate()");
         expect(static_cast<bool>(session.scheduler->register_binding("Immediate", [](auth::BindingContext& context, const auth::ValueList& args) {
@@ -243,6 +320,59 @@ std::int64_t unit_word(std::uint64_t tick_key, std::uint64_t id, std::uint64_t d
 
 void object_turn_contracts() {
     const eawr::sim::InlineExecutor executor;
+    {
+        Session session = make_object_session({3});
+        const auto saved = session.scheduler->save();
+        const auto hash = session.scheduler->state_hash();
+        expect(saved && hash, "host-read accounting fixture saves and hashes");
+        for (unsigned read = 0; read < 16; ++read) {
+            expect(global_number(session, 3, "Count") == 0, "host global read returns the stored value");
+            auto missing = session.scheduler->read_global(3, "Never_Authored_By_This_Module");
+            expect(missing && missing.value() && std::holds_alternative<std::monostate>(missing.value()->data),
+                "host global read preserves absent values");
+        }
+        expect(saved && session.scheduler->save().value() == saved.value(),
+            "host global inspection leaves canonical save bytes and logical quotas unchanged");
+        expect(hash && session.scheduler->state_hash().value() == hash.value(),
+            "host global inspection leaves the script hash unchanged");
+    }
+    {
+        Session session = make_object_session({3});
+        turn(session, executor, {3}, 10);
+        submit_due(session, 3, auth::ScriptEvent::Kind::call, 20, "Barrier");
+        auth::ServiceOptions options;
+        options.defer_instance = [](std::uint64_t id) { return id == 3; };
+        for (unsigned held=0;held<4;++held) {
+            auto barrier = session.scheduler->service(executor, options);
+            expect(barrier && barrier.value().loads.empty()
+                && std::holds_alternative<std::monostate>(session.scheduler->read_global(3,"Barrier_Last").value()->data),
+                "object owner defers barrier callbacks without double servicing its instance");
+        }
+        const auto saved=session.scheduler->save();
+        Session restored=make_object_session({3});
+        expect(saved.has_value(),"deferred callback saves after several barriers");if (!saved) return;
+        auto loaded=restored.scheduler->load(saved.value());
+        expect(loaded.has_value(),"deferred overdue callback restores after several barriers");
+        if (!loaded) { std::cerr<<loaded.error().message<<'\n'; return; }
+        expect(restored.scheduler->save().value()==saved.value(),"deferred clock and pending callback bytes restore canonically");
+        auto next=session.scheduler->service_turn(executor,{3});
+        const eawr::platform::ThreadWorkerAdapter other_workers(4);
+        auto back=restored.scheduler->service_turn(other_workers,{3});
+        expect(next && back && next.value().commands.size()==1 && back.value().commands.size()==1
+            && global_number(session,3,"Count")==1 && global_number(restored,3,"Count")==1
+            && global_number(session,3,"Barrier_Last")==global_number(restored,3,"Barrier_Last")
+            && session.scheduler->state_hash().value()==restored.scheduler->state_hash().value(),
+            "saved deferred callbacks arrive once in the next turn on another worker count without a new pump");
+    }
+    {
+        Session plain=make_session({{"Obj.lua",turn_object_source}});
+        expect(bool(plain.scheduler->create_instance(9,"Obj.lua")),"plain deferral guard instance creates");
+        const auto before=plain.scheduler->state_hash();
+        auth::ServiceOptions options;options.defer_instance=[](std::uint64_t) { return true; };
+        auto refused=plain.scheduler->service(executor,options);
+        expect(before && !refused && plain.scheduler->state_hash().value()==before.value(),
+            "subset deferral refuses an unattached instance without changing saved state");
+    }
     constexpr std::uint64_t domain = auth::turn_random_domain;
     {
         // A subset turn equals the full turn restricted to the subset; the rest stay untouched.

@@ -1,4 +1,7 @@
 #include "ui/dialog_builder.hpp"
+#include "ui/battle_overlay.hpp"
+
+#include <godot_cpp/variant/callable_method_pointer.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -71,7 +74,8 @@ namespace data = eawr::data::ui;
 } // namespace
 
 BuiltDialog build_dialog(const data::Dialog& dialog, const model::ThemeModel& theme, data::TextLookup* text,
-                         const model::Placement placement, const bool retail_combos) {
+                         const model::Placement placement, const bool retail_combos,
+                         std::function<void(std::string_view)> sound) {
     BuiltDialog built;
     const std::string frame_style = theme.variation(dialog, nullptr);
     const model::RcRect size{0, 0, dialog.rect.width, dialog.rect.height};
@@ -147,6 +151,7 @@ BuiltDialog build_dialog(const data::Dialog& dialog, const model::ThemeModel& th
         } else if (gadget.kind == "slider") {
             auto* slider = memnew(EawrUiSlider);
             slider->set_max(100.0);
+            slider->set_dialog_sound(sound);
             made = slider;
         } else if (gadget.kind == "bar") {
             made = memnew(EawrUiBar);
@@ -164,6 +169,29 @@ BuiltDialog build_dialog(const data::Dialog& dialog, const model::ThemeModel& th
                 if (auto* edit = Object::cast_to<LineEdit>(made)) edit->set_editable(false);
             }
             built.frame->add_child(made);
+            // WGP-184: common dialog events are fixed names, independent of the
+            // command-bar component schema. Only the opting-in screen supplies audio.
+            if (sound) {
+                const auto connect_sound = [&](const char* signal, const char* event, const int arguments = 0) {
+                    auto* relay = memnew(EawrOverlayButton);
+                    relay->set_name("dialog_sound");
+                    relay->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+                    made->add_child(relay);
+                    relay->set_action([made, sound, event] {
+                        if (!made->is_visible_in_tree()) return;
+                        if (const auto* button = Object::cast_to<BaseButton>(made); button && button->is_disabled()) return;
+                        sound(event);
+                    });
+                    auto callback = callable_mp(relay, &EawrOverlayButton::activate);
+                    made->connect(signal, arguments ? callback.unbind(arguments) : callback);
+                };
+                if (Object::cast_to<BaseButton>(made)) {
+                    connect_sound("button_down", "GUI_Common_Dialog_Button_Press");
+                    connect_sound("mouse_entered", "GUI_Common_Dialog_Button_Hilight");
+                }
+                if (gadget.kind == "list" || gadget.kind == "combo")
+                    connect_sound("item_selected", "GUI_Common_Dialog_Listbox_Entry_Select", 1);
+            }
         }
         built.gadgets.push_back(std::move(gadget));
     }

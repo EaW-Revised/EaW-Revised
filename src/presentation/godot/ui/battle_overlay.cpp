@@ -165,6 +165,26 @@ void EawrBattleOverlay::show_message(const std::optional<bool> won) {
     relayout();
 }
 
+void EawrBattleOverlay::show_countdown(const String& text, const Color& colour, const double x_share, const double y_share) {
+    if (countdown_ == text && countdown_colour_ == colour && countdown_x_ == x_share && countdown_y_ == y_share) return;
+    countdown_ = text; countdown_colour_ = colour; countdown_x_ = x_share; countdown_y_ = y_share;
+    layout_countdown();
+}
+
+void EawrBattleOverlay::layout_countdown() {
+    const Vector2 size = get_size();
+    countdown_rect_ = Rect2();
+    if (countdown_.is_empty() || size.x <= 0.0F || size.y <= 0.0F) {
+        countdown_text_.draw(*this, KitTextStyle{}, String(), Rect2(), HORIZONTAL_ALIGNMENT_LEFT, false, false, 1.0F, 1.0F);
+        return;
+    }
+    const KitTextStyle style = text_style(style_.banner, countdown_colour_, countdown_pixels_);
+    const float width = text_width(style_.banner, countdown_pixels_, countdown_);
+    const float height = style.font.is_valid() ? style.font->get_height(style.size) : 0.0F;
+    countdown_rect_ = Rect2(static_cast<float>(countdown_x_) * size.x, static_cast<float>(countdown_y_) * size.y, width, height);
+    countdown_text_.draw(*this, style, countdown_, countdown_rect_, HORIZONTAL_ALIGNMENT_LEFT, false, false, size.y / 720.0F, 1.0F);
+}
+
 void EawrBattleOverlay::show_paused(const bool paused) {
     if (paused_ == paused) return;
     paused_ = paused;
@@ -358,6 +378,7 @@ void EawrBattleOverlay::relayout() {
     const Vector2 size = get_size();
     if (size.x <= 0.0F || size.y <= 0.0F || size == laid_out_ || resume_ == nullptr) return;
     laid_out_ = size;
+    layout_countdown();
     if (result_dialog_ && result_dialog_->frame != nullptr && result_dialog_->frame->get_size() != size) {
         result_dialog_->frame->queue_free();
         result_dialog_.reset();
@@ -569,6 +590,7 @@ std::optional<Rect2> EawrBattleOverlay::control_rect(const std::string_view name
                 return gadget.control->get_global_rect();
         }
     }
+    if (name == "countdown" && !countdown_.is_empty()) return countdown_rect_;
     if (name == "message" && message_ && !ended_) return message_rect_;
     if ((name == "resume" || (name == "begin" && ready_)) && resume_ != nullptr && resume_->is_visible()) return Rect2(resume_->get_position(), resume_->get_size());
     if ((name == "quit" || name == "exit") && quit_ != nullptr && (quit_->is_visible() || (ended_ && result_dialog_)))

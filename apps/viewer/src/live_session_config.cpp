@@ -306,7 +306,11 @@ namespace {
                                 (hud.size() == 8 && hud.substr(0, 6) == "tqueue" && digits(hud.substr(6)));
         const bool special = hud == "special_weapon" || hud == "movie_camera" || hud == "b_camera_t"
             || hud == "beacon" || hud == "b_special_weapon2" || hud == "retreat" || hud == "b_retreat";
-        if (!time && !production && !order && !special) return std::nullopt;
+        // #3925: the options button and the in-game menu's controls (its Options, Back, Quit Game, Resume
+        // buttons and the quit confirmation's Yes and No).
+        const bool menu = hud == "options" || hud == "b_option_t" || hud == "menu_options" || hud == "menu_back"
+            || hud == "menu_quit" || hud == "menu_resume" || hud == "menu_yes" || hud == "menu_no";
+        if (!time && !production && !order && !special && !menu) return std::nullopt;
         if (input.shift || input.ctrl || input.alt) return std::nullopt;
         return input;
     }
@@ -522,7 +526,7 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                     "<tick>:key:<name>, each with optional +shift, +ctrl or +alt, "
                     "<tick>:mdrag:<dx>,<dy> or <tick>:mclick:centre, each with optional +ctrl, "
                     "or <tick>:wheel:<in|out>, or <tick>:<click|rclick|hover|press|release>:hud=<pause|fast_forward|resume|quit|"
-                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|waypoint|stop|guard|special_weapon|retreat>; "
+                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|waypoint|stop|guard|special_weapon|retreat|options|menu_options|menu_back|menu_quit|menu_resume|menu_yes|menu_no>; "
                     "f<frame> in place of <tick> fires on that frame after the warm-up";
         } else {
             options.inputs.push_back(std::move(*input));

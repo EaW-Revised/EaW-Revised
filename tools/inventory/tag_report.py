@@ -22,6 +22,7 @@ STATUSES = {
     "presentation-later": "Presentation work outside the current space battle scope.",
     "foc-ignores": "The registry records evidence that FoC ignores this value.",
     "deferred": "Explicitly postponed; see the note or tracking ticket.",
+    "by-design": "Our implementation intentionally replaces this mechanism; the evidence cites the rule that says so.",
     "land-or-galactic": "Land battle or galactic campaign work outside space skirmish.",
     "multiplayer": "Multiplayer work outside the current scope.",
 }

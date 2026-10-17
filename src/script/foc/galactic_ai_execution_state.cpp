@@ -32,6 +32,25 @@ core::Result<void> validate(const ExecutionRetainedState& state) {
 void word(std::vector<std::uint8_t>& bytes, std::uint64_t value, unsigned size = 8) {
     for (unsigned i = 0; i < size; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (i * 8)));
 }
+std::vector<std::uint8_t> execution_record(gc::PlayerId player, const ExecutionRetainedPlayer& row) {
+    std::vector<std::uint8_t> bytes;
+    word(bytes, player); word(bytes, row.initialized, 1); word(bytes, row.finder_present, 1);
+    word(bytes, row.next_refresh); word(bytes, row.maximum_distance.repr); word(bytes, row.node_order.size());
+    for (const auto node : row.node_order) word(bytes, node);
+    word(bytes, row.reservations.size());
+    for (const auto& [object, plan] : row.reservations) { word(bytes, object); word(bytes, plan); }
+    return bytes;
+}
+void update_records(core::RecordDigest& records, const ExecutionRetainedState& before, const ExecutionRetainedState& after) {
+    for (const auto& [player, row] : before) { static_cast<void>(row); if (!after.contains(player)) records.erase(player, 0, 0); }
+    for (const auto& [player, row] : after) {
+        const auto old = before.find(player); if (old != before.end() && old->second == row && old->second.maximum_distance.repr == row.maximum_distance.repr) continue;
+        records.set(player, 0, 0, execution_record(player, row));
+    }
+}
+core::RecordDigest execution_records(const ExecutionRetainedState& state) {
+    core::RecordDigest records; update_records(records, {}, state); return records;
+}
 struct Reader {
     std::span<const std::uint8_t> bytes;
     std::size_t at{};
@@ -58,10 +77,11 @@ core::Result<void> ExecutionStateContributor::replace(ExecutionRetainedState sta
     if (auto checked = validate(state); !checked) return checked;
     if (validator_) if (auto checked = validator_(state); !checked) return checked;
     mark_state_changed();
-    state_ = std::move(state);
+    update_records(records_, state_, state); state_ = std::move(state);
     return core::Result<void>::success();
 }
 core::Result<NativeState> ExecutionStateContributor::capture() const {
+    if (auto verified = verify_record_sync_hash(); !verified) return core::Result<NativeState>::failure(verified.error());
     if (auto checked = validate(state_); !checked) return core::Result<NativeState>::failure(checked.error());
     NativeState out;
     auto& bytes = out.components[std::string(component)];
@@ -131,6 +151,7 @@ core::Result<std::string> ExecutionStateContributor::state_hash() const {
     return core::Result<std::string>::success(core::sha256_hex(captured.value().components.at(std::string(component))));
 }
 core::Result<NativeState> LiveExecutionStateContributor::capture() const {
+    if (auto verified = verify_record_sync_hash(); !verified) return core::Result<NativeState>::failure(verified.error());
     ExecutionStateContributor codec(validator_);
     if (auto copied = codec.replace(retained_); !copied) return core::Result<NativeState>::failure(copied.error());
     return codec.capture();
@@ -138,7 +159,7 @@ core::Result<NativeState> LiveExecutionStateContributor::capture() const {
 core::Result<void> LiveExecutionStateContributor::replace_retained(ExecutionRetainedState state) {
     ExecutionStateContributor codec(validator_);
     if (auto valid = codec.replace(std::move(state)); !valid) return valid;
-    mark_state_changed(); retained_ = codec.state();
+    mark_state_changed(); update_records(records_, retained_, codec.state()); retained_ = codec.state();
     return core::Result<void>::success();
 }
 core::Result<std::string> LiveExecutionStateContributor::state_hash() const {
@@ -182,7 +203,17 @@ core::Result<void> LiveExecutionStateContributor::restore(const NativeState& inp
     // WGA-139: new native owners have no finder. Rebuild from copied inputs,
     // preserve the restored deadline, then publish before their first service.
     mark_state_changed();
-    retained_ = std::move(state); routes_ = std::move(staged); pool_->pool = std::move(pool);
+    update_records(records_, retained_, state); retained_ = std::move(state); routes_ = std::move(staged); pool_->pool = std::move(pool);
     return core::Result<void>::success();
+}
+core::Result<std::string> ExecutionStateContributor::record_sync_hash(bool cold) const {
+    return core::Result<std::string>::success(cold ? execution_records(state_).digest(component) : records_.digest(component));
+}
+void LiveExecutionStateContributor::enable_revision_tracking() {
+    mark_state_changed(); records_ = execution_records(retained_); tracked_ = true;
+}
+core::Result<std::string> LiveExecutionStateContributor::record_sync_hash(bool cold) const {
+    return core::Result<std::string>::success(cold || !tracked_ ? execution_records(retained_).digest(ExecutionStateContributor::component)
+        : records_.digest(ExecutionStateContributor::component));
 }
 } // namespace eawr::script::foc::galactic_ai

@@ -14,6 +14,7 @@
 // that is not hosted is listed by unsupported_plan_calls().
 
 #include "eawr/core/result.hpp"
+#include "eawr/script/foc/ai_diagnostics.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/authoritative/tactical_bridge.hpp"
 #include "eawr/script/authoritative/tactical_scoring.hpp"
@@ -131,7 +132,7 @@ inline constexpr std::uint32_t ai_projectile_missile = 1U;
 inline constexpr std::uint32_t ai_projectile_rocket = 2U;
 inline constexpr std::uint32_t ai_projectile_mptl_rocket = 4U;
 struct AiContent {
-    std::vector<AiType> types;
+    std::vector<AiType> types; // the type table in load order: a category team enumerates it in this order (PL-20)
     std::map<sim::tactical::TypeId, std::uint32_t> projectile_categories; // projectile object type -> ai_projectile_* bits
     std::map<std::string, std::uint64_t, std::less<>> categories; // upper-case name -> bit
     std::map<std::string, std::uint64_t, std::less<>> properties; // upper-case name -> bit
@@ -189,6 +190,7 @@ struct AiTickCost {
     std::uint32_t reinforcement_candidates{};
     std::uint64_t reinforcement_search_ns{}; // wall-clock diagnostics only; never hashed
     std::uint32_t object_instances{}; // SOS-42: active attachments, separate from AI plans
+    std::uint32_t object_turn_due_ticks{}, object_turn_rows{}; // diagnostic work, never hashed
     std::uint32_t object_pumps{};     // SOS-42: strictly due object services
 };
 
@@ -218,6 +220,13 @@ struct AiJournal {
     std::vector<PlanEvent> plans;
     std::vector<AiTickCost> costs;
     std::vector<AiServiceEvent> services;
+    // Lifetime overflow counts; diagnostic clearing/restoring does not save them.
+    std::uint64_t plans_dropped{};
+    std::uint64_t costs_dropped{};
+    std::uint64_t services_dropped{};
+    void append_plan(PlanEvent row) { append_ai_diagnostic(plans, plans_dropped, std::move(row)); }
+    void append_cost(AiTickCost row) { append_ai_diagnostic(costs, costs_dropped, std::move(row)); }
+    void append_service(AiServiceEvent row) { append_ai_diagnostic(services, services_dropped, std::move(row)); }
 };
 
 struct AiSetup {
@@ -244,6 +253,9 @@ struct AiSetup {
     std::function<std::optional<numeric::LuaNumber>(std::string_view, sim::tactical::PlayerId)> evaluate_in_galactic_context;
     // FD-71: owned authoritative scoring, distinct from the derived results view.
     std::shared_ptr<authoritative::TacticalScoring> scoring;
+    // Optional fixture/controller admission boundary in completed simulation ticks.
+    // Omitted players run immediately; admitted control never changes the world clock.
+    std::map<sim::tactical::PlayerId, std::uint64_t> player_ai_start_ticks;
 };
 
 // The AI XML files the goal system reads (#449), as logical paths.
@@ -252,6 +264,10 @@ struct AiSetup {
 // The Lua files the host loads, as logical paths: the freestore and its
 // library chain, and the plan library that holds the contrast weights.
 [[nodiscard]] std::vector<std::string> required_modules(const AiSetup& setup);
+
+// AI-16: the selected controller's authored space freestore; the setup default
+// remains available to hosts that deliberately run without goal XML.
+[[nodiscard]] std::string freestore_module(const AiSetup& setup, const AiPlayer& player);
 
 // The instance ID of an AI player's freestore script.
 [[nodiscard]] constexpr std::uint64_t freestore_instance(sim::tactical::PlayerId player) noexcept {
@@ -272,9 +288,11 @@ struct PreparedAiSession {
 [[nodiscard]] core::Result<PreparedAiSession> prepare_session(
     const AiSetup& setup, const std::map<std::string, std::string>& modules);
 
-// The plan scripts AI-30 and SAE-03 select for the M2 fixture, and the plan library chain above the
+// The stock qualification cohort (AI-30 / SAE-03), and the plan library chain above the
 // freestore's (pgevents, PGTaskForce), as logical paths.
 [[nodiscard]] std::vector<std::string> selected_plans();
+// PL-02: candidates from the frozen mounted script inventory, in logical order.
+[[nodiscard]] std::vector<std::string> selected_plans(const std::map<std::string, std::string>& modules);
 [[nodiscard]] std::vector<std::string> plan_library_modules();
 
 // One selected plan after its definition load: the goal category its Definitions() sets and
@@ -288,9 +306,12 @@ struct PlanInspection {
 
 // Loads each plan in its own instance through the host's bindings and runs the engine's plan
 // definition load (PlanDefinitionLoad, Base_Definitions). `modules` holds at least
-// required_modules(), plan_library_modules() and selected_plans().
+// required_modules(), plan_library_modules() and the admitted plan inventory.
 [[nodiscard]] core::Result<std::vector<PlanInspection>> inspect_plans(
     const AiSetup& setup, const std::map<std::string, std::string>& modules);
+// Qualify an explicit fixture cohort while retaining its full dependency manifest.
+[[nodiscard]] core::Result<std::vector<PlanInspection>> inspect_plans(
+    const AiSetup& setup, const std::map<std::string, std::string>& modules, const std::vector<std::string>& paths);
 
 // The engine APIs the selected plans call that the host does not simulate (stand-ins), one
 // line each (#449).

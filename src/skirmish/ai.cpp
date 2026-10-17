@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <set>
 
 namespace eawr::skirmish {
 namespace {
@@ -48,7 +49,14 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         else if (upper(projectile.category) == "MPTL_ROCKET") bits = script::foc::ai_projectile_mptl_rocket;
         if (bits != 0) setup.content.projectile_categories.emplace(type_id(projectile.id), bits);
     }
-    for (const auto& unit : tables.units) {
+    // PL-20: content.types is the type table in load order; a category team enumerates it in that
+    // order, so equal weights pick the type the original lists first. Equal positions keep roster order.
+    std::vector<const units::UnitType*> table;
+    table.reserve(tables.units.size());
+    for (const auto& unit : tables.units) table.push_back(&unit);
+    std::stable_sort(table.begin(), table.end(), [](const auto* a, const auto* b) { return a->table_order < b->table_order; });
+    for (const auto* row : table) {
+        const auto& unit = *row;
         if (roster_disabled_types().contains(type_id(unit.id))) continue;
         script::foc::AiType type;
         type.type_id = type_id(unit.id);
@@ -171,10 +179,9 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         }
         setup.content.types.push_back(std::move(type));
     }
-    std::sort(setup.content.types.begin(), setup.content.types.end(),
-        [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
-    setup.content.types.erase(std::unique(setup.content.types.begin(), setup.content.types.end(),
-                                  [](const auto& a, const auto& b) { return a.type_id == b.type_id; }),
+    std::set<sim::tactical::TypeId> listed;
+    setup.content.types.erase(std::remove_if(setup.content.types.begin(), setup.content.types.end(),
+                                  [&](const auto& type) { return !listed.insert(type.type_id).second; }),
         setup.content.types.end());
     for (const auto& player : start.players) {
         script::foc::AiPlayer entry;
@@ -204,14 +211,28 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
 }
 
 core::Result<void> enable_goal_system(const vfs::Vfs& files, script::foc::AiSetup& setup) {
-    for (const std::string& path : script::foc::required_xml()) {
+    // AI-16: these are engine-defined directories, not content filenames.
+    std::vector<std::string> paths;
+    for (const auto directory : {"players", "templates", "goalfunctions", "goals", "perceptualequations"}) {
+        const std::string prefix = std::string("data/xml/ai/") + directory + "/";
+        auto entries = files.enumerate(prefix, ".xml");
+        if (!entries) return core::Result<void>::failure(entries.error());
+        for (const auto& entry : entries.value()) {
+            if (entry.canonical_path.find('/', prefix.size()) == std::string::npos) paths.push_back(entry.canonical_path);
+        }
+    }
+    for (const auto& path : script::foc::required_xml())
+        if (!path.starts_with("data/xml/ai/")) paths.push_back(path);
+    std::map<std::string, std::string, std::less<>> xml;
+    for (const std::string& path : paths) {
         auto bytes = files.open(path);
         if (!bytes) return core::Result<void>::failure(bytes.error());
         std::string text(bytes.value().size(), '\0');
         std::transform(bytes.value().begin(), bytes.value().end(), text.begin(),
             [](std::byte value) { return static_cast<char>(value); });
-        setup.xml.emplace(path, std::move(text));
+        xml.emplace(path, std::move(text));
     }
+    setup.xml = std::move(xml);
     return core::Result<void>::success();
 }
 
@@ -221,16 +242,38 @@ core::Result<std::map<std::string, std::string>> ai_modules(
     std::map<std::string, std::string> modules;
     auto paths = script::foc::required_modules(setup);
     if (plans) {
-        for (auto list : {script::foc::plan_library_modules(), script::foc::selected_plans()}) {
-            paths.insert(paths.end(), list.begin(), list.end());
-        }
+        const auto list = script::foc::plan_library_modules();
+        paths.insert(paths.end(), list.begin(), list.end());
     }
+    // L-03a / ML-34: freeze the mounted logical script corpus before creating
+    // instances. Unused chunks are not executed or compiled. Existing host
+    // quotas also bound this admission policy; require never opens native files.
+    std::set<std::string> admitted;
+    for (const auto& path : paths) admitted.insert(upper(path));
+    for (const auto extension : {".lua", ".lc"}) {
+        auto entries = files.enumerate("data/scripts/", extension);
+        if (!entries) return ModulesResult::failure(entries.error());
+        for (const auto& entry : entries.value())
+            if (admitted.insert(upper(entry.canonical_path)).second) paths.push_back(entry.canonical_path);
+    }
+    const script::authoritative::Quotas quotas;
+    std::uint64_t total_bytes{};
     for (const std::string& path : paths) {
+        if (modules.contains(path)) continue;
+        auto entry = files.stat(path);
+        if (!entry) return ModulesResult::failure(entry.error());
+        if (modules.size() >= quotas.identities || entry.value().size > quotas.memory_bytes - total_bytes) {
+            core::Diagnostic diagnostic;
+            diagnostic.code = std::string(script::authoritative::codes::module_rejected);
+            diagnostic.message = "mounted script inventory exceeds the host admission quota at " + path;
+            return ModulesResult::failure(std::move(diagnostic));
+        }
         auto bytes = files.open(path);
         if (!bytes) return ModulesResult::failure(bytes.error());
         std::string text(bytes.value().size(), '\0');
         std::transform(bytes.value().begin(), bytes.value().end(), text.begin(),
             [](std::byte value) { return static_cast<char>(value); });
+        total_bytes += static_cast<std::uint64_t>(text.size());
         modules.emplace(path, std::move(text));
     }
     return ModulesResult::success(std::move(modules));
@@ -241,20 +284,47 @@ core::Result<std::map<std::string, std::string>> select_ai_modules(
     using Result = core::Result<std::map<std::string, std::string>>;
     auto paths = script::foc::required_modules(setup);
     if (plans) {
-        for (auto list : {script::foc::plan_library_modules(), script::foc::selected_plans()})
-            paths.insert(paths.end(), list.begin(), list.end());
+        const auto list = script::foc::plan_library_modules();
+        paths.insert(paths.end(), list.begin(), list.end());
     }
-    std::map<std::string, std::string> selected;
     for (const auto& path : paths) {
-        const auto found = cached.find(path);
+        const auto canonical = script::authoritative::ModuleManifest::normalise(path);
+        const auto found = std::find_if(cached.begin(), cached.end(), [&](const auto& entry) {
+            return script::authoritative::ModuleManifest::normalise(entry.first) == canonical;
+        });
         if (found == cached.end()) {
             core::Diagnostic diagnostic;
             diagnostic.code = std::string(script::authoritative::codes::module_rejected);
             diagnostic.message = "required module is not in the prepared cache: " + path;
             return Result::failure(std::move(diagnostic));
         }
-        selected.emplace(found->first, found->second);
     }
+    // A producer can append a previously optional root using another spelling
+    // of its logical path. Preserve one copy of identical winning bytes; never
+    // choose between conflicting aliases by case-sensitive map order.
+    std::map<std::string, std::string> selected;
+    std::map<std::string, std::string> spellings;
+    for (const auto& [path, bytes] : cached) {
+        const auto canonical = script::authoritative::ModuleManifest::normalise(path);
+        if (!canonical) {
+            core::Diagnostic diagnostic;
+            diagnostic.code = std::string(script::authoritative::codes::module_rejected);
+            diagnostic.message = "invalid cached module path: " + path;
+            return Result::failure(std::move(diagnostic));
+        }
+        const auto [found, added] = spellings.emplace(*canonical, path);
+        if (!added) {
+            if (selected.at(found->second) != bytes) {
+                core::Diagnostic diagnostic;
+                diagnostic.code = std::string(script::authoritative::codes::module_rejected);
+                diagnostic.message = "conflicting cached module bytes: " + *canonical;
+                return Result::failure(std::move(diagnostic));
+            }
+            continue;
+        }
+        selected.emplace(path, bytes);
+    }
+    // Keep dependencies, including dynamically constructed require names.
     return Result::success(std::move(selected));
 }
 

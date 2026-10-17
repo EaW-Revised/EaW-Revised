@@ -134,6 +134,9 @@ void EawrUiSlider::_gui_input(const Ref<InputEvent>& event) {
         const Part part = part_at(motion->get_position());
         if (held_ == Part::track) set_from_track(motion->get_position().x);
         if (part != hovered_) {
+            // WGP-184: only the slider's button parts, not its track/thumb.
+            if (dialog_sound_ && (part == Part::minus || part == Part::plus))
+                dialog_sound_("GUI_Common_Dialog_Button_Hilight");
             hovered_ = part;
             queue_redraw();
         }
@@ -143,6 +146,8 @@ void EawrUiSlider::_gui_input(const Ref<InputEvent>& event) {
     if (button.is_null() || button->get_button_index() != MOUSE_BUTTON_LEFT) return;
     if (button->is_pressed()) {
         held_ = part_at(button->get_position());
+        if (dialog_sound_ && (held_ == Part::minus || held_ == Part::plus))
+            dialog_sound_("GUI_Common_Dialog_Button_Press");
         if (held_ != Part::none) ++edit_revision_;
         if (held_ == Part::minus) set_value(get_value() - step);
         if (held_ == Part::plus) set_value(get_value() + step);

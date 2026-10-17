@@ -190,6 +190,44 @@ void observer_idle() {
     config.observer->local_player = 1;
     auto foreign = take(eawr::campaign::GameSession::create(config)); (void)prepare(foreign, config, pool, unused);
     expect(!foreign.galaxy().snapshot()->corruption_menu(), "foreign observer never receives an actor's corruption capability");
+    config.observer->local_player = 2;
+    auto visible = take(eawr::campaign::GameSession::create(config));
+    const auto choice = prepare(visible, config, pool, unused);
+    order(visible, 2, gc::ExecutePreparedAbility{choice}); (void)take(visible.step(pool));
+    const auto publication = visible.galaxy().snapshot();
+    const auto transitions = publication->corruption_transitions();
+    const auto at = std::find_if(transitions.begin(), transitions.end(), [&](const auto& row) { return row.planet == config.planets[0].id; });
+    expect(at != transitions.end() && at->transition == visible.galaxy().ability_state()->transitions[0].transition,
+        "WGP-47 publication retains exact committed current/target/flags and logical deadlines");
+    const auto bytes = publication->canonical_bytes();
+    const auto native = gc::GalacticSnapshot::native_view(publication, {});
+    expect(native->corruption_transitions().data() == transitions.data() && publication->canonical_bytes() == bytes,
+        "read-only native view borrows transition storage without changing canonical bytes");
+    gc::NativeSnapshotChanges other_view; other_view.observer = *publication->observer();
+    other_view.observer->local_player = 1;
+    const auto foreign_view = gc::GalacticSnapshot::native_view(publication, std::move(other_view));
+    expect(foreign_view->corruption_transitions().empty(),
+        "observer replacement never borrows another player's admitted transition facts");
+    const auto stacked_foreign = gc::GalacticSnapshot::native_view(foreign_view, {});
+    expect(stacked_foreign->observer() && stacked_foreign->observer()->local_player == 1
+        && stacked_foreign->corruption_transitions().empty(),
+        "flattened native views retain inherited observer admission for corruption transitions");
+    const auto stacked_local = gc::GalacticSnapshot::native_view(native, {});
+    expect(stacked_local->corruption_transitions().data() == transitions.data(),
+        "stacked unchanged native views share the admitted transition allocation");
+    order(visible, 3, gc::PauseGalaxy{}); (void)take(visible.step(pool));
+    const auto* storage = visible.galaxy().snapshot()->corruption_transitions().data();
+    for (unsigned i = 0; i < 10; ++i) {
+        (void)take(visible.step(pool));
+        expect(visible.galaxy().snapshot()->corruption_transitions().data() == storage,
+            "idle transitions share one publication allocation");
+    }
+    const auto ids = cp::game_identities(config);
+    const auto save = take(cp::save_game_checkpoint(visible, ids));
+    auto loaded = take(cp::load_game_checkpoint(save, ids, {}, pool));
+    const auto restored = loaded.session.galaxy().snapshot()->corruption_transitions();
+    expect(std::equal(restored.begin(), restored.end(), visible.galaxy().snapshot()->corruption_transitions().begin(),
+        visible.galaxy().snapshot()->corruption_transitions().end()), "restored committed transition republishes unchanged");
 }
 namespace tactical = eawr::sim::tactical;
 namespace campaign = eawr::campaign;

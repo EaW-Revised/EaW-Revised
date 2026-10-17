@@ -7,7 +7,7 @@ std::optional<sim::galactic::PlanetId> GalacticWorld::markup_stage(tactical::Pla
     // WGA-226/466: preserve the owning site's published order.
     const auto key = upper_case(policy);
     if (key == "SINGLE_HOP_DISCONNECTED") return target;
-    for (const auto& row : connectivity_.goal_reach)
+    for (const auto& row : connectivity_->goal_reach)
         if (row.player == player && row.source == target && upper_case(row.policy) == key)
             return row.production_sites.empty() ? std::nullopt : std::optional{row.production_sites.front()};
     return {};

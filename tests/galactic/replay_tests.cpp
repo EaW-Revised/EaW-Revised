@@ -48,6 +48,7 @@ constexpr std::array galactic_command_opcodes{
     galactic::galactic_opcodes::special_cancel,
     galactic::galactic_opcodes::ability,
     galactic::galactic_opcodes::launch_from_surface,
+    galactic::galactic_opcodes::launch_fleet,
     galactic::galactic_opcodes::recheck_orbit,
 };
 static_assert([] {

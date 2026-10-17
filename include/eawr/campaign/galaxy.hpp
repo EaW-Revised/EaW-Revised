@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/core/diagnostic.hpp"
 #include "eawr/data/galactic/galactic_data.hpp"
 #include "eawr/sim/galactic/types.hpp"
 #include "eawr/units/galactic_types.hpp"
@@ -20,6 +21,8 @@ struct GalaxyModel {
     sim::EntityId next_id{};
     sim::math::Fixed maximum_movement_distance;
     std::array<std::uint8_t, 32> content_identity{};
+    // Admission warnings are observations, outside persistent graph identity.
+    std::vector<core::Diagnostic> diagnostics;
 };
 
 // WGS-01/WGM-16/17: campaign-scoped graph objects from validated tables. Assign IDs in authored

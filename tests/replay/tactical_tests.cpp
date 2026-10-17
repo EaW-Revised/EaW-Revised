@@ -33,6 +33,18 @@ void expect(const bool condition, const std::string_view message) {
     }
 }
 
+// #3644: a provider whose object turn is due every tick and asks for nothing.
+class EveryTurn final : public tactical::ObjectTurnService {
+public:
+    [[nodiscard]] bool due(const std::uint64_t) override { return true; }
+    [[nodiscard]] eawr::core::Result<std::vector<tactical::ObjectTurnUse>> run(
+        const eawr::sim::PartitionExecutor&, const tactical::ObjectTurnView& view) override {
+        rows = view.rows.size();
+        return eawr::core::Result<std::vector<tactical::ObjectTurnUse>>::success({});
+    }
+    std::size_t rows{};
+};
+
 class FailingExecutor final : public eawr::sim::PartitionExecutor {
 public:
     [[nodiscard]] std::size_t worker_count() const noexcept override { return 2; }
@@ -50,6 +62,24 @@ public:
             .source_id = std::string("tactical-test"),
         });
     }
+};
+
+// Fail only the read-only publication accelerator, after producing partial output.
+class FailingCanonicalExecutor final : public eawr::sim::PartitionExecutor {
+public:
+    [[nodiscard]] std::size_t worker_count() const noexcept override { return 2; }
+    [[nodiscard]] eawr::core::Result<void> execute(const std::size_t count,
+        const std::function<void(std::size_t)>& partition) const override {
+        return eawr::sim::InlineExecutor{}.execute(count, partition);
+    }
+    [[nodiscard]] eawr::core::Result<void> execute_phase(const std::string_view phase,
+        const std::size_t count, const std::function<void(std::size_t)>& partition) const override {
+        if (phase != "canonical-records") return execute(count, partition);
+        reached = true;
+        for (std::size_t index = 0; index < count / 2; ++index) partition(index);
+        return FailingExecutor{}.execute(count, partition);
+    }
+    mutable bool reached{};
 };
 
 // Reports any worker count and runs the partitions inline, last partition first.
@@ -533,7 +563,7 @@ void test_golden_across_workers(const std::string& fixtures, const Golden& golde
 // serial, loses its name or changes its partition count fails here. A new partitioned phase
 // adds its name to `required` and to the phase map.
 void test_phase_map(const std::string& fixtures) {
-    const std::vector<std::string_view> required{"gather", "movement", "hull-service", "combat-input-refresh", "targeting", "unit-systems", "visibility"};
+    const std::vector<std::string_view> required{"gather", "movement", "hull-service", "combat-input-refresh", "targeting", "unit-systems", "visibility", "canonical-records"};
     const auto replay = load_fixture(fixtures);
     auto created = tactical::TacticalSession::from_replay(replay);
     expect(static_cast<bool>(created), "phase map fixture session is created");
@@ -556,7 +586,39 @@ void test_phase_map(const std::string& fixtures) {
                 ++next;
             }
         }
-        expect(next == required.end(), "tick " + tick + ": the movement, targeting, unit-systems and visibility phases run partitioned, in order");
+        expect(next == required.end(), "tick " + tick + ": the movement, targeting, unit-systems, visibility and canonical-records phases run partitioned, in order");
+        expect(std::none_of(recorder.calls.begin(), recorder.calls.end(),
+                   [](const PhaseRecorder::Call& call) { return call.phase == "object-turn-rows"; }),
+            "tick " + tick + ": without an object-turn provider the object-turn-rows phase never runs");
+    }
+
+    // The object turn (#3644): with a provider whose turn is due, its staged rows are one named partitioned
+    // phase after the targeting and ability service and before the unit systems.
+    auto turn_created = tactical::TacticalSession::from_replay(replay);
+    expect(static_cast<bool>(turn_created), "object-turn phase fixture session is created");
+    if (!turn_created) {
+        return;
+    }
+    auto turn_session = std::move(turn_created).value();
+    const auto provider = std::make_shared<EveryTurn>();
+    expect(static_cast<bool>(turn_session.set_object_turn_service(provider)), "the phase map provider installs");
+    while (turn_session.completed_tick() < replay.final_tick_count) {
+        recorder.calls.clear();
+        const auto tick = std::to_string(turn_session.completed_tick());
+        expect(static_cast<bool>(turn_session.step(recorder)), "object-turn phase tick " + tick + " succeeds");
+        const auto position = [&](const std::string_view name) {
+            return std::find_if(recorder.calls.begin(), recorder.calls.end(),
+                [&](const PhaseRecorder::Call& call) { return call.phase == name; }) - recorder.calls.begin();
+        };
+        const auto rows = position("object-turn-rows");
+        expect(static_cast<std::size_t>(rows) < recorder.calls.size()
+                && recorder.calls[static_cast<std::size_t>(rows)].partitions == eawr::sim::tick_partition_count
+                && std::count_if(recorder.calls.begin(), recorder.calls.end(),
+                       [](const PhaseRecorder::Call& call) { return call.phase == "object-turn-rows"; }) == 1,
+            "tick " + tick + ": the object-turn-rows phase runs once and partitioned");
+        expect(position("targeting") < rows && rows < position("unit-systems"),
+            "tick " + tick + ": object-turn-rows runs after targeting and before the unit systems");
+        expect(provider->rows >= turn_session.units().size() && provider->rows != 0, "the provider saw the staged rows");
     }
 
     // The script service (#247) runs its instances as one named phase.
@@ -575,6 +637,32 @@ void test_phase_map(const std::string& fixtures) {
         return call.phase == script::script_phase_name && call.partitions == eawr::sim::tick_partition_count;
     });
     expect(script_phase && recorder.calls.size() == 1, "the script-instances phase runs partitioned");
+
+    // Hash preparation follows authoritative commit. Even partial worker failure
+    // must publish that completed tick through the identical serial encoder.
+    auto recovered_created = tactical::TacticalSession::from_replay(replay);
+    auto reference_created = tactical::TacticalSession::from_replay(replay);
+    expect(recovered_created && reference_created, "canonical failure fixtures are created");
+    if (!recovered_created || !reference_created) return;
+    auto recovered = std::move(recovered_created).value();
+    auto reference = std::move(reference_created).value();
+    const FailingCanonicalExecutor encoding_failure;
+    const ReverseInline reversed(4);
+    for (std::uint64_t index = 0; index < 3 && index < replay.final_tick_count; ++index) {
+        encoding_failure.reached = false;
+        const auto expected = reference.step(reversed);
+        const auto actual = recovered.step(encoding_failure);
+        expect(encoding_failure.reached && expected && actual,
+            "partial canonical worker failure completes publication");
+        if (!expected || !actual) break;
+        expect(actual.value().state_hash.get() == expected.value().state_hash.get()
+                && recovered.canonical_state_bytes() == reference.canonical_state_bytes(),
+            "canonical fallback preserves the exact state bytes and hash");
+        expect(recovered.snapshot()->completed_tick() == recovered.completed_tick()
+                && recovered.snapshot()->canonical_bytes() == reference.snapshot()->canonical_bytes()
+                && recovered.pending_command_count() == reference.pending_command_count(),
+            "canonical fallback publishes the completed snapshot and command queue");
+    }
 }
 
 void test_live_submission_and_recording(const std::string& fixtures, const Golden& golden) {

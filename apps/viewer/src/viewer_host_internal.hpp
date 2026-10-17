@@ -116,6 +116,8 @@ struct ViewerHost::Options final {
     // --eawr-front-end: the main menu and its screens, with the setup screen behind Skirmish and LAN.
     bool front_end{};
     bool skirmish_setup_test{};
+    // --eawr-allow-unknown-build: extract the fonts from a Forces of Corruption build EAWR has not verified (#3963).
+    bool allow_unknown_build{};
     bool skirmish_setup_returned{};
     bool startup_metrics{};
     bool cache_content{true};

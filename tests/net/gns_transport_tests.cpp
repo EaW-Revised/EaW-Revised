@@ -45,6 +45,10 @@ void frames() {
     std::vector<Bytes> expected{{}, {0}, {1}, {2}, {3}, {4}, {5}, {6}, {255}, Bytes(1024 * 1024, 173)};
     for (unsigned i = 0; i < 1000; ++i) expected.push_back({static_cast<std::uint8_t>(i), static_cast<std::uint8_t>(i >> 8)});
     for (const auto& bytes : expected) require(pair.host->send(1, bytes));
+    const auto queued = pair.host->queue_progress(1);
+    expect(queued.native_valid && queued.outbound_frames == expected.size() && !queued.reliable_drained,
+        "Queue snapshot observes accepted sends without claiming delivery or pumping them");
+    expect(!pair.host->queue_progress(0).native_valid, "Self has no native queue snapshot");
     std::size_t received{};
     until([&] {
         expect(!pair.host->poll(), "GNS control traffic is private");
@@ -185,6 +189,73 @@ void invalid_options() {
     expect(!GnsTransport::host("invalid-address", 0, options()), "GNS requires numeric direct IP");
     expect(!GnsTransport::connect("127.0.0.1", 0, options()), "GNS connect requires remote port");
     expect(!GnsTransport::host_introduced({}, options()), "GNS requires signalling endpoint");
+    value = options(); value.stun_servers = "turn:127.0.0.1:3478";
+    expect(!GnsTransport::host("127.0.0.1", 0, value), "STUN list must hold stun: URIs");
+    value.stun_servers = "stun:127.0.0.1:3478,stun:";
+    expect(!GnsTransport::host("127.0.0.1", 0, value), "STUN list entries cannot be empty");
+}
+// The room factories: one transport per process can still be created against an in-process room, which is enough to
+// check the roster-size contract, the incomplete-mesh Start refusal and the closed state without a second GNS identity.
+void room_contracts() {
+    const auto room_options = [](std::uint32_t peers) { auto value = options(); value.peers = peers; return value; };
+    const auto code = [](const auto& result) { return result ? std::string{} : result.error().code; };
+    InProcessGnsRoom room(3);
+    auto host = require(room.attach(0, "room-host"));
+    // Roster size, seat and options are agreed before anything is created.
+    expect(code(GnsTransport::host_room(host, room_options(4))) == "EAWR-NET-1765", "Room capacity must equal the agreed roster size");
+    expect(code(GnsTransport::host_room(host, room_options(2))) == "EAWR-NET-1765", "A smaller roster is refused too");
+    expect(code(GnsTransport::join_room(host, room_options(3))) == "EAWR-NET-1765", "The host seat cannot join as a guest");
+    expect(code(GnsTransport::host_room(host, room_options(1))) == "EAWR-NET-1501"
+        && code(GnsTransport::host_room(host, room_options(10))) == "EAWR-NET-1501", "Roster size is 2..max_match_seats");
+    expect(code(GnsTransport::host_room({}, room_options(3))) == "EAWR-NET-1509", "A room endpoint is required");
+    auto timed = room_options(3); timed.pair_timeout = 0ms;
+    expect(code(GnsTransport::host_room(host, timed)) == "EAWR-NET-1501", "A pair needs a deadline");
+    auto relay = room_options(3); relay.turn_only = true;
+    expect(code(GnsTransport::host_room(host, relay)) == "EAWR-NET-1519", "TURN-only needs relay credentials");
+    auto stun = room_options(3); stun.stun_servers = "stun:127.0.0.1:3478";
+    {
+        auto guest = require(room.attach(1, "room-guest"));
+        expect(code(GnsTransport::host_room(guest, room_options(3))) == "EAWR-NET-1765", "A guest cannot host the room");
+    }
+    auto transport = require(GnsTransport::host_room(host, stun));
+    expect(transport->mesh() && transport->self() == 0 && transport->peer_count() == 3 && transport->port() == 0, "Room host shape");
+    expect(transport->link(1) == LinkState::connecting && transport->link(2) == LinkState::connecting
+        && transport->link(0) == LinkState::closed && transport->link(3) == LinkState::closed, "Unfilled slots are still connecting");
+    expect(!transport->send(1, {}) && !transport->poll() && !transport->diagnostic(), "No pair, no frames");
+    expect(!transport->mesh_complete() && transport->connected_seats() == 0U, "A seat counts as connected only when every pair of the roster is");
+    const auto lock = transport->lock_room();
+    expect(!lock && lock.error().code == "EAWR-NET-1764", "Start is refused while the mesh is incomplete");
+    for (unsigned i = 0; i < 5; ++i) { static_cast<void>(transport->poll()); std::this_thread::sleep_for(2ms); }
+    expect(!transport->take_event(), "A lone host has no events");
+    expect(transport->signal_counts(1).sent_blobs == 0 && transport->pair(1).phase == GnsPairPhase::absent, "No pair, no signals");
+    transport->close();
+    until([&] { static_cast<void>(transport->poll()); return transport->closed(); });
+    transport.reset();
+    // A closed room cannot be joined.
+    InProcessGnsRoom closing(2);
+    auto first = require(closing.attach(0, "closing-host"));
+    require(first->leave());
+    expect(code(GnsTransport::host_room(first, room_options(2))) == "EAWR-NET-1760", "A closed room cannot be used");
+
+    // A late joiner's validated commitment arrives on GNS while its room
+    // endpoint still reports the pre-Lock roster. No sleeps or TLS race.
+    InProcessGnsRoom late(2);
+    auto late_host = require(late.attach(0, "late-host"));
+    auto late_guest = require(late.attach(1, "late-guest"));
+    auto guest_transport = require(GnsTransport::join_room(late_guest, room_options(2)));
+    expect(!guest_transport->room_locked(), "Late joiner starts in formation");
+    TcpRejoinAuth auth; auth.epoch = 1; auth.match_identity.fill(17);
+    auth.seat_tokens.resize(2); auth.seat_tokens[0].fill(23);
+    expect(!guest_transport->repair_closed_links(auth), "Staging cannot arm battle repair");
+    require(guest_transport->commit_room());
+    expect(late_host->roster().state == GnsRoomState::open && guest_transport->room_locked(),
+        "Commitment locks the native guest before its roster reports Lock");
+    require(guest_transport->repair_closed_links(auth));
+    require(guest_transport->commit_room());
+    static_cast<void>(guest_transport->poll());
+    expect(guest_transport->room_locked(), "A stale open roster cannot undo commitment");
+    guest_transport->cancel();
+    expect(!guest_transport->commit_room(), "A cancelled mesh cannot commit");
 }
 }
 int main() {
@@ -194,7 +265,7 @@ int main() {
             expect(!disabled && disabled.error().code == "EAWR-NET-1500", "Typed disabled GNS factory");
             std::cout << "GNS disabled: transport contracts skipped\n"; return 77;
         }
-        invalid_options(); frames(); mismatch(0); mismatch(1); mismatch(2); link_stats(); lifecycle(); capacity();
+        invalid_options(); room_contracts(); frames(); mismatch(0); mismatch(1); mismatch(2); link_stats(); lifecycle(); capacity();
         std::cout << "GNS message/lifecycle contracts passed\n"; return 0;
     } catch (const std::exception& failure) { std::cerr << failure.what() << '\n'; return 1; }
 }

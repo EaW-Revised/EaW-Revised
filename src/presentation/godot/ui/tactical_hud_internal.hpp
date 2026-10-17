@@ -89,7 +89,7 @@ struct HudButtonArt final {
 };
 
 // The options button: the component's four state textures. P2-20a only counts
-// presses; the in-game menu it opens is P2-20e. The control spans the drawn art
+// presses and runs its action, the in-game menu. The control spans the drawn art
 // quad, but only its component's mesh rect takes the pointer (hover and click),
 // as FoC picks the shell mesh, not the art (docs/ui/ui-layer.md 1.3).
 class EawrHudButton final : public TextureButton {
@@ -121,9 +121,9 @@ public:
         const auto& cue = get_button_mask() == MOUSE_BUTTON_MASK_RIGHT ? right_click_sfx_ : click_sfx_;
         if (sound_ && !cue.empty()) sound_(cue);
         if (action_) action_();
-        else UtilityFunctions::print("[eawr-hud] options pressed (P2-20a stub: the in-game menu is P2-20e)");
+        else UtilityFunctions::print("[eawr-hud] options pressed (no handler)");
     }
-    // #459: what a press does (the time panel's buttons); the options button has none yet.
+    // #459: what a press does (the time panel's buttons and the options button).
     void set_action(std::function<void()> action) { action_ = std::move(action); }
     // #3075: the authored Click_SFX / Mouse_Over_SFX names and the owner's SFX sink.
     void set_sounds(std::string click, std::string mouse_over, std::function<void(const std::string&)> sound, std::string right_click = {}) {
@@ -387,6 +387,7 @@ struct TacticalHud::State final {
     Control* movie_bands{};
     std::optional<float> movie_height;
     std::function<void()> movie_handler;
+    std::function<void()> options_handler;
     bool movie{};
     // #459: the time panel's live buttons, and #453/#459's overlay.
     EawrHudButton* pause_button{};

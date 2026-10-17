@@ -62,6 +62,13 @@ void record_prototypes(Sandbox::Impl& sandbox, const Proto* root) {
     }
 }
 
+void Sandbox::push_global(::std::string_view name) {
+    ++impl_->memory_suspended;
+    lua_pushlstring(impl_->state, name.data(), name.size());
+    --impl_->memory_suspended;
+    lua_rawget(impl_->state, LUA_GLOBALSINDEX);
+}
+
 bool Sandbox::push_canonical_keys(int index) {
     lua_State* state = impl_->state;
     if (index < 0 && index > LUA_REGISTRYINDEX) index = lua_gettop(state) + index + 1;

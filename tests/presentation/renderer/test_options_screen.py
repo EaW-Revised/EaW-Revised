@@ -12,6 +12,7 @@ EAWR_OPTIONS_CAPTURE_DIR to keep the page captures for an eye check.
 """
 
 import json
+import itertools
 import math
 import os
 import pathlib
@@ -24,6 +25,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
 from viewer_mode_sources import source_text  # noqa: E402
+from dialog_rectangles import assert_dialog_rectangles  # noqa: E402
 
 SRC = ROOT / "apps/viewer/src"
 TOOL = ROOT / "tools/fonts/extract_eaw_fonts.py"
@@ -136,6 +138,45 @@ class OptionsScreenGraphical(unittest.TestCase):
         path = self.directory / f"{name}.cfg"
         path.unlink(missing_ok=True)
         return path
+
+    def assert_network_rectangles(self, geometry):
+        controls = geometry["controls"]
+        self.assertTrue(controls)
+        for control in controls:
+            assert_dialog_rectangles(self, {"dialog": geometry["dialog"], "controls": [control]})
+        for first, second in itertools.combinations(controls, 2):
+            intended_frame_overlay = False
+            for group, label in ((first, second), (second, first)):
+                if group["kind"] != "group" or label["kind"] != "label":
+                    continue
+                if "authored" not in group or "authored" not in label:
+                    continue
+                gx, gy, gw, gh = group["rect"]
+                lx, ly, lw, lh = label["rect"]
+                # Retail Network dialog data lets labels straddle ONLY the left edge
+                # of a group backdrop. Their centre and remaining edges stay inside,
+                # and neither authored rectangle may move or grow for this exception.
+                if (lx < gx and gx <= lx + lw / 2 <= gx + gw and gy <= ly + lh / 2 <= gy + gh
+                        and gy <= ly and ly + lh <= gy + gh and lx + lw <= gx + gw):
+                    self.assertEqual(group["rect"], group["authored"], "frame overlay requires unchanged retail frame")
+                    self.assertEqual(label["rect"], label["authored"], "frame overlay requires unchanged retail label")
+                    intended_frame_overlay = True
+            if not intended_frame_overlay:
+                assert_dialog_rectangles(self, {"dialog": geometry["dialog"], "controls": [first, second]})
+
+    def test_dialog_rectangles_network_options(self):
+        for resolution in ("1920x1080", "1280x720"):
+            with self.subTest(resolution=resolution):
+                result = run_viewer(self, self.directory, "dialog-rectangles-network-" + resolution,
+                                    self.cache, self.settings("dialog-rectangles-" + resolution),
+                                    "--eawr-options-page", "network", resolution=resolution)
+                geometry = result["rectangles"]
+                self.assert_network_rectangles(geometry)
+                labels = [control for control in geometry["controls"] if control["kind"] == "label"]
+                self.assertTrue(labels)
+                for label in labels:
+                    for actual, authored in zip(label["rect"], label["authored"]):
+                        self.assertAlmostEqual(actual, authored, delta=0.1, msg=label["id"])
 
     def test_online_service_settings_persist_validate_and_cancel(self):
         settings = self.settings("online-service")

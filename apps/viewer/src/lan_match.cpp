@@ -1,4 +1,5 @@
 #include "lan_match.hpp"
+#include "lan_diagnostics.hpp"
 #include "online_match.hpp"
 #include "match_transport.hpp"
 #include "skirmish_prepare.hpp"
@@ -30,6 +31,50 @@
 #include <utility>
 
 namespace eawr::presentation::godot_backend {
+std::string online_pair_message(const net::GnsPairDiagnostic& pair) {
+    switch (pair.phase) {
+    case net::GnsPairPhase::absent: return "Waiting for connection";
+    case net::GnsPairPhase::signalling: return "Connecting";
+    case net::GnsPairPhase::handshaking: return "Checking connection";
+    case net::GnsPairPhase::refreshing: return "Refreshing room credentials";
+    case net::GnsPairPhase::repairing: return "Restoring connection";
+    case net::GnsPairPhase::authenticating: return "Checking restored connection";
+    case net::GnsPairPhase::open: return pair.route == net::GnsRoute::relayed ? "Connected through relay"
+        : pair.route == net::GnsRoute::direct ? "Connected directly" : "Connected";
+    case net::GnsPairPhase::failed:
+    case net::GnsPairPhase::lost:
+        switch (pair.code) {
+        case 1790: return "Connection repair is unavailable";
+        case 1791: return "Room credentials could not be refreshed";
+        case 1792: return "Restored connection could not be authenticated";
+        case 1793: return "Connection repair timed out";
+        case 1794: return "Retained game data could not be restored";
+        default: break;
+        }
+        return pair.relay_offered ? "Connection failed (relay was offered)" : "Connection failed; no relay was available";
+    case net::GnsPairPhase::closed: return "Connection closed";
+    default: return "Restoring connection";
+    }
+}
+std::string online_mesh_failure_text(std::string_view code) {
+    if (code == "EAWR-NET-1790") return "Connection repair is unavailable. You have left the match.";
+    if (code == "EAWR-NET-1791") return "The online service could not restore your connection. You have left the match.";
+    if (code == "EAWR-NET-1792") return "The returning connection could not be authenticated. You have left the match.";
+    if (code == "EAWR-NET-1793") return "The connection could not be restored in time. You have left the match.";
+    if (code == "EAWR-NET-1794") return "The connection could not catch up within the recovery limit. You have left the match.";
+    if (code == net::mesh_errors::left) return "Your connection to the other players could not be restored. You have left the match.";
+    if (code == net::mesh_errors::no_majority) return "The match ended: the players could not agree on which connections were lost.";
+    if (code == net::mesh_errors::no_decision) return "The match ended: the players could not confirm who left.";
+    if (code == net::mesh_errors::overlap) return "The match ended: another connection failed while a lost one was being settled.";
+    if (code == net::mesh_errors::malformed) return "The match ended: a repair message could not be read.";
+    return {};
+}
+void handle_online_start_failure(const core::Diagnostic& error,
+    const std::function<void(const core::Diagnostic&)>& feedback,
+    const std::function<void(const core::Diagnostic&)>& end_room) {
+    feedback(error);
+    if (error.code == "EAWR-NET-1021") end_room(error);
+}
 namespace {
 namespace tactical = sim::tactical;
 using Bytes = std::vector<std::uint8_t>;
@@ -155,9 +200,25 @@ public:
     std::uint64_t sent{}, received{}, batches_sent{}, batches_received{};
     bool count_progress{};
     std::shared_ptr<net::LanReconnectCredentials> credentials;
+    std::function<bool(const net::Received&)> credential_filter;
     std::optional<core::Diagnostic> credential_error;
+    std::shared_ptr<LanDiagnostics> diagnostics;
+    void observe_links() {
+        if (diagnostics && tcp) diagnostics->links(*tcp, [this](net::PeerIndex peer) {
+            const auto pair = tcp->mesh() ? tcp->pair(peer) : net::GnsPairDiagnostic{};
+            if (pair.code) return "EAWR-NET-" + std::to_string(pair.code);
+            return tcp->diagnostic() ? tcp->diagnostic()->code : std::string("none");
+        });
+    }
+    void observe_departure(std::string_view event, net::PeerIndex peer, std::span<const std::uint8_t> bytes) {
+        if (!diagnostics || bytes.size() < 6 || bytes.front() != net::departure_proposal_kind) return;
+        const auto reason = bytes[5] == 1 ? "disconnect" : bytes[5] == 2 ? "timeout" : bytes[5] == 3 ? "pair-loss" : "invalid";
+        diagnostics->emit(event, reason, peer);
+    }
     core::Result<void> send(net::PeerIndex peer, std::span<const std::uint8_t> bytes) override {
         auto result = tcp->send(peer, bytes);
+        observe_links();
+        if (result) observe_departure("departure-sent", peer, bytes);
         if (result && count_progress) { ++sent; if (!bytes.empty() && bytes.front() == net::sealed_batch_kind) ++batches_sent; }
         return result;
     }
@@ -170,7 +231,10 @@ public:
             std::optional<net::Received> next;
             if (!queued || pending.empty()) next = tcp->poll();
             else { next = std::move(pending.front()); pending.pop_front(); pending_bytes -= std::min(pending_bytes, next->frame.size()); }
+            observe_links();
+            if (next) observe_departure("departure-received", next->from, next->frame);
             if (next && !next->frame.empty() && (next->frame[0] == net::lan_credentials_kind || next->frame[0] == net::lan_credentials_ack_kind)) {
+                if (credential_filter && !credential_filter(*next)) { net::erase_reconnect_secret(next->frame); continue; }
                 if (!credentials) {
                     net::erase_reconnect_secret(next->frame);
                     credential_error = diagnostic("EAWR-NET-1025", "Reconnect credential provider is unavailable.");
@@ -190,6 +254,8 @@ public:
     net::PeerIndex self() const override { return tcp->self(); }
     std::uint32_t peer_count() const override { return tcp->peer_count(); }
     std::optional<net::LinkStats> link_stats(net::PeerIndex peer) const override { return tcp->link_stats(peer); }
+    std::uint64_t edge_identity(net::PeerIndex peer) const override { return tcp ? tcp->edge_identity(peer) : 0; }
+    void fail_repair(net::PeerIndex peer, unsigned code) override { if (tcp) tcp->fail_repair(peer, code); }
 };
 // This stable owner keeps the monitor's transport reference valid when a stopped
 // match hands its remaining I/O to a drain thread. No live-world callbacks escape.
@@ -291,6 +357,12 @@ void finish_io(std::unique_ptr<TerminalIo> io) {
         // and must await the peer's final exchange without an elapsed-time cut-off.
         // Online GNS callbacks share a process I/O owner; teardown stays on it.
         if (io->transport.tcp->online()) { io->transport.tcp->close(); (void)io->transport.tcp->poll(); return; }
+        // The detached drain must not retain the live owner's logger or state.
+        if (io->transport.diagnostics) {
+            for (net::PeerIndex peer = 0; peer < io->transport.peer_count(); ++peer)
+                if (peer != io->transport.self()) io->transport.diagnostics->emit("link-close-request", "terminal-drain", peer);
+            io->transport.diagnostics.reset();
+        }
         io->deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         drain_workers().start(std::move(io));
     }
@@ -300,6 +372,22 @@ class GatedMonitor final : public net::SessionMonitor {
 public:
     net::DesyncMonitor* monitor{};
     bool advance_allowed{};
+    core::Result<void> bind(net::DesyncMonitor& value) {
+        monitor = &value;
+        if (!pending_peer_) return core::Result<void>::success();
+        const auto peer = *pending_peer_; pending_peer_.reset();
+        return monitor->on_link_repair(peer, std::exchange(pending_ownership_, {}));
+    }
+    void reset() { monitor = nullptr; pending_peer_.reset(); pending_ownership_ = {}; }
+    core::Result<void> on_link_repair(net::PeerIndex peer, std::function<bool(net::PeerIndex)> ownership = {}) override {
+        if (monitor) return monitor->on_link_repair(peer, std::move(ownership));
+        // The host creates setup before loading binds the concrete monitor.
+        // Preserve the creation self-call, including send ownership, until bind.
+        if (pending_peer_ && *pending_peer_ != peer)
+            return core::Result<void>::failure(diagnostic("EAWR-NET-1790", "Unbound monitor received a peer repair."));
+        pending_peer_ = peer; pending_ownership_ = std::move(ownership);
+        return core::Result<void>::success();
+    }
     bool needs_encoding(std::uint64_t tick, bool end = false) const override { return monitor->needs_encoding(tick, end); }
     core::Result<void> record(std::uint64_t tick, std::string_view hash, std::span<const std::uint8_t> state,
         std::span<const std::uint8_t> input, bool end = false) override { return monitor->record(tick, hash, state, input, end); }
@@ -313,6 +401,9 @@ public:
     bool may_step() const override { return advance_allowed && monitor->may_step(); }
     bool frozen() const noexcept override { return monitor->frozen(); }
     std::vector<net::PeerIndex> waiting_for_peers() const override { return monitor->waiting_for_peers(); }
+private:
+    std::optional<net::PeerIndex> pending_peer_;
+    std::function<bool(net::PeerIndex)> pending_ownership_;
 };
 class LiveAdapter final : public net::SessionAdapter {
 public:
@@ -434,6 +525,15 @@ private:
 };
 class TcpLanMatch final : public LanMatch, public std::enable_shared_from_this<TcpLanMatch> {
 public:
+    void set_diagnostic_logger(std::function<void(std::string_view)> logger) override {
+        if (handed_over_) return;
+        // GNS/TURN lines (#4021) go to the same log. The process-wide sink owns its own copy of the logger (never this
+        // match's diagnostics, which cancel() rewrites); the transport hands the lines over on the I/O owner's poll.
+        net::GnsTransport::set_log_sink(logger ? net::GnsLogSink(logger) : net::GnsLogSink{});
+        gns_log_owner_ = static_cast<bool>(logger);
+        diagnostics_->sink = std::move(logger);
+        io_->transport.diagnostics = diagnostics_;
+    }
     void set_recovery_policy(net::SetupRecoveryPolicy policy, LanCredentialProvider credentials = {}) override {
         if (handed_over_) return;
         recovery_policy_ = policy; credentials_ = std::move(credentials);
@@ -500,17 +600,16 @@ public:
     bool lobby_game(const skirmish::FixtureOptions& options) override {
         if (!lobby_mutable() || !view().host) return false;
         auto configured = options;
-        std::set<sim::tactical::PlayerId> planned;
-        for (const auto& seat : lobby_->snapshot().seats) planned.insert(seat.selection.slot);
-        for (net::PeerIndex peer = 0; peer < owners_.size(); ++peer)
-            if (std::none_of(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(), [&](const auto& seat) { return seat.peer == peer; })) planned.insert(owners_[peer]);
+        const std::set<sim::tactical::PlayerId> planned(owners_.begin(), owners_.end());
         if (configured.slots) for (auto& row : *configured.slots) row.human = planned.contains(row.slot);
         auto encoded = encode_lan_lobby_game(configured, input_delay_);
         if (!encoded) return lobby_feedback(core::Result<void>::failure(encoded.error()));
         auto assignments = lobby_->snapshot().seats;
         for (auto& seat : assignments) {
             const auto row = std::find_if(options.slots->begin(), options.slots->end(), [&](const auto& slot) { return slot.slot == seat.selection.slot; });
-            if (row == options.slots->end()) return false;
+            // #4041: a row holding a human (host or guest) keeps its control; the host removes a guest with the kick action.
+            if (row == options.slots->end() || !planned.contains(row->slot))
+                return lobby_feedback(lobby_fail<void>(net::LobbyReason::invalid_choice, "A slot held by a human cannot be switched to AI, Closed or Open; kick the player first."));
             seat.selection.faction = row->faction; seat.selection.team = row->team;
             seat.selection.colour = row->colour_index.value_or(row->slot - 1); seat.player = row->slot;
         }
@@ -556,15 +655,32 @@ public:
         const auto local = std::find_if(state.snapshot.seats.begin(), state.snapshot.seats.end(), [&](const auto& seat) { return seat.peer == lobby_self_; });
         state.local_ready = local != state.snapshot.seats.end() && local->ready;
         state.identity_pending = local != state.snapshot.seats.end() && local->selection.name != lobby_name_;
-        state.ready_enabled = !state.preparing && !state.identity_pending && local != state.snapshot.seats.end() && state.snapshot.phase == net::LobbyPhase::staging;
-        state.start_enabled = view().host && state.snapshot.seats.size() >= 2 && state.snapshot.phase == net::LobbyPhase::staging
-            && std::all_of(state.snapshot.seats.begin(), state.snapshot.seats.end(), [](const auto& seat) { return seat.ready; });
+        const auto valid = validate_lobby(state.snapshot, true);
+        if (!valid) state.ready_reason = valid.error().message;
+        const bool hosting = view().host;
+        const bool mesh_complete = !io_->transport.tcp || io_->transport.tcp->mesh_complete();
+        const bool all_ready = std::all_of(state.snapshot.seats.begin(), state.snapshot.seats.end(), [](const auto& seat) { return seat.ready; });
+        state.connections_pending = hosting && online_options_.has_value() && !mesh_complete;
+        state.start_reason = state.ready_reason;
+        if (state.start_reason.empty() && state.connections_pending)
+            state.start_reason = "Waiting for connections between players. Every pair must connect before Start; My connections shows only your own links.";
+        else if (state.start_reason.empty() && !all_ready) state.start_reason = "Waiting for every player to accept the current setup.";
+        state.ready_enabled = !state.preparing && !state.identity_pending && local != state.snapshot.seats.end()
+            && state.snapshot.phase == net::LobbyPhase::staging && (state.local_ready || valid);
+        // An online room starts only complete: every seat present and every pair verified (docs/net-online-npeer.md, section 3).
+        state.start_enabled = hosting && state.snapshot.seats.size() >= 2 && state.snapshot.phase == net::LobbyPhase::staging
+            && valid
+            && mesh_complete && all_ready;
         return state;
     }
 private:
     bool lobby_mutable() const { return !handed_over_ && view().phase != LanPhase::ended && lobby_ && io_->transport.tcp; }
     void flush_lobby_closes() {
-        if (io_->transport.tcp) for (const auto peer : closing_peers_) (void)io_->transport.tcp->close_peer(peer);
+        if (io_->transport.tcp) for (const auto peer : closing_peers_) {
+            // A room mesh has no per-peer stream to close: the host frees the seat in the room, which closes its pairs.
+            if (io_->transport.tcp->mesh()) { if (const auto room = online_endpoint_.lock(); room && view().host) (void)room->release(peer); }
+            else (void)io_->transport.tcp->close_peer(peer);
+        }
         closing_peers_.clear();
     }
     bool lobby_feedback(core::Result<void> result) {
@@ -579,7 +695,9 @@ private:
         if (!options) return core::Result<void>::failure(options.error());
         const auto map = std::find_if(lobby_maps_.begin(), lobby_maps_.end(), [&](const auto& value) { return value.path == state.game.map; });
         if (map == lobby_maps_.end() || !map->unavailable.empty()) return lobby_fail<void>(net::LobbyReason::invalid_choice, "TEXT_MAP_NOT_AVAILABLE_TO_PLAY");
-        if (auto slots = skirmish::validate_setup_slots(*options.value().slots, map->metadata, false); !slots) return lobby_fail<void>(net::LobbyReason::invalid_choice, slots.error().message);
+        // WSS-17/18 gate Ready/Start, not intermediate edits or staging snapshots.
+        if (auto slots = skirmish::validate_setup_slots(*options.value().slots, map->metadata, false, starting); !slots)
+            return lobby_fail<void>(net::LobbyReason::invalid_choice, slots.error().message);
         auto planned_state = state; planned_state.seats.clear();
         auto planned = decode_lan_lobby_game(planned_state);
         if (!planned) return core::Result<void>::failure(planned.error());
@@ -587,7 +705,8 @@ private:
             if (std::none_of(planned.value().slots->begin(), planned.value().slots->end(), [&](const auto& row) { return row.slot == owner; }))
                 return lobby_fail<void>(net::LobbyReason::invalid_choice, "A planned human owner has no loaded map row.");
         }
-        for (const auto& row : *planned.value().slots) if (row.slot > skirmish::setup_row_count(*map))
+        const auto owner_rows = skirmish::setup_row_count(*map, false);
+        for (const auto& row : *planned.value().slots) if (row.slot > owner_rows)
             return lobby_fail<void>(net::LobbyReason::invalid_choice, "An owner row is outside the loaded map capacity.");
         std::set<std::uint32_t> colours;
         for (const auto& slot : *options.value().slots) {
@@ -606,12 +725,10 @@ private:
             if (std::none_of(planned.value().slots->begin(), planned.value().slots->end(), [&](const auto& row) { return row.slot == seat.selection.slot && row.human; }))
                 return lobby_fail<void>(net::LobbyReason::invalid_choice, "This owner row is reserved for AI by the host.");
             // Defense in depth: the host roster already limits its planned human rows.
-            human_rows.insert(seat.selection.slot);
+            if (!human_rows.insert(seat.selection.slot).second)
+                return lobby_fail<void>(net::LobbyReason::invalid_choice, "Each human needs a separate owner row.");
             if (human_rows.size() > sim::max_match_human_sides)
                 return lobby_fail<void>(net::LobbyReason::invalid_choice, "Too many human owner rows.");
-            for (const auto& other : state.seats) if (seat.peer != other.peer && seat.selection.slot == other.selection.slot
-                && (seat.selection.faction != other.selection.faction || seat.selection.team != other.selection.team || seat.selection.colour != other.selection.colour))
-                return lobby_fail<void>(net::LobbyReason::invalid_choice, "Shared human seats must agree on their owner row.");
             const auto team = std::find_if(map->teams.begin(), map->teams.end(), [&](const auto& value) { return value.team == seat.selection.team; });
             if (team == map->teams.end() || std::find(team->factions.begin(), team->factions.end(), seat.selection.faction) == team->factions.end())
                 return lobby_fail<void>(net::LobbyReason::invalid_choice, "Faction is unavailable on this team.");
@@ -622,6 +739,39 @@ private:
             auto built = validated_lan_options(selected, lobby_maps_);
             if (!built) return lobby_fail<void>(net::LobbyReason::invalid_choice, built.error().message);
         }
+        return core::Result<void>::success();
+    }
+    void clear_mesh_repair_material() {
+        mesh_repair_auth_.reset(); mesh_material_revision_.reset(); mesh_retired_ = 0;
+        credential_state_->clear();
+    }
+    bool current_mesh_credentials(const net::Received& frame) {
+        if (!lobby_) return true;
+        const auto revision = lobby_->snapshot().revision;
+        if (frame.frame.front() == net::lan_credentials_kind && frame.from == 0 && io_->transport.self() != 0) {
+            // Host snapshots and credentials share one ordered pair stream. The
+            // preceding Ready snapshot supplies this frozen attempt's revision.
+            if (mesh_material_revision_ && *mesh_material_revision_ != revision) clear_mesh_repair_material();
+            mesh_material_revision_ = revision;
+        } else if (frame.frame.front() == net::lan_credentials_ack_kind && io_->transport.self() == 0) {
+            if (mesh_material_revision_ && lobby_->snapshot().phase == net::LobbyPhase::staging
+                && *mesh_material_revision_ != revision) clear_mesh_repair_material();
+            // A new Start requires every guest's fresh Ready on this same ordered
+            // stream, so an old attempt's ACK cannot overtake that Ready barrier.
+            if (!mesh_material_revision_) return false; // Late ACK from an already cancelled attempt.
+        }
+        return true;
+    }
+    core::Result<void> provision_mesh_repair(const net::SetupOffer& offer, std::uint64_t revision) {
+        if (!online_options_ || offer.seats.size() < 3) return core::Result<void>::success();
+        if (mesh_material_revision_ && *mesh_material_revision_ != revision) clear_mesh_repair_material();
+        auto keys = credential_state_->provide_mesh_repair(offer, io_->transport);
+        if (!keys) return core::Result<void>::failure(keys.error());
+        auto encoded = net::encode_setup_offer(offer);
+        if (!encoded) return core::Result<void>::failure(encoded.error());
+        net::TcpRejoinAuth auth;
+        auth.match_identity = core::sha256(encoded.value()); auth.seat_tokens = std::move(keys).value();
+        mesh_repair_auth_ = std::move(auth); mesh_material_revision_ = revision;
         return core::Result<void>::success();
     }
     net::LobbyHooks lobby_hooks() {
@@ -637,12 +787,29 @@ private:
             offer.identity = {std::string(core::build_identity()), *prepared_setup_->match_identity}; offer.seats = seats; offer.input_delay = delay;
             // The default LAN lobby does not provision confidential recovery. Existing legacy setup retains that path.
             if (recovery_policy_.reconnect || recovery_policy_.resync) return lobby_fail<net::SetupOffer>(net::LobbyReason::recovery_unavailable, "Recovery provisioning for staging is unavailable.");
+            if (auto provisioned = provision_mesh_repair(offer, state.frozen_revision); !provisioned)
+                return core::Result<net::SetupOffer>::failure(provisioned.error());
             return core::Result<net::SetupOffer>::success(std::move(offer));
         };
-        hooks.setup = [this](net::MessageTransport& stream, const net::LobbySnapshot&) -> core::Result<net::LobbySetupContext> {
+        hooks.setup = [this](net::MessageTransport& stream, const net::LobbySnapshot& staged) -> core::Result<net::LobbySetupContext> {
             lobby_stream_ = &stream;
             net::LobbySetupContext context; context.options.auto_accept = false; context.options.auto_start = false;
             context.options.timeout_ms = 180'000; context.options.session.keep_admission_tick_open = true;
+            if (online_options_ && staged.seats.size() >= 3) {
+                // Three or more seats share one room mesh: a lost pair is decided by one seat, not by each end (N4). The setup
+                // stream is dense (host first, roster order); the pair diagnostics belong to the transport slots.
+                net::MeshIncidentOptions mesh;
+                std::vector<net::PeerIndex> slots;
+                for (const auto& seat : staged.seats) slots.push_back(seat.peer);
+                mesh.relay_failed = [this, slots](net::PeerIndex dense) {
+                    return dense >= slots.size() || !io_->transport.tcp || io_->transport.tcp->pair(slots[dense]).relay_failed;
+                };
+                context.options.session.mesh = std::move(mesh);
+                context.providers.configure_session = [this, revision = staged.frozen_revision](net::SessionOptions&, const net::SetupOffer& offer) {
+                    return provision_mesh_repair(offer, revision);
+                };
+                context.providers.credentials_delivered = [this] { return credential_state_->delivered(); };
+            }
             context.options.session.pending_input_epoch = [this] { return pending_input_epoch(); };
             context.providers.identify = [this](const net::SetupOffer&) {
                 if (!prepared_setup_ || !prepared_setup_->match_identity) return lobby_fail<sim::MatchAgreement>(net::LobbyReason::setup_failed, "Local staging match identity is unavailable.");
@@ -665,16 +832,33 @@ private:
             return core::Result<net::LobbySetupContext>::success(std::move(context));
         };
         hooks.remove_peer = [this](net::PeerIndex peer, net::LobbyReason) { closing_peers_.insert(peer); removed_peers_.insert(peer); };
+        if (online_options_) {
+            hooks.mesh_complete = [this]() -> core::Result<void> {
+                if (io_->transport.tcp && io_->transport.tcp->mesh_complete()) return core::Result<void>::success();
+                return lobby_fail<void>(net::LobbyReason::mesh_incomplete, "The room mesh is incomplete.");
+            };
+            hooks.lock_room = [this]() -> core::Result<void> {
+                return io_->transport.tcp ? io_->transport.tcp->lock_room() : lobby_fail<void>(net::LobbyReason::mesh_incomplete, "The room mesh is gone.");
+            };
+        }
         return hooks;
     }
     void reset_lobby() {
-        lobby_.reset(); lobby_result_.reset(); lobby_stream_ = nullptr; prepared_setup_.reset(); ready_pending_ = false; lobby_setup_accepted_ = false;
+        gate_.reset();
+        lobby_.reset(); lobby_result_.reset(); lobby_stream_ = nullptr; prepared_setup_.reset(); ready_pending_ = false; lobby_setup_accepted_ = false; lobby_room_committed_ = false;
         removed_peers_.clear(); known_edges_.clear(); closing_peers_.clear(); lobby_notice_.reset(); last_lobby_state_.reset(); identity_retry_at_ms_ = 0;
     }
     void start_lobby() {
         const auto state = lobby_state();
         if (!state || !state->start_enabled || !prepared_setup_ || handed_over_) return;
-        if (!lobby_feedback(lobby_->start(state->snapshot.revision))) return;
+        auto started = lobby_->start(state->snapshot.revision);
+        if (!started) {
+            if (online_options_) handle_online_start_failure(started.error(),
+                [this](const core::Diagnostic& error) { (void)lobby_feedback(core::Result<void>::failure(error)); },
+                [this](const core::Diagnostic& error) { set_failure(error); });
+            else (void)lobby_feedback(started);
+            return;
+        }
         auto raw = io_->transport.tcp->poll();
         if (raw) { io_->transport.pending_bytes += raw->frame.size(); io_->transport.pending.push_back(std::move(*raw)); }
         last_lobby_state_ = lobby_state();
@@ -684,6 +868,8 @@ private:
     void pump_lobby(const skirmish::FixtureOptions& selected) {
         if (handed_over_ || !io_->transport.tcp || view().phase == LanPhase::ended) return;
         lobby_clock_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        if (online_options_ && !drain_mesh_events()) return;
+        sample_online_route();
         if (lobby_ && lobby_->snapshot().phase == net::LobbyPhase::starting && view().host) {
             auto raw = io_->transport.tcp->poll();
             if (raw) {
@@ -732,6 +918,9 @@ private:
             } else {
                 auto raw = io_->transport.tcp->poll();
                 if (!raw) {
+                    // The wait for the host's first snapshot starts once the host pair is verified: ICE has its own deadline.
+                    if (!online_snapshot_deadline_ && online_options_ && io_->transport.link(0) == net::LinkState::open)
+                        online_snapshot_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(20);
                     if (online_snapshot_deadline_ && std::chrono::steady_clock::now() >= *online_snapshot_deadline_)
                         set_failure(diagnostic("EAWR-NET-1536", "Online staging snapshot timed out."));
                     return;
@@ -761,21 +950,32 @@ private:
             auto options = decode_lan_lobby_game(snapshot);
             if (!options) { set_failure(options.error()); return; }
             for (net::PeerIndex peer = 1; peer < io_->transport.peer_count(); ++peer) {
-                if (io_->transport.link(peer) != net::LinkState::open
-                    || std::any_of(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(), [&](const auto& seat) { return seat.peer == peer; })) continue;
-                const auto edge = io_->transport.tcp->edge_identity(peer);
+                if (io_->transport.link(peer) != net::LinkState::open) {
+                    // A room slot keeps its roster identity when its occupant returns, so a removal cannot outlive the closed pair
+                    // (a leave, a refusal or a retry would otherwise be answered "removed from the room"). The service's own
+                    // denylist covers a kicked player.
+                    if (io_->transport.tcp->mesh()) { removed_peers_.erase(peer); known_edges_.erase(peer); }
+                    continue;
+                }
+                if (std::any_of(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(), [&](const auto& seat) { return seat.peer == peer; })) continue;
+                const auto edge = room_edge(peer);
                 if (known_edges_[peer] != edge) { known_edges_[peer] = edge; removed_peers_.erase(peer); }
                 if (removed_peers_.contains(peer)) {
                     auto rejected = net::encode_lobby_frame(net::LobbyRejected{{lobby_->snapshot().room, lobby_->snapshot().revision, net::LobbyReason::denied, "This connection was removed from the room."}});
                     if (rejected) (void)io_->transport.send(peer, rejected.value());
                     closing_peers_.insert(peer); continue;
                 }
-                const auto row = std::find_if(options.value().slots->begin(), options.value().slots->end(), [&](const auto& value) { return value.slot == owners_[peer]; });
+                auto row = options.value().slots->end();
+                for (auto candidate = options.value().slots->begin(); candidate != options.value().slots->end(); ++candidate) {
+                    if (std::find(owners_.begin(), owners_.end(), candidate->slot) == owners_.end()
+                        || std::any_of(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(), [&](const auto& seat) { return seat.selection.slot == candidate->slot; })) continue;
+                    if (row == options.value().slots->end() || candidate->slot < row->slot) row = candidate;
+                }
                 if (row == options.value().slots->end()) {
                     if (online_options_) { set_failure(diagnostic("EAWR-NET-1535", "Online staging has no vacant player row for this seat.")); return; }
                     continue;
                 }
-                auto admitted = lobby_->admit(peer, "lan-edge-" + std::to_string(edge),
+                auto admitted = lobby_->admit(peer, admission_identity(peer, edge),
                     {lan_admission_name(lobby_->snapshot(), peer), row->faction, row->colour_index.value_or(row->slot - 1), row->team, row->slot}, row->slot, lobby_->snapshot().revision);
                 if (!admitted) {
                     const auto reason = lan_lobby_reason(admitted.error());
@@ -787,6 +987,8 @@ private:
             }
         }
         auto pumped = lobby_->pump(lobby_clock_); flush_lobby_closes(); if (!pumped) { set_failure(pumped.error()); return; }
+        if (online_options_ && mesh_material_revision_ && lobby_->snapshot().phase == net::LobbyPhase::staging
+            && *mesh_material_revision_ != lobby_->snapshot().revision) clear_mesh_repair_material();
         if (!view().host && lobby_->snapshot().phase == net::LobbyPhase::staging && lobby_clock_ >= identity_retry_at_ms_) {
             const auto local = std::find_if(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(), [&](const auto& seat) { return seat.peer == io_->transport.self(); });
             if (local != lobby_->snapshot().seats.end() && local->selection.name != lobby_name_) {
@@ -834,12 +1036,23 @@ private:
         { const std::lock_guard lock(mutex_);
             view_.seat = io_->transport.self(); if (local != state->snapshot.seats.end()) view_.player = local->player;
             view_.connected_seats = static_cast<std::uint32_t>(state->snapshot.seats.size()); view_.connected = state->snapshot.seats.size() > 1;
-            if (online_options_ && view_.connected && view_.message == "Player connecting...") view_.message.clear();
+            if (online_options_ && view_.connected && (view_.message == "Player connecting..." || view_.message == "Waiting for a player to join...")) view_.message.clear();
+            if (online_options_ && view_.host) {
+                // The room code stays on show while a slot is free; a full room has no use for it.
+                const bool full = state->snapshot.seats.size() >= state->snapshot.capacity;
+                view_.invitation_code = full ? std::string{} : online_alias_; view_.invitation_consumed = full;
+            }
             view_.human_owners.clear(); for (const auto& seat : state->snapshot.seats) view_.human_owners.push_back(seat.player);
             view_.phase = LanPhase::setup; view_.start_enabled = state->start_enabled; view_.accept_enabled = state->ready_enabled;
             if (state->snapshot.phase == net::LobbyPhase::closed) { view_.phase = LanPhase::ended; view_.reason = LanReason::peer_left; }
         }
-        if (state->snapshot.phase == net::LobbyPhase::closed) { io_->transport.tcp->close(); (void)io_->transport.tcp->poll(); }
+        if (state->snapshot.phase == net::LobbyPhase::closed) {
+            if (state->notice && state->notice->reason == net::LobbyReason::pair_unreachable) {
+                set_failure(net::lobby_diagnostic(state->notice->reason, state->notice->message)); return;
+            }
+            erase_credentials();
+            io_->transport.tcp->close(); (void)io_->transport.tcp->poll();
+        }
         if (state->snapshot.phase == net::LobbyPhase::starting && !view().host && offered_) { accepted_ = true; pending_ = offered_; }
         if (io_->transport.tcp->diagnostic() && !view().connected) set_failure(*io_->transport.tcp->diagnostic());
     }
@@ -856,7 +1069,7 @@ private:
     std::optional<tactical::TacticalSetup> prepared_setup_;
     std::future<core::Result<tactical::TacticalSetup>> preparing_;
     std::uint64_t preparing_revision_{}, prepared_revision_{}, lobby_clock_{};
-    bool ready_pending_{}, lobby_setup_accepted_{};
+    bool ready_pending_{}, lobby_setup_accepted_{}, lobby_room_committed_{};
     std::uint64_t identity_retry_at_ms_{};
     std::set<net::PeerIndex> removed_peers_, closing_peers_;
     std::map<net::PeerIndex, std::uint64_t> known_edges_;
@@ -872,12 +1085,164 @@ public:
 private:
     std::optional<OnlineMatchOptions> online_options_;
     std::shared_ptr<OnlineAdmission> online_admission_, online_retiring_;
-    // Observed after pairing only to read the service lease and credential age for notices (ticket E). Weak on
-    // purpose: the transport owns signalling, and closing it must release the service session for the other peer.
-    std::weak_ptr<net::GnsSignallingEndpoint> online_endpoint_;
+    std::optional<net::TcpRejoinAuth> mesh_repair_auth_; // Native room-slot keys, I/O owner only; never published.
+    std::optional<std::uint64_t> mesh_material_revision_;
+    net::MeshSeats mesh_retired_{};
+    // Observed after the room opens only to read the service lease and credential age for notices (ticket E) and to release
+    // a seat before Start. Weak on purpose: the transport owns signalling, and closing it must release the service session.
+    std::weak_ptr<net::NetworkGnsRoom> online_endpoint_;
     std::chrono::steady_clock::time_point online_paired_at_{};
+    std::chrono::steady_clock::time_point online_sample_at_{};
     std::optional<std::chrono::steady_clock::time_point> online_snapshot_deadline_;
-    void begin_online(bool hosting, std::string code) {
+    std::string online_alias_;
+    // The attached room member while its roster has not arrived yet (pump_online).
+    std::shared_ptr<net::NetworkGnsRoom> online_pending_;
+    std::chrono::steady_clock::time_point online_pending_deadline_{};
+    // Seats the single-decider agreement removed, as curated lines for LanView::mesh_notice (oldest first, bounded).
+    std::size_t mesh_seen_{};
+    LanDepartureNotices mesh_notices_;
+    std::string mesh_left_text_;
+    // The session's seats are positions in the staged roster (host first, admission order), not transport slots.
+    std::string seat_name(net::PeerIndex position) const {
+        if (last_lobby_state_ && position < last_lobby_state_->snapshot.seats.size() && !last_lobby_state_->snapshot.seats[position].selection.name.empty())
+            return last_lobby_state_->snapshot.seats[position].selection.name;
+        return "Player " + std::to_string(position + 1);
+    }
+    core::Result<void> arm_mesh_repair(const net::LockstepSession& session) {
+        if (!online_options_ || !session.mesh_running()) return core::Result<void>::success();
+        if (!mesh_repair_auth_ || session.mesh_incident_id() == 0)
+            return core::Result<void>::failure(diagnostic("EAWR-NET-1790", "Match-bound mesh repair material is unavailable."));
+        auto auth = *mesh_repair_auth_; auth.epoch = session.mesh_incident_id();
+        return io_->transport.tcp->repair_closed_links(std::move(auth));
+    }
+    core::Result<void> retire_mesh_seat(net::PeerIndex dense) {
+        if (!online_options_) return core::Result<void>::success();
+        if (!last_lobby_state_ || dense >= last_lobby_state_->snapshot.seats.size())
+            return core::Result<void>::failure(diagnostic("EAWR-NET-1790", "Frozen room seat is unavailable for retirement."));
+        const auto native = last_lobby_state_->snapshot.seats[dense].peer;
+        if (native == io_->transport.self() || (mesh_retired_ & net::mesh_seat(native))) return core::Result<void>::success();
+        auto closed = io_->transport.tcp->close_peer(native);
+        if (closed) mesh_retired_ |= net::mesh_seat(native);
+        return closed;
+    }
+    std::string mesh_repair_message() const {
+        if (last_lobby_state_) for (net::PeerIndex dense = 0; dense < last_lobby_state_->snapshot.seats.size(); ++dense) {
+            const auto native = last_lobby_state_->snapshot.seats[dense].peer;
+            if (native == io_->transport.self() || (mesh_retired_ & net::mesh_seat(native))) continue;
+            const auto pair = io_->transport.tcp->pair(native);
+            if (pair.phase != net::GnsPairPhase::open)
+                return "Connection to " + seat_name(dense) + ": " + online_pair_message(pair) + ". Play is paused.";
+        }
+        return "Your connections are ready. Waiting for all players to confirm. Play is paused.";
+    }
+    // "Connection to <name> could not be restored. You have left the match." for the seat the agreement removed.
+    std::string removed_seat_text(const net::LockstepSession& session) const {
+        const auto self = lobby_stream_ ? lobby_stream_->self() : io_->transport.self();
+        for (auto result = session.mesh_results().rbegin(); result != session.mesh_results().rend(); ++result) {
+            if (result->kind != net::MeshIncidentResult::Kind::leave || self >= net::max_match_seats) continue;
+            auto pick = static_cast<net::MeshSeats>(result->lost[self] & result->survivors);
+            if (pick == 0) pick = result->lost[self];
+            for (net::PeerIndex other = 0; other < net::max_match_seats && pick != 0; ++other)
+                if (pick & net::mesh_seat(other)) return "Connection to " + seat_name(other) + " could not be restored. You have left the match.";
+        }
+        return "Your connection to the other players could not be restored. You have left the match.";
+    }
+    void append_mesh_notice(const net::MeshIncidentResult& result, std::uint64_t now_ms) {
+        if (result.kind != net::MeshIncidentResult::Kind::departure) return;
+        const auto name = [&](net::PeerIndex position) { return seat_name(position); };
+        for (net::PeerIndex removed = 0; removed < net::max_match_seats; ++removed) {
+            if (!(result.removed & net::mesh_seat(removed))) continue;
+            // The first survivor the removed seat could not reach; failing that, any seat it could not reach.
+            const auto lost = result.lost[removed];
+            net::MeshSeats pick = static_cast<net::MeshSeats>(lost & result.survivors);
+            if (pick == 0) pick = lost;
+            std::string line = name(removed) + " left";
+            for (net::PeerIndex other = 0; other < net::max_match_seats && pick != 0; ++other)
+                if (pick & net::mesh_seat(other)) { line += ": their connection to " + name(other) + " failed."; pick = 0; }
+            if (line.back() != '.') line += ".";
+            mesh_notices_.push(std::move(line), now_ms);
+        }
+    }
+    // The room scope a failed or cancelled request opened is closed on a drain worker: its last reference joins a worker
+    // that may wait out a pending connect.
+    static void retire_room(std::shared_ptr<net::NetworkGnsRoom> room) {
+        if (room) drain_workers().start(std::function<void()>([room = std::move(room)]() mutable { room.reset(); }));
+    }
+    std::uint64_t room_edge(net::PeerIndex peer) const {
+        if (!io_->transport.tcp->mesh()) return io_->transport.tcp->edge_identity(peer);
+        const auto room = online_endpoint_.lock();
+        if (!room || peer >= net::max_match_seats || io_->transport.link(peer) != net::LinkState::open) return 0;
+        // The roster identity is the service's own name for the occupant: a different occupant is a different edge.
+        return std::hash<std::string>{}(room->roster().slots[peer].identity) | 1U;
+    }
+    void sample_online_route() {
+        if (!online_options_ || !io_->transport.tcp || !io_->transport.tcp->mesh()) return;
+        const auto sample_now = std::chrono::steady_clock::now();
+        if (sample_now < online_sample_at_) return;
+        online_sample_at_ = sample_now + std::chrono::milliseconds(250);
+        auto route = net::GnsRoute::unknown;
+        std::vector<std::string> connections;
+        std::uint32_t connected = 1;
+        const auto endpoint = online_endpoint_.lock();
+        const auto roster = endpoint ? endpoint->roster() : net::GnsRoomRoster{};
+        const auto seats = lobby_ ? lobby_->snapshot().seats
+            : last_lobby_state_ ? last_lobby_state_->snapshot.seats : std::vector<net::LobbySeat>{};
+        for (net::PeerIndex peer = 0; peer < io_->transport.peer_count(); ++peer) {
+            const auto seat = std::find_if(seats.begin(), seats.end(), [peer](const auto& value) { return value.peer == peer; });
+            std::string name = seat != seats.end() ? seat->selection.name
+                : peer == io_->transport.self() ? lobby_name_ : "Player " + std::to_string(peer + 1);
+            std::string line = "Seat " + std::to_string(peer + 1) + " - " + name;
+            if (peer == io_->transport.self()) line += " (you): Connected";
+            else if (peer < roster.capacity && roster.slots[peer].state == net::GnsRoomSlotState::vacant)
+                line = "Seat " + std::to_string(peer + 1) + ": Waiting for a player";
+            else if (peer < roster.capacity && roster.slots[peer].state == net::GnsRoomSlotState::reserved)
+                line = "Seat " + std::to_string(peer + 1) + ": Player joining";
+            else line += ": " + online_pair_message(io_->transport.tcp->pair(peer));
+            connections.push_back(std::move(line));
+            if (peer != io_->transport.self() && io_->transport.link(peer) == net::LinkState::open) {
+                ++connected;
+                const auto seen = io_->transport.tcp->pair(peer).route;
+                if (seen == net::GnsRoute::relayed || (seen == net::GnsRoute::direct && route == net::GnsRoute::unknown)) route = seen;
+            }
+        }
+        const std::lock_guard lock(mutex_);
+        if (route != net::GnsRoute::unknown) view_.online_route = route;
+        view_.online_capacity = io_->transport.peer_count(); view_.online_connected = connected;
+        view_.online_connections = std::move(connections);
+    }
+    std::string admission_identity(net::PeerIndex peer, std::uint64_t edge) const {
+        if (io_->transport.tcp->mesh())
+            if (const auto room = online_endpoint_.lock(); room && peer < net::max_match_seats)
+                return "room-" + room->roster().slots[peer].identity;
+        return "lan-edge-" + std::to_string(edge);
+    }
+    // Pair events before Start (docs/net-online-npeer.md, section 3). False once the match has failed.
+    bool drain_mesh_events() {
+        if (!io_->transport.tcp || !io_->transport.tcp->mesh()) return true;
+        if (view().host && !lobby_) return true; // the host lobby handles seat refusals: keep them until it exists
+        while (const auto event = io_->transport.tcp->take_mesh_event()) {
+            if (event->kind == net::GnsMeshEventKind::seat_refused && lobby_ && view().host) {
+                (void)lobby_feedback(lobby_->refuse_unreachable(event->seat, event->other, event->relay_offered));
+            } else if (event->kind == net::GnsMeshEventKind::left_room) {
+                core::Diagnostic error; error.code = "EAWR-NET-" + std::to_string(event->code);
+                if (event->code == 1762) {
+                    // The host's closed notice cannot reach a seat whose transport is already fatal: name the player here, from
+                    // what the host stream still holds (the refusal can overtake the admission snapshot) or the roster seen so far.
+                    std::vector<net::Received> queued;
+                    while (queued.size() < 16)
+                        if (auto raw = io_->transport.tcp->poll()) queued.push_back(std::move(*raw)); else break;
+                    const auto seats = lobby_ ? lobby_->snapshot().seats : std::vector<net::LobbySeat>{};
+                    error.message = online_refusal_text(queued, seats, event->other, event->relay_offered);
+                }
+                else if (event->code == 1502 || event->code == 1503) error.message = "Game build identities differ"; // the build refusal text
+                else if (event->code == 1760) error.message = "The room was closed.";
+                else error.message = "You could not take part in this room.";
+                set_failure(error); return false;
+            }
+        }
+        return true;
+    }
+    void begin_online(bool hosting, std::string code, std::optional<net::OnlineRoomAdmission> admission = {}) {
         cancel();
         if (online_retiring_ && !online_retiring_->finished.load()) {
             set_failure(diagnostic("EAWR-NET-1534", "The previous online request is still closing.")); return;
@@ -889,8 +1254,10 @@ private:
             }
         }
         online_retiring_.reset();
-        if (owners_.size() != 2 || roster_error_) {
-            set_failure(diagnostic("EAWR-NET-1530", "Online play currently requires two seats.")); return;
+        if (!hosting) { owners_ = {1, 2}; roster_error_.reset(); }
+        if (roster_error_) { set_failure(*roster_error_); return; }
+        if (owners_.size() < 2 || owners_.size() > net::max_match_seats) {
+            set_failure(diagnostic("EAWR-NET-1810", "Choose between two and nine human seats.")); return;
         }
         if (!net::GnsTransport::available() || !net::NetworkGnsIntroduction::available()) {
             set_failure(diagnostic("EAWR-NET-1530", "Online play is disabled in this build.")); return;
@@ -900,35 +1267,70 @@ private:
           view_.human_owners = owners_; view_.player = hosting ? owners_.front() : owners_.back();
           view_.message = hosting ? "Creating invitation..." : "Finding game...";
         }
+        online_alias_.clear(); mesh_seen_ = 0; mesh_notices_.clear(); mesh_left_text_.clear(); online_sample_at_ = {};
         online_admission_ = std::make_shared<OnlineAdmission>();
-        drain_workers().start(std::function<void()>([state = online_admission_, options = *online_options_, hosting, code = std::move(code)]() mutable {
-            state->run(std::move(options), hosting, std::move(code));
+        drain_workers().start(std::function<void()>([state = online_admission_, options = *online_options_, hosting, code = std::move(code), admission = std::move(admission)]() mutable {
+            state->run(std::move(options), hosting, std::move(code), std::move(admission));
             state->finished = true;
         }));
     }
     bool pump_online() {
-        std::shared_ptr<net::GnsSignallingEndpoint> endpoint;
         std::optional<core::Diagnostic> error;
-        { const std::lock_guard lock(online_admission_->mutex);
-          error = online_admission_->failure; endpoint = std::move(online_admission_->paired);
-          const std::lock_guard view_lock(mutex_);
-          view_.invitation_code = online_admission_->code; view_.invitation_expires = online_admission_->expires;
-          if (!online_admission_->bridge_code.empty()) view_.message = "Waiting for a player to join...";
+        if (!online_pending_) {
+            std::shared_ptr<net::NetworkGnsRoom> room;
+            std::string alias;
+            { const std::lock_guard lock(online_admission_->mutex);
+              error = online_admission_->failure; room = std::move(online_admission_->room); alias = online_admission_->code;
+              if (!room) { const std::lock_guard view_lock(mutex_); view_.invitation_code = alias; view_.invitation_expires = online_admission_->expires; }
+            }
+            if (error) { online_admission_->cancelled = true; online_retiring_ = std::move(online_admission_); set_failure(*error); return false; }
+            if (!room) return false;
+            if (online_options_->turn_credentials_observer)
+                if (const auto credentials = room->turn_credentials()) online_options_->turn_credentials_observer(*credentials);
+            online_pending_ = std::move(room); online_alias_ = alias;
+            online_pending_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            const std::lock_guard lock(mutex_);
+            view_.invitation_code = alias; view_.invitation_expires = online_pending_->lease().expires; view_.invitation_consumed = !view_.host;
         }
-        if (error) { online_admission_->cancelled = true; online_retiring_ = std::move(online_admission_); set_failure(*error); return false; }
-        if (!endpoint) return false;
-        if (online_options_->turn_credentials_observer)
-            if (const auto credentials = endpoint->turn_credentials()) online_options_->turn_credentials_observer(*credentials);
+        // The admission reply carries no roster: the service pushes it right after. The agreed room size and this seat come from it.
+        if (const auto status = online_pending_->status(); !status) {
+            error = status.error();
+            online_admission_.reset(); retire_room(std::exchange(online_pending_, {})); set_failure(*error); return false;
+        }
+        const auto roster = online_pending_->roster();
+        if (roster.capacity == 0 || roster.slots[online_pending_->local_slot() % net::max_match_seats].state != net::GnsRoomSlotState::attached) {
+            if (std::chrono::steady_clock::now() >= online_pending_deadline_) {
+                online_admission_.reset(); retire_room(std::exchange(online_pending_, {}));
+                set_failure(diagnostic("EAWR-NET-1528", "The room did not report its roster in time.")); return false;
+            }
+            return false;
+        }
+        online_admission_.reset();
+        auto room = std::exchange(online_pending_, {});
+        const std::string alias = online_alias_;
+        const auto capacity = roster.capacity;
+        if (view().host && capacity != owners_.size()) {
+            retire_room(std::move(room));
+            set_failure(diagnostic("EAWR-NET-1535", "The published room does not have the seat count of this match.")); return false;
+        }
         net::GnsOptions options; options.build_identity = online_options_->build_identity;
         options.timeout = std::chrono::milliseconds(180000); options.turn_only = online_options_->turn_only;
+        options.repair_grace = net::MeshIncidentOptions{}.repair_grace;
+        options.peers = capacity;
         if (lobby_builder_) options.max_frame_size = static_cast<std::uint32_t>(net::max_lobby_frame_bytes);
-        auto opened = view().host ? net::GnsTransport::host_introduced(endpoint, options) : net::GnsTransport::connect_introduced(endpoint, options);
-        online_admission_.reset();
-        online_endpoint_ = endpoint; online_paired_at_ = std::chrono::steady_clock::now();
-        { const std::lock_guard lock(mutex_); view_.invitation_code.clear(); view_.invitation_consumed = true; view_.message = "Player connecting..."; }
-        if (!opened) { set_failure(opened.error()); return false; }
+        auto opened = view().host ? net::GnsTransport::host_room(room, options) : net::GnsTransport::join_room(room, options);
+        online_endpoint_ = room; online_paired_at_ = std::chrono::steady_clock::now(); online_alias_ = alias;
+        { const std::lock_guard lock(mutex_);
+          view_.invitation_code = alias; view_.invitation_expires = room->lease().expires; view_.invitation_consumed = !view_.host;
+          view_.message = view_.host ? "Waiting for a player to join..." : "Player connecting...";
+        }
+        if (!opened) { online_endpoint_.reset(); retire_room(std::move(room)); set_failure(opened.error()); return false; }
+        if (online_options_->transport_observer) online_options_->transport_observer(*opened.value());
         io_->transport.tcp = std::make_unique<MatchTransport>(std::move(opened).value());
-        if (!view().host) online_snapshot_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        if (lobby_builder_ && capacity >= 3) {
+            io_->transport.credentials = credential_state_;
+            io_->transport.credential_filter = [this](const net::Received& frame) { return current_mesh_credentials(frame); };
+        }
         return true;
     }
 public:
@@ -939,14 +1341,16 @@ public:
         if (handed_over_) return;
         const std::set<tactical::PlayerId> sides(owners.begin(), owners.end());
         roster_error_.reset();
-        if (owners.size() < 2 || owners.size() > net::max_match_seats || sides.contains(0) || sides.size() > net::max_match_human_sides) {
-            roster_error_ = diagnostic("EAWR-NET-1300", "Choose two to nine humans sharing up to three owners.");
+        if (owners.size() < 2 || owners.size() > net::max_match_seats || sides.contains(0) || sides.size() != owners.size()) {
+            roster_error_ = diagnostic("EAWR-NET-1300", "Choose two to nine humans with a separate owner for each player.");
             return;
         }
         owners_ = std::move(owners);
     }
     ~TcpLanMatch() override {
+        release_gns_log();
         if (online_admission_) online_admission_->cancelled = true;
+        retire_room(std::exchange(online_pending_, {}));
         erase_credentials();
         if (mapping_) drain_workers().start(std::move(mapping_));
     }
@@ -972,6 +1376,10 @@ public:
         view_.credential_provider_available = static_cast<bool>(credentials_);
         if (view_.reconnect_enabled) view_.reconnect_unavailable.clear();
     }
+    void join_admitted(net::OnlineRoomAdmission admission) override {
+        if (online_options_) { begin_online(false, {}, std::move(admission)); return; }
+        join(std::move(admission.room));
+    }
     void join(std::string endpoint) override {
         if (online_options_) { begin_online(false, std::move(endpoint)); return; }
         cancel();
@@ -996,15 +1404,28 @@ public:
         view_.credential_provider_available = static_cast<bool>(credentials_);
         if (view_.reconnect_enabled) view_.reconnect_unavailable.clear();
     }
+    // No GNS line reaches a logger after the match that installed it is cancelled or gone.
+    void release_gns_log() {
+        if (std::exchange(gns_log_owner_, false)) net::GnsTransport::set_log_sink({});
+    }
     void cancel() override {
+        release_gns_log();
+        diagnostics_->view(view());
+        if (view().phase != LanPhase::idle && view().phase != LanPhase::ended)
+            diagnostics_->emit("quit-local", "cancelled", diagnostics_->seat);
+        auto logger = std::move(diagnostics_->sink);
+        *diagnostics_ = LanDiagnostics{}; diagnostics_->sink = std::move(logger);
+        io_->transport.diagnostics = diagnostics_;
+        last_logged_failure_.clear(); last_lease_error_.clear(); last_renewal_failure_ = 0;
         online_snapshot_deadline_.reset();
         online_endpoint_.reset();
+        retire_room(std::exchange(online_pending_, {}));
         if (online_admission_) {
             online_admission_->cancelled = true;
             { const std::lock_guard lock(online_admission_->mutex);
-              if (auto endpoint = std::move(online_admission_->paired)) {
+              if (auto room = std::move(online_admission_->room)) {
                   online_admission_->close_confirmed = true;
-                  drain_workers().start(std::function<void()>([endpoint = std::move(endpoint)]() mutable { endpoint.reset(); }));
+                  retire_room(std::move(room));
               }
             }
             online_retiring_ = std::move(online_admission_);
@@ -1090,6 +1511,8 @@ public:
     }
     void capture_diagnostic(const net::DesyncReport& report) {
         if (diagnostic_bundle_ && diagnostic_bundle_->id == report.bundle.id) return;
+        diagnostics_->emit("desync", "hash-mismatch", diagnostics_->seat,
+            "divergent_tick=" + std::to_string(report.first_divergent_tick));
         view_.desync_tick = report.first_divergent_tick;
         view_.bundle_path = report.bundle_location;
         diagnostic_bundle_ = report.bundle;
@@ -1098,6 +1521,10 @@ public:
         if (report.bundle_error) view_.diagnostic_save_notice = "Diagnostic details could not be saved locally.";
     }
     void pump_setup(const skirmish::FixtureOptions& selected) override {
+        pump_setup_impl(selected);
+        if (!handed_over_) diagnostics_->view(view());
+    }
+    void pump_setup_impl(const skirmish::FixtureOptions& selected) {
         if (online_admission_ && !pump_online()) return;
         if (online_options_ && !handed_over_ && view().phase == LanPhase::ended) {
             // Finish the bounded in-band GNS refusal so both peers see its reason.
@@ -1260,16 +1687,6 @@ public:
         return std::exchange(pending_, {});
     }
     std::optional<skirmish::FixtureOptions> offered_setup() const override { return offered_; }
-    std::string bridge_ownership() const override {
-        if (!online_admission_) return {};
-        const std::lock_guard lock(online_admission_->mutex);
-        return online_admission_->bridge_owner;
-    }
-    std::string bridge_invitation() const override {
-        if (!online_admission_) return {};
-        const std::lock_guard lock(online_admission_->mutex);
-        return online_admission_->bridge_code;
-    }
     LanView view() const override {
         const std::lock_guard lock(mutex_);
         auto result = view_;
@@ -1292,6 +1709,7 @@ public:
         return [self = shared_from_this(), setup](platform::LiveStepContext& context,
             std::span<const tactical::PlayerCommand> commands, std::uint64_t now) {
                 self->progress(context, now);
+                self->diagnostics_->tick = context.completed_tick();
                 if (self->trace_ && self->trace_->failed()) {
                     auto result = fail<bool>("Cannot open or write LAN acceptance trace.");
                     self->set_failure(result.error());
@@ -1299,6 +1717,9 @@ public:
                 }
                 auto result = self->drive(setup, context, commands, now);
                 if (!result && self->view().phase != LanPhase::ended) self->set_failure(result.error());
+                self->diagnostics_->tick = context.completed_tick();
+                self->diagnostics_->view(self->view());
+                if (self->view().phase == LanPhase::ended) self->diagnostics_->stall(false, now);
                 // Trace observers only record I/O failure; report it at the driver boundary.
                 if (self->trace_ && self->trace_->failed()) {
                     result = fail<bool>("Cannot open or write LAN acceptance trace.");
@@ -1310,6 +1731,8 @@ public:
     }
 private:
     void erase_credentials() noexcept {
+        mesh_repair_auth_.reset(); mesh_material_revision_.reset(); mesh_retired_ = 0;
+        io_->transport.credential_filter = {};
         credential_state_->clear();
         io_->transport.credentials.reset(); // Drains cannot provision a finished match again.
         const auto erase_delivery = [](auto& queue) {
@@ -1351,12 +1774,20 @@ private:
     }
     net::SetupResult& setup_result() { return lobby_result_ ? lobby_result_->setup() : *runtime_; }
     net::LockstepSession& core_session() { return rejoin_session_ ? *rejoin_session_ : setup_result().session(); }
+    net::PeerIndex diagnostic_peer(sim::SeatId seat) {
+        for (const auto& value : setup_result().offer().seats) if (value.seat == seat) return value.peer;
+        return diagnostics_->seat;
+    }
     void attach_stage_observer() {
-        if (trace_) core_session().set_stage_observer([this](std::string_view event, const net::SeatInput& input, std::uint64_t tick) {
+        if (trace_ || diagnostics_->sink) core_session().set_stage_observer([this](std::string_view event, const net::SeatInput& input, std::uint64_t tick) {
             const auto* bound = static_cast<const LiveAdapter&>(core_session().active_adapter()).binding(input.key.seat);
             if (!bound) return;
             auto decoded = net::decode_tactical_input(input, *bound);
-            if (decoded) trace_->stage(event, input.key, command_kind(decoded.value().payload), tick);
+            if (!decoded) return;
+            if (trace_) trace_->stage(event, input.key, command_kind(decoded.value().payload), tick);
+            if (std::holds_alternative<tactical::QuitPayload>(decoded.value().payload))
+                diagnostics_->emit(event == "seal" ? "quit-sent" : "quit-received", "intentional-quit",
+                    diagnostic_peer(input.key.seat), "command_tick=" + std::to_string(input.key.tick));
         });
     }
     core::Diagnostic repair_diagnostic(core::Diagnostic error) const {
@@ -1412,9 +1843,47 @@ private:
             << " sent=" << io_->transport.sent << " received=" << io_->transport.received
             << " batches_sent=" << io_->transport.batches_sent << " batches_received=" << io_->transport.batches_received << std::endl;
     }
+    void input_progress(std::string_view reason) {
+        if (!io_ || (!runtime_ && !lobby_result_) || !io_->transport.tcp) return;
+        const auto& session = core_session();
+        const auto self = lobby_stream_ ? lobby_stream_->self() : io_->transport.self();
+        for (net::PeerIndex peer = 0; peer < setup_result().offer().seats.size(); ++peer) {
+            if (peer == self) continue;
+            const auto native = lobby_result_ && last_lobby_state_ && peer < last_lobby_state_->snapshot.seats.size()
+                ? last_lobby_state_->snapshot.seats[peer].peer : peer;
+            const auto queue = io_->transport.tcp->queue_progress(native);
+            const auto signals = io_->transport.tcp->signal_counts(native);
+            const auto sent = session.last_sent_batch(peer);
+            const auto sent_tick = sent ? std::to_string(*sent) : "none";
+            // Only an empty native reliable lane and application queue prove
+            // every successful send acknowledged. Otherwise the ACK tick is unknown.
+            std::ostringstream detail;
+            detail << "input_peer=" << peer << " next_seal=" << session.next_seal() << " last_sent_batch=" << sent_tick
+                << " acked_batch=" << (queue.reliable_drained ? sent_tick : "unknown")
+                << " received_through=" << session.received_through(peer)
+                << " queue_frames=" << queue.outbound_frames << " queue_bytes=" << queue.outbound_bytes
+                << " inbound_frames=" << queue.inbound_frames << " inbound_bytes=" << queue.inbound_bytes
+                << " native_valid=" << queue.native_valid << " native_state=" << queue.native_state
+                << " native_ping_ms=" << queue.ping_ms << " pending_reliable=" << queue.pending_reliable
+                << " unacked_reliable=" << queue.unacked_reliable << " pending_unreliable=" << queue.pending_unreliable
+                << " deferred_signals=" << queue.deferred_signals
+                << " signals_sent_blobs=" << signals.sent_blobs << " signals_received_blobs=" << signals.received_blobs;
+            diagnostics_->emit("input-progress", reason, native, detail.str());
+        }
+    }
     void set_failure(const core::Diagnostic& diagnostic, bool terminal = true) {
+        if (last_logged_failure_ != diagnostic.code) {
+            if (diagnostic.code == net::session_errors::stalled) input_progress(diagnostic.code);
+            diagnostics_->emit("failure", diagnostic.code, diagnostics_->seat);
+            last_logged_failure_ = diagnostic.code;
+        }
+        const bool lost = lan_connection_loss(diagnostic.code);
+        auto lost_name = view().peer_name;
+        if (lost && (runtime_ || lobby_result_))
+            if (const auto peer = core_session().connection_lost_peer()) lost_name = seat_name(*peer);
         LanReason reason = LanReason::refused;
-        if (diagnostic.code == net::lobby_diagnostic(net::LobbyReason::not_ready, "").code) reason = LanReason::cancelled;
+        if (diagnostic.code == "EAWR-NET-1762") reason = LanReason::refused; // The named player may contain words such as "build" or "version".
+        else if (diagnostic.code == net::lobby_diagnostic(net::LobbyReason::not_ready, "").code) reason = LanReason::cancelled;
         else if (diagnostic.code == "EAWR-NET-0202" || diagnostic.message.find("build") != std::string::npos) reason = LanReason::build;
         else if (diagnostic.code == "EAWR-NET-0201" || diagnostic.message.find("version") != std::string::npos) reason = LanReason::version;
         else if (diagnostic.code == "EAWR-NET-0302" || diagnostic.message.find("identity") != std::string::npos) reason = LanReason::identity;
@@ -1436,15 +1905,26 @@ private:
                 view_.recovery = LanRecovery::rejoin_failed;
             else view_.recovery = LanRecovery::none;
             view_.rejoin_enabled = false;
-            if (online_options_) {
+            if (lost) {
+                view_.reason = LanReason::timeout; view_.victory.reset(); view_.recovery = LanRecovery::none;
+                view_.diagnostic_code = diagnostic.code; view_.peer_name = lost_name;
+                view_.message = "Connection lost: the match could not continue.\n" + lost_name + "\n" + diagnostic.code;
+            }
+            else if (online_options_) {
                 view_.diagnostic_code = diagnostic.code;
-                if (reason == LanReason::build && diagnostic.code != "EAWR-NET-1530") view_.message = "Both players need the same game build.";
+                if (reason == LanReason::build && diagnostic.code != "EAWR-NET-1530") view_.message = "All players need the same game build.";
+                else if (diagnostic.code == "EAWR-NET-1810") view_.message = "Choose between two and nine human seats.";
+                else if (diagnostic.code == "EAWR-NET-1300") view_.message = "Choose two to nine humans sharing up to three owners.";
                 else if (diagnostic.code == "EAWR-NET-1520") view_.message = "The online service did not accept your access credentials.";
                 else if (diagnostic.code == "EAWR-NET-1522" || diagnostic.code == "EAWR-NET-1523" || diagnostic.code == "EAWR-NET-1524") view_.message = "This invitation is no longer available. Ask the host for a new one.";
                 else if (diagnostic.code == "EAWR-NET-1532" || diagnostic.code == "EAWR-NET-1525" || diagnostic.code == "EAWR-NET-1527") view_.message = "The online service is busy. Try again shortly.";
                 else if (diagnostic.code == "EAWR-NET-1534") view_.message = "The previous invitation is still closing. Wait for it to expire before trying again.";
                 else if (diagnostic.code == "EAWR-NET-1530") { view_.reason = LanReason::refused; view_.message = "Online play is unavailable in this build or configuration."; }
-                else if (diagnostic.code == "EAWR-NET-1535" || diagnostic.code == "EAWR-NET-1536") view_.message = diagnostic.message;
+                else if (diagnostic.code == "EAWR-NET-1535" || diagnostic.code == "EAWR-NET-1536" || diagnostic.code == "EAWR-NET-1760"
+                    || diagnostic.code == "EAWR-NET-1762" || diagnostic.code == "EAWR-NET-1764"
+                    || diagnostic.code == online_match_errors::no_room_code) view_.message = diagnostic.message;
+                else if (diagnostic.code == net::mesh_errors::left && !mesh_left_text_.empty()) view_.message = mesh_left_text_;
+                else if (const auto text = online_mesh_failure_text(diagnostic.code); !text.empty()) view_.message = text;
                 else if (diagnostic.code == "EAWR-NET-1730") view_.message = "The online service session reached its maximum length.";
                 else if (diagnostic.code == "EAWR-NET-1731") view_.message = "The online service session was not renewed in time.";
                 else if (const auto endpoint = online_endpoint_.lock(); endpoint && online_relay_allocation_ended(reason, endpoint->turn_credentials(), online_paired_at_, std::chrono::steady_clock::now())) {
@@ -1460,9 +1940,10 @@ private:
             else if (diagnostic.code >= "EAWR-NET-0200" && diagnostic.code <= "EAWR-NET-0209")
                 view_.message.clear(); // Let lan_message retain the curated legacy reason, including host retries.
         }
+        diagnostics_->view(view());
         // A failed driver will no longer be polled by LiveSession.
         if (terminal) {
-            if (lobby_ && !lobby_result_) { io_->monitor.reset(); gate_.monitor = nullptr; lobby_stream_ = nullptr; }
+            if (lobby_ && !lobby_result_) { io_->monitor.reset(); gate_.reset(); lobby_stream_ = nullptr; }
             erase_credentials();
             pump_close();
             finish_io(std::exchange(io_, std::make_unique<TerminalIo>()));
@@ -1582,6 +2063,7 @@ private:
                               view_.recovery = core_session().resyncing() ? LanRecovery::resyncing
                                   : core_session().reconnect_status().phase == net::ReconnectPhase::proving ? LanRecovery::proving : LanRecovery::catching_up;
                               view_.catch_up_tick = staged->completed_tick(); }
+                            diagnostics_->view(view());
                             return service_recovery_io();
                         };
                         fresh->options_applied = [this](net::MatchOptions options, std::uint64_t tick) {
@@ -1595,7 +2077,8 @@ private:
                 retained_options_ = policy; retained_offer_ = agreed;
                 return core::Result<void>::success();
             };
-            gate_.monitor = io_->monitor.get();
+            auto bound_monitor = gate_.bind(*io_->monitor);
+            if (!bound_monitor) { set_failure(bound_monitor.error()); return DriverResult::failure(bound_monitor.error()); }
             providers.monitor = &gate_;
             providers.credentials_delivered = [this, enabled = offer.recovery.reconnect] {
                 return !enabled || !default_credentials_ || credential_state_->delivered();
@@ -1631,7 +2114,7 @@ private:
             auto pumped = lobby_->pump(lobby_clock_); // Steady-clock milliseconds, independent of sim ticks.
             flush_lobby_closes();
             if (lobby_->snapshot().phase == net::LobbyPhase::staging || lobby_->snapshot().phase == net::LobbyPhase::closed) {
-                io_->monitor.reset(); gate_.monitor = nullptr; lobby_stream_ = nullptr;
+                io_->monitor.reset(); gate_.reset(); lobby_stream_ = nullptr;
                 const auto reason = lobby_->notice() ? lobby_->notice()->reason : net::LobbyReason::setup_failed;
                 const auto message = reason == net::LobbyReason::kicked ? "TEXT_INTERNET_PLAYER_KICKED"
                     : reason == net::LobbyReason::host_closed ? "TEXT_HOST_LEFT_GAME" : "The room ended before Start was committed.";
@@ -1644,6 +2127,16 @@ private:
             }
             if (lobby_->snapshot().phase != net::LobbyPhase::committed || !context.advance_allowed)
                 return DriverResult::success(false);
+            // Validated host commitment freezes native formation immediately;
+            // the independent TLS roster push need not have reached this guest.
+            if (!lobby_room_committed_) {
+                auto committed = io_->transport.tcp->commit_room();
+                if (!committed) return DriverResult::failure(committed.error());
+                lobby_room_committed_ = true;
+            }
+            // The host commits on its own readiness, which does not prove this guest holds every peer's tick-zero
+            // summary yet. Wait for the local barrier (bounded by the setup timeout); never take the result early (#3929).
+            if (!lobby_->result_ready()) return DriverResult::success(false);
             auto ready = lobby_->take_result(); if (!ready) return DriverResult::failure(ready.error());
             lobby_result_ = std::make_shared<net::LobbyResult>(std::move(ready).value());
             io_->room_lifetime = lobby_result_; io_->application_stream = lobby_stream_;
@@ -1746,7 +2239,11 @@ private:
             if (retry) { const std::lock_guard lock(mutex_); rejoin_requested_ = true; }
         }
         if (!adapter_->staging) adapter_->context = &context;
+        sample_online_route();
         auto& session = core_session();
+        if (auto armed = arm_mesh_repair(session); !armed) {
+            set_failure(armed.error()); return DriverResult::failure(armed.error());
+        }
         const auto status_before = session.reconnect_status();
         if (session.reconnect_available() && status_before.phase != net::ReconnectPhase::playing
             && (!last_repair_ms_ || now - *last_repair_ms_ >= 1000)) {
@@ -1755,7 +2252,7 @@ private:
             else repair_notice_.reset();
             last_repair_ms_ = now;
         }
-        if (session.resyncing() || io_->monitor->frozen() || session.reconnect_status().phase != net::ReconnectPhase::playing) discard_recovery_commands();
+        if (session.mesh_running() || session.resyncing() || io_->monitor->frozen() || session.reconnect_status().phase != net::ReconnectPhase::playing) discard_recovery_commands();
         for (const auto& command : queued_) {
             const auto& seat = setup_result().offer().seats[lobby_stream_ ? lobby_stream_->self() : io_->transport.self()];
             if (command.key.player_id != seat.player) return fail<bool>("Command belongs to another player's seat.");
@@ -1794,11 +2291,26 @@ private:
           else if (session.reconnect_status().phase != net::ReconnectPhase::playing)
               { view_.phase = LanPhase::reconnecting; view_.recovery = LanRecovery::held; }
           else if (io_->monitor->frozen()) view_.recovery = LanRecovery::desync; }
+        diagnostics_->view(view());
         auto pumped = session.pump(now);
         if (!pumped) {
+            if (online_options_ && pumped.error().code == net::mesh_errors::left) mesh_left_text_ = removed_seat_text(session);
             if (pumped.error().code.starts_with("EAWR-NET-102")) refuse_credentials(pumped.error());
             else set_failure(pumped.error());
             return DriverResult::failure(pumped.error());
+        }
+        // Core detection occurs inside pump. Arm before the next native poll,
+        // with the agreed incident epoch; pair failures remain N4 decision evidence.
+        if (auto armed = arm_mesh_repair(session); !armed) {
+            set_failure(armed.error()); return DriverResult::failure(armed.error());
+        }
+        if (online_options_) for (const auto& result : session.mesh_results()) {
+            if (result.kind != net::MeshIncidentResult::Kind::departure) continue;
+            for (net::PeerIndex peer = 0; peer < net::max_match_seats; ++peer) if (result.removed & net::mesh_seat(peer)) {
+                if (auto retired = retire_mesh_seat(peer); !retired) {
+                    set_failure(retired.error()); return DriverResult::failure(retired.error());
+                }
+            }
         }
         if (io_->transport.credential_error) {
             const auto error = *io_->transport.credential_error; refuse_credentials(error);
@@ -1820,6 +2332,8 @@ private:
         }
         const auto& completeness = session.waiting_for();
         const bool waiting = (completeness && !completeness->peers.empty()) || !io_->monitor->waiting_for_peers().empty();
+        const auto missing = completeness && !completeness->peers.empty() ? completeness->peers : io_->monitor->waiting_for_peers();
+        if (diagnostics_->stall(waiting, now, missing)) input_progress("stall-start");
         if (!waiting) waiting_since_.reset();
         else {
             if (!waiting_since_) waiting_since_ = now;
@@ -1862,6 +2376,11 @@ private:
                         ? LanRecovery::recovered : LanRecovery::none;
                     break;
                 }
+                if (online_options_ && session.mesh_running()) {
+                    view_.phase = LanPhase::reconnecting; view_.recovery = LanRecovery::held;
+                    view_.recovery_epoch = session.mesh_incident_id(); view_.rejoin_enabled = false;
+                    view_.message = mesh_repair_message();
+                }
                 if (io_->monitor->report()) capture_diagnostic(*io_->monitor->report());
                 else if (io_->monitor->recovered_report()) capture_diagnostic(*io_->monitor->recovered_report());
                 if (reconnect.phase == net::ReconnectPhase::playing) repair_notice_.reset();
@@ -1875,12 +2394,30 @@ private:
                         view_.reconnect_warning = "Reconnect is unavailable for this match. Play can continue.";
                 }
             }
+            if (online_options_) {
+                const auto& results = session.mesh_results();
+                while (mesh_seen_ < results.size()) append_mesh_notice(results[mesh_seen_++], now);
+                view_.mesh_notice = mesh_notices_.text(now);
+            }
             view_.service_notice.clear();
             if (view_.phase != LanPhase::ended) {
                 if (const auto endpoint = online_endpoint_.lock()) {
                     const auto notice_now = std::chrono::steady_clock::now();
                     const auto status = endpoint->status();
-                    view_.service_notice = online_lease_notice(endpoint->lease(), notice_now, status ? "" : status.error().code);
+                    const auto renewal_failure = endpoint->renewal_failure();
+                    if (renewal_failure.first != last_renewal_failure_) {
+                        if (renewal_failure.first) diagnostics_->emit("relay-renewal-failure", renewal_failure.second, diagnostics_->seat,
+                            "failure_count=" + std::to_string(renewal_failure.first));
+                        last_renewal_failure_ = renewal_failure.first;
+                    }
+                    const auto lease_error = status ? std::string{} : status.error().code;
+                    if (lease_error != last_lease_error_) {
+                        if (!lease_error.empty()) diagnostics_->emit("relay-lease-failure", lease_error, diagnostics_->seat);
+                        last_lease_error_ = lease_error;
+                    }
+                    // The room lease is renewed by any attached member; only its end is visible here.
+                    net::GnsSessionLease lease; lease.ends = lease.hard_ends = endpoint->lease().expires;
+                    view_.service_notice = online_lease_notice(lease, notice_now, status ? "" : status.error().code);
                     const auto credentials = online_credential_notice(endpoint->turn_credentials(), online_paired_at_, notice_now);
                     if (!credentials.empty()) view_.service_notice += (view_.service_notice.empty() ? "" : "\n") + credentials;
                 }
@@ -1901,6 +2438,16 @@ private:
             }
         }
         for (const auto& event : pumped.value().departure_events) {
+            constexpr std::array departure_reasons{"quit", "disconnect", "timeout", "pair-loss"};
+            const auto reason_index = static_cast<std::size_t>(event.reason);
+            diagnostics_->emit("departure-applied", reason_index < departure_reasons.size() ? departure_reasons[reason_index] : "unknown",
+                diagnostic_peer(event.key.seat), "command_tick=" + std::to_string(event.key.tick));
+            if (online_options_) for (net::PeerIndex peer = 0; peer < setup_result().offer().seats.size(); ++peer)
+                if (setup_result().offer().seats[peer].seat == event.key.seat) {
+                    if (auto retired = retire_mesh_seat(peer); !retired) {
+                        set_failure(retired.error()); return DriverResult::failure(retired.error());
+                    }
+                }
             const auto* bound = adapter_->binding(event.key.seat);
             if (!bound) continue;
             net::DepartureOutcome departure{event, bound->player, bound->player, net::DepartureState::continues};
@@ -1970,6 +2517,7 @@ private:
     std::optional<net::LockstepSession> rejoin_session_;
     std::unique_ptr<net::SessionAdapter> returning_adapter_;
     bool rejoin_requested_{};
+    bool gns_log_owner_{};
     std::optional<std::uint64_t> last_repair_ms_;
     std::optional<core::Diagnostic> repair_notice_;
     std::deque<net::Received> retained_rejoin_frames_;
@@ -1997,10 +2545,13 @@ private:
     std::vector<net::MatchOptions> speed_requests_;
     net::MatchSpeedWindow speed_window_;
     std::shared_ptr<LanTrace> trace_;
+    std::shared_ptr<LanDiagnostics> diagnostics_{std::make_shared<LanDiagnostics>()};
+    std::string last_logged_failure_, last_lease_error_;
+    std::uint64_t last_renewal_failure_{};
 };
 }
 net::LobbyReason lan_lobby_reason(const core::Diagnostic& error) {
-    for (unsigned value = 0; value <= static_cast<unsigned>(net::LobbyReason::recovery_unavailable); ++value)
+    for (unsigned value = 0; value <= static_cast<unsigned>(net::LobbyReason::mesh_incomplete); ++value)
         if (error.code == net::lobby_diagnostic(static_cast<net::LobbyReason>(value), "").code) return static_cast<net::LobbyReason>(value);
     return net::LobbyReason::invalid_choice;
 }

@@ -478,8 +478,9 @@ void lock_and_battle() {
     w.settle_all();
     auto again = attached_of(*w.sink.take(back, Kind::room_attached));
     expect(again.slot == 1 && again.capability == g1.attached.capability && again.turn.username != old_user, "Reattach binds a new connection with fresh credentials");
-    expect(std::find(w.sink.revoked.begin() + static_cast<std::ptrdiff_t>(before), w.sink.revoked.end(), old_user) != w.sink.revoked.end(),
-        "The replaced credential is revoked");
+    // #4021: the seat's other pair links still authenticate with the credential it held, so a reattach must not revoke it.
+    expect(std::find(w.sink.revoked.begin() + static_cast<std::ptrdiff_t>(before), w.sink.revoked.end(), old_user) == w.sink.revoked.end(),
+        "The replaced credential stays valid for the seat's live links");
     expect(w.roster(h.conn).slots[1].first == 2, "The seat is attached again");
     // A half-open old connection is taken over by the capability holder.
     auto second = w.add(g2.prefix);
@@ -497,6 +498,8 @@ void lock_and_battle() {
     w.rooms->disconnect(back, w.now);
     w.tick(61s);
     expect(w.roster(second).slots[1].first == 4 && w.roster(second).slots[1].second == "peer-1", "A seat nobody repairs is marked left");
+    expect(std::find(w.sink.revoked.begin(), w.sink.revoked.end(), old_user) != w.sink.revoked.end(),
+        "The credential a reattach left valid is revoked when the seat ends");
     auto late = w.add(g1.prefix);
     w.send(late, g1.prefix, attach_request(Kind::room_reattach, h.room, g1.attached.capability, "peer-1"));
     expect(w.failure_of(late) == room_capability, "A left seat cannot be reattached");
@@ -1015,6 +1018,18 @@ void loopback_room(const std::string& certificate, const std::string& key) {
     // The lease and heartbeat keep running; Start locks the room.
     require(t.host->lock());
     until([&] { return one->roster().state == GnsRoomState::locked && t.host->roster().state == GnsRoomState::locked; }, "Start reaches every member");
+    // Repair runs on the existing TLS owner and refreshes each member's TURN
+    // credentials, including a host whose pairs survive. Alias-only admission
+    // lacks the canonical room ID on the deployed protocol: fail promptly.
+    until([&] { return two->roster().state == GnsRoomState::locked; }, "Alias sees Lock");
+    const auto alias_repair = two->repair_attachment(1);
+    expect(!alias_repair && alias_repair.error().code == "EAWR-NET-1791", "An old-server alias cannot hang or reuse cached TURN");
+    for (auto* member : {t.host.get(), one.get()}) {
+        const auto before = member->turn_credentials()->username;
+        until([&] { return require(member->repair_attachment(1)); }, "Nonblocking Reattach completes");
+        expect(member->turn_credentials() && member->turn_credentials()->username != before,
+            "Every repaired member gets newly issued TURN, never its original credential");
+    }
     auto late = NetworkGnsRoom::attach_alias(f.client, t.host->alias(), "latecomer");
     expect(!late && late.error().code == "EAWR-NET-1775", "A started room takes no one");
     // A lost connection holds the seat; reattach with the capability repairs it.

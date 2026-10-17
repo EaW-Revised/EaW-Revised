@@ -138,6 +138,7 @@ core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::u
         impl_->published_actor_records.reset(); impl_->published_production_originals.reset();
         impl_->published_economy_input_generation.reset();
         impl_->published_black_market_menus.reset(); impl_->published_ability_results.reset();
+        impl_->published_corruption_transitions.reset();
         impl_->published_hero_action_menus.reset(); impl_->published_corruption_menu.reset();
         impl_->income_forecast_cache.reset(); impl_->gathered_income_inputs.reset();
         impl_->movement_access_generation = std::numeric_limits<std::uint64_t>::max();
@@ -421,7 +422,15 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
             const auto controller = std::find_if(controllers.begin(), controllers.end(), [&](const auto& value) { return value.player == row.player; });
             row.active = controller != controllers.end() && controller->kind == FactionControl::ai;
         }
-        session_dirty(); events.push_back(event); return;
+        events.push_back(event);
+        // TM-04: fast forward is single-human; a rejoin that makes the session multi-human ends it here, in order.
+        if (active && clock.strategic_speed.raw() == fast_forward_factor_raw
+            && std::count_if(seats.begin(), seats.end(), [](const Seat& row) { return row.active && row.kind == SeatKind::human; }) > 1) {
+            clock.strategic_speed = math::Fixed::from_raw(math::Fixed::scale);
+            event.kind = GalacticEventKind::speed_changed; event.subject = 0U; event.value = static_cast<std::uint64_t>(clock.strategic_speed.raw());
+            events.push_back(event);
+        }
+        session_dirty(); return;
     }
     if (const auto* role = std::get_if<AssignBattleTeamRole>(&command.payload)) {
         if (!seat_control || !seat_control->battle || seat_control->battle->conflict != role->conflict)
@@ -499,6 +508,11 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
         return;
     }
     if (const auto* speed = std::get_if<SetSpeed>(&command.payload)) {
+        // TM-04: fast forward is a single-human feature; with several active human seats the
+        // strategic fast-forward factor is refused here, not only hidden by the HUD.
+        if (!speed->tactical && speed->factor.raw() == fast_forward_factor_raw
+            && std::count_if(seats.begin(), seats.end(), [](const Seat& row) { return row.active && row.kind == SeatKind::human; }) > 1)
+            return reject(GalacticRejectReason::not_authorized);
         event.subject = speed->tactical ? 1U : 0U;
         event.value = static_cast<std::uint64_t>(speed->factor.raw());
         events.push_back(event);
@@ -576,6 +590,9 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
         // WGM-13 (#2880): the seat launch reuses the native launch gates and ordinary fleet admission.
         execute_launch(command, tick, events, pending_local_conflict); return;
     }
+    if (std::holds_alternative<LaunchFleet>(command.payload)) {
+        execute_launch_fleet(command, tick, events, pending_local_conflict); return;
+    }
     if (const auto* order = std::get_if<RecheckOrbit>(&command.payload)) {
         event.subject = order->target;
         if (!issuer || issuer->kind != SeatKind::script || !issuer->active) return reject(GalacticRejectReason::not_authorized);
@@ -623,6 +640,17 @@ std::span<const CensusObject> GalacticSession::Impl::actor_inputs() const {
         published_actor_records = std::make_shared<const std::vector<CensusObject>>(std::move(records));
     }
     return *published_actor_records;
+}
+std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::publish_native_snapshot(std::vector<GalacticEvent> events) const {
+    if (native_commit_publication) {
+        ++native_commit_publications;
+        NativeSnapshotChanges changes;
+        // Cancellation has a refund publication before its removal event.
+        // The staged final columns cannot supply this intermediate event prefix.
+        changes.events = std::move(events);
+        return GalacticSnapshot::native_view(native_commit_publication, std::move(changes));
+    }
+    return make_snapshot(std::move(events));
 }
 std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std::vector<GalacticEvent> events,
     const PartitionExecutor* executor) const {
@@ -781,6 +809,23 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
             }
         }
     }
+    // WGP-19/47: copy committed state only after observer admission. Timers are
+    // retained values, so idle ticks share storage while the reader computes age.
+    const std::array<std::uint64_t, 3> corruption_key{ability_input_generation,
+        observer_input_generation, observer ? observer->local_player : 0};
+    if (!published_corruption_transitions || corruption_publication_key != corruption_key) {
+        std::vector<LiveCorruptionTransition> transitions;
+        if (ability_host && observer && observer_projection) {
+            std::set<PlanetId> discovered;
+            for (const auto& seen : *observer_projection)
+                if (seen.player == observer->local_player && seen.discovered) discovered.insert(seen.planet);
+            for (const auto& row : ability_host->transitions) {
+                if (discovered.contains(row.planet)) transitions.push_back(row);
+            }
+        }
+        published_corruption_transitions = std::make_shared<const std::vector<LiveCorruptionTransition>>(std::move(transitions));
+        corruption_publication_key = corruption_key;
+    }
     // Offer admission consumes this publication's current projection; it must
     // not bypass the generation cache with a second full observer projection.
     auto offers = observed_production_offers(observer_projection
@@ -794,7 +839,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     if (setup.census && !published_sale_types)
         published_sale_types = std::make_shared<const std::vector<CensusType>>(setup.census->types);
     return std::make_shared<const GalacticSnapshot>(
-        completed_tick, published, setup.players, current_planets, sorted_routes(), std::move(live_fleets), std::move(events), setup.rules.maximum_fleet_movement_distance, setup.fleet_control ? std::optional(fleet_control_state()) : std::nullopt, movement_inputs, seat_control, seats, economy, production, control, control_effects, population, observer, income, victory, std::move(offers), observer_projection, std::move(forecast), published_production_originals, std::nullopt, std::nullopt, economy_corruption, planet_access, observer_input_generation, economy_input_generation, published_actor_records, published_black_market_menus, published_ability_results, published_hero_action_menus, published_corruption_menu, published_sale_types);
+        completed_tick, published, setup.players, current_planets, sorted_routes(), std::move(live_fleets), std::move(events), setup.rules.maximum_fleet_movement_distance, setup.fleet_control ? std::optional(fleet_control_state()) : std::nullopt, movement_inputs, seat_control, seats, economy, production, control, control_effects, population, observer, income, victory, std::move(offers), observer_projection, std::move(forecast), published_production_originals, std::nullopt, std::nullopt, economy_corruption, planet_access, observer_input_generation, economy_input_generation, published_actor_records, published_black_market_menus, published_ability_results, published_hero_action_menus, published_corruption_menu, published_sale_types, published_corruption_transitions);
 }
 
 GalacticSession::GalacticSession(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -807,6 +852,9 @@ core::Result<GalacticSession> GalacticSession::create(const GalacticSetup& setup
     auto impl = std::make_unique<Impl>();
     impl->verify_cached_hash = hash_verification_requested();
     impl->setup = setup;
+    impl->native_population_schema = session_detail::native_population_schema(setup);
+    if (setup.income) impl->native_income_schema = std::make_shared<const IncomeSetup>(*setup.income);
+    if (setup.fiscal) impl->native_fiscal_schema = std::make_shared<const FiscalSetup>(*setup.fiscal);
     if (setup.census) for (const auto& row : setup.census->objects) impl->actor_records.emplace(row.id, row);
     impl->economy = setup.player_economy;
     impl->victory = setup.victory;
@@ -1086,6 +1134,7 @@ core::Result<void> GalacticSession::append_native_effect(NativeEffectKind kind, 
     NativeEffectPhase phase) {
     auto& impl = *impl_;
     if (impl.native_applying) return core::Result<void>::success();
+    if (auto* shadow = native_shadow()) return stage_native_effect(*shadow, kind, std::move(payload), phase);
     if (impl.failed || impl.native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::income_block
         || phase > NativeEffectPhase::world_service || payload.size() > galactic_replay_max_payload
         || impl.native_effects.size() + impl.executed.size() + impl.pending.size() >= galactic_max_commands
@@ -1208,6 +1257,9 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
     if (impl.failed) {
         return fail<GalacticTick>(diagnostic_codes::worker_failure, "an earlier phase failed; the session cannot continue");
     }
+    if (native_barrier()) {
+        return fail<GalacticTick>(diagnostic_codes::invalid_command, "galactic service requires a completed native action barrier");
+    }
     if (auto replayed = replay_native_barrier(executor); !replayed) {
         impl.failed = true; return core::Result<GalacticTick>::failure(replayed.error());
     }
@@ -1274,7 +1326,7 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
         // GFD-02/05: committed ownership listeners and immediate credit-cap clamp
         // precede fiscal; its consumer must gather fresh post-control inputs.
         // GFD-01 / GFS-U01 retain arrival-to-control admission as a scheduling seam.
-        if (auto completed = impl.service_corruption(executor); !completed) {
+        if (auto completed = impl.service_corruption(executor, events.size()); !completed) {
             impl.failed = true; return core::Result<GalacticTick>::failure(completed.error());
         }
         if (auto controlled = impl.service_control(executor, executing, events, tick.work); !controlled) {
@@ -1311,6 +1363,9 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
             }
             account->credits = balance.value();
             impl.dirty[static_cast<std::size_t>(StateSection::players)] = true;
+            // WGP-53: first-capture award, after crediting; not every windfall.
+            if (impl.feedback_notice_handler && impl.observer && effect.new_owner == impl.observer->local_player)
+                impl.feedback_notice_handler({GalacticFeedbackNotice::Kind::capture_reward, effect.new_owner, effect.planet, events.size()});
             if (auto tested = impl.test_credit_condition(effect.new_owner, executing, events); !tested) {
                 impl.failed = true; return core::Result<GalacticTick>::failure(tested.error());
             }
@@ -1730,6 +1785,9 @@ void GalacticSession::set_conflict_tail_handler(ConflictTailHandler handler, con
 void GalacticSession::set_credit_notification_handler(CreditNotificationHandler handler) {
     impl_->credit_notification_handler = std::move(handler);
 }
+void GalacticSession::set_feedback_notice_handler(FeedbackNoticeHandler handler) {
+    impl_->feedback_notice_handler = std::move(handler);
+}
 
 void GalacticSession::set_native_production_outcome_handler(NativeProductionOutcomeHandler handler) {
     impl_->native_production_outcome_handler = std::move(handler);
@@ -1747,6 +1805,7 @@ core::Result<math::Fixed> GalacticSession::add_credits(PlayerId player, math::Fi
         [](const auto& row, PlayerId id) { return row.player < id; });
     if (at == accounts.end() || at->player != player)
         return fail<math::Fixed>(diagnostic_codes::invalid_setup, "credit addition names a missing player");
+    if (auto* shadow = native_shadow()) return stage_native_credits(*shadow, player, delta, positive_multiplier);
     auto balance = adjusted_credits(at->credits, delta, positive_multiplier, at->credit_cap);
     if (!balance) return balance;
     auto actual = math::subtract(balance.value(), at->credits);
@@ -1765,7 +1824,7 @@ core::Result<math::Fixed> GalacticSession::add_credits(PlayerId player, math::Fi
     if (!victory) {
         impl_->failed = true; return core::Result<math::Fixed>::failure(victory.error());
     }
-    impl_->snapshot = impl_->make_snapshot(std::move(published));
+    impl_->snapshot = impl_->publish_native_snapshot(std::move(published));
     return actual;
 }
 void GalacticSession::finish_conflict_frame_timer() {
@@ -1811,7 +1870,7 @@ GalacticClock GalacticSession::clock() const noexcept {
     result.session_tick = impl_->completed_tick;
     return result;
 }
-EntityId GalacticSession::next_entity_id() const noexcept { return impl_->next_id; }
+EntityId GalacticSession::next_entity_id() const noexcept { if (const auto* shadow = native_shadow()) return shadow->next_entity_id(); return impl_->next_id; }
 const std::optional<VictoryState>& GalacticSession::victory() const noexcept { return impl_->victory; }
 const GalacticSetup& GalacticSession::setup() const noexcept { return impl_->setup; }
 std::span<const Seat> GalacticSession::seats() const noexcept { return impl_->seats; }
@@ -1853,7 +1912,7 @@ std::size_t GalacticSession::pending_command_count() const noexcept { return imp
 std::span<const GameCommand> GalacticSession::executed_commands() const noexcept { return impl_->executed; }
 
 GalacticReplay GalacticSession::record() const { return GalacticReplay{impl_->setup, impl_->completed_tick, impl_->executed, impl_->native_effects}; }
-std::shared_ptr<const GalacticSnapshot> GalacticSession::snapshot() const noexcept { return impl_->snapshot; }
+std::shared_ptr<const GalacticSnapshot> GalacticSession::snapshot() const noexcept { if (const auto* shadow = native_shadow()) return shadow->snapshot(); return impl_->snapshot; }
 
 core::Result<bool> GalacticSession::set_planet_access(PlanetId planet, bool restricted,
     std::optional<bool> local_revealed) {

@@ -12,7 +12,8 @@ void test_environment_selection() {
         expect(!item.cause.empty(), "every not-rendered component carries a cause: " + item.component);
         expect(item.status != "unused", "no environment component is accepted as unused");
         if (item.component == "secondary_sky") secondary = item.declared == "EAWR_SPACE_SECONDARY_SKY"
-            && item.status == "declared_not_rendered";
+            && item.status == "declared_not_rendered"
+            && item.cause.find("environment scene") != std::string::npos;
         if (item.component == "cloud_texture") cloud = item.status == "declared_not_rendered";
         if (item.component == "planet") planet = item.status == "unexamined_blocked";
         if (item.component == "nebula") nebula = item.status == "unexamined_blocked";

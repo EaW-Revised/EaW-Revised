@@ -1,17 +1,18 @@
-#include "eawr/core/tick_profile.hpp"
 // Perceptual equations of the FoC tactical AI (#449, docs/behaviour/foc-tactical-ai.md
 // "Perceptual equations"). Rule IDs PE-xx cite that note.
 
 #include "ai_equations.hpp"
 
+#include "eawr/core/ascii.hpp"
+#include "eawr/core/tick_profile.hpp"
 #include "eawr/script/numeric/binary64.hpp"
 #include "eawr/script/numeric/decimal.hpp"
 
 #include <algorithm>
 #include <array>
-#include <mutex>
 #include <limits>
-#include "eawr/core/ascii.hpp"
+#include <memory>
+#include <mutex>
 
 namespace eawr::script::foc::ai {
 namespace {
@@ -447,11 +448,82 @@ const Equation* EquationSet::find(std::string_view name) const {
     return found == equations_.end() ? nullptr : &found->second;
 }
 
-std::optional<Real> run(const Equation& equation, LookupResolver& resolver, AiRandom& random) {
+namespace {
+
+struct EvaluationScratch final {
     std::vector<Real> stack;
-    std::vector<std::string> texts; // string values bound as parameters
-    // Parameter values may be strings; they ride on the stack as indices into `texts`.
+    std::vector<std::string> texts;
+    std::size_t text_count{};
     std::vector<bool> is_text;
+    std::vector<Binding> bindings;
+    std::vector<Binding> spare_bindings;
+
+    void reset() {
+        stack.clear();
+        text_count = 0;
+        is_text.clear();
+    }
+
+    std::vector<Binding>& binding_buffer(const std::size_t count) {
+        // Keep removed slots' owned strings when another lookup has fewer parameters.
+        // Total live slots follow the largest parameter count, not the number of lookups.
+        while (bindings.size() > count) {
+            spare_bindings.push_back(std::move(bindings.back()));
+            bindings.pop_back();
+        }
+        while (bindings.size() < count) {
+            if (spare_bindings.empty()) bindings.emplace_back();
+            else {
+                bindings.push_back(std::move(spare_bindings.back()));
+                spare_bindings.pop_back();
+            }
+        }
+        return bindings;
+    }
+};
+
+struct EvaluationScratchPool final {
+    std::vector<std::unique_ptr<EvaluationScratch>> frames;
+    std::size_t depth{};
+};
+
+// Resolver callbacks may recursively evaluate another equation. Each active call owns a
+// stable frame; retained capacity is local to this thread and never caches lookup results.
+// Literal values are copied at their original push point, including across resolver callbacks.
+class EvaluationScratchLease final {
+public:
+    EvaluationScratchLease() : pool_(pool()), scratch_(acquire(pool_)) {}
+    EvaluationScratchLease(const EvaluationScratchLease&) = delete;
+    EvaluationScratchLease& operator=(const EvaluationScratchLease&) = delete;
+    ~EvaluationScratchLease() {
+        --pool_.depth;
+    }
+    [[nodiscard]] EvaluationScratch& get() noexcept { return scratch_; }
+
+private:
+    static EvaluationScratchPool& pool() {
+        static thread_local EvaluationScratchPool value;
+        return value;
+    }
+    static EvaluationScratch& acquire(EvaluationScratchPool& value) {
+        if (value.frames.size() == value.depth)
+            value.frames.push_back(std::make_unique<EvaluationScratch>());
+        return *value.frames[value.depth++];
+    }
+    EvaluationScratchPool& pool_;
+    EvaluationScratch& scratch_;
+};
+
+} // namespace
+
+std::optional<Real> run(const Equation& equation, LookupResolver& resolver, AiRandom& random) {
+    EvaluationScratchLease lease;
+    auto& scratch = lease.get();
+    scratch.reset();
+    auto& stack = scratch.stack;
+    auto& texts = scratch.texts;
+    // Parameter values may be strings; they ride on the stack as indices into `texts`.
+    auto& is_text = scratch.is_text;
     const auto push = [&](Real value, bool text) {
         stack.push_back(value);
         is_text.push_back(text);
@@ -465,14 +537,17 @@ std::optional<Real> run(const Equation& equation, LookupResolver& resolver, AiRa
         using Kind = Node::Kind;
         switch (node.kind) {
         case Kind::constant: push(node.value, false); break;
-        case Kind::text:
-            texts.push_back(node.text);
-            push(real(static_cast<std::int64_t>(texts.size() - 1)), true);
+        case Kind::text: {
+            const auto index = scratch.text_count++;
+            if (index == texts.size()) texts.push_back(node.text);
+            else texts[index] = node.text;
+            push(real(static_cast<std::int64_t>(index)), true);
             break;
+        }
         case Kind::lookup: {
             const Lookup& lookup = equation.lookups[node.lookup];
             if (stack.size() < lookup.parameters.size()) return std::nullopt;
-            std::vector<Binding> bindings(lookup.parameters.size());
+            auto& bindings = scratch.binding_buffer(lookup.parameters.size());
             for (std::size_t index = lookup.parameters.size(); index-- > 0;) {
                 const bool text = is_text.back();
                 Real value{};

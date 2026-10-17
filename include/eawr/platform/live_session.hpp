@@ -100,6 +100,17 @@ struct LiveBaseAttack {
     sim::math::Vec3 position{};
 };
 
+// BA-64: retained while the parent lives; independent of snapshot-history eviction.
+struct LiveHardpointLoss {
+    sim::EntityId unit{};
+    sim::tactical::TypeId type{};
+    sim::tactical::PlayerId owner{};
+    std::uint32_t hardpoint{};
+    bool weapon{};
+    bool weapons_remaining{};
+    std::vector<std::uint32_t> standing;
+};
+
 // The events of one completed tick that the battle view presents (LiveEventLog).
 struct LiveTickEvents {
     std::uint64_t tick{};
@@ -107,6 +118,7 @@ struct LiveTickEvents {
     std::vector<sim::tactical::CombatEvent> combat_events;
     std::vector<sim::tactical::AsteroidImpact> asteroid_impacts;
     std::vector<LiveBaseAttack> base_attacks{};
+    std::vector<LiveHardpointLoss> hardpoint_losses{};
 };
 
 // What events_after() hands back: the ticks with presented events in (after, through], oldest

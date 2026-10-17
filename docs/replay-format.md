@@ -264,6 +264,17 @@ the tactical allocator; battle-only objects allocate above it, and the campaign 
 resulting first-free ID on return. Records still increase by tag. Absent tag 6 preserves
 legacy versions 2/3 and their exact bytes and state hashes.
 
+Tag 16, `OBJT` (coordinator-reserved), records every ability use the object-turn provider issued at the
+tick's seam, applied or refused, ([phase map](simulation.md#phase-map)). The body is exactly uint32 version 1 and a nonzero
+uint32 record count; the records follow the last command, each 64 bytes: uint64 tick, uint64 unit,
+uint64 sequence, uint8 ability, uint8 action (both as in the Ability command), uint16 flags (bit 0: the
+world point is present; other bits zero), uint32 reserved (zero), uint64 target (zero for none) and
+three int64 Q24 position components (zero without the flag). Records are in strictly increasing
+(tick, unit, sequence) order, each tick below the final tick count, the unit nonzero and the ability and
+action in range. A session without an object-turn provider applies the recorded uses at the same seam, so
+the replay of a provider run is world-only (a refused use is refused again on replay); a tick that has a
+recorded use and a due provider fails. The record is omitted only when no use was issued, preserving every other replay byte and state hash.
+
 ## Header: exactly 104 bytes for versions 2/3
 
 | Offset | Width | Field | Rule |

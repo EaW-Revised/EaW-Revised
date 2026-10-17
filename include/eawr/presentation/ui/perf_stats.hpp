@@ -47,6 +47,9 @@ struct PerfSummary final {
     double tick_worst_ms{};  // over the window
     std::size_t ticks{};     // ticks recorded in total
     std::size_t window_ticks{};
+    // Simulation ticks completed per real second: the ticks of the last second over that second
+    // (or over the run so far, shorter). Measured, so it shows what a speed setting really gets.
+    double ticks_per_second{};
 };
 
 class PerfStats final {

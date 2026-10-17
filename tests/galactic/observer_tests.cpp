@@ -667,7 +667,9 @@ void capture_metrics_contract() {
     expect(metrics.failure.empty() && report.find("\"all_ai\":true") != std::string::npos, "capture collector admits all-AI published seats");
     for (const auto value : {"\"fleet_moves\":1", "\"builds_completed\":1", "\"units_built_space\":1",
         "\"attacks\":1", "\"battles_won\":1", "\"battles_lost\":1", "\"planets_taken_beyond_start\":1",
-        "\"maximum_idle_frames\":1800"}) expect(report.find(value) != std::string::npos, value);
+        "\"maximum_idle_frames\":1800", "\"hostile_moves\":1", "\"conflicts_started\":1",
+        "\"production_started_by_category\":{\"space\":1,\"ground\":0,\"structures\":0,\"starbase_upgrades\":0",
+        "\"production_completed_by_category\":{\"space\":1,\"ground\":0", "\"unavailable_perceptions\":null"}) expect(report.find(value) != std::string::npos, value);
     expect(report.find("\"fleet_moves\":2") == std::string::npos && report.find("\"battles\":2") == std::string::npos,
         "move requests and repeated retained outcomes do not inflate committed metrics");
     metrics.observe(idle, {6, true, {}});
@@ -684,6 +686,65 @@ void capture_metrics_contract() {
         {1800, gc::GalacticEventKind::production_completed, {}, 1, 900, 77}, std::nullopt}}});
     expect(unknown.failure.empty() && unknown.json().find("\"builds_unclassified\":1,\"units_built_available\":false") != std::string::npos,
         "unclassified completed purchases mark the unit count unavailable");
+
+    // Every production category is counted on its own event, ground channel included.
+    {
+        config.production->planets[0].offers.clear();
+        const std::vector<std::pair<std::uint64_t, gc::ProductionKind>> kinds{{77, gc::ProductionKind::unit},
+            {78, gc::ProductionKind::unit}, {79, gc::ProductionKind::structure},
+            {80, gc::ProductionKind::starbase}, {81, gc::ProductionKind::technology}};
+        for (const auto& [type, kind] : kinds) {
+            gc::ProductionOffer o; o.type = type; o.kind = kind; config.production->planets[0].offers.push_back(o);
+        }
+        eawr::viewer::galactic::CampaignCaptureMetrics categories;
+        categories.observe(publication(0), {});
+        eawr::platform::LiveGalacticEvents started, done; started.through = 5; done.through = 10;
+        for (std::size_t i = 0; i < kinds.size(); ++i) {
+            gc::ProductionEntry e; e.type = kinds[i].first; e.builder = 1; e.build_id = 910 + i;
+            config.production->planets[0].queues[i == 0 ? 1 : 0].push_back(e);
+            started.events.push_back({i + 1, {1, gc::GalacticEventKind::production_started, {}, 1, 910 + i, kinds[i].first}, std::nullopt});
+            done.events.push_back({i + 6, {2, gc::GalacticEventKind::production_completed, {}, 1, 910 + i, kinds[i].first}, std::nullopt});
+        }
+        categories.observe(publication(1), started);
+        categories.observe(publication(2), done);
+        categories.observe(publication(1800), {10, false, {}}); // checkpoint publishes the counters
+        const auto text = categories.json();
+        const std::string each = "{\"space\":1,\"ground\":1,\"structures\":1,\"starbase_upgrades\":1,\"technology\":1}";
+        expect(categories.failure.empty() && text.find("\"production_started_by_category\":" + each) != std::string::npos
+            && text.find("\"production_completed_by_category\":" + each) != std::string::npos,
+            "production categories are counted for started and completed events");
+    }
+
+    // A move into a neutral-owned planet is expansion, not a hostile move.
+    {
+        eawr::viewer::galactic::CampaignCaptureMetrics neutral;
+        neutral.neutral_owner = 3;
+        neutral.observe(publication(0), {});
+        neutral.observe(publication(1), {2, false, {
+            {1, {1, gc::GalacticEventKind::movement_begin, {1}, 10, 1, 3}, std::nullopt},
+            {2, {1, gc::GalacticEventKind::movement_begin, {1}, 10, 2, 2}, std::nullopt}}});
+        neutral.observe(publication(1800), {2, false, {}}); // checkpoint publishes the counters
+        const auto text = neutral.json();
+        expect(neutral.failure.empty() && text.find("\"fleet_moves\":2,\"hostile_moves\":1") != std::string::npos,
+            "moves into neutral planets are not hostile");
+    }
+
+    // A publication that jumps over a 60 s boundary still gets its checkpoint.
+    {
+        eawr::viewer::galactic::CampaignCaptureMetrics jump;
+        const auto samples = [&] {
+            std::size_t count = 0;
+            for (auto at = jump.json().find("\"galactic_frame\""); at != std::string::npos; at = jump.json().find("\"galactic_frame\"", at + 1)) ++count;
+            return count;
+        };
+        jump.observe(publication(0), {});
+        jump.observe(publication(1790), {});
+        expect(samples() == 1, "no checkpoint before the first 60 s boundary");
+        jump.observe(publication(1810), {});
+        expect(samples() == 2, "a publication that skips the 60 s boundary is sampled once past it");
+        jump.observe(publication(1815), {});
+        expect(samples() == 2, "the next checkpoint waits for the next 60 s boundary");
+    }
 }
 int main() {
     black_market_publication();

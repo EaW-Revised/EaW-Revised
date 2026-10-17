@@ -69,6 +69,10 @@
 --            unknown name. Line: "FM s<service> <key>=<type>@<distance>|nil|E ... X=<result>",
 --            also written with DebugMessage; a frozen s<service> after X means the unknown
 --            name ended the script.
+--   backdrop #3935: a Death_Star_II (In_Background in its type) for the local player at the map
+--            centre, held; the camera is left at the start view for backdrop_free seconds, then
+--            pointed at it, so the stills show how an In_Background live unit is drawn (position,
+--            size) from the start view and from close. Line: "BD <phase> +<s> x<x> y<y> z<z>".
 --   melee    #601: the melee benchmark's size S (Rebel 11 ships and 10 squadrons, Empire 11 and
 --            10) placed in two lines across the map centre and set on each other, again and
 --            again (EaWR_Stage_Melee). Line: "ML c<cycle> <wait|gather|settle|fight> +<s>
@@ -147,6 +151,10 @@ EaWR_Stage = {
 	reticle_leg = 2500,  -- units off the station, towards the map centre
 	reticle_leg_time = 12,
 	reticle_hold = 300,  -- seconds each subject is held under the camera
+	-- backdrop (#3935)
+	backdrop_type = "Death_Star_II",
+	backdrop_at = {0, 0, 0}, -- open space at the map centre, clear of every station
+	backdrop_free = 150, -- seconds the camera stays at the start view before it follows the unit
 	-- pause (#532)
 	pause_point = {2200, -2700}, -- where the fleet goes, about 2000 from the Empire station
 	pause_near = 3000,   -- an enemy ship or craft this close to the local station counts as near
@@ -1716,6 +1724,45 @@ function EaWR_Stage_Reticle()
 	end
 end
 
+-- #3935 backdrop: one In_Background unit held while the stills run.
+function EaWR_Stage_Backdrop()
+	local d = EaWR_Stage
+	local now = EaWR_Stage_Now()
+	local age = now - d.phase_start
+	if d.phase == "wait" then
+		EaWR_Stage_Wait_Line("BD", age)
+		if age >= d.wait_for then
+			local units = EaWR_Stage_Spawn(d.backdrop_type, (EaWR_Stage_Players()),
+				Create_Position(d.backdrop_at[1], d.backdrop_at[2], d.backdrop_at[3]))
+			if not units then
+				d.wait_for = 2
+				EaWR_Stage_Set_Phase("wait")
+				return
+			end
+			d.ship = units[1]
+			EaWR_Stage_Call("invulnerable", function() return d.ship.Make_Invulnerable(true) end)
+			EaWR_Stage_Set_Phase("free")
+		end
+		return
+	end
+	if not EaWR_Stage_Valid(d.ship) then
+		d.line = "BD lost"
+		d.ship = nil
+		EaWR_Stage_Set_Phase("wait")
+		d.wait_for = 2
+		return
+	end
+	if d.phase == "free" and age >= d.backdrop_free then
+		EaWR_Stage_Set_Phase("follow")
+	end
+	if d.phase == "follow" then
+		EaWR_Stage_Camera(d.ship)
+	end
+	local x, y, z = EaWR_Stage_XY(d.ship)
+	d.line = "BD " .. d.phase .. " +" .. string.format("%.0f", age) .. " x" .. string.format("%.0f", x or 0) ..
+		" y" .. string.format("%.0f", y or 0) .. " z" .. string.format("%.0f", z or 0)
+end
+
 -- #601 melee: the melee benchmark's size S (apps/path_bench/melee.cpp) staged in the retail game.
 -- Each side's ships and squadrons spawn at its own station, go to their places in two lines
 -- front_gap apart across the map centre (a teleport when the engine takes one, else a move and
@@ -2055,6 +2102,8 @@ function EaWR_Stage_Step()
 		EaWR_Stage_Melee()
 	elseif d.scenario == "seismic" then
 		EaWR_Stage_Seismic()
+	elseif d.scenario == "backdrop" then
+		EaWR_Stage_Backdrop()
 	elseif d.scenario == "bolts" then
 		EaWR_Stage_Bolts()
 	elseif d.scenario == "shieldgen" then

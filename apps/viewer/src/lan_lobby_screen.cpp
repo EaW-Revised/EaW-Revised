@@ -1,5 +1,6 @@
 #include "lan_lobby_screen.hpp"
 #include "online_service_settings.hpp"
+#include "dialog_rectangles.hpp"
 #include "settings_store.hpp"
 #include "skirmish_prepare.hpp"
 
@@ -21,6 +22,7 @@
 #include "eawr/net/tcp_transport.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
 #include "eawr/presentation/ui/lan_lobby.hpp"
+#include "eawr/presentation/ui/skirmish_setup.hpp"
 #include "eawr/presentation/ui/theme.hpp"
 #include "eawr/skirmish/setup.hpp"
 #include "eawr/scene/scene.hpp"
@@ -46,10 +48,13 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <map>
 #include <functional>
 #include <optional>
+#include <numeric>
 #include <set>
+#include <string_view>
 #include <system_error>
 #include <tuple>
 #include <utility>
@@ -65,6 +70,9 @@ namespace {
 // Above the loading screen (98) and under the message box (100): modal, so nothing under it takes
 // input (UI-I1).
 constexpr int screen_layer = 99;
+// Keep the established 1080p geometry while following the front end's letterbox rule.
+constexpr float lobby_width = 1920.0F;
+constexpr float lobby_height = 1080.0F;
 
 // The retail game types the host options list shows, with the text keys of the name and of the
 // description (debug build, MNU-27). Only the space game is playable in this build.
@@ -181,6 +189,24 @@ constexpr const char* prompt_cancel_button = "EAWR_LOBBY_PROMPT_CANCEL";
             || x.colour_index != y.colour_index) return false;
     }
     return true;
+}
+
+// LLB-08: network staging has nine authored row gadgets; local setup keeps WSS-08's eight.
+[[nodiscard]] std::uint32_t network_row_count(const skirmish::SetupMap& map) {
+    return skirmish::setup_row_count(map, false);
+}
+
+// Staging is editable before admission too; WSS-17/18 gate Ready and Start.
+[[nodiscard]] skirmish::FixtureOptions staging_options(const skirmish::SetupSelection& selection) {
+    skirmish::FixtureOptions options;
+    options.map = selection.map;
+    options.slots = selection.slots;
+    options.match = selection.match;
+    if (options.match) {
+        if (auto condition = sim::tactical::parse_victory_condition(options.match->space_win_condition))
+            options.victory_condition = condition.value();
+    }
+    return options;
 }
 
 [[nodiscard]] std::uint32_t now_ms() { return static_cast<std::uint32_t>(Time::get_singleton()->get_ticks_msec()); }
@@ -307,11 +333,15 @@ struct EawrLanLobby::Resources final {
     std::vector<skirmish::SetupMap> maps;
     std::vector<skirmish::LobbyColour> palette;
     skirmish::MatchOptions defaults;
+    std::optional<skirmish::CreditsBounds> credits_bounds; // MNU-22 / WSS-25: the options dialog's credits display
     std::vector<std::string> sfx_ids; // the effective SFX events, for the chat sounds
 };
 
 struct EawrLanLobby::PageState final {
     Control* root{};
+    Control* canvas{};
+    ColorRect* backdrop{};
+    Vector2 connections_size;
     EawrUiCheck* port_mapping{};
     std::optional<BuiltDialog> dialog;
     std::map<std::string, Control*> controls;
@@ -322,6 +352,14 @@ struct EawrLanLobby::PageState final {
     // New chat lines were added: the list scrolls to the end once its layout has caught up.
     bool chat_scroll{};
     std::size_t dialog_rows{};
+    // The host's advanced options dialog: a copy being edited until Accept (R-SETUP-05).
+    std::optional<BuiltDialog> options_dialog;
+    Control* options_panel{};
+    std::optional<skirmish::SetupOptionsEdit> editing;
+    EawrUiCheck *opt_heroes{}, *opt_units{}, *opt_super{};
+    EawrUiCombo* opt_win{};
+    EawrUiButton *opt_accept{}, *opt_cancel{}, *opt_defaults{};
+    bool opt_win_list_was_open{};
     // Set while a control is being filled: its signals must not edit the model.
     bool loading{};
 };
@@ -379,12 +417,14 @@ struct EawrLanLobby::Impl final {
     std::string preview_path;
     std::string status;
     std::string start_caption;
+    std::string start_reason;
     bool start_enabled{};
     std::size_t visible_rows{};
     bool remote_colour_applied{};
     std::uint64_t room_chat_sequence{};
     std::uint64_t room_revision{};
     std::string room_notice;
+    std::vector<std::string> online_connections;
     bool linked{}; // the transport's link to the other player is open
 };
 
@@ -409,7 +449,7 @@ void register_lan_lobby_classes() {
 
 // ---- Loading ----------------------------------------------------------------------------------
 
-bool EawrLanLobby::build(Options options) {
+bool EawrLanLobby::build(Options options, const skirmish::SetupMapCache* shared_maps) {
     options_ = std::move(options);
     resources_ = std::make_unique<Resources>();
     impl_ = std::make_unique<Impl>();
@@ -493,14 +533,19 @@ bool EawrLanLobby::build(Options options) {
         return false;
     }
     resources.defaults = std::move(defaults).value();
+    if (auto bounds = skirmish::read_credits_bounds(filesystem)) resources.credits_bounds = bounds.value();
     skirmish::SetupMapQuery query;
     query.custom.reset();
-    auto maps = skirmish::setup_maps(filesystem, *resources.content->catalog, query);
-    if (!maps) {
-        failure_ = maps.error().message;
-        return false;
+    const auto* shared = shared_maps ? shared_maps->find(filesystem, *resources.content->catalog, query) : nullptr;
+    if (shared) resources.maps = *shared;
+    else {
+        auto maps = skirmish::setup_maps(filesystem, *resources.content->catalog, query);
+        if (!maps) {
+            failure_ = maps.error().message;
+            return false;
+        }
+        resources.maps = std::move(maps).value();
     }
-    resources.maps = std::move(maps).value();
 
     auto dialogs = data::load_dialog_catalog(filesystem);
     if (!dialogs) {
@@ -564,6 +609,9 @@ bool EawrLanLobby::build(Options options) {
     }
     built_ = true;
     lan_match_ = match_;
+    match_->set_diagnostic_logger([](std::string_view line) {
+        UtilityFunctions::print(String::utf8(line.data(), static_cast<std::int64_t>(line.size())));
+    });
     return true;
 }
 
@@ -616,7 +664,7 @@ void EawrLanLobby::build_page(const char* dialog_name) {
     Resources& resources = *resources_;
     state_ = std::make_unique<PageState>();
     PageState& state = *state_;
-    const Vector2 size = get_viewport()->get_visible_rect().size;
+    const Vector2 size(lobby_width, lobby_height);
     if (resources.theme.is_null() || resources.theme_size != size) {
         model::ThemeSources sources;
         sources.catalog = &*resources.dialogs;
@@ -646,13 +694,33 @@ void EawrLanLobby::build_page(const char* dialog_name) {
     backdrop->set_size(size);
     backdrop->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
     root->add_child(backdrop);
+    state.backdrop = backdrop;
+    state.canvas = memnew(Control);
+    state.canvas->set_size(size);
+    state.canvas->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    state.canvas->set_oversampling_with_scale(CanvasItem::OVERSAMPLING_WITH_SCALE_ENABLED);
+    root->add_child(state.canvas);
 
     const data::Dialog* dialog = resources.dialogs->script.find(dialog_name);
     state.dialog = build_dialog(*dialog, *resources.theme_model, resources.text ? &*resources.text : nullptr,
-                                model::Placement::centre);
-    root->add_child(state.dialog->frame);
+                                model::Placement::centre, std::string_view(dialog_name) == staging_dialog);
+    state.canvas->add_child(state.dialog->frame);
+    layout_page();
     for (const BuiltGadget& gadget : state.dialog->gadgets) {
         if (gadget.control != nullptr) state.controls[gadget.id] = gadget.control;
+    }
+}
+
+void EawrLanLobby::layout_page() {
+    if (!state_ || !state_->canvas) return;
+    const Vector2 size = get_viewport()->get_visible_rect().size;
+    if (size.x <= 0.0F || size.y <= 0.0F) return;
+    state_->root->set_size(size);
+    state_->backdrop->set_size(size);
+    const auto layout = fit_letterbox_canvas(*state_->canvas, size, Vector2(lobby_width, lobby_height));
+    if (impl_->box) {
+        impl_->box->set_scale(Vector2(layout.scale, layout.scale));
+        impl_->box->set_offset(layout.offset);
     }
 }
 
@@ -711,6 +779,20 @@ void EawrLanLobby::on_box_result(const int64_t) {
 
 // ---- Lobby ------------------------------------------------------------------------------------
 
+// Fit captions to a bounded authored row without changing the loaded skin.
+static void fit_control_caption(Control& control, const char* role, const Vector2 bounds) {
+    const KitTextStyle style = kit_text_style(control, role);
+    if (style.font.is_null() || style.size <= 0) return;
+    for (int caption_size = style.size - 1; caption_size > 0; --caption_size) {
+        const Vector2 minimum = control.get_combined_minimum_size();
+        if (minimum.x <= bounds.x && minimum.y <= bounds.y) break;
+        control.add_theme_font_size_override(role, caption_size);
+        control.add_theme_constant_override(String(role) + "_cell_ascent", style.cell_ascent * caption_size / style.size);
+        control.add_theme_constant_override(String(role) + "_cell_descent", style.cell_descent * caption_size / style.size);
+        control.update_minimum_size();
+    }
+}
+
 void EawrLanLobby::open_lobby() {
     page_ = Page::lobby;
     impl_->prompt.reset();
@@ -724,13 +806,18 @@ void EawrLanLobby::open_lobby() {
     if (auto* extra = EAWR_CONTROL(Control, "IDC_GAME_LIST2")) extra->set_visible(false);
     if (const BuiltGadget* gadget = find_gadget(dialog, "IDC_GAME_LIST")) {
         state.controls["IDC_GAME_LIST"]->set_visible(false);
+        state.controls["IDC_GAME_LIST"]->set_name("EAWR_AUTHORED_GAME_LIST");
         state.game_list = memnew(EawrLobbyGameList);
         state.game_list->set_name("IDC_GAME_LIST");
         Rect2 rect = local_rect(dialog, *gadget);
-        // Prefer the unused second list's space, keeping the loaded LAN list geometry intact.
+        // Use the loaded list width and action-row height for the source selector.
         const BuiltGadget* spare = find_gadget(dialog, "IDC_GAME_LIST2");
         const Rect2 selector = spare != nullptr ? local_rect(dialog, *spare) : rect;
-        const float selector_height = std::min(28.0F, selector.size.y);
+        const auto* anchor = find_gadget(dialog, "IDC_SET_FILTER_BUTTON");
+        const float selector_height = anchor ? local_rect(dialog, *anchor).size.y : selector.size.y / 2.0F;
+        const float gap = selector_height / 6.0F;
+        // The spare list shares the sort-header row. Use the main list's top for the source tabs.
+        const Vector2 selector_position(rect.position.x, rect.position.y);
         for (const auto& [id, caption] : std::array<std::pair<const char*, const char*>, 2>{{
                  {lan_source_button, "LAN"}, {online_source_button, "Online"}}}) {
             auto* button = memnew(EawrUiButton);
@@ -738,7 +825,7 @@ void EawrLanLobby::open_lobby() {
             button->set_text(caption);
             const bool lan = std::string_view(id) == lan_source_button;
             const float x = lan ? 0.0F : selector.size.x / 2.0F;
-            button->set_position(selector.position + Vector2(x, 0.0F));
+            button->set_position(selector_position + Vector2(x, 0.0F));
             button->set_size(Vector2(selector.size.x / 2.0F, selector_height));
             button->set_disabled(lan ==
                 (impl_->join_selection.source() == model::LobbySourceKind::lan));
@@ -746,24 +833,22 @@ void EawrLanLobby::open_lobby() {
             button->connect("pressed", callable_mp(this, &EawrLanLobby::on_pressed).bind(String(id)));
             state.controls[id] = button;
         }
-        if (spare == nullptr) {
-            rect.position.y += selector_height + 8.0F;
-            rect.size.y = std::max(0.0F, rect.size.y - selector_height - 8.0F);
-        }
+        rect.position.y += selector_height + gap;
+        rect.size.y = std::max(0.0F, rect.size.y - selector_height - gap);
         const bool online = impl_->join_selection.source() == model::LobbySourceKind::online;
-        // Online adds two small rows under the list: the room code and the join/cancel buttons, then
-        // refresh, paging and the page count. They reuse the dialog's own controls; there is no new art.
-        constexpr float row_height = 28.0F, row_gap = 4.0F;
-        const float footer = 2.0F * row_height + row_gap + 6.0F;
-        const Rect2 list_rect(rect.position, Vector2(rect.size.x, online ? std::max(0.0F, rect.size.y - footer) : rect.size.y));
+        const float row_height = selector_height;
+        // Anchor the new bar to the authored action row, reserving three separate lines.
+        const float second = anchor ? local_rect(dialog, *anchor).position.y - row_height - gap
+                                    : rect.position.y + rect.size.y - row_height;
+        const float top = second - row_height - gap;
+        const float footer = online ? std::max(0.0F, rect.position.y + rect.size.y - top + gap) : 0.0F;
+        const Rect2 list_rect(rect.position, Vector2(rect.size.x, std::max(0.0F, rect.size.y - footer)));
         state.game_list->set_position(list_rect.position);
         state.game_list->set_size(list_rect.size);
         dialog.frame->add_child(state.game_list);
         state.game_list->connect("row_chosen", callable_mp(this, &EawrLanLobby::on_rows_chosen));
         if (online) {
             const float width = rect.size.x;
-            const float top = rect.position.y + rect.size.y - footer + 3.0F;
-            const float second = top + row_height + row_gap;
             const auto add_button = [&](const char* id, const char* caption, const float x, const float y, const float w) {
                 auto* button = memnew(EawrUiButton);
                 button->set_name(id);
@@ -799,8 +884,8 @@ void EawrLanLobby::open_lobby() {
             add_button(next_button, ">", 0.34F, second, 0.1F);
             auto* pages = memnew(EawrUiLabel);
             pages->set_name(page_label);
-            pages->set_position(Vector2(rect.position.x + 0.46F * width, second + 4.0F));
-            pages->set_size(Vector2(0.54F * width, row_height));
+            pages->set_position(Vector2(rect.position.x, second + row_height + gap));
+            pages->set_size(Vector2(width, row_height));
             pages->set_wrap(false);
             pages->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
             dialog.frame->add_child(pages);
@@ -819,6 +904,9 @@ void EawrLanLobby::open_lobby() {
     }
     if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_LAN_CHAT_LIST")) list->set_select_mode(ItemList::SELECT_SINGLE);
     if (auto* colour = EAWR_CONTROL(EawrUiCombo, "IDC_LAN_COLOR_SELECT")) {
+        colour->set_fit_to_longest_item(false);
+        colour->set_clip_text(true);
+        colour->set_retail_list(true);
         for (std::size_t index = 0; index < resources.palette.size(); ++index) {
             const auto& rgb = resources.palette[index].rgb;
             Ref<Image> swatch = Image::create_empty(12, 12, false, Image::FORMAT_RGBA8);
@@ -880,6 +968,119 @@ void EawrLanLobby::open_lobby() {
                 : "Online play is not available in this build or service configuration.");
         }
         if (auto* join = EAWR_CONTROL(EawrUiButton, "IDC_LAN_JOIN_GAME_BUTTON")) join->set_disabled(!impl_->online_rooms);
+        // Measure the loaded skin and captions before assigning the shared bar. Godot buttons
+        // and edits can be taller/wider than their requested rectangles because of minimum sizes.
+        if (auto* list = state.game_list) {
+            const std::array<const char*, 7> ids{{refresh_button, prev_button, next_button, direct_button,
+                "IDC_SET_FILTER_BUTTON", "IDC_LAN_HOST_GAME_BUTTON", "IDC_LAN_JOIN_GAME_BUTTON"}};
+            const auto* anchor = find_gadget(dialog, "IDC_SET_FILTER_BUTTON");
+            if (anchor) {
+                const Rect2 authored = local_rect(dialog, *anchor);
+                const float width = list->get_size().x;
+                float height = authored.size.y;
+                if (auto* code = EAWR_CONTROL(Control, invitation_edit))
+                    height = std::max(height, code->get_combined_minimum_size().y);
+                for (const char* id : ids) if (auto* button = EAWR_CONTROL(Control, id))
+                    height = std::max(height, button->get_combined_minimum_size().y);
+                const float gap = height / 6.0F;
+                float count = 0;
+                for (const char* id : ids) if (EAWR_CONTROL(Control, id)) ++count;
+                const float available = width - gap * (count - 1);
+                const auto minimum_width = [&]() {
+                    float total = 0;
+                    for (const char* id : ids) if (auto* button = EAWR_CONTROL(Control, id))
+                        total += button->get_combined_minimum_size().x;
+                    return total;
+                };
+                // The extra online actions share one row. Fit their captions uniformly if the
+                // loaded font needs more room than the authored list provides.
+                auto* sample = EAWR_CONTROL(Control, refresh_button);
+                const KitTextStyle style = kit_text_style(*sample, "Push_Button");
+                for (int size = style.size - 1; minimum_width() > available && size > 0; --size) {
+                    for (const char* id : ids) if (auto* button = EAWR_CONTROL(Control, id)) {
+                        button->add_theme_font_size_override("Push_Button", size);
+                        button->add_theme_constant_override("Push_Button_cell_ascent", style.cell_ascent * size / style.size);
+                        button->add_theme_constant_override("Push_Button_cell_descent", style.cell_descent * size / style.size);
+                        button->update_minimum_size();
+                    }
+                }
+                const float second = authored.position.y - height - gap;
+                const float first = second - height - gap;
+                float x = list->get_position().x;
+                const float extra = std::max(0.0F, available - minimum_width()) / count;
+                for (const char* id : ids) if (auto* button = EAWR_CONTROL(Control, id)) {
+                    const float button_width = button->get_combined_minimum_size().x + extra;
+                    button->set_position(Vector2(x, second));
+                    button->set_size(Vector2(button_width, height));
+                    x += button_width + gap;
+                }
+                const std::array<const char*, 3> code_ids{{invitation_edit, code_button, cancel_join_button}};
+                float code_minimum = 0;
+                for (const char* id : code_ids) if (auto* control = EAWR_CONTROL(Control, id))
+                    code_minimum += control->get_combined_minimum_size().x;
+                const float code_extra = std::max(0.0F, width - 2 * gap - code_minimum);
+                x = list->get_position().x;
+                for (const char* id : code_ids) if (auto* control = EAWR_CONTROL(Control, id)) {
+                    const float share = std::string_view(id) == invitation_edit ? 0.6F : 0.2F;
+                    const float control_width = control->get_combined_minimum_size().x + code_extra * share;
+                    control->set_position(Vector2(x, first));
+                    control->set_size(Vector2(control_width, height));
+                    x += control_width + gap;
+                }
+                if (auto* pages = EAWR_CONTROL(Control, page_label)) {
+                    pages->set_position(Vector2(list->get_position().x, second + height + gap));
+                    pages->set_size(Vector2(width, height));
+                }
+                list->set_size(Vector2(width, std::max(0.0F, first - gap - list->get_position().y)));
+            }
+        }
+    }
+    // Respect measured header and tab heights at smaller viewports. Captions can make
+    // a button wider than its resource rectangle, while the skin can make it taller.
+    if (state.game_list) {
+        float header_bottom = 0.0F;
+        for (const auto& gadget : dialog.gadgets) {
+            if (!gadget.control || !gadget.control->is_visible()
+                || !gadget.id.starts_with("IDC_INTERNET_") || gadget.kind != "button") continue;
+            const Rect2 authored = local_rect(dialog, gadget);
+            fit_control_caption(*gadget.control, "Push_Button", Vector2(authored.size.x, gadget.control->get_size().y));
+            gadget.control->set_size(Vector2(authored.size.x, gadget.control->get_size().y));
+            header_bottom = std::max(header_bottom, gadget.control->get_position().y + gadget.control->get_size().y);
+        }
+        auto* lan = EAWR_CONTROL(Control, lan_source_button);
+        auto* online_tab = EAWR_CONTROL(Control, online_source_button);
+        if (lan && online_tab) {
+            const float tab_height = std::max(lan->get_combined_minimum_size().y, online_tab->get_combined_minimum_size().y);
+            const float gap = tab_height / 6.0F;
+            const float tab_top = std::max(lan->get_position().y, header_bottom + gap);
+            for (auto* tab : {lan, online_tab}) {
+                tab->set_position(Vector2(tab->get_position().x, tab_top));
+                tab->set_size(Vector2(tab->get_size().x, tab_height));
+            }
+            const float bottom = state.game_list->get_position().y + state.game_list->get_size().y;
+            const float top = tab_top + tab_height + gap;
+            state.game_list->set_position(Vector2(state.game_list->get_position().x, top));
+            state.game_list->set_size(Vector2(state.game_list->get_size().x, std::max(0.0F, bottom - top)));
+        }
+    }
+    // The native edit minimum can exceed its authored height. Keep the following
+    // player heading and list below it, preserving the list's bottom anchor.
+    if (auto* name = EAWR_CONTROL(Control, "IDC_LAN_NAME_EDIT")) {
+        if (auto* players = EAWR_CONTROL(Control, "IDC_PLAYER_LIST")) {
+            const float bottom = players->get_position().y + players->get_size().y;
+            float top = players->get_position().y;
+            for (const auto& gadget : dialog.gadgets) {
+                if (gadget.kind != "label" || !gadget.control) continue;
+                const Rect2 authored = local_rect(dialog, gadget);
+                if (authored.position.y <= name->get_position().y || authored.position.y >= players->get_position().y) continue;
+                const float gap = authored.size.y / 6.0F;
+                const float heading_top = std::max(authored.position.y, name->get_position().y + name->get_size().y + gap);
+                gadget.control->set_position(Vector2(authored.position.x, heading_top));
+                top = std::max(top, heading_top + gadget.control->get_size().y + gap);
+            }
+            players->set_position(Vector2(players->get_position().x, top));
+            players->set_size(Vector2(players->get_size().x, std::max(0.0F, bottom - top)));
+        }
     }
     state.loading = false;
     // The player list shows who is in the lobby; the first line is the player.
@@ -1049,18 +1250,6 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
         }
         return;
     }
-    if (gadget == "EAWR_LAN_HOST_TEAMS") {
-        if (auto* combo = EAWR_CONTROL(EawrUiCombo, gadget)) {
-            const int value = combo->get_item_id(static_cast<int>(index));
-            const auto first = static_cast<std::uint32_t>(value / 10);
-            const auto second = static_cast<std::uint32_t>(value % 10);
-            const auto count = static_cast<std::uint32_t>(impl_->human_owners.size());
-            impl_->human_owners.assign(count, 1);
-            for (std::uint32_t seat = first; seat < count; ++seat)
-                impl_->human_owners[seat] = seat < first + second ? 2 : 3;
-        }
-        return;
-    }
     if (gadget == "EAWR_LAN_DIRECT_SEATS") {
         if (auto* combo = EAWR_CONTROL(EawrUiCombo, gadget))
             impl_->direct_seats = static_cast<std::uint32_t>(combo->get_item_id(static_cast<int>(index)));
@@ -1101,12 +1290,21 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
     Resources& resources = *resources_;
     if (gadget == "IDC_STAGING_MAP_LIST") {
         if (index >= 0 && static_cast<std::size_t>(index) < impl.listed.size()) {
-            impl.map_index = static_cast<int>(impl.listed[static_cast<std::size_t>(index)]);
-            skirmish::repair_setup_selection(impl.selection, resources.maps[static_cast<std::size_t>(impl.map_index)]);
+            const auto chosen = impl.listed[static_cast<std::size_t>(index)];
+            if (network_row_count(resources.maps[chosen]) < impl.human_owners.size()) {
+                note_chat(model::ChatKind::error, "Choose a map with a player row for every human.");
+                if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST")) {
+                    const auto previous = std::find(impl.listed.begin(), impl.listed.end(), static_cast<std::size_t>(impl.map_index));
+                    if (previous != impl.listed.end()) list->select(static_cast<int>(previous - impl.listed.begin()));
+                }
+                return;
+            }
+            impl.map_index = static_cast<int>(chosen);
+            skirmish::repair_setup_selection(impl.selection, resources.maps[static_cast<std::size_t>(impl.map_index)], false);
             prepare_host_rows(resources.maps[static_cast<std::size_t>(impl.map_index)]);
             impl.rows_signature.clear();
             fill_host_seats();
-            publish_staging_selection();
+            static_cast<void>(publish_staging_selection());
             announce();
         }
         return;
@@ -1121,6 +1319,12 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
     const auto parsed = std::from_chars(gadget.data() + split + 1, gadget.data() + gadget.size(), row);
     if (parsed.ec != std::errc{}) return;
     const std::uint32_t slot = row + 1;
+    if (slot > network_row_count(map)) {
+        note_chat(model::ChatKind::error, core::format_diagnostic(net::lobby_diagnostic(net::LobbyReason::invalid_choice,
+            "This player row is outside the map's loaded capacity.")));
+        impl.rows_signature.clear();
+        return;
+    }
     auto* combo = EAWR_CONTROL(EawrUiCombo, gadget);
     if (combo == nullptr) return;
     const int id_value = combo->get_item_id(static_cast<int>(index));
@@ -1128,6 +1332,13 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
                                [slot](const skirmish::LobbySlot& value) { return value.slot == slot; });
     if (field == "IDC_PLAYER_NAME") {
         if (id_value >= 10000 && match_->lobby_state()) { (void)match_->lobby_kick(static_cast<net::PeerIndex>(id_value - 10000)); return; }
+        // #4041: a row held by a human keeps its control for everyone; only the kick item (above) removes the player.
+        if (const auto lobby = match_->lobby_state(); lobby && std::any_of(lobby->snapshot.seats.begin(), lobby->snapshot.seats.end(), [&](const auto& seat) { return seat.selection.slot == slot; })) {
+            note_chat(model::ChatKind::error, core::format_diagnostic(net::lobby_diagnostic(net::LobbyReason::invalid_choice,
+                "A slot held by a human cannot be switched to AI, Closed or Open; kick the player first.")));
+            impl.rows_signature.clear();
+            return;
+        }
         if (slot < 3) return;
         if (id_value == 0) {
             if (record != impl.selection.slots.end()) impl.selection.slots.erase(record);
@@ -1155,7 +1366,7 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
                                                             resources.palette.size()));
         }
     }
-    publish_staging_selection();
+    static_cast<void>(publish_staging_selection());
     impl.rows_signature.clear();
 }
 
@@ -1274,7 +1485,9 @@ void EawrLanLobby::join_selected() {
     }
     const auto attempt = impl.join_selection.begin(model::LanDiscoveryTarget{*selected});
     if (!attempt) return;
-    match_->configure_seats(std::vector<sim::tactical::PlayerId>(impl.direct_seats, 1));
+    std::vector<sim::tactical::PlayerId> owners(impl.direct_seats);
+    std::iota(owners.begin(), owners.end(), 1U);
+    match_->configure_seats(std::move(owners));
     configure_staging();
     match_->join(selected->address);
     open_staging(false, selected->name, selected->address);
@@ -1286,7 +1499,9 @@ void EawrLanLobby::join_address(const std::string& address, const std::string& g
         show_failure("Choose a hosted game with two to nine human seats."); return;
     }
     if (!impl_->join_selection.begin(model::LanAddressTarget{address})) return;
-    match_->configure_seats(std::vector<sim::tactical::PlayerId>(impl_->direct_seats, 1));
+    std::vector<sim::tactical::PlayerId> owners(impl_->direct_seats);
+    std::iota(owners.begin(), owners.end(), 1U);
+    match_->configure_seats(std::move(owners));
     configure_staging();
     match_->join(address);
     open_staging(false, game, address);
@@ -1353,15 +1568,20 @@ bool EawrLanLobby::configure_online_match() {
     if (online_match_) { match_ = online_match_; return true; }
     auto configured = online_match_options(*options_.online_settings);
     if (!configured) return false;
+    // The host's match opens the signalling scope of the room this source published.
+    if (impl_->online_rooms) bind_online_room_source(configured.value(), impl_->online_rooms);
     if (match_ && match_ != lan_match_) match_->cancel();
     match_ = make_online_match(std::move(configured).value(), options_.diagnostic_root, options_.input_delay);
+    match_->set_diagnostic_logger([](std::string_view line) {
+        UtilityFunctions::print(String::utf8(line.data(), static_cast<std::int64_t>(line.size())));
+    });
     match_->configure_factions(scene::faction_order(*resources_->content->catalog));
     online_match_ = match_;
     return true;
 }
 
-// The room code field: a four-character code or a full invitation goes straight to the two-player
-// online bridge, the same way a picked room does.
+// The room code field: a four-character code attaches the room's signalling scope straight away, the same way a picked
+// room does after its directory admission.
 void EawrLanLobby::join_code(const std::string& code) {
     if (page_ != Page::lobby || impl_->join_selection.source() != model::LobbySourceKind::online
         || impl_->join_selection.attempt() || impl_->prompt) return;
@@ -1374,8 +1594,7 @@ void EawrLanLobby::join_code(const std::string& code) {
         note_chat(model::ChatKind::error, std::string(model::online_join_notice(model::OnlineJoinStatus::not_configured)));
     } else if (impl_->join_selection.begin(model::OnlineInvitationTarget{"online", *canonical})) {
         note_chat(model::ChatKind::notice, "Finding game…");
-        impl_->direct_seats = 2;
-        match_->configure_seats(std::vector<sim::tactical::PlayerId>(impl_->direct_seats, 1));
+        // Code admission learns its capacity from the attached room roster, before creating any pair transport.
         configure_staging();
         match_->join(*canonical);
         open_staging(false, {}, {});
@@ -1535,19 +1754,19 @@ void EawrLanLobby::pump_online() {
     for (const net::OnlineLobbyJoinCompletion& result : impl.online_rooms->take_join_results()) {
         if (!impl.join_selection.complete(result.attempt)) continue;
         if (result.admission) {
-            // Admitted: the room's code goes into the two-player online bridge, then the shared staging.
+            // Admitted: the reserved seat and its member capability attach the room's signalling scope, then the shared staging.
+            // This directory connection stays with the source, so the seat reservation outlives the attach.
             const std::string game = impl.join_game, room = impl.join_room;
             close_password_prompt();
-            if (!configure_online_match() || (!options_.match && result.admission->bridge_invitation.empty())) {
+            if (!configure_online_match() || (!options_.match && result.admission->member_capability.empty())) {
                 impl.online_rooms->cancel(result.attempt);
                 core::Diagnostic error; error.code = "EAWR-NET-1752"; error.message = "The game is no longer available.";
                 online_failure(error);
                 continue;
             }
-            impl.direct_seats = 2;
-            match_->configure_seats(std::vector<sim::tactical::PlayerId>(impl.direct_seats, 1));
+            // The admission reserves a room slot; its roster supplies the authoritative two-to-nine seat count.
             configure_staging();
-            match_->join(options_.match ? room : result.admission->bridge_invitation);
+            match_->join_admitted(*result.admission);
             open_staging(false, game, {});
             return;
         }
@@ -1618,37 +1837,10 @@ void EawrLanLobby::open_host_options() {
             ? "Leave empty for a public room. A password makes it a private room."
             : "Passwords are not supported in this build yet.");
     }
-    // Match the clan control in the free row between it and the game-type list.
-    // Derive the row spacing from the retail name/password edits so it scales with the dialog.
     if (auto* seats = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO")) {
-        const auto* name = EAWR_CONTROL(Control, "IDC_INTERNET_GAME_NAME_EDIT");
-        const auto* password = EAWR_CONTROL(Control, "IDC_INTERNET_GAME_PASSWORD_EDIT");
-        const auto* clan_label = EAWR_CONTROL(EawrUiLabel, "IDC_TEXT_HOST_CLAN");
-        if (name && password && clan_label) {
-            const Vector2 offset(0, password->get_position().y - name->get_position().y);
-            seats->set_fit_to_longest_item(false);
-            seats->set_clip_text(true);
-            seats->set_retail_list(true);
-            auto* teams = memnew(EawrUiCombo);
-            teams->set_name("EAWR_LAN_HOST_TEAMS");
-            teams->set_theme_type_variation(seats->get_theme_type_variation());
-            teams->set_fit_to_longest_item(false);
-            teams->set_clip_text(true);
-            teams->set_retail_list(true);
-            state.dialog->frame->add_child(teams);
-            teams->set_position(seats->get_position() + offset);
-            teams->set_size(seats->get_size());
-            state.controls["EAWR_LAN_HOST_TEAMS"] = teams;
-            teams->connect("item_selected", callable_mp(this, &EawrLanLobby::on_item_selected).bind(String("EAWR_LAN_HOST_TEAMS")));
-            auto* label = memnew(EawrUiLabel);
-            label->set_text("Teams");
-            label->set_role("R_Text");
-            label->set_theme_type_variation(clan_label->get_theme_type_variation());
-            label->set_alignment(HORIZONTAL_ALIGNMENT_RIGHT);
-            state.dialog->frame->add_child(label);
-            label->set_position(clan_label->get_position() + offset);
-            label->set_size(clan_label->get_size());
-        }
+        seats->set_fit_to_longest_item(false);
+        seats->set_clip_text(true);
+        seats->set_retail_list(true);
     }
     fill_host_seats();
     if (auto* seats = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO"))
@@ -1675,6 +1867,14 @@ void EawrLanLobby::open_host_options() {
         state.port_mapping->set_text("Map router TCP port for Internet play");
         state.port_mapping->set_tooltip_text("Ask your router for a temporary port mapping. This cannot bypass upstream NAT or CGNAT.");
         state.dialog->frame->add_child(state.port_mapping);
+        if (const auto* clan = find_gadget(*state.dialog, "IDC_TEXT_HOST_CLAN")) {
+            const Rect2 next_row = local_rect(*state.dialog, *clan);
+            const float gap = next_row.size.y / 6.0F;
+            if (auto* game_name = EAWR_CONTROL(Control, "IDC_INTERNET_GAME_NAME_EDIT"))
+                position.y = std::max(position.y, game_name->get_position().y + game_name->get_size().y + gap);
+            size.y = std::max(0.0F, next_row.position.y - gap - position.y);
+            fit_control_caption(*state.port_mapping, "Global_Default", size);
+        }
         state.port_mapping->set_position(position); state.port_mapping->set_size(size);
     }
     if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_GAME_TYPE_LIST")) {
@@ -1704,66 +1904,47 @@ void EawrLanLobby::open_host_options() {
 
 void EawrLanLobby::fill_host_seats(const std::uint32_t requested_count) {
     auto* seats = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO");
-    auto* teams = EAWR_CONTROL(EawrUiCombo, "EAWR_LAN_HOST_TEAMS");
-    if (!seats || !teams) return;
+    if (!seats) return;
     const bool was_loading = state_->loading;
     state_->loading = true;
     seats->clear();
-    teams->clear();
     const skirmish::SetupMap* map = nullptr;
     if (impl_->map_index >= 0 && static_cast<std::size_t>(impl_->map_index) < resources_->maps.size())
         map = &resources_->maps[static_cast<std::size_t>(impl_->map_index)];
     if (!map) {
-        const auto preferred = std::find_if(resources_->maps.begin(), resources_->maps.end(), [&](const auto& candidate) {
-            return candidate.path == skirmish::m2_fixture().map && candidate.metadata.custom == impl_->custom_maps;
-        });
-        if (preferred != resources_->maps.end()) map = &*preferred;
-        else for (const auto& candidate : resources_->maps) if (candidate.metadata.custom == impl_->custom_maps) { map = &candidate; break; }
-    }
-    const auto owner_rows = map ? std::min(skirmish::setup_row_count(*map), static_cast<std::uint32_t>(sim::max_match_human_sides)) : 0U;
-    // Map capacity bounds owner rows, not the humans sharing each row.
-    const int seat_limit = impl_->join_selection.source() == model::LobbySourceKind::online
-        ? 2 : static_cast<int>(sim::max_match_seats);
-    const auto count = std::clamp(requested_count == 0 ? static_cast<std::uint32_t>(impl_->human_owners.size())
-        : requested_count, 2U, static_cast<std::uint32_t>(seat_limit));
-    if (owner_rows > 0) for (int humans = 2; humans <= seat_limit; ++humans)
-        seats->add_item(text(std::to_string(humans)), humans);
-    model::HumanTeamSplit previous{};
-    for (const auto owner : impl_->human_owners) if (owner >= 1 && owner <= previous.size()) ++previous[owner - 1];
-    const auto choices = model::human_team_splits(count, owner_rows);
-    const auto selected = model::closest_human_team_split(choices, previous);
-    for (const auto& split : choices) {
-        teams->add_item(text(model::human_team_split_text(split)), static_cast<int>(split[0] * 10 + split[1]));
-        if (split == selected) teams->select(teams->get_item_count() - 1);
-    }
-    if (!choices.empty()) {
-        seats->select(static_cast<int>(count) - 2);
-        auto canonical_previous = previous;
-        std::sort(canonical_previous.begin(), canonical_previous.end(), std::greater<>());
-        // Opening the options or refreshing the map keeps existing owner assignments intact.
-        if (count != impl_->human_owners.size() || selected != canonical_previous) {
-            impl_->human_owners.assign(count, 1);
-            for (std::uint32_t seat = selected[0]; seat < count; ++seat)
-                impl_->human_owners[seat] = seat < selected[0] + selected[1] ? 2 : 3;
+        // Before the first map choice, offer the largest loaded map; hosting selects a map that fits.
+        for (const auto& candidate : resources_->maps) {
+            if (candidate.metadata.custom != impl_->custom_maps || !candidate.unavailable.empty()) continue;
+            if (!map || network_row_count(candidate) > network_row_count(*map)) map = &candidate;
         }
     }
-    seats->set_disabled(choices.empty());
-    teams->set_disabled(choices.empty());
-    teams->set_tooltip_text("Humans on one side share its units, credits, reinforcement pool and fog.");
+    // LLB-08: every skirmish human occupies a separate authored player row.
+    const auto seat_limit = map ? network_row_count(*map) : 0U;
+    for (std::uint32_t humans = 2; humans <= seat_limit; ++humans)
+        seats->add_item(text(std::to_string(humans)), static_cast<int>(humans));
+    if (seat_limit >= 2) {
+        const auto count = std::clamp(requested_count == 0 ? static_cast<std::uint32_t>(impl_->human_owners.size())
+            : requested_count, 2U, seat_limit);
+        seats->select(static_cast<int>(count) - 2);
+        impl_->human_owners.resize(count);
+        std::iota(impl_->human_owners.begin(), impl_->human_owners.end(), 1U);
+    }
+    seats->set_disabled(seat_limit < 2);
+    seats->set_tooltip_text("Each human has a player row. Set alliances with each row's Team in staging.");
     state_->loading = was_loading;
 }
 
 void EawrLanLobby::prepare_host_rows(const skirmish::SetupMap& map) {
     const std::set<sim::tactical::PlayerId> owners(impl_->human_owners.begin(), impl_->human_owners.end());
     for (const auto owner : owners) {
-        if (owner > skirmish::setup_row_count(map)) {
+        if (owner > network_row_count(map)) {
             note_chat(model::ChatKind::error, core::format_diagnostic(net::lobby_diagnostic(net::LobbyReason::invalid_choice,
                 "A planned human owner is outside this map's loaded rows.")));
             return;
         }
         if (std::any_of(impl_->selection.slots.begin(), impl_->selection.slots.end(), [&](const auto& row) { return row.slot == owner; })) continue;
-        // Reuse validated data-driven row admission, preferring a new authored team for a new human owner.
-        if (auto added = append_lan_ai_row(impl_->selection, map, owner, resources_->palette.size(), true); !added) {
+        // Reuse data-driven defaults; a human row may join an existing team (LLB-08/09).
+        if (auto added = append_lan_ai_row(impl_->selection, map, owner, resources_->palette.size()); !added) {
             note_chat(model::ChatKind::error, core::format_diagnostic(net::lobby_diagnostic(net::LobbyReason::invalid_choice, added.error().message)));
             return;
         }
@@ -1804,21 +1985,16 @@ void EawrLanLobby::begin_hosting() {
     match_->configure_seats(impl.human_owners);
     match_->set_port_mapping(state_->port_mapping && state_->port_mapping->is_pressed());
     configure_staging();
-    if (online) { impl.online_rooms->set_bridge_invitation({}); match_->set_public_invitation(impl.host_password.empty()); }
+    if (online) match_->set_public_invitation(impl.host_password.empty());
     match_->host(options_.game_port);
     open_staging(true, *cleaned, {});
 }
 
 // ---- Staging ----------------------------------------------------------------------------------
 
-void EawrLanLobby::publish_staging_selection() {
-    if (!impl_->host || !match_->lobby_state()) return;
-    auto selected = validated_lan_options(impl_->selection, resources_->maps);
-    if (!selected) {
-        note_chat(model::ChatKind::error, core::format_diagnostic(net::lobby_diagnostic(net::LobbyReason::invalid_choice, selected.error().message)));
-        return;
-    }
-    (void)match_->lobby_game(selected.value());
+bool EawrLanLobby::publish_staging_selection() {
+    if (!impl_->host || !match_->lobby_state()) return true;
+    return match_->lobby_game(staging_options(impl_->selection));
 }
 
 void EawrLanLobby::configure_staging() {
@@ -1842,9 +2018,12 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     impl.locked = false;
     impl.launch.reset();
     impl.offered.reset();
+    impl.preview_path.clear();
+    impl.rows_signature.clear();
     impl.last_message.clear();
     impl.staging_chat = model::ChatLog();
     impl.room_chat_sequence = impl.room_revision = 0; impl.room_notice.clear();
+    impl.online_connections.clear();
     impl.refused = false;
     page_ = Page::staging;
     build_page(staging_dialog);
@@ -1862,8 +2041,8 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
         chat->connect("text_submitted", callable_mp(this, &EawrLanLobby::on_text_submitted).bind(String("IDC_LAN_CHAT_EDIT")));
         chat->grab_focus();
     }
-    // The preview image the dialog builder leaves to the screen. The joiner sees none (LLB-08, MNU-28).
-    if (const BuiltGadget* image = find_gadget(dialog, "IDC_IMAGE"); image != nullptr && host) {
+    // Both peers can review the selected map before accepting the setup (#3759).
+    if (const BuiltGadget* image = find_gadget(dialog, "IDC_IMAGE"); image != nullptr) {
         state.preview = memnew(TextureRect);
         state.preview->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
         state.preview->set_stretch_mode(TextureRect::STRETCH_SCALE);
@@ -1906,9 +2085,20 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
         load->set_text(resolved(resources.text, "TEXT_BUTTON_ACCEPT"));
         load->set_disabled(true);
     }
+    // #4041, MNU-22: the host edits the advanced options; a joiner's button is hidden below and the
+    // summary list shows the host's values read-only.
     if (auto* options = EAWR_CONTROL(EawrUiButton, "IDC_SELECT_OPTIONS")) {
-        options->set_disabled(true);
-        options->set_tooltip_text("The match options page is opened from the skirmish setup screen for now.");
+        if (host) build_options_overlay();
+        options->set_disabled(!host || state.options_panel == nullptr);
+        if (host && state.options_panel == nullptr)
+            options->set_tooltip_text("The advanced options dialog is not in the loaded data.");
+    }
+    // The client option summary shares the host's map-source button area in the resource.
+    // A host shows the map controls there, not the client's option/setting headings.
+    if (host) {
+        for (const char* id : {"IDC_GAME_OPTIONS_CLIENT_DISPLAY_LEFT", "IDC_GAME_OPTIONS_CLIENT_DISPLAY_RIGHT"}) {
+            if (auto* control = EAWR_CONTROL(Control, id)) control->hide();
+        }
     }
     if (auto* start = EAWR_CONTROL(EawrUiButton, "IDC_LAN_START_GAME_BUTTON")) {
         start->set_text(resolved(resources.text, host ? "TEXT_BUTTON_START_GAME" : "TEXT_BUTTON_ACCEPT"));
@@ -1917,23 +2107,88 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     if (auto* title = EAWR_CONTROL(EawrUiLabel, "IDC_INTERNET_DIALOG_HEADER")) {
         title->set_text(resolved(resources.text, host ? "TEXT_INTERNET_HOST_GAME_TITLE" : "TEXT_INTERNET_JOIN_GAME_TITLE"));
     }
-    if (host && impl.join_selection.source() == model::LobbySourceKind::online && impl.host_password.empty()) {
-        auto* invitation = memnew(EawrUiLabel); invitation->set_name("EAWR_ONLINE_PUBLIC_INVITATION");
-        invitation->set_position(Vector2(dialog.frame->get_size().x * 0.08F, dialog.frame->get_size().y * 0.10F));
-        invitation->set_size(Vector2(dialog.frame->get_size().x * 0.84F, 28.0F));
-        invitation->set_mouse_filter(Control::MOUSE_FILTER_IGNORE); dialog.frame->add_child(invitation);
-        state.controls["EAWR_ONLINE_PUBLIC_INVITATION"] = invitation;
+    // Staging keeps its loaded rectangles: fit the skin and caption inside each one.
+    for (const auto& gadget : dialog.gadgets) {
+        if (gadget.kind != "button" || !gadget.control) continue;
+        auto* button = cast<EawrUiButton>(gadget.control);
+        if (!button) continue;
+        const Rect2 authored = local_rect(dialog, gadget);
+        button->set_fit_to_rect(true);
+        fit_control_caption(*button, "Push_Button", authored.size);
+        button->set_size(authored.size);
+    }
+    const auto* cancel_gadget = find_gadget(dialog, "IDC_LAN_CANCEL_BUTTON");
+    const auto* start_gadget = find_gadget(dialog, "IDC_LAN_START_GAME_BUTTON");
+    if (cancel_gadget && start_gadget) {
+        const Rect2 cancel_rect = local_rect(dialog, *cancel_gadget);
+        const Rect2 start_rect = local_rect(dialog, *start_gadget);
+        const float gap = cancel_rect.size.y * 0.5F;
+        const float row_left = cancel_rect.get_end().x + gap;
+        const float row_width = start_rect.position.x - gap - row_left;
+        const Vector2 connection_size(row_width * 0.48F, cancel_rect.size.y);
+        state.connections_size = connection_size;
+        if (host && impl.join_selection.source() == model::LobbySourceKind::online && impl.host_password.empty()) {
+            auto* invitation = memnew(EawrUiLabel); invitation->set_name("EAWR_ONLINE_PUBLIC_INVITATION");
+            invitation->set_position(Vector2(row_left + row_width * 0.52F, cancel_rect.position.y));
+            invitation->set_size(connection_size);
+            invitation->set_mouse_filter(Control::MOUSE_FILTER_IGNORE); dialog.frame->add_child(invitation);
+            state.controls["EAWR_ONLINE_PUBLIC_INVITATION"] = invitation;
+        }
+        if (impl.join_selection.source() == model::LobbySourceKind::online) {
+            auto* connections = memnew(EawrUiButton);
+            connections->set_name("EAWR_ONLINE_CONNECTIONS");
+            connections->set_fit_to_rect(true);
+            if (auto* cancel = EAWR_CONTROL(Control, "IDC_LAN_CANCEL_BUTTON"))
+                connections->set_theme_type_variation(cancel->get_theme_type_variation());
+            connections->set_text("My connections");
+            connections->set_position(Vector2(row_left, cancel_rect.position.y));
+            connections->set_size(connection_size);
+            connections->set_tooltip_text("View each human seat and your connection to it. Start waits for every player's connections.");
+            dialog.frame->add_child(connections); state.controls["EAWR_ONLINE_CONNECTIONS"] = connections;
+            fit_control_caption(*connections, "Push_Button", state.connections_size);
+            connections->set_size(state.connections_size);
+            if (auto* invitation = EAWR_CONTROL(Control, "EAWR_ONLINE_PUBLIC_INVITATION"))
+                invitation->set_size(state.connections_size);
+            connections->connect("pressed", callable_mp(this, &EawrLanLobby::on_pressed).bind(String("EAWR_ONLINE_CONNECTIONS")));
+            auto* list = memnew(EawrUiList);
+            list->set_name("EAWR_ONLINE_CONNECTIONS_LIST");
+            list->set_position(Vector2(dialog.frame->get_size().x * 0.08F, dialog.frame->get_size().y * 0.18F));
+            list->set_size(Vector2(dialog.frame->get_size().x * 0.84F, dialog.frame->get_size().y * 0.62F));
+            list->set_item_selectable(list->add_item("Waiting for the room roster"), false);
+            list->set_z_index(20); list->hide();
+            dialog.frame->add_child(list); state.controls["EAWR_ONLINE_CONNECTIONS_LIST"] = list;
+        }
+    } else if (impl.join_selection.source() == model::LobbySourceKind::online) {
+        notes_.push_back("online staging: connections controls require the loaded Cancel and Start row");
     }
     // The joiner never edits the host's map; the host's list is filled below.
     if (!host) {
-        for (const char* hidden : {"IDC_SELECT_OFFICIAL_MAPS", "IDC_SELECT_CUSTOM_MAPS", "IDC_STAGING_MAP_LIST", "IDC_IMAGE", "IDC_SELECT_OPTIONS"}) {
+        for (const char* hidden : {"IDC_SELECT_OFFICIAL_MAPS", "IDC_SELECT_CUSTOM_MAPS", "IDC_SELECT_OPTIONS",
+                                   "IDC_GAME_OPTIONS_CLIENT_DISPLAY_RIGHT"}) {
             if (auto* control = EAWR_CONTROL(Control, hidden)) control->set_visible(false);
         }
+        // Reuse the host map list as a read-only settings summary. No map-selection
+        // signal is connected for a joiner, and every summary item is disabled.
+        if (auto* heading = EAWR_CONTROL(EawrUiLabel, "IDC_GAME_OPTIONS_CLIENT_DISPLAY_LEFT")) {
+            if (const auto* area = find_gadget(dialog, "IDC_SELECT_OFFICIAL_MAPS")) {
+                const Rect2 rect = local_rect(dialog, *area);
+                heading->set_position(rect.position); heading->set_size(rect.size);
+            }
+            heading->set_alignment(HORIZONTAL_ALIGNMENT_LEFT);
+            heading->set_text("Game settings");
+        }
+        if (const auto* area = find_gadget(dialog, "IDC_SELECT_OPTIONS")) {
+            auto* name = memnew(EawrUiLabel); name->set_theme(resources.theme);
+            const Rect2 rect = local_rect(dialog, *area);
+            name->set_position(rect.position); name->set_size(rect.size);
+            name->set_text("Waiting for host setup");
+            name->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            dialog.frame->add_child(name); state.controls["EAWR_JOINER_MAP_NAME"] = name;
+        }
     } else {
-        impl.custom_maps = false;
         impl.selection = skirmish::SetupSelection{};
         impl.selection.match = resources.defaults;
-        impl.map_index = -1;
+        // Host options bounded the human count against this map; keep it for the new room.
         impl.remote_colour_applied = false;
         // The host's row takes the player's profile colour.
         if (!impl.selection.slots.empty() && impl.colour < resources.palette.size()) {
@@ -1947,6 +2202,149 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     if (host) fill_map_list();
     announce();
     refresh_staging();
+}
+
+// MNU-22 (#4041): the catalogue's advanced options dialog, built hidden over the host's staging. Heroes,
+// starting units, super weapons and the win condition reach the match through the lobby game blob;
+// the credits slider only displays the data's value, as the skirmish setup does (WSS-25).
+void EawrLanLobby::build_options_overlay() {
+    PageState& state = *state_;
+    Resources& resources = *resources_;
+    state.options_panel = nullptr;
+    const data::Dialog* resource = resources.dialogs->script.find(std::string(model::skirmish_options_dialog));
+    if (resource == nullptr) return;
+    state.options_dialog = build_dialog(*resource, *resources.theme_model, resources.text ? &*resources.text : nullptr,
+                                        model::Placement::centre, true);
+    const BuiltDialog& built = *state.options_dialog;
+    const auto control_of = [&](const char* id) -> Control* {
+        const BuiltGadget* gadget = find_gadget(built, id);
+        return gadget != nullptr ? gadget->control : nullptr;
+    };
+    state.opt_heroes = cast<EawrUiCheck>(control_of("IDC_ALLOW_HEROES"));
+    state.opt_units = cast<EawrUiCheck>(control_of("IDC_ALLOW_STARTING_UNIT_PURCHASE"));
+    state.opt_super = cast<EawrUiCheck>(control_of("IDC_ALLOW_SUPER_WEAPONS"));
+    state.opt_accept = cast<EawrUiButton>(control_of("IDC_BUTTON_ACCEPT"));
+    state.opt_cancel = cast<EawrUiButton>(control_of("IDC_CANCEL_BUTTON"));
+    state.opt_defaults = cast<EawrUiButton>(control_of("IDC_DEFAULTS_BUTTON"));
+    if (!state.opt_heroes || !state.opt_units || !state.opt_super || !state.opt_accept || !state.opt_cancel || !state.opt_defaults) {
+        state.options_dialog.reset();
+        notes_.push_back("lobby options dialog lacks a required control; the Advanced Options button stays disabled");
+        return;
+    }
+    for (const BuiltGadget& gadget : built.gadgets) {
+        // A group box is its rim alone: the dialog's own shade shows inside it, as in the retail dialog.
+        if (gadget.kind == "group" && gadget.control != nullptr) {
+            built.frame->move_child(gadget.control, 0);
+            if (auto* rim = cast<EawrUiFrame>(gadget.control)) rim->set_rim_only(true);
+        }
+    }
+    // WSS-27: the pre-built base is hidden in space.
+    if (auto* base = control_of("IDC_PRE_BUILT_BASE")) base->set_visible(false);
+    for (const auto& [button, name] : {std::pair{state.opt_accept, "EAWR_OPT_ACCEPT"}, std::pair{state.opt_cancel, "EAWR_OPT_CANCEL"},
+                                       std::pair{state.opt_defaults, "EAWR_OPT_DEFAULTS"}})
+        button->connect("pressed", callable_mp(this, &EawrLanLobby::on_pressed).bind(String(name)));
+    state.opt_win = cast<EawrUiCombo>(control_of("IDC_WIN_CONDITION_COMBO"));
+    if (state.opt_win != nullptr) {
+        state.opt_win->set_focus_mode(Control::FOCUS_ALL);
+        for (const auto& choice : model::setup_win_conditions())
+            state.opt_win->add_item(resolved(resources.text, std::string(choice.text_key)));
+        state.opt_win->select(-1);
+    }
+    auto* slider = cast<EawrUiSlider>(control_of("IDC_SKIRMISH_CREDITS_SLIDER"));
+    const bool credits_shown = slider != nullptr && resources.credits_bounds.has_value();
+    for (const char* id : {"IDC_SKIRMISH_CREDITS_TEXT", "IDC_SKIRMISH_CREDITS_SLIDER", "IDC_SKIRMISH_CREDITS_VALUE"})
+        if (auto* control = control_of(id)) control->set_visible(credits_shown);
+    if (credits_shown) {
+        const String reason = text(std::string(model::setup_notice(model::SetupNotice::credits_not_applied)));
+        slider->set_min(static_cast<double>(resources.credits_bounds->minimum));
+        slider->set_max(static_cast<double>(resources.credits_bounds->maximum));
+        slider->set_step(0.0);
+        slider->set_forced_states(KitState::disabled, KitState::disabled);
+        slider->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        slider->set_tooltip_text(reason);
+        auto* cover = memnew(Control);
+        cover->set_position(slider->get_position());
+        cover->set_size(slider->get_size());
+        cover->set_mouse_filter(Control::MOUSE_FILTER_STOP);
+        cover->set_tooltip_text(reason);
+        built.frame->add_child(cover);
+    }
+    // The transparent panel only takes the pointer, so the staging behind stays inert while the dialog is up.
+    auto* panel = memnew(ColorRect);
+    panel->set_name("EAWR_LOBBY_OPTIONS");
+    panel->set_color(Color(0.0F, 0.0F, 0.0F, 0.0F));
+    panel->set_size(state.canvas->get_size());
+    panel->set_mouse_filter(Control::MOUSE_FILTER_STOP);
+    panel->add_child(built.frame);
+    panel->hide();
+    state.canvas->add_child(panel);
+    state.options_panel = panel;
+}
+
+void EawrLanLobby::open_options() {
+    PageState& state = *state_;
+    Impl& impl = *impl_;
+    if (!impl.host || state.options_panel == nullptr || state.editing) return;
+    state.editing = skirmish::begin_setup_options(impl.selection, resources_->defaults);
+    show_options_values();
+    state.options_panel->move_to_front();
+    state.options_panel->show();
+}
+
+// Writes every dialog control from the edited copy (open and Defaults).
+void EawrLanLobby::show_options_values() {
+    PageState& state = *state_;
+    const auto& value = state.editing->value;
+    state.opt_heroes->set_pressed_no_signal(value.allow_heroes);
+    state.opt_units->set_pressed_no_signal(value.free_starting_units);
+    state.opt_super->set_pressed_no_signal(value.allow_superweapons);
+    if (state.opt_win != nullptr) {
+        const auto index = model::setup_win_condition_index(value.space_win_condition);
+        state.opt_win->select(index ? static_cast<int>(*index) : -1);
+    }
+    if (const auto* gadget = find_gadget(*state.options_dialog, "IDC_SKIRMISH_CREDITS_SLIDER");
+        gadget != nullptr && resources_->credits_bounds) {
+        const auto shown = model::setup_credits_clamp({resources_->credits_bounds->minimum, resources_->credits_bounds->maximum},
+                                                      value.credits.trunc_to_integer());
+        if (auto* slider = cast<EawrUiSlider>(gadget->control)) slider->set_value_no_signal(static_cast<double>(shown));
+        if (const auto* label = find_gadget(*state.options_dialog, "IDC_SKIRMISH_CREDITS_VALUE"))
+            if (auto* caption = cast<EawrUiLabel>(label->control)) caption->set_text(text(std::to_string(shown)));
+    }
+}
+
+void EawrLanLobby::close_options(const bool accept) {
+    PageState& state = *state_;
+    if (!state.editing) return;
+    if (accept) {
+        // The host never runs ahead of the room: a refused publish (room starting) restores the selection.
+        const auto before = impl_->selection;
+        skirmish::accept_setup_options(impl_->selection, *state.editing);
+        if (!publish_staging_selection()) impl_->selection = before;
+    }
+    state.editing.reset();
+    state.options_panel->hide();
+}
+
+// Polls the dialog's checks and combo into the edited copy; a change marks the options custom.
+void EawrLanLobby::process_options() {
+    PageState& state = *state_;
+    if (!state.editing) return;
+    auto& edit = *state.editing;
+    if (state.opt_heroes->is_pressed() != edit.value.allow_heroes || state.opt_units->is_pressed() != edit.value.free_starting_units
+        || state.opt_super->is_pressed() != edit.value.allow_superweapons) edit.custom = true;
+    edit.value.allow_heroes = state.opt_heroes->is_pressed();
+    edit.value.free_starting_units = state.opt_units->is_pressed();
+    edit.value.allow_superweapons = state.opt_super->is_pressed();
+    if (state.opt_win != nullptr && state.opt_win->is_visible_in_tree()) {
+        const int picked = state.opt_win->get_selected();
+        const auto choices = model::setup_win_conditions();
+        const auto current = model::setup_win_condition_index(edit.value.space_win_condition);
+        if (picked >= 0 && static_cast<std::size_t>(picked) < choices.size() && (!current || static_cast<int>(*current) != picked)) {
+            edit.value.space_win_condition = std::string(choices[static_cast<std::size_t>(picked)].name);
+            edit.custom = true;
+        }
+    }
+    state.opt_win_list_was_open = state.opt_win != nullptr && state.opt_win->get_popup()->is_visible();
 }
 
 // The host's map list for the official or the custom maps; keeps the current map when it is listed.
@@ -1967,14 +2365,23 @@ void EawrLanLobby::fill_map_list() {
         impl.listed.push_back(index);
         list->add_item(text(map.name + (map.unavailable.empty() ? "" : " (unavailable)")));
         list->set_item_tooltip(list->get_item_count() - 1, text(map.unavailable.empty() ? map.path : map.unavailable));
+        list->set_item_disabled(list->get_item_count() - 1, network_row_count(map) < impl.human_owners.size());
         if (map.path == previous) initial = list->get_item_count() - 1;
     }
     impl.map_index = -1;
     if (!impl.listed.empty()) {
-        list->select(initial);
-        impl.map_index = static_cast<int>(impl.listed[static_cast<std::size_t>(initial)]);
-        skirmish::repair_setup_selection(impl.selection, resources.maps[static_cast<std::size_t>(impl.map_index)]);
-        prepare_host_rows(resources.maps[static_cast<std::size_t>(impl.map_index)]);
+        if (network_row_count(resources.maps[impl.listed[static_cast<std::size_t>(initial)]]) < impl.human_owners.size()) {
+            const auto fitting = std::find_if(impl.listed.begin(), impl.listed.end(), [&](const auto index) {
+                return resources.maps[index].unavailable.empty() && network_row_count(resources.maps[index]) >= impl.human_owners.size();
+            });
+            initial = fitting == impl.listed.end() ? -1 : static_cast<int>(fitting - impl.listed.begin());
+        }
+        if (initial >= 0) {
+            list->select(initial);
+            impl.map_index = static_cast<int>(impl.listed[static_cast<std::size_t>(initial)]);
+            skirmish::repair_setup_selection(impl.selection, resources.maps[static_cast<std::size_t>(impl.map_index)], false);
+            prepare_host_rows(resources.maps[static_cast<std::size_t>(impl.map_index)]);
+        }
     }
     fill_host_seats();
     state_->loading = false;
@@ -1995,6 +2402,7 @@ void EawrLanLobby::leave_staging() {
 
 void EawrLanLobby::_process(const double) {
     if (!shown_ || !impl_) return;
+    layout_page();
     Impl& impl = *impl_;
     bool changed = false;
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
@@ -2020,6 +2428,7 @@ void EawrLanLobby::_process(const double) {
         // Retail rebuilds the list once a second.
         if (changed || impl.dirty || now_ms() - impl.last_list_ms >= model::lan_game_list_refresh_ms) refresh_lobby();
     } else if (page_ == Page::staging) {
+        process_options();
         refresh_staging();
     }
 }
@@ -2029,6 +2438,16 @@ void EawrLanLobby::_input(const Ref<InputEvent>& event) {
     const auto* key = Object::cast_to<InputEventKey>(event.ptr());
     if (key == nullptr || !key->is_pressed() || key->is_echo() || key->get_keycode() != KEY_ESCAPE) return;
     if (Viewport* viewport = get_viewport()) viewport->set_input_as_handled();
+    if (page_ == Page::staging) {
+        // Escape cancels the options copy, except the press that closes the win-condition list.
+        if (state_->editing) {
+            if (!state_->opt_win_list_was_open) close_options(false);
+            return;
+        }
+        if (auto* list = EAWR_CONTROL(EawrUiList, "EAWR_ONLINE_CONNECTIONS_LIST"); list && list->is_visible()) {
+            list->hide(); return;
+        }
+    }
     switch (page_) {
     case Page::lobby: handle_button(impl_->prompt ? prompt_cancel_button : "IDC_LAN_CANCEL_BUTTON"); break;
     case Page::staging: leave_staging(); break;
@@ -2055,10 +2474,28 @@ void EawrLanLobby::show_failure(const std::string& message) {
         return;
     }
     impl.box = box;
+    layout_page();
     box->connect("result_chosen", callable_mp(this, &EawrLanLobby::on_box_result));
 }
 
 void EawrLanLobby::handle_button(const std::string& id) {
+    if (impl_->box != nullptr) return;
+    if (id == "EAWR_ONLINE_CONNECTIONS" && page_ == Page::staging) {
+        if (auto* list = EAWR_CONTROL(EawrUiList, "EAWR_ONLINE_CONNECTIONS_LIST")) list->set_visible(!list->is_visible());
+        return;
+    }
+    if (page_ == Page::staging && impl_->host && state_->options_panel != nullptr) {
+        if (id == "IDC_SELECT_OPTIONS") { open_options(); return; }
+        if (state_->editing) {
+            if (id == "EAWR_OPT_ACCEPT") close_options(true);
+            else if (id == "EAWR_OPT_CANCEL") close_options(false);
+            else if (id == "EAWR_OPT_DEFAULTS") {
+                skirmish::reset_setup_options(*state_->editing, resources_->defaults);
+                show_options_values();
+            }
+            return; // the dialog is modal: nothing behind it acts
+        }
+    }
     Impl& impl = *impl_;
     if (impl.box != nullptr) return;
     // The password prompt is modal: only its own buttons act while it is up.
@@ -2182,7 +2619,7 @@ void EawrLanLobby::handle_button(const std::string& id) {
     } else if (id == "IDC_SELECT_OFFICIAL_MAPS" || id == "IDC_SELECT_CUSTOM_MAPS") {
         impl.custom_maps = id == "IDC_SELECT_CUSTOM_MAPS";
         fill_map_list();
-        publish_staging_selection();
+        static_cast<void>(publish_staging_selection());
         announce();
     }
 }
@@ -2271,14 +2708,29 @@ void EawrLanLobby::refresh_staging() {
 
     // LobbySession owns editable staging; SetupSession owns the frozen final barrier.
     std::optional<skirmish::FixtureOptions> built;
-    if (impl.host && impl.map_index >= 0) {
-        if (auto options = validated_lan_options(impl.selection, resources.maps)) built = std::move(options).value();
-    }
+    if (impl.host && impl.map_index >= 0) built = staging_options(impl.selection);
     match_->pump_setup(built ? *built : skirmish::FixtureOptions{});
     const LanView view = match_->view();
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
+    if (auto* connections = EAWR_CONTROL(EawrUiButton, "EAWR_ONLINE_CONNECTIONS")) {
+        const String caption = text(view.online_capacity == 0 ? std::string("My connections")
+            : "My connections (" + std::to_string(view.online_connected > 0 ? view.online_connected - 1 : 0) + "/"
+                + std::to_string(view.online_capacity - 1) + ")");
+        if (connections->get_text() != caption) {
+            connections->set_text(caption);
+            fit_control_caption(*connections, "Push_Button", state_->connections_size);
+            connections->set_size(state_->connections_size);
+        }
+    }
+    if (auto* list = EAWR_CONTROL(EawrUiList, "EAWR_ONLINE_CONNECTIONS_LIST"); list && view.online_connections != impl.online_connections) {
+        impl.online_connections = view.online_connections;
+        list->clear();
+        for (const auto& line : impl.online_connections) {
+            const int item = list->add_item(text(line));
+            list->set_item_selectable(item, false); list->set_item_tooltip(item, text(line));
+        }
+    }
     if (online && impl.host && impl.online_rooms) {
-        impl.online_rooms->set_bridge_invitation(match_->bridge_invitation(), match_->bridge_ownership());
         if (auto* invitation = EAWR_CONTROL(EawrUiLabel, "EAWR_ONLINE_PUBLIC_INVITATION")) {
             // Display public invites in their own control, never in chat/status reports.
             invitation->set_text(text(impl.host_password.empty() && view.invitation_code.size() == 4 ? "Room code: " + view.invitation_code : std::string{}));
@@ -2295,14 +2747,20 @@ void EawrLanLobby::refresh_staging() {
 
     // The status line is one notice per change, like a chat line.
     const auto room = match_->lobby_state();
+    if (auto* options = EAWR_CONTROL(EawrUiButton, "IDC_SELECT_OPTIONS"))
+        options->set_disabled(!impl.host || state.options_panel == nullptr
+                              || (room && room->snapshot.phase != net::LobbyPhase::staging));
     std::string status;
-    if (view.phase != LanPhase::idle && view.phase != LanPhase::running) status = online ? view.message : lan_message(view);
+    if (view.phase != LanPhase::idle && view.phase != LanPhase::running && view.phase != LanPhase::ended)
+        status = online ? view.message : lan_message(view);
     if (view.phase == LanPhase::setup && view.read_only && !view.accept_enabled) status = utf8(resolved(resources.text, "TEXT_WAITING"));
     if (lan_reconnect_disabled_notice(view)) {
         if (!status.empty()) status += "\n";
         status += "Reconnect: disabled. " + view.reconnect_unavailable;
     }
     if (room && (room->preparing || room->snapshot.phase == net::LobbyPhase::starting)) status = utf8(resolved(resources.text, "TEXT_WAITING"));
+    if (online && impl.host && room && room->connections_pending && room->ready_reason.empty() && view.phase == LanPhase::setup)
+        status = room->start_reason;
     if (!status.empty() && status != impl.status) {
         impl.status = status;
         note_chat(model::ChatKind::notice, status);
@@ -2321,7 +2779,7 @@ void EawrLanLobby::refresh_staging() {
             for (std::size_t i = 0; i < resources.maps.size(); ++i) if (resources.maps[i].path == room->snapshot.game.map) {
                 map = &resources.maps[i]; impl.map_index = static_cast<int>(i);
             }
-            if (map) visible = model::visible_staging_rows(skirmish::setup_row_count(*map), dialog_rows);
+            if (map) visible = model::visible_staging_rows(network_row_count(*map), dialog_rows);
             auto planned_snapshot = room->snapshot; planned_snapshot.seats.clear();
             const auto planned = decode_lan_lobby_game(planned_snapshot);
             for (const auto& slot : *authoritative.value().slots) {
@@ -2343,20 +2801,21 @@ void EawrLanLobby::refresh_staging() {
             emit_signal("profile_changed", text(impl.name), static_cast<int64_t>(impl.colour));
         }
         impl.room_revision = room->snapshot.revision;
-        for (const auto& chat : room->chat) if (chat.sequence > impl.room_chat_sequence) {
+        for (const auto& chat : room->chat) if (view.phase != LanPhase::ended && chat.sequence > impl.room_chat_sequence) {
             note_chat(model::ChatKind::normal, chat.name + ": " + chat.text, chat.name);
             impl.room_chat_sequence = chat.sequence;
             if (chat.name != impl.name) play_sound("GUI_Common_Chat_Receive");
         }
-        if (room->notice && room->notice->message != impl.room_notice) {
+        if (view.phase != LanPhase::ended && room->notice && room->notice->message != impl.room_notice) {
             impl.room_notice = room->notice->message;
             const auto key = room->notice->reason == net::LobbyReason::kicked ? "TEXT_INTERNET_PLAYER_KICKED"
                 : room->notice->reason == net::LobbyReason::host_closed ? "TEXT_HOST_LEFT_GAME" : "";
-            note_chat(model::ChatKind::error, *key ? key : impl.room_notice);
+            if (!lan_notice_in_chat(*room->notice, room->chat)) note_chat(model::ChatKind::error, *key ? key : impl.room_notice);
         }
         if (auto* ready = EAWR_CONTROL(EawrUiButton, "IDC_LOAD_GAME")) {
             ready->set_text(resolved(resources.text, room->local_ready ? "TEXT_BUTTON_CANCEL" : "TEXT_BUTTON_ACCEPT"));
             ready->set_disabled(!room->ready_enabled);
+            ready->set_tooltip_text(text(room->ready_reason));
         }
     } else {
         // Who is in the game, from the presence: the host's name for the joiner, the joiner's for the host.
@@ -2401,22 +2860,20 @@ void EawrLanLobby::refresh_staging() {
                 if (candidate.path == *impl.offered->map) map = &candidate;
             }
         }
-        if (map != nullptr) visible = model::visible_staging_rows(skirmish::setup_row_count(*map), dialog_rows);
+        if (map != nullptr) visible = model::visible_staging_rows(network_row_count(*map), dialog_rows);
         if (impl.host) {
-            // Rows describe faction owners; the independent human seats can share a row.
+            // Each planned human has its own row; pending members remain Open.
             for (const skirmish::LobbySlot& slot : impl.selection.slots) {
                 if (slot.slot == 0 || slot.slot > dialog_rows) continue;
                 model::StagingRow& row = rows[slot.slot - 1];
                 const auto seats = std::count(impl.human_owners.begin(), impl.human_owners.end(), slot.slot);
-                row.kind = seats > 0 ? (slot.slot == 1 || connected ? model::RowKind::human : model::RowKind::open) : model::RowKind::ai;
-                row.name = seats == 0 ? std::string{} : slot.slot == 1 ? impl.name : remote_name;
-                if (slot.slot != 1 && seats > 0 && impl.human_owners.size() > 2) row.name = "Human side";
-                if (seats > 1) row.name += " (" + std::to_string(seats) + " human seats)";
+                row.kind = seats > 0 ? (slot.slot == 1 || (slot.slot == 2 && connected) ? model::RowKind::human : model::RowKind::open) : model::RowKind::ai;
+                row.name = row.kind != model::RowKind::human ? std::string{} : slot.slot == 1 ? impl.name : remote_name;
                 row.faction = slot.faction;
                 row.team = slot.team;
                 row.colour = slot.colour_index.value_or(slot.slot - 1);
                 row.local = slot.slot == 1;
-                row.accepted = slot.slot == 1 || row.kind == model::RowKind::ai || (seats > 0 && connected);
+                row.accepted = row.kind == model::RowKind::ai || row.kind == model::RowKind::human;
             }
             if (dialog_rows > 1 && rows[1].kind == model::RowKind::none) rows[1].kind = model::RowKind::open;
         } else {
@@ -2441,10 +2898,9 @@ void EawrLanLobby::refresh_staging() {
                     row.local = slot.human && slot.slot == view.player;
                     row.accepted = !slot.human || view.phase == LanPhase::barrier || view.phase == LanPhase::running;
                     if (slot.slot == 1) row.accepted = true;
-                    const auto seats = std::count(view.human_owners.begin(), view.human_owners.end(), slot.slot);
                     if (!slot.human) row.name.clear();
-                    else if (view.human_owners.size() > 2 || seats > 1)
-                        row.name = (row.local ? impl.name : std::string("Human side")) + " (" + std::to_string(seats) + " human seats)";
+                    else if (row.local) row.name = impl.name;
+                    else if (slot.slot == 1) row.name = impl.host_name.empty() ? "Host" : impl.host_name;
                     row.faction = slot.faction;
                     row.team = slot.team;
                     row.colour = slot.colour_index.value_or(slot.slot - 1);
@@ -2454,6 +2910,42 @@ void EawrLanLobby::refresh_staging() {
     }
     impl.rows = rows;
     impl.visible_rows = visible;
+
+    if (!impl.host && impl.offered && impl.offered->map) {
+        if (auto* name = EAWR_CONTROL(EawrUiLabel, "EAWR_JOINER_MAP_NAME")) {
+            name->set_text(text(map ? map->name : *impl.offered->map));
+            name->set_tooltip_text(text(*impl.offered->map));
+        }
+        // Refresh independently of the roster: a host can change only options.
+        if (auto* summary = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST"); summary && impl.offered->match) {
+            const auto& options = *impl.offered->match;
+            std::vector<String> lines;
+            const auto flag = [&](const char* caption, bool enabled) {
+                lines.push_back(resolved(resources.text, caption) + ": " + (enabled ? "On" : "Off"));
+            };
+            lines.push_back(resolved(resources.text, "TEXT_SKIRMISH_CREDITS") + ": "
+                + text(std::to_string(options.credits.trunc_to_integer())));
+            flag("TEXT_ALLOW_HEROES", options.allow_heroes);
+            flag("TEXT_FREE_STARTING_UNITS", options.free_starting_units);
+            flag("TEXT_ALLOW_SUPER_WEAPONS", options.allow_superweapons);
+            flag("TEXT_PRE_BUILT_BASE", options.pre_built_base);
+            const auto condition = model::setup_win_condition_index(options.space_win_condition);
+            const auto condition_text = condition ? resolved(resources.text,
+                std::string(model::setup_win_conditions()[*condition].text_key)) : text(options.space_win_condition);
+            lines.push_back(resolved(resources.text, "TEXT_WIN_CONDITION") + ": " + condition_text);
+            bool changed = summary->get_item_count() != static_cast<int>(lines.size());
+            for (int i = 0; !changed && i < summary->get_item_count(); ++i)
+                changed = summary->get_item_text(i) != lines[static_cast<std::size_t>(i)];
+            if (changed) {
+                summary->clear();
+                for (const auto& line : lines) {
+                    summary->add_item(line, Ref<Texture2D>(), false);
+                    summary->set_item_disabled(summary->get_item_count() - 1, true);
+                    summary->set_item_tooltip(summary->get_item_count() - 1, line);
+                }
+            }
+        }
+    }
 
     // Refill the combos only when what they show changed: a refill closes an open drop-down.
     std::string signature = std::string(impl.host ? "H" : "J") + std::to_string(impl.map_index) + "|"
@@ -2492,34 +2984,25 @@ void EawrLanLobby::refresh_staging() {
                 name->set_visible(shown);
                 if (impl.host && index >= 2 && row.kind != model::RowKind::human && row.kind != model::RowKind::open) {
                     // Unplanned rows offer none or AI; unavailable AI levels stay disabled.
-                    // Planned human/open rows use the shared occupancy controls instead.
+                    // Planned human/open rows retain their individual name controls.
                     name->add_item(resolved(resources.text, "TEXT_NO_PLAYER"), 0);
                     name->add_item(resolved(resources.text, "TEXT_OPEN_PLAYER"), 1);
                     name->add_item(resolved(resources.text, "TEXT_EASY_AI_PLAYER"), 2);
                     name->add_item(resolved(resources.text, "TEXT_MEDIUM_AI_PLAYER"), 3);
                     name->add_item(resolved(resources.text, "TEXT_HARD_AI_PLAYER"), 4);
                     for (const int item : {1, 2, 4}) name->set_item_disabled(item, true);
-                    name->set_tooltip_text("Humans on one side share its units, credits and fog; AI rows use the selected AI level.");
+                    name->set_tooltip_text("AI rows use the selected AI level. Set alliances with each row's Team.");
                     name->select(row.kind == model::RowKind::ai ? 3 : 0);
                     name->set_disabled(false);
                 } else {
                     std::string label = row.name.empty()
                         ? (row.kind == model::RowKind::open ? std::string("TEXT_OPEN_PLAYER")
                             : row.kind == model::RowKind::ai ? std::string("TEXT_MEDIUM_AI_PLAYER") : std::string{}) : row.name;
-                    const auto& owners = impl.host ? impl.human_owners : view.human_owners;
-                    const auto seats = room
-                        ? std::count_if(room->snapshot.seats.begin(), room->snapshot.seats.end(), [&](const auto& seat) { return seat.selection.slot == index + 1; })
-                        : std::count(owners.begin(), owners.end(), static_cast<sim::tactical::PlayerId>(index + 1));
-                    if ((impl.host || impl.offered) && seats > 0 && (owners.size() > 2 || seats > 1)) {
-                        const auto detail = " (" + std::to_string(seats) + " human seats)";
-                        if (label.ends_with(detail)) label.resize(label.size() - detail.size());
-                        label = "[" + std::to_string(seats) + "] " + label;
-                    }
                     name->add_item(resolved(resources.text, label), 0);
                     name->set_tooltip_text(text(row.name));
                     if (room && row.local && !impl.host) {
                         name->clear();
-                        for (const auto& target : rows) if (target.kind == model::RowKind::human || target.kind == model::RowKind::open) {
+                        for (const auto& target : rows) if (target.local || target.kind == model::RowKind::open) {
                             const auto slot = static_cast<int>(&target - rows.data() + 1);
                             name->add_item(text(std::to_string(slot)), slot);
                             if (slot == static_cast<int>(index + 1)) name->select(name->get_item_count() - 1);
@@ -2570,12 +3053,17 @@ void EawrLanLobby::refresh_staging() {
             if (colour != nullptr) {
                 colour->clear();
                 colour->set_visible(filled);
+                // Like skirmish setup, the staging colour column contains only a centred bar.
+                const Vector2 box = colour->get_size();
+                const int bar_width = std::max(1, static_cast<int>(std::lround(box.x * 0.27F)));
+                const int bar_height = std::max(1, static_cast<int>(std::lround(box.y * 0.25F)));
+                colour->set_icon_alignment(HORIZONTAL_ALIGNMENT_CENTER);
                 for (std::size_t item = 0; item < resources.palette.size(); ++item) {
                     const auto& rgb = resources.palette[item].rgb;
-                    Ref<Image> swatch = Image::create_empty(12, 12, false, Image::FORMAT_RGBA8);
+                    Ref<Image> swatch = Image::create_empty(bar_width, bar_height, false, Image::FORMAT_RGBA8);
                     swatch->fill(Color(rgb[0] / 255.0F, rgb[1] / 255.0F, rgb[2] / 255.0F));
                     colour->add_icon_item(ImageTexture::create_from_image(swatch),
-                                          text(colour_name(resources.palette[item].constant)), static_cast<int>(item));
+                                          String(), static_cast<int>(item));
                 }
                 if (row.colour < resources.palette.size()) colour->select(static_cast<int>(row.colour));
                 colour->set_disabled(!choices_editable);
@@ -2659,6 +3147,8 @@ void EawrLanLobby::refresh_staging() {
             : impl.host ? (view.start_enabled && model::host_start_enabled(rows, impl.human_owners.size())) : view.accept_enabled;
         if (room && !impl.host) start->set_text(resolved(resources.text, room->local_ready ? "TEXT_BUTTON_CANCEL" : "TEXT_BUTTON_ACCEPT"));
         start->set_disabled(!enabled || impl.launch.has_value());
+        impl.start_reason = room ? (impl.host ? room->start_reason : room->ready_reason) : online ? view.message : std::string{};
+        start->set_tooltip_text(text(impl.start_reason));
         impl.start_enabled = enabled;
         impl.start_caption = utf8(start->get_text());
     }
@@ -2687,6 +3177,11 @@ void EawrLanLobby::refresh_staging() {
 // ---- Scripted use -----------------------------------------------------------------------------
 
 bool EawrLanLobby::run_action(const std::string& action) {
+    if (!shown_ || !state_) return false;
+    if (action == "connections") {
+        if (page_ != Page::staging || !EAWR_CONTROL(EawrUiList, "EAWR_ONLINE_CONNECTIONS_LIST")) return false;
+        handle_button("EAWR_ONLINE_CONNECTIONS"); return true;
+    }
     Impl& impl = *impl_;
     if (!shown_) return false;
     const auto colon = action.find(':');
@@ -2753,37 +3248,8 @@ bool EawrLanLobby::run_action(const std::string& action) {
         impl.dirty = true;
         return true;
     }
-    if (verb == "roster") {
-        if (impl.join_selection.source() != model::LobbySourceKind::lan) return false;
-        if (page_ != Page::lobby && page_ != Page::host_options) return false;
-        const auto slash = argument.find('/');
-        const auto next = slash == std::string::npos ? slash : argument.find('/', slash + 1);
-        std::uint32_t count{}, first{}, second{};
-        if (slash == std::string::npos || !number(argument.substr(0, slash), count)
-            || !number(argument.substr(slash + 1, next == std::string::npos ? next : next - slash - 1), first)
-            || count < 2 || count > sim::max_match_seats || first >= count) return false;
-        if (next == std::string::npos) {
-            second = first == 0 ? 0 : count - first;
-            if (first == 0) first = count;
-        } else if (!number(argument.substr(next + 1), second) || first == 0 || second == 0 || first + second > count) return false;
+    if (verb == "humans" && (page_ == Page::lobby || page_ == Page::host_options)) {
         if (page_ == Page::lobby) open_host_options();
-        fill_host_seats(count);
-        model::HumanTeamSplit split{first, second, count - first - second};
-        auto canonical = split;
-        std::sort(canonical.begin(), canonical.end(), std::greater<>());
-        auto* combo = EAWR_CONTROL(EawrUiCombo, "EAWR_LAN_HOST_TEAMS");
-        if (!combo || impl.human_owners.size() != count) return false;
-        for (int item = 0; item < combo->get_item_count(); ++item)
-            if (combo->get_item_id(item) == static_cast<int>(canonical[0] * 10 + canonical[1])) {
-                combo->select(item);
-                impl.human_owners.assign(count, 1);
-                for (std::uint32_t seat = first; seat < count; ++seat)
-                    impl.human_owners[seat] = seat < first + second ? 2 : 3;
-                return true;
-            }
-        return false;
-    }
-    if (verb == "humans" && page_ == Page::host_options) {
         std::uint32_t count{};
         if (!number(argument, count)) return false;
         auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO");
@@ -2794,12 +3260,27 @@ bool EawrLanLobby::run_action(const std::string& action) {
         return false;
     }
     if (verb == "host_dropdown" && page_ == Page::host_options) {
-        const char* id = argument == "humans" ? "IDC_INTERNET_HOST_CLAN_COMBO" : "EAWR_LAN_HOST_TEAMS";
-        if (argument != "humans" && argument != "teams") return false;
-        if (auto* combo = EAWR_CONTROL(EawrUiCombo, id)) {
-            const char* other = argument == "humans" ? "EAWR_LAN_HOST_TEAMS" : "IDC_INTERNET_HOST_CLAN_COMBO";
-            if (auto* previous = EAWR_CONTROL(EawrUiCombo, other)) previous->get_popup()->hide();
+        if (argument != "humans") return false;
+        if (auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO")) {
             combo->show_popup(); return true;
+        }
+        return false;
+    }
+
+    if (verb == "staging_dropdown" && page_ == Page::staging) {
+        const auto field_separator = argument.find(':');
+        if (field_separator == std::string::npos) return false;
+        const std::string field = argument.substr(0, field_separator);
+        if (field != "COLOR" && field != "FACTION" && field != "TEAM") return false;
+        std::uint32_t row{};
+        if (!number(argument.substr(field_separator + 1), row) || row >= state_->dialog_rows) return false;
+        for (const auto& entry : state_->controls) {
+            if (auto* combo = cast<EawrUiCombo>(entry.second)) combo->get_popup()->hide();
+        }
+        if (auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_PLAYER_" + field + "_" + std::to_string(row));
+            combo != nullptr && combo->is_visible() && !combo->is_disabled()) {
+            combo->show_popup();
+            return true;
         }
         return false;
     }
@@ -2877,7 +3358,8 @@ bool EawrLanLobby::run_action(const std::string& action) {
         return page_ == Page::staging;
     }
     if (verb == "cancel") {
-        handle_button("IDC_LAN_CANCEL_BUTTON");
+        handle_button(page_ == Page::host_options || page_ == Page::direct_connect || page_ == Page::filter
+            ? "IDC_CANCEL_BUTTON" : "IDC_LAN_CANCEL_BUTTON");
         return true;
     }
     if (verb == "leave") {
@@ -2888,7 +3370,8 @@ bool EawrLanLobby::run_action(const std::string& action) {
     if (page_ != Page::staging) return false;
     if (verb == "map" && impl.host) {
         for (std::size_t item = 0; item < impl.listed.size(); ++item) {
-            if (resources_->maps[impl.listed[item]].name == argument) {
+            if (resources_->maps[impl.listed[item]].name == argument || resources_->maps[impl.listed[item]].path == argument) {
+                if (network_row_count(resources_->maps[impl.listed[item]]) < impl.human_owners.size()) return false;
                 if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST")) list->select(static_cast<int>(item));
                 on_item_selected(static_cast<int64_t>(item), "IDC_STAGING_MAP_LIST");
                 return true;
@@ -2907,13 +3390,13 @@ bool EawrLanLobby::run_action(const std::string& action) {
         return true;
     }
     if (verb == "team" && page_ == Page::staging) {
-        const auto equals = argument.find('=');
+        const auto equals = argument.find_first_of(":=");
         if (equals == std::string::npos) return false;
         std::uint32_t row{}, team{};
         if (!number(argument.substr(0, equals), row) || !number(argument.substr(equals + 1), team) || team == 0) return false;
         const std::string id = "IDC_PLAYER_TEAM_" + std::to_string(row);
         auto* combo = EAWR_CONTROL(EawrUiCombo, id);
-        if (combo == nullptr) return false;
+        if (combo == nullptr || !combo->is_visible() || combo->is_disabled()) return false;
         for (int item = 0; item < combo->get_item_count(); ++item) {
             if (combo->get_item_id(item) == static_cast<int>(team) - 1) {
                 combo->select(item);
@@ -3066,10 +3549,29 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
         if (shot.chat_shown > 0) shot.chat_last_shown = utf8(list->get_item_text(list->get_item_count() - 1));
     }
     shot.rows = impl.row_states;
+    if (state_ && page_ == Page::staging) {
+        if (const auto* list = EAWR_CONTROL(EawrUiList, "EAWR_ONLINE_CONNECTIONS_LIST")) {
+            shot.connections_open = list->is_visible();
+            for (int item = 0; item < list->get_item_count(); ++item) shot.connections.push_back(utf8(list->get_item_text(item)));
+        }
+    }
     shot.status = impl.status;
+    if (state_ && state_->dialog) shot.rectangles = dialog_rectangles(*state_->dialog);
     if (impl.host && impl.map_index >= 0) shot.map = resources_->maps[static_cast<std::size_t>(impl.map_index)].name;
     else if (impl.offered && impl.offered->map) shot.map = *impl.offered->map;
+    if (state_ && page_ == Page::staging && !impl.host) {
+        if (const auto* name = EAWR_CONTROL(EawrUiLabel, "EAWR_JOINER_MAP_NAME")) shot.drawn_map = utf8(name->get_text());
+        shot.preview_visible = state_->preview && state_->preview->is_visible() && state_->preview->get_texture().is_valid();
+        if (const auto* summary = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST")) {
+            shot.settings_read_only = summary->is_visible() && summary->get_item_count() > 0;
+            for (int i = 0; i < summary->get_item_count(); ++i) {
+                shot.settings.push_back(utf8(summary->get_item_text(i)));
+                shot.settings_read_only = shot.settings_read_only && summary->is_item_disabled(i) && !summary->is_item_selectable(i);
+            }
+        }
+    }
     shot.start_caption = impl.start_caption;
+    shot.start_reason = impl.start_reason;
     shot.start_enabled = impl.start_enabled;
     shot.host = impl.host;
     if (const auto room = match_->lobby_state()) {
@@ -3097,7 +3599,7 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
         for (const char* id : {"IDC_SELECT_OFFICIAL_MAPS", "IDC_SELECT_CUSTOM_MAPS", "IDC_STAGING_MAP_LIST", "IDC_SELECT_OPTIONS"}) {
             if (const auto* control = EAWR_CONTROL(Control, id); control != nullptr && !control->is_visible()) shot.hidden.emplace_back(id);
         }
-        // The preview is a texture rect the screen makes for the host only.
+        // The preview is a texture rect shared by both staging roles.
         if (state_->preview == nullptr) shot.hidden.emplace_back("IDC_IMAGE");
     }
     return shot;

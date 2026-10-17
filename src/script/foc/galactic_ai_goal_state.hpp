@@ -12,10 +12,12 @@ namespace eawr::script::foc::ai {
 class GoalStateContributor final : public galactic_ai::StateContributor {
 public:
     GoalStateContributor(std::shared_ptr<Engine> engine, std::string content_identity)
-        : engine_(std::move(engine)), content_identity_(std::move(content_identity)) {}
+        : engine_(std::move(engine)), content_identity_(std::move(content_identity)) { if (engine_) engine_->enable_native_records(); }
     [[nodiscard]] core::Result<galactic_ai::NativeState> capture() const override;
     [[nodiscard]] core::Result<void> restore(const galactic_ai::NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
+    [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return engine_ ? engine_->native_records_.byte_size() + 1024 : 0; }
     [[nodiscard]] std::optional<std::uint64_t> state_revision() const noexcept override {
         return engine_ ? std::optional{engine_->native_state_revision()} : std::nullopt;
     }

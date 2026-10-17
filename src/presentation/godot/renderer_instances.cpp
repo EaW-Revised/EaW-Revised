@@ -58,10 +58,31 @@ void GodotRenderer::Impl::forget_instance_pose(const sim::EntityId entity_id) {
         return failure(diagnostic_codes::invalid_skin_pose,
             "skin pose bone count does not match the uploaded skinned asset");
     }
-    if (!cache_skin_pose(skin_poses_, entity_id, asset_id, bones,
-            [](const animation::Matrix& matrix) { return transform_from(matrix); }, &skin_changes_)) {
-        return failure(diagnostic_codes::invalid_skin_pose,
+    const auto convert = [](const animation::Matrix& matrix) { return transform_from(matrix); };
+    std::shared_ptr<const SkinPosePalette<Transform3D>> prepared;
+    if (skin_batch_active_) {
+        prepared = skin_batch_.prepare(bones, convert, skin_profile_ ? &skin_work_ : nullptr);
+        if (!prepared) return failure(diagnostic_codes::invalid_skin_pose,
             "skin pose contains a non-finite palette matrix");
+    } else {
+        // A live turret/clip may follow a shared idle pose. Compare against the
+        // palette actually submitted, preserving the ordinary retained buffers.
+        const auto retained = skin_poses_.find(entity_id);
+        if (retained != skin_poses_.end() && retained->second.prepared)
+            retained->second.palette = retained->second.active_palette();
+        if (!cache_skin_pose(skin_poses_, entity_id, asset_id, bones, convert, &skin_changes_)) {
+            return failure(diagnostic_codes::invalid_skin_pose,
+                "skin pose contains a non-finite palette matrix");
+        }
+        skin_poses_.at(entity_id).prepared.reset();
+    }
+    SkinPoseTimer binding(skin_profile_ ? &skin_work_.binding_ms : nullptr);
+    if (skin_profile_) ++skin_work_.bindings;
+    if (prepared) {
+        auto& pending = skin_poses_[entity_id];
+        skin_palette_changes(pending.active_palette(), prepared->palette, skin_changes_, pending.asset_id != asset_id);
+        pending.asset_id = asset_id;
+        pending.prepared = std::move(prepared);
     }
     const PendingPose& pose = skin_poses_.at(entity_id);
     const auto instance = instances_.find(entity_id);
@@ -76,7 +97,7 @@ void GodotRenderer::Impl::forget_instance_pose(const sim::EntityId entity_id) {
         // bones, so only byte-different palette matrices cross the engine API.
         const auto changes = resource->second.billboard_modes.empty()
             ? std::span<const std::uint8_t>(skin_changes_) : std::span<const std::uint8_t>{};
-        if (!apply_skin_pose(*rendering, instance->second, pose, changes)) {
+        if (!apply_skin_pose(*rendering, instance->second, pose, changes, skin_profile_ ? &skin_work_ : nullptr)) {
             return failure(diagnostic_codes::invalid_skin_pose,
                 "Godot skeleton palette binding failed");
         }
@@ -257,7 +278,7 @@ core::Result<void> GodotRenderer::Impl::set_material_vector3(const sim::AssetId 
         if (!instance.skeleton.is_valid()) continue;
         const auto pose = skin_poses_.find(entity_id);
         if (pose == skin_poses_.end() || pose->second.asset_id != instance.asset_id) continue;
-        result.push_back({entity_id, instance.asset_id, pose->second.palette.size()});
+        result.push_back({entity_id, instance.asset_id, pose->second.active_palette().size()});
     }
     std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
         return left.entity_id < right.entity_id;
@@ -286,6 +307,7 @@ core::Result<void> GodotRenderer::Impl::set_material_vector3(const sim::AssetId 
     const Transform3D identity;
     for (const auto& [entity_id, instance] : instances_) {
         GodotRenderer::InstanceEvidence evidence{.entity_id = entity_id, .asset_id = instance.asset_id};
+        evidence.visible = instance.visible;
         evidence.mesh_surfaces = rendering->mesh_get_surface_count(resources_.at(instance.asset_id).mesh);
         if (instance.skeleton.is_valid()) {
             evidence.skeleton_bones = rendering->skeleton_get_bone_count(instance.skeleton);
@@ -479,13 +501,19 @@ GodotRenderer::Impl::InstanceMap::iterator GodotRenderer::Impl::remove_instance(
 
 [[nodiscard]] bool GodotRenderer::Impl::apply_skin_pose(
     RenderingServer& rendering, const Instance& instance, const PendingPose& pose,
-    const std::span<const std::uint8_t> changes) {
+    const std::span<const std::uint8_t> changes, SkinPoseWork* work) {
+    SkinPoseTimer upload(work ? &work->upload_ms : nullptr);
     if (!instance.skeleton.is_valid()) return false;
-    if (!changes.empty() && changes.size() != pose.palette.size()) return false;
-    for (std::size_t index = 0; index < pose.palette.size(); ++index) {
+    const auto& palette = pose.active_palette();
+    if (!changes.empty() && changes.size() != palette.size()) return false;
+    bool uploaded = false;
+    for (std::size_t index = 0; index < palette.size(); ++index) {
         if (!changes.empty() && changes[index] == 0) continue;
+        if (work && !uploaded) ++work->palette_uploads;
+        uploaded = true;
+        if (work) ++work->bone_uploads;
         rendering.skeleton_bone_set_transform(instance.skeleton,
-            static_cast<std::int32_t>(index), transform_from(pose.palette[index]));
+            static_cast<std::int32_t>(index), transform_from(palette[index]));
     }
     return true;
 }
@@ -498,8 +526,8 @@ void GodotRenderer::Impl::refresh_billboards(RenderingServer& rendering, const s
     const auto pending = skin_poses_.find(entity);
     const PendingPose* pose = pending != skin_poses_.end() && pending->second.asset_id == instance.asset_id
         ? &pending->second : nullptr;
-    billboard_pose_.reset(pose ? pose->model_transforms : resource.bind_models,
-        pose ? std::span<const animation::Matrix>(pose->palette) : std::span<const animation::Matrix>{},
+    billboard_pose_.reset(pose ? pose->active_models() : resource.bind_models,
+        pose ? std::span<const animation::Matrix>(pose->active_palette()) : std::span<const animation::Matrix>{},
         Transform3D(), [](const animation::Matrix& matrix) { return transform_from(matrix); });
     auto& models = billboard_pose_.models;
     auto& palettes = billboard_pose_.palettes;
@@ -550,7 +578,10 @@ void GodotRenderer::Impl::refresh_billboards(RenderingServer& rendering, const s
             models[child] = delta * models[child];
         }));
     }
+    SkinPoseTimer upload(skin_profile_ ? &skin_work_.upload_ms : nullptr);
+    if (skin_profile_ && resource.bone_count) ++skin_work_.billboard_uploads;
     for (std::size_t bone = 0; bone < resource.bone_count; ++bone) {
+        if (skin_profile_) ++skin_work_.bone_uploads;
         rendering.skeleton_bone_set_transform(instance.skeleton,
             static_cast<std::int32_t>(bone), palettes[bone]);
     }
@@ -572,7 +603,7 @@ void GodotRenderer::Impl::bind_instance_skin(
             static_cast<std::int32_t>(index), identity);
     }
     if (pose && pose->asset_id == instance.asset_id
-        && pose->palette.size() == resource.bone_count) {
+        && pose->active_palette().size() == resource.bone_count) {
         static_cast<void>(apply_skin_pose(rendering, instance, *pose));
     }
 }

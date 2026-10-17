@@ -10,7 +10,9 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 // #424 (P2-19/P2-20): FoC's battle UI drawn in the world over the units: the selection circle under
@@ -304,6 +306,19 @@ struct HardpointReticleSizes final {
 // No unsourced size fallback: unavailable/invalid constants disable the reticles.
 [[nodiscard]] std::optional<HardpointReticleSizes> hardpoint_reticle_sizes(const vfs::Vfs& filesystem);
 
+// WU-32: each state names independent art; tracked names need not share a stem.
+struct HardpointReticleArt final {
+    std::vector<std::string> enemy, enemy_tracked, friendly, friendly_tracked;
+    std::vector<std::string> repairing, disabled, disabled_tracked;
+};
+using HardpointReticleArtTable = std::unordered_map<std::string, HardpointReticleArt>;
+// Keys are uppercase hardpoint type names. Missing rows/states stay empty.
+[[nodiscard]] HardpointReticleArtTable hardpoint_reticle_art(const vfs::Vfs& filesystem);
+// Named seams: hostile reflects the existing admission policy; repair_phase is supplied
+// by presentation scheduling (currently held true until its cadence is qualified).
+[[nodiscard]] std::string_view hardpoint_reticle_texture(const HardpointReticleArt& art,
+    float health, bool hostile, bool tracked, bool disabled, bool repairing, bool repair_phase = true) noexcept;
+
 // A reticle's place on the screen in pixels: its top-left corner and its size.
 struct ReticleRect {
     float x{};
@@ -329,10 +344,5 @@ struct ReticleRect {
 // WU-33: grey when disabled, else
 // green from 66 % health, yellow from 33 %, red below.
 [[nodiscard]] Rgb hardpoint_reticle_tint(float health_fraction, bool disabled) noexcept;
-
-// WU-32: the reticle art of a hardpoint type (HardPoint_Target_Reticle_*_Texture): the texture name
-// without extension, its "_tracked" variant for the hardpoint under the pointer. Empty for a type
-// with no reticle.
-[[nodiscard]] std::string_view hardpoint_reticle_texture(std::string_view hardpoint_type) noexcept;
 
 } // namespace eawr::presentation::ui

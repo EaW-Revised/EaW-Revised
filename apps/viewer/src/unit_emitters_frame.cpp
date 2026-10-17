@@ -27,10 +27,12 @@ namespace {
 constexpr std::uint64_t engine_drain_limit_samples = 300;
 
 // The emitter modes a unit's snapshot instance sets (BP-42, BP-43, space-abilities AB-31, AB-32).
-[[nodiscard]] UnitEmitters::Modes modes_of(const sim::tactical::TacticalInstance* instance) {
+[[nodiscard]] UnitEmitters::Modes modes_of(const sim::tactical::TacticalInstance* instance,
+                                           const std::span<const tactical::TypeId> ion_stun_types) {
     UnitEmitters::Modes modes;
     if (instance == nullptr) return modes;
     modes.engines_online = !instance->durability || instance->durability->engines_online;
+    modes.ion_stun_effect = std::binary_search(ion_stun_types.begin(), ion_stun_types.end(), instance->type_id);
     // IS-09: the stun shows its emitters from the hit until its end frame (IS-03).
     modes.ion_stunned = instance->ion_stun_frames > 0;
     for (const auto& ability : instance->abilities) {
@@ -60,6 +62,7 @@ constexpr std::uint64_t engine_drain_limit_samples = 300;
 } // namespace
 
 void UnitEmitters::stop_all(Ship& ship, const char* reason) {
+    ship.reconciled = false;
     for (const Running& running : ship.running) static_cast<void>(registry_->release(running.handle));
     if (!ship.running.empty()) stopped_[reason] += ship.running.size();
     ship.running.clear();
@@ -85,7 +88,11 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
     if (!ship.planned || ship.modes != modes
         || !std::equal(ship.states.begin(), ship.states.end(), states.begin(), states.end())) {
         plan(ship, view, states, modes);
+        ship.reconciled = false;
     }
+    // A reconciled ship (its running emitters already match its plan) changes only when it replans or
+    // loses a running emitter, which clear the flag: skip walking the large wanted/running records.
+    if (ship.reconciled) return;
     // Stop what the plan no longer admits (BP-43), start what it newly admits (BP-41, BP-42).
     for (auto running = ship.running.begin(); running != ship.running.end();) {
         const bool kept = std::any_of(ship.wanted.begin(), ship.wanted.end(),
@@ -149,6 +156,7 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
         ship.running.back().elapsed_clock = view.projectile;
         ++started_[wanted.proxy_name];
     }
+    ship.reconciled = true;
 }
 
 void UnitEmitters::place(const std::size_t index, const sim::math::Mat3x4& pose) {
@@ -168,6 +176,7 @@ void UnitEmitters::place(const std::size_t index, const sim::math::Mat3x4& pose)
         const bool placed = frame && (!running->mesh_local || mesh) && registry_->set_frame(running->handle, *frame)
             && (!mesh || registry_->set_mesh_frame(running->handle, *mesh));
         if (!placed) {
+            ship.reconciled = false;
             static_cast<void>(registry_->release(running->handle));
             ++stopped_["frame_overflow"];
             running = ship.running.erase(running);
@@ -253,6 +262,13 @@ void UnitEmitters::orphan_clone(Ship& ship) {
     ship.clone.clear();
 }
 
+void UnitEmitters::rebuild_busy() {
+    busy_.clear();
+    for (std::size_t index = 0; index < ships_.size(); ++index) {
+        if (!ships_[index].running.empty() || !ships_[index].clone.empty()) busy_.push_back(index);
+    }
+}
+
 bool UnitEmitters::advance_sample() {
     // #421: a clone's proxies that outlived it stop emitting and drain where they last stood.
     for (CloneProxy& proxy : clone_orphans_) {
@@ -269,7 +285,8 @@ bool UnitEmitters::advance_sample() {
         batch_handles_.insert(batch_handles_.end(), prepared.handles.begin(), prepared.handles.end());
         batch_deltas_.insert(batch_deltas_.end(), prepared.deltas.begin(), prepared.deltas.end());
     };
-    for (const Ship& ship : ships_) {
+    for (const std::size_t slot : busy_) {
+        const Ship& ship = ships_[slot];
         for (const CloneProxy& proxy : ship.clone) collect(proxy);
     }
     for (const CloneProxy& proxy : clone_orphans_) collect(proxy);
@@ -296,7 +313,8 @@ bool UnitEmitters::advance_sample() {
         clone_particles_now_ += step.value().stats.particles;
         clone_dropped_at_capacity_ += step.value().stats.advance.dropped_at_capacity;
     };
-    for (Ship& ship : ships_) {
+    for (const std::size_t slot : busy_) {
+        Ship& ship = ships_[slot];
         for (CloneProxy& proxy : ship.clone) complete(proxy);
         std::erase_if(ship.clone, [](const CloneProxy& proxy) { return !proxy.life; });
     }
@@ -305,7 +323,8 @@ bool UnitEmitters::advance_sample() {
         return !proxy.life || (!proxy.life->active() && proxy.life->draining().empty());
     });
     std::uint64_t clone_live = 0;
-    for (const Ship& ship : ships_) {
+    for (const std::size_t slot : busy_) {
+        const Ship& ship = ships_[slot];
         for (const CloneProxy& proxy : ship.clone) {
             if (proxy.life) clone_live += proxy.life->draining().size() + (proxy.life->active() ? 1U : 0U);
         }
@@ -322,7 +341,8 @@ bool UnitEmitters::advance_running(const float delta_seconds, const bool project
     // #638: every running emitter steps in one batch on the particle workers; the results are
     // then taken in the running order, as one advance after another gave them.
     batch_handles_.clear();
-    for (const Ship& ship : ships_) {
+    for (const std::size_t slot : busy_) {
+        const Ship& ship = ships_[slot];
         for (const Running& running : ship.running) {
             if (running.elapsed_clock == projectiles) batch_handles_.push_back(running.handle);
         }
@@ -332,7 +352,8 @@ bool UnitEmitters::advance_running(const float delta_seconds, const bool project
         return false;
     }
     std::size_t next = 0;
-    for (Ship& ship : ships_) {
+    for (const std::size_t slot : busy_) {
+        Ship& ship = ships_[slot];
         for (auto running = ship.running.begin(); running != ship.running.end();) {
             if (running->elapsed_clock != projectiles) { ++running; continue; }
             const particles::EffectFrameStats& advanced = batch_stats_[next++];
@@ -361,6 +382,7 @@ bool UnitEmitters::advance_running(const float delta_seconds, const bool project
             // A drain that has no particle left, or has drained for the bound, is released.
             const bool finished = running->draining && advanced.finished;
             if (running->draining && (finished || samples_ - running->drain_from >= engine_drain_limit_samples)) {
+                ship.reconciled = false;
                 static_cast<void>(registry_->release(running->handle));
                 if (running->engine) ++(finished ? engine_drains_finished_ : engine_drains_cut_short_);
                 if (running->ion_stun) ++(finished ? ion_stun_drains_finished_ : ion_stun_drains_cut_short_);
@@ -389,7 +411,8 @@ bool UnitEmitters::advance_projectiles(const double presented_tick) {
     const double elapsed = std::max(0.0, presented_tick - *projectile_clock_tick_);
     if (elapsed == 0.0) {
         batch_handles_.clear();
-        for (const Ship& ship : ships_) {
+        for (const std::size_t slot : busy_) {
+            const Ship& ship = ships_[slot];
             for (const Running& running : ship.running) {
                 if (running.elapsed_clock) batch_handles_.push_back(running.handle);
             }
@@ -408,7 +431,8 @@ bool UnitEmitters::advance_projectiles(const double presented_tick) {
 bool UnitEmitters::present_running() {
     // #638: one batch on the particle workers, as advance_sample.
     batch_handles_.clear();
-    for (const Ship& ship : ships_) {
+    for (const std::size_t slot : busy_) {
+        const Ship& ship = ships_[slot];
         for (const Running& running : ship.running) {
             if (!running.elapsed_clock) batch_handles_.push_back(running.handle);
         }
@@ -418,7 +442,8 @@ bool UnitEmitters::present_running() {
         return false;
     }
     std::uint64_t effects = 0;
-    for (const Ship& ship : ships_) {
+    for (const std::size_t slot : busy_) {
+        const Ship& ship = ships_[slot];
         for (const Running& running : ship.running) {
             if (running.elapsed_clock) continue;
             ++effects;
@@ -438,6 +463,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                          const FadeOpacity& fade_opacity, const std::span<const sim::EntityId> unfogged_props,
                          const ProjectileOpacity& projectile_opacity) {
     if (released_) return true;
+    FrameTimer owner_setup(measure_owner_ ? &owner_timings_[0] : nullptr);
     const auto instance_of = [](const sim::tactical::TacticalSnapshot& snapshot, const sim::EntityId entity)
         -> const sim::tactical::TacticalInstance* {
         const auto instances = snapshot.instances();
@@ -466,19 +492,26 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
     // last sample is drawn.
     // FW-19: retain already running emitters while their host eases out of raw visibility.
     // A newly revealed host with no running stream still starts at its first visible sample.
+    owner_setup.finish();
+    FrameTimer owner_fading(measure_owner_ ? &owner_timings_[1] : nullptr);
     std::vector<sim::EntityId> fading_emitters;
-    // FW-24: historical samples retain unfogged map owners too, including
-    // owners whose streams have not started yet on the first catch-up frame.
-    if (!reveal) fading_emitters.assign(unfogged_props.begin(), unfogged_props.end());
-    if (!reveal && fade_opacity) {
-        for (std::size_t index = 0; index < ships_.size(); ++index) {
-            const auto view = population.live_ship_emitter_view(index);
-            if (view && !view->projectile && view->model_to_world && !ships_[index].running.empty()
-                && fade_opacity(view->entity) < 1.0F) fading_emitters.push_back(view->entity);
+    // Only the catch-up samples below read the list, and most frames run none: scan only for them.
+    if (samples_ + 1U < due) {
+        // FW-24: historical samples retain unfogged map owners too, including
+        // owners whose streams have not started yet on the first catch-up frame.
+        if (!reveal) fading_emitters.assign(unfogged_props.begin(), unfogged_props.end());
+        if (!reveal && fade_opacity) {
+            for (std::size_t index = 0; index < ships_.size(); ++index) {
+                const auto view = population.live_ship_emitter_view(index);
+                if (view && !view->projectile && view->model_to_world && !ships_[index].running.empty()
+                    && fade_opacity(view->entity) < 1.0F) fading_emitters.push_back(view->entity);
+            }
+            std::sort(fading_emitters.begin(), fading_emitters.end());
+            fading_emitters.erase(std::unique(fading_emitters.begin(), fading_emitters.end()), fading_emitters.end());
         }
-        std::sort(fading_emitters.begin(), fading_emitters.end());
-        fading_emitters.erase(std::unique(fading_emitters.begin(), fading_emitters.end()), fading_emitters.end());
     }
+    owner_fading.finish();
+    FrameTimer owner_catchup(measure_owner_ ? &owner_timings_[2] : nullptr);
     for (; samples_ + 1U < due; ++samples_) {
         ++caught_up_;
         const double tick = *clock_start_ + static_cast<double>(samples_) + 1.0;
@@ -558,7 +591,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
             }
             std::vector<scene::HardpointState> states(view->states.begin(), view->states.end());
             const sim::tactical::TacticalInstance* instance = unit->instance;
-            const Modes modes = modes_of(instance);
+            const Modes modes = modes_of(instance, ion_stun_types_);
             if (instance != nullptr && instance->durability) {
                 const auto& hardpoints = instance->durability->hardpoints;
                 for (std::size_t slot = 0; slot < hardpoints.size() && slot < states.size(); ++slot) {
@@ -568,10 +601,19 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
             update(ship, *view, states, modes, base + 1U, samples_);
             place(index, *pose);
         }
+        rebuild_busy();
         if (!advance_projectiles(tick) || !advance_sample()) return false;
     }
+    owner_catchup.finish();
     // The frame's own sample: the poses just drawn and the latest states.
+    // A pooled slot that runs nothing and is neither posed nor a death clone has nothing to do here
+    // (the walk below would only stop what it does not run): skip it.
+    visit_.clear();
     for (std::size_t index = 0; index < ships_.size(); ++index) {
+        if (ships_[index].running.empty() && ships_[index].clone.empty()
+            && !population.live_ship_emitter_visit(index)) continue;
+        visit_.push_back(index);
+        FrameTimer owner_update(measure_owner_ ? &owner_timings_[3] : nullptr, true);
         Ship& ship = ships_[index];
         const auto view = population.live_ship_emitter_view(index);
         // #421: a death clone runs its own proxies on its clip pose, once per sample due.
@@ -591,11 +633,12 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
             continue;
         }
         const sim::tactical::TacticalInstance* now = instance_of(latest, view->entity);
-        const Modes modes = modes_of(now);
+        const Modes modes = modes_of(now, ion_stun_types_);
         const bool engines_online = modes.engines_online;
         update(ship, *view, view->states, modes, latest.completed_tick(), samples_);
         // BP-45: the brightness FoC gives the engine emitters this tick.
-        const sim::tactical::TacticalInstance* before = instance_of(previous, view->entity);
+        const sim::tactical::TacticalInstance* before =
+            now != nullptr && now->durability && now->durability->max_speed ? instance_of(previous, view->entity) : nullptr;
         if (now != nullptr && before != nullptr && now->durability && now->durability->max_speed
             && now->durability->max_speed->raw() > 0) {
             double step = 0.0;
@@ -604,31 +647,52 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                     - to_double(before->fixed_transform.rows[axis][3]);
                 step += delta * delta;
             }
-            engine_brightness_[view->entity] = engines_online
+            // The report's per-entity map keeps its node for the ship's entity: no lookup per frame.
+            // The cached pointer is safe only because engine_brightness_ is never erased from
+            // (std::map nodes stay put on insert).
+            if (ship.brightness_slot == nullptr || ship.brightness_entity != view->entity) {
+                ship.brightness_slot = &engine_brightness_[view->entity];
+                ship.brightness_entity = view->entity;
+            }
+            *ship.brightness_slot = engines_online
                 ? std::clamp(std::sqrt(step) * 0.8 / to_double(*now->durability->max_speed) + 0.2, 0.0, 1.0)
                 : 0.0;
-            ship.engine_brightness = static_cast<float>(engine_brightness_[view->entity]);
+            ship.engine_brightness = static_cast<float>(*ship.brightness_slot);
         }
         // BP-40: every running emitter stands at its bone on the ship's drawn pose for the
         // samples this frame is due; world-space particles it already emitted stay where they
         // were born.
+        owner_update.finish();
+        FrameTimer owner_place(measure_owner_ ? &owner_timings_[4] : nullptr, true);
         place(index, *view->model_to_world);
+        owner_place.finish();
+        FrameTimer owner_brightness(measure_owner_ ? &owner_timings_[5] : nullptr, true);
         // BP-45/FW-19: engine brightness and shared unit opacity multiply at presentation;
         // damage, fire and other unit emitters carry the same opacity as their hull.
+        // The opacity belongs to the ship, not to each of its emitters: look it up once.
+        const float fade = ship.running.empty() ? 1.0F
+            : view->projectile && projectile_opacity ? projectile_opacity(index)
+            : fade_opacity ? fade_opacity(view->entity) : 1.0F;
         for (auto running = ship.running.begin(); running != ship.running.end();) {
-            const float fade = view->projectile && projectile_opacity ? projectile_opacity(index)
-                : fade_opacity ? fade_opacity(view->entity) : 1.0F;
             if (registry_->set_brightness(running->handle, (running->engine ? ship.engine_brightness : 1.0F) * fade)) {
                 ++running;
                 continue;
             }
+            // A stopped emitter must be respawned: without this update() early-returns on the
+            // reconciled ship until a replan.
+            ship.reconciled = false;
             static_cast<void>(registry_->release(running->handle));
             ++stopped_["frame_overflow"];
             running = ship.running.erase(running);
         }
     }
+    busy_.clear();
+    for (const std::size_t index : visit_) {
+        if (!ships_[index].running.empty() || !ships_[index].clone.empty()) busy_.push_back(index);
+    }
+    FrameTimer owner_registry(measure_owner_ ? &owner_timings_[6] : nullptr);
     std::uint64_t running_count = 0;
-    for (const Ship& ship : ships_) running_count += ship.running.size();
+    for (const std::size_t slot : busy_) running_count += ships_[slot].running.size();
     max_running_ = std::max(max_running_, running_count);
     // #433: a frame drawn between samples still draws each emitter where the model stands now:
     // its particles that live in the emitter's frame follow it (FoC's linked particles,
@@ -639,8 +703,11 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
         if (!advance_sample()) return false;
     }
     if (!advance_projectiles(presented_tick)) return false;
+    owner_registry.finish();
+    FrameTimer owner_finish(measure_owner_ ? &owner_timings_[7] : nullptr);
     // What this frame draws: each new emitter's age now is the one it is first seen at.
-    for (const Ship& ship : ships_) {
+    for (const std::size_t slot : busy_) {
+        const Ship& ship = ships_[slot];
         for (const Running& running : ship.running) {
             if (running.log < start_log_.size() && !start_log_[running.log].first_age) {
                 start_log_[running.log].first_age = samples_ - std::min(samples_, running.born);

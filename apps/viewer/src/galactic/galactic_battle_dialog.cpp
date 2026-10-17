@@ -86,7 +86,8 @@ bool GalacticMode::State::build_battle_dialog() {
         data::ui::TextLookup lookup(*database);
         // WGP-37: the campaign score is a full-screen dialog like the battle summary.
         auto built = build_dialog(*definition, theme, &lookup, id == "IDD_BATTLE_END_DIALOG"
-            || id == "IDD_CAMPAIGN_SCORE_DIALOG" ? model::Placement::full_screen : model::Placement::centre);
+            || id == "IDD_CAMPAIGN_SCORE_DIALOG" ? model::Placement::full_screen : model::Placement::centre, false,
+            [this](std::string_view cue) { if (audio) audio->ui_sound(cue); });
         built.frame->set_theme(native_theme);
         for (auto& gadget : built.gadgets) if (gadget.control &&
             (gadget.id == "IDC_TITLE_STATIC" || gadget.id == "IDC_TIME_STATIC")) {

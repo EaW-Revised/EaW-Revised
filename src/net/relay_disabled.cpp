@@ -62,9 +62,11 @@ core::Result<std::optional<GnsRoomSignal>> NetworkGnsRoom::poll() { return core:
 std::optional<GnsTurnCredentials> NetworkGnsRoom::turn_credentials() const { return {}; }
 GnsRoomLease NetworkGnsRoom::lease() const { return {}; }
 core::Result<void> NetworkGnsRoom::status() const { return core::Result<void>::failure(relay_disabled()); }
+core::Result<bool> NetworkGnsRoom::repair_attachment(std::uint64_t) { return core::Result<bool>::failure(relay_disabled()); }
 core::Result<void> NetworkGnsRoom::leave() { return core::Result<void>::failure(relay_disabled()); }
 core::Result<void> NetworkGnsRoom::release(PeerIndex) { return core::Result<void>::failure(relay_disabled()); }
 core::Result<void> NetworkGnsRoom::kick(PeerIndex) { return core::Result<void>::failure(relay_disabled()); }
 core::Result<void> NetworkGnsRoom::lock() { return core::Result<void>::failure(relay_disabled()); }
+std::pair<std::uint64_t, std::string> NetworkGnsRoom::renewal_failure() const { return {}; }
 #endif
 } // namespace eawr::net

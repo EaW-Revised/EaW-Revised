@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <chrono>
+#include <set>
 #include <utility>
 
 #include "unit_emitters_internal.hpp"
@@ -58,7 +60,87 @@ constexpr std::uint64_t plan_seed = 394;
     }
     return result;
 }
+
+[[nodiscard]] const char* clone_proxy_skip(const assets::Proxy& proxy, const assets::Model& model) {
+    if (!proxy.visible) return "hidden by its proxy flag";
+    std::string upper = proxy.name;
+    for (char& character : upper) character = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
+    if (upper.find("_ALT") != std::string::npos || upper.find("_LOD") != std::string::npos) {
+        return "alternate or LOD proxy (not modelled on a death clone)";
+    }
+    if (proxy.bone >= model.bones.size()) return "bone out of range";
+    return nullptr;
+}
 } // namespace
+
+void UnitEmitters::prepare_assets(const SpacePopulation& population) {
+    if (assets_prepared_) return;
+    const auto began = std::chrono::steady_clock::now();
+    std::set<std::string> models, frames, systems, sources, attached_models;
+    std::map<std::string, std::string> attached_paths;
+    const auto source = [&](const std::string& path) {
+        if (sources.insert(path).second) {
+            if (const auto entry = filesystem_->stat(path)) prepared_source_bytes_ += entry.value().size;
+        }
+    };
+    const auto prepare_system = [&](const std::string& path) {
+        if (path.empty() || !systems.insert(path).second) return;
+        ++prepared_system_requests_;
+        source(path);
+        if (effect_system(path).system) ++prepared_systems_;
+    };
+    const auto prepare_model = [&](const scene::Placement& placement, const bool death_clone) {
+        const auto& path = placement.model_path;
+        if (path.empty()) return;
+        const assets::Model* model = emitter_model(path);
+        if (models.insert(path).second) {
+            ++prepared_model_requests_;
+            source(path);
+            if (model) ++prepared_models_;
+        }
+        if (!death_clone && model && frames.insert(path).second) static_cast<void>(model_frames(placement, model));
+        if (!model && !death_clone) prepare_system(path); // A particle-system model can own a projectile slot.
+        for (std::size_t ordinal = 0; ordinal < placement.effects.size(); ++ordinal) {
+            if (death_clone && (!model || ordinal >= model->proxies.size()
+                || clone_proxy_skip(model->proxies[ordinal], *model))) continue;
+            const auto& effect = placement.effects[ordinal];
+            prepare_system(effect.resolved);
+            // Non-particle model proxies use the same cached classification as plan_model.
+            if (!effect.resolved.empty() && !effect_system(effect.resolved).system) {
+                if (models.insert(effect.resolved).second) {
+                    ++prepared_model_requests_;
+                    source(effect.resolved);
+                    if (emitter_model(effect.resolved)) ++prepared_models_;
+                }
+            }
+        }
+    };
+    for (std::size_t ship = 0; ship < population.live_ship_count(); ++ship) {
+        const auto view = population.live_ship_emitter_assets(ship);
+        if (!view || !view->placement) continue;
+        prepare_model(*view->placement, view->death_clone);
+        if (view->death_clone) continue; // Clone planning reads its own model proxies only.
+        for (const auto& hardpoint : view->hardpoints) {
+            if (!hardpoint.resolved || hardpoint.model.empty()) continue;
+            scene::Placement attached;
+            auto [path, inserted] = attached_paths.try_emplace(hardpoint.model);
+            if (inserted) path->second = probe(cache_, "data/art/models/", hardpoint.model, model_suffixes);
+            attached.model_path = path->second;
+            if (attached.model_path.empty() || !attached_models.insert(attached.model_path).second) continue;
+            if (const auto* model = emitter_model(attached.model_path)) {
+                attached.effects = scene::model_proxy_effects(cache_.access(), *model);
+            }
+            prepare_model(attached, false);
+        }
+    }
+    asset_prepare_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
+    assets_prepared_ = true;
+}
+
+const assets::Model* UnitEmitters::emitter_model(const std::string& path) {
+    if (model_paths_.insert(path).second && assets_prepared_) ++unprepared_models_[path];
+    return cache_.model(path);
+}
 
 const assets::Texture* UnitEmitters::resolve_texture(const std::string_view authored) {
     const std::size_t slash = authored.find_last_of("/\\");
@@ -86,6 +168,7 @@ const assets::Texture* UnitEmitters::resolve_texture(const std::string_view auth
 const UnitEmitters::EffectSystem& UnitEmitters::effect_system(const std::string& path) {
     auto found = systems_.find(path);
     if (found != systems_.end()) return found->second;
+    if (assets_prepared_) ++unprepared_systems_[path];
     EffectSystem entry;
     if (auto bytes = filesystem_->open(path); !bytes) {
         entry.cause = core::format_diagnostic(bytes.error());
@@ -102,10 +185,11 @@ const UnitEmitters::EffectSystem& UnitEmitters::effect_system(const std::string&
 
 const UnitEmitters::ModelFrames* UnitEmitters::model_frames(const scene::Placement& placement,
                                                             const assets::Model*& model) {
-    model = cache_.model(placement.model_path);
+    model = emitter_model(placement.model_path);
     if (model == nullptr) return nullptr;
     auto found = frames_.find(placement.model_path);
     if (found != frames_.end()) return &found->second;
+    if (assets_prepared_) ++unprepared_frames_[placement.model_path];
     // The bind pose, as the static attached plan reads it: capital ships run no idle clip that
     // moves their proxy bones.
     ModelFrames frames;
@@ -163,7 +247,7 @@ void UnitEmitters::plan(Ship& ship, const SpacePopulation::LiveShipEmitterView& 
                 if (!bone->visible || bone_index >= owner_frames->bones.size() || !owner_frames->bones[bone_index]) continue;
                 scene::Placement placement;
                 placement.model_path = probe(cache_, "data/art/models/", hardpoint.model, model_suffixes);
-                const assets::Model* attached = cache_.model(placement.model_path);
+                const assets::Model* attached = emitter_model(placement.model_path);
                 if (attached == nullptr || attached->proxies.empty()) continue;
                 placement.effects = scene::model_proxy_effects(cache_.access(), *attached);
                 placement.map_logical_path = view.placement->map_logical_path;
@@ -208,7 +292,7 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
         if (path.empty()) continue;
         const EffectSystem& system = effect_system(path);
         effects[ordinal] = {system.system ? particles::EffectKind::particle
-                                : cache_.model(path) ? particles::EffectKind::non_particle
+                                : emitter_model(path) ? particles::EffectKind::non_particle
                                                      : particles::EffectKind::unknown,
                             system.capacity};
     }
@@ -250,6 +334,12 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
             if (record.cause != particles::MapEffectCause::hardpoint_state) {
                 ++not_admitted_[record.proxy_name + ": " + record.detail];
             }
+            continue;
+        }
+        // IS-09: the ion-stun behaviour initializes its emitters hidden, even when
+        // the model authors them visible. Only a live stun shows them; expiry hides them again.
+        if (modes.ion_stun_effect && !modes.ion_stunned && ion_stun_emitter(record.proxy_name)) {
+            ++not_admitted_[record.proxy_name + ": ion stun inactive"];
             continue;
         }
         // BP-43: hidden by type when the object is created, until an ability shows the type:
@@ -308,7 +398,7 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
 void UnitEmitters::plan_clone(Ship& ship, const SpacePopulation::LiveShipEmitterView& view) {
     ship.clone_planned = true;
     ++clone_ships_;
-    const assets::Model* model = cache_.model(view.placement->model_path);
+    const assets::Model* model = emitter_model(view.placement->model_path);
     if (model == nullptr) {
         ++clone_not_run_[view.placement->model_path + ": model not loaded"];
         return;
@@ -317,21 +407,8 @@ void UnitEmitters::plan_clone(Ship& ship, const SpacePopulation::LiveShipEmitter
         const assets::Proxy& proxy = model->proxies[ordinal];
         const auto skip = [&](const std::string& cause) { ++clone_not_run_[proxy.name + ": " + cause]; };
         // FoC hides a proxy with its hidden flag set for good (BP-46, the debug build).
-        if (!proxy.visible) {
-            skip("hidden by its proxy flag");
-            continue;
-        }
-        const std::string upper = [&] {
-            std::string text = proxy.name;
-            for (char& character : text) character = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
-            return text;
-        }();
-        if (upper.find("_ALT") != std::string::npos || upper.find("_LOD") != std::string::npos) {
-            skip("alternate or LOD proxy (not modelled on a death clone)");
-            continue;
-        }
-        if (proxy.bone >= model->bones.size()) {
-            skip("bone out of range");
+        if (const char* cause = clone_proxy_skip(proxy, *model)) {
+            skip(cause);
             continue;
         }
         const std::string path = ordinal < view.placement->effects.size() ? view.placement->effects[ordinal].resolved

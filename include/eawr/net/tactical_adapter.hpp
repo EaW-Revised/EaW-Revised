@@ -64,6 +64,8 @@ public:
         std::optional<std::uint64_t> input_epoch = std::nullopt);
     [[nodiscard]] core::Result<TacticalPumpResult> pump(std::uint64_t now_ms);
     [[nodiscard]] const std::optional<WaitingFor>& waiting_for() const noexcept { return core_.waiting_for(); }
+    [[nodiscard]] bool mesh_running() const noexcept { return core_.mesh_running(); }
+    [[nodiscard]] std::uint64_t mesh_incident_id() const noexcept { return core_.mesh_incident_id(); }
     [[nodiscard]] const sim::tactical::TacticalSession& simulation() const noexcept { return adapter_->simulation(); }
     [[nodiscard]] const std::optional<core::Diagnostic>& failure() const noexcept { return core_.failure(); }
     void set_engine_step(TacticalSessionAdapter::EngineStep step) { adapter_->set_engine_step(std::move(step)); }

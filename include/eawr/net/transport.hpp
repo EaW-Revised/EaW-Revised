@@ -41,6 +41,12 @@ public:
     // and for adapters without a measurement facility. Consumers can detect
     // stale observations when sample_count stops advancing.
     virtual std::optional<LinkStats> link_stats(PeerIndex) const { return std::nullopt; }
+    // Changes only when a replacement authenticated stream is published. Zero
+    // means the adapter has no stream-generation observation.
+    virtual std::uint64_t edge_identity(PeerIndex) const { return 0; }
+    // A replacement cannot recover its bounded input tail. Close this candidate
+    // and expose final pair-failure evidence to the departure policy.
+    virtual void fail_repair(PeerIndex, unsigned) {}
 };
 
 } // namespace eawr::net

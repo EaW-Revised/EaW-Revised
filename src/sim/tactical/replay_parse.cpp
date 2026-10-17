@@ -105,6 +105,7 @@ core::Result<TacticalReplay> parse_replay(
     TacticalReplay replay;
     std::vector<EntityId> disabled_garrisons;
     std::vector<UnitState> carriers;
+    std::uint32_t object_turn_count{};
     const auto node = [&](auto&& self, Reader& body, std::size_t& nodes, CarriedObject& object, const std::size_t depth) -> bool {
         std::uint32_t flags{}, members{};
         if (depth > 32 || ++nodes > max_units || !body.read_u64(object.entity_id)
@@ -471,6 +472,13 @@ core::Result<TacticalReplay> parse_replay(
                 replay.setup.native_scene = std::move(scene);
                 continue;
             }
+            if (tag == replay_extension_object_turn) {
+                std::uint32_t version{};
+                if (object_turn_count != 0 || length != 8 || !reader.read_u32(version) || version != 1
+                    || !reader.read_u32(object_turn_count) || object_turn_count == 0 || object_turn_count > max_commands)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid or duplicate OBJT extension", logical_path);
+                continue;
+            }
             if (tag != replay_extension_match_policy) {
                 return fail<Parsed>(diagnostic_codes::version,
                     "unknown replay header extension tag " + std::to_string(tag), logical_path);
@@ -493,7 +501,7 @@ core::Result<TacticalReplay> parse_replay(
                 && !replay.setup.first_free_entity_id && !replay.setup.campaign && carriers.empty()
                 && replay.setup.cinematic_seats.empty() && !replay.setup.match_identity
                 && !replay.setup.departure_policy && replay.setup.beacon_rules.empty()
-                && !replay.setup.attract_pool && !replay.setup.native_scene)) {
+                && !replay.setup.attract_pool && !replay.setup.native_scene && object_turn_count == 0)) {
             return fail<Parsed>(diagnostic_codes::malformed, "invalid replay header extension length", logical_path);
         }
     }
@@ -918,6 +926,30 @@ core::Result<TacticalReplay> parse_replay(
             std::get<MovePayload>(command.payload).append = true;
         }
         replay.commands.push_back(std::move(command));
+    }
+    if (object_turn_count > reader.remaining() / replay_object_turn_record_size) {
+        return fail<Parsed>(diagnostic_codes::malformed,
+            "truncated object-turn table for declared count " + std::to_string(object_turn_count), logical_path);
+    }
+    replay.object_turns.reserve(object_turn_count);
+    for (std::uint32_t index = 0; index < object_turn_count; ++index) {
+        ObjectTurnRecord record;
+        std::uint8_t ability{}, action{};
+        std::uint16_t flags{};
+        std::uint32_t reserved{};
+        math::Vec3 position;
+        if (!reader.read_u64(record.tick) || !reader.read_u64(record.use.unit) || !reader.read_u64(record.use.sequence)
+            || !reader.read_u8(ability) || !reader.read_u8(action) || !reader.read_u16(flags)
+            || !reader.read_u32(reserved) || !reader.read_u64(record.use.target) || !read_vec3(reader, position))
+            return fail<Parsed>(diagnostic_codes::malformed,
+                "truncated object-turn record " + std::to_string(index), logical_path);
+        if (reserved != 0 || (flags & ~1U) != 0 || ((flags & 1U) == 0 && position != math::Vec3{}))
+            return fail<Parsed>(diagnostic_codes::version,
+                "unsupported object-turn flags or reserved bits at record " + std::to_string(index), logical_path);
+        record.use.ability = static_cast<AbilityKind>(ability);
+        record.use.action = static_cast<AbilityAction>(action);
+        if ((flags & 1U) != 0) record.use.position = position;
+        replay.object_turns.push_back(record);
     }
     if (reader.remaining() != 0) {
         return fail<Parsed>(diagnostic_codes::malformed,

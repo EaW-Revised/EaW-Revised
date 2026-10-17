@@ -6,8 +6,13 @@
 
 #include <algorithm>
 #include <functional>
+#include <memory>
 #include <span>
+#include <string>
 #include <utility>
+#include <variant>
+#include <vector>
+#include <type_traits>
 
 namespace eawr::viewer::galactic {
 
@@ -22,6 +27,40 @@ namespace eawr::viewer::galactic {
         return value.player < key.first || (value.player == key.first && value.planet < key.second);
     });
     return row != rows.end() && row->player == player && row->planet == id && row->discovered;
+}
+
+// WGUI-05/60/62: the alternate surface set one planet draws. An undiscovered galaxy planet shows the
+// authored grid shell (alternate 2) in whatever scene layer it sits, but only when its model has one;
+// a model with no alternate-2 surface (a mod planet) keeps the camera's rule so it never vanishes.
+// Scene-only art and non-planet objects never take the shell. Only the world layer follows the camera.
+struct PlanetShellInput {
+    bool galaxy_planet{}, scene_art{}, discovered{}, has_shell{}, world_layer{}, camera_target{};
+    int camera_alternate{};
+};
+[[nodiscard]] inline int planet_alternate(const PlanetShellInput& art) {
+    if (!art.galaxy_planet) return 0;
+    if (!art.scene_art && !art.discovered && art.has_shell) return 2;
+    return art.world_layer && art.camera_target ? art.camera_alternate : 0;
+}
+// A surface tagged with an alternate draws only when it matches; untagged surfaces always draw.
+[[nodiscard]] inline bool surface_drawn(int authored_alternate, int desired_alternate) {
+    return authored_alternate < 0 || authored_alternate == desired_alternate;
+}
+// WGUI-05: a model has the grid shell when one of its drawn surfaces is tagged alternate 2. A mod model
+// with only alternate 0/1 surfaces has none, and its planet keeps the camera rule while undiscovered.
+template <class Surfaces>
+[[nodiscard]] inline bool has_shell_surface(const Surfaces& surfaces) {
+    return std::any_of(surfaces.begin(), surfaces.end(), [](const auto& surface) {
+        return surface.status == "drawn" && surface.alternate == 2; });
+}
+// WGUI-05: the galaxy planets that show the shell for lack of discovery; scene-only art never does.
+// The HUD resubmits the instances exactly when this list changes between publications.
+[[nodiscard]] inline std::vector<ObjectId> undiscovered_planets(std::span<const ObjectId> galaxy_planets,
+    std::span<const ObjectId> scene_art, const std::function<bool(ObjectId)>& discovered) {
+    std::vector<ObjectId> result;
+    for (const auto id : galaxy_planets)
+        if (std::find(scene_art.begin(), scene_art.end(), id) == scene_art.end() && !discovered(id)) result.push_back(id);
+    return result;
 }
 
 // Presentation inputs are copied from an observer snapshot and the owning HUD.
@@ -53,6 +92,8 @@ struct InputWidget {
 };
 struct PointerPoint { float x{}, y{}; };
 enum class DropKind { move, merge, land, orbit_slot, launch, ability };
+using AbilityIntent = std::variant<sim::galactic::PrepareGalacticAbility,
+    sim::galactic::ExecutePreparedAbility, sim::galactic::CancelGalacticAbility>;
 struct DropIntent {
     DropKind kind{};
     ObjectId source{}, target{}, planet{};
@@ -63,7 +104,85 @@ struct DropIntent {
     std::vector<ObjectId> members;
     // #3072: a move dropped on a planet's stack icon asks for that orbit slot on arrival.
     std::optional<std::uint8_t> destination_slot;
+    std::optional<AbilityIntent> ability{};
 };
+
+// One queued execution per published capability, scoped to its session lifetime
+// so a replacement/load can publish the same numeric preparation again.
+struct PendingAbilityDrop {
+    std::weak_ptr<const void> owner{};
+    std::optional<sim::galactic::PreparedAbility> prepared{};
+    [[nodiscard]] bool matches(const std::weak_ptr<const void>& current_owner,
+        const sim::galactic::PreparedAbility& capability) const {
+        return prepared && *prepared == capability && !owner.owner_before(current_owner)
+            && !current_owner.owner_before(owner);
+    }
+    void arm(const std::weak_ptr<const void>& current_owner, const sim::galactic::PreparedAbility& capability) {
+        owner = current_owner; prepared = capability;
+    }
+    void observe(const sim::galactic::PreparedAbility* capability) {
+        if (prepared && (!capability || *prepared != *capability)) { prepared.reset(); owner.reset(); }
+    }
+};
+
+// WGUI-172: bind a published actor/container capability to the fleet being dragged.
+// Follow current observer identities; missing, dead, foreign or cyclic links fail closed.
+[[nodiscard]] inline bool ability_source_in_fleet(const sim::galactic::GalacticSnapshot& snapshot,
+    PlayerId local, ObjectId source, ObjectId fleet_id) {
+    const auto fleets = snapshot.fleets();
+    const auto fleet = std::lower_bound(fleets.begin(), fleets.end(), fleet_id,
+        [](const auto& row, auto id) { return row.id < id; });
+    if (fleet == fleets.end() || fleet->id != fleet_id || fleet->owner != local || fleet->motion.transit) return false;
+    const auto actors = snapshot.actor_records();
+    for (std::size_t remaining = actors.size(); source && remaining; --remaining) {
+        const auto actor = std::lower_bound(actors.begin(), actors.end(), source,
+            [](const auto& row, auto id) { return row.id < id; });
+        if (actor == actors.end() || actor->id != source || actor->owner != local || actor->dead || actor->delete_pending)
+            return false;
+        // Setup/allocation share one object-ID namespace: a transport cannot alias
+        // a fleet root, and a direct fleet parent is represented by that fleet's ID.
+        if (actor->container == fleet_id) return actor->planet == fleet->orbit;
+        source = actor->container;
+    }
+    return false;
+}
+
+// WGUI-49/50: resolve the live identity's parents, rather than accepting a
+// widget's cached planet. Fleet shells need not have census rows; their orbit is authoritative.
+[[nodiscard]] inline ObjectId actor_containing_planet(const sim::galactic::GalacticSnapshot& snapshot,
+    ObjectId actor_id) {
+    const auto actors = snapshot.actor_records();
+    const auto planets = snapshot.planets();
+    const auto fleets = snapshot.fleets();
+    for (std::size_t remaining = actors.size() + 1; actor_id && remaining; --remaining) {
+        const auto fleet = std::lower_bound(fleets.begin(), fleets.end(), actor_id,
+            [](const auto& row, auto id) { return row.id < id; });
+        if (fleet != fleets.end() && fleet->id == actor_id) {
+            const auto record = std::lower_bound(actors.begin(), actors.end(), actor_id,
+                [](const auto& row, auto id) { return row.id < id; });
+            if (record != actors.end() && record->id == actor_id && (record->dead || record->delete_pending)) return 0;
+            if (fleet->motion.transit) return 0;
+            return std::any_of(planets.begin(), planets.end(), [&](const auto& row) { return row.id == fleet->orbit; })
+                ? fleet->orbit : 0;
+        }
+        const auto actor = std::lower_bound(actors.begin(), actors.end(), actor_id,
+            [](const auto& row, auto id) { return row.id < id; });
+        if (actor == actors.end() || actor->id != actor_id || actor->dead || actor->delete_pending)
+            return 0;
+        if (std::any_of(planets.begin(), planets.end(), [&](const auto& row) { return row.id == actor->container; }))
+            return actor->container;
+        actor_id = actor->container;
+    }
+    return 0;
+}
+[[nodiscard]] inline ObjectId first_hero_planet(const sim::galactic::GalacticSnapshot& snapshot,
+    sim::galactic::TypeId type) {
+    if (!type) return 0;
+    for (const auto& actor : snapshot.actor_records())
+        if (actor.current_type == type && !actor.dead && !actor.delete_pending)
+            return actor_containing_planet(snapshot, actor.id);
+    return 0;
+}
 
 // #3072: the local fleets one dragged card or stack icon stands for: every parked
 // (not travelling) local fleet at `planet` in one of `slots`, in fleet-id order,
@@ -93,16 +212,13 @@ struct DropIntent {
 // Project preview binding: a selected local fleet and a map destination become
 // an ordinary typed drop. Reuse WGM-16..22 search and the published movement
 // access table; never draw a direct line through an intermediate conflict.
-[[nodiscard]] inline std::optional<DropIntent> fleet_destination_intent(
-    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId selected_fleet,
+[[nodiscard]] inline std::optional<std::vector<sim::galactic::PlanetId>> destination_path(
+    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId source,
     ObjectId destination, std::span<const InputPlanet> planets) {
     using namespace sim::galactic;
-    const auto fleets = snapshot.fleets();
-    const auto fleet = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == selected_fleet; });
-    if (fleet == fleets.end() || fleet->owner != local || fleet->motion.transit) return std::nullopt;
     const auto target = std::find_if(planets.begin(), planets.end(), [&](const auto& row) { return row.id == destination; });
     if (target == planets.end() || !target->discovered) return std::nullopt;
-    if (destination == fleet->orbit) return DropIntent{DropKind::land, selected_fleet, 0, destination, {}, 0, {}, std::nullopt};
+    if (destination == source) return std::nullopt;
     const auto* movement = snapshot.movement();
     if (!movement || !snapshot.maximum_movement_distance()) return std::nullopt;
     auto graph = PlanetGraph::build(snapshot.planets(), snapshot.routes(), *snapshot.maximum_movement_distance());
@@ -120,9 +236,23 @@ struct DropIntent {
         access.push_back(row);
     }
     PathOptions options; options.allow_bad_final = true;
-    auto path = find_planet_path(graph.value(), fleet->orbit, destination, access, options);
+    auto path = find_planet_path(graph.value(), source, destination, access, options);
     if (!path || path.value().planets.size() < 2) return std::nullopt;
-    return DropIntent{DropKind::move, selected_fleet, 0, destination, std::move(path).value().planets, 0, {}, std::nullopt};
+    return std::move(path).value().planets;
+}
+
+[[nodiscard]] inline std::optional<DropIntent> fleet_destination_intent(
+    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId selected_fleet,
+    ObjectId destination, std::span<const InputPlanet> planets) {
+    const auto fleets = snapshot.fleets();
+    const auto fleet = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == selected_fleet; });
+    if (fleet == fleets.end() || fleet->owner != local || fleet->motion.transit) return std::nullopt;
+    const auto target = std::find_if(planets.begin(), planets.end(), [&](const auto& row) { return row.id == destination; });
+    if (target == planets.end() || !target->discovered) return std::nullopt;
+    if (destination == fleet->orbit) return DropIntent{DropKind::land, selected_fleet, 0, destination, {}, 0, {}, std::nullopt};
+    auto path = destination_path(snapshot, local, fleet->orbit, destination, planets);
+    if (!path) return std::nullopt;
+    return DropIntent{DropKind::move, selected_fleet, 0, destination, std::move(*path), 0, {}, std::nullopt};
 }
 
 class MapInput final {
@@ -213,10 +343,9 @@ public:
         if (index >= planets.size() || !planets[index].discovered) return {};
         return select(planets, planets[index].id, camera);
     }
-    // Containment resolution belongs to the snapshot/widget producer (#2263). First-match
-    // leader/hero order is preserved by accepting its resolved containing planet.
+    // The snapshot producer resolves first-match leader/hero containment (WGUI-49/50).
     SelectionEffects go_home(std::span<const InputPlanet> planets, ObjectId first_leader_planet, CameraState camera) {
-        if (!home) home = first_leader_planet;
+        if (!home && planet(planets, first_leader_planet)) home = first_leader_planet;
         if (!planet(planets, home)) return {};
         auto effect = select(planets, home, camera); effect.position = true; return effect;
     }
@@ -317,9 +446,41 @@ public:
             for (std::size_t i = 0; i < order.units.size(); ++i)
                 if (!order.units[i] || std::find(order.units.begin(), order.units.begin() + static_cast<std::ptrdiff_t>(i),
                     order.units[i]) != order.units.begin() + static_cast<std::ptrdiff_t>(i)) return std::nullopt;
+            if (!intent.path.empty()) {
+                if (intent.target || intent.path.size() < 2 || intent.path.front() != intent.planet
+                    || intent.path.back() == intent.planet || (intent.destination_slot && *intent.destination_slot > 2)) return std::nullopt;
+                for (const auto id : intent.path) {
+                    const auto* node = planet(planets, id);
+                    if (!node || !node->discovered) return std::nullopt;
+                }
+                return LaunchFleet{std::move(order.units), intent.path, intent.destination_slot};
+            }
             return order;
         }
-        case DropKind::ability: return std::nullopt; // #2263: hero/ability eligibility and command producer.
+        case DropKind::ability: {
+            // WGUI-172: preserve the producer's typed capability. The sim revalidates
+            // eligibility, ownership, price and preparation identity at execution.
+            if (!gates.hud_enabled || gates.action_menu || gates.selection_locked || !intent.ability) return std::nullopt;
+            return std::visit([&](const auto& order) -> std::optional<CommandPayload> {
+                using Order = std::decay_t<decltype(order)>;
+                if constexpr (std::is_same_v<Order, CancelGalacticAbility>) {
+                    if (order.actor != intent.source || !order.preparation) return std::nullopt;
+                } else {
+                    const auto actor = [&] {
+                        if constexpr (std::is_same_v<Order, PrepareGalacticAbility>) return order.actor;
+                        else return order.prepared.actor;
+                    }();
+                    const auto destination = [&] {
+                        if constexpr (std::is_same_v<Order, PrepareGalacticAbility>) return order.planet;
+                        else return order.prepared.planet;
+                    }();
+                    const auto* target = planet(planets, intent.planet);
+                    if (actor != intent.source || destination != intent.planet || !target || !target->discovered)
+                        return std::nullopt;
+                }
+                return CommandPayload{order};
+            }, *intent.ability);
+        }
         }
         return std::nullopt;
     }

@@ -9,6 +9,9 @@
 
 namespace eawr::sim::tactical {
 core::Result<void> TacticalSession::configure_retreat(RetreatConfig config) {
+    if (impl_->object_turn_running)
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            "configure_retreat during an object-turn provider call"));
     if (impl_->completed_tick || impl_->retreat)
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
             "retreat content must be installed once before stepping"));

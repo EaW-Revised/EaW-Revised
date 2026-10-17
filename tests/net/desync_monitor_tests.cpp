@@ -570,6 +570,56 @@ void liveness_waits(const std::filesystem::path& directory) {
         "final missing summary sender not exposed");
 }
 
+void repair_replay_crosses_a_retired_window(const std::filesystem::path& directory) {
+    for (const std::uint64_t older_end : {0ULL, 20ULL}) for (const unsigned contradicts : {0U, 1U, 2U, 3U, 4U}) {
+        Pair pair(directory, 4096, 10);
+        good(pair.left.on_link_repair(0)); good(pair.right.on_link_repair(1));
+        good(pair.left.record(0, digest(0))); good(pair.right.record(0, digest(0))); pair.drain();
+        for (std::uint64_t tick = 1; tick <= older_end; ++tick) {
+            good(pair.left.record(tick, digest(tick))); good(pair.right.record(tick, digest(tick)));
+            if (tick % 10 == 0) pair.drain();
+        }
+        const auto older_first = older_end == 0 ? 0 : older_end - 9;
+        const auto current = older_end + 10;
+        for (std::uint64_t tick = older_end + 1; tick <= current; ++tick) {
+            good(pair.left.record(tick, digest(tick))); good(pair.right.record(tick, digest(tick)));
+        }
+        // Only the fast receiver sees the other summary. The sender still needs
+        // the receiver's current summary and must retry its retained older one.
+        const auto fast = pair.a.poll(); require(fast.has_value(), "missing fast-side summary"); good(pair.left.receive(*fast));
+        require(pair.left.peer_confirmed_tick() == current && pair.right.peer_confirmed_tick() == older_end,
+            "fixture requires one completed exchange of skew between receiver and sender");
+        good(pair.right.on_link_repair(0));
+        auto replay = pair.a.poll(); require(replay.has_value(), "missing prior-window retry");
+        const auto original = replay->frame;
+        if (contradicts == 1) replay->frame[17] = replay->frame[17] == '0' ? '1' : '0';
+        if (contradicts == 2) replay->frame = row_frame(older_first, older_end, older_first);
+        if (contradicts == 3) replay->frame.back() = 1;
+        if (contradicts == 4) replay->frame[1] = static_cast<std::uint8_t>(older_first + 1);
+        std::cout << "REPAIR-WINDOW sender=1 confirmed=" << older_end << " current=" << older_end + 1 << ".." << current
+            << " receiver=0 confirmed=" << current << " next=" << current + 1 << " retry=" << older_first << ".." << older_end << '\n';
+        const auto received = pair.left.receive(*replay);
+        if (contradicts) {
+            require(!received && received.error().code == "EAWR-NET-0401", "changed retired-window evidence must fail");
+            continue;
+        }
+        good(received);
+        good(pair.left.receive(1, row_frame(older_first, older_end, 999)));
+        pair.drain();
+        require(pair.left.peer_confirmed_tick() == current && pair.right.peer_confirmed_tick() == current,
+            "retry cannot change agreement or hold either monitor");
+        for (std::uint64_t tick = current + 1; tick <= current + 10; ++tick) {
+            good(pair.left.record(tick, digest(tick))); good(pair.right.record(tick, digest(tick)));
+        }
+        const auto next = pair.a.poll(); require(next.has_value(), "missing next fast-side summary"); good(pair.left.receive(*next));
+        good(pair.right.on_link_repair(0)); pair.drain();
+        require(pair.left.peer_confirmed_tick() == current + 10 && pair.right.peer_confirmed_tick() == current + 10,
+            "retired receipt advances with agreement");
+        good(pair.left.receive(1, row_frame(older_end + 1, current, 999)));
+        require(!pair.left.receive(1, original), "older-than-retained retries stay refused; no unbounded replay history");
+    }
+}
+
 void notice_agrees_without_rows(const std::filesystem::path& directory) {
     Bus bus(3); FakeTransport a(bus, 0), b(bus, 1), c(bus, 2);
     net::DesyncMonitor local(a, Pair::options(directory, 4096));
@@ -668,6 +718,7 @@ int main(int argc, char** argv) {
         retained_departed_rows(directory);
         remote_freeze_without_local_mismatch(directory);
         liveness_waits(directory);
+        repair_replay_crosses_a_retired_window(directory);
         notice_agrees_without_rows(directory);
         report_window_survives_late_note(directory);
         std::cout << "desync monitor contracts passed\n";

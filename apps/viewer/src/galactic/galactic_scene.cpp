@@ -600,6 +600,10 @@ bool GalacticMode::State::upload_models() {
                     extra.push_back(std::move(family));
                 }
             }
+            // AVC-02/05: use the tactical renderer's authored UV-scroll clock
+            // admission. A model without an idle clip can still animate.
+            const bool effect_clock = surface.route == space::SceneRoute::planet || legacy::reads_effect_time(material);
+            if (legacy::reads_effect_time(material)) material.bindings.push_back({"eawr_effect_time", 0.0F});
             item.asset = next_asset++;
             if (auto uploaded = target.upload(item.asset, geometry, *primary, material, extra); !uploaded) {
                 item.asset = 0;
@@ -611,6 +615,7 @@ bool GalacticMode::State::upload_models() {
                 if (!player) { failure = core::format_diagnostic(player.error()); return false; }
                 item.idle.emplace(std::move(player.value()));
             }
+            if (effect_clock) upload.effect_clock_assets.push_back(item.asset);
             item.status = "drawn";
             asset_alternates[item.asset] = item.alternate;
             upload.status = "drawn";
@@ -626,6 +631,9 @@ bool GalacticMode::State::refresh_model_instances() {
     // Rebuild immutable instance values from cached uploads; no models or textures reload.
     instances.clear();
     instance_planets.clear();
+    shell_planets.clear();
+    galaxy_planet_ids.clear();
+    for (const auto& planet : galaxy->planets) galaxy_planet_ids.insert(planet.id);
     for (auto& scene : scenes) scene.instances.clear();
     const auto objects = render_objects();
     // Explicit before/after GPU control: reproduce the former planet matrix
@@ -650,6 +658,8 @@ bool GalacticMode::State::refresh_model_instances() {
         }
         const auto chosen = planet_models.at(planet.id);
         if (!chosen) continue;
+        // Decide the grid shell per planet model, not per asset: a mod model without alternate 2 keeps its normal draw.
+        if (galactic_view::has_shell_surface(models[*chosen].surfaces)) shell_planets.insert(planet.id);
         const bool cursor = planet.id == selection_cursor_id;
         const auto marker = std::find_if(galaxy->fleets.begin(), galaxy->fleets.end(),
             [&](const auto& item) { return item.fleet == planet.id; });
@@ -724,24 +734,117 @@ bool GalacticMode::State::build_overlay() {
 }
 
 bool GalacticMode::State::service_corruption(const double elapsed) {
-    if (!galaxy || !content || !content->corruption_system) return true;
-    auto publication = corruption_publication.value_or(galactic_view::CorruptionPublication{});
+    if (!galaxy || !content) return true;
+    auto& publication = corruption_frame_publication;
+    publication.planets.clear(); publication.effects.clear(); publication.seat = galaxy->local.seat;
+    if (corruption_publication) publication = *corruption_publication;
     if (!corruption_publication && displayed_snapshot)
-        publication = galactic_view::observed_corruption(*displayed_snapshot, *galaxy, content->corruption_particle);
+        galactic_view::observed_corruption(*displayed_snapshot, *galaxy, content->corruption_particle,
+            publication, corruption_observation_scratch);
     if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "corruption") {
         publication.seat = galaxy->local.seat;
         galactic_view::CorruptionPlanetFact fact;
         fact.planet = 101; fact.corrupted = true; fact.particle_type = content->corruption_particle;
+        fact.source_nonempty = fact.target_nonempty = true;
         publication.planets = {std::move(fact)};
     }
-    corruption_visuals.update(*galaxy, publication);
-    if (!corruption_particles && !corruption_visuals.attachments.empty()) {
-        const auto mounted = filesystem ? filesystem : (battle_content ? battle_content->filesystem : nullptr);
-        if (!mounted || !scenes[2].host) return true;
-        corruption_particles = std::make_unique<CorruptionParticles>(*scenes[2].host, mounted);
+    corruption_fixture_seconds += std::max(0.0, elapsed);
+    const bool spread_fixture = options.campaign == galactic_view::synthetic_campaign
+        && options.hud_fixture.starts_with("corruption-spread");
+    if (spread_fixture) {
+        publication.seat = galaxy->local.seat; publication.planets.clear();
+        for (const auto id : {101U, 102U, 103U}) {
+            galactic_view::CorruptionPlanetFact fact;
+            fact.planet = id; fact.corrupted = id != 102;
+            fact.source_nonempty = fact.target_nonempty = fact.corrupted;
+            fact.particle_type = content->corruption_particle;
+            if (id == 102) {
+                fact.transitioning = fact.increasing = true; fact.target_nonempty = true;
+                fact.fraction = static_cast<float>(std::clamp(corruption_fixture_seconds/5, 0.0, 1.0));
+                if (options.hud_fixture == "corruption-spread-settled" || fact.fraction >= 1) {
+                    fact.corrupted = true; fact.transitioning = fact.increasing = false;
+                    fact.source_nonempty = true; fact.fraction = 1;
+                }
+                if (options.hud_fixture == "corruption-spread-removing") {
+                    fact.corrupted = true; fact.transitioning = true; fact.increasing = false;
+                    fact.source_nonempty = true; fact.target_nonempty = false;
+                }
+                if (options.hud_fixture == "corruption-spread-removed") {
+                    fact.corrupted = fact.transitioning = fact.increasing = false;
+                    fact.source_nonempty = fact.target_nonempty = false;
+                }
+            }
+            if (options.hud_fixture == "corruption-spread-replaced" && id == 102 && corruption_fixture_seconds >= 1)
+                fact.particle_type = content->corruption_style.line_particle;
+            publication.planets.push_back(std::move(fact));
+        }
+        if (options.hud_fixture == "corruption-spread-removed" && corruption_fixture_seconds >= 1)
+            publication.planets.clear();
     }
-    return !corruption_particles || corruption_particles->service(corruption_visuals,
-        content->corruption_particle, *content->corruption_system, camera, elapsed, failure);
+    for (auto& fact : publication.planets) galactic_view::configure_corruption(fact, content->corruption_parameters);
+    corruption_visuals.update(*galaxy, publication);
+    const auto mounted = filesystem ? filesystem : (battle_content ? battle_content->filesystem : nullptr);
+    if (!mounted || !audio_catalog) return true;
+    std::array<bool, 4> occupied_layers{};
+    for (const auto& attachment : corruption_visuals.attachments) {
+        auto [entry, inserted] = corruption_particle_layers.try_emplace(attachment.fact.particle_type);
+        if (inserted) entry->second = static_cast<std::size_t>(galactic_view::galactic_particle_layer(*audio_catalog, attachment.fact.particle_type));
+        occupied_layers.at(entry->second) = true;
+    }
+    for (std::size_t layer = 0; layer < corruption_particles.size(); ++layer) {
+        auto& particles = corruption_particles[layer];
+        if (!particles && occupied_layers[layer] && scenes[layer].host)
+            particles = std::make_unique<CorruptionParticles>(*scenes[layer].host, mounted);
+        if (particles && !particles->service(corruption_visuals, *audio_catalog, *content, layer, camera, elapsed, failure)) return false;
+    }
+    const auto& style = content->corruption_style;
+    if (!corruption_lines && content->corruption_line_system
+        && std::any_of(corruption_visuals.connections.begin(), corruption_visuals.connections.end(), [](const auto& connection) { return !connection.path; })) {
+        const auto layer = static_cast<std::size_t>(galactic_view::galactic_particle_layer(*audio_catalog, style.line_particle));
+        if (scenes[layer].host) corruption_lines = std::make_unique<CorruptionParticles>(*scenes[layer].host, mounted);
+    }
+    const auto logical_frame = spread_fixture
+        ? static_cast<std::uint64_t>(corruption_fixture_seconds*sim::galactic::galactic_frames_per_second)
+        : (displayed_snapshot ? displayed_snapshot->clock().galactic_frame : 0);
+    if (corruption_lines && content->corruption_line_system
+        && !corruption_lines->service_lines(corruption_visuals, *galaxy, style, *content->corruption_line_system,
+            logical_frame, camera, elapsed, failure)) return false;
+    auto& quads = corruption_quads; quads.clear();
+    auto& planets = corruption_planet_index; planets.clear();
+    for (const auto& planet : galaxy->planets) planets.emplace(planet.id, &planet);
+    planets.sort();
+    auto& facts = corruption_fact_index; facts.clear();
+    for (const auto& fact : publication.planets) facts.emplace(fact.planet, &fact);
+    facts.sort();
+    const Vector3 eye(camera.eye[0], camera.eye[1], camera.eye[2]);
+    for (const auto& connection : corruption_visuals.connections) {
+        if (!connection.path || style.path_width <= 0 || style.path_texture.empty()) continue;
+        const auto a = planets.find(connection.from), b = planets.find(connection.to);
+        const auto fact = facts.find(connection.from);
+        if (a == planets.end() || b == planets.end() || fact == facts.end()) continue;
+        const auto point = [&](const galactic_view::Vec3 value) {
+            const auto p = galactic_view::render_point({value.x+style.path_offset.x, value.y+style.path_offset.y, value.z+style.path_offset.z});
+            return Vector3(p[0], p[1], p[2]);
+        };
+        const Vector3 start = point(a->second->position), end = point(b->second->position);
+        if ((end-start).length_squared() == 0) continue;
+        const Vector3 side = (end-start).normalized().cross(eye-(start+end)*0.5F).normalized()*style.path_width*0.5F;
+        const auto colour = galactic_view::corruption_path_colour(style, *fact->second);
+        RouteGeometry::Quad quad;
+        const std::array<Vector3, 4> corners{start-side, end-side, end+side, start+side};
+        for (std::size_t i = 0; i < corners.size(); ++i) quad.points[i] = {corners[i].x, corners[i].y, corners[i].z};
+        quad.colour = {colour[0], colour[1], colour[2], colour[3]}; quads.push_back(quad);
+    }
+    if (!corruption_paths && !quads.empty() && scenes[0].host) {
+        corruption_paths = std::make_unique<RouteGeometry>();
+        if (!corruption_paths->initialize(scenes[0].host->get_world_3d()->get_scenario(), *mounted, style.path_texture, failure)) return false;
+    }
+    corruption_path_quads = quads.size();
+    if (corruption_paths && quads != corruption_uploaded_quads) {
+        corruption_paths->update(quads);
+        corruption_uploaded_quads.assign(quads.begin(), quads.end());
+    }
+    return true;
 }
 
 bool GalacticMode::State::service_station_rotation(const double elapsed,

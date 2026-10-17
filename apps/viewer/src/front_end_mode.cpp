@@ -414,6 +414,8 @@ struct FrontEndMode::State final {
     // after, and how many frames the shell has had since the battle handed the screen back.
     bool battle_started{};
     bool battle_left_setup{};
+    // A game was left for the main menu (return_to_main_menu): the scripted runs have nothing more to walk.
+    bool returned_to_menu{};
     std::uint32_t frames_after_battle{};
 
     bool build();
@@ -774,13 +776,7 @@ void FrontEndMode::State::layout() {
     backdrop->set_size(size);
     overlay->set_size(size);
     fade->set_size(size);
-    const float scale = std::min(size.x / canvas_width, size.y / canvas_height);
-    // Whole pixels, so the skin and the glyphs are not sampled between two pixels.
-    root->set_position(((size - Vector2(canvas_width, canvas_height) * scale) * 0.5F).round());
-    if (root->get_scale() != Vector2(scale, scale)) {
-        root->set_scale(Vector2(scale, scale));
-        refresh_text_oversampling(*root);
-    }
+    static_cast<void>(fit_letterbox_canvas(*root, size, Vector2(canvas_width, canvas_height)));
 }
 
 void FrontEndMode::State::show_screen() {
@@ -1217,6 +1213,7 @@ std::optional<int> FrontEndMode::State::run_test() {
 // itself is the galactic mode's; this only watches the way in.
 std::optional<int> FrontEndMode::State::run_campaign_test() {
     using S = model::FrontEndScreen;
+    if (returned_to_menu) return std::nullopt; // the campaign was left from its menu; the driver ends the run
     const auto press_gadget = [&](model::FrontEndScreen screen, const char* id) {
         Menu& menu = menus[menu_index(screen)];
         if (Entry* entry = find_entry(menu, id); entry != nullptr && entry->button != nullptr)
@@ -1378,7 +1375,7 @@ std::optional<int> FrontEndMode::State::run_battle_test() {
     }
     // The shell is also processed while the battle loads behind the hidden setup screen; count
     // only the frames since the setup screen came back.
-    if (frames_after_battle == 0 && !setup->visible()) {
+    if (frames_after_battle == 0 && !setup->visible() && !returned_to_menu) {
         battle_left_setup = true;
         return std::nullopt;
     }
@@ -1393,10 +1390,13 @@ std::optional<int> FrontEndMode::State::run_battle_test() {
     case 20:
         UtilityFunctions::print("EAWR front end battle music: ",
                                 audio && audio->music_playing() ? "playing " : "silent ", text(audio ? audio->music_file() : std::string{}));
-        if (auto* back = setup->back_button()) click(back->get_global_rect().get_center());
+        // A battle left through the in-game menu's Quit Game came back to the main menu: no setup screen to leave.
+        if (auto* back = setup->back_button(); back != nullptr && setup->visible()) click(back->get_global_rect().get_center());
         break;
     case 30: UtilityFunctions::print("EAWR front end back: ", text(model::to_string(nav.current()))); break;
-    case 32: press_gadget(S::single_player, "IDC_BACK_BUTTON_MAIN"); break;
+    case 32:
+        if (nav.current() == S::single_player) press_gadget(S::single_player, "IDC_BACK_BUTTON_MAIN");
+        break;
     case 40: press_gadget(S::main_menu, "IDC_MAIN_MENU_EXIT2"); break;
     default: break;
     }
@@ -1503,6 +1503,22 @@ void FrontEndMode::input(const Ref<InputEvent>& event) {
 void FrontEndMode::window_activated() {
     State& state = *state_;
     if (state.attract && state.attract->running()) state.attract->window_activated();
+}
+
+void FrontEndMode::return_to_main_menu() {
+    State& state = *state_;
+    state.campaign_started = false;
+    state.campaign_launching = false;
+    state.returned_to_menu = true;
+    // begin_campaign() hid the shell's art; show_screen() draws the menu on the next frame and
+    // closes whatever screen started the game (the setup screen, the campaign staging screen).
+    if (state.overlay != nullptr) state.overlay->show();
+    state.nav.reset();
+    // A shell that never left the main menu still redraws it: the art was hidden for the game.
+    if (state.shown && *state.shown == model::FrontEndScreen::main_menu) state.shown.reset();
+    // The Escape that closed the in-game menu is not a press on the main menu (which quits).
+    state.escape_was_down = true;
+    UtilityFunctions::print("EAWR front end returned to the main menu");
 }
 
 bool FrontEndMode::owns_frame() const {

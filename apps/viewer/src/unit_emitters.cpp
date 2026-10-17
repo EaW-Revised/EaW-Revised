@@ -21,11 +21,17 @@ namespace tactical = sim::tactical;
 using namespace unit_emitters_detail;
 
 
-UnitEmitters::UnitEmitters(godot::Node3D& host, const vfs::Vfs& filesystem)
+UnitEmitters::UnitEmitters(godot::Node3D& host, const vfs::Vfs& filesystem,
+                           const std::span<const sim::tactical::DurabilityProfile> durability)
     : host_(&host), filesystem_(&filesystem), cache_(filesystem),
       backend_(std::make_unique<GodotParticleBackend>(
           host, [this](const std::string_view name) { return resolve_texture(name); })),
       registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {
+    // IS-09: only types carrying ION_STUN_EFFECT initialize their ion emitters hidden.
+    for (const auto& profile : durability) {
+        if (profile.ion_stun_effect) ion_stun_types_.push_back(profile.type_id);
+    }
+    std::sort(ion_stun_types_.begin(), ion_stun_types_.end());
     // #638: nothing here reads the streams' hashes, so the frames do not compute them.
     registry_->set_stream_hashes(false);
 }

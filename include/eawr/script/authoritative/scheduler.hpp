@@ -292,9 +292,16 @@ struct ServiceReport {
 
 // Per-service choices of the host. They are inputs of the tick, like its events.
 struct ServiceOptions {
+    // An in-tick owner defers these instances, including their callbacks,
+    // until its next subset service. Fresh definitions can still run at a barrier.
+    std::function<bool(std::uint64_t instance)> defer_instance{};
     // Instances whose threads the host paces: they are pumped only by pump
     // events, never after their events. Empty: every instance is pumped.
     std::function<bool(std::uint64_t instance)> host_paced;
+    // Immediate-effect hosts only. Names the chain an instance runs in: its owner's. Instances of one chain run
+    // in ascending ID over a shadow of their own, one chain after another in ascending key with key 0 (no owner)
+    // last, and each chain publishes its changes before the next chain captures. Empty: one chain in ID order.
+    std::function<std::uint64_t(std::uint64_t instance)> chain_of;
     // GC profile: GetCurrentTime reads this mode frame at 1/30 s.
     // Absent, it reads the last set_galactic_frame value. Native timers and
     // random keys retain the scheduler's invocation tick domain.
@@ -422,6 +429,9 @@ public:
     // Per-tick actual state digest: cache unchanged sandbox graphs, compose
     // current scheduler metadata. The full archive/state_hash stays available.
     [[nodiscard]] core::Result<std::string> sync_hash(bool verify_graphs = false);
+    // Dirty graphs use disjoint fixed partitions, joined before returning.
+    // No Lua mutation, save or hash consumer can overlap this capture.
+    [[nodiscard]] core::Result<std::string> sync_hash(const sim::PartitionExecutor& executor, bool verify_graphs = false);
     [[nodiscard]] std::uint64_t sync_graph_encodes() const noexcept;
 
 private:

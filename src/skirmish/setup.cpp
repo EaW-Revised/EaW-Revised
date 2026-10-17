@@ -1,9 +1,13 @@
 #include "eawr/skirmish/setup.hpp"
 #include "skirmish_internal.hpp"
+#include "setup_workers.hpp"
+#include "eawr/core/load_profile.hpp"
+#include "eawr/sim/seat.hpp"
 #include "eawr/data/ui/text_database.hpp"
 
 #include <algorithm>
 #include <charconv>
+#include <thread>
 #include <set>
 
 namespace eawr::skirmish {
@@ -45,30 +49,27 @@ bool setup_map_eligible(const assets::Map& map, const SetupMapQuery& query) {
 }
 
 core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const data::Catalog& catalog,
-    const SetupMapQuery& query) {
+    const SetupMapQuery& query, const unsigned requested_workers) {
     using Result = core::Result<std::vector<SetupMap>>;
     auto records = filesystem.enumerate("data/art/maps/", ".ted");
     if (!records) return Result::failure(records.error());
     std::vector<SetupMap> maps;
-    const units::UnitTables tables;
     const auto types = assets::object_type_catalog(catalog);
     auto texts = data::ui::load_language_text_database(filesystem, "ENGLISH");
-    for (const auto& record : records.value()) {
-        auto map = assets::load_map(filesystem, record.canonical_path, types);
-        // WSS-03 supplies the authored eligibility filters. Excluding a map that
-        // cannot be decoded is the project's fail-closed policy, not a retail fallback.
-        if (!map || !setup_map_eligible(map.value(), query)) continue;
+    const auto checks = detail::inspect_setup_content(filesystem, catalog);
+    const auto build_entry = [&](const vfs::AssetRecord& record, const assets::Map& map,
+        const std::span<const std::byte> bytes) {
         SetupMap entry;
         entry.path = record.canonical_path;
         entry.name = fallback_name(entry.path);
-        entry.metadata = map.value().lobby;
-        entry.context_name = map.value().context_name;
+        entry.metadata = map.lobby;
+        entry.context_name = map.context_name;
         {
             // WSS-06: capacity prefixes the authored display name (including an
             // untranslated key); an absent display name keeps the bare map stem.
-            if (map.value().display_name_key && !map.value().display_name_key->empty()) {
-                const auto* text = texts ? texts.value().find(*map.value().display_name_key) : nullptr;
-                entry.name = text ? data::ui::to_utf8(text->value) : *map.value().display_name_key;
+            if (map.display_name_key && !map.display_name_key->empty()) {
+                const auto* text = texts ? texts.value().find(*map.display_name_key) : nullptr;
+                entry.name = text ? data::ui::to_utf8(text->value) : *map.display_name_key;
                 entry.display_name = entry.name;
                 entry.name = "(" + std::to_string(*entry.metadata.capacity) + ") " + entry.name;
             }
@@ -79,65 +80,118 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
                 if (filesystem.stat(path)) { entry.preview_path = path; break; }
             }
             if (entry.preview_path.empty()) {
-                for (const auto& chunk : map.value().chunks) {
+                for (const auto& chunk : map.chunks) {
                     if (chunk.id == 19 && !chunk.group) { entry.embedded_preview = chunk.payload; break; }
                 }
             }
         }
-        FixtureOptions options;
-        options.map = entry.path;
-        auto fixture = fixture_from_options(options, filesystem, catalog);
-        if (!fixture) entry.unavailable = fixture.error().message;
+        auto placements = detail::inspect_setup_placements(map, bytes, entry.path, catalog, checks);
+        if (!placements) entry.unavailable = placements.error().message;
         else {
-            auto inputs = read_start_inputs(fixture.value(), filesystem, catalog, tables);
-            if (!inputs) entry.unavailable = inputs.error().message;
-            else {
-                std::map<std::uint32_t, std::uint32_t> spawns;
-                for (const auto& placement : inputs.value().placements) {
-                    if (!placement.marker || !placement.position || !placement.orientation_degrees
-                        || placement.orientation_degrees->x != Fixed{} || placement.orientation_degrees->y != Fixed{}) continue;
-                    if (const auto team = marker_team(placement.type, "_Spawn_Point_Marker")) ++spawns[*team];
-                }
-                // SK-11: the first marker in reverse record order serves the first player on a team.
-                std::set<std::uint32_t> seen;
-                for (auto p = inputs.value().placements.rbegin(); p != inputs.value().placements.rend(); ++p) {
-                    const auto team = marker_team(p->type, "_Space_Station");
-                    if (!p->marker || !team || !seen.insert(*team).second
-                        || !p->position || !p->orientation_degrees) continue;
-                    SetupTeam side{*team, {}, spawns[*team]};
-                    for (const auto& candidate : p->marker_for) {
-                        for (const auto& faction : detail::tokens(candidate.affiliation)) {
-                            if (faction != "Rebel" && faction != "Empire" && faction != "Underworld") continue;
-                            if (std::find(side.factions.begin(), side.factions.end(), faction) == side.factions.end())
-                                side.factions.push_back(faction);
-                        }
-                    }
-                    if (!side.factions.empty() && entry.metadata.start_positions
-                        && side.team < entry.metadata.start_positions->size()) entry.teams.push_back(std::move(side));
-                }
-                std::sort(entry.teams.begin(), entry.teams.end(), [](const auto& a, const auto& b) { return a.team < b.team; });
-                if (entry.teams.size() < 2) entry.unavailable = "This map has fewer than two supported station teams.";
-                if (entry.metadata.new_markers != true)
-                    entry.unavailable = "Legacy map starts are not supported yet.";
-                else if (!entry.metadata.start_positions || entry.metadata.start_positions->size() < 2)
-                    entry.unavailable = "This map has missing or malformed authored start positions.";
+            std::map<std::uint32_t, std::uint32_t> spawns;
+            for (const auto& placement : placements.value()) {
+                if (!placement.marker || !placement.position || !placement.orientation_degrees
+                    || placement.orientation_degrees->x != Fixed{} || placement.orientation_degrees->y != Fixed{}) continue;
+                if (const auto team = marker_team(placement.type, "_Spawn_Point_Marker")) ++spawns[*team];
             }
+            // SK-11: the first marker in reverse record order serves the first player on a team.
+            std::set<std::uint32_t> seen;
+            for (auto p = placements.value().rbegin(); p != placements.value().rend(); ++p) {
+                const auto team = marker_team(p->type, "_Space_Station");
+                if (!p->marker || !team || !seen.insert(*team).second
+                    || !p->position || !p->orientation_degrees) continue;
+                SetupTeam side{*team, {}, spawns[*team]};
+                for (const auto& candidate : p->marker_for) {
+                    for (const auto& faction : detail::tokens(candidate.affiliation)) {
+                        if (faction != "Rebel" && faction != "Empire" && faction != "Underworld") continue;
+                        if (std::find(side.factions.begin(), side.factions.end(), faction) == side.factions.end())
+                            side.factions.push_back(faction);
+                    }
+                }
+                if (!side.factions.empty() && entry.metadata.start_positions
+                    && side.team < entry.metadata.start_positions->size()) entry.teams.push_back(std::move(side));
+            }
+            std::sort(entry.teams.begin(), entry.teams.end(), [](const auto& a, const auto& b) { return a.team < b.team; });
+            if (entry.teams.size() < 2) entry.unavailable = "This map has fewer than two supported station teams.";
+            if (entry.metadata.new_markers != true)
+                entry.unavailable = "Legacy map starts are not supported yet.";
+            else if (!entry.metadata.start_positions || entry.metadata.start_positions->size() < 2)
+                entry.unavailable = "This map has missing or malformed authored start positions.";
         }
-        maps.push_back(std::move(entry));
+        return entry;
+    };
+    // Retain only picker records. Full decoded maps and source bytes live on
+    // their worker, bounding memory by concurrency even for large mod corpora.
+    std::vector<std::optional<SetupMap>> candidates(records.value().size());
+    const auto errors = [&] {
+        // The load-profile map line reports elapsed parallel-batch time on the
+        // recording's owning thread, rather than summing worker CPU times.
+        core::load_profile::Scope map_scope(core::load_profile::Phase::map);
+        return detail::run_setup_map_workers(candidates.size(), requested_workers, [&](const std::size_t index) {
+            const auto& record = records.value()[index];
+            // Keep load_map's allocation guard before opening a TED. Metadata
+            // and body are read from the same effective winner and same bytes.
+            if (record.size > 512U * 1024U * 1024U) return;
+            auto bytes = filesystem.open(record.canonical_path);
+            if (!bytes) return;
+            auto header = assets::load_map_header(bytes.value(), assets::source_from(record));
+            if (!header || !setup_map_eligible(header.value(), query)) return;
+            auto map = assets::load_map(bytes.value(), assets::source_from(record), types);
+            // A header match still requires a completely valid body.
+            if (map) candidates[index] = build_entry(record, map.value(), bytes.value());
+        });
+    }();
+    for (std::size_t index = 0; index < errors.size(); ++index) {
+        if (!errors[index]) continue;
+        try { std::rethrow_exception(errors[index]); }
+        catch (const std::exception& error) {
+            return Result::failure(detail::error(diagnostic_codes::fixture,
+                "Could not prepare map " + records.value()[index].canonical_path + ": " + error.what()));
+        } catch (...) {
+            return Result::failure(detail::error(diagnostic_codes::fixture,
+                "Could not prepare map " + records.value()[index].canonical_path + ": unknown worker exception"));
+        }
     }
+    // Worker scheduling never chooses list order or a marker's reverse-record priority.
+    for (auto& candidate : candidates) if (candidate) maps.push_back(std::move(*candidate));
     std::sort(maps.begin(), maps.end(), [](const auto& a, const auto& b) {
         return a.name != b.name ? a.name < b.name : a.path < b.path;
     });
     return Result::success(std::move(maps));
 }
 
-std::uint32_t setup_row_count(const SetupMap& map) noexcept {
-    return std::min(map.metadata.capacity.value_or(0), local_setup_rows);
+core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+    const SetupMapQuery& query) {
+    return setup_maps(filesystem, catalog, query, std::thread::hardware_concurrency());
 }
 
-void repair_setup_selection(SetupSelection& selection, const SetupMap& map) {
+const std::vector<SetupMap>* SetupMapCache::find(const vfs::Vfs& filesystem,
+    const data::Catalog& catalog, const SetupMapQuery& query) const {
+    return filesystem_.get() == &filesystem && catalog_.get() == &catalog
+        && generation_ == catalog.generation() && query_ == query ? &maps_ : nullptr;
+}
+
+core::Result<void> SetupMapCache::load(std::shared_ptr<const vfs::Vfs> filesystem,
+    std::shared_ptr<const data::Catalog> catalog, const SetupMapQuery& query) {
+    if (find(*filesystem, *catalog, query)) return core::Result<void>::success();
+    auto maps = setup_maps(*filesystem, *catalog, query);
+    if (!maps) return core::Result<void>::failure(maps.error());
+    maps_ = std::move(maps).value();
+    filesystem_ = std::move(filesystem);
+    catalog_ = std::move(catalog);
+    generation_ = catalog_->generation();
+    query_ = query;
+    return core::Result<void>::success();
+}
+
+std::uint32_t setup_row_count(const SetupMap& map, const bool local_controls) noexcept {
+    return std::min(map.metadata.capacity.value_or(0), local_controls ? local_setup_rows
+        : static_cast<std::uint32_t>(sim::max_match_seats));
+}
+
+void repair_setup_selection(SetupSelection& selection, const SetupMap& map, const bool local_controls) {
     selection.map = map.path;
-    const auto rows = setup_row_count(map);
+    const auto rows = setup_row_count(map, local_controls);
     if (selection.slots.size() > rows) selection.slots.resize(rows);
     std::set<std::uint32_t> occupied;
     for (auto& slot : selection.slots) {
@@ -155,13 +209,14 @@ void repair_setup_selection(SetupSelection& selection, const SetupMap& map) {
 }
 
 core::Result<void> validate_setup_slots(const std::span<const LobbySlot> slots,
-    const assets::MapLobbyMetadata& metadata, const bool local_controls) {
+    const assets::MapLobbyMetadata& metadata, const bool local_controls, const bool complete_teams) {
     using Result = core::Result<void>;
     const auto fail = [](std::string message) {
         return Result::failure(detail::error(diagnostic_codes::fixture, std::move(message)));
     };
     if (!metadata.capacity) return fail("This map has no valid authored player capacity.");
-    const auto rows = std::min(*metadata.capacity, local_setup_rows);
+    const auto rows = std::min(*metadata.capacity, local_controls ? local_setup_rows
+        : static_cast<std::uint32_t>(sim::max_match_seats));
     if (slots.size() < 2 || slots.size() > rows) return fail("Choose at least two players within this map's local capacity.");
     if (metadata.new_markers != true) return fail("Legacy map starts are not supported yet.");
     if (!metadata.start_positions || metadata.start_positions->size() < 2)
@@ -177,10 +232,10 @@ core::Result<void> validate_setup_slots(const std::span<const LobbySlot> slots,
         if (local_controls && slot.slot != 1 && slot.human) return fail("Other local rows support AI or Open only.");
         if (slot.team >= metadata.start_positions->size()) return fail("The selected team has no authored start on this map.");
         const auto [team, inserted] = factions.emplace(slot.team, slot.faction);
-        if (!inserted && !detail::iequals(team->second, slot.faction))
+        if (complete_teams && !inserted && !detail::iequals(team->second, slot.faction))
             return fail("Players sharing a team must choose the same faction.");
     }
-    if (factions.size() < 2) return fail("Choose at least two different teams.");
+    if (complete_teams && factions.size() < 2) return fail("Choose at least two different teams.");
     return Result::success();
 }
 
@@ -208,7 +263,8 @@ core::Result<void> select_setup_colour(SetupSelection& selection, const std::uin
     return Result::success();
 }
 
-core::Result<FixtureOptions> setup_options(const SetupSelection& selection, std::span<const SetupMap> maps) {
+core::Result<FixtureOptions> setup_options(const SetupSelection& selection, std::span<const SetupMap> maps,
+    const bool local_controls) {
     using Result = core::Result<FixtureOptions>;
     const auto fail = [](std::string message) {
         return Result::failure(detail::error(diagnostic_codes::fixture, std::move(message)));
@@ -216,7 +272,7 @@ core::Result<FixtureOptions> setup_options(const SetupSelection& selection, std:
     const auto map = std::find_if(maps.begin(), maps.end(), [&](const auto& entry) { return entry.path == selection.map; });
     if (map == maps.end()) return fail("Select an installed space skirmish map.");
     if (!map->unavailable.empty()) return fail(map->unavailable);
-    if (auto valid = validate_setup_slots(selection.slots, map->metadata); !valid) return Result::failure(valid.error());
+    if (auto valid = validate_setup_slots(selection.slots, map->metadata, local_controls); !valid) return Result::failure(valid.error());
     std::set<std::uint32_t> colours;
     for (const auto& slot : selection.slots) {
         const auto colour = slot.colour_index.value_or(slot.slot - 1);

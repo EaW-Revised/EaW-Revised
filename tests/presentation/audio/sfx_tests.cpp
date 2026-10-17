@@ -3,6 +3,7 @@
 #include "eawr/presentation/audio/sfx.hpp"
 #include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/audio/command_cues.hpp"
+#include "eawr/presentation/audio/hardpoint_loss.hpp"
 #include "eawr/presentation/space/unit_fade.hpp"
 
 #include <array>
@@ -33,6 +34,47 @@ void expect(const bool condition, const std::string& message) {
 
 [[nodiscard]] bool near(const double a, const double b, const double tolerance = 1.0e-9) {
     return std::abs(a - b) <= tolerance;
+}
+
+void hardpoint_loss() {
+    audio::SfxRegistry registry;
+    std::vector<std::string> problems;
+    registry.add("Unit_Lost_Laser_Calamari", std::vector<Field>{{"Is_2D", "Yes"}, {"Is_3D", "No"},
+        {"Is_Unit_Response_VO", "Yes"}, {"Samples", "synthetic.wav"}, {"Overlap_Test", "Unit_Calamari"}}, problems);
+    registry.add("All_Weapons", std::vector<Field>{{"Samples", "synthetic.wav"}}, problems);
+    const auto* laser = registry.find("Unit_Lost_Laser_Calamari");
+    const auto* all = registry.find("All_Weapons");
+    std::map<std::string, const audio::SfxEvent*> cues;
+    const auto resolve = [&registry](const std::string& name) { return registry.find(name); };
+    audio::read_hardpoint_loss("HARD_POINT_WEAPON_LASER, Unit_Lost_Laser_Calamari", cues, resolve);
+    audio::read_hardpoint_loss("HARD_POINT_WEAPON_MISSILE, Unit_Lost_Laser_Calamari", cues, resolve);
+    audio::read_hardpoint_loss("hard_point_weapon_missile, ", cues, resolve);
+    const std::vector<std::string> types{"hard_point_weapon_laser", "hard_point_weapon_laser", "hard_point_weapon_missile"};
+    const std::array<std::uint32_t, 2> first{1, 2};
+    const std::array<std::uint32_t, 1> remaining{2};
+    const std::span<const std::uint32_t> none;
+    const auto choose = [&](bool local, std::size_t lost, std::span<const std::uint32_t> standing,
+                            bool weapons, const audio::SfxEvent* fallback) {
+        return audio::hardpoint_loss_cue(local, true, weapons, lost, standing, types, cues, fallback);
+    };
+    expect(!choose(true, 0, first, true, all), "BA-64: first laser loss stays silent while another laser stands");
+    const auto* chosen = choose(true, 1, remaining, true, all);
+    expect(chosen == laser, "BA-64: local Calamari's last laser selects its authored warning");
+    expect(!choose(false, 1, remaining, true, all), "BA-64: enemy/allied owner cannot warn the local player");
+    expect(!choose(true, 2, none, false, nullptr), "BA-64: blank derived class clears inherited warning");
+    expect(choose(true, 1, none, false, all) == all, "BA-64: authored all-weapons warning takes precedence");
+    expect(choose(true, 1, none, false, nullptr) == laser, "BA-64: absent all-weapons event falls back to class");
+    audio::Random random(7);
+    audio::EventQueue queue;
+    const auto admitted = queue.admit({{chosen, {}}}, random);
+    expect(admitted.handle.has_value(), "BA-64: local hardpoint warning enters ordinary SFX queue once");
+    expect(queue.admit({{chosen, {}}}, random).result == Result::instance_limit,
+        "BA-64: pending warning respects ordinary instance throttling");
+    auto competing = *laser;
+    competing.name = "Other_Calamari_Response";
+    expect(queue.admit({{&competing, {}}}, random).result == Result::overlap,
+        "BA-64: authored shared overlap group throttles different Calamari responses");
+    expect(queue.size() == 1, "BA-64: refused warnings do not queue retries");
 }
 
 void registry_and_presets() {
@@ -1154,6 +1196,7 @@ int main() {
     chains.cancel(0);
     expect(!chains.complete(0).cue, "explicit cancellation removes pending assist");
     registry_and_presets();
+    hardpoint_loss();
     event_lifecycle();
     stolen_event_completion();
     wave_files();

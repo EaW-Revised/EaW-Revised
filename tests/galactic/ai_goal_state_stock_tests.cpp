@@ -95,6 +95,8 @@ namespace eawr::script::foc::ai {
 // Supporting synthetic continuation inventory, not installed AI behavior.
 struct EngineContractAccess {
     static void running(Engine& e, std::uint64_t goal) {
+        const auto native_record_write = e.native_record_scope();
+        e.native_records_replaced(); e.mark_native_state_changed();
         auto& p = e.players_.front();
         auto found = std::find_if(p.proposed.begin(), p.proposed.end(), [&](const auto& row) { return row.id == goal; });
         Goal retained = *found; p.proposed.erase(found); retained.active = true;
@@ -102,15 +104,15 @@ struct EngineContractAccess {
         potential.units = {100}; potential.freestore = {51}; potential.sources = {0}; potential.producers = {0}; potential.pool_tokens = {0};
         potential.taskforce_of_unit = potential.team_of_unit = {0}; potential.cost = Real::from_repr(0x3ff0000000000001ULL);
         potential.current_contrast = potential.target_contrast = {{7, real(2)}}; potential.threshold = real(3);
-        Plan plan; plan.id = e.next_plan_id_++; plan.instance = e.next_instance_++; plan.definition = potential.plan;
+        Plan plan; plan.id = *e.allocate_plan_id(p); plan.instance = *e.allocate_instance_id(p); plan.definition = potential.plan;
         plan.goal = retained.id; plan.player = p.player; plan.target = retained.target; plan.start_tick = 0;
-        TaskForce tf; tf.id = e.next_taskforce_id_++; tf.plan = plan.id; tf.name = "Main"; tf.units = {51};
+        TaskForce tf; tf.id = *e.allocate_taskforce_id(p); tf.plan = plan.id; tf.name = "Main"; tf.units = {51};
         tf.types = {100}; tf.sources = {0}; tf.producers = {0}; tf.pool_tokens = {0}; tf.had_units = true; tf.last_target[51] = 61;
         plan.taskforces = {tf.id}; retained.plan = plan.id; p.assigned[51] = tf.id;
         const auto block = block_id(plan.instance, 17);
         Block b; b.id = block; b.instance = plan.instance; b.taskforce = tf.id; b.kind = Block::Kind::produce;
         b.destination_object = 61; b.movers = {51}; b.ordered_tick[51] = 99; b.distance = real(5); b.waiting_on = 0;
-        e.blocks_[block] = b;
+        e.players_.front().blocks[block] = b;
         BuildTask task; task.taskforce = tf.id; task.block = block; task.type = 100; task.object = 51;
         task.source = 2; task.producer = 10; task.issued = 41; task.generic_cost = real(2); p.tasks = {task};
         p.active = {retained}; p.activations[{"GOAL", retained.target}].entries = {{true, -1}, {false, 600}};
@@ -121,7 +123,7 @@ struct EngineContractAccess {
         p.nontrivial = 7; p.maintenance_due = true; p.exclusion_counts["ZERO"] = 0; p.reserved_credits[retained.id] = real(8);
         p.reserved_pool[100] = 1; p.reserved_pool_tokens[222] = retained.id;
         p.reserved[999999] = retained.id; // known pending loss/cancel retains identity
-        e.taskforces_[tf.id] = tf; e.running_[plan.id] = plan; e.plan_of_instance_[plan.instance] = plan.id;
+        e.players_.front().taskforces[tf.id] = tf; e.players_.front().running[plan.id] = plan; e.players_.front().plan_of_instance[plan.instance] = plan.id;
         e.pad_reservations_[10] = {p.player, retained.id, 100, true, 47};
         e.pending_attach_.push_back({p.player, retained.id}); e.globals_["MARKER"] = Real::from_repr(0x8000000000000000ULL);
         e.threats_[51][61] = real(4); e.last_hits_[51] = {61, true};
@@ -131,12 +133,16 @@ struct EngineContractAccess {
         event.arguments = {authoritative::Value{std::vector<authoritative::Value>{authoritative::Value::text("nested"), authoritative::Value::number(real(2))}}};
         e.events_ = {event}; e.orders_ = {{1, plan.instance, 3, "fixture", {authoritative::Value::number(real(11))}}};
         e.host_->credit_changes[p.player] = math::Fixed::from_raw(12345);
+
+        e.rebuild_runtime_index();
     }
     static std::uint64_t movement_fixture(Engine& e, std::uint64_t goal) {
+        const auto native_record_write = e.native_record_scope();
+        e.native_records_replaced(); e.mark_native_state_changed();
         running(e, goal);
-        auto& block = e.blocks_.begin()->second;
+        auto& block = e.players_.front().blocks.begin()->second;
         block.kind = Block::Kind::move; block.galactic_request = 77; block.galactic_actor = 50;
-        auto& force = e.taskforces_.at(block.taskforce); force.thread = 0; force.galactic_fleet = 50;
+        auto& force = e.players_.front().taskforces.at(block.taskforce); force.thread = 0; force.galactic_fleet = 50;
         e.players_.front().tasks.clear(); e.events_.clear(); e.orders_.clear(); e.pending_attach_.clear(); e.pad_reservations_.clear();
         return block.id;
     }

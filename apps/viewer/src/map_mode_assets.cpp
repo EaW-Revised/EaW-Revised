@@ -23,6 +23,7 @@ map_mode_detail::MapParticleProvider::MapParticleProvider(Node3D& host, const vf
 MapMode::State::State(Options value) : options(std::move(value)) {}
 
 MapMode::State::~State() {
+        free_game_menu();
         shutdown_trace::mark("map mode teardown begins");
         space.reset();
         shutdown_trace::mark("space view freed");

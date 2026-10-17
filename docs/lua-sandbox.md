@@ -297,7 +297,11 @@ with reversed partitions and request order.
 scripts. A tick: submit the local players' input with the keys it carries (UI-07
 `CommandScheduler::take`); submit the previous service's script commands in commit order;
 step the world; service the scripts on the same executor. Scripts therefore see the tick
-they follow, and their commands execute in the next one: never during a script call.
+they follow. Ordinary commands execute in the next tick. Object instances instead run at the
+in-tick object turn (SOS-42), after ability service and before tracking: ability commands become
+recorded uses at that seam, while their other verbs retain the next-tick route. Both services
+merge ordinary output in (issuer, sequence) order before routing or saving. Initialized objects
+are deferred at the barrier, including callbacks, so a turn never services them twice.
 
 A script command becomes a tactical player command through the translator registered for
 its verb (the tactical AI host registers FoC's), a pure function of the command that names the issuing
@@ -444,3 +448,5 @@ WGA-471/472 provide an opt-in census for galactic markup handles. At an eligible
 Native inventory and releases use private operations on the existing immediate-effect shadow. Release commits in stable native-ID order with the same atomic publication as ordinary script writes. Any rolled-back script call or quota fault suppresses collection for that invocation. VM destruction never calls the native host. An explicit host root supplier retains aliases in bridge command queues. Ordinary host observation copies do not own a native handle unless explicitly registered.
 
 The galactic policy visits completed invocations 64, 128, and so on. The fixed interval reduces recurring graph-walk work; the already-saved completed-invocation counter preserves its phase across load. An orphan remains until the next eligible clean invocation. The interval participates in session identity and never adapts to wall time or allocator state. Graph object/edge/physical-entry counters and elapsed time are diagnostic outputs only. The default and tactical profiles do no census and preserve their encoding.
+
+Host global inspection uses a raw lookup and preserves the Lua stack and logical memory charge. Looking up a scheduling field during a rebuild therefore does not consume script quota or alter canonical checkpoint bytes. Script-created strings keep their existing allocation charges.

@@ -154,6 +154,7 @@ struct UnitMode::State final {
         std::int32_t bone{};
         std::string texture;
         sim::AssetId asset{};
+        bool effect_missing{};
     };
     struct Frame final {
         float requested{};
@@ -266,7 +267,11 @@ bool UnitMode::State::plan(Node3D& host) {
     for (const preview::UnitSurface& surface : preview::unit_surfaces(model, levels)) {
         const assets::Mesh& mesh = model.meshes[surface.mesh];
         const assets::Submesh& submesh = mesh.submeshes[surface.submesh];
-        if (scene::find_legacy_selector(submesh.shader) == nullptr) {
+        const scene::AssetAccess effect_access{
+            .exists = [this](const std::string_view path) { return static_cast<bool>(filesystem->stat(path)); },
+        };
+        const bool effect_missing = scene::missing_material_effect(effect_access, submesh.shader);
+        if (scene::material_selector(submesh.shader, effect_missing) == nullptr) {
             skipped.push_back(mesh.name + "/" + std::to_string(surface.submesh) + " " + submesh.shader
                 + ": no legacy selector");
             continue;
@@ -275,6 +280,7 @@ bool UnitMode::State::plan(Node3D& host) {
         item.surface = surface;
         item.mesh = mesh.name;
         item.shader = submesh.shader;
+        item.effect_missing = effect_missing;
         item.bone = mesh.bone;
         item.route = !submesh.skin_bones.empty() ? "palette" : (mesh.bone >= 0 ? "rigid" : "unskinned");
         drawn.push_back(std::move(item));
@@ -338,10 +344,10 @@ bool UnitMode::State::upload() {
         mesh.submeshes = {source.submeshes[item.surface.submesh]};
         single.meshes.push_back(std::move(mesh));
         const assets::Submesh& submesh = single.meshes.front().submeshes.front();
-        const scene::LegacySelector* selector = scene::find_legacy_selector(submesh.shader);
+        const scene::LegacySelector* selector = scene::material_selector(submesh.shader, item.effect_missing);
 
         assets::Texture texture = placeholder_texture();
-        for (const assets::MaterialParameter& parameter : submesh.parameters) {
+        if (!item.effect_missing) for (const assets::MaterialParameter& parameter : submesh.parameters) {
             if (!ieq(parameter.name, "BaseTexture")) continue;
             const auto* name = std::get_if<std::string>(&parameter.value);
             if (name == nullptr) continue;
@@ -365,7 +371,7 @@ bool UnitMode::State::upload() {
             .pass_name = std::string(selector->pass),
             .bindings = {},
         };
-        for (const assets::MaterialParameter& parameter : submesh.parameters) {
+        if (!item.effect_missing) for (const assets::MaterialParameter& parameter : submesh.parameters) {
             material.bindings.push_back({parameter.name, parameter.value});
         }
         if (colour && std::string_view(selector->program).find("Colorize") != std::string_view::npos) {
@@ -463,6 +469,7 @@ bool UnitMode::State::write_report() const {
         const Drawn& item = drawn[index];
         output << (index ? ",\n    " : "\n    ") << "{\"mesh\": " << json(item.mesh) << ", \"submesh\": "
                << item.surface.submesh << ", \"shader\": " << json(item.shader) << ", \"route\": " << json(item.route)
+               << ", \"effect_missing\": " << (item.effect_missing ? "true" : "false")
                << ", \"bone\": " << item.bone << ", \"texture\": " << json(item.texture) << ", \"asset\": " << item.asset
                << "}";
     }

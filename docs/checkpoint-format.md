@@ -69,7 +69,7 @@ skipped. IDs from 0x8000 are never part of a state hash.
 | 8 | victory | conditions, pending result, waits | galaxy sections |
 | 9 | scripts | one scheduler save per Lua host ([Lua persistence](lua-persistence.md)) | galaxy sections |
 | 10 | child-log | a battle as its entry and commands | v1, below |
-| 11 | child-state | a battle's full state | v7, below |
+| 11 | child-state | a battle's full state | v8, below |
 | 12 | mod-list | the mod load order | reserved |
 | 13 | tactical-return | persistent hero returns, upgrades and structure markers; latest tactical result and its conflict context | v1 |
 | 14 | galactic-ai | completed boundary and versioned native AI components, including retained funding | v1 |
@@ -322,29 +322,36 @@ barrier without its payload. Child
 flag, host, log and state must participate together; the conflict identity, effective seat
 assignment and entry/barrier clocks are checked before restoration (WGS-44/62/65/66).
 
-The campaign child's tactical AI payload freezes the exact Lua/XML/type/selection closure and immutable world
+The tactical AI payload, in standalone or campaign sessions, freezes the exact Lua/XML/type/selection closure and immutable world
 content identity. Its engine archive retains system clocks, allocation cursors, targets,
 goals and selected templates, potential/running plans, taskforces, build tasks, blocks,
 reservations, learning histories, threats, pending events/orders, wallet deltas and synchronized
-RNG. The threat grid retains its tracked-object deadlines, entries and per-cell insertion
+RNG. Tactical attack positioning retains each unit's issuing plan instance, next service
+deadline and retained attack target. A departed plan's issuing identity persists until
+flag-off or unit loss; a lost unit's row awaits the next positioning service for cleanup.
+The threat grid retains its tracked-object deadlines, entries and per-cell insertion
 order; recreating it from current positions would change the next decision. Producer/query
 caches and diagnostic timelines are rebuilt or discarded. Restore validates the rebuilt
-configuration, player/goal/plan/taskforce/block references, Lua plan instances, framing and
-canonical map order before publishing. It services no gameplay (WGS-66).
+configuration, player/goal/plan/taskforce/block references, live Lua plan instances, framing and
+canonical map order before publishing. An exited plan awaits owner cleanup after its Lua
+instance is removed. Restore services no gameplay (WGS-66).
 
-Campaign sessions with a goals owner publish this payload. Any tactical session with an
+Tactical sessions with a goals owner publish this payload in both standalone and campaign modes
+(GFS-A24). Any tactical session with an
 authoritative scoring provider or a used suspension gate also publishes it, including skirmish,
-MP and freestore-only sessions. Other standalone sessions retain their Lua-only contract.
-The tactical-host-v3 envelope retains the gate, provider continuation and freestore hold clock;
-the eawr-tactical-ai-v6 inventory additionally retains the goal engine's enabled service clock
-and whether its first staggered deadlines have been seeded. Pending holds survive restore.
+MP and freestore-only sessions. Goal-free sessions without these providers retain their Lua-only contract.
+The tactical-host-v3 envelope retains the gate, scoring-provider continuation and freestore hold clock.
+When a goals owner is present, its eawr-tactical-ai-v10 inventory additionally retains the goal engine's enabled service clock
+and whether its first staggered deadlines have been seeded, plus the proposal-block holders
+owned by each goal. It also retains each AI player's synchronized stream (GFS-A24). The threat grid also retains each session player's per-cell last fully-fogged frames and the setup station limit (PE-25, PG-03); its previous fog rows are derived and are re-recorded from the restored tick. The immutable
+controller configuration includes its authored goal-set extension. Pending holds survive restore.
 Older native envelopes are rejected; pre-release saves have no compatibility guarantee.
 The child's script digest composes the Lua digest and SHA-256 of these native bytes with
 `eawr-tactical-host-v2`. The native closure configuration digest is cached once; runtime
 serialization remains a full prepared-barrier inventory, with no incremental performance
 claim. Parent galactic goal components use `eawr-galactic-goals-v4` to include explicit selected
 template identity, complete immutable template/constants configuration and all eight learning
-tables. The shared tactical engine inventory uses `eawr-tactical-ai-v6`; restore retains
+tables. The shared tactical engine inventory uses `eawr-tactical-ai-v10`; restore retains
 outcomes, expiries, cumulative counters and synchronized RNG without reevaluating them.
 
 Exact runtime/resync restoration preserves nested pause counts and emits no load prologue.

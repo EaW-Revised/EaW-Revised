@@ -30,7 +30,7 @@
       "path": "src/skirmish/economy.cpp",
       "start": "namespace eawr::skirmish {",
       "end": "} // namespace eawr::skirmish",
-      "sha256_lf": "8a32e5bc320ec0abaff1929c64d0284b4d257c1248b1c9fe166c5d27ae49be5e"
+      "sha256_lf": "0c10eb04fd9ecb72ee17288e7bb7edf17190334dee17bb2eb13f11c3848beda6"
     },
     "src/data/xml_registry.cpp#layer_rank": {
       "path": "src/data/xml_registry.cpp",
@@ -54,13 +54,13 @@
       "path": "src/skirmish/start.cpp",
       "start": "class Builder final {",
       "end": "\n} // namespace\n",
-      "sha256_lf": "c6c8c2b8b8378bde1a381b961c233c73ac994a2f09307ed7cbb270a8fa56652d"
+      "sha256_lf": "9d1f171521ada7600c4d50de8e561b4901537238db3fab9ed073ef57a8f5e6ab"
     },
     "src/script/foc/tactical_ai_bindings.cpp#plan_bindings": {
       "path": "src/script/foc/tactical_ai_bindings.cpp",
       "start": "void register_globals(",
       "end": "} // namespace tactical_ai_detail",
-      "sha256_lf": "70bbee1e81641eaa2f5a0e34cd90fa3050118a7f8fed791aaf8bc2699dac02d3"
+      "sha256_lf": "b967e36d4196a9e296a5f9457fd0aae6405c600a4616bc0e4065405f8a167ee5"
     },
     "src/script/foc/tactical_ai.cpp#unsupported_plan_calls": {
       "path": "src/script/foc/tactical_ai.cpp",
@@ -90,7 +90,7 @@
       "path": "src/sim/tactical/session_step_commands.cpp",
       "start": "    auto& replans = tracked_.value().replans.value();\n    auto& self_destructs = tracked_.value().self_destructs.emplace();",
       "end": "    const auto& table = impl_->motion;\n    const auto& frame = tracked_.value().frame.emplace",
-      "sha256_lf": "31d887b1e66da10e58d3ad3f3dbfe4ee88f0bae55b13605127629963e0200c15"
+      "sha256_lf": "1fd10a6ea137698ec1f40beb19492e61971496d4dbd8ac08add14902ac534dd2"
     },
     "src/sim/tactical/fighters_spawner.cpp#service_spawner": {
       "path": "src/sim/tactical/fighters_spawner.cpp",
@@ -102,7 +102,7 @@
       "path": "src/script/foc/ai_selection.cpp",
       "start": "bool Engine::select_units(",
       "end": "bool Engine::test_target_contrast(",
-      "sha256_lf": "e38f3ba70e40072a45153a798aad1a4340687e2771d78564ca325825a87534b8"
+      "sha256_lf": "7d5ecfdc9762954f0c78b69defbb0861a56e4ace1e29a5bcef9d1b18b56306ca"
     },
     "src/script/foc/ai_execution.cpp#economy_execution": {
       "path": "src/script/foc/ai_execution.cpp",
@@ -126,7 +126,7 @@
       "path": "src/data/xml_merge.cpp",
       "start": "core::Result<EffectiveObject> Catalog::resolve(const std::string_view object_id) const {",
       "end": "} // namespace eawr::data",
-      "sha256_lf": "3b4bf221d220dcef7d361ef5c5a2c6b17dbdea6c3d9d51c4fa85df4e0718c1d6"
+      "sha256_lf": "e404c99f78a929ae7cbb27c4ec212752931a72328e762db92bf10e751e9a6401"
     },
     "src/units/unit_support.cpp#resolve": {
       "path": "src/units/unit_support.cpp",

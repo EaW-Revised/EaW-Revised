@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -122,6 +123,9 @@ public:
     [[nodiscard]] std::shared_ptr<const sim::galactic::GalacticSnapshot> snapshot() const;
     // Confirmed startup fact from the prepared owner, before its live thread starts.
     [[nodiscard]] bool native_ai_installed() const noexcept;
+    // The AI players the runtime actually selected (player and authored AI player type).
+    struct NativeAiPlayer { sim::galactic::PlayerId player{}; std::string player_type; };
+    [[nodiscard]] const std::vector<NativeAiPlayer>& native_ai_players() const noexcept;
 private:
     friend class LiveGameSession;
     class Impl;
@@ -230,11 +234,68 @@ struct LiveGalacticEvent {
     // SND-68/WGEP-130: qualified local tech-setter request. For these rows
     // `event` is unused; the recipient is retained independently of snapshots.
     std::optional<sim::galactic::PlayerId> construction_options_player{};
+    std::optional<sim::galactic::GalacticFeedbackNotice> feedback{};
 };
 struct LiveGalacticEvents {
     std::uint64_t through{};
     bool incomplete{}; // reader fell behind the bounded retention window
     std::vector<LiveGalacticEvent> events;
+};
+
+// WGUI-114: transient per-player wall clock; never checkpointed or hashed.
+class GalacticApproachThrottle final {
+public:
+    [[nodiscard]] bool admit(sim::galactic::PlayerId player, std::uint64_t now_ms) {
+        if (!player) return false;
+        const auto at = last_.find(player);
+        const auto last = at == last_.end() ? 0 : at->second;
+        if (now_ms < last || now_ms - last < 5000) return false;
+        last_[player] = now_ms;
+        return true;
+    }
+private:
+    std::map<sim::galactic::PlayerId, std::uint64_t> last_;
+};
+
+// The live pacer's wall-clock schedule (ADR-013: speed changes only the pacing). Step n after a
+// rebase is due at start + n * interval, so wake-up latency and tick cost do not add to every
+// period and a 4x setting really runs four times as many ticks per real second as long as the
+// ticks fit the interval. A pacer that falls too far behind drops the missed time instead of
+// spiralling. Pure arithmetic over caller-supplied time points; no clock is read here.
+class LivePaceSchedule final {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    // Starts a fresh interval: the next step is due one interval after `now`.
+    void rebase(const Clock::time_point now, const std::chrono::nanoseconds interval) noexcept {
+        start_ = now;
+        interval_ = interval;
+        steps_ = 0;
+    }
+    [[nodiscard]] std::chrono::nanoseconds interval() const noexcept { return interval_; }
+    [[nodiscard]] Clock::time_point next_due() const noexcept {
+        return start_ + interval_ * static_cast<std::int64_t>(steps_ + 1U);
+    }
+    // One step ran (paced or forced by input); the next due time moves one interval on.
+    void stepped() noexcept { ++steps_; }
+    // Steps due at `now` and not yet run (1 when only the next one is due).
+    [[nodiscard]] std::uint64_t behind(const Clock::time_point now) const noexcept {
+        if (now < next_due()) return 0U;
+        const auto due = static_cast<std::uint64_t>((now - start_) / interval_);
+        return due > steps_ ? due - steps_ : 0U;
+    }
+    // When more than `max_catch_up` steps are due at once, forget the missed time (the next step is
+    // due now). Returns whether it did.
+    bool drop_backlog(const Clock::time_point now, const std::uint64_t max_catch_up) noexcept {
+        if (behind(now) <= max_catch_up) return false;
+        start_ = now - interval_;
+        steps_ = 0;
+        return true;
+    }
+private:
+    Clock::time_point start_{};
+    std::chrono::nanoseconds interval_{std::chrono::nanoseconds(1)};
+    std::uint64_t steps_{};
 };
 
 class LiveGameSession final {
@@ -260,7 +321,12 @@ public:
         std::shared_ptr<const CampaignServiceConfiguration> services{};
         LiveSaveOptions saves{};
         bool await_presentation{};
+        // Real-time pacing: ticks that may be overdue before the pacer drops the missed wall time
+        // (the tactical pacer's LiveSession::Options::max_catch_up, same value).
+        std::uint64_t max_catch_up{5};
     };
+    // The newest tick_cost_history parent steps are kept for the performance overlay.
+    static constexpr std::size_t tick_cost_history = 4096;
 
     [[nodiscard]] static core::Result<std::unique_ptr<LiveGameSession>> start(
         const sim::galactic::GalacticSetup& setup, Options options);
@@ -314,6 +380,10 @@ public:
     [[nodiscard]] bool battle_paused(sim::EntityId conflict) const;
     [[nodiscard]] bool battle_is_ready(sim::EntityId conflict) const;
     [[nodiscard]] std::uint64_t completed_tick() const;
+    // Wall-clock cost of each parent step after `after` (a session tick), oldest first:
+    // `command-source` (the callback, which runs the GC AI) and `session-step`. Never part of a
+    // snapshot, hash or replay.
+    [[nodiscard]] std::vector<LiveTickCost> tick_costs_after(std::uint64_t after) const;
     [[nodiscard]] std::optional<core::Diagnostic> failure() const;
     [[nodiscard]] std::vector<core::Diagnostic> rejected_orders() const;
     [[nodiscard]] std::size_t worker_count() const noexcept;

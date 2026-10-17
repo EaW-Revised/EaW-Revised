@@ -7,8 +7,8 @@
 // - the shell art (faceplate, help droid) as textured canvas triangles with
 //   their repeating UVs, MeshAlpha alpha-blended and the radar's MeshAdditive
 //   scan lines added, farthest first;
-// - the options button as a state-textured button (a stub: it counts presses
-//   and opens nothing yet; P2-20e adds the in-game menu);
+// - the options button as a state-textured button (it counts presses and runs
+//   the options handler, the in-game menu);
 // - the time panel: help and holocron as inert normal-state art, pause and
 //   fast forward as toggle buttons (#459, docs/behaviour/tactical-time-controls.md);
 // - the battle overlay (#453, #459): the win/lose message, the pause banner and
@@ -234,6 +234,9 @@ public:
     void set_time_handlers(TimeHandlers handlers);
     void set_order_handler(std::function<void(std::string_view)> handler);
     void set_movie_handler(std::function<void()> handler);
+    // The options button (b_option_t, tooltip TEXT_BUTTON_MAIN_MENU): what a press does, the in-game menu.
+    // Without a handler the press only counts.
+    void set_options_handler(std::function<void()> handler);
     void set_beacon_handler(std::function<void()> handler);
     void set_beacon(bool enabled, bool targeting);
     void set_movie_mode(bool on);
@@ -261,6 +264,9 @@ public:
     using ReplayWriter = std::function<std::vector<std::uint8_t>(std::string&)>;
     void set_replay_writer(bool allowed, ReplayWriter writer);
     void set_begin(bool ready);
+    // RP-06..RP-08: the retreat countdown line (already built, localized) in the retreating faction's
+    // colour; an empty line hides it. The position is the tactical countdown share of GameConstants.
+    void set_retreat_countdown(const std::string& line, const std::array<std::uint8_t, 4>& colour);
     // #848 (docs/behaviour/foc-battle-selection.md V-5b): while either overview level is on, the
     // tactical shell with everything on it and, while paused, the pause banner hide; the win/lose
     // message and the end panel stay (V-5e).
@@ -268,7 +274,7 @@ public:
     // Whether the shell and the pause banner draw this frame.
     [[nodiscard]] bool shell_shown() const;
     [[nodiscard]] bool pause_banner_shown() const;
-    // A control's centre in viewport pixels while it is shown: pause, fast_forward, resume, quit.
+    // A control's centre in viewport pixels while it is shown: pause, fast_forward, resume, quit, options.
     [[nodiscard]] std::optional<std::array<float, 2>> control_point(const std::string& name) const;
     // The "hud" object of a viewer report: what was drawn, from where, and the
     // pixel rects at the current viewport size.

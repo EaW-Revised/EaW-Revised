@@ -19,6 +19,7 @@ view, not a census of tags used in a particular battle.
 | presentation-later | Presentation work outside the current space battle scope. |
 | foc-ignores | The registry records evidence that FoC ignores this value. |
 | deferred | Explicitly postponed; see the note or tracking ticket. |
+| by-design | Our implementation intentionally replaces this mechanism; the evidence cites the rule that says so. |
 | land-or-galactic | Land battle or galactic campaign work outside space skirmish. |
 | multiplayer | Multiplayer work outside the current scope. |
 
@@ -26,26 +27,27 @@ view, not a census of tags used in a particular battle.
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 1831 | 1831 |
-| partial | 1023 | 1023 |
-| todo | 1271 | 1271 |
-| presentation-later | 0 | 459 |
-| foc-ignores | 250 | 250 |
+| applied | 1881 | 1881 |
+| partial | 1032 | 1032 |
+| todo | 1258 | 1258 |
+| presentation-later | 0 | 457 |
+| foc-ignores | 251 | 251 |
 | deferred | 75 | 75 |
-| land-or-galactic | 0 | 3295 |
+| by-design | 10 | 10 |
+| land-or-galactic | 0 | 3240 |
 | multiplayer | 0 | 4 |
-| **Total** | **4450** | **8208** |
+| **Total** | **4507** | **8208** |
 
 ## Totals by area
 
 | Area | Space skirmish | Everything |
 |---|---:|---:|
-| [ai](ai.md) | 99 | 109 |
-| [combat](combat.md) | 1272 | 3186 |
+| [ai](ai.md) | 102 | 112 |
+| [combat](combat.md) | 1310 | 3184 |
 | [data](data.md) | 74 | 74 |
-| [economy](economy.md) | 842 | 1126 |
+| [economy](economy.md) | 840 | 1109 |
 | [fighters](fighters.md) | 61 | 89 |
-| [movement](movement.md) | 412 | 489 |
-| [presentation](presentation.md) | 1690 | 3135 |
+| [movement](movement.md) | 414 | 491 |
+| [presentation](presentation.md) | 1706 | 3149 |
 
 Regenerate with `python tools/inventory/tag_report.py`. Do not edit generated pages by hand.

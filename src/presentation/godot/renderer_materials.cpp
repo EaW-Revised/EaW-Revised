@@ -278,6 +278,7 @@ void GodotRenderer::Impl::configure_material(
             godot_matrix(meshgloss_hemisphere_matrix(0.08F, 0.0F, light)));
         rendering.material_set_param(material, StringName("eawr_sph_fill_b"),
             godot_matrix(meshgloss_hemisphere_matrix(0.10F, 0.0F, light)));
+        rendering.material_set_param(material, StringName("eawr_light_ambient"), Vector3(0.08F, 0.08F, 0.10F));
         rendering.material_set_param(material, StringName("eawr_light_diffuse"), Vector3(2.0F, 1.88F, 1.72F));
         rendering.material_set_param(material, StringName("eawr_eye_position"),
             Vector3(0.0F, 420.0F, 1050.0F));

@@ -1,4 +1,5 @@
 #include "unit_tables_decode.hpp"
+#include "eawr/sim/math/geometry.hpp"
 
 namespace eawr::units::unit_tables_detail {
 
@@ -75,10 +76,30 @@ BonePoint Loader::point(const std::string& bone, const Frames* owner, const std:
                     const std::optional<std::size_t> attach_bone) {
         BonePoint result;
         result.bone = bone;
+        const auto note_frame = [&] {
+            if (!result.axes) return;
+            auto normalized = *result.axes;
+            for (auto& axis : normalized) {
+                const auto value = sim::math::normalize(axis);
+                if (!value) return;
+                axis = value.value();
+            }
+            for (std::size_t left = 0; left < normalized.size(); ++left) {
+                for (std::size_t right = left + 1; right < normalized.size(); ++right) {
+                    const auto product = sim::math::dot(normalized[left], normalized[right]);
+                    if (product && (product.value().raw() < -sim::tactical::frame_tolerance_raw
+                            || product.value().raw() > sim::tactical::frame_tolerance_raw)) {
+                        report_.note(owner_id, field, bone, "W-07: nonorthogonal bone axes retained");
+                        return;
+                    }
+                }
+            }
+        };
         if (bone.empty() || owner == nullptr) return result;
         if (const auto index = bone_index(*owner->model, bone)) {
             result.position = translation(owner->frames[*index]);
             result.axes = axes(owner->frames[*index]);
+            note_frame();
             return result;
         }
         const Frames* attached = attached_path.empty() || !attach_bone ? nullptr : frames(attached_path, owner_id);
@@ -89,6 +110,7 @@ BonePoint Loader::point(const std::string& bone, const Frames* owner, const std:
                     result.position = translation(frame.value());
                     result.axes = axes(frame.value());
                     result.from_attached_model = true;
+                    note_frame();
                     return result;
                 }
             }
@@ -142,6 +164,10 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         UnitType unit;
         unit.id = id;
         unit.kind = hint;
+        // PL-20 covers unique names. Duplicate names retain the catalog winner's position;
+        // the separate retail duplicate-entry/name-lookup seam is tracked in legacy #3741.
+        if (const auto* definition = input_.catalog->find(id, data::Category::game_object))
+            unit.table_order = (static_cast<std::uint64_t>(definition->registry_order) << 32) | definition->definition_order;
         auto object = resolve(*input_.catalog, id, data::Category::game_object, id, "type", report_);
         if (!object) {
             tables_.units.push_back(std::move(unit));
@@ -215,6 +241,8 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         if (!unit.death_projectiles.empty()) {
             for (const auto& projectile : unit.death_projectiles) want_projectile(projectile);
         }
+        unit.retreat_self_destruct = trim(object->text("Retreat_Self_Destruct_Explosion"));
+        want_projectile(unit.retreat_self_destruct);
         unit.capture_point = has_behavior(*object, "CAPTURE_POINT");
         unit.build_pad = has_behavior(*object, "TACTICAL_BUILD_OBJECTS");
         unit.under_construction = has_behavior(*object, "TACTICAL_UNDER_CONSTRUCTION");
@@ -406,9 +434,11 @@ void Loader::load_projectile(const std::string& id) {
         projectile.id = object->effective.object_id;
         bool spawned = false;
         bool death_payload = false;
+        bool retreat_payload = false;
         bool fired = false;
         for (const auto& unit : tables_.units) {
             for (const auto& entry : unit.death_projectiles) death_payload |= iequals(entry, projectile.id);
+            retreat_payload |= iequals(unit.retreat_self_destruct, projectile.id);
             for (const auto* list : {&unit.abilities, &unit.team_abilities}) for (const auto& ability : *list) {
                 spawned |= iequals(ability.spawned_object, projectile.id);
                 fired |= iequals(ability.projectile_override, projectile.id);
@@ -443,7 +473,7 @@ void Loader::load_projectile(const std::string& id) {
             projectile.rocket_straight_distance = object->fixed("Projectile_Rocket_Straight_Distance", report_, false);
         }
         // WNO-30: the created death payload has flight/lifetime but no authored category.
-        if (projectile.category.empty() && !spawned_only && !(death_payload && !fired))
+        if (projectile.category.empty() && !spawned_only && !((death_payload || retreat_payload) && !fired))
             report_.missing(projectile.id, "Projectile_Category", {}, "required tag is absent");
         projectile.does_shield_damage = flag(*object, "Projectile_Does_Shield_Damage", true).value_or(false);
         projectile.does_energy_damage = flag(*object, "Projectile_Does_Energy_Damage", false).value_or(false);

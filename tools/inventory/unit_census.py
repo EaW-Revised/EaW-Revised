@@ -209,7 +209,7 @@ def census(game_root):
                 need(row, key)
                 continue
             status = entry["status"]
-            if status in ("foc-ignores", "land-or-galactic", "presentation-later", "multiplayer", "deferred"):
+            if status in ("foc-ignores", "land-or-galactic", "presentation-later", "multiplayer", "deferred", "by-design"):
                 row.setdefault("excluded_tags", []).append({"class": obs["registry_class"], "tag": obs["tag"],
                     "registry_status": status, "reason": entry.get("note", entry.get("evidence", "registry scope decision"))})
                 continue

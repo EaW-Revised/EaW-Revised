@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/core/tick_profile.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include "eawr/sim/tactical/formation.hpp"
@@ -30,6 +31,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -61,6 +63,10 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
 }
 
 core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const std::uint8_t> bytes) {
+    if (impl_->object_turn_running) {
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            "load_checkpoint_state during an object-turn provider call"));
+    }
     try {
         checkpoint_detail::Reader in(bytes);
         std::uint32_t version{};
@@ -151,6 +157,12 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         for (auto it = impl_->pending.begin(); it != impl_->pending.end() && it->first.tick < impl_->completed_tick;) {
             impl_->executed.push_back(it->second);
             it = impl_->pending.erase(it);
+        }
+        // #3644: the factory also submitted the object-turn uses of the past ticks.
+        impl_->object_turns_executed.clear();
+        while (!impl_->object_turn_pending.empty() && impl_->object_turn_pending.begin()->second.tick < impl_->completed_tick) {
+            impl_->object_turns_executed.push_back(impl_->object_turn_pending.begin()->second);
+            impl_->object_turn_pending.erase(impl_->object_turn_pending.begin());
         }
         impl_->rebuild(live, false);
         impl_->publish_staged(live, {}, {});
@@ -388,8 +400,88 @@ TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const
         return instance;
     }
 
+void TacticalSession::Impl::append_canonical_unit(std::vector<std::uint8_t>& bytes, const LiveUnit& unit) const {
+    detail::append_unit_record(bytes, unit.state);
+    detail::append_order(bytes, unit.state.order);
+    if (unit.state.barrage_source != invalid_entity_id) {
+        bytes.insert(bytes.end(), {'B', 'P', 'R', 'X'});
+        sim::detail::append_u64(bytes, unit.state.barrage_source);
+    }
+    // A durable unit appends its health; any other unit encodes exactly as before #72.
+    if (unit.durability) {
+        append_fixed(bytes, unit.durability->hull);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(unit.durability->hardpoints.size()));
+        sim::detail::append_u32(bytes, 0);
+        for (const auto health : unit.durability->hardpoints) {
+            append_fixed(bytes, health);
+        }
+        // With damage rules (#74): the shield and the depletion and last-hit frames; since
+        // #361 the energy pool and the next shield and energy recharge frames.
+        if (durability.damage) {
+            append_fixed(bytes, unit.durability->shields);
+            for (const auto& frame : {unit.durability->depleted_frame, unit.durability->last_hit_frame}) {
+                sim::detail::append_u32(bytes, frame ? 1U : 0U);
+                sim::detail::append_u64(bytes, frame.value_or(0));
+            }
+            append_fixed(bytes, unit.durability->energy);
+            sim::detail::append_u64(bytes, unit.durability->next_shield_frame);
+            sim::detail::append_u64(bytes, unit.durability->next_energy_frame);
+        }
+    }
+    // A unit with a motion profile (#70) then appends its motion record, and with
+    // avoidance rules (#71) its plan's nodes.
+    if (unit.motion) {
+        append_motion(bytes, *unit.motion);
+        if (motion.avoidance) {
+            append_nodes(bytes, *unit.motion);
+        }
+    }
+    // A unit with a combat profile (#73) then appends its combat record.
+    if (unit.combat) {
+        detail::append_combat(bytes, *unit.combat);
+    }
+}
+
+std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const PartitionExecutor& executor) const {
+    std::vector<std::pair<EntityId, entt::entity>> order;
+    std::vector<LiveUnit> units;
+    {
+        core::tick_profile::Scope record_profile_scope("serial.tactical.finish.records");
+        order.assign(handles.begin(), handles.end());
+        units.resize(order.size());
+    }
+    std::array<std::vector<std::uint8_t>, tick_partition_count> encoded_units;
+    // The registry is frozen after the ordered commit. Each fixed range owns its
+    // copied records and byte buffer; only pointer metadata is gathered serially.
+    const auto prepared = executor.execute_phase("canonical-records", tick_partition_count,
+        [&](const std::size_t partition) {
+            const auto range = partition_range(partition, units.size());
+            std::vector<std::uint8_t> bytes;
+            bytes.reserve((range.end - range.begin) * (detail::unit_record_size + detail::order_record_size));
+            for (auto index = range.begin; index < range.end; ++index) {
+                units[index] = live_at(order[index].first, order[index].second);
+                append_canonical_unit(bytes, units[index]);
+            }
+            encoded_units[partition] = std::move(bytes);
+        });
+    // This phase only accelerates publication of an already committed tick. A
+    // failed read-only worker pass must not leave that tick without its hash and
+    // snapshot; discard its partial buffers and use the existing serial encoder.
+    if (!prepared) return canonical_bytes();
+    return canonical_bytes(units, encoded_units);
+}
+
 std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
-        const auto units = sorted_live();
+        const auto units = [&] {
+            core::tick_profile::Scope record_profile_scope("serial.tactical.finish.records");
+            return sorted_live();
+        }();
+        return canonical_bytes(units, {});
+    }
+
+std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span<const LiveUnit> units,
+    const std::span<const std::vector<std::uint8_t>> encoded_units) const {
+        core::tick_profile::Scope encoding_profile_scope("serial.tactical.finish.encoding");
         std::vector<std::uint8_t> bytes;
         bytes.reserve(120 + setup.players.size() * detail::player_record_size
             + units.size() * (detail::unit_record_size + detail::order_record_size));
@@ -415,46 +507,11 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
             detail::append_player(bytes, player);
         }
         sim::detail::append_u64(bytes, units.size());
-        for (const auto& unit : units) {
-            detail::append_unit_record(bytes, unit.state);
-            detail::append_order(bytes, unit.state.order);
-            if (unit.state.barrage_source != invalid_entity_id) {
-                bytes.insert(bytes.end(), {'B', 'P', 'R', 'X'});
-                sim::detail::append_u64(bytes, unit.state.barrage_source);
-            }
-            // A durable unit appends its health; any other unit encodes exactly as before #72.
-            if (unit.durability) {
-                append_fixed(bytes, unit.durability->hull);
-                sim::detail::append_u32(bytes, static_cast<std::uint32_t>(unit.durability->hardpoints.size()));
-                sim::detail::append_u32(bytes, 0);
-                for (const auto health : unit.durability->hardpoints) {
-                    append_fixed(bytes, health);
-                }
-                // With damage rules (#74): the shield and the depletion and last-hit frames; since
-                // #361 the energy pool and the next shield and energy recharge frames.
-                if (durability.damage) {
-                    append_fixed(bytes, unit.durability->shields);
-                    for (const auto& frame : {unit.durability->depleted_frame, unit.durability->last_hit_frame}) {
-                        sim::detail::append_u32(bytes, frame ? 1U : 0U);
-                        sim::detail::append_u64(bytes, frame.value_or(0));
-                    }
-                    append_fixed(bytes, unit.durability->energy);
-                    sim::detail::append_u64(bytes, unit.durability->next_shield_frame);
-                    sim::detail::append_u64(bytes, unit.durability->next_energy_frame);
-                }
-            }
-            // A unit with a motion profile (#70) then appends its motion record, and with
-            // avoidance rules (#71) its plan's nodes.
-            if (unit.motion) {
-                append_motion(bytes, *unit.motion);
-                if (motion.avoidance) {
-                    append_nodes(bytes, *unit.motion);
-                }
-            }
-            // A unit with a combat profile (#73) then appends its combat record.
-            if (unit.combat) {
-                detail::append_combat(bytes, *unit.combat);
-            }
+        if (encoded_units.empty()) {
+            for (const auto& unit : units) append_canonical_unit(bytes, unit);
+        } else {
+            // Fixed contiguous ranges concatenate in exactly the serial entity order.
+            for (const auto& part : encoded_units) bytes.insert(bytes.end(), part.begin(), part.end());
         }
         std::uint64_t disabled_garrisons = 0;
         for (const auto& unit : units) disabled_garrisons += unit.state.garrison_enabled ? 0U : 1U;

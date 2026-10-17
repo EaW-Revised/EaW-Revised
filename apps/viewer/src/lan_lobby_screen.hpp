@@ -25,7 +25,7 @@
 #include "eawr/net/tcp_transport.hpp"
 #include "eawr/presentation/ui/lan_lobby.hpp"
 #include "eawr/presentation/ui/layout.hpp"
-#include "eawr/skirmish/start.hpp"
+#include "eawr/skirmish/setup.hpp"
 
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/control.hpp>
@@ -93,6 +93,7 @@ public:
     };
     struct Snapshot final {
         std::string page;
+        std::string rectangles{"{}"};
         std::string name;
         std::uint32_t colour{};
         std::vector<std::string> games;      // lobby rows as shown
@@ -103,7 +104,11 @@ public:
         std::vector<RowState> rows;          // staging rows
         std::string status;                  // the staging's or lobby's last message
         std::string map;
+        std::string drawn_map;
+        std::vector<std::string> settings;
+        bool preview_visible{}, settings_read_only{};
         std::string start_caption;
+        std::string start_reason;
         bool start_enabled{};
         bool host{};
         std::uint64_t room_revision{};
@@ -122,6 +127,8 @@ public:
         bool chat_open{};                    // the online chat window can send
         bool room_private{};                 // the room being hosted asks for a password
         std::vector<std::string> locked;     // names of the rooms drawn with the lock
+        std::vector<std::string> connections; // the curated per-seat online connection list
+        bool connections_open{};
     };
 
     EawrLanLobby();
@@ -129,7 +136,7 @@ public:
 
     // Loads the dialog catalogue, skin, fonts, text, maps and colours. False with failure() set
     // when the data could not be read; the screen then cannot be shown.
-    [[nodiscard]] bool build(Options options);
+    [[nodiscard]] bool build(Options options, const skirmish::SetupMapCache* shared_maps = nullptr);
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     [[nodiscard]] const std::vector<std::string>& notes() const noexcept { return notes_; }
 
@@ -179,7 +186,7 @@ private:
     void fill_host_seats(std::uint32_t requested_count = 0);
     void prepare_host_rows(const skirmish::SetupMap&);
     void configure_staging();
-    void publish_staging_selection();
+    [[nodiscard]] bool publish_staging_selection();
     void open_staging(bool host, const std::string& game, const std::string& address);
     void open_direct_connect();
     void open_filter();
@@ -187,6 +194,7 @@ private:
     void clear_page();
     void close_screen(bool emit);
     void build_page(const char* dialog_name);
+    void layout_page();
 
     // Signal sinks, bound with the gadget id.
     void on_pressed(godot::String id);
@@ -200,6 +208,12 @@ private:
     void draw_chat(class EawrUiList& list, const presentation::ui::ChatLog& log);
     void commit_name_from_edit();
     void refresh_staging();
+    // MNU-22: the host's advanced options dialog over the staging (#4041); guests read the summary list.
+    void build_options_overlay();
+    void open_options();
+    void show_options_values();
+    void close_options(bool accept);
+    void process_options();
     void commit_name(const std::string& typed);
     void commit_colour(std::uint32_t colour);
     void send_chat(const std::string& typed);

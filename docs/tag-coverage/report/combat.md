@@ -4,15 +4,16 @@
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 478 | 478 |
-| partial | 350 | 350 |
-| todo | 402 | 402 |
+| applied | 473 | 473 |
+| partial | 357 | 357 |
+| todo | 438 | 438 |
 | presentation-later | 0 | 0 |
 | foc-ignores | 42 | 42 |
 | deferred | 0 | 0 |
-| land-or-galactic | 0 | 1913 |
+| by-design | 0 | 0 |
+| land-or-galactic | 0 | 1873 |
 | multiplayer | 0 | 1 |
-| **Total** | **1272** | **3186** |
+| **Total** | **1310** | **3184** |
 
 Tables group the exact object class families listed together in the registry. Object kinds
 are station, ship, squadron or craft when specified; an empty kind list means the whole
@@ -27,7 +28,6 @@ and are plain numbers. Code locations are repository paths without identifier an
 | LandFreeStoreScript | land-or-galactic | application not recorded | — | — | — | Read for the land tactical mode; the land game is out of scope.; FOCU-FREESTORE |
 | Personality/Aggressiveness | todo | application not recorded | — | 737 | — | — |
 | Personality/Focus | todo | application not recorded | — | 737 | — | — |
-| SpaceFreeStoreScript | todo | application not recorded | — | 737 | — | FoC attaches the authored script; the host fixes the stock tactical script, equal to every stock skirmish AI type, so a mod naming another script is ignored (WSS-37).; FOCU-FREESTORE |
 | Templates/Land | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
 | Templates/Space | applied | whole class (src/script/foc/ai_data.cpp) | DG-24, DG-26, V-03, W-10 | — | src/script/foc/ai_data.cpp | basis: reviewed |
 
@@ -132,18 +132,12 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Repair_Ability/Applicable_Unit_Categories | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Tactical_R2_3PO_Team) |
 | Abilities/Repair_Ability/Applicable_Unit_Types | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Tactical_R2_3PO_Team) |
 | Abilities/Repair_Ability/Team_Member_With_Ability | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Tactical_R2_3PO_Team) |
-| CategoryMask | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp) | WAR-21, WAR-26 | — | src/campaign/auto_resolve_strength.cpp | the loader reads it for other classes; the M2 scene's objects of this class never have it read Mixed ground/space, space carriers on Container: Darth_Vader_TIE_Fighter_Container, Hutt_VWing_Squadron_Container, Red_Squadron_Container, Rogue_Squadron_Space_Container, StarViper_Team, TIE_Defender_Squadron_Container, Y_Wing_Squadron_Container. Mixed ground/space, space carriers on Container: Darth_Vader_TIE_Fighter_Container, Hutt_VWing_Squadron_Container, Red_Squadron_Container, Rogue_Squadron_Space_Container, StarViper_Team, TIE_Defender_Squadron_Container, Y_Wing_Squadron_Container. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
+| CategoryMask | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/script/foc/tactical_ai_bindings.cpp); missing: tactical scene objects of this class | WAR-21, WAR-26; WAR-21, WAR-26 | 650 | src/campaign/auto_resolve_strength.cpp; src/script/foc/tactical_ai_bindings.cpp | the loader reads it for other classes; the M2 scene's objects of this class never have it read Mixed ground/space, space carriers on Container: Darth_Vader_TIE_Fighter_Container, Hutt_VWing_Squadron_Container, Red_Squadron_Container, Rogue_Squadron_Space_Container, StarViper_Team, TIE_Defender_Squadron_Container, Y_Wing_Squadron_Container. Mixed ground/space, space carriers on Container: Darth_Vader_TIE_Fighter_Container, Hutt_VWing_Squadron_Container, Red_Squadron_Container, Rogue_Squadron_Space_Container, StarViper_Team, TIE_Defender_Squadron_Container, Y_Wing_Squadron_Container. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
 | ContainerArrangement | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Arctic_Human_Civ_Team, Bothan_Slave_Team, Bothan_Team, Civilian_Independent_AI_Team, Civilian_Urban_Usable_Team, Desert_Human_Civ_Team, Empire_Field_Commander_Team, Ewok_Team (+33 more)) |
 | Is_Squashable | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Arctic_Human_Civ_Team, Bothan_Slave_Team, Bothan_Team, Civilian_Independent_AI_Team, Civilian_Urban_Usable_Team, Desert_Human_Civ_Team, Empire_Field_Commander_Team, Ewok_Team (+32 more)) |
 | Pre_Lit | todo | application not recorded | — | 650 | — | — |
 | Unit_Abilities_Data/Unit_Ability/Damage_Percent_When_Activated | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Underworld_Disruptor_Merc_Team, Underworld_Merc_Team) |
 | Unit_Abilities_Data/Unit_Ability/Friendly_Ability | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Tactical_R2_3PO_Team) |
-
-## Container, GenericHeroUnit, GroundBuildable, GroundInfantry, GroundStructure, GroundVehicle, HeroUnit, Indigenous_Unit, Marker, Mobile_Defense_Unit, Projectile, SecondaryStructure, Slave_Unit, SpaceUnit, SpecialStructure, TransportUnit, UniqueUnit
-
-| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
-|---|---|---|---|---|---|---|
-| Land_FOW_Reveal_Range | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
 
 ## Container, GenericHeroUnit, GroundInfantry, GroundVehicle, HeroUnit, Indigenous_Unit, Mobile_Defense_Unit, UniqueUnit
 
@@ -156,6 +150,12 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Variant_Of_Existing_Type | applied | whole class (src/data/xml_merge.cpp); galactic current-type membership (src/data/xml_merge.cpp) | R-08, R-11; WGA-363, WGA-364 | — | src/data/xml_merge.cpp | WGA-363/364: load-time roster marks and variant copy-time member bits qualify current types; runtime admission uses the freestore consumer.; basis: reviewed |
+
+## Container, GenericHeroUnit, HeroUnit, Mobile_Defense_Unit, SecondaryStructure, SpaceUnit, SpecialStructure, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Land_FOW_Reveal_Range | todo | application not recorded | — | 650 | — | scope label removed (&#35;4002): what a tactical battle does with this tag is not audited |
 
 ## Container, GenericHeroUnit, HeroUnit, SpaceBuildable, SpaceUnit, SpecialStructure, Squadron, StarBase, UniqueUnit, UpgradeObject
 
@@ -254,7 +254,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Radar_Icon_Scale_Land | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
+| Radar_Icon_Scale_Land | todo | application not recorded | — | 650 | — | scope label removed (&#35;4002): what a tactical battle does with this tag is not audited |
 
 ## Container, Squadron
 
@@ -533,7 +533,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Enhance_Defense_Ability/Activation_Style | partial | GC space scene (src/campaign/space_rules.cpp); missing: other modes and persistent story/corruption producer | WGT-49, WGT-50, WGT-51 | 760 | src/campaign/space_rules.cpp | Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
 | Abilities/Enhance_Defense_Ability/Apply_To_All_Allies | partial | GC space scene (src/campaign/space_rules.cpp); missing: other modes and persistent story/corruption producer | WGT-49, WGT-50, WGT-51 | 760 | src/campaign/space_rules.cpp | Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
 | Abilities/Enhance_Defense_Ability/Enhancement_Percentage | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC space scene (src/campaign/space_rules.cpp) | WAR-26; WGT-49, WGT-50, WGT-51 | — | src/campaign/auto_resolve_strength.cpp; src/campaign/space_rules.cpp | Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
-| Abilities/Enhance_Defense_Ability/Unit_Strength_Category | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp) | WAR-26 | — | src/campaign/auto_resolve_strength.cpp | Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
+| Abilities/Enhance_Defense_Ability/Unit_Strength_Category | todo | application not recorded | — | 650 | — | applied only by the galactic auto-resolve (src/campaign/auto_resolve_*); no tactical code reads it, and whether FoC's tactical battle does is unverified (&#35;4002) |
 | Abilities/Neutralize_Hero_Ability/Can_Neutralize_Major_Heroes | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Bounty_Hunter_E, Generic_Bounty_Hunter_R) |
 | Abilities/Neutralize_Hero_Ability/Can_Neutralize_Minor_Heroes | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Bounty_Hunter_E, Generic_Bounty_Hunter_R) |
 | Abilities/Neutralize_Hero_Ability/Owner_Respawn_Time_In_Secs | land-or-galactic | application not recorded | — | — | — | SCOPE-GALACTIC: only galactic-mode agents (CategoryMask NonCombatHero) author this galactic ability (Generic_Bounty_Hunter_E, Generic_Bounty_Hunter_R) |
@@ -967,6 +967,12 @@ and are plain numbers. Code locations are repository paths without identifier an
 | No_Refraction_Below_Detail_Level | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
 | Occlusion_Silhouette_Enabled | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
 
+## GroundBuildable, GroundInfantry, GroundStructure, GroundVehicle, Indigenous_Unit, Marker, Projectile, Slave_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Land_FOW_Reveal_Range | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
+
 ## GroundBuildable, GroundInfantry, GroundStructure, GroundVehicle, Indigenous_Unit, Slave_Unit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
@@ -992,7 +998,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Targeting_Max_Attack_Distance | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
 | UnitCollisionClass | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
 
-## GroundBuildable, GroundInfantry, GroundStructure, GroundVehicle, Marker, Mobile_Defense_Unit, SecondaryStructure, SpaceBuildable, SpaceStructure, SpecialStructure, TransportUnit, UniqueUnit
+## GroundBuildable, GroundInfantry, GroundStructure, GroundVehicle, Marker
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
@@ -1048,7 +1054,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | SFXEvent_Ambient_Loop | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
 
-## GroundBuildable, GroundStructure, GroundVehicle, HeroUnit, Marker, Mobile_Defense_Unit, SecondaryStructure, SpecialStructure, UniqueUnit
+## GroundBuildable, GroundStructure, GroundVehicle, Marker
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
@@ -2087,6 +2093,12 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Walk_Transition | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Cuddles_The_Rancor, Cuddles_The_Rancor_Death_Clone_00, Cuddles_The_Rancor_Death_Clone_01) |
 | Weather_Category | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Cuddles_The_Rancor, Cuddles_The_Rancor_Death_Clone_00, Cuddles_The_Rancor_Death_Clone_01) |
 
+## HeroUnit, Mobile_Defense_Unit, SecondaryStructure, SpecialStructure, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Has_Land_Evaluator | todo | application not recorded | — | 650 | — | scope label removed (&#35;4002): what a tactical battle does with this tag is not audited |
+
 ## HeroUnit, SpecialStructure, Squadron, UniqueUnit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
@@ -2101,7 +2113,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Abilities/Combat_Bonus_Ability/Unit_Strength_Category | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp) | WAR-26 | — | src/campaign/auto_resolve_strength.cpp | Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Commander_Akbar. Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Home_One, Rogue_10_XWing, Rogue_11_XWing, Rogue_2_XWing, Rogue_4_XWing (+3 more). Mixed ground/space, space carriers on HeroUnit: Captain_Piet, Commander_Akbar. Mixed ground/space, space carriers on UniqueUnit: Accuser_Star_Destroyer, Admonitor_Star_Destroyer, Admonitor_Star_Destroyer_No_Engine_Hardpoint, Home_One, Rogue_10_XWing, Rogue_11_XWing, Rogue_2_XWing, Rogue_4_XWing (+3 more). Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
+| Abilities/Combat_Bonus_Ability/Unit_Strength_Category | todo | application not recorded | — | 650 | — | applied only by the galactic auto-resolve (src/campaign/auto_resolve_*); no tactical code reads it, and whether FoC's tactical battle does is unverified (&#35;4002) |
 
 ## HeroUnit, UniqueUnit
 
@@ -2145,15 +2157,15 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Bolt_Creation_Interval_Max | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
-| Bolt_Creation_Interval_Min | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
-| Cycles_Per_Distance | todo | application not recorded | — | 650 | — | — |
-| Detail | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
-| Displace | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
-| Number_Bolts | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
-| Update_All | todo | application not recorded | — | 650 | — | — |
-| Width_Max | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
-| Width_Min | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Repair lightning authored look in an inferred bounded ribbon adapter.; basis: reviewed |
+| Bolt_Creation_Interval_Max | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Bolt_Creation_Interval_Min | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Cycles_Per_Distance | partial | tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | TBF-06, TBF-07, TBF-08 | 650 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Detail | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Displace | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Number_Bolts | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Update_All | partial | tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | TBF-06, TBF-07, TBF-08 | 650 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Width_Max | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+| Width_Min | partial | repair lightning (apps/viewer/src/battle_effects_projectiles.cpp); tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | WSH-08; TBF-06, TBF-07, TBF-08 | 2275 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
 
 ## LightningEffect, LightSource
 
@@ -2319,6 +2331,14 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Unit_Abilities_Data/@SubObjectList | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
 | Weather_Category | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Abstract_Mobile_Defense_Unit, Empire_Mobile_Defense_Unit, Rebel_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit, Underworld_Mobile_Defense_Unit_Prologue) |
 
+## Mobile_Defense_Unit, SecondaryStructure, SpaceBuildable, SpaceStructure, SpecialStructure, TransportUnit, UniqueUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Land_Damage_Alternates | todo | application not recorded | — | 650 | — | scope label removed (&#35;4002): what a tactical battle does with this tag is not audited |
+| Land_Damage_SFX | todo | application not recorded | — | 650 | — | scope label removed (&#35;4002): what a tactical battle does with this tag is not audited |
+| Land_Damage_Thresholds | todo | application not recorded | — | 650 | — | scope label removed (&#35;4002): what a tactical battle does with this tag is not audited |
+
 ## MovementClassType
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
@@ -2346,8 +2366,6 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Force_Healing_Ability/Heal_Range | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Bossk_Plasma_Grenade_Burn) |
 | Dynamic_Transform_Delay_Seconds | todo | application not recorded | — | 650 | — | — |
 | Dynamic_Transform_Seconds | todo | application not recorded | — | 650 | — | — |
-| In_Midforeground | todo | application not recorded | — | 650 | — | — |
-| In_Midground | todo | application not recorded | — | 650 | — | — |
 | Is_Editor_Placed | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Splash_Wake_Lava) |
 
 ## Particle, SpaceProp
@@ -2659,14 +2677,14 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Damage_Type | applied | craft (src/units/unit_combat.cpp) | DG-12, WWP-48 | — | src/units/unit_combat.cpp | &#35;851 reassessment: the unit-authored tag supplies only its own Projectile_Types weapon (WWP-48); ship hardpoint shots use each hardpoint's Damage_Type, then its projectile's (DG-12). The checked ships do not author the unit tag; an absent baseline node is not proof of a failed read.; CHECK-842; basis: reviewed |
 | Death_Leave_Hulk_Behind | todo | application not recorded | — | 650 | — | — |
 | Energy_Refresh_Rate | applied | whole class (src/units/unit_durability.cpp) | DG-13, EN-02, WCC-46 | — | src/units/unit_durability.cpp | &#35;851 reassessment: the 9000-tick M2 check changes structural tables but observes no battle change; the cited application remains, and this scenario does not prove its effect. This includes craft energy regeneration (EN-02, AB-23); no craft-specific gap was established.; CHECK-842; basis: reviewed |
-| Land_Bomber_Type | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp) | WAR-16 | — | src/campaign/auto_resolve_strength.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
+| Land_Bomber_Type | todo | application not recorded | — | 650 | — | applied only by the galactic auto-resolve (src/campaign/auto_resolve_*); no tactical code reads it, and whether FoC's tactical battle does is unverified (&#35;4002) |
 | Moniker | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Should_Attacker_Hold_Fire_For_Special_Ability | todo | application not recorded | — | 650 | — | — |
-| TSW_Attack_Distance_From_Target | todo | application not recorded | — | 650 | — | — |
+| TSW_Attack_Distance_From_Target | partial | TACTICAL_SUPER_WEAPON objects (src/skirmish/start.cpp); missing: move into attack range, tactical super weapon attack stages | TSW-01 | 650 | src/skirmish/start.cpp | Applied at the start of a tactical battle for an effective TACTICAL_SUPER_WEAPON object: the nearest enemy-owned super weapon target anchors its starting position (TSW-01); the move into attack range, in-range state and attack stages are not modelled.; basis: reviewed |
 | TSW_Power_Up_Countdown_Seconds | todo | application not recorded | — | 650 | — | — |
-| TSW_Start_Distance_From_Target | todo | application not recorded | — | 650 | — | — |
-| TSW_Start_Pos_Match_Targets_Z | todo | application not recorded | — | 650 | — | — |
-| TSW_Z_Adjust_Relative_To_Target_Pos | todo | application not recorded | — | 650 | — | — |
+| TSW_Start_Distance_From_Target | partial | TACTICAL_SUPER_WEAPON objects (src/skirmish/start.cpp); missing: move into attack range, tactical super weapon attack stages | TSW-01 | 650 | src/skirmish/start.cpp | Applied at the start of a tactical battle for an effective TACTICAL_SUPER_WEAPON object: the nearest enemy-owned super weapon target anchors its starting position (TSW-01); the move into attack range, in-range state and attack stages are not modelled.; basis: reviewed |
+| TSW_Start_Pos_Match_Targets_Z | partial | TACTICAL_SUPER_WEAPON objects (src/skirmish/start.cpp); missing: move into attack range, tactical super weapon attack stages | TSW-01 | 650 | src/skirmish/start.cpp | Applied at the start of a tactical battle for an effective TACTICAL_SUPER_WEAPON object: the nearest enemy-owned super weapon target anchors its starting position (TSW-01); the move into attack range, in-range state and attack stages are not modelled.; basis: reviewed |
+| TSW_Z_Adjust_Relative_To_Target_Pos | partial | TACTICAL_SUPER_WEAPON objects (src/skirmish/start.cpp); missing: move into attack range, tactical super weapon attack stages | TSW-01 | 650 | src/skirmish/start.cpp | Applied at the start of a tactical battle for an effective TACTICAL_SUPER_WEAPON object: the nearest enemy-owned super weapon target anchors its starting position (TSW-01); the move into attack range, in-range state and attack stages are not modelled.; basis: reviewed |
 | Unit_Abilities_Data/Unit_Ability/Effective_Radius | partial | SpaceUnit LURE (src/sim/tactical/session_step_commands.cpp); SpaceUnit MISSILE_SHIELD and SENSOR_JAMMING (src/sim/tactical/session_world.cpp); missing: other space ability radii | WLU-04; WHE-32, WPJ-17 | 760 | src/sim/tactical/session_step_commands.cpp; src/sim/tactical/session_world.cpp | — |
 | Unit_Abilities_Data/Unit_Ability/Is_Pulsing | foc-ignores | application not recorded | — | — | — | Parsed into the ability data, but the pulse cadence reads only the frequency and the maximum count and the data has no accessor for this flag; a runtime check may be wanted (Focumentation: Unit Abilities, LURE).; WLU-03 |
 | Unit_Abilities_Data/Unit_Ability/Max_Number_Of_Pulses | applied | SpaceUnit LURE (the A-wing craft, the only space author) (src/sim/tactical/abilities.cpp) | WLU-03 | — | src/sim/tactical/abilities.cpp | basis: reviewed |
@@ -2768,7 +2786,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Gravity_Control_Field_Slow_Fraction | todo | application not recorded | — | 650 | — | — |
 | Include_In_UI_Map_Header | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND: only ground objects author it in the effective FoC XML (Garrison_Bunker_Capturable) |
 | Is_Special_Weapon_In_Space | partial | prepared galactic AI type facts (src/campaign/ai_selection_content.cpp); prepared campaign space entry (src/campaign/space_entry.cpp); tactical AI type query Is_Hero (src/skirmish/ai.cpp); missing: other special-weapon consumers (superweapon targeting and galactic modes), Unsupported scene and qualification boundaries in docs/behaviour/galactic-space-entry.md | WGA-253; WGT-13; WTA-36 | 2006 | src/campaign/ai_selection_content.cpp; src/campaign/space_entry.cpp; src/skirmish/ai.cpp | Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md. The tactical AI type query Is_Hero answers true for a type whose built hero authors this flag (debug build); other consumers remain separate.; basis: reviewed |
-| Land_Victory_Relevant | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
+| Land_Victory_Relevant | todo | application not recorded | — | 650 | — | scope label removed (&#35;4002): what a tactical battle does with this tag is not audited |
 | Lobbing_Superweapon_Chargeup_Frames | todo | application not recorded | — | 650 | — | — |
 | Num_Garrison_Guns | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
 | Place_At_Every_Specific_Marker_Position | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
@@ -2834,6 +2852,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Available_In_Skirmish | todo | application not recorded | — | 650 | — | — |
 | Energy_Refresh_Rate | applied | whole class (src/units/unit_durability.cpp) | DG-13, EN-02, WCC-46 | — | src/units/unit_durability.cpp | &#35;851 reassessment: the 9000-tick M2 check changes structural tables but observes no battle change; the cited application remains, and this scenario does not prove its effect.; CHECK-842; basis: reviewed |
+| Retreat_Self_Destruct_Explosion | applied | station (src/sim/tactical/session_step_commands.cpp); station (src/units/unit_tables_decode.cpp) | RP-09; RP-09 | — | src/sim/tactical/session_step_commands.cpp; src/units/unit_tables_decode.cpp | The station creates the authored projectile at the retreat's station boundary; its blast is gameplay.; basis: reviewed |
 | Victory_Relevant | applied | station (src/skirmish/content.cpp) | VT-03 | — | src/skirmish/content.cpp | &#35;851 reassessment: the default enemy-starbase-destroyed condition builds relevant targets only from stations (VT-01 to VT-03); no altered victory result occurs in the check.; CHECK-842; basis: reviewed |
 
 ## TacticalCamera
@@ -2876,7 +2895,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Affiliation | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34 | 650 | src/campaign/live_setup.cpp | WHE-07/49: the M2 resolver touches carried heroes, unselected transports and unique creation templates as metadata; the generic body or ability consumer for other classes is not applied to these scene objects.; basis: reviewed |
 | Armor_Type | todo | application not recorded | — | 650 | — | WHE-07/49: the M2 resolver touches carried heroes, unselected transports and unique creation templates as metadata; the generic body or ability consumer for other classes is not applied to these scene objects. Mixed ground/space, space carriers on HeroUnit: Boba_Fett, Boba_Fett_NoStealth, Bossk, Chewbacca, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo (+12 more). |
 | Can_Participate_In_Space_Battle | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); prepared campaign space entry (src/campaign/space_entry.cpp) | WAR-15; WGT-19 | — | src/campaign/auto_resolve_strength.cpp; src/campaign/space_entry.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer. Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
-| CategoryMask | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp) | WAR-21, WAR-26 | — | src/campaign/auto_resolve_strength.cpp | WHE-07/49: the M2 resolver touches carried heroes, unselected transports and unique creation templates as metadata; the generic body or ability consumer for other classes is not applied to these scene objects. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
+| CategoryMask | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/script/foc/tactical_ai_bindings.cpp) | WAR-21, WAR-26; WAR-21, WAR-26 | — | src/campaign/auto_resolve_strength.cpp; src/script/foc/tactical_ai_bindings.cpp | WHE-07/49: the M2 resolver touches carried heroes, unselected transports and unique creation templates as metadata; the generic body or ability consumer for other classes is not applied to these scene objects. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; basis: reviewed |
 | Collidable_By_Projectile_Living | todo | application not recorded | — | 650 | — | WHE-07/49: the M2 resolver touches carried heroes, unselected transports and unique creation templates as metadata; the generic body or ability consumer for other classes is not applied to these scene objects. |
 | Energy_Refresh_Rate | todo | application not recorded | — | 650 | — | WHE-07/49: the M2 resolver touches carried heroes, unselected transports and unique creation templates as metadata; the generic body or ability consumer for other classes is not applied to these scene objects. |
 | Exit_Door_Angle_Degrees | todo | application not recorded | — | 650 | — | — |

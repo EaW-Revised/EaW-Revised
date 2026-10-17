@@ -17,6 +17,7 @@
 #include "eawr/sim/world.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <map>
 #include <memory>
@@ -96,6 +97,13 @@ struct Host {
     AiSetup setup;
     bool ai_suspended{}; // FD-72: ordered host gate, never written from a Lua worker.
     bool suspension_used{};
+    bool in_object_turn{}; // bindings read staged rows; completed-world queries trip a diagnostic
+    mutable std::atomic<bool> rejected_turn_read{false};
+    [[nodiscard]] bool allow_dynamic_read() const noexcept {
+        if (!in_object_turn) return true;
+        rejected_turn_read.store(true, std::memory_order_relaxed);
+        return false;
+    }
     std::shared_ptr<const ai::World> ai_world;
     // FT-05/07: immutable selected-manager/source/execution queries during Lua.
     std::shared_ptr<const ai::FindTargetQueries> find_target_queries;
@@ -117,12 +125,16 @@ struct Host {
     // The goal system engine (#449); null when only the freestore runs. The bindings only read it.
     const ai::Engine* engine{};
     std::map<tactical::PlayerId, math::Fixed> credit_changes; // current barrier's ordered wallet changes
+    // S-T3b: raw wallet changes staged by player turns that have not committed yet (stacked reads); zero
+    // outside the engine's player loop. The engine answers and counts reads of other players' deltas.
+    [[nodiscard]] std::int64_t uncommitted_credits(tactical::PlayerId id) const noexcept;
 
     [[nodiscard]] const AiType* type(tactical::TypeId id) const {
         const auto found = types.find(id);
         return found == types.end() ? nullptr : found->second;
     }
     [[nodiscard]] const tactical::EconomyView* economy(tactical::PlayerId id) const {
+        if (!allow_dynamic_read()) return nullptr;
         if (ai_world) return ai_world->account(id);
         if (!snapshot) return nullptr;
         for (const auto& account : snapshot->economy()) if (account.player == id) return &account;
@@ -133,15 +145,21 @@ struct Host {
         if (account == nullptr) return {};
         const auto change = credit_changes.find(id);
         return math::Fixed::from_raw(account->credits.raw()
-            + (change != credit_changes.end() ? change->second.raw() : 0));
+            + (change != credit_changes.end() ? change->second.raw() : 0)
+            + uncommitted_credits(id));
     }
     [[nodiscard]] bool neutral(tactical::PlayerId id) const {
         const auto found = players.find(id);
         return found != players.end() && found->second->neutral;
     }
+    [[nodiscard]] bool ai_admitted(tactical::PlayerId id) const {
+        const auto start = setup.player_ai_start_ticks.find(id);
+        return start == setup.player_ai_start_ticks.end() || start->second == 0
+            || (view != nullptr && start->second <= view->tick);
+    }
     [[nodiscard]] bool ai(tactical::PlayerId id) const {
         const auto found = players.find(id);
-        return found != players.end() && found->second->ai;
+        return found != players.end() && found->second->ai && ai_admitted(id);
     }
     [[nodiscard]] bool allied(tactical::PlayerId a, tactical::PlayerId b) const {
         const ViewPlayer* left = view->player(a);
@@ -366,6 +384,11 @@ inline bool request_ability(BindingContext& context, const Host& host, const Vie
     }
     const auto view = ability_view(host, unit, kind);
     if (!view.has || !view.ready) return false;
+    if (host.in_object_turn && !tactical::object_turn_supports(kind)) {
+        context.report(authoritative::codes::unsupported_api,
+            "Activate_Ability(" + ability + ") is not admitted at the object-turn seam");
+        return false;
+    }
     if (kind == tactical::AbilityKind::ion_cannon_shot) {
         context.report(authoritative::codes::unsupported_api,
             "Activate_Ability(" + ability + ") ignored: a targeted ability is not switched from Lua (#561)");

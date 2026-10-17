@@ -113,7 +113,8 @@ struct PendingCommand {
 };
 using PendingBuildOption = std::function<const sim::tactical::BuildOption*(sim::EntityId, sim::tactical::TypeId)>;
 [[nodiscard]] sim::tactical::EconomyView pending_economy(sim::tactical::EconomyView snapshot,
-    std::span<const PendingCommand> pending, const PendingBuildOption& option_of);
+    std::span<const PendingCommand> pending, const PendingBuildOption& option_of,
+    std::optional<std::uint64_t> completed_tick = std::nullopt);
 [[nodiscard]] sim::tactical::ProductionCounts pending_production_counts(
     sim::tactical::ProductionCounts base, const sim::tactical::EconomyView& ledger,
     std::uint64_t completed_tick, std::span<const PendingCommand> pending,
@@ -176,8 +177,8 @@ public:
     // Producer side. Thread-safe; a failure queues nothing and uses no sequence.
     [[nodiscard]] core::Result<void> issue(const TacticalIntent& intent) override;
 
-    // Enables snapshot reservations. Offline receipts retire strictly after execution;
-    // LAN producer epochs are not execution ticks, so LAN retires by command result instead.
+    // Enables snapshot reservations. Retire strictly after the assigned execution tick;
+    // untaken inputs and LAN producer epochs alone never acknowledge execution.
     void present_snapshot(std::uint64_t completed_tick);
     void present_result(std::uint64_t sequence);
     void note_execution(std::uint64_t sequence, std::uint64_t tick);

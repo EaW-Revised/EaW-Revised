@@ -145,7 +145,10 @@ unchanged on a room member connection; they do not need new IDs.
    protocol, build identity, frame limit and role; the codec checks magic, version
    (1502), build (1503), frame limit (1504) and role, and `accept` must carry exactly
    `u32 1` (the two-peer client index). N2 changes the pair handshake: the hello adds the
-   sender's slot and the roster size (`peers`), `accept` carries the accepted slot
+   sender's slot and the roster size (`peers`) and the GNS hello revision is bumped on purpose
+   (`gns_protocol_version` = 2; the LAN/TCP protocol stays 1), so the N2 decoder tells an
+   old-layout hello 1502 and never a malformed-hello error (a build from before revision 2 is
+   unchanged and answers an N2 hello with its own 1518); `accept` carries the accepted slot
    instead of the constant 1, and `GnsTransport` option validation accepts
    `2..max_match_seats` peers instead of exactly 2. A roster-size or slot mismatch is
    refused before any application frame. The host cross-checks the newcomer's slot and
@@ -185,7 +188,10 @@ closes the room for everyone (owner decision 4).
 
 Every pair hello compares the exact `core::build_identity()`, so all 36 pairs check it,
 not only the host pairs. A mismatch on the host pair fails the join with 1503 and the
-existing curated text. After admission, `SetupSession` already binds the build into
+existing curated text. Slice N2 compares the build on every pair hello in the codec
+(tested with a non-host pair); through the adapter a mismatch on a pair that does not
+include the host cannot be reached, because that peer already matched the host's build on
+its own host pair and every admitted seat shares it. After admission, `SetupSession` already binds the build into
 `SetupOffer::identity.build` and requires every peer's Accept for the frozen digest;
 that is N-peer today. The directory row's build tag stays a hint.
 
@@ -223,7 +229,8 @@ documented residual; rotating coturn's shared secret would end every live alloca
 | --- | --- | --- |
 | Relay `Kind` 34..49 | 16 (14 used, 48..49 spare) | room open/opened, attach/attached, roster, signal, forwarded, leave, release, kick, lock, reattach, closed, ack. 1..12 base, 13..19 ticket E, 20..33 ticket I are taken. The server's request routing needs an explicit range check for these (ticket I review found a `kind >= 20` predicate). |
 | `TcpMessage` 15..18 | 4 | GNS mesh controls on host streams: pair grant, member vacated, pair report (open/failed/lost), mesh ready. The existing `mesh_pair` (12) is reused for the pair handshake. GNS-only bodies; TCP refuses them. |
-| Lockstep app kinds | 2 | unsealed link report (per remote: open/lost and smoothed RTT; feeds both the pair-loss decision and adaptive timing) and the sealed pair-loss departure decision (section 3). 80..81 are taken by the LAN credential delivery (`lan_credentials_kind`). |
+| Lockstep app kinds | 4 | 82 link report (63 bytes: per remote open/lost and smoothed RTT, plus the sender's active set; feeds both the pair-loss decision and adaptive timing), 83 pair-loss proposal, 84 pledge, 85 confirmation (section 3; slice N4 split the sealed decision into proposal, pledge and confirmation). 80..81 are taken by the LAN credential delivery (`lan_credentials_kind`). |
+| `EAWR-NET-1778..1789` | 12 | slice N4, pair loss in battle. Emitted: 1778 you left (excluded or isolated), 1780 no majority/decider, 1781 decision without confirmation, 1782 overlapping second loss, 1783 malformed or unexpected mesh control, 1784 invalid mesh options. Declared in `mesh_errors` and not emitted by N4 (the survivors' notice, the flapping hold-down and the timing freeze are not failures): 1779, 1785, 1786. 1787 is the online match's "the service issues no room codes" (a host that can only be joined by code, such as the online test kit, fails at once on a `room_aliases=0` service; the lobby screen joins through the room list and does not require a code). 1788..1789 are spare. The staging refusals reuse 1762 (pair unreachable) and 1764 (mesh incomplete) through two new `LobbyReason` values. |
 | EAWR-NET-1760..1779 | 20 | room service: unknown/closed room, capability, slot reserved/expired/full, locked, not a member, kicked, room budget, reattach refused, roster mismatch; client: pair unreachable direct and relay, pair handshake timeout, mesh incomplete at Start, pair lost in battle, repair failed, departure selected for pair loss, invalid room size. `LobbyReason` values for the new staging refusals take numbers from this range. |
 
 ## 3. Client: GnsTransport with N peers
@@ -440,6 +447,142 @@ departed seat's retained batches among survivors once, inside its bounded protoc
   players stall more; raising the delay for everyone needs both ends of a pair to lie.
   The timing change itself is still proposed by the host and agreed by every peer.
 
+### Slice N4 implementation notes
+
+Landed in `include/eawr/net/mesh_incident.hpp`, `src/net/mesh_incident.cpp`, `LockstepSession` (`SessionOptions::mesh`), `LobbySession`
+(`LobbyHooks::mesh_complete`, `lock_room`, `refuse_unreachable`) and `apps/viewer/src/online_match.*` + `lan_match.*`.
+
+- **Online bridge.** The host's room source publishes a plain directory room (no bridge invitation, protocol tag
+  `online-room-v1`); the host's match waits for it (`OnlineMatchOptions::hosted_room`), opens the signalling scope with
+  `NetworkGnsRoom::open` and builds `GnsTransport::host_room`. A guest attaches with its directory admission
+  (`OnlineRoomAdmission::slot` + `member_capability`; the room source keeps the directory connection, so the reservation outlives
+  the attach) or with the four-character alias, then `GnsTransport::join_room`. The match options carry the room's capacity
+  (`GnsOptions::peers`); the host's seat count must equal it.
+- **Staging.** `LobbySession` admits a seat when its host pair verifies. A newcomer the mesh refuses (`seat_refused`) is refused
+  with `mesh_newcomer_refusal_text` (1762) and a room notice; a closed or locked mesh refuses Start with 1764. Start calls
+  `mesh_complete` first and `lock_room` just before the committed broadcast; a refused Lock aborts the Start.
+- **Incident driver (`MeshIncident`).** One per `LockstepSession` with three or more active seats. The incident ID is "incidents
+  completed + 1"; the time base is the earliest start heard, in the sender's elapsed milliseconds, so seats that noticed the loss
+  at different moments still share the grace and the pledge cutoff. A pair lost three times within two minutes is held lost for
+  the rest of the incident from this end's own history (flapping hold-down). Each end proves its own relay failure: a remote
+  report never turns an open local link into a failed row (no mirror), so a half-open pair whose open end still sends successfully
+  removes nobody and fails closed at the agreed deadline with 1780. A send that fails on a link which still reads open is that end's
+  own evidence: during an incident it is reported as a failed pair (inside the incident driver it is never a fatal service error, and
+  the remaining seats still get the report), so the pair is lost at both ends and decided like any other. The session's own batch,
+  departure and timing sends use the same mesh ownership rule, so their failed sends do not bypass the incident.
+- **The agreed active set.** The incident runs over the seats that are not leaving by an ordinary departure. A seat whose quit
+  batch arrived, whose timeout/disconnect agreement is running or that is held leaves the set at once (`LockstepSession::mesh_active`),
+  not when its quit executes. Those exclusions are learned at different moments, so every link report carries the sender's active set
+  (two bytes) and a seat begins or feeds an incident only from reports of exactly its own set; a seat with a different set waits, the
+  sender resends every second, and the sets converge through the departure agreement itself. A running incident whose set changes
+  (shrinks on a departure, grows when an agreement is abandoned) restarts its policy over the new set while nothing is proposed or
+  pledged (same incident ID and time base; the report revision keeps counting), and a closed link starts an incident only after the
+  receive queue drained, so a queued quit batch is read first. The closed link of a seat outside the set stays with the ordinary
+  departure scan. Tests: `ordinary_quit_never_starts_an_incident` (3 and 4 seats, a lagging survivor),
+  `ordinary_timeout_ends_without_an_invented_departure` (a frozen application with open links ends the running seats without
+  inventing a departure), `sets_that_differ_neither_begin_nor_feed`, `staggered_restart_still_converges`. Not covered here, handed to N5: a set
+  change after a proposal was made or pledged is not applied (the incident then fails closed), a quitter that crashes before its quit
+  batch reached every seat leaves the seats that never saw it with a closed link they read as a pair loss; they converge through the
+  ordinary departure's proposal and restart over the smaller set, and only a proposal that stays deferred behind another running
+  agreement for the whole incident ends with 1780, and an ordinary departure that runs
+  alongside an incident pauses its timeout through the unconfirmed repair/decision window; confirmed settlement keeps its bounded timeout.
+- **Decider loss.** The policy has one decider and one pledge per seat, so nobody continues on a different survivor set. If the
+  decider drops after seats pledged, nobody receives a confirmation. A pledged survivor whose own pair to the decider closes leaves
+  at once (1781); a pledged victim, who does not read the survivors' pairs, gives up at the agreed cutoff plus the 10 s decision
+  window (and the 500 ms tolerance) with 1781; a seat that never saw a proposal leaves at the cutoff with 1780; 1778 is only for a
+  seat a confirmation named. A decider that goes silent without closing its links ends the same way at the same deadlines. Every
+  wait is bounded, so no seat hangs. `mesh_session_tests` (`decider_loss_ends_the_match`) pins the codes through `LockstepSession`.
+  A pledge that is not the exact proposal is ignored (one bad pledge cannot end the decider's incident); a restoration
+  confirmation is resent once a second until the pledge window closes, like a removal.
+- **Hand-off.** A confirmed decision queues `DepartureReason::pair_loss` (3) departures at the survivors; the existing protocol
+  (48..51) agrees the cutoff and the quit. A pair-loss proposal without a matching confirmed decision is refused.
+- **Adaptive timing.** The host's `mesh_rtt_ms` is the maximum over pairs of the smaller of the two ends' reports (its own pairs
+  from its own transport); an unmeasured pair counts as 600000 ms so it can never lower the maximum. With the host held,
+  excluded or departed, timing freezes at the last agreed delay (`LockstepSession::timing_frozen`).
+- **Fallbacks at session level.** `mesh_session_tests` and `mesh_session_workers_tests` (1/2/4/8 sim workers, equal cutoff ticks
+  and state) cover the all-open decider, a crashed seat among four (the majority clique {0, 1, 2}) and three lost pairs among five
+  (clique {1, 2, 4} over {1, 3, 4} by the lowest seat list) with their exact leave codes; no majority is covered by
+  `no_decider_ends_the_match`.
+- **Accepted deviations from this document.** One room chat line for every member, naming the newcomer and the player it could not
+  reach, replaces the per-audience refusal lines and "up to three players" (a room chat is a broadcast; per-audience lines need a
+  new lobby frame, with the nine-seat texts in N6). Timing also pauses while an incident runs (the header documents it). The
+  `mesh_complete` check does not read the locked flag: Lock is only issued after it. `require_short_code` stays off in the lobby
+  screen (its host is joined through the room list, so no code is awaited); only a code-only host such as the online test kit sets
+  it. Adaptive timing is configured by no app yet, so the per-pair minimum is reached only through tests until MP-2 turns it on.
+- **Lock.** `GnsTransport::lock_room` queues the service Lock and marks the host's own mesh locked in the same call, so the host
+  ignores later attachments whatever the service answers; `NetworkGnsRoom::last_refusal()` keeps the service's acknowledgement for
+  diagnostics. A late newcomer at an unlocked service can only fail at its own pairs.
+- **Repair before departure.** The adapter attempts an authenticated replacement during the incident grace. A successful
+  repair uses the existing restoration agreement; a failed repair waits for the same decision and departure cutoff.
+- **What the minority side sees.** A seat cut off from the decider receives no confirmation. It cannot continue alone: at the
+  agreed cutoff it ends with 1780 (no majority) or 1781 (a decision but no confirmation), and a seat a confirmation named ends with
+  1778. Neither claims a departure for the other side. The majority's survivors see one line per removed seat,
+  `<name> left: their connection to <other> failed.` (`LanView::mesh_notice`, bounded to eight lines); a confirmed removed seat sees
+  `Connection to <name> could not be restored. You have left the match.`; the other codes have curated texts. The nine-seat
+  battle texts are slice N6's. The viewer reaches these paths only with three or more seats, which the lobby screen does not
+  offer before N6 (its two-seat limit and join paths are N6's and are untouched here).
+
+Contracts of the follow-up (legacy EAWR-3697) in this slice: incident ID, shared incident time base, flapping-pair policy, decider loss mid-incident
+(fail closed, above) and the minority-side note are done. Left: automatic decider failover (a second decider could confirm a different survivor set); wiring the GNS per-peer teardown into the viewer (the adapter supplies `close_peer`, and the viewer still needs to call it);
+and the STUN list (`GnsOptions::stun_servers` stays empty because the room service does not hand out STUN URIs yet).
+
+### Slice N5 repair contract
+
+The I/O owner arms `GnsTransport::repair_closed_links` with the agreed incident or held-seat epoch and the locally retained
+MP-5 match identity and pair keys. Repeated calls for the same epoch are idempotent; older epochs or changed keys are refused.
+`poll` then requests a nonblocking `GnsRoomEndpoint::repair_attachment` on the TLS worker. The existing Reattach request takes
+over an attached or held member and issues fresh provider credentials. No relay message kind or server change is required.
+Existing peer data paths survive a signalling reattachment. The new credentials are installed on each new dial and accepted
+connection; an unavailable provider never falls back to the original credentials.
+
+A replacement uses deterministic pair roles (higher seat dials), including a request arriving while the other end still sees
+its old link open. Every replacement proves its pair key with the MP-5 nonce/HMAC primitives in a separate GNS pair domain,
+bound to both seats, match identity and epoch. Both nonce challenges must finish before the link opens or any application
+frame reaches the session. The original pair grant and the room capability alone cannot authenticate it. Each pair has one
+bounded attempt in the epoch, including credential refresh, ICE and proof. The transport's `repair_grace` defaults to the
+agreed 30-second grace and is distinct from its 20-second per-connection `pair_timeout`. The higher seat still dials, so
+lower-seat-first detection allows the higher seat's connected timeout and refresh within that full grace. Signals arriving
+before the receiving core arms are retained in the bounded 32-signal buffer; arming does not discard them. Expiry produces
+final failure evidence for N4. This is one deadline per epoch, shared by its pairs; it does not restart for a second pair.
+The owner arms a new agreed epoch for a new incident.
+`restart_links` re-dials a returning seat's surviving edges; `close_peer` retires one excluded edge without ending the room.
+
+The session retains its own sealed tail, bounded by the input horizon and an 8 MiB budget. Pending departure/timing
+controls have a separate 1 MiB queue per peer; a replacement rebuilds those controls from the existing agreement state,
+including the most recently completed departure acknowledgement. Queue progress is retained across backpressure, and only
+identical settled-departure replays on a replacement are ignored; contradictory input digests or cutoffs still fail. When `edge_identity` changes
+after authentication, it resends that original tail in tick order before sending later batches. Receivers use the existing
+identical-duplicate checks; another seat never manufactures or forwards it. The monitor's retained current and previous hash
+summaries (and diagnostic rows when needed) are resent through `SessionMonitor::on_link_repair(peer, ownership)`; identical retry frames are
+idempotent, while contradictory hashes still fail. The viewer's monitor wrapper must forward this hook and its ownership predicate; an unsupported monitor fails before play. If retention exceeded the byte budget, the candidate
+is closed with 1794 and the existing pair-loss departure protocol resolves it. Ordinary departures and pending timing votes pause their own timeout during
+the shared repair/decision window; confirmed settlement retains its ordinary timeout. Normal tick advancement waits for the incident's restoration confirmation even when repaired links have already filled
+the sealed-input gap; receive, control service and ordinary departure convergence keep running. No networking work enters
+the simulation.
+
+Monitor replay retains the current and previous payload windows. One additional retired-window digest receipt per peer
+validates ordered overlap: a slower sender can retry its previous window after the receiver has already agreed the sender's
+current one. Identical summaries or digest-matching detail rows are harmless; changed hashes, frontiers or end flags still
+fail. This receipt is overwritten on the next agreement and cleared at reconnect; it retains no older rows or payloads.
+
+**Data for the viewer slice.** `GnsPairPhase` adds `refreshing`, `repairing` and `authenticating`; `open` still means proved.
+`relay_failed` becomes true only when the attempt is exhausted. Diagnostic codes are 1790 (invalid repair input/epoch),
+1791 (fresh room attachment or credentials unavailable), 1792 (pair proof), 1793 (repair deadline), and 1794 (retained tail budget).
+Codes 1791..1794 are pair-diagnostic evidence for N6; the session outcome is still N4's typed result (for example 1778 for a
+confirmed removed seat, or 1780/1781 when agreement cannot be completed). They are not substitutes for that session outcome.
+The viewer owner supplies the already negotiated MP-5 keys/epoch, continues pumping through these states, forwards
+`edge_identity` and `fail_repair` through its transport wrapper, consumes the existing mesh decision for player departures,
+and calls per-peer teardown for confirmed exclusions. These are state data, not display text.
+
+**Deployed-server alias limitation.** Alias-only admission returns a seat and capability, but no canonical room ID. The current
+server's Reattach request requires the canonical ID, so that client fails promptly with 1791 and proceeds to the agreed typed
+departure if it cannot use a directory admission. It never waits forever or reuses cached TURN. Directory-admitted members and
+the host retain their canonical ID and can repair. Supplying a canonical ID after alias admission remains a server follow-up.
+
+The policy retains its existing flapping hold-down, incident identity, shared clock, clique selection and fail-closed decider-loss
+rule. Automatic decider failover and service-provided STUN URIs remain separate follow-ups. Cross-network Cloudflare/NAT
+qualification still needs the deployed-service cases in the test plan; loopback checks cannot establish those properties.
+
 ## 4. Bounds at nine peers
 
 ### Client
@@ -493,7 +636,8 @@ real headroom is smaller.
 
 **Allocations, not bandwidth, are the binding coturn limit.** If GNS creates a TURN
 allocation per connection whenever TURN servers are configured (expected from its
-per-connection ICE sessions; slice N2 confirms against the pinned source and a capture),
+per-connection ICE sessions; slice N2 confirmed this by reading the pinned source, not by a
+capture: no allocation count was measured),
 a nine-peer room holds 9 x 8 = **72 allocations even when every pair is direct**. The
 sample coturn config in the deployment guide (`user-quota=2`, `total-quota=128`, relay
 ports 49160..49200 = 41 ports) cannot serve one full room. Slice N3 updates the guide:
@@ -506,8 +650,9 @@ not proposed for the first slices.
 
 **STUN.** The adapter configures TURN but no STUN server list. Whether GNS derives
 server-reflexive candidates from the TURN server's responses decides how many pairs
-behind ordinary NAT connect directly; slice N2 checks it, and if not, the service hands
-out a STUN URI with the credentials (coturn answers STUN on the same port).
+behind ordinary NAT connect directly; slice N2 read the pinned source (not measured): GNS
+makes none, so the adapter takes a STUN list (`GnsOptions::stun_servers`) and the service
+hands out a STUN URI with the credentials (coturn answers STUN on the same port).
 
 ## 5. Test plan
 
@@ -581,3 +726,9 @@ Decided 2026-10-14 (legacy EAWR-3669):
    removed player may rejoin if its links recover. With no all-open decider,
    the largest connected majority clique continues; without a majority clique,
    everyone leaves at the deadline.
+
+### Unconfirmed application timeout
+
+A required input batch or hash voter that is still missing after the 30-second completeness deadline ends the local match as **Connection lost: the match could not continue**, with no winner. Every still-running peer reaches its own bounded loss deadline. The viewer names the missing peer and diagnostic reason, logs the loss, and saves the completed replay prefix with a companion `.connection-loss.json` reason record; the binary replay format is unchanged. A received quit, a confirmed mesh membership decision, or a closed-stream departure backed by received matching votes from multiple survivors retains its normal departure result. A lone survivor cannot confirm the other peer departed just by voting for itself. The retail observations MP-34 and MP-36 allow timeout-triggered quit processing; the deliberate project deviation is to withhold a winner when membership was not confirmed, so two isolated peers cannot each award themselves the match. Application silence on an otherwise open transport is not a mesh pair-loss report: feeding that evidence into recovery is a separate follow-up.
+
+This application-timeout rule also applies to three or more seats; it does not start a mesh membership incident. An already agreed reconnect policy still holds a closed-stream seat for its existing grace, progress and hard-cap deadlines before an unconfirmed lone-survivor loss ends neutrally. Confirmed mesh failures retain their specific agreement-failure messages. Loss recordings publish complete temporary files by rename in the log directory: the companion is published first and the final replay is the pair's commit marker.

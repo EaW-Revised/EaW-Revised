@@ -15,6 +15,23 @@ using namespace eawr::viewer::galactic;
 
 int main() {
     {
+        // TM-03..TM-06: the galactic fast-forward button.
+        using eawr::sim::math::Fixed;
+        const auto normal = Fixed::from_raw(Fixed::scale);
+        const auto factor = Fixed::from_raw(eawr::sim::galactic::fast_forward_factor_raw);
+        assert(factor.raw() == 4 * Fixed::scale);
+        assert(live_fast_forward_factor(false, true) == factor);
+        assert(!live_fast_forward_factor(true, true) && !live_fast_forward_factor(false, false)); // fixture keeps its own
+        assert(clock_controls_admitted(1, false) && clock_controls_admitted(0, false));
+        assert(!clock_controls_admitted(2, false) && clock_controls_admitted(2, true)); // TM-04: two humans disable
+        assert(fast_forward_available(true, false, true));
+        assert(!fast_forward_available(false, false, true) && !fast_forward_available(true, true, true)
+            && !fast_forward_available(true, false, false)); // TM-06: not while paused, not without a factor
+        assert(fast_forward_target(normal, factor) == factor && fast_forward_target(factor, factor) == normal);
+        assert(pause_ends_fast_forward(factor, factor) && !pause_ends_fast_forward(normal, factor)
+            && !pause_ends_fast_forward(factor, std::nullopt)); // TM-05
+    }
+    {
         namespace gc = eawr::sim::galactic;
         gc::PlayerEconomySetup accounts;
         accounts.players = {{7, {}, {}, 1, 5}, {42, {}, {}, 4, 4}};

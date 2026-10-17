@@ -203,6 +203,42 @@ std::string trace(const ai::GalacticConnectivity& value, bool archived_only = fa
     for (const auto& row : value.island_paths) out << row.player << ':' << row.planet << ':' << row.least_force << ':' << row.largest << ';';
     return out.str();
 }
+std::string route_publications(unsigned workers, bool fog) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    auto session = take(world_session(fixture())); Host host(perception(fog));
+    done(host.world.bind(session.snapshot(), {}, executor, 1, session.next_entity_id()));
+    std::map<gc::PlayerId, std::shared_ptr<const std::vector<ai::GalacticExecutionRoute>>> publications;
+    std::vector<ai::GalacticExecutionRoute> flat;
+    for (const auto owner : {1U, 2U}) {
+        auto rows = std::make_shared<std::vector<ai::GalacticExecutionRoute>>();
+        for (const auto& source : session.snapshot()->planets()) for (const auto& target : session.snapshot()->planets())
+            rows->push_back({owner, source.id, target.id, false, real(source.id + target.id), real(owner), {}});
+        flat.insert(flat.end(), rows->begin(), rows->end()); publications.emplace(owner, std::move(rows));
+    }
+    done(host.world.publish_execution_routes(true, 10, flat));
+    const auto native = take(host.world.state_hash());
+    done(host.world.publish_execution_route_generations(true, 10, publications));
+    for (const auto& row : flat) {
+        const auto* found = host.world.execution_route(row.player, row.source, row.candidate);
+        expect(found && found->distance == row.distance && found->threat == row.threat,
+            "player-indexed route publication equals flat decoded matrix");
+        const auto& generation = *publications.at(row.player);
+        expect(found >= generation.data() && found < generation.data() + generation.size(),
+            "route reader borrows the player's immutable generation");
+    }
+    auto invalid = std::make_shared<std::vector<ai::GalacticExecutionRoute>>(*publications.at(1));
+    invalid->pop_back(); auto refused = publications; refused[1] = invalid;
+    expect(!host.world.publish_execution_route_generations(true, 11, refused), "incomplete route generation refuses atomically");
+    expect(host.world.execution_route(1, 1, 2)->distance == real(3), "failed route publication retains the previous generation");
+    auto changed = std::make_shared<std::vector<ai::GalacticExecutionRoute>>(*publications.at(1));
+    changed->front().distance = real(99); auto next = publications; next[1] = changed;
+    const auto* foreign = host.world.execution_route(2, 1, 1);
+    done(host.world.publish_execution_route_generations(true, 11, next));
+    expect(host.world.execution_route(1, 1, 1)->distance == real(99) && publications.at(1)->front().distance == real(2)
+        && host.world.execution_route(2, 1, 1) == foreign, "one player refresh leaves retained and foreign generations immutable");
+    expect(take(host.world.state_hash()) == native, "derived route layout does not alter native perception bytes");
+    return native;
+}
 std::string contracts(unsigned workers, bool fog) {
     eawr::platform::ThreadWorkerAdapter executor(workers);
     auto config = fixture();
@@ -246,6 +282,15 @@ std::string contracts(unsigned workers, bool fog) {
     expect(sites("Single_Hop_Disconnected", 2) == std::vector<gc::PlanetId>({1, 3, 5}), "single-hop policy unions reachable adjacent components");
     expect(first.island_paths.size() == 5 && first.island_paths[1].least_force && first.island_paths[3].least_force
         && first.island_paths[1].largest, "WGA-260..262 qualified chain connectors and largest pair");
+    expect(first.island_sizes.size() == 1 && first.island_sizes[0].player == 1 && first.island_sizes[0].largest == 1
+        && first.island_sizes[0].second == 1, "WGA-476 three single-planet allied components publish the two largest site counts");
+    const auto publication = take(provider.connectivity_publication(session, host.world, host.engine, executor));
+    const auto publication_trace = trace(*publication);
+    for (unsigned i = 0; i < 20; ++i)
+        expect(take(provider.connectivity_publication(session, host.world, host.engine, executor)) == publication,
+            "unchanged connectivity retains one immutable publication without copying rows");
+    done(host.world.bind_publication(session.snapshot(), publication, executor, session.completed_tick(), session.next_entity_id()));
+    expect(trace(*publication) == publication_trace, "world binding retains the completed immutable generation");
     const auto work = provider.work();
     for (unsigned i = 0; i < 20; ++i) expect(trace(take(provider.connectivity(session, host.world, host.engine, executor))) == trace(first), "unchanged output stable");
     expect(provider.work().generations == work.generations && provider.work().searches == work.searches, "WGA-265 unchanged requests prepare no planets or searches");
@@ -823,7 +868,7 @@ int main() {
         connecting_heap_order();
         for (const bool fog : {false, true}) {
             std::string reference;
-            for (const unsigned workers : {1U, 2U, 4U, 8U}) { indigenous(workers); connecting_capacity(workers); const auto result = equal_connecting_routes(workers) + deadline_projection(workers, fog) + stealth_publication(workers, fog) + discovery_counter_reuse(workers, fog) + pending_access_restore(workers) + pending_site_restore(workers) + negative_connecting_hops(workers) + refreshed_force_clock(workers) + expired_connectivity(workers, fog) + reconstruction(workers, fog) + contracts(workers, fog) + partitioned_supplier(workers, fog); if (reference.empty()) reference = result; else expect(result == reference, "provider output and native/world hashes equal on 1/2/4/8"); }
+            for (const unsigned workers : {1U, 2U, 4U, 8U}) { indigenous(workers); connecting_capacity(workers); const auto result = route_publications(workers, fog) + equal_connecting_routes(workers) + deadline_projection(workers, fog) + stealth_publication(workers, fog) + discovery_counter_reuse(workers, fog) + pending_access_restore(workers) + pending_site_restore(workers) + negative_connecting_hops(workers) + refreshed_force_clock(workers) + expired_connectivity(workers, fog) + reconstruction(workers, fog) + contracts(workers, fog) + partitioned_supplier(workers, fog); if (reference.empty()) reference = result; else expect(result == reference, "provider output and native/world hashes equal on 1/2/4/8"); }
         }
         for (const bool fog : {false, true}) expect(partitioned_supplier(16, fog) == partitioned_supplier(1, fog), "usability supplier contract 1/16 equality");
         eawr::sim::InlineExecutor executor; access_checkpoint(executor);

@@ -88,7 +88,9 @@ enum class SurfaceStatus : std::uint8_t {
 // A reviewed admission of one original shader identity into the opaque
 // diffuse contract. Only BaseTexture is consumed; every other parameter the
 // shader carries must be listed as reviewed-unconsumed, or the surface is
-// rejected. A shader name alone never admits a Planet/Nebula/Skydome surface.
+// rejected. A shader name alone never admits a Planet/Nebula/Skydome surface
+// to this contract. The viewer's environment scene routes such surfaces
+// separately (SceneRoute in environment_scene.hpp) and reports what it skips.
 struct Qualification final {
     std::string shader;
     std::vector<std::string> reviewed_unconsumed_parameters;
