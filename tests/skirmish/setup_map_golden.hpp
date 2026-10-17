@@ -106,7 +106,7 @@ inline void write_team_corpus(const std::filesystem::path& directory, const std:
     const auto real = [&](float value) { return integer(std::bit_cast<std::uint32_t>(value)); };
     const auto point = [&](float x,float y,float z) { Bytes out;add(out,real(x));add(out,real(y));add(out,real(z));return out; };
     Bytes root;
-    for (const auto [id,value] : {std::pair{0U,0x0201U},{1U,2U},{2U,capacity},{3U,5U}}) mini(root,static_cast<std::uint8_t>(id),integer(value));
+    for (const auto& [id,value] : {std::pair{0U,0x0201U},{1U,2U},{2U,capacity},{3U,5U}}) mini(root,static_cast<std::uint8_t>(id),integer(value));
     mini(root,11,{std::byte{0}}); mini(root,18,{std::byte{1}});
     Bytes placements; std::uint32_t ordinal{};
     for (const auto& [name,x] : std::vector<std::pair<std::string,float>>{

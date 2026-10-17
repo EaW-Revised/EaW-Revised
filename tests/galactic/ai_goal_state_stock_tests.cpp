@@ -115,7 +115,7 @@ struct EngineContractAccess {
         e.players_.front().blocks[block] = b;
         BuildTask task; task.taskforce = tf.id; task.block = block; task.type = 100; task.object = 51;
         task.source = 2; task.producer = 10; task.issued = 41; task.generic_cost = real(2); p.tasks = {task};
-        p.active = {retained}; p.activations[{"GOAL", retained.target}].entries = {{true, -1}, {false, 600}};
+        p.active.clear(); p.active.push_back(retained); p.activations[{"GOAL", retained.target}].entries = {{true, -1}, {false, 600}};
         p.goal_outcomes = p.activations; p.plan_outcomes[{plan.definition, retained.target}].entries = {{false, 700}};
         p.plan_success[plan.definition] = {3, 5};
         p.goal_success["GOAL"] = {1, 4}; p.target_goal_success[{"GOAL", retained.target}] = {1, 4};

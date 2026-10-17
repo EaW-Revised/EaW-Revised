@@ -30,8 +30,11 @@ namespace {
 using Bytes = std::vector<std::uint8_t>;
 using Clock = std::chrono::steady_clock;
 // Repair dials per pair and epoch, and the pause before the second (it doubles each time): 0.5 + 1 + 2 + 4 s.
+#if EAWR_HAS_GNS
 constexpr unsigned gns_repair_dial_limit = 5;
 constexpr std::chrono::milliseconds gns_repair_redial_pause{500};
+constexpr std::size_t gns_log_max_pending = 256;
+#endif
 core::Diagnostic error(unsigned number, std::string message) {
     core::Diagnostic result;
     result.code = "EAWR-NET-" + std::to_string(number); result.message = std::move(message);
@@ -43,7 +46,6 @@ std::atomic<int>& observed_route_cell() {
 }
 // Diagnostics for godot.log (#4021). GNS threads and the I/O owner queue lines; the owner's poll hands them to the sink.
 struct GnsLogState {
-    static constexpr std::size_t max_pending = 256;
     std::mutex mutex;
     GnsLogSink sink;
     std::deque<std::string> pending;
@@ -90,7 +92,7 @@ void gns_log_push(int seat, int peer, std::string_view text, bool limited = fals
         if (entry.second) body += " (" + std::to_string(entry.second) + " more since the last one)";
         entry = {now, 0};
     }
-    if (log.pending.size() >= GnsLogState::max_pending) { ++log.dropped; return; }
+    if (log.pending.size() >= gns_log_max_pending) { ++log.dropped; return; }
     log.pending.push_back(gns_log_line(seat, peer, body));
     log.has_pending.store(true, std::memory_order_release);
 }

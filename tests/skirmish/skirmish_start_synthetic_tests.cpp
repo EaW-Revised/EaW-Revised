@@ -1470,7 +1470,7 @@ void setup_contract(const std::filesystem::path& fixtures) {
             auto custom = skirmish::setup_maps(filesystem.value(), catalog, custom_query);
             expect(custom && custom.value().size() == 1 && custom.value()[0].path.ends_with("_mp_space_custom.ted"),
                 "WSS-07: official and custom maps in the same layer are classified only by authored flags");
-            for (const auto query : {skirmish::SetupMapQuery{}, custom_query}) {
+            for (const auto& query : {skirmish::SetupMapQuery{}, custom_query}) {
                 const auto eager = setup_map_reference::eager_maps(filesystem.value(), catalog, query);
                 expect(static_cast<bool>(eager), "eager synthetic setup reference succeeds");
                 for (const unsigned workers : {1U, 2U, 4U, 8U}) {

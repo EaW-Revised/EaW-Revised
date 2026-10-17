@@ -11,7 +11,12 @@ struct Writer {
         bytes.resize(offset + width);
         for (std::size_t i = 0; i < width; ++i) bytes[offset + i] = static_cast<std::uint8_t>(value >> (8U * i));
     }
-    void text(std::string_view value) { word(value.size(), 4); bytes.insert(bytes.end(), value.begin(), value.end()); }
+    void text(std::string_view value) {
+        word(value.size(), 4);
+        const auto offset = bytes.size();
+        bytes.resize(offset + value.size());
+        for (std::size_t i = 0; i < value.size(); ++i) bytes[offset + i] = static_cast<std::uint8_t>(value[i]);
+    }
     void key(const GalacticMarkupKey& value) { word(value.observer, 4); word(value.player_target, 1); word(value.target); }
     void hints(const std::map<std::string, Real, std::less<>>& values) {
         word(values.size()); for (const auto& [name, value] : values) { text(name); word(value.repr); }

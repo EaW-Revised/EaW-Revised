@@ -230,7 +230,7 @@ struct EngineContractAccess {
     static void retain_plan_without_instance(Engine& engine, tactical::PlayerId id, bool exited) {
         auto& player = checked_player(engine, id);
         Goal goal; goal.id = 1; goal.plan = 1;
-        player.active = {goal}; player.next_goal_id = 2;
+        player.active.clear(); player.active.push_back(goal); player.next_goal_id = 2;
         Plan plan; plan.id = plan.goal = 1; plan.player = id;
         plan.instance = first_plan_instance; plan.exited = exited;
         player.running[1] = plan; player.plan_of_instance[plan.instance] = 1;

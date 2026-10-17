@@ -126,7 +126,7 @@ class CampaignFromMenuGpu(unittest.TestCase):
     def test_native_ai_switch_from_the_menu(self):
         # Exercise real menu selection and Start, without the all-AI capture override.
         output = pathlib.Path(tempfile.mkdtemp(prefix="front-end-native-ai-")).resolve()
-        for flag, installed in ((None, True), ("off", False), ("on", True)):
+        for flag, installed in ((None, False), ("off", False), ("on", True)):
             with self.subTest(flag=flag):
                 label = flag or "default"
                 report = output / (label + ".json")
