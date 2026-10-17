@@ -4,10 +4,10 @@
 
 namespace eawr::viewer::galactic {
 
-// --eawr-galactic-ai on|off: native galactic AI is OFF by default in 0.2.5 (saves taken while a
-// battle prompt is pending cannot be loaded with AI on, #4068). Anything other than on/off is invalid.
+// --eawr-galactic-ai on|off: native galactic AI is ON by default (release default, owner 10-17).
+// Only "off" switches it off; anything other than on/off is flagged invalid.
 struct NativeAiFlag final {
-    bool enabled{};
+    bool enabled{true};
     bool invalid{};
 };
 

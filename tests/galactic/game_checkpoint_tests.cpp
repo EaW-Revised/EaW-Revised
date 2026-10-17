@@ -293,6 +293,135 @@ void hero_return_tail_barrier() {
         }
     }
 }
+// A retained manager under auto-resolve admission plans on paused ticks too (its admission gate returns true for
+// every tick it is asked about); this stub mirrors that gate without any engine state.
+struct PausedPlanning final : auth::GalacticScriptEngine {
+    bool admits_service(const galactic::GalacticTick&) const noexcept override { return true; }
+    eawr::core::Result<auth::ServiceOptions> before_service(const eawr::sim::PartitionExecutor&,
+        const galactic::GalacticSession&, const galactic::GalacticTick&, auth::ScriptScheduler&) override {
+        return eawr::core::Result<auth::ServiceOptions>::success({});
+    }
+};
+// A conflict admitted inside a hosted tick pauses the galaxy after that tick's AI service and before the outer
+// frame timer, so while it is pending the AI host has served one frame more than the galaxy has counted. Saves
+// taken in that window must restore, a save written after such a restore must restore again, and the resolution
+// that ends the pause must close the lead (#4068). `resolve_tick` 0 keeps the conflict pending for the whole run;
+// `paused_planning` installs an AI engine that also services paused ticks, so the lead grows past one.
+void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paused_planning) {
+    const auto config = victory_setup(); const auto identities = cp::game_identities(config);
+    campaign::ConflictRecord conflict; conflict.id = 9000; conflict.planet = config.planets.front().id;
+    conflict.invader = 1; conflict.defender = 2; conflict.tactical.first_free_entity_id = 9001;
+    conflict.tactical.content_identity = config.content_identity;
+    const auto no_content = [](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success({}); };
+    // The solver reports its result once the galaxy has run to `resolve_tick`; before that the conflict stays pending.
+    const auto solver = [resolve_tick](const campaign::ConflictRecord& record, const galactic::GalacticSnapshot& snapshot,
+                                        const eawr::sim::PartitionExecutor&) {
+        using Outcome = std::optional<campaign::AutoResolveOutcomeApplication>;
+        if (resolve_tick == 0 || snapshot.completed_tick() < resolve_tick) return eawr::core::Result<Outcome>::success({});
+        campaign::AutoResolveOutcomeApplication outcome;
+        outcome.planet = record.planet; outcome.planet_type = "FixturePlanet";
+        outcome.invader = record.invader; outcome.defender = record.defender;
+        outcome.result.conflict = record.id; outcome.result.winner = record.defender;
+        return eawr::core::Result<Outcome>::success(std::move(outcome));
+    };
+    // Everything a session needs to hold this conflict, installed on fresh and restored sessions alike.
+    const auto services = [&](campaign::GameSession& session) {
+        session.set_conflict_service([](const auto&, const auto&, auto) {
+            return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
+        }, no_content);
+        session.set_auto_resolver(solver);
+        campaign::AutoResolveOutcomeServices outcomes;
+        outcomes.control = [](auto&, const auto&) { return eawr::core::Result<void>::success(); };
+        session.set_auto_resolve_outcome_services(std::move(outcomes));
+    };
+    const auto engine = [&](auth::ScriptedGalacticSession& host) {
+        if (paused_planning) check(host.set_ai_engine(std::make_shared<PausedPlanning>()));
+    };
+    const auto make = [&] {
+        auto game = take(campaign::GameSession::create(config));
+        services(game);
+        check(game.install_galactic_scripts(gc_scheduler(1), gc_scheduler(2)));
+        check(configure_gc(*game.galactic_scripts())); engine(*game.galactic_scripts());
+        check(game.queue_conflict(conflict, {campaign::ConflictRoute::instant_auto}));
+        return game;
+    };
+    auto options = scripted_options(); options.content = no_content;
+    options.configure_session = [&](campaign::GameSession& session) {
+        services(session); return eawr::core::Result<void>::success();
+    };
+    options.configure_galactic = [&](auth::ScriptedGalacticSession& host) {
+        auto configured = configure_gc(host); if (configured) engine(host); return configured;
+    };
+    constexpr int horizon = 60;
+    const auto lead = [](campaign::GameSession& session) {
+        return static_cast<std::int64_t>(session.galactic_scripts()->ai_scheduler().completed_tick())
+            - static_cast<std::int64_t>(session.galaxy().clock().galactic_frame);
+    };
+    const auto paused_now = [](campaign::GameSession& session) { return session.galaxy().clock().pause_depth != 0; };
+    const eawr::sim::InlineExecutor serial;
+    // States are indexed by completed ticks n: state n is the one after step n - 1.
+    auto reference = make(); std::vector<std::string> hashes; std::vector<std::int64_t> leads; std::vector<bool> paused;
+    std::int64_t deepest = 0;
+    for (int tick = 0; tick < horizon; ++tick) {
+        hashes.push_back(take(reference.step(serial)).state_hash.get());
+        leads.push_back(lead(reference)); paused.push_back(paused_now(reference));
+        deepest = std::max(deepest, leads.back());
+    }
+    const auto first_paused = static_cast<int>(std::find(paused.begin(), paused.end(), true) - paused.begin());
+    const auto resumed = static_cast<int>(std::find(paused.begin() + first_paused, paused.end(), false) - paused.begin());
+    expect(first_paused < horizon && leads[static_cast<std::size_t>(first_paused)] >= 1,
+        "fixture pauses the galaxy with the AI host ahead of the paused galaxy");
+    if (resolve_tick == 0) expect(resumed == horizon, "an unresolved conflict keeps the galaxy paused");
+    else expect(resumed < horizon && !paused.back() && (paused_planning || leads[static_cast<std::size_t>(resumed)] == 0),
+        "the resolution resumes the galaxy and, with the production service gate, the timer advance closes the AI lead");
+    expect(paused_planning ? deepest > 1 : deepest == 1, paused_planning
+        ? "an engine that plans on paused ticks grows the lead past one frame"
+        : "the production service gate leads the paused galaxy by exactly one frame");
+    // Under paused planning the lead outlives the resolution, so only the pause window is a describable barrier.
+    const bool window_only = paused_planning && resolve_tick != 0;
+    const int last_barrier = window_only ? resumed : horizon - 6;
+    const int last_resave = window_only ? resumed : horizon;
+    const auto continue_equal = [&](campaign::GameSession& session, const eawr::sim::PartitionExecutor& pool) {
+        while (session.completed_tick() < hashes.size()) {
+            const auto tick = session.completed_tick();
+            expect(take(session.step(pool)).state_hash.get() == hashes[tick], "restore around a pending conflict continues equal");
+            expect(lead(session) == leads[tick] && paused_now(session) == paused[tick],
+                "restored session keeps the reference AI lead and pause");
+        }
+    };
+    std::size_t windowed = 0, resaved_windowed = 0;
+    for (const auto workers : {std::size_t{1}, std::size_t{4}}) {
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        for (int barrier = 0; barrier <= last_barrier; ++barrier) {
+            auto original = make(); for (int tick = 0; tick < barrier; ++tick) (void)take(original.step(pool));
+            // A barrier inside the window really is paused with the AI host ahead of the galaxy.
+            if (barrier > 0 && paused[static_cast<std::size_t>(barrier) - 1]) {
+                ++windowed;
+                expect(paused_now(original) && lead(original) >= 1, "a window barrier is saved paused with the AI host ahead");
+            }
+            const auto saved = take(cp::save_game_checkpoint(original, identities));
+            auto restored = take(cp::load_game_checkpoint(saved, identities, options, pool));
+            expect(take(cp::save_game_checkpoint(restored.session, identities)) == saved, "pending-conflict checkpoint bytes are canonical");
+            while (restored.session.completed_tick() < static_cast<std::uint64_t>(std::min(barrier + 5, last_resave))) {
+                const auto tick = restored.session.completed_tick();
+                expect(take(restored.session.step(pool)).state_hash.get() == hashes[tick], "restored session runs equal to the uninterrupted one");
+            }
+            if (paused_now(restored.session) && lead(restored.session) >= 1) ++resaved_windowed;
+            const auto resaved = take(cp::save_game_checkpoint(restored.session, identities));
+            auto again = take(cp::load_game_checkpoint(resaved, identities, options, pool));
+            expect(again.session.state_sha256() == restored.session.state_sha256(), "a save written after a restore restores to the same state");
+            expect(lead(again.session) == lead(restored.session) && paused_now(again.session) == paused_now(restored.session),
+                "the second restore keeps the AI lead and pause");
+            continue_equal(again.session, pool);
+            continue_equal(restored.session, pool);
+        }
+    }
+    expect(windowed > 0 && resaved_windowed > 0, "barriers and re-saves were taken inside the pause window");
+}
+void pending_conflict_resave() {
+    for (const auto resolve_tick : {std::uint64_t{0}, std::uint64_t{20}})
+        for (const auto paused_planning : {false, true}) pending_conflict_barriers(resolve_tick, paused_planning);
+}
 void story_clock_refusals() {
     const auto config = setup(); const auto identities = cp::game_identities(config);
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
@@ -1241,7 +1370,10 @@ void timeline_contracts() {
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--timeline") { timeline_contracts(); return failures == 0 ? 0 : 1; }
-        nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals();
+        if (argc == 2 && std::string_view(argv[1]) == "--pending-conflict") {
+            pending_conflict_resave(); return failures == 0 ? 0 : 1;
+        }
+        nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
         admission_and_fixups(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();
         scripted_child_barriers(); child_casualty_return();
         if (argc != 2) throw std::runtime_error("expected corpus directory");

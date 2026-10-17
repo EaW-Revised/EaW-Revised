@@ -827,13 +827,13 @@ void campaign_start_uses_authored_home_transform() {
     assert(changed.distance == 1234.0F && changed.pitch_degrees == 20.0F && changed.yaw_degrees == 0.0F);
 }
 
-void native_ai_is_off_by_default_and_on_enables_it() {
+void native_ai_is_on_by_default_and_off_disables_it() {
     NativeAiFlag flag;
-    assert(!flag.enabled && !flag.invalid);
-    apply_native_ai_flag(flag, "on");
     assert(flag.enabled && !flag.invalid);
     apply_native_ai_flag(flag, "off");
     assert(!flag.enabled && !flag.invalid);
+    apply_native_ai_flag(flag, "on");
+    assert(flag.enabled && !flag.invalid);
     apply_native_ai_flag(flag, "maybe");
     assert(flag.invalid);
 }
@@ -841,7 +841,7 @@ void native_ai_is_off_by_default_and_on_enables_it() {
 } // namespace
 
 int main() {
-    native_ai_is_off_by_default_and_on_enables_it();
+    native_ai_is_on_by_default_and_off_disables_it();
     planet_bonus_metadata_survives_view_projection();
     corruption_attachment_edges_and_events_follow_admitted_facts();
     corruption_parameters_and_retained_pairs();

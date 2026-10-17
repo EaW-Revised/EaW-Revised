@@ -98,9 +98,11 @@ public:
     // pure translators/engines before continuing, as for create().
     [[nodiscard]] static core::Result<ScriptedGalacticSession> restore(
         sim::galactic::GalacticSession world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved);
-    // Parent ownership transfer is transactional: failed validation retains its world.
+    // Parent ownership transfer is transactional: failed validation retains its world. `conflict_paused` says the
+    // campaign owner holds a pending-conflict pause on this galaxy; only then may the AI host lead the frame timer.
     [[nodiscard]] static core::Result<ScriptedGalacticSession> restore_preserving(
-        sim::galactic::GalacticSession& world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved);
+        sim::galactic::GalacticSession& world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved,
+        bool conflict_paused = false);
     ScriptedGalacticSession(ScriptedGalacticSession&&) noexcept;
     ScriptedGalacticSession& operator=(ScriptedGalacticSession&&) noexcept;
     ~ScriptedGalacticSession();

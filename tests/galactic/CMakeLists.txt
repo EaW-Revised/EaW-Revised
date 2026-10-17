@@ -295,6 +295,7 @@ target_link_libraries(galactic_game_checkpoint_tests PRIVATE eawr::checkpoint ea
 target_compile_features(galactic_game_checkpoint_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(galactic_game_checkpoint_tests)
 add_test(NAME galactic_timeline_contracts COMMAND galactic_game_checkpoint_tests --timeline)
+add_test(NAME galactic_pending_conflict_barrier COMMAND galactic_game_checkpoint_tests --pending-conflict)
 add_test(NAME galactic_game_checkpoint_contracts COMMAND galactic_game_checkpoint_tests
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/corpus")
 
