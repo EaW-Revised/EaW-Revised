@@ -644,12 +644,11 @@ Rules:
 
 ## 8. AI
 
-- **Native GC AI, off by default in 0.2.5.** Fresh campaigns install native galactic AI only
-  with `--eawr-galactic-ai on` (viewer and front-end path); `off` is the default until loading a save
-  taken while a battle prompt is pending works with AI on.
+- **Native GC AI, on by default.** Fresh campaigns install native galactic AI unless
+  `--eawr-galactic-ai off` is passed (viewer and front-end path); `on` is the default.
   The capture-only `--eawr-galactic-all-ai yes` proof also opts in.
   Enabled AI keeps the retail service periods (300/1/3/3/300/1 frames). Saves retain
-  their native AI state; loading such a save requires AI to be on. With AI
+  their native AI state; loading such a save requires AI to be on (the default). With AI
   off, no native AI inputs are prepared or validated. The compute budget remains a
   known limit; redesign follows
   in separate slices.

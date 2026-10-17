@@ -1709,7 +1709,8 @@ core::Result<void> GameSession::install_galactic_scripts(authoritative::ScriptSc
         return fail<void>("install galactic scripts once at creation or at a restored barrier");
     auto fresh = galactic::GalacticSession::create(impl_->galaxy.setup());
     if (!fresh) return core::Result<void>::failure(fresh.error());
-    auto host = saved ? authoritative::ScriptedGalacticSession::restore_preserving(impl_->galaxy, std::move(ai), std::move(story), *saved)
+    auto host = saved ? authoritative::ScriptedGalacticSession::restore_preserving(
+                            impl_->galaxy, std::move(ai), std::move(story), *saved, impl_->conflict_pause)
                       : authoritative::ScriptedGalacticSession::create(std::move(fresh).value(), std::move(ai), std::move(story));
     if (!host) return core::Result<void>::failure(host.error());
     if (!saved) host.value().parent_world() = std::move(impl_->galaxy);

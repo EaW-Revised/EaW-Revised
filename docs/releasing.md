@@ -8,8 +8,8 @@ Releases are built on the public repository's GitHub-hosted runners by
 
 The last published release is v0.1.6 (2026-10-07). The next candidate is v0.2.5: the portable player
 download with its double-click launcher, a debug download, playable space skirmish, LAN and
-online multiplayer and a partially working Galactic Conquest. The galactic AI is off by default
-in live campaigns; `--eawr-galactic-ai on` switches it on. Keep a candidate local until the
+online multiplayer and a partially working Galactic Conquest. The galactic AI is on by default
+in live campaigns; `--eawr-galactic-ai off` switches it off. Keep a candidate local until the
 owner approves the public sync.
 
 ## Cutting a release

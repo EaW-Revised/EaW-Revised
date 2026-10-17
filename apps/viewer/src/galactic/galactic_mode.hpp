@@ -50,7 +50,7 @@ public:
         std::string queue_type;
         std::uint32_t queue_planet{}; // 0 = first planet the local player is offered the type on
         bool red_green_routes{}; // Profile adapter seam; explicit in synthetic captures.
-        bool native_ai{}; // --eawr-galactic-ai on|off: fresh campaign install, default off (#4068).
+        bool native_ai{true}; // --eawr-galactic-ai on|off: fresh campaign install, default on.
         bool native_ai_invalid{};
         bool galactic_reveal{}; // --eawr-galactic-reveal on|off: draw-only fog reveal, default off (#3931).
         bool galactic_reveal_invalid{};

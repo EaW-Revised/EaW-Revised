@@ -248,7 +248,8 @@ core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore(
     return restore_preserving(world, std::move(ai), std::move(story), saved);
 }
 core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preserving(
-    gc::GalacticSession& world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved) {
+    gc::GalacticSession& world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved,
+    const bool conflict_paused) {
     auto refuse = [](std::string message) {
         return core::Result<ScriptedGalacticSession>::failure(error(codes::load_rejected, std::move(message)));
     };
@@ -269,8 +270,17 @@ core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preservin
     const auto served_frame = [&](const std::uint64_t frame) {
         return frame == saved.galactic_frame || (tail_lag != 0 && frame + tail_lag == saved.galactic_frame);
     };
-    if (ai.completed_tick() != saved.galactic_frame || story.completed_tick() > saved.completed_tick ||
-        !served_frame(ai.galactic_frame()) || !served_frame(story.galactic_frame()) || !unique_instances(ai, story))
+    // A conflict admitted inside a hosted tick pauses the galaxy after that tick's AI service and before the outer
+    // frame timer, so while the pause is pending the AI host has served at least one frame more than the galaxy has
+    // counted, all stamped with the barrier frame. A paused tick services no AI unless the engine admits one (the
+    // retained manager's auto-resolve planning), so the lead is not capped at one; it is capped by one service per
+    // elapsed tick. The pause resumes with a timer advance that closes the first frame of the lead.
+    const bool paused_service_lead = conflict_paused && world.clock().pause_depth != 0 &&
+        ai.galactic_frame() == saved.galactic_frame && ai.completed_tick() > saved.galactic_frame &&
+        ai.completed_tick() <= saved.completed_tick;
+    if ((ai.completed_tick() != saved.galactic_frame && !paused_service_lead) ||
+        story.completed_tick() > saved.completed_tick || !served_frame(ai.galactic_frame()) ||
+        !served_frame(story.galactic_frame()) || !unique_instances(ai, story))
         return refuse("saved AI/story service clocks or instance identities do not match the barrier");
     for (const auto& [id, sequence] : saved.next_sequence) {
         static_cast<void>(sequence);
