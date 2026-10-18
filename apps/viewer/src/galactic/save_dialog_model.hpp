@@ -11,7 +11,8 @@ struct SaveMenuAdmission {
 };
 struct SaveMenuEnabled { bool open{}, save{}, load{}; };
 [[nodiscard]] constexpr SaveMenuEnabled save_menu_enabled(SaveMenuAdmission facts) {
-    const bool both = facts.cinematic || facts.letterbox || facts.pending_battle
+    // WGS-P01: a pending battle never prevents recovery through Save/Load.
+    const bool both = facts.cinematic || facts.letterbox
         || facts.tutorial || facts.multiplayer_skirmish;
     return {!facts.cinematic, !both && !(facts.multiplayer_campaign && facts.tactical),
         !both && !facts.multiplayer_campaign};

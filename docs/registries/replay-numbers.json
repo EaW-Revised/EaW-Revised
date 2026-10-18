@@ -87,7 +87,7 @@
     "tag": 10,
     "constant": "replay_extension_campaign",
     "name": "campaign",
-    "documented": false
+    "documented": true
    },
    {
     "tag": 11,

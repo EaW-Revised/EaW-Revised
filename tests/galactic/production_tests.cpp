@@ -255,6 +255,78 @@ void offer_projection() {
         else expect(std::equal(after.begin(), after.end(), baseline.begin(), baseline.end()), "offer projection equal on 1/2/4/8 workers");
     }
     {
+        auto active = config;
+        active.rules.fiscal_cycle_frames = 1000;
+        active.planets[1].owner = 2;
+        auto& foreign = active.production->planets[1];
+        foreign.target_owner = foreign.starbase_owner = foreign.ground_occupier = 2;
+        for (auto& planet : active.production->planets) {
+            planet.offers.front().seconds = f(2);
+            // Large immutable content makes the encoded-byte budget observable without timing.
+            for (galactic::TypeId id = 2000; id < 2064; ++id) {
+                auto type = planet.offers.back(); type.type = id;
+                planet.offers.push_back(std::move(type));
+            }
+        }
+        std::vector<std::string> hashes;
+        for (auto workers : eawr::platform::determinism_worker_counts()) {
+            eawr::platform::ThreadWorkerAdapter pool(workers);
+            auto game = take(galactic::GalacticSession::create(active));
+            game.set_hash_verification(true);
+            game.set_native_production_handler([](const auto& notice) {
+                return eawr::core::Result<galactic::GalacticSession::NativeProductionPayment>::success(
+                    {true, notice.player, notice.amount});
+            });
+            const auto admitted = take(game.admit_native_production({2, 2, 1000, f(100)}, pool));
+            expect(admitted.admission == galactic::ProductionAdmission::allowed, "foreign AI production starts");
+            submit(game, buy(0, 1));
+            auto previous = take(game.step(pool));
+            const auto canonical_size = game.canonical_state_bytes().size();
+            for (std::size_t tick = 0; tick < 6; ++tick) {
+                const auto result = take(game.step(pool));
+                expect(result.work.production_entries == 2, "both local and AI queues make progress");
+                expect(result.work.production_hash_bytes > 0 && result.work.production_hash_bytes < canonical_size / 4,
+                    "dirty production hashes mutable state and fixed-size digests, excluding immutable offer bytes");
+                expect(result.work.production_offer_rebuilds == 0,
+                    "active countdowns and AI payments reuse local offer rows");
+                expect(result.snapshot->production_offers().data() == previous.snapshot->production_offers().data(),
+                    "active ticks retain the immutable offer publication");
+                expect(result.snapshot->player_economy()->players[1].credits < previous.snapshot->player_economy()->players[1].credits,
+                    "AI bills really change its account on each observed tick");
+                expect(result.snapshot->production()->planets.front().queues[0].front().last_remaining
+                    < previous.snapshot->production()->planets.front().queues[0].front().last_remaining,
+                    "human countdown really changes despite reused offer rows");
+                if (workers == 1) hashes.push_back(result.state_hash.get());
+                else expect(result.state_hash.get() == hashes[tick], "active production hashes agree across worker counts");
+                previous = result;
+            }
+            // A membership change still invalidates the rows immediately.
+            submit(game, cancel(game.completed_tick(), 2, 0));
+            const auto cancelled = take(game.step(pool));
+            expect(cancelled.work.production_offer_rebuilds == 1
+                && !cancelled.snapshot->production_offers().front().already_in_production,
+                "cancellation invalidates membership and refund admission inputs");
+        }
+        auto changed = active;
+        changed.production->planets.front().offers.back().authored_price = f(123);
+        auto original = take(galactic::GalacticSession::create(active));
+        auto different = take(galactic::GalacticSession::create(changed));
+        expect(original.state_sha256() != different.state_sha256(), "immutable offer content remains part of state identity");
+        eawr::sim::InlineExecutor serial;
+        // Direct restore accepts fresh owners. Prime the target's immutable digest through the hash API first.
+        expect(original.cached_state_hash().get() != different.cached_state_hash().get(),
+            "fresh owners cache different immutable offer digests");
+        (void)take(original.step(serial));
+        const auto saved = take(original.save_checkpoint_state());
+        const auto loaded = different.load_checkpoint_state(saved);
+        if (!loaded) throw std::runtime_error(loaded.error().message);
+        auto fresh = take(galactic::GalacticSession::create(active));
+        const auto restored = fresh.load_checkpoint_state(saved);
+        if (!restored) throw std::runtime_error(restored.error().message);
+        expect(different.cached_state_hash().get() == fresh.state_sha256(),
+            "in-place checkpoint load replaces cached immutable offer digests with the restored owner's content");
+    }
+    {
         // WGUI-170: renamed/synthetic ground, space and station offers retain
         // their identity and price while fiscal income changes admission.
         auto poor = config;

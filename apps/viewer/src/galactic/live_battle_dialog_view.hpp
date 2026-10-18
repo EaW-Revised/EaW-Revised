@@ -4,6 +4,20 @@
 #include "eawr/platform/live_game_session.hpp"
 
 namespace eawr::viewer::galactic {
+// Only acknowledge an actually published result. A result can occupy both
+// slots after auto-resolve; closing its one summary dismisses both copies.
+inline bool acknowledge_battle_summary(BattleSummaryAcknowledgements& acknowledged,
+    const platform::LiveGameFrame& frame, std::uint64_t conflict) {
+    if (!conflict) return false;
+    bool found = false;
+    if (frame.result && frame.result->conflict == conflict) {
+        acknowledged.returned = conflict; found = true;
+    }
+    if (frame.auto_resolve_outcome && frame.auto_resolve_outcome->result.conflict == conflict) {
+        acknowledged.automatic = conflict; found = true;
+    }
+    return found;
+}
 struct LiveBattleDialogNames {
     std::function<std::string(std::uint64_t)> planet;
     std::function<BattleDialogSide(sim::galactic::PlayerId)> side;
@@ -24,12 +38,12 @@ struct LiveBattleDialogNames {
 class LiveBattleSummaryPublication final {
 public:
     bool reuse(const platform::LiveGameFrame& frame, sim::galactic::SeatId seat,
-        sim::galactic::PlayerId local, std::uint64_t acknowledged, std::uint64_t metadata,
+        sim::galactic::PlayerId local, BattleSummaryAcknowledgements acknowledged, std::uint64_t metadata,
         const campaign::ConflictRecord* fallback = nullptr) {
         const auto* context = frame.result_conflict ? frame.result_conflict.get() : fallback;
         const bool tactical = frame.result && context && frame.result->conflict == context->id
-            && frame.result->conflict != acknowledged;
-        const bool automatic = frame.auto_resolve_outcome && frame.auto_resolve_outcome->result.conflict != acknowledged;
+            && !acknowledged.contains(frame.result->conflict);
+        const bool automatic = frame.auto_resolve_outcome && !acknowledged.contains(frame.auto_resolve_outcome->result.conflict);
         if (frame.pending_conflict || (!tactical && !automatic)) { valid_ = false; return false; }
         if (valid_ && result_ == frame.result && outcome_ == frame.auto_resolve_outcome && invasion_ == frame.invasion_offer
             && ((!context && !context_) || (context && context_ && *context_ == *context))
@@ -54,7 +68,8 @@ private:
     bool available_{};
     sim::galactic::SeatId seat_{};
     sim::galactic::PlayerId local_{};
-    std::uint64_t acknowledged_{}, metadata_{}, builds_{};
+    BattleSummaryAcknowledgements acknowledged_;
+    std::uint64_t metadata_{}, builds_{};
     bool valid_{};
 };
 // Pending/progress content is retained between immutable owner publications.
@@ -86,7 +101,7 @@ private:
 // Pure projection of the same publication used by command validation. Summary
 // acknowledgement is presentation state, never a parent ResumeGalaxy command.
 [[nodiscard]] inline BattleDialogView live_battle_dialog_view(const platform::LiveGameFrame& frame,
-    sim::galactic::SeatId seat, sim::galactic::PlayerId local, std::uint64_t acknowledged,
+    sim::galactic::SeatId seat, sim::galactic::PlayerId local, BattleSummaryAcknowledgements acknowledged,
     const LiveBattleDialogNames& names, bool tactical_available = false,
     const campaign::ConflictRecord* returned_conflict = nullptr) {
     if (frame.result_conflict) returned_conflict = frame.result_conflict.get();
@@ -188,7 +203,7 @@ private:
             }
         }
     } else if (frame.result && returned_conflict && frame.result->conflict == returned_conflict->id
-        && frame.result->conflict != acknowledged) {
+        && !acknowledged.contains(frame.result->conflict)) {
         const auto& entry = *returned_conflict;
         const auto& result = *frame.result;
         view.conflict = entry.id;
@@ -217,7 +232,7 @@ private:
                 view.invasion_fleet = offer.fleet; view.invasion_planet = offer.planet;
                 break;
             }
-    } else if (frame.auto_resolve_outcome && frame.auto_resolve_outcome->result.conflict != acknowledged) {
+    } else if (frame.auto_resolve_outcome && !acknowledged.contains(frame.auto_resolve_outcome->result.conflict)) {
         const auto& outcome = *frame.auto_resolve_outcome;
         view.conflict = outcome.result.conflict;
         describe(outcome.planet, outcome.defender, outcome.invader);

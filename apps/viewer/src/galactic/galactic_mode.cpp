@@ -5,6 +5,7 @@
 #include "viewer_path.hpp"
 #include "hud_clock_fixture.hpp"
 #include "capture_hud_fixture.hpp"
+#include "auto_summary_hint.hpp"
 #include "weapon_action_live_fixture.hpp"
 #include "live_battle_dialog_view.hpp"
 #include "galactic_mode_seats.hpp"
@@ -46,6 +47,11 @@ constexpr float keyboard_pan_fraction = 0.8F;
 constexpr double keyboard_pan_max_delta = 0.1;
 }
 
+platform::LiveGameFrame GalacticMode::State::battle_dialog_frame() const {
+    if (!game) return {};
+    auto frame = galaxy ? game->frame(sim::SeatId{galaxy->local.seat}) : game->frame();
+    return galactic_view::frame_with_auto_summary(std::move(frame), restored_auto_summary);
+}
 bool GalacticMode::State::build_view() {
     if (options.native_ai_invalid) {
         failure = "--eawr-galactic-ai expects on or off";
@@ -77,8 +83,9 @@ bool GalacticMode::State::build_view() {
     if (!options.space_cycle_proof.empty() && (options.campaign == galactic_view::synthetic_campaign
         || options.synthetic_battle || options.paused || options.coop_preview
         || (options.space_cycle_proof != "win" && options.space_cycle_proof != "retreat"
-            && options.space_cycle_proof != "save" && options.space_cycle_proof != "loss"))) {
-        failure = "Space cycle proof requires an unpaused single-player authored campaign and mode win, retreat, loss or save";
+            && options.space_cycle_proof != "save" && options.space_cycle_proof != "prompt-save"
+            && options.space_cycle_proof != "loss"))) {
+        failure = "Space cycle proof requires an unpaused single-player authored campaign and mode win, retreat, loss, save or prompt-save";
         return false;
     }
     galactic_view::GalaxySnapshotStub snapshot = galactic_view::synthetic_galaxy();
@@ -1099,18 +1106,19 @@ bool GalacticMode::ready(Node3D& host) {
         if (!owner->game || !owner->galaxy) return false;
         if (choice == galactic_view::BattleChoice::continue_galaxy) {
             if (owner->battle_dialog && owner->battle_dialog->view().phase == galactic_view::BattleDialogPhase::summary
-                && owner->battle_dialog->view().conflict == conflict) owner->acknowledged_battle_summary = conflict;
-            return owner->acknowledged_battle_summary == conflict;
+                && owner->battle_dialog->view().conflict == conflict)
+                return galactic_view::acknowledge_battle_summary(owner->acknowledged_battle_summary, owner->battle_dialog_frame(), conflict);
+            return owner->acknowledged_battle_summary.contains(conflict);
         }
         if (choice == galactic_view::BattleChoice::invade) {
             const auto frame = owner->game->frame();
             if (!frame.invasion_offer || frame.invasion_offer->conflict != conflict
                 || frame.invasion_offer->observer != owner->galaxy->local.player
                 || !frame.invasion_offer->visible_admitted || !frame.invasion_offer->accept_permitted) return false;
+            if (!galactic_view::acknowledge_battle_summary(owner->acknowledged_battle_summary, frame, conflict)) return false;
             owner->game->submit(platform::LiveGameOrder{sim::SeatId{owner->galaxy->local.seat},
                 sim::galactic::PauseGalaxy{}, {}, conflict});
             ++owner->submitted_orders;
-            owner->acknowledged_battle_summary = conflict;
             return true;
         }
         if (choice == galactic_view::BattleChoice::retreat) {
@@ -1152,7 +1160,7 @@ std::optional<int> GalacticMode::process(const double delta) {
         return 2;
     }
     if (state.game && state.battle_dialog && state.galaxy && !state.options.hud_fixture.starts_with("battle-")) {
-        const auto frame = state.game->frame(sim::SeatId{state.galaxy->local.seat});
+        const auto frame = state.battle_dialog_frame();
         if (!state.battle_pending_publication.reuse(frame, sim::SeatId{state.galaxy->local.seat},
             state.galaxy->local.player, state.battle_metadata_generation)
             && !state.battle_summary_publication.reuse(frame, sim::SeatId{state.galaxy->local.seat},

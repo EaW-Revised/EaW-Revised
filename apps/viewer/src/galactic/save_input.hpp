@@ -15,7 +15,4 @@ enum class SaveInputAction { none, quick_save, quick_load };
     if (key == profile.quick_load) return SaveInputAction::quick_load;
     return SaveInputAction::none;
 }
-[[nodiscard]] inline bool manual_save_load_allowed(bool pending_battle, bool busy) {
-    return !pending_battle && !busy; // WGS-98: this gate does not gate F6.
-}
 } // namespace eawr::viewer::galactic

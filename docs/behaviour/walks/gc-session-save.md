@@ -891,3 +891,9 @@ while AI potential is available without manufacturing tactical objects.
 | ID | Qualified unknown | Capture recipe |
 |---|---|---|
 | WGS-IND-U01 | Exact galaxy-map indigenous presentation, display counts and faction colouring, and what is visible before the first battle or after a later battle/save/load. Potential getters and starting-force inventory do not qualify a visible troop icon. | Start matched ordinary/story/tutorial/multiplayer campaigns containing Endor, Kashyyyk or Tatooine; record selected planet, visible ground slots/tooltips, faction/control and underlying authored-force IDs before any battle. Enter land, remove some/all spawners, return, record the same fields, then save/load and repeat with fog state documented. Keep potential authoring, actual persistent forces and child spawner survivors as separate observations. |
+
+## Project save admission override
+
+| ID | Project rule | Authority |
+|---|---|---|
+| WGS-P01 | Save Game and Load Game remain available while a pending conflict choice, auto-resolve progress, or battle summary is presented. Saves use the existing pending-conflict checkpoint and presentation-hint paths, restoring the same unacknowledged prompt once. One optional automatic-summary snapshot uses the existing outcome codec in unhashed presentation hints; the runtime battle-record ring remains unpersisted. Other cinematic, tutorial and multiplayer admission rules remain as in WGS-152. This intentionally overrides the pending-battle refusal observed in WGS-98/152. | Owner decision, 2026-10-18 (legacy EAWR-4139) |

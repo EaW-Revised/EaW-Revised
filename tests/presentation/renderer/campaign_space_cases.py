@@ -63,7 +63,7 @@ def qualified_campaign_arguments(mode):
     The Imperial Byss defender has a Tartan patrol cruiser and authored station.
     Tactical admission remains a production gate; this fixture never bypasses it.
     """
-    if mode not in ("win", "retreat", "loss", "save"):
+    if mode not in ("win", "retreat", "loss", "save", "prompt-save"):
         raise ValueError("unsupported campaign space proof mode: " + str(mode))
     return [
         "--eawr-galactic", "Sandbox_Gateways_Rebel",

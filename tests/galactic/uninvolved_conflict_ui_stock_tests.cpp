@@ -103,7 +103,7 @@ int run(std::uint64_t frames) {
     names.force = [](auto) { return std::string{}; };
     names.type = [](std::string_view name) { return view::CampaignResultType{std::string(name), false, false, 0, 0}; };
     std::map<std::uint64_t, Episode> episodes;
-    std::uint64_t acknowledged{};
+    view::BattleSummaryAcknowledgements acknowledged;
     unsigned opened_uninvolved{}, party_choices{};
     for (std::uint64_t tick = 1; tick <= frames; ++tick) {
         live->advance_to(tick);

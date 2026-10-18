@@ -56,6 +56,7 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
 
       - name: Verify Linux ARM64
+        timeout-minutes: 90
         if: ${{ runner.os == 'Linux' }}
         shell: bash
         run: |
@@ -65,6 +66,7 @@ jobs:
           ctest --preset linux-arm64-gcc -LE "game-data|installed-required"
 
       - name: Verify Apple Silicon
+        timeout-minutes: 90
         if: ${{ runner.os == 'macOS' }}
         shell: bash
         run: |
@@ -74,7 +76,7 @@ jobs:
           ctest --test-dir out/build/macos --output-on-failure -LE "game-data|installed-required"
 
       - name: File a non-blocking verification ticket
-        if: ${{ failure() }}
+        if: ${{ !cancelled() && failure() }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -85,7 +87,7 @@ jobs:
           set -euo pipefail
           title="Post-release verification: $TAG / $PLATFORM"
           # Repeat attempts reuse the open ticket. Never touch release assets or state.
-          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title $title" --json title --jq '.[].title')
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json title --jq '.[].title')
           if ! printf '%s\n' "$existing" | grep -Fxq "$title"; then
             printf 'Non-blocking ARM/Apple verification failed after publication.\n\nRun: %s\n\nInvestigate and fix forward; this result cannot block or pull the release.\n' "$RUN_URL" > issue-body.txt
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file issue-body.txt
