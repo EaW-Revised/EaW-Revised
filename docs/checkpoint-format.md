@@ -75,7 +75,7 @@ skipped. IDs from 0x8000 are never part of a state hash.
 | 14 | galactic-ai | completed boundary and versioned native AI components, including retained funding | v1 |
 | 15 | galactic-abilities | live ability preparations and lifecycle | galaxy sections |
 | 16 | campaign-scoring | ordered build, death and ownership counters | galaxy sections |
-| 17 | galactic-owner | full world/session barrier, consumed and future command/native cursors, admission queues and child owners | galaxy v32 |
+| 17 | galactic-owner | full world/session barrier, consumed and future command/native cursors, admission queues and child owners | galaxy v33 |
 | 0x8000 | presentation-hints | camera and selection per seat; never hashed | player saves |
 | 0x8001 | live-input | deferred local orders and future command envelopes outside the completed simulation frontier | live player saves, v1 |
 | 0x8002 | campaign-identity | authored campaign/set/difficulty, saving seat/faction and optional custom startup economy/hero values (WGP-190) | player saves of authored campaigns, v2 |

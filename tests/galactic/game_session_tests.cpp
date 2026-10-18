@@ -236,21 +236,21 @@ void tactical_nesting() {
         int applied = 0;
         auto unsupported = record;
         unsupported.seats.insert(unsupported.seats.end() - 1, campaign::BattleSeat{{3}, 3});
-        expect(!game.stage_battle(unsupported, content), "a seat cannot be assigned an absent tactical player");
+        expect(!game.stage_battle(unsupported, content, eawr::campaign::ScriptRequirement::none), "a seat cannot be assigned an absent tactical player");
         unsupported = record; unsupported.forces.front().role = static_cast<campaign::ForceRole>(99);
-        expect(!game.stage_battle(unsupported, content), "unknown persistent force roles fail before entry");
+        expect(!game.stage_battle(unsupported, content, eawr::campaign::ScriptRequirement::none), "unknown persistent force roles fail before entry");
         unsupported = record; unsupported.tactical.units.back().owner = 1;
-        expect(!game.stage_battle(unsupported, content), "a deployed reserve must retain its persistent owner");
+        expect(!game.stage_battle(unsupported, content, eawr::campaign::ScriptRequirement::none), "a deployed reserve must retain its persistent owner");
         game.set_result_applier([&](galactic::GalacticSession& galaxy, const campaign::BattleResult& result) {
             ++applied;
             expect(galaxy.clock().galactic_frame == 1 && result.conflict == record.id, "return hook runs before next galaxy service");
             galaxy.append_outcome_events(record.planet, record.id, result.winner, 2);
             return eawr::core::Result<void>::success();
         });
-        const auto staged = game.stage_battle(record, content);
+        const auto staged = game.stage_battle(record, content, eawr::campaign::ScriptRequirement::none);
         expect(static_cast<bool>(staged), "hand-built conflict stages a scripted tactical child");
         if (!staged) { std::cerr << staged.error().code << ": " << staged.error().message << '\n'; return; }
-        expect(!game.stage_battle(record, content), "only one child may be staged");
+        expect(!game.stage_battle(record, content, eawr::campaign::ScriptRequirement::none), "only one child may be staged");
         auto entering = game.step(pool).value();
         expect(entering.mode == campaign::SessionMode::galaxy && game.mode() == campaign::SessionMode::battle,
             "entry galaxy tick builds the child without stepping it");
@@ -301,11 +301,11 @@ void tactical_nesting() {
         while (alone.completed_tick() < child.final_tick_count) expect(static_cast<bool>(alone.step(pool)), "exported child replays standalone");
         expect(alone.outcome() && alone.outcome()->winner == 1, "standalone child reproduces its outcome");
         expect(alone.state_sha256() == final_world, "standalone child reproduces the final tactical state exactly");
-        expect(!game.stage_battle(record, content), "completed conflict IDs cannot be reused");
+        expect(!game.stage_battle(record, content, eawr::campaign::ScriptRequirement::none), "completed conflict IDs cannot be reused");
         auto second = record;
         second.id = game.galaxy().next_entity_id();
         second.tactical.first_free_entity_id = second.id + 20;
-        expect(!game.stage_battle(second, content), "a fresh conflict ID cannot restore a destroyed persistent force");
+        expect(!game.stage_battle(second, content, eawr::campaign::ScriptRequirement::none), "a fresh conflict ID cannot restore a destroyed persistent force");
         const auto current = game.galaxy().snapshot();
         for (auto& force : second.forces) {
             const auto fleet = std::find_if(current->fleets().begin(), current->fleets().end(),
@@ -319,7 +319,7 @@ void tactical_nesting() {
         }
         std::sort(second.forces.begin(), second.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
         std::sort(second.tactical.units.begin(), second.tactical.units.end(), [](const auto& a, const auto& b) { return a.entity_id < b.entity_id; });
-        expect(static_cast<bool>(game.stage_battle(second, battle_content(second))), "a fresh conflict can enter with surviving persistent members");
+        expect(static_cast<bool>(game.stage_battle(second, battle_content(second), eawr::campaign::ScriptRequirement::none)), "a fresh conflict can enter with surviving persistent members");
         const auto resumed = game.step(pool).value(); hashes.push_back(resumed.state_hash.get());
         expect(resumed.galaxy_work.serviced && game.galaxy().clock().galactic_frame == frozen_frame + 1, "galaxy resumes on next session tick");
         while (game.completed_tick() <= 10) {
@@ -331,7 +331,7 @@ void tactical_nesting() {
         expect(whole.conflicts.size() == 2 && game.conflict()->id == second.id, "stale input was tested against an active later child");
         auto restored = GameSession::from_recording(whole, [](const campaign::ConflictRecord& conflict) {
             return eawr::core::Result<tactical::TacticalContent>::success(battle_content(conflict));
-        }).value();
+        }, {}, eawr::campaign::ScriptRequirement::none).value();
         std::vector<std::string> replay_hashes;
         while (restored.completed_tick() < whole.commands.final_tick_count) replay_hashes.push_back(restored.step(pool).value().state_hash.get());
         expect(replay_hashes == hashes, "whole-session recording replays entry, battle, return and stale input");
@@ -346,7 +346,7 @@ void battle_context_hash() {
     const auto content = battle_content(record);
     const eawr::sim::InlineExecutor executor;
     auto plain = GameSession::create(setup).value();
-    expect(static_cast<bool>(plain.stage_battle(record, content)), "context fixture stages");
+    expect(static_cast<bool>(plain.stage_battle(record, content, eawr::campaign::ScriptRequirement::none)), "context fixture stages");
     const auto original = plain.step(executor).value();
     for (int variant = 0; variant < 4; ++variant) {
         auto changed = record;
@@ -356,7 +356,7 @@ void battle_context_hash() {
         if (variant == 3) changed.linked_mission_options = {1, 2, 3};
         auto game = GameSession::create(setup).value();
         game.set_state_hasher(std::make_shared<eawr::platform::ThreadStateHasher>());
-        expect(static_cast<bool>(game.stage_battle(changed, content)), "changed conflict context stages");
+        expect(static_cast<bool>(game.stage_battle(changed, content, eawr::campaign::ScriptRequirement::none)), "changed conflict context stages");
         const auto tick = game.step(executor).value();
         expect(tick.battle_state_hash.get() == original.battle_state_hash.get()
             && tick.galaxy->sha256() == original.galaxy->sha256(), "context changes leave both worlds identical");
@@ -404,7 +404,7 @@ void container_result_and_invalid_allocator() {
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         const eawr::platform::ThreadWorkerAdapter executor(workers);
         auto game = GameSession::create(setup).value();
-        const auto staged = game.stage_battle(record, content);
+        const auto staged = game.stage_battle(record, content, eawr::campaign::ScriptRequirement::none);
         expect(static_cast<bool>(staged), "persistent squadron reserve stages with one craft");
         if (!staged) { std::cerr << staged.error().message << '\n'; return; }
         expect(static_cast<bool>(game.step(executor)), "persistent squadron enters");
@@ -447,7 +447,7 @@ void child_scripts_and_failure() {
     auto game = GameSession::create(setup).value();
     auto plain = GameSession::create(setup).value();
     expect(static_cast<bool>(game.stage_battle(record, content, scripts(record).value())), "pinned scripts can be installed on the child");
-    expect(static_cast<bool>(plain.stage_battle(record, content)), "empty scheduler builds the same world");
+    expect(static_cast<bool>(plain.stage_battle(record, content, eawr::campaign::ScriptRequirement::none)), "empty scheduler builds the same world");
     std::vector<std::string> hashes;
     for (int i = 0; i < 4; ++i) {
         hashes.push_back(game.step(executor).value().state_hash.get());
@@ -464,7 +464,7 @@ void child_scripts_and_failure() {
     failed.set_result_applier([](galactic::GalacticSession&, const campaign::BattleResult&) -> eawr::core::Result<void> {
         throw std::runtime_error("synthetic return failure");
     });
-    expect(static_cast<bool>(failed.stage_battle(record, content)), "failure fixture stages");
+    expect(static_cast<bool>(failed.stage_battle(record, content, eawr::campaign::ScriptRequirement::none)), "failure fixture stages");
     expect(static_cast<bool>(failed.step(executor)), "failure fixture enters battle");
     auto quit = tactical_input(record, {{0, 2, 1}, {}, tactical::QuitPayload{}});
     expect(static_cast<bool>(failed.submit({{1, {2}, 1}, quit})), "intentional quit goes through the typed battle route");
@@ -619,6 +619,46 @@ void game_session_loopback() {
 } // namespace
 
 int main() {
+    {
+        const auto setup = eawr::campaign::build_synthetic_campaign(coop_campaign()).value();
+        auto game = GameSession::create(setup);
+        // A missing stock factory is refused before any child world is staged.
+        if (game) {
+            campaign::GameSession::ConflictLayerServices services;
+            expect(static_cast<bool>(game.value().install_conflict_layer(campaign::BattleLayer::space, std::move(services))), "stock layer installs once");
+            const auto record = conflict_record(setup);
+            const auto refused = game.value().stage_battle(record, battle_content(record));
+            expect(!refused && refused.error().code == campaign::missing_conflict_scripts
+                && refused.error().message == "conflict layer requires a script factory", "missing stock scripts have a named diagnostic and message");
+            auto land = record; land.layer = campaign::BattleLayer::land;
+            expect(static_cast<bool>(game.value().install_conflict_layer(campaign::BattleLayer::land, {})), "land layer installs independently");
+            const auto land_refused = game.value().stage_battle(land, battle_content(land));
+            expect(!land_refused && land_refused.error().code == campaign::missing_conflict_scripts
+                && land_refused.error().message == refused.error().message, "land layer has the same required-script refusal");
+            expect(!game.value().install_conflict_layer(campaign::BattleLayer::space, {}), "stock layer cannot be replaced");
+            expect(!game.value().battle(), "refusal creates no child");
+        }
+        expect(static_cast<bool>(game), "script requirement fixture creates");
+        auto composed = GameSession::create(setup).value();
+        auto record = conflict_record(setup);
+        const auto queries = composed.conflict_parent_queries(campaign::BattleLayer::space);
+        std::size_t factory_calls{};
+        campaign::GameSession::ConflictLayerServices services;
+        services.scripts = [&, queries](const auto& conflict) {
+            ++factory_calls;
+            const auto query = queries(conflict);
+            expect(query && query("parent", 1) == eawr::script::numeric::LuaNumber{7}, "parent queries augment the installed factory");
+            eawr::script::authoritative::SessionConfig config;
+            config.seed = campaign::child_seed(setup.seed, conflict.id);
+            return eawr::script::authoritative::ScriptScheduler::create(config, {});
+        };
+        expect(static_cast<bool>(composed.install_conflict_layer(campaign::BattleLayer::space, std::move(services))), "scripted layer installs");
+        expect(static_cast<bool>(composed.add_conflict_parent_queries(campaign::BattleLayer::space, [](const auto&) {
+            return campaign::GalacticParentQuery([](auto, auto) { return std::optional<eawr::script::numeric::LuaNumber>{7}; });
+        })), "parent query binding adds after the factory install");
+        expect(static_cast<bool>(composed.stage_battle(record, battle_content(record))), "composed stock factory stages");
+        expect(factory_calls == 1, "parent binding preserves the original script factory");
+    }
     synthetic_campaigns();
     routing_and_hash();
     allocator_extension();

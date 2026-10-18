@@ -4,9 +4,9 @@
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 35 | 35 |
+| applied | 37 | 37 |
 | partial | 31 | 31 |
-| todo | 7 | 7 |
+| todo | 5 | 5 |
 | presentation-later | 0 | 2 |
 | foc-ignores | 21 | 21 |
 | deferred | 8 | 8 |
@@ -25,8 +25,8 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Difficulty_Adjustments/Easy | todo | application not recorded | — | 735 | — | only the Normal difficulty adjustments are read (walk 6 G-07) |
-| Difficulty_Adjustments/Hard | todo | application not recorded | — | 735 | — | only the Normal difficulty adjustments are read (walk 6 G-07) |
+| Difficulty_Adjustments/Easy | applied | whole class (src/script/foc/ai_data.cpp) | WSS-36, WTA-46, WTA-47 | — | src/script/foc/ai_data.cpp | The Easy lobby AI row reads this entry; the contrast multiplier and the goal-cycle sleep follow it. Health, shield and damage follow with the combat consumers.; basis: reviewed |
+| Difficulty_Adjustments/Hard | applied | whole class (src/script/foc/ai_data.cpp) | WSS-36, WTA-46, WTA-47 | — | src/script/foc/ai_data.cpp | The Hard lobby AI row reads this entry; the contrast multiplier and the goal-cycle sleep follow it. Health, shield and damage follow with the combat consumers.; basis: reviewed |
 | Difficulty_Adjustments/Normal | applied | whole class (src/script/foc/ai_service.cpp) | AB-24, BP-17 | — | src/script/foc/ai_service.cpp | basis: reviewed |
 | GalacticFreeStoreScript | land-or-galactic | application not recorded | — | — | — | WGA-10 |
 | GoalProposalFunctionSets | applied | whole class (src/script/foc/ai_data.cpp) | none recorded | — | src/script/foc/ai_data.cpp | no behaviour-note rule mentions this tag yet; basis: reviewed |

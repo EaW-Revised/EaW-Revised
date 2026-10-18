@@ -347,7 +347,7 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
         auto pending = std::move(impl.pending);
         impl.pending.clear();
         for (auto& command : pending) out.script_input.push_back(impl.route(std::move(command)));
-        auto stepped = impl.world.step(executor, local_conflict_pending);
+        auto stepped = gc_profile::timed(gc_profile::Phase::tick_galaxy_step, [&] { return impl.world.step(executor, local_conflict_pending); });
         if (!stepped) return abort(stepped.error());
         out.world = std::move(stepped).value();
         if (impl.ai_engine ? impl.ai_engine->admits_service(out.world) : out.world.work.serviced) {
@@ -356,7 +356,7 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
             out.ai = std::move(serviced).value();
             impl.pending = out.ai->commands;
         }
-        auto serviced = impl.service(executor, out.world, impl.story, impl.story_engine, true);
+        auto serviced = gc_profile::timed(gc_profile::Phase::tick_story_service, [&] { return impl.service(executor, out.world, impl.story, impl.story_engine, true); });
         if (!serviced) return abort(serviced.error());
         out.story = std::move(serviced).value();
         if (!unique_instances(impl.ai, impl.story))

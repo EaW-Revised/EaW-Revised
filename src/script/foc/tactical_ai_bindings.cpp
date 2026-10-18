@@ -828,8 +828,13 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         }
         return none();
     });
-    // AI-G03: Normal difficulty.
-    player("Get_Difficulty", [](BindingContext&, const ValueList&) { return one(Value::text("Normal")); });
+    // WTA-47: the AI player's level; a player that is not a lobby AI answers Normal.
+    player("Get_Difficulty", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto self = static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id);
+        const auto found = host->players.find(self);
+        const auto level = found == host->players.end() ? sim::tactical::AiLevel::normal : found->second->difficulty;
+        return one(Value::text(std::string(sim::tactical::to_string(level))));
+    });
     player("Is_Human", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const auto self = static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id);
         const auto found = host->players.find(self);

@@ -27,6 +27,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -148,6 +149,147 @@ std::string LiveSessionView::slotless_report_rows() const {
             + ", \"type\": " + json(name) + ", \"units\": " + std::to_string(entities.size()) + "}";
     }
     return rows;
+}
+
+namespace {
+
+// FNV-1a over 64-bit words: the draw digests are for equality between two runs of one build, not for security.
+class DrawHash final {
+public:
+    void add(const std::uint64_t value) noexcept {
+        for (unsigned shift = 0; shift < 64; shift += 8) {
+            state_ = (state_ ^ ((value >> shift) & 0xFFU)) * 1099511628211ULL;
+        }
+    }
+    void add(const std::int64_t value) noexcept { add(static_cast<std::uint64_t>(value)); }
+    void add(const std::string_view text) noexcept {
+        add(static_cast<std::uint64_t>(text.size()));
+        for (const char letter : text) state_ = (state_ ^ static_cast<unsigned char>(letter)) * 1099511628211ULL;
+    }
+    [[nodiscard]] std::uint64_t value() const noexcept { return state_; }
+
+private:
+    std::uint64_t state_{14695981039346656037ULL};
+};
+
+[[nodiscard]] std::string hex16(const std::uint64_t value) {
+    char text[17];
+    std::snprintf(text, sizeof text, "%016llx", static_cast<unsigned long long>(value));
+    return text;
+}
+
+[[nodiscard]] std::int64_t hundredths(const double value) noexcept { return std::llround(value * 100.0); }
+
+} // namespace
+
+void LiveSessionView::record_draw_digest(const std::vector<SpacePopulation::LivePose>& drawn,
+                                       const std::vector<SpacePopulation::LiveClipPose>& clips, const std::uint64_t tick) {
+    if (options_.hashes_path.empty() || draw_digest_rows_.size() >= 1U << 20) return;
+    DrawHash visible_hash;
+    for (const VisibleUnit& unit : visible_) {
+        visible_hash.add(static_cast<std::uint64_t>(unit.entity));
+        visible_hash.add(static_cast<std::uint64_t>(unit.ship));
+        visible_hash.add(static_cast<std::uint64_t>(unit.type));
+        visible_hash.add(static_cast<std::uint64_t>(unit.owner));
+        visible_hash.add(static_cast<std::uint64_t>(unit.own) | static_cast<std::uint64_t>(unit.hostile) << 1U
+                         | static_cast<std::uint64_t>(unit.neutral) << 2U);
+        for (const double axis : unit.position) visible_hash.add(hundredths(axis));
+        visible_hash.add(hundredths(unit.yaw));
+    }
+    DrawHash drawn_hash;
+    for (const SpacePopulation::LivePose& pose : drawn) {
+        drawn_hash.add(static_cast<std::uint64_t>(pose.ship));
+        drawn_hash.add(static_cast<std::uint64_t>(pose.entity));
+        for (const auto& value : {pose.position.x, pose.position.y, pose.position.z, pose.yaw_degrees, pose.roll_degrees,
+                                  pose.pitch_degrees}) {
+            drawn_hash.add(value.raw());
+        }
+        drawn_hash.add(static_cast<std::uint64_t>(pose.hardpoints.size()));
+        for (const auto state : pose.hardpoints) drawn_hash.add(static_cast<std::uint64_t>(state));
+        drawn_hash.add(static_cast<std::uint64_t>(pose.defend_active) | static_cast<std::uint64_t>(pose.stealth_active) << 1U
+                       | static_cast<std::uint64_t>(pose.blast_charging) << 2U | static_cast<std::uint64_t>(pose.blast_charged) << 3U
+                       | static_cast<std::uint64_t>(pose.turret.has_value()) << 4U);
+        if (pose.turret) {
+            drawn_hash.add(pose.turret->yaw.raw());
+            drawn_hash.add(pose.turret->pitch.raw());
+            drawn_hash.add(static_cast<std::uint64_t>(pose.turret->xy_only) | static_cast<std::uint64_t>(pose.turret->barrel) << 1U);
+        }
+    }
+    drawn_hash.add(static_cast<std::uint64_t>(clips.size()));
+    for (const SpacePopulation::LiveClipPose& clip : clips) {
+        drawn_hash.add(static_cast<std::uint64_t>(clip.ship));
+        drawn_hash.add(clip.position.position);
+        drawn_hash.add(static_cast<std::uint64_t>(clip.position.subdivisions));
+        drawn_hash.add(hundredths(static_cast<double>(clip.blend_from)));
+        drawn_hash.add(static_cast<std::uint64_t>(clip.alternate));
+    }
+    const DrawDigestRow row{frames_, tick, std::llround(presented_tick_ * 1000.0), visible_.size(), drawn.size(),
+                            visible_hash.value(), drawn_hash.value()};
+    if (!draw_digest_rows_.empty() && draw_digest_rows_.back().tick == tick) draw_digest_rows_.back() = row;
+    else draw_digest_rows_.push_back(row);
+}
+
+std::string LiveSessionView::draw_digest_report() const {
+    std::string rows;
+    for (const DrawDigestRow& row : draw_digest_rows_) {
+        rows += (rows.empty() ? "" : ", ") + std::string("[") + std::to_string(row.tick)
+            + ", " + std::to_string(row.visible) + ", " + std::to_string(row.drawn)
+            + ", \"" + hex16(row.visible_digest) + "\", \"" + hex16(row.drawn_digest) + "\", "
+            + std::to_string(row.frame) + ", " + std::to_string(row.presented_milli) + "]";
+    }
+    // The slot plan as it stands at the end: the composed slots, the launch slots and which entity took which.
+    DrawHash placed;
+    for (const auto& ship : placed_ships_) {
+        placed.add(std::string_view{ship.object_id});
+        placed.add(static_cast<std::uint64_t>(ship.live_entity));
+        placed.add(ship.team_colour ? static_cast<std::uint64_t>((ship.team_colour->at(0) << 16U) | (ship.team_colour->at(1) << 8U)
+                                                                 | ship.team_colour->at(2)) + 1U : 0U);
+        placed.add(static_cast<std::uint64_t>(ship.death_clone) | static_cast<std::uint64_t>(ship.breakoff) << 1U
+                   | static_cast<std::uint64_t>(ship.launch_slot) << 2U | static_cast<std::uint64_t>(ship.placement_preview) << 3U
+                   | static_cast<std::uint64_t>(ship.projectile_slot) << 4U | static_cast<std::uint64_t>(ship.beacon_model) << 5U
+                   | static_cast<std::uint64_t>(ship.ability_proxy_owner) << 6U | static_cast<std::uint64_t>(ship.construction) << 7U);
+    }
+    DrawHash slots;
+    for (const LaunchSlot& slot : launch_slots_) {
+        slots.add(static_cast<std::uint64_t>(slot.type));
+        slots.add(static_cast<std::uint64_t>(slot.ship));
+        slots.add(static_cast<std::uint64_t>(slot.bound));
+        slots.add(static_cast<std::uint64_t>(slot.required_station));
+        slots.add(static_cast<std::uint64_t>(slot.station_owner));
+    }
+    DrawHash start_slots;
+    for (const auto& [entity, ship] : ship_of_entity_) {
+        start_slots.add(static_cast<std::uint64_t>(entity));
+        start_slots.add(static_cast<std::uint64_t>(ship));
+    }
+    DrawHash launched;
+    for (const auto& [entity, ship] : launched_ship_of_entity_) {
+        launched.add(static_cast<std::uint64_t>(entity));
+        launched.add(static_cast<std::uint64_t>(ship));
+    }
+    DrawHash arrivals;
+    for (const auto& [entity, row] : arrivals_) {
+        arrivals.add(static_cast<std::uint64_t>(entity));
+        arrivals.add(static_cast<std::uint64_t>(row.owner));
+        arrivals.add(static_cast<std::uint64_t>(row.type));
+        arrivals.add(row.first_tick);
+        arrivals.add(row.visible_tick);
+        arrivals.add(row.landed_tick);
+        arrivals.add(hundredths(row.facing_yaw));
+    }
+    DrawHash slotless;
+    for (const auto& [key, entities] : slotless_hits_) {
+        slotless.add(static_cast<std::uint64_t>(key.first));
+        slotless.add(static_cast<std::uint64_t>(key.second));
+        for (const sim::EntityId entity : entities) slotless.add(static_cast<std::uint64_t>(entity));
+    }
+    return std::string("{\"ticks\": [") + rows + "], \"plan\": {\"placed_ships\": [" + std::to_string(placed_ships_.size())
+        + ", \"" + hex16(placed.value()) + "\"], \"launch_slots\": [" + std::to_string(launch_slots_.size()) + ", \""
+        + hex16(slots.value()) + "\"], \"start_slots\": [" + std::to_string(ship_of_entity_.size()) + ", \""
+        + hex16(start_slots.value()) + "\"], \"launched_slots\": [" + std::to_string(launched_ship_of_entity_.size()) + ", \""
+        + hex16(launched.value()) + "\"], \"arrivals\": [" + std::to_string(arrivals_.size()) + ", \"" + hex16(arrivals.value())
+        + "\"], \"slotless\": [" + std::to_string(slotless_hits_.size()) + ", \"" + hex16(slotless.value())
+        + "\"], \"slots_released\": " + std::to_string(slots_released_) + "}}";
 }
 
 void LiveSessionView::write_report(std::ostream& output) const {
@@ -631,7 +773,9 @@ void LiveSessionView::write_report(std::ostream& output) const {
     }
     output << "]}, \"event_gaps\": [";
     for (std::size_t index = 0; index < event_gap_rows_.size(); ++index) output << (index ? ", " : "") << event_gap_rows_[index];
-    output << "], \"completed_ticks\": " << hashes_.size()
+    output << "]";
+    if (!options_.hashes_path.empty()) output << ", \"draw_digest\": " << draw_digest_report();
+    output << ", \"completed_ticks\": " << hashes_.size()
            << ", \"final_state_sha256\": " << json(hashes_.empty() ? "" : hashes_.back())
            << ", \"headless_hashes_equal\": " << (headless_equal_ ? (*headless_equal_ ? "true" : "false") : "null")
            << ", \"outcome\": ";

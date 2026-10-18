@@ -26,6 +26,8 @@ struct Received {
 struct LinkStats {
     std::chrono::microseconds last_rtt{}, smoothed_rtt{}, jitter{};
     std::uint64_t sample_count{};
+    // Share of recent packets lost on this link, percent; 0 when the transport cannot tell (#4043).
+    double loss_pct{};
 };
 
 // One reliable, ordered stream per remote peer; the transport frames whole messages.

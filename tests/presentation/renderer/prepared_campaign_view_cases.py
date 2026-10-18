@@ -8,6 +8,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'tools'))
 from native_cpp_fixture import compile_fixture, select_toolchain
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from viewer_mode_sources import source_text  # noqa: E402
 
 
 def extract_function(source, signature):
@@ -31,6 +33,7 @@ HARNESS = r'''
 #include <vector>
 #include <iostream>
 namespace tactical {
+enum class AiLevel : unsigned char { normal = 0, easy = 1, hard = 2 };
 using TypeId = unsigned; using FactionId = unsigned;
 constexpr unsigned max_players = 64;
 struct Player { unsigned player_id, team_id, faction_id; };
@@ -49,7 +52,7 @@ std::string content_identity(const UnitTables& tables) { return tables.identity;
 }
 namespace skirmish {
 unsigned type_id(const std::string& name) { return name == "Ship" ? 10U : 20U; }
-struct LobbySlot { unsigned slot; std::string faction; unsigned team; bool human; };
+struct LobbySlot { unsigned slot; std::string faction; unsigned team; bool human; tactical::AiLevel difficulty{}; };
 struct Colour { std::array<std::uint8_t,3> rgb; };
 struct StartPlayer { tactical::Player player; std::optional<Colour> colour; };
 struct StartUnit { tactical::UnitState state; std::string type; };
@@ -131,7 +134,7 @@ class PreparedCampaignViewContracts(unittest.TestCase):
         toolchain = select_toolchain()
         if toolchain is None:
             self.skipTest('requires C++ compiler')
-        source = (ROOT / 'apps/viewer/src/live_session_prepare.cpp').read_text(encoding='utf-8')
+        source = source_text('apps/viewer/src/live_session_prepare.cpp')
         method = '\n\n'.join(extract_function(source, signature) for signature in (
             'bool LiveSessionView::prepare_borrowed(',
             'bool LiveSessionView::prepare_native(',

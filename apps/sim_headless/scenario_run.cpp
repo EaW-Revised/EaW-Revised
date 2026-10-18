@@ -1,4 +1,5 @@
 #include "scenario_internal.hpp"
+#include "eawr/battle/start.hpp"
 #include <cstdlib>
 
 namespace sim_headless::scenario_detail {
@@ -29,7 +30,7 @@ core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::
     for (const auto& [label, faction] : scenario.players) {
         const auto id = static_cast<tactical::PlayerId>(setup.players.size() + 1);
         player_ids.emplace(label, id);
-        setup.players.push_back({id, id, eawr::skirmish::faction_id(faction), tactical::player_flag_commandable});
+        setup.players.push_back({id, id, eawr::battle::faction_id(faction), tactical::player_flag_commandable});
     }
     std::vector<Traced> traced;
     std::map<std::string, std::pair<eawr::sim::EntityId, tactical::PlayerId>> unit_ids;
@@ -43,7 +44,7 @@ core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::
             return fail<ScenarioRun>("unit '" + unit.label + "' names an unknown owner or unit type", path);
         }
         tactical::UnitState state;
-        state.type_id = eawr::skirmish::type_id(unit.type);
+        state.type_id = eawr::battle::type_id(unit.type);
         state.owner = owner->second;
         state.position = unit.position;
         // The unit's Space_Layer puts it Layer_Z_Adjust above the requested height.
@@ -102,7 +103,7 @@ core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::
             [&](const auto& entry) { return entry.second == unit.label; });
         const auto staged = std::find_if(setup.units.begin(), setup.units.end(),
             [&](const auto& entry) { return named != labels.end() && entry.entity_id == named->first; });
-        if (staged == setup.units.end() || staged->type_id != eawr::skirmish::type_id(unit.type)
+        if (staged == setup.units.end() || staged->type_id != eawr::battle::type_id(unit.type)
             || staged->owner != player_ids.at(unit.owner)) {
             return fail<ScenarioRun>("initial pose for '" + unit.label + "' needs a matching tick-zero member", path);
         }
@@ -119,7 +120,7 @@ core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::
         if (type == nullptr) return fail<ScenarioRun>("hardpoint '" + hardpoint.label + "' names an unknown unit", path);
         const auto named = std::find_if(type->hardpoints.begin(), type->hardpoints.end(),
             [&](const eawr::units::Hardpoint& entry) { return lower(entry.id) == lower(hardpoint.hardpoint); });
-        const auto* profile = combat.value().find(eawr::skirmish::type_id(unit->type));
+        const auto* profile = combat.value().find(eawr::battle::type_id(unit->type));
         if (named == type->hardpoints.end() || profile == nullptr) {
             return fail<ScenarioRun>("hardpoint '" + hardpoint.label + "' is not a hardpoint of " + unit->type, path);
         }
@@ -263,7 +264,7 @@ core::Result<ScenarioRun> execute_scenario(const Scenario& scenario, const std::
     if (projectile_contact_diagnostics()) combat_log << ",selected_target";
     combat_log << '\n';
     std::map<tactical::TypeId, const eawr::units::UnitType*> types_by_id;
-    for (const auto& type : tables.value().units) types_by_id.emplace(eawr::skirmish::type_id(type.id), &type);
+    for (const auto& type : tables.value().units) types_by_id.emplace(eawr::battle::type_id(type.id), &type);
     std::map<std::pair<eawr::sim::EntityId, std::string>, std::int64_t> last_health;
     std::map<eawr::sim::EntityId, tactical::TypeId> live_before;
     const auto combat_rows = [&](const std::uint64_t tick) { write_combat_rows(session, labels, types_by_id, last_health, live_before, combat_log, tick); };

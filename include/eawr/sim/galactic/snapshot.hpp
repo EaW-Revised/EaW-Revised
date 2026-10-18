@@ -132,7 +132,12 @@ public:
         std::shared_ptr<const HeroActionMenus> live_hero_action_menus = {},
         std::shared_ptr<const CorruptionMenu> live_corruption_menu = {},
         std::shared_ptr<const std::vector<CensusType>> sale_types = {},
-        std::shared_ptr<const std::vector<LiveCorruptionTransition>> corruption_transitions = {});
+        std::shared_ptr<const std::vector<LiveCorruptionTransition>> corruption_transitions = {},
+        // The session's cached offer rows, shared by pointer while their inputs are unchanged; when set it replaces
+        // `production_offers`, which the by-value path still serves for hand-built snapshots.
+        std::shared_ptr<const std::vector<ObservedProductionOffer>> shared_production_offers = {},
+        // The session's published production state, shared by pointer while unchanged; when set it replaces `production`.
+        std::shared_ptr<const std::optional<ProductionSetup>> shared_production = {});
 
     [[nodiscard]] std::span<const CensusType> sale_types() const noexcept {
         if (native_base_) return native_base_->sale_types();
@@ -181,14 +186,16 @@ public:
             if (const auto* changes = native_column(NativeColumn::production)) return changes->production;
             return native_base_->production();
         }
-        return production_;
+        static const std::optional<ProductionSetup> none;
+        return production_ ? *production_ : none;
     }
     [[nodiscard]] std::span<const ObservedProductionOffer> production_offers() const noexcept {
         if (native_base_) {
             if (const auto* changes = native_column(NativeColumn::production_offers)) return std::span<const ObservedProductionOffer>(*changes->production_offers);
             return native_base_->production_offers();
         }
-        return production_offers_;
+        return production_offers_ ? std::span<const ObservedProductionOffer>(*production_offers_)
+            : std::span<const ObservedProductionOffer>{};
     }
     [[nodiscard]] const CorruptionMenu* corruption_menu() const noexcept {
         if (native_base_) return native_base_->corruption_menu();
@@ -339,7 +346,7 @@ private:
     std::optional<SeatControlState> seat_control_;
     std::vector<Seat> seats_;
     std::optional<PlayerEconomySetup> player_economy_;
-    std::optional<ProductionSetup> production_;
+    std::shared_ptr<const std::optional<ProductionSetup>> production_;
     std::optional<PoliticalControlSetup> control_;
     std::vector<PoliticalControlEffect> control_effects_;
     std::vector<PopulationTotal> population_;
@@ -348,7 +355,7 @@ private:
     std::optional<IncomeState> income_;
     std::optional<VictoryState> victory_;
     // Derived observer-local presentation data, excluded from canonical bytes.
-    std::vector<ObservedProductionOffer> production_offers_;
+    std::shared_ptr<const std::vector<ObservedProductionOffer>> production_offers_;
     std::optional<EconomyForecast> economy_forecast_;
     // Derived observer-local prepared facts; the campaign host remains a seam.
     std::optional<HeroActionMenus> hero_action_menus_;

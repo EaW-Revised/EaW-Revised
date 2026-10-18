@@ -1,0 +1,19 @@
+eawr_add_test_case(
+    NAME galactic_victory_tests
+    SOURCES victory_tests.cpp
+    LIBS eawr::campaign eawr::platform eawr::checkpoint
+    TESTS galactic_victory_contracts
+)
+
+eawr_add_python_contract(python_presentation_renderer_galactic_economy_runtime tests.presentation.renderer.test_viewer_galactic_economy_runtime)
+set_tests_properties(python_presentation_renderer_galactic_economy_runtime PROPERTIES LABELS gpu)
+eawr_add_python_contract(python_presentation_renderer_galactic_planet_block_runtime tests.presentation.renderer.test_viewer_galactic_planet_block_runtime)
+set_tests_properties(python_presentation_renderer_galactic_planet_block_runtime PROPERTIES LABELS gpu)
+eawr_add_python_contract(python_presentation_renderer_galactic_build_hammer_runtime tests.presentation.renderer.test_viewer_galactic_build_hammer_runtime)
+set_tests_properties(python_presentation_renderer_galactic_build_hammer_runtime PROPERTIES LABELS gpu)
+
+eawr_add_python_contract(python_presentation_renderer_galactic_encyclopedia_runtime tests.presentation.renderer.test_viewer_galactic_encyclopedia_runtime)
+set_tests_properties(python_presentation_renderer_galactic_encyclopedia_runtime PROPERTIES LABELS gpu)
+target_sources(foc_tag_perturb PRIVATE foc_tag_perturb_gc.cpp)
+target_include_directories(foc_tag_perturb PRIVATE "${PROJECT_SOURCE_DIR}/tests/skirmish")
+target_link_libraries(foc_tag_perturb PRIVATE eawr::campaign)

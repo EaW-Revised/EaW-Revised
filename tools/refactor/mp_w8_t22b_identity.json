@@ -1,0 +1,57 @@
+[
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_host_options",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::open_host_options",
+    "sha256": "817836c6905959093eef70636a753a045fd835b9a0de5d75bcd3b780211f3ff0"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::build_options_overlay",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::build_options_overlay",
+    "sha256": "c8a4a80314e3aa283f5e02173aa1951415cfc054d05d6340b8ba38ee92ac3b2a"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_options",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::open_options",
+    "sha256": "8c58fe6e24a47dc51d9f3da393b39fd19f101870e67dcdb580d30f7b1fb8c20b"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::show_options_values",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::show_options_values",
+    "sha256": "96a22d3c6ddd27c5fcf8c895eeabd0f8ccb119aa5ecf1835a9f70787e919c1af"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::close_options",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::close_options",
+    "sha256": "b7cfa12efd1f33af1b13663d640c197f97c599faf7e016abb14942705312ce95"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::process_options",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::process_options",
+    "sha256": "46169283ff2393dfe732165fd0095ea7272a509dbc2752ed360f0f85509f3821"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_filter",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::open_filter",
+    "sha256": "0f9b5839d79ed5ae8b2038478bf61a3b502f05debe15ac4465a200c4f93bbd7e"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_direct_connect",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::open_direct_connect",
+    "sha256": "ac2c78649550216592e8a7319220502b01e6fa81ea51d4b4bbe5c920460bf650"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::refresh_staging",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::refresh_staging",
+    "sha256": "ff56da1e5c5ce742e1d88f4e328465d789cf5c87bbb0cdddaeab9bdde3fc4cac"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::run_action",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::run_action",
+    "sha256": "4128370c4fedf95feb175bc363d9f182ffc5bc0a5b10cdd52215ed97b193d5cf"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::condition",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::condition",
+    "sha256": "7bb2eb109aba5df69bc172f230c602ce34f6a8410a9607ac19eb62a8807036dd"
+  }
+]

@@ -82,7 +82,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 state.open_loading_screen(host, map);
                 state.load_report(presentation::ui::load_stage_map, 1, 1);
                 if (state.live_options.audio_pace && !state.live_options.real_time) {
-                    // #474: see the Options::audio_pace comment (live_session_view.hpp). A frame at
+                    // #474: see the Options::audio_pace comment (live_session_options.hpp). A frame at
                     // this rate covers exactly one tick's worth of real time, so BattleAudio's
                     // requests reach Godot's real mixer on the same real schedule as the battle's
                     // own tick rate, on every host.
@@ -561,6 +561,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                     output << "  \"loading_screen\": {\"shown\": false, \"failure\": " << json(state.loading_failure) << "},\n";
                 if (state.hud) output << "  \"hud\": " << state.hud->report_json() << ",\n";
                 output << "  \"perf_overlay\": " << state.perf_report_json() << ",\n";
+                output << "  \"net_perf\": " << state.net_perf_json() << ",\n";
                 if (state.live_session) output << "  \"overview_ui\": " << state.overview_report_json() << ",\n";
             },
         });

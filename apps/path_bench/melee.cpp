@@ -19,6 +19,7 @@
 // the sampling perturbs the tick times, so a profile run is not a timing run.
 
 #include "melee.hpp"
+#include "eawr/battle/start.hpp"
 #include "sampler.hpp"
 
 #include "eawr/data/xml.hpp"
@@ -168,7 +169,7 @@ template <typename T>
 
 struct Content {
     units::UnitTables tables;
-    skirmish::SkirmishStart start;
+    eawr::battle::BattleStart start;
     skirmish::SessionContent content;
 };
 
@@ -314,7 +315,7 @@ struct Run {
     out.hashes.reserve(pending.size());
     for (const auto& hash : pending) out.hashes.push_back(hash.get());
     std::map<tactical::TypeId, std::string> names;
-    for (const auto& type : content.tables.units) names.emplace(skirmish::type_id(type.id), type.id);
+    for (const auto& type : content.tables.units) names.emplace(eawr::battle::type_id(type.id), type.id);
     for (const auto& unit : session.units()) {
         ++out.survivors[unit.owner];
         std::ostringstream line;

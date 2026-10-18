@@ -9,6 +9,7 @@
 #include "eawr/net/lobby_session.hpp"
 #include "eawr/net/online_lobby.hpp"
 #include "eawr/presentation/ui/lan_lobby.hpp"
+#include "eawr/presentation/ui/net_perf.hpp"
 
 #include "eawr/platform/live_session.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
@@ -52,6 +53,9 @@ struct LanView {
     bool invitation_consumed{};
     std::string remote_endpoint;
     std::optional<net::LinkStats> link_stats;
+    // #4043: per remote seat link quality and the lockstep wait ledger for the F3 overlay's network section. Presentation only.
+    std::vector<presentation::ui::NetPeerLink> net_peers;
+    presentation::ui::NetStallSnapshot net_stall;
     net::MatchOptions options{};
     std::uint64_t options_tick{};
     bool reconnect_enabled{}, rejoin_enabled{};

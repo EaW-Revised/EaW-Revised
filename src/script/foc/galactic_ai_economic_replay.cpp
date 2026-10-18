@@ -14,9 +14,13 @@ std::uint64_t raw(sim::math::Fixed value) { return std::bit_cast<std::uint64_t>(
 Bytes production(const gc::GalacticSession::NativeProductionRequest& request, const gc::GalacticSession::NativeProductionReceipt& receipt) {
     return words({request.player, request.planet, request.type, raw(*request.mark_cost), static_cast<std::uint64_t>(receipt.admission), receipt.build, raw(receipt.price)});
 }
+// A bill's inputs are rebuilt by the replayed world; only the producer callback's answer is journaled
+// (build, accepted, payer, charge), which keeps the per-bill entry small (#4058).
+constexpr std::size_t payment_bytes = 8 + 1 + 4 + 8;
 Bytes payment(const gc::GalacticSession::NativeProductionNotice& notice, const gc::GalacticSession::NativeProductionPayment& result) {
-    return words({static_cast<std::uint64_t>(notice.kind), notice.player, notice.build, raw(notice.amount), raw(notice.price), raw(notice.remaining), notice.planet_owner,
-        result.accepted, result.payer, raw(result.amount)});
+    Bytes out; word(out, notice.build); out.push_back(result.accepted ? 1 : 0);
+    for (unsigned i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(result.payer >> (i * 8)));
+    word(out, raw(result.amount)); return out;
 }
 Bytes magic(const ActionRequest& request, std::span<const sim::EntityId> actors) {
     auto out = words({request.player, request.target, request.type, actors.size()}); for (auto actor : actors) word(out, actor); return out;
@@ -52,15 +56,18 @@ void NativeActions::bind_economic_replay_owners(gc::GalacticSession& world, Plac
         if (notice.kind == gc::GalacticSession::NativeProductionNotice::Kind::marked) return Result::success({true, notice.player, {}});
         const auto bytes = world.consume_native_effect(gc::NativeEffectKind::production_payment); if (!bytes) return Result::failure(bytes.error());
         try {
-            Reader reader(bytes.value());
-            gc::GalacticSession::NativeProductionNotice recorded;
-            const auto kind = reader.word(); recorded.kind = static_cast<gc::GalacticSession::NativeProductionNotice::Kind>(kind);
-            recorded.player = reader.player(); recorded.build = reader.word(); recorded.amount = reader.amount();
-            recorded.price = reader.amount(); recorded.remaining = reader.amount(); recorded.planet_owner = reader.player(true);
-            gc::GalacticSession::NativeProductionPayment payment; payment.accepted = reader.boolean(); payment.payer = reader.player(true); payment.amount = reader.amount(); reader.end();
-            if (kind != 1 || recorded.player != notice.player || recorded.build != notice.build || recorded.amount != notice.amount
-                || recorded.price != notice.price || recorded.remaining != notice.remaining || recorded.planet_owner != notice.planet_owner
-                || payment.amount.raw() < 0 || payment.amount > notice.price || (payment.accepted && !payment.payer) || (!payment.accepted && payment.amount.raw()))
+            const auto& entry = bytes.value();
+            if (entry.size() != economic_replay::payment_bytes) throw std::runtime_error("economic payment size invalid");
+            const auto read = [&](std::size_t at, unsigned width) { std::uint64_t out{}; for (unsigned i = 0; i < width; ++i) out |= std::uint64_t(entry[at + i]) << (i * 8); return out; };
+            gc::GalacticSession::NativeProductionPayment payment;
+            const auto build = read(0, 8); const auto accepted = entry[8];
+            payment.payer = static_cast<gc::PlayerId>(read(9, 4)); payment.amount = Fixed::from_raw(std::bit_cast<std::int64_t>(read(13, 8)));
+            payment.accepted = accepted == 1;
+            // Player, amount requested, remaining work and planet owner are rebuilt inputs;
+            // their divergence (including payer versus input player) is caught by state hashes,
+            // not by this compact outcome decoder.
+            if (accepted > 1 || build != notice.build || payment.amount.raw() < 0 || payment.amount > notice.price
+                || (payment.accepted && !payment.payer) || (!payment.accepted && payment.amount.raw()))
                 return Result::failure(error("economic payment differs from recorded producer callback"));
             return Result::success(payment);
         } catch (const std::exception& e) { return Result::failure(error(e.what())); }

@@ -92,5 +92,6 @@ void test_broad_phase_reach();
 void test_broad_phase_sphere_reach();
 void test_missile_homing();
 void test_missile_lock_loss();
+void test_difficulty();
 
 } // namespace damage_test_support

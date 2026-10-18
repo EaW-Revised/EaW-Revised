@@ -109,7 +109,7 @@ eawr::core::Result<void> configure_gc(auth::ScriptedGalacticSession& host) {
     });
 }
 cp::GameLoadOptions scripted_options() {
-    cp::GameLoadOptions options;
+    cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
     options.galactic_scripts = [] { return eawr::core::Result<cp::GameLoadOptions::GalacticSchedulers>::success(
         {gc_scheduler(1), gc_scheduler(2)}); };
     options.configure_galactic = configure_gc; return options;
@@ -328,7 +328,7 @@ void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paus
     const auto services = [&](campaign::GameSession& session) {
         session.set_conflict_service([](const auto&, const auto&, auto) {
             return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
-        }, no_content);
+        }, no_content, {}, eawr::campaign::ScriptRequirement::none);
         session.set_auto_resolver(solver);
         campaign::AutoResolveOutcomeServices outcomes;
         outcomes.control = [](auto&, const auto&) { return eawr::core::Result<void>::success(); };
@@ -502,6 +502,53 @@ void direct_restore_equality() {
         }
     }
 }
+void owner_journal_refusal() {
+    // A real native admission gives the owner one applied entry. A fresh owner
+    // built from a different recording must not silently adopt its state.
+    auto config = setup();
+    config.rules.maximum_fleet_movement_distance = take(eawr::sim::math::Fixed::from_integer(10000));
+    config.fleet_control.emplace();
+    std::set<galactic::TypeId> types;
+    for (const auto& fleet : config.fleets) for (const auto& member : fleet.members) types.insert(member.type);
+    for (const auto type : types) config.fleet_control->types.push_back({type, false, true, false});
+    auto producer = take(galactic::GalacticSession::create(config));
+    const auto& fleet = config.fleets.front();
+    expect(take(producer.admit_native_fleet(fleet.owner,
+        galactic::RemoveFleetMembers{fleet.id, {fleet.members.front().id}})).admitted,
+        "owner journal refusal fixture records a native admission");
+    const auto owner = take(producer.save_checkpoint_state());
+    auto recording = producer.record();
+    expect(recording.native_effects.size() == 1, "owner journal refusal fixture has one applied entry");
+    auto valid = take(galactic::GalacticSession::from_replay(recording));
+    check(valid.load_checkpoint_state(owner));
+    recording.native_effects.clear();
+    auto mismatched = take(galactic::GalacticSession::from_replay(recording));
+    const auto refused = mismatched.load_checkpoint_state(owner);
+    expect(!refused && refused.error().message.find("owner journal differs") != std::string::npos,
+        "direct owner restore refuses a journal length different from its recording");
+}
+
+void human_command_history_growth() {
+    auto config = setup();
+    for (auto& seat : config.seats) { seat.kind = galactic::SeatKind::human; seat.human_side_id = seat.seat_id.value; }
+    const auto identities = cp::game_identities(config);
+    auto game = take(campaign::GameSession::create(config));
+    const eawr::sim::InlineExecutor executor;
+    const auto owner_size = [&] {
+        return take(cp::parse_checkpoint(take(cp::save_game_checkpoint(game, identities))))
+            .find(cp::SectionId::galactic_owner)->bytes.size();
+    };
+    auto before = owner_size();
+    for (std::uint64_t sequence = 1; sequence <= 3; ++sequence) {
+        check(game.submit({{game.completed_tick(), {1}, sequence}, galactic::PauseGalaxy{}}));
+        (void)take(game.step(executor));
+        const auto after = owner_size();
+        expect(after > before, "human-only saves retain growing executed command history in the owner");
+        expect(game.recording().commands.commands.size() == sequence && game.galaxy().native_effects().empty(),
+            "human-only command growth is independent of the native journal");
+        before = after;
+    }
+}
 void future_native_frontier() {
     galactic::SyntheticGalaxyOptions spec; spec.planets = 8; spec.players = 2;
     spec.fleets_per_player = 2; spec.members_per_fleet = 2;
@@ -527,7 +574,7 @@ void future_native_frontier() {
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         const eawr::platform::ThreadWorkerAdapter pool(workers);
         for (const int barrier : {2, 8}) {
-            auto control = take(campaign::GameSession::from_recording(recording, {}));
+            auto control = take(campaign::GameSession::from_recording(recording, {}, {}, eawr::campaign::ScriptRequirement::none));
             for (int i = 0; i < barrier; ++i) (void)take(control.step(pool));
             expect(control.galaxy().native_effects().size() == (barrier == 2 ? 0U : 1U),
                 "native barriers exercise both an unconsumed and a nonzero consumed replay cursor");
@@ -617,7 +664,7 @@ void admission_and_fixups() {
         auto runtime = take(cp::load_game_checkpoint(saved, identities, {}, executor));
         expect(runtime.session.galaxy().clock() == game.galaxy().clock(), "runtime preserves nested pause and speed");
         expect(runtime.presentation_hints == hints, "presentation hints round-trip separately");
-        cp::GameLoadOptions player; player.player_load = true; player.reserved_autosave = true;
+        cp::GameLoadOptions player; player.script_requirement = eawr::campaign::ScriptRequirement::none; player.player_load = true; player.reserved_autosave = true;
         auto loaded = take(cp::load_game_checkpoint(saved, identities, player, executor));
         expect(loaded.session.galaxy().clock().pause_depth == 0, "galaxy player-load normalizes pause to zero");
         expect(loaded.first_commands.size() == 1 && std::holds_alternative<galactic::PostLoadFixup>(loaded.first_commands.front().payload), "fixup is a typed first command");
@@ -745,7 +792,7 @@ void observer_load_clock() {
             check(world.submit({{0, {99}, 1}, refresh})); (void)take(world.step(executor));
             return read(world, 1);
         };
-        cp::GameLoadOptions options; options.player_load = true;
+        cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none; options.player_load = true;
         const auto galaxy_save = take(cp::save_game_checkpoint(game, identities));
         auto exact_galaxy = take(cp::load_game_checkpoint(galaxy_save, identities, {}, executor));
         expect(take(cp::save_game_checkpoint(exact_galaxy.session, identities)) == galaxy_save,
@@ -757,7 +804,7 @@ void observer_load_clock() {
             && galaxy_load.session.galaxy().snapshot()->observer()->logical_fps == observer.logical_fps,
             "galactic-only player load retains ordinary galactic expiry");
         const auto conflict = child(config); const auto content = fight_content(conflict);
-        check(game.stage_battle(conflict, content)); (void)take(game.step(executor));
+        check(game.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none)); (void)take(game.step(executor));
         const auto retained_frame = game.galaxy().clock().galactic_frame;
         while (game.battle()->completed_tick() < 5) (void)take(game.step(executor));
         const auto frame = game.battle()->completed_tick();
@@ -801,7 +848,7 @@ void child_return_and_future_input() {
     auto game = take(campaign::GameSession::create(config));
     check(game.install_galactic_scripts(gc_scheduler(1), gc_scheduler(2)));
     check(configure_gc(*game.galactic_scripts()));
-    check(game.stage_battle(conflict, content)); (void)take(game.step(serial));
+    check(game.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none)); (void)take(game.step(serial));
     const auto defender = conflict.forces.back().id;
     const auto damage = input(conflict, {{0, 1, 1}, {defender}, tactical::DamagePayload{eawr::sim::math::Fixed::from_integer(1000).value()}});
     const auto stop = input(conflict, {{0, 1, 1}, {conflict.forces.front().id}, tactical::StopPayload{}});
@@ -836,7 +883,7 @@ void child_return_and_future_input() {
         expect(take(cp::save_game_checkpoint(loaded_after.session, identities)) == after,
             "lagging story service clock round trips canonically after child return");
         expect(loaded_after.session.battle_record() == restored.session.battle_record(), "last exported child and ended IDs reconstruct after return");
-        expect(!loaded_after.session.stage_battle(conflict, content), "ended conflict ID remains unavailable after restore");
+        expect(!loaded_after.session.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none), "ended conflict ID remains unavailable after restore");
         for (int tick = 0; tick < 3; ++tick) {
             loaded_after.session.scramble_storage_for_testing();
             expect(take(loaded_after.session.step(pool)).state_hash.get() ==
@@ -848,10 +895,10 @@ void child_return_and_future_input() {
 void child_roundtrip() {
     const auto config = setup(true); const auto identities = cp::game_identities(config); const auto conflict = child(config);
     const eawr::sim::InlineExecutor serial;
-    cp::GameLoadOptions options;
+    cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
     options.content = [](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success({}); };
     auto game = take(campaign::GameSession::create(config));
-    check(game.stage_battle(conflict, {}));
+    check(game.stage_battle(conflict, {}, eawr::campaign::ScriptRequirement::none));
     check(game.submit({{0, {1}, 1}, galactic::SaveRequest{7, false, true, true}}));
     // Save before activation too: the queued entry must stay a future entry, never run early.
     const auto queued = take(cp::save_game_checkpoint(game, identities));
@@ -924,7 +971,7 @@ void direct_child_refusals() {
     const eawr::sim::InlineExecutor executor;
     auto game = take(campaign::GameSession::create(config));
     for (int tick = 0; tick < 5; ++tick) (void)take(game.step(executor));
-    check(game.stage_battle(record, {})); (void)take(game.step(executor));
+    check(game.stage_battle(record, {}, eawr::campaign::ScriptRequirement::none)); (void)take(game.step(executor));
     check(game.submit({{game.completed_tick(), {1}, 1}, input(record,
         {{0, 1, 1}, {record.forces.front().id}, tactical::StopPayload{}})}));
     for (int tick = 0; tick < 3; ++tick) (void)take(game.step(executor));
@@ -948,7 +995,7 @@ void direct_child_refusals() {
         auto fresh = take(campaign::GameSession::create(config));
         fresh.set_conflict_service({}, [](const auto&) {
             return eawr::core::Result<tactical::TacticalContent>::success({});
-        });
+        }, {}, eawr::campaign::ScriptRequirement::none);
         return fresh.load_checkpoint_state(state);
     };
     check(load(bytes));
@@ -1158,7 +1205,7 @@ void child_casualty_return() {
     const auto kill = [&](eawr::sim::EntityId id) { return input(conflict,
         {{0, 1, 1}, {id}, tactical::DamagePayload{eawr::sim::math::Fixed::from_integer(1000).value()}}); };
     const auto make = [&] {
-        auto game = take(campaign::GameSession::create(config)); check(game.stage_battle(conflict, content));
+        auto game = take(campaign::GameSession::create(config)); check(game.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none));
         const eawr::sim::InlineExecutor serial; (void)take(game.step(serial));
         check(game.submit({{2, {1}, 1}, kill(victim)})); check(game.submit({{12, {1}, 2}, kill(last_enemy)}));
         return game;
@@ -1179,7 +1226,7 @@ void child_casualty_return() {
     for (const auto& row : expected_result->casualties)
         expect(expected_ledger.deaths.contains({row.owner, row.final_blow_player, row.original_type}),
             "each death keeps its owner, final-blow player and original type");
-    cp::GameLoadOptions options;
+    cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
     options.content = [content](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success(content); };
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         const eawr::platform::ThreadWorkerAdapter pool(workers);
@@ -1301,7 +1348,7 @@ void timeline_contracts() {
         expect(!child_value_reader(), "move-safe factory can bind a future child and refuses until entry");
         auto child_reader = game.child_timeline_reader({campaign::SessionMode::battle, record.id});
         expect(!child_reader(), "fixed child reader refuses before its mode exists");
-        check(game.stage_battle(record, content));
+        check(game.stage_battle(record, content, eawr::campaign::ScriptRequirement::none));
         (void)take(game.step(executor));
         expect(take(reader()) == 0 && take(game.timeline({})) == 4, "fresh child zero overrides retained parent four");
         (void)take(game.step(executor));
@@ -1324,7 +1371,7 @@ void timeline_contracts() {
             "fixed child reader tracks decreases and refuses mismatched identity");
         expect(!game.timeline({campaign::SessionMode::battle, record.id + 1}), "mismatched mode refuses");
         const auto child_saved = take(cp::save_game_checkpoint(game, identities));
-        cp::GameLoadOptions options;
+        cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
         options.content = [content](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success(content); };
         auto child_loaded = take(cp::load_game_checkpoint(child_saved, identities, options, executor));
         expect(take(child_loaded.session.active_timeline()) == 1 && take(child_loaded.session.timeline({})) == 4,
@@ -1373,7 +1420,7 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--pending-conflict") {
             pending_conflict_resave(); return failures == 0 ? 0 : 1;
         }
-        nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
+        nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
         admission_and_fixups(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();
         scripted_child_barriers(); child_casualty_return();
         if (argc != 2) throw std::runtime_error("expected corpus directory");

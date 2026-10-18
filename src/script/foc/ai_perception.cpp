@@ -942,8 +942,12 @@ struct TacticalWorld::Evaluator final : LookupResolver {
             return real(0);
         }
         if (token == "ISDIFFICULTY") {
-            // Normal difficulty (AI-G03); Easy = 0, Normal = 1, Hard = 2.
-            return real(parameters.difficulty && *parameters.difficulty == real(1) ? 1 : 0);
+            // WTA-47: the evaluated player's level; Easy = 0, Normal = 1, Hard = 2. A player the host does
+            // not know is Normal.
+            const auto found = host().players.find(id);
+            const auto level = found == host().players.end() ? sim::tactical::AiLevel::normal : found->second->difficulty;
+            const std::int64_t number = level == sim::tactical::AiLevel::easy ? 0 : level == sim::tactical::AiLevel::hard ? 2 : 1;
+            return real(parameters.difficulty && *parameters.difficulty == real(number) ? 1 : 0);
         }
         return std::nullopt;
     }

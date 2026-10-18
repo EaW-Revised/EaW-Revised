@@ -1002,10 +1002,10 @@
       "tests/galactic/fixtures/production-corpus/queues-basic.eawr-gcreplay": "95f46587e64b7ccc2c74c5a9451ee15b60812bc3f34c5b14f84db7c577826f69",
       "tests/galactic/fixtures/production-corpus/queues-orbit.eawr-gcreplay": "6a8feaf0f386c597ca7bb4ea80955f9f3666e58c4c2392db270709db90bcfc34",
       "tests/galactic/fixtures/production-corpus/queues-paygo.eawr-gcreplay": "847f32a3830adca6c249ba9bf44149f3ff685c4807c2e2aca2a22566f81f0012",
-      "tests/skirmish/fixtures/installed/banked-hardpoints.eawr-replay": "b7ed71e4e5f9c38aa3ab06cfb2817ae6912deee4885f75f986d40f9e5a3906dc",
-      "tests/skirmish/fixtures/installed/carrier-waypoints.eawr-replay": "54c9e94401d316f0d214aa7e65e4a8253d125d4d569833eb6f02c71867742972",
-      "tests/skirmish/fixtures/installed/leech-shields.eawr-replay": "b3df5279063c69ac618d54e993b93be4a954e22cab9042338ebbb1d9ed228a86",
-      "tests/skirmish/fixtures/installed/special-blast.eawr-replay": "c02139cd2f6b88051b131659aa13c7fbf32bf71a47905be734f8a632cc47f2f4"
+      "tests/skirmish/fixtures/installed/banked-hardpoints.eawr-replay": "2adb6efd6b2bd92ff84d5e28eabc3a7e8222128b04c24912bca6bb478113e94f",
+      "tests/skirmish/fixtures/installed/carrier-waypoints.eawr-replay": "0d6db05c021afc5dee38f9f601d36b115e270dfc1d396c6ea722513e5abd253b",
+      "tests/skirmish/fixtures/installed/leech-shields.eawr-replay": "cf5cc819e70445e9e1265bb14583e292b5eb55583129d8d0ad8866c5cfeef8ff",
+      "tests/skirmish/fixtures/installed/special-blast.eawr-replay": "a923668e25245fca6bcdc7377068d12a5ebbed97d3623eb6230da4cbfb128584"
     },
     "image_allowlist_origins": {
       "third_party/lua/doc/logo.gif": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",

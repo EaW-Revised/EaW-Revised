@@ -578,7 +578,7 @@ void pending_choice_publication() {
                 return eawr::core::Result<eawr::sim::tactical::TacticalContent>::failure(refusal);
             }
             return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({});
-        });
+        }, {}, eawr::campaign::ScriptRequirement::none);
         return game.queue_conflict(entry, {cp::ConflictRoute::pending_tactical, false, false});
     };
     LiveGameSession::Options options; options.workers = 2;
@@ -696,7 +696,7 @@ void child_untimed_input_after_drain() {
         for (const auto& seat : initial.seats) if (seat.player <= 2) entry.seats.push_back({seat.seat_id, seat.player});
         LiveGameSession::Options options;
         options.workers = workers; options.pacing = LiveGameSession::Pacing::driven;
-        options.entries.push_back({1, entry, content});
+        options.entries.push_back({1, entry, content, eawr::campaign::ScriptRequirement::none});
         auto started = LiveGameSession::start(initial, options);
         expect(bool(started), "child inbox regression starts"); if (!started) continue;
         auto& live = *started.value();
@@ -770,11 +770,11 @@ void child_readiness_and_return() {
         content.victory.relevant_types = {hull.type_id};
         LiveGameSession::Options options;
         options.workers = workers; options.pacing = LiveGameSession::Pacing::driven;
-        options.entries.push_back({1, entry, content});
+        options.entries.push_back({1, entry, content, eawr::campaign::ScriptRequirement::none});
         auto next_entry = entry;
         next_entry.id += 10;
         next_entry.tactical.first_free_entity_id = next_entry.id + 1;
-        options.entries.push_back({8, next_entry, content});
+        options.entries.push_back({8, next_entry, content, eawr::campaign::ScriptRequirement::none});
         const auto stale_options = options;
         const auto defender_fleet = std::find_if(initial.fleets.begin(), initial.fleets.end(),
             [&](const auto& row) { return row.id == next_entry.forces.back().parent; });
@@ -785,7 +785,7 @@ void child_readiness_and_return() {
         auto next_hull = hull; next_hull.type_id = replacement.type;
         next_content.durability.profiles.push_back(next_hull);
         next_content.victory.relevant_types.push_back(replacement.type);
-        options.entries.back() = {8, next_entry, next_content};
+        options.entries.back() = {8, next_entry, next_content, eawr::campaign::ScriptRequirement::none};
         std::atomic<bool> preparation_entered{}, release_preparation{};
         auto services = std::make_shared<eawr::platform::CampaignServiceConfiguration>();
         services->loading_descriptor = [](const auto& record, const auto&) {
@@ -897,7 +897,7 @@ void child_readiness_and_return() {
         campaign::GameRecording recording{live->record(), {{1, entry}}};
         auto replayed = campaign::GameSession::from_recording(recording, [content](const auto&) {
             return eawr::core::Result<tactical::TacticalContent>::success(content);
-        }).value();
+        }, {}, eawr::campaign::ScriptRequirement::none).value();
         std::vector<std::string> again;
         const eawr::sim::InlineExecutor executor;
         for (std::size_t tick = 0; tick < hashes.size(); ++tick) again.push_back(replayed.step(executor).value().state_hash.get());
@@ -994,7 +994,7 @@ void repeated_child_lifetimes() {
             entry.tactical.units.push_back(unit);
         }
         for (const auto& seat : initial.seats) if (seat.player <= 2) entry.seats.push_back({seat.seat_id, seat.player});
-        options.entries.push_back({1 + cycle * 20, entry, content});
+        options.entries.push_back({1 + cycle * 20, entry, content, eawr::campaign::ScriptRequirement::none});
     }
     auto live = LiveGameSession::start(initial, options).value();
     const auto owner = live->lifetime();

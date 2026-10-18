@@ -4,6 +4,10 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME ci_doc_refs COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/publish_scan/doc_refs.py"
          --root "${PROJECT_SOURCE_DIR}")
 add_test(NAME ci_doc_refs_contract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_doc_refs.py")
+# The replay number registry (docs/registries/replay-numbers.json): doc, registry and code constants agree.
+add_test(NAME ci_replay_numbers COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/check_replay_numbers.py"
+         --root "${PROJECT_SOURCE_DIR}")
+add_test(NAME ci_replay_numbers_contract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_replay_numbers.py")
 
 add_test(NAME ci_native_cpp_fixture COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_native_cpp_fixture.py")
 add_test(NAME ci_game_data_tests COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_game_data_tests.py")

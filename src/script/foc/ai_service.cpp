@@ -292,12 +292,8 @@ core::Result<void> Engine::before_service(const World& world,
                 const auto found = data_.templates.find(type->second.space_templates.front());
                 if (found != data_.templates.end()) player.space_template = &found->second;
             }
-            // AI-G03: Normal difficulty.
-            if (const auto name = type->second.difficulty.find("NORMAL"); name != type->second.difficulty.end()) {
-                if (const auto found = data_.difficulties.find(name->second); found != data_.difficulties.end()) {
-                    player.difficulty = found->second;
-                }
-            }
+            // WTA-46, WTA-47: the lobby slot's level picks the player type's adjustment entry; Normal is the default.
+            player.difficulty = ai::resolve_difficulty(data_, &type->second, sim::tactical::to_string(setup.difficulty));
             // GS-02: the space goal functions of the player type's function sets, in order.
             for (const std::string& set : type->second.function_sets) {
                 const auto functions = data_.function_sets.find(set);

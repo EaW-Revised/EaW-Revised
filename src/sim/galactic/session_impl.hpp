@@ -199,6 +199,18 @@ public:
     // Derived canonical gather for WGM-110; excludes recursive member build-limit quotas.
     std::map<PlayerId, std::map<TypeId, std::uint64_t>> original_owned_counts;
     mutable std::shared_ptr<const std::vector<CensusObject>> published_production_originals;
+    // Derived observer-local offer rows (never hashed). Recomputed only when a state section they read changed
+    // (the same dirty-flag generations that guard the economy forecast) or an id/object counter moved.
+    mutable std::shared_ptr<const std::vector<ObservedProductionOffer>> published_production_offers;
+    mutable std::array<std::uint64_t, 5> production_offer_key{};
+    // Counts the changes of the sections the rows read (planets, production, players, census, corruption,
+    // abilities), taken from the dirty flags before the state hash consumes them.
+    mutable std::uint64_t offer_generation{1};
+    mutable std::uint64_t production_offer_rebuilds{};
+    // Published production state: copied again only after the production section changed (its dirty flag is
+    // counted before the hash consumes it, like the economy input generation).
+    mutable std::shared_ptr<const std::optional<ProductionSetup>> published_production;
+    mutable std::uint64_t production_generation{1}, published_production_generation{};
     [[nodiscard]] std::span<const CensusObject> actor_inputs() const;
     void refresh_fleet_combat_skip(FleetId);
     void notify_fleet_approach(FleetId, PlanetId, bool notify, std::size_t preceding_events);
@@ -235,8 +247,20 @@ public:
     std::uint64_t production_producers{}, production_entries{};
     void execute_production(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_object_sale(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&);
-    [[nodiscard]] std::vector<ObservedProductionOffer> observed_production_offers(
+    // What the observer's offer rows read besides the production/economy sections, as exact values: the producers
+    // the observer controls and sees, the fleet facts production admission reads (id, owner, orbit, transit flag,
+    // member types) and the income reductions. Rows are rebuilt only when these or a tracked section changed.
+    struct ProductionOfferInputs {
+        std::vector<PlanetId> visible;
+        std::vector<std::uint64_t> fleets;
+        std::vector<ProductionReductionSource> reductions;
+        friend bool operator==(const ProductionOfferInputs&, const ProductionOfferInputs&) = default;
+    };
+    mutable ProductionOfferInputs published_offer_inputs;
+    [[nodiscard]] ProductionOfferInputs production_offer_inputs(
         std::span<const ObservedPlanet> observations, std::span<const Fleet> fleet_inputs) const;
+    [[nodiscard]] std::vector<ObservedProductionOffer> observed_production_offers(const ProductionOfferInputs& inputs,
+        std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor) const;
     [[nodiscard]] core::Result<void> service_production(const PartitionExecutor&, std::uint64_t,
         std::vector<GalacticEvent>&, bool pending_conflict);
     std::map<PlayerId, std::size_t> owned_planet_counts;

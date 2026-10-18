@@ -47,6 +47,24 @@ struct LayerPresence {
     std::uint32_t starbase_level{}, ground_base_level{};
     bool prepared_resolver{}; // WGM-103: PREPARED override precedes either layer's roster checks
 };
+// Admission uses qualified orbit entries; later phases retain the admitted identities.
+// A null snapshot is valid only for an admitted record with no live planet lookup.
+struct ConflictPartyRequest {
+    const ConflictRecord* admitted{};
+    const sim::galactic::GalacticEvent* arrival{};
+    const LayerPresence* presence{};
+    const sim::galactic::NativeInvasion* invasion{};
+    bool current_station_owner{};
+};
+struct ConflictParties {
+    sim::galactic::PlayerId invader{}, defender{}, station_owner{}, station_side{}, planet_owner{};
+    // WAR-12: every roster and solver keeps the same two admitted owners.
+    [[nodiscard]] bool contains(sim::galactic::PlayerId owner) const noexcept {
+        return owner == invader || owner == defender;
+    }
+};
+[[nodiscard]] ConflictParties resolve_conflict_parties(
+    const sim::galactic::GalacticSnapshot* snapshot, const ConflictPartyRequest& request);
 using ForceQualifier = std::function<core::Result<AdmissionForce>(
     const sim::galactic::FleetMember&, sim::galactic::PlayerId, sim::EntityId)>;
 using FleetQualifier = std::function<core::Result<OuterFleetFacts>(const sim::galactic::Fleet&)>;

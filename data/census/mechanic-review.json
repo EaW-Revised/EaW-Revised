@@ -74,10 +74,10 @@
       "end": "std::vector<AbilityStatus> TacticalSession::Impl::ability_statuses(",
       "sha256_lf": "1f2249b6c424a438e713638cf18689623c1c82e33f5f3df18a086d7c70e2144a"
     },
-    "src/sim/tactical/session_step_commands.cpp#apply_ability": {
-      "path": "src/sim/tactical/session_step_commands.cpp",
-      "start": "    const auto apply_ability =",
-      "end": "    // Commands phase: serial, in canonical (tick, player, sequence) order.",
+    "src/sim/tactical/session_cmd_abilities.cpp#apply_ability": {
+      "path": "src/sim/tactical/session_cmd_abilities.cpp",
+      "start": "core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ability(",
+      "end": "} // namespace eawr::sim::tactical",
       "sha256_lf": "a24e3e849ed0f0eb07fa391e83c2910ee3ac0fdaad108fdc4c0f45842c7bc86f"
     },
     "src/sim/tactical/session_step_combat.cpp#ion_team_service": {

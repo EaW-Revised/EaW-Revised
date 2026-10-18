@@ -4,6 +4,66 @@
 
 namespace skirmish_start_test_support {
 
+// WTA-46 (#735): a lobby AI's level, through the installed XML and the start, scales what its objects spawn with.
+void foc_difficulty_binding(const skirmish::StartInputs& inputs, const eawr::units::UnitTables& tables) {
+    using AiLevel = tactical::AiLevel;
+    const std::array<tactical::PlayerId, 1> humans{1};
+    struct Spawned { std::vector<std::pair<tactical::PlayerId, std::int64_t>> hulls; std::vector<tactical::DifficultyScale> scales; };
+    const auto spawn = [&](const AiLevel level) -> std::optional<Spawned> {
+        auto fixture = skirmish::m2_fixture();
+        fixture.slots[1].difficulty = level;
+        const auto start = skirmish::build_start(fixture, inputs);
+        auto content = skirmish::session_content(tables, humans);
+        expect(start && content, "WTA-46: the difficulty start builds");
+        if (!start || !content) return std::nullopt;
+        const auto bound = skirmish::bind_difficulty(content.value(), start.value(), inputs);
+        expect(static_cast<bool>(bound), "WTA-46: the difficulty scales bind");
+        if (!bound) return std::nullopt;
+        auto created = tactical::TacticalSession::create(start.value().setup, content.value().sensors,
+            content.value().durability, content.value().motion, std::nullopt, content.value().combat,
+            {}, content.value().abilities);
+        expect(static_cast<bool>(created), "WTA-46: the difficulty session creates");
+        if (!created) return std::nullopt;
+        Spawned out;
+        out.scales = content.value().durability.difficulty;
+        for (const auto& unit : start.value().units) {
+            const auto state = created.value().durability_state(unit.state.entity_id);
+            if (state) out.hulls.emplace_back(unit.state.owner, state->hull.raw());
+        }
+        return out;
+    };
+    const auto normal = spawn(AiLevel::normal);
+    const auto easy = spawn(AiLevel::easy);
+    const auto hard = spawn(AiLevel::hard);
+    if (!normal || !easy || !hard) return;
+    expect(normal->scales.empty(), "WTA-46: a Normal AI slot binds no scale, so Normal sessions are unchanged");
+    const auto close = [](const std::int64_t value, const std::int64_t expected) {
+        return std::llabs(value - expected) <= expected / 1000 + 2;
+    };
+    const auto scaled = [&](const Spawned& level, const std::int64_t numerator, const std::int64_t denominator) {
+        bool any = false;
+        if (level.hulls.size() != normal->hulls.size()) return false;
+        for (std::size_t index = 0; index < level.hulls.size(); ++index) {
+            const auto owner = normal->hulls[index].first;
+            const auto base = normal->hulls[index].second;
+            if (level.hulls[index].first != owner) return false;
+            if (owner == 2U) {
+                any = true;
+                if (!close(level.hulls[index].second, base / denominator * numerator)) return false;
+            } else if (level.hulls[index].second != base) return false;
+        }
+        return any;
+    };
+    expect(scaled(*easy, 4, 10), "WTA-46: an Easy AI slot spawns every object with 0.4 of its hull; the human's are untouched");
+    expect(scaled(*hard, 75, 100), "WTA-46: a Hard AI slot spawns every object with 0.75 of its hull");
+    expect(easy->scales.size() == 1 && easy->scales[0].player == 2
+            && std::llabs(easy->scales[0].damage.raw() * 10 - 6 * eawr::sim::math::Fixed::scale) <= 40,
+        "WTA-46: an Easy AI slot's damage scale is the authored 0.6");
+    expect(hard->scales.size() == 1 && hard->scales[0].player == 2
+            && std::llabs(hard->scales[0].damage.raw() * 10 - 18 * eawr::sim::math::Fixed::scale) <= 40,
+        "WTA-46: a Hard AI slot's damage scale is the authored 1.8");
+}
+
 void foc_player_peacebringer_blast(const eawr::units::LoadInput& input) {
     auto extended = input;
     extended.types = {"The_Peacebringer", "Tartan_Patrol_Cruiser", "Skirmish_Underworld_Star_Base_1",
@@ -787,6 +847,7 @@ void foc_start(const std::filesystem::path& fixtures) {
         std::cerr << eawr::core::format_diagnostic(inputs.error()) << '\n';
         return;
     }
+    foc_difficulty_binding(inputs.value(), tables.value());
     expect(inputs.value().placements.size() == 58, "SK-01: 58 placement records");
     // #495, PG-01: the declared extents are the minis' binary32 payloads (13000.0 and 12000.0).
     expect(inputs.value().map_extents == std::pair<std::uint32_t, std::uint32_t>{0x464B2000U, 0x464B2000U},

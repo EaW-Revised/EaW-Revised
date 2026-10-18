@@ -35,6 +35,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+if __package__ in (None, ""):
+    from tag_registry import load_registry
+else:
+    from .tag_registry import load_registry
+
 ROOTS = ("src", "include", "apps")
 SUFFIXES = (".cpp", ".hpp", ".h", ".cc", ".gd")
 SKIP_PARTS = ("/third_party/", "/upstream/", "/tests/")
@@ -55,7 +60,7 @@ _TRIVIAL = {"0", "1", "2", "-1", "0.0", "1.0", "2.0", "-1.0"}
 
 
 def load_tags(repo: Path) -> set[str]:
-    rows = json.loads((repo / STATUSES_PATH).read_text(encoding="utf-8"))["rows"]
+    rows = load_registry(repo / STATUSES_PATH)["rows"]
     tags = set()
     for row in rows:
         tag = row["tag"]
@@ -168,9 +173,9 @@ def local_callables(source: str) -> dict[str, list[tuple[list[str], str]]]:
     """Same-file definitions and local lambdas; this is deliberately not a C++ parser."""
     masked = masked_strings(source)
     pattern = re.compile(
-        r"(?:^[ \t]*[\w:<>,*& \t]+\b(?P<function>[A-Za-z_]\w*)\s*"
+        r"(?:^[ \t]*(?:\[\[[^\]]*\]\]\s*)?[\w:<>,*& \t]+\b(?P<function>[A-Za-z_]\w*)\s*"
         r"|\b(?:const\s+)?auto\s+(?P<lambda>[A-Za-z_]\w*)\s*=\s*\[[^\]]*\]\s*)"
-        r"\((?P<parameters>[^;{}()]*)\)\s*(?:const\s*)?(?:noexcept\s*)?\{", re.MULTILINE)
+        r"\((?P<parameters>[^;{}()]*)\)\s*(?:const\s*)?(?:noexcept\s*)?(?:->\s*[\w:<>,*&\s]+)?\{", re.MULTILINE)
     result: dict[str, list[tuple[list[str], str]]] = {}
     for match in pattern.finditer(masked):
         if match['function'] in {'if', 'for', 'while', 'switch', 'catch'}:
@@ -178,7 +183,7 @@ def local_callables(source: str) -> dict[str, list[tuple[list[str], str]]]:
         parameters = match['parameters']
         while re.search(r"<[^<>]*>", parameters):
             parameters = re.sub(r"<[^<>]*>", "", parameters)
-        params = [re.findall(r"[A-Za-z_]\w*", item)[-1] for item in parameters.split(',') if item.strip()]
+        params = [tokens[-1] for item in parameters.split(',') if (tokens := re.findall(r"[A-Za-z_]\w*", item))]
         start = match.end() - 1
         end = balanced_end(masked, start)
         result.setdefault(match['function'] or match['lambda'], []).append((params, source[start + 1:end - 1]))
@@ -311,9 +316,29 @@ def reference_is_backed(repo: Path, reference: tuple[str, str], marked: set[str]
                for body in function_bodies(source, function) for tag in marked if tag in tags)
 
 
+def without_component_counts(code: str, definitions: dict) -> str:
+    """Mask only the last integer argument of a local reader that checks its parsed list length."""
+    masked = masked_strings(code)
+    result = list(code)
+    for match in re.finditer(r"\b(numbers|components)\s*\(", masked):
+        end = balanced_end(masked, match.end() - 1)
+        count = re.search(r",\s*(\d+[uUlL]*)\s*\)$", code[match.start():end])
+        if not count:
+            continue
+        checked = any(parameters and re.search(
+            r"\.size\s*\(\s*\)\s*(?:==|!=)\s*" + re.escape(parameters[-1]) + r"\b", body)
+            for parameters, body in definitions.get(match[1], []))
+        if checked:
+            start = match.start() + count.start(1)
+            result[start:match.start() + count.end(1)] = " " * len(count[1])
+    return "".join(result)
+
+
 def scan_file(path: Path, rel: str, tags: set[str], repo: Path | None = None) -> list[dict]:
     findings = []
     lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+    source = source_without_comments("\n".join(lines))
+    definitions = local_callables(source) if re.search(r"\b(?:numbers|components)\s*\(", source) else {}
     pending: tuple[set[str], set[str], tuple[str, str] | None] | None = None
     for number, raw in enumerate(lines, 1):
         block = _BLOCK_START.match(raw)
@@ -346,7 +371,7 @@ def scan_file(path: Path, rel: str, tags: set[str], repo: Path | None = None) ->
             pending = None
         if not named:
             continue
-        values = literals(code)
+        values = literals(without_component_counts(code, definitions))
         if not values:
             continue
         if fallback and (marker_is_backed(lines, number - 1, fallback, tags)

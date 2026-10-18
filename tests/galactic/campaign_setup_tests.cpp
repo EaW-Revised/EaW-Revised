@@ -451,7 +451,7 @@ void retained_parent() {
     tactical::DurabilityProfile durability; durability.type_id = 7; durability.max_hull = f(100); content.durability.profiles.push_back(durability);
     content.victory.condition = tactical::VictoryCondition::all_enemy_units_destroyed; content.victory.contenders = {1, 2};
     content.victory.controlled_players = {1, 2}; content.victory.humans = {1}; content.victory.relevant_types = {7}; content.victory.countdown_frames = 2;
-    auto staged = root.game()->stage_battle(conflict, content);
+    auto staged = root.game()->stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none);
     expect(static_cast<bool>(staged), "authored root stages ordinary child"); if (!staged) return;
     const eawr::sim::InlineExecutor executor;
     static_cast<void>(root.game()->step(executor).value());

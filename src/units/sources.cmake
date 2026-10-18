@@ -13,4 +13,7 @@ set(EAWR_UNITS_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/unit_tables.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/unit_tables_decode.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/unit_tables_profiles.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/unit_tables_abilities_nested.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/unit_tables_abilities_special.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/unit_tables_abilities_bonuses.cpp"
 )

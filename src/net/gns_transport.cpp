@@ -53,6 +53,7 @@ struct GnsLogState {
     std::map<std::string, std::pair<Clock::time_point, std::size_t>> limited;
     std::atomic<bool> enabled{}, has_pending{};
     std::atomic<int> seat{-1};
+    std::uint64_t generation{};
 };
 GnsLogState& gns_log() {
     static GnsLogState state;
@@ -647,7 +648,11 @@ struct GnsTransport::Impl {
             SteamNetConnectionRealTimeStatus_t status{};
             const auto valid_ping = sockets().GetConnectionRealTimeStatus(stream, &status, 0, nullptr) == k_EResultOK
                 && status.m_eState == k_ESteamNetworkingConnectionState_Connected;
-            stats.observe(now, valid_ping ? std::optional<int>(status.m_nPing) : std::nullopt);
+            // m_flConnectionQualityLocal is the share of packets that arrived intact, or negative while unmeasured.
+            const std::optional<double> loss = valid_ping && status.m_flConnectionQualityLocal >= 0.0F
+                ? std::optional<double>(std::clamp(1.0 - static_cast<double>(status.m_flConnectionQualityLocal), 0.0, 1.0) * 100.0)
+                : std::nullopt;
+            stats.observe(now, valid_ping ? std::optional<int>(status.m_nPing) : std::nullopt, loss);
             SteamNetConnectionInfo_t info{};
             const bool info_ok = sockets().GetConnectionInfo(stream, &info);
             const bool connected = info_ok && info.m_eState == k_ESteamNetworkingConnectionState_Connected;
@@ -1373,7 +1378,10 @@ struct GnsTransport::Mesh {
         bool needed = false;
         for (PeerIndex p = 0; p < peers; ++p)
             if (p != self && slot[p].was_open && !slot[p].excluded && link(p) != LinkState::open) needed = true;
-        if (!needed) return;
+        // The grace belongs to one stretch of repair: once every pair is open again the next loss starts a fresh one, rather
+        // than meeting the expired deadline of a long previous incident and being given up on the instant it happens (1793
+        // on the first pair lost after a 39 s incident, N9-H, before the next epoch is armed).
+        if (!needed) { repair_deadline.reset(); return; }
         if (!repair_deadline) repair_deadline = Clock::now() + options.repair_grace;
         const auto failed_repair = [&](unsigned code) {
             for (PeerIndex p = 0; p < peers; ++p) {
@@ -1486,12 +1494,23 @@ struct GnsTransport::Mesh {};
 
 GnsRoute GnsTransport::observed_route() { return static_cast<GnsRoute>(observed_route_cell().load()); }
 bool GnsTransport::available() { return EAWR_HAS_GNS != 0; }
-void GnsTransport::set_log_sink(GnsLogSink sink) {
+std::uint64_t GnsTransport::set_log_sink(GnsLogSink sink) {
     auto& log = gns_log();
     const std::lock_guard lock(log.mutex);
     log.enabled.store(static_cast<bool>(sink));
     log.sink = std::move(sink);
+    ++log.generation;
     if (!log.enabled.load()) { log.pending.clear(); log.limited.clear(); log.dropped = 0; log.has_pending.store(false); }
+    return log.enabled.load() ? log.generation : 0;
+}
+void GnsTransport::clear_log_sink(std::uint64_t generation) {
+    auto& log = gns_log();
+    const std::lock_guard lock(log.mutex);
+    if (generation == 0 || generation != log.generation || !log.enabled.load()) return;
+    log.enabled.store(false);
+    log.sink = {};
+    ++log.generation;
+    log.pending.clear(); log.limited.clear(); log.dropped = 0; log.has_pending.store(false);
 }
 GnsTransport::GnsTransport(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 GnsTransport::GnsTransport(std::unique_ptr<Mesh> mesh) : mesh_(std::move(mesh)) {}

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Generate the public XML tag report using only statuses.json; --check detects stale pages."""
+"""Generate the public XML tag report using only statuses.json.
+
+Per PR: --pr [--base REF] (report/ may be stale). Batch job: --batch regenerates, --check verifies.
+"""
 from __future__ import annotations
 
 import argparse
@@ -7,6 +10,7 @@ from collections import Counter, defaultdict
 import html
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 
 if __package__ in (None, ""):
@@ -144,20 +148,72 @@ def check_report(pages: dict[str, str], destination: Path) -> list[str]:
                       or (destination / name).read_bytes() != (generated / name).read_bytes())
 
 
+def touched_pages(base: str, destination: Path) -> list[str]:
+    """Report pages (by name) that differ from `base`, including deletions, per git."""
+    try:
+        relative = destination.resolve().relative_to(ROOT.resolve()).as_posix()
+    except ValueError as error:
+        raise ValueError("--pr --base requires --out inside the repository") from error
+    result = subprocess.run(["git", "diff", "--name-only", "-z", f"{base}...HEAD", "--", relative],
+                            cwd=ROOT, capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError(f"cannot compare report pages with base {base!r}; "
+                         "fetch the base ref and ensure it shares history with HEAD")
+    return sorted(Path(line).name for line in result.stdout.split("\0") if line.endswith(".md"))
+
+
+def pr_check(pages: dict[str, str], destination: Path, base: str | None) -> int:
+    """Per-PR gate: statuses.json loaded (and so parsed); report/ may stay stale but is never hand-edited."""
+    if base is None:
+        print(f"XML tag report (per-PR): registry renders {len(pages)} pages; report/ freshness is a batch check.")
+        return 0
+    different = set(check_report(pages, destination))
+    hand_edited = [name for name in touched_pages(base, destination) if name in different]
+    if hand_edited:
+        print("XML tag report pages were edited but do not match a regen: " + ", ".join(hand_edited))
+        print("Leave docs/tag-coverage/report/ alone in PRs; the batch job runs "
+              "python tools/inventory/tag_report.py --batch.")
+        return 1
+    print(f"XML tag report (per-PR): no hand-edited pages versus {base}.")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--statuses", type=Path, default=ROOT / "docs/tag-coverage/statuses.json")
     parser.add_argument("--out", type=Path, default=ROOT / "docs/tag-coverage/report")
-    parser.add_argument("--check", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true",
+                      help="batch/release gate: fail if report/ differs from a regen of statuses.json")
+    mode.add_argument("--batch", action="store_true",
+                      help="batch job: regenerate report/, list the pages that changed, verify the result")
+    mode.add_argument("--pr", action="store_true",
+                      help="per-PR gate: validate statuses.json; report/ may be stale")
+    parser.add_argument("--base", help="with --pr: git base ref; fail if a PR touched report pages that do not match a regen")
     args = parser.parse_args(argv)
     pages = render(load_registry(args.statuses))
+    if args.pr:
+        try:
+            return pr_check(pages, args.out, args.base)
+        except ValueError as error:
+            parser.error(str(error))
+    if args.base:
+        parser.error("--base only applies to --pr")
     if args.check:
         different = check_report(pages, args.out)
         if different:
             print("XML tag report is stale: " + ", ".join(different))
-            print("Run python tools/inventory/tag_report.py and commit docs/tag-coverage/report/.")
+            print("Run python tools/inventory/tag_report.py --batch (batch job) and commit docs/tag-coverage/report/.")
             return 1
         print(f"XML tag report: {len(pages)} pages match.")
+    elif args.batch:
+        changed = check_report(pages, args.out)
+        write_report(pages, args.out)
+        if check_report(pages, args.out):
+            print("XML tag report: regeneration did not converge.")
+            return 1
+        print(f"XML tag report: wrote {len(pages)} pages, {len(changed)} changed"
+              + (": " + ", ".join(changed) if changed else "."))
     else:
         write_report(pages, args.out)
         print(f"XML tag report: wrote {len(pages)} pages.")

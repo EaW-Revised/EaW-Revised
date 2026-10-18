@@ -11,8 +11,6 @@
 namespace eawr::sim::tactical { class TacticalSession; }
 
 namespace eawr::campaign {
-using GalacticParentQuery = std::function<std::optional<script::numeric::LuaNumber>(std::string_view, sim::tactical::PlayerId)>;
-using GalacticParentQueryFactory = std::function<GalacticParentQuery(const ConflictRecord&)>;
 
 // WGT-07/08: explicit GC-to-tactical binding, never an equality of numeric domains.
 struct SpaceEntryType {

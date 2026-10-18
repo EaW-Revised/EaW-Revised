@@ -356,7 +356,9 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   does the same outside it. That replay takes about as long as the battle did, so an interactive
   (real-time) session skips it (`headless_hashes_equal` is null) and closing its window exits at
   once, writing the report (`status: space_environment_closed`); `--eawr-live-verify on|off`
-  overrides the default either way. The console build prints `EAWR shutdown +<ms> ms <step>` lines
+  overrides the default either way. With `--eawr-live-hashes` the report also carries `live_session.draw_digest`:
+  per tick a digest of the visible units and of the drawn poses with their model slots, and at the end digests of
+  the slot plan (fixed-point and quantized values, no wall clock). The console build prints `EAWR shutdown +<ms> ms <step>` lines
   for the quit path.
 - `--eawr-live-input <tick>:<click|dclick|rclick|hover>:<unit=N[+@dx,dy,dz]|@x,y,z|screen=x,y>`,
   `<tick>:<hover|click|dclick|rclick>:icon=N`, `<tick>:box:@x,y,z/@x,y,z`, `<tick>:box:screen=x,y/screen=x,y`

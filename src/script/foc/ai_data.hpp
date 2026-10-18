@@ -91,6 +91,11 @@ struct Difficulty {
     Real galactic_build_time_multiplier{real(1)};
     Real galactic_goal_cycle_sleep{};
     Real credit_multiplier{real(1)};
+    // WTA-46 / WTA-45: the combat and production multipliers; 1 is Normal (and an absent tag).
+    Real health_multiplier{real(1)};
+    Real shield_multiplier{real(1)};
+    Real damage_multiplier{real(1)};
+    Real space_build_time_multiplier{real(1)};
 };
 
 // gameconstants.xml values of the space perception grid and targets; engine defaults where
@@ -120,6 +125,11 @@ struct AiData {
     Constants constants;
     EquationSet equations;
 };
+
+// WTA-46: the adjustment a player of `type` runs at `level` (EASY / NORMAL / HARD, any case; empty is
+// Normal). A level the type authors no entry for gets the engine's dummy adjustment (every multiplier 1),
+// not the Normal entry.
+[[nodiscard]] Difficulty resolve_difficulty(const AiData& data, const PlayerType* type, std::string_view level);
 
 // The XML files the goal system reads, as logical paths (AI-15).
 [[nodiscard]] std::vector<std::string> ai_xml_files();

@@ -1,0 +1,614 @@
+{
+ "schema": 1,
+ "about": "Machine-readable numbers of the tactical replay. docs/replay-format.md keeps the prose; tools/check_replay_numbers.py keeps this file, the doc and the code constants in agreement. Add a row here in the same change that adds the code constant. `documented` says whether the doc already describes the row. Numbers are handed out by the coordinator; ask before taking one.",
+ "tactical_replay": {
+  "format_versions": [
+   {
+    "value": 2,
+    "constant": "replay_format_version",
+    "name": "v2",
+    "documented": true
+   },
+   {
+    "value": 3,
+    "constant": "replay_format_version_squadrons",
+    "name": "v3 (squadrons)",
+    "documented": true
+   },
+   {
+    "value": 4,
+    "constant": "replay_format_version_extensions",
+    "name": "v4 (extensions)",
+    "documented": true
+   },
+   {
+    "value": 5,
+    "constant": "replay_format_version_squadron_extensions",
+    "name": "v5 (squadron extensions)",
+    "documented": true
+   }
+  ],
+  "header_extensions": [
+   {
+    "tag": 1,
+    "constant": "replay_extension_match_policy",
+    "name": "match policy",
+    "documented": true
+   },
+   {
+    "tag": 2,
+    "constant": "replay_extension_skirmish_setup",
+    "name": "SKSU",
+    "documented": true
+   },
+   {
+    "tag": 3,
+    "constant": "replay_extension_garrison_disabled",
+    "name": "GSPN",
+    "documented": true
+   },
+   {
+    "tag": 4,
+    "constant": "replay_extension_queue_identities",
+    "name": "QIDS",
+    "documented": true
+   },
+   {
+    "tag": 5,
+    "constant": "replay_extension_free_garrison",
+    "name": "GARR",
+    "documented": true
+   },
+   {
+    "tag": 6,
+    "constant": "replay_extension_first_free_id",
+    "name": "first free entity id",
+    "documented": true
+   },
+   {
+    "tag": 7,
+    "constant": "replay_extension_match_identity",
+    "name": "MTID",
+    "documented": true
+   },
+   {
+    "tag": 8,
+    "constant": "replay_extension_multiplayer_departure",
+    "name": "MPDP",
+    "documented": true
+   },
+   {
+    "tag": 9,
+    "constant": "replay_extension_beacon_rules",
+    "name": "beacon rules",
+    "documented": false
+   },
+   {
+    "tag": 10,
+    "constant": "replay_extension_campaign",
+    "name": "campaign",
+    "documented": false
+   },
+   {
+    "tag": 11,
+    "constant": "replay_extension_carriers",
+    "name": "carriers",
+    "documented": false
+   },
+   {
+    "tag": 12,
+    "constant": "replay_extension_cinematic_seats",
+    "name": "cinematic seats",
+    "documented": false
+   },
+   {
+    "tag": 13,
+    "constant": "replay_extension_attract_pool",
+    "name": "ATRC",
+    "documented": true
+   },
+   {
+    "tag": 15,
+    "constant": "replay_extension_native_scene",
+    "name": "native campaign scene",
+    "documented": true
+   },
+   {
+    "tag": 16,
+    "constant": "replay_extension_object_turn",
+    "name": "OBJT",
+    "documented": true
+   }
+  ],
+  "opcodes": [
+   {
+    "value": 1,
+    "constant": null,
+    "name": "stop",
+    "documented": true
+   },
+   {
+    "value": 2,
+    "constant": null,
+    "name": "move",
+    "documented": true
+   },
+   {
+    "value": 3,
+    "constant": null,
+    "name": "attack",
+    "documented": true
+   },
+   {
+    "value": 4,
+    "constant": null,
+    "name": "damage",
+    "documented": true
+   },
+   {
+    "value": 5,
+    "constant": null,
+    "name": "face",
+    "documented": true
+   },
+   {
+    "value": 6,
+    "constant": null,
+    "name": "attack_move",
+    "documented": true
+   },
+   {
+    "value": 7,
+    "constant": null,
+    "name": "guard",
+    "documented": true
+   },
+   {
+    "value": 8,
+    "constant": null,
+    "name": "ability",
+    "documented": true
+   },
+   {
+    "value": 9,
+    "constant": null,
+    "name": "buy",
+    "documented": true
+   },
+   {
+    "value": 10,
+    "constant": null,
+    "name": "cancel",
+    "documented": true
+   },
+   {
+    "value": 11,
+    "constant": null,
+    "name": "reinforce",
+    "documented": true
+   },
+   {
+    "value": 12,
+    "constant": "opcode_attack_hardpoint",
+    "name": "attack_hardpoint",
+    "documented": true
+   },
+   {
+    "value": 13,
+    "constant": "opcode_pad_build",
+    "name": "pad_build",
+    "documented": true
+   },
+   {
+    "value": 14,
+    "constant": "opcode_credit_grant",
+    "name": "credit_grant",
+    "documented": true
+   },
+   {
+    "value": 15,
+    "constant": "opcode_pad_sell",
+    "name": "pad_sell",
+    "documented": true
+   },
+   {
+    "value": 16,
+    "constant": "opcode_intentional_quit",
+    "name": "intentional_quit",
+    "documented": true
+   },
+   {
+    "value": 17,
+    "constant": "opcode_area_ability",
+    "name": "area_ability",
+    "documented": true
+   },
+   {
+    "value": 18,
+    "constant": "opcode_manual_target",
+    "name": "manual_target",
+    "documented": true
+   },
+   {
+    "value": 19,
+    "constant": "opcode_reserved_reinforce",
+    "name": "reserved_reinforce",
+    "documented": true
+   },
+   {
+    "value": 20,
+    "constant": "opcode_hazard_move",
+    "name": "hazard_move",
+    "documented": true
+   },
+   {
+    "value": 21,
+    "constant": "opcode_reveal_all",
+    "name": "reveal_all",
+    "documented": true
+   },
+   {
+    "value": 22,
+    "constant": "opcode_cancel_entry",
+    "name": "cancel_entry",
+    "documented": true
+   },
+   {
+    "value": 23,
+    "constant": "opcode_ai_reservation_debit",
+    "name": "ai_reservation_debit",
+    "documented": true
+   },
+   {
+    "value": 24,
+    "constant": "opcode_prepaid_buy",
+    "name": "prepaid_buy",
+    "documented": true
+   },
+   {
+    "value": 25,
+    "constant": "opcode_repair_hardpoint",
+    "name": "repair_hardpoint",
+    "documented": true
+   },
+   {
+    "value": 26,
+    "constant": "opcode_reinforce_facing",
+    "name": "reinforce_facing",
+    "documented": true
+   },
+   {
+    "value": 27,
+    "constant": "opcode_special_fire",
+    "name": "special_fire",
+    "documented": false
+   },
+   {
+    "value": 28,
+    "constant": "opcode_retreat",
+    "name": "retreat",
+    "documented": false
+   },
+   {
+    "value": 29,
+    "constant": "opcode_campaign_credit_release",
+    "name": "campaign_credit_release",
+    "documented": false
+   },
+   {
+    "value": 30,
+    "constant": "opcode_retreat_cinematic",
+    "name": "retreat_cinematic",
+    "documented": false
+   },
+   {
+    "value": 31,
+    "constant": "opcode_beacon",
+    "name": "beacon",
+    "documented": false
+   }
+  ]
+ },
+ "tactical_state_blocks": [
+  {
+   "tag": "ABIL",
+   "constant": "ability_tag",
+   "documented": true
+  },
+  {
+   "tag": "APPR",
+   "constant": "approach_tag",
+   "documented": true
+  },
+  {
+   "tag": "ARRV",
+   "constant": "arrival_tag",
+   "documented": true
+  },
+  {
+   "tag": "ASTD",
+   "constant": "asteroid_tag",
+   "documented": true
+  },
+  {
+   "tag": "AVUL",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "BECN",
+   "constant": "beacon_tag",
+   "documented": false
+  },
+  {
+   "tag": "BLST",
+   "constant": "charged_blast_tag",
+   "documented": true
+  },
+  {
+   "tag": "BUZZ",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "BZQR",
+   "constant": "tag",
+   "documented": false
+  },
+  {
+   "tag": "CAMC",
+   "constant": "tag",
+   "documented": false
+  },
+  {
+   "tag": "CFIR",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "CINS",
+   "constant": "tag",
+   "documented": false
+  },
+  {
+   "tag": "COLL",
+   "constant": "projectile_collection_tag",
+   "documented": false
+  },
+  {
+   "tag": "CRFT",
+   "constant": "craft_tag",
+   "documented": true
+  },
+  {
+   "tag": "CRPT",
+   "constant": "corrupt_tag",
+   "documented": true
+  },
+  {
+   "tag": "CULL",
+   "constant": "collection_tag",
+   "documented": false
+  },
+  {
+   "tag": "DDMG",
+   "constant": "blast_tag",
+   "documented": true
+  },
+  {
+   "tag": "DTRK",
+   "constant": "damage_tracking_tag",
+   "documented": true
+  },
+  {
+   "tag": "ECON",
+   "constant": "economy_tag",
+   "documented": true
+  },
+  {
+   "tag": "EDIS",
+   "constant": "engine_disable_tag",
+   "documented": true
+  },
+  {
+   "tag": "FOGC",
+   "constant": "fog_tag",
+   "documented": true
+  },
+  {
+   "tag": "FREV",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "FRMN",
+   "constant": "formation_tag",
+   "documented": true
+  },
+  {
+   "tag": "GRSN",
+   "constant": "garrison_tag",
+   "documented": false
+  },
+  {
+   "tag": "HABL",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "HBON",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "HERO",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "HNGR",
+   "constant": "hangar_tag",
+   "documented": true
+  },
+  {
+   "tag": "IMOD",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "IONS",
+   "constant": "ion_stun_tag",
+   "documented": true
+  },
+  {
+   "tag": "KSCR",
+   "constant": "self_destruct_script_tag",
+   "documented": true
+  },
+  {
+   "tag": "LSVC",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "MANN",
+   "constant": "manual_tag",
+   "documented": true
+  },
+  {
+   "tag": "MPDP",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "MSCR",
+   "constant": "mc30_script_tag",
+   "documented": false
+  },
+  {
+   "tag": "MVHZ",
+   "constant": "hazard_move_tag",
+   "documented": true
+  },
+  {
+   "tag": "NEBC",
+   "constant": "nebula_tag",
+   "documented": true
+  },
+  {
+   "tag": "PADS",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "PDEF",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "POPS",
+   "constant": "population_tag",
+   "documented": true
+  },
+  {
+   "tag": "PROJ",
+   "constant": "projectile_tag",
+   "documented": true
+  },
+  {
+   "tag": "PTOK",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "QIDS",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "QUIT",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "ROLL",
+   "constant": "roll_tag",
+   "documented": true
+  },
+  {
+   "tag": "RTRY",
+   "constant": "path_retry_tag",
+   "documented": false
+  },
+  {
+   "tag": "SEEN",
+   "constant": "sighting_tag",
+   "documented": false
+  },
+  {
+   "tag": "SLCE",
+   "constant": "sliced_tag",
+   "documented": false
+  },
+  {
+   "tag": "SPAB",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "SPIN",
+   "constant": "spin_tag",
+   "documented": true
+  },
+  {
+   "tag": "SQAP",
+   "constant": "squadron_attack_path_tag",
+   "documented": false
+  },
+  {
+   "tag": "SQDN",
+   "constant": "squadron_tag",
+   "documented": true
+  },
+  {
+   "tag": "SQST",
+   "constant": "squadron_state_tag",
+   "documented": true
+  },
+  {
+   "tag": "STLH",
+   "constant": "stealth_tag",
+   "documented": true
+  },
+  {
+   "tag": "STLX",
+   "constant": "stealth_end_tag",
+   "documented": true
+  },
+  {
+   "tag": "STMC",
+   "constant": "storm_tag",
+   "documented": true
+  },
+  {
+   "tag": "TRAK",
+   "constant": "tracking_tag",
+   "documented": true
+  },
+  {
+   "tag": "UPGD",
+   "constant": "tag",
+   "documented": true
+  },
+  {
+   "tag": "VICT",
+   "constant": "victory_tag",
+   "documented": true
+  },
+  {
+   "tag": "WYPT",
+   "constant": "waypoint_tag",
+   "documented": false
+  }
+ ]
+}

@@ -21,6 +21,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 using namespace eawr;
@@ -622,7 +623,7 @@ void admitted_cycle() {
     for (const auto workers : std::array<std::size_t, 4>{1, 2, 4, 8}) {
         const platform::ThreadWorkerAdapter executor(workers);
         auto game = take(campaign::GameSession::create(galaxy));
-        game.set_conflict_service(admission, content);
+        game.set_conflict_service(admission, content, {}, eawr::campaign::ScriptRequirement::none);
         game.set_entry_resolver([&](const auto& record, const auto&, auto next) {
             auto built = campaign::build_space_entry(record, input, next, galaxy.seed);
             if (!built) return core::Result<campaign::ResolvedConflictEntry>::failure(built.error());
@@ -683,7 +684,7 @@ void admitted_cycle() {
             && carrier->contained[0].entity_id == 24 && carrier->contained[0].parent == 20,
             "rider is contained, outside the spatial roster, with exact parent identity");
         const auto save = take(checkpoint::save_game_checkpoint(game, checkpoint::game_identities(galaxy)));
-        checkpoint::GameLoadOptions load; load.content = content;
+        checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.content = content;
         auto restored = take(checkpoint::load_game_checkpoint(save, checkpoint::game_identities(galaxy), load, executor));
         expect(restored.session.state_sha256() == game.state_sha256(),
             "fresh checkpoint restores permanent orbital roles and retained source links");
@@ -703,7 +704,7 @@ void admitted_cycle() {
         const auto recording = game.recording();
         expect(recording.conflicts.size() == 1 && recording.conflicts.front().conflict == resolved,
             "history stores resolved entry, not the unresolved admission manifest");
-        auto parent_replay = take(campaign::GameSession::from_recording(recording, content));
+        auto parent_replay = take(campaign::GameSession::from_recording(recording, content, {}, eawr::campaign::ScriptRequirement::none));
         for (std::uint64_t tick = 0; tick < recording.commands.final_tick_count; ++tick) (void)take(parent_replay.step(executor));
         expect(parent_replay.state_sha256() == game.state_sha256(),
             "parent recording consumes the resolved selection without re-running entry placement");
@@ -933,11 +934,11 @@ void orbital_owner_admission() {
         "every-marker orbital copy retains its nonparticipant source owner");
     campaign::GameSession::ConflictService unused=[](const auto&,const auto&,sim::EntityId){return core::Result<std::optional<campaign::RecordedAdmission>>::success(std::nullopt);};
     campaign::GameSession::ContentResolver resolver=[&](const auto& conflict){return campaign::space_entry_content(conflict.tactical,input.map);};
-    auto game=take(campaign::GameSession::create(galaxy)); game.set_conflict_service(unused,resolver);
+    auto game=take(campaign::GameSession::create(galaxy)); game.set_conflict_service(unused,resolver, {}, eawr::campaign::ScriptRequirement::none);
     check(game.queue_conflict(entry.conflict,{campaign::ConflictRoute::pending_tactical,false,true}));
-    auto staged=take(campaign::GameSession::create(galaxy)); check(staged.stage_battle(entry.conflict,entry.content));
+    auto staged=take(campaign::GameSession::create(galaxy)); check(staged.stage_battle(entry.conflict,entry.content, eawr::campaign::ScriptRequirement::none));
     auto unknown=entry.conflict; for(auto& force:unknown.forces) if(force.role==campaign::ForceRole::orbital) force.owner=4;
-    auto refused=take(campaign::GameSession::create(galaxy)); refused.set_conflict_service(unused,resolver);
+    auto refused=take(campaign::GameSession::create(galaxy)); refused.set_conflict_service(unused,resolver, {}, eawr::campaign::ScriptRequirement::none);
     expect(!refused.queue_conflict(unknown,{campaign::ConflictRoute::pending_tactical,false,true}),"unknown nonparticipant orbital owner is refused");
 }
 void formation_contracts() {
@@ -1093,6 +1094,17 @@ void garrison_contracts() {
     const auto* high=content.motion.squadrons.find_spawner(skirmish::type_id("Station"),2);
     expect(low && high && low->entries.size()==1 && low->entries.front().starting==1 && low->entries.front().reserve==-1, "owner Tech0 keeps the authored unlimited reserve sentinel");
     expect(high && high->entries.size()==1 && high->entries.front().starting==5 && high->entries.front().reserve==0, "Tech3 chooses independent complete starting/reserve tiers; reserve-only type makes no spawn row and no lower per-type fallback");
+    units::SpawnPolicy policy{units::SpawnPolicy::Mode::campaign, {{1, 0}, {2, 3}}};
+    const auto direct = take(units::motion_table(tables, policy));
+    expect(direct.squadrons.spawners == content.motion.squadrons.spawners
+        && direct.squadrons.campaign_spawners == content.motion.squadrons.campaign_spawners,
+        "the public motion policy output supplies exactly the campaign arrival roster");
+    auto sparse = tables;
+    auto* sparse_station = const_cast<units::UnitType*>(sparse.find("Station"));
+    sparse_station->spawner->campaign_starting[0].clear();
+    const auto empty_tier = take(units::motion_table(sparse, policy));
+    const auto* empty = empty_tier.squadrons.find_spawner(skirmish::type_id("Station"), 1);
+    expect(empty && empty->entries.empty(), "an unauthored lower tier overrides the populated base with an empty roster");
     setup.campaign->players.front().start_tech=6; setup.campaign->players.front().max_tech=6;
     expect(!campaign::space_entry_content(setup,input.map),"invalid owner tech is refused");
     auto legacy=tables; legacy.campaign_scene=false; legacy.campaign_ability_locks={{1,"Commander","Defense",false}};
@@ -1108,8 +1120,8 @@ void garrison_contracts() {
 void station_ship_spawn_scenario(const std::string& ship_name, const bool hyperspace, const std::uint32_t level) {
     const auto ship_type = skirmish::type_id(ship_name);
     const std::string station_name = level == 4 ? "Station4" : "Station";
-    const auto build = [&](const bool campaign_scene) {
-        auto tables = tables_for_entry(); tables.campaign_scene = campaign_scene;
+    const auto build = [&](const bool campaign_policy) {
+        auto tables = tables_for_entry(); tables.campaign_scene = true;
         if (level == 4) { auto clone = *tables.find("Station"); clone.id = station_name; tables.units.push_back(clone); }
         if (ship_name != "Ship") { auto clone = *tables.find("Ship"); clone.id = ship_name; tables.units.push_back(clone); }
         const_cast<units::UnitType*>(tables.find(ship_name))->campaign_hyperspace = hyperspace;
@@ -1123,12 +1135,20 @@ void station_ship_spawn_scenario(const std::string& ship_name, const bool hypers
         }
         campaign::ConflictRecord record; record.id = 90; record.invader = 1; record.defender = 2;
         record.map_identity = input.map.map; record.station_level = level; record.forces = {{20, 1, 1, 10}, {30, 1, 2, 12}};
-        return take(campaign::build_space_entry(record, input, 100, 17));
+        auto result = take(campaign::build_space_entry(record, input, 100, 17));
+        const auto generic = take(campaign::conflict_entry_content(result.conflict.tactical, input.map));
+        const auto* generic_station = generic.motion.squadrons.find_spawner(skirmish::type_id(station_name), 2);
+        expect(generic_station && generic_station->entries.size() == 2
+            && generic_station->entries[1].ship && generic_station->entries[1].arrival == hyperspace
+            && generic_station->entries[0].reserve == 0 && generic_station->entries[1].reserve == 0,
+            "generic campaign conflict content retains single ships and zero reserves");
+        if (!campaign_policy) result.content.motion = take(skirmish::session_content(tables)).motion;
+        return result;
     };
     const auto skirmish_like = build(false);
     expect(std::none_of(skirmish_like.content.motion.squadrons.spawners.begin(), skirmish_like.content.motion.squadrons.spawners.end(),
         [](const auto& profile) { return std::any_of(profile.entries.begin(), profile.entries.end(), [](const auto& e) { return e.ship; }); }),
-        "a table outside the campaign scene keeps dropping ship spawn entries");
+        "the skirmish spawn policy keeps dropping ship spawn entries");
     const auto entry = build(true);
     const auto* profile = entry.content.motion.squadrons.find_spawner(skirmish::type_id(station_name), 2);
     expect(entry.conflict.station_level == level && profile != nullptr && profile->entries.size() == 2 && !profile->entries[0].ship && !profile->entries[0].arrival
@@ -1628,7 +1648,7 @@ void installed_garrison(const std::shared_ptr<const campaign::StockSpaceEntry>& 
             expect(entering.diagnostics.empty() && staging.battle(), "stock sequence stages the campaign child without diagnostics");
             if (staging.battle()) remember_garrison(*staging.battle());
             std::vector<std::string> hashes;
-            bool fleet_attacked = false, spawned_attacked = false, defence_started = false;
+            bool fleet_attacked = false, spawned_attacked = false, defence_started = false, scout_took_fleet = false;
             sim::EntityId engaged_garrison{};
             std::uint64_t fleet_attack_tick{}, garrison_attack_tick{};
             for (unsigned frame = 0; frame < 1800; ++frame) {
@@ -1659,6 +1679,8 @@ void installed_garrison(const std::shared_ptr<const campaign::StockSpaceEntry>& 
             std::size_t defence_rejections{};
             for (const auto& event : journal->plans) {
                 if (event.player == 2 && event.goal == "DEFEND_SPACE_STATION" && event.event == "started") defence_started = true;
+                if (event.player == 2 && event.goal == "SPACE_SCOUT" && event.event == "order"
+                    && event.detail.find("[200]") != std::string::npos) scout_took_fleet = true;
                 if (event.player == 2 && event.goal == "DEFEND_SPACE_STATION") {
                     defence_trace.push_back(std::to_string(event.tick) + " " + event.target + " " + event.event + " " + event.detail);
                     if (event.event == "rejected" && event.detail.starts_with("nonpositive authored desire")) {
@@ -1679,7 +1701,11 @@ void installed_garrison(const std::shared_ptr<const campaign::StockSpaceEntry>& 
                 << " spawned_tick=" << garrison_attack_tick << " garrison_ids=" << garrison_ids.size() << '\n';
             // WAS-10, GS-04: absent resource types must not poison the burn
             // equation and block the authored station-defence proposal.
-            expect(fleet_attacked, "fleet behind its station receives an attack within 1800 frames");
+            // PE-25: the skirmish context fogs the AI's unseen cells, so the stock scouting goal takes the lone
+            // free cruiser at once and it is away scouting, not behind its station. The GC run journals no
+            // scouting goal, so the fleet stays and defends; the station-spawned garrison defends in both.
+            if (campaign_context) expect(fleet_attacked, "fleet behind its station receives an attack within 1800 frames");
+            else expect(scout_took_fleet, "skirmish context: the scouting goal journals an order for the fleet");
             if (campaign_context) expect(spawned_attacked, "station-spawned GC garrison receives an attack within 1800 frames");
             expect(defence_started, "stock GC and skirmish contexts start their authored station-defence plan");
             expect(defence_rejections > 0, "stock station-defence fixture journals its nonpositive authored desire");
@@ -1845,6 +1871,66 @@ void installed_commanders(const campaign::CampaignSetupPlan& plan, const units::
         const auto hashes=std::vector<std::string>{take(live.step(executor)).state_sha256,take(restored.step(executor)).state_sha256};
         expect(hashes[0]==hashes[1],"stock commander sources and presentation identities restore without reattachment");
         if(reference.empty()) reference=hashes; else expect(reference==hashes,"stock company-to-battle commander path agrees on 1/2/4/8 workers");
+    }
+}
+void installed_layer_services(const vfs::Vfs& files, const data::Catalog& catalog,
+    data::galactic::GalacticData authored, const units::GalacticTypeTable& types,
+    campaign::CampaignSetupOptions options) {
+    auto source = *authored.campaign("Sandbox_Equal_Footing_Empire");
+    source.name = "LayerServicesFixture";
+    source.locations = source.planets = {"Shola", "Kamino"};
+    source.trade_routes.clear();
+    source.home_locations = {{"Rebel", "Shola"}, {"Empire", "Kamino"}};
+    source.starting_active_player = "Rebel";
+    source.starting_forces = {{"Rebel", "Shola", "R_Ground_Barracks"}, {"Empire", "Kamino", "E_Ground_Barracks"},
+        {"Rebel", "Shola", "Corellian_Corvette"}, {"Empire", "Shola", "Tartan_Patrol_Cruiser"}};
+    source.special_case_production.clear(); source.corruption_level_overrides.clear();
+    authored.campaigns.push_back(std::move(source));
+    options.seats.push_back({gc::SeatId{3}, 3, gc::SeatKind::ai, 2, true, 0});
+    const auto plan = take(campaign::plan_live_campaign_setup(files, authored, types, "LayerServicesFixture", options, "Normal_Default"));
+    const auto services = take(campaign::prepare_live_campaign_services(files, catalog, authored, types, plan, "Normal_Default"));
+    const auto provider = take(campaign::prepare_stock_space_entry(files, catalog, authored, types, plan));
+    const auto location = std::find_if(plan.locations().begin(), plan.locations().end(), [](const auto& row) {
+        return row.original_type == "Shola" && row.planet;
+    });
+    if (location == plan.locations().end()) throw std::runtime_error("stock layer fixture has no battle location");
+    for (const auto& [layer, ai_parent_queries] : std::array{
+        std::pair{campaign::BattleLayer::space, false},
+        std::pair{campaign::BattleLayer::land, false},
+        std::pair{campaign::BattleLayer::space, true}}) {
+        auto root = take(campaign::CampaignRoot::create(plan, services));
+        check(campaign::configure_live_campaign_conflicts(root, files, catalog, authored, types, provider));
+        auto& game = *root.game();
+        const auto snapshot = game.galaxy().snapshot();
+        campaign::ConflictRecord record;
+        record.id = game.galaxy().next_entity_id(); record.planet = location->planet->id;
+        record.invader = 1; record.defender = 2; record.seats = {{{1}, 1}, {{2}, 2}};
+        record.map_identity = authored.planet("Shola")->space_tactical_map;
+        for (const auto& fleet : snapshot->fleets()) if (fleet.orbit == record.planet && (fleet.owner == 1 || fleet.owner == 2))
+            for (const auto& member : fleet.members) record.forces.push_back({member.id, member.type, fleet.owner, fleet.id});
+        std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        expect(record.forces.size() == 2, "stock layer fixture retains both authored forces");
+        auto entry = take(provider->resolve(record, *snapshot, record.id + 1));
+        // Both layers formerly used the same callbacks for an already retained entry.
+        entry.conflict.layer = layer;
+        std::size_t parent_preparations{};
+        if (ai_parent_queries) {
+            check(game.add_conflict_parent_queries(campaign::BattleLayer::space,
+                [&parent_preparations, id = entry.conflict.id](const campaign::ConflictRecord& context) {
+                    ++parent_preparations;
+                    expect(context.id == id && context.layer == campaign::BattleLayer::space,
+                        "AI-on parent queries receive the stock space conflict identity");
+                    return campaign::GalacticParentQuery([](std::string_view, tt::PlayerId)
+                        -> std::optional<script::numeric::LuaNumber> { return {}; });
+                }));
+            expect(game.has_conflict_parent_queries(campaign::BattleLayer::space)
+                && !game.has_conflict_parent_queries(campaign::BattleLayer::land),
+                "AI-on stock fixture binds the space parent-query slot");
+        }
+        check(game.stage_battle(entry.conflict, entry.content));
+        if (ai_parent_queries) expect(parent_preparations == 1,
+            "AI-on stock space staging reaches the bound parent-query factory exactly once");
+        expect(!game.battle(), "both installed layers stage their retained script host before activation");
     }
 }
 void installed(bool garrison_only = false, bool population_only = false, bool commander_only = false, bool superweapon_only = false) {
@@ -2167,6 +2253,7 @@ void installed(bool garrison_only = false, bool population_only = false, bool co
         auto manifest_proof = take(provider->prepare_ai(resolved.conflict));
         check(manifest_proof.scripts.create_instance(42, "Data/Scripts/GameObject/" + vader_team->lua_script + ".lua"));
     }
+    installed_layer_services(files, catalog.catalog, authored, types, options);
     auto staging = take(campaign::GameSession::create(setup));
     auto ai = campaign::space_entry_script_services(provider);
     staging.set_child_configurator(std::move(ai.bind));

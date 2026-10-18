@@ -17,7 +17,7 @@
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
-#include "eawr/skirmish/start.hpp"
+#include "eawr/battle/start.hpp"
 
 #include <array>
 #include <chrono>
@@ -163,8 +163,39 @@ void MapMode::State::set_perf_overlay(const bool shown) {
     perf->set_shown(shown);
 }
 
+void MapMode::State::sync_net_perf(const double delta) {
+    if (!live_session || !live_session->multiplayer()) return;
+    const LanView lan = live_session->lan_view();
+    if (lan.phase == LanPhase::ended || lan.phase == LanPhase::idle) return;
+    if (delta > 0.0) net_stats.record_frame(delta);
+    for (const platform::LiveTickCost& cost : live_session->tick_costs_after(net_last_tick)) {
+        net_last_tick = cost.tick;
+        net_stats.record_tick({cost.tick, cost.total_ms, {}});
+    }
+    const presentation::ui::PerfSummary summary = net_stats.summary();
+    presentation::ui::NetPerfReport report;
+    report.seat = lan.seat;
+    report.peers = lan.net_peers;
+    report.stall = lan.net_stall;
+    report.frame_ms = summary.frame_avg_ms;
+    report.sim_ms = summary.tick_avg_ms;
+    net_report = std::move(report);
+    // Every 5 s, so a log read after the fact shows game against network for the whole match.
+    net_log_clock += delta;
+    if (net_log_clock >= presentation::ui::net_perf_log_seconds) {
+        net_log_clock = 0.0;
+        const std::string line = presentation::ui::net_summary_line(*net_report);
+        UtilityFunctions::print(String::utf8(line.data(), static_cast<int64_t>(line.size())));
+    }
+}
+
+std::string MapMode::State::net_perf_json() const {
+    return net_report ? presentation::ui::net_report_json(*net_report) : std::string("null");
+}
+
 void MapMode::State::sync_perf_overlay() {
     if (perf == nullptr || !perf->shown()) return;
+    perf->set_network(net_report);
     std::vector<presentation::ui::PerfTick> ticks;
     if (live_session) {
         // After a hidden spell the old ticks are skipped, not drawn as one burst.
@@ -434,13 +465,13 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
 
 void MapMode::State::fill_type_names() {
     if (!minimap_type_names.empty() || !live_session || live_session->tables() == nullptr) return;
-    for (const units::UnitType& type : live_session->tables()->units) minimap_type_names.emplace(skirmish::type_id(type.id), type.id);
-    for (const auto& type : live_session->tables()->obstacles) minimap_type_names.emplace(skirmish::type_id(type.id), type.id);
+    for (const units::UnitType& type : live_session->tables()->units) minimap_type_names.emplace(battle::type_id(type.id), type.id);
+    for (const auto& type : live_session->tables()->obstacles) minimap_type_names.emplace(battle::type_id(type.id), type.id);
     // #530: the station build lists also name objects outside the unit tables (the upgrades, PU-20),
     // so their build buttons find their Icon_Name.
     for (const units::UnitType& type : live_session->tables()->units) {
         for (const auto& group : type.production.buildable) {
-            for (const std::string& name : group.types) minimap_type_names.emplace(skirmish::type_id(name), name);
+            for (const std::string& name : group.types) minimap_type_names.emplace(battle::type_id(name), name);
         }
     }
 }

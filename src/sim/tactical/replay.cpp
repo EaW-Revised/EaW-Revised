@@ -229,6 +229,10 @@ core::Result<void> validate_setup(const TacticalSetup& setup) {
             if (slot.fleet.size() > 1024U || (slot.colour_index && *slot.colour_index >= max_players)) {
                 return fail<void>(diagnostic_codes::invalid_setup, "SKSU fleet or palette exceeds limits", path);
             }
+            if (static_cast<std::uint8_t>(slot.difficulty) > static_cast<std::uint8_t>(AiLevel::hard)
+                || (slot.human && slot.difficulty != AiLevel::normal)) {
+                return fail<void>(diagnostic_codes::invalid_setup, "SKSU slot level is invalid", path);
+            }
             for (const auto& type : slot.fleet) {
                 if (!text(type) || type.empty()) {
                     return fail<void>(diagnostic_codes::invalid_setup, "SKSU fleet type is invalid", path);

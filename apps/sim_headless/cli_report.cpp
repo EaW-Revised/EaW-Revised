@@ -1,4 +1,5 @@
 #include "cli_internal.hpp"
+#include "eawr/battle/start.hpp"
 
 namespace sim_headless::cli {
 
@@ -168,7 +169,7 @@ int publish(const std::vector<eawr::platform::PublishedFile>& outputs) {
 
 // The unit tables of an installation, mounted read-only as --skirmish m2 mounts it: the mod
 // chain, then FoC over base EaW.
-void list_start(std::ostream& output, const eawr::skirmish::SkirmishStart& start, const std::string& state_sha256) {
+void list_start(std::ostream& output, const eawr::battle::BattleStart& start, const std::string& state_sha256) {
     const auto whole = [](const eawr::sim::math::Fixed value) {
         return std::to_string(value.nearest_even_to_integer());
     };
@@ -193,7 +194,7 @@ void list_start(std::ostream& output, const eawr::skirmish::SkirmishStart& start
     }
     for (const auto& unit : start.units) {
         output << "unit " << unit.state.entity_id << ' ' << unit.type << " owner " << unit.state.owner << ' '
-               << eawr::skirmish::to_string(unit.role) << " record " << unit.record << " at ("
+               << eawr::battle::to_string(unit.role) << " record " << unit.record << " at ("
                << whole(unit.state.position.x) << ", " << whole(unit.state.position.y) << ", "
                << whole(unit.state.position.z) << ") yaw " << whole(unit.yaw_degrees);
         if (unit.craft != 0) output << " craft " << unit.craft << " x " << unit.craft_type;
@@ -201,7 +202,7 @@ void list_start(std::ostream& output, const eawr::skirmish::SkirmishStart& start
     }
     for (const auto& removed : start.removed) {
         output << "removed " << removed.type << " record " << removed.record << " (" << removed.faction << ", "
-               << eawr::skirmish::to_string(removed.reason) << ")\n";
+               << eawr::battle::to_string(removed.reason) << ")\n";
     }
     for (const auto& launch : start.launches) {
         output << "launch (not simulated) " << launch.count << " x " << launch.squadron << " from unit "

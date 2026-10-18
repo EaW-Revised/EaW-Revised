@@ -492,6 +492,16 @@ Landed in `include/eawr/net/mesh_incident.hpp`, `src/net/mesh_incident.cpp`, `Lo
   window (and the 500 ms tolerance) with 1781; a seat that never saw a proposal leaves at the cutoff with 1780; 1778 is only for a
   seat a confirmation named. A decider that goes silent without closing its links ends the same way at the same deadlines. Every
   wait is bounded, so no seat hangs. `mesh_session_tests` (`decider_loss_ends_the_match`) pins the codes through `LockstepSession`.
+- **Relay churn (legacy EAWR-4021).** On a relay that keeps dropping pairs, a pair goes silent while still reading open, its watchdog
+  closes it 15 s later and the redial takes a few seconds, so an incident easily runs the whole 40 s window. Three rules keep that
+  from ending the match for everyone (`mesh_cascade_tests`: nine seats, silent pairs, a model of the transport's repair deadline):
+  (1) a *restoration* removes nobody, so a pair lost while it is pending does not break it (the loss opens the next incident), and a
+  seat whose own view of some pair is older than the decider's snapshot (that pair is silent towards it) still pledges it;
+  a *departure* still fails closed when a further pair between its survivors is lost; (2) a seat that pledged to nothing and was
+  confirmed nothing does not leave at the end of a window: while the pairs are being repaired the next window (20 s, the decision
+  window twice) starts for every seat together, ten and a half seconds after the previous deadline, three windows in all
+  (`MeshIncidentOptions::rounds`); a seat that pledged still leaves at its own deadline (1781), because its pledge may be
+  effective; (3) the transport's repair deadline belongs to one stretch of repair and starts afresh once every pair is open again.
   A pledge that is not the exact proposal is ignored (one bad pledge cannot end the decider's incident); a restoration
   confirmation is resent once a second until the pledge window closes, like a removal.
 - **Hand-off.** A confirmed decision queues `DepartureReason::pair_loss` (3) departures at the survivors; the existing protocol

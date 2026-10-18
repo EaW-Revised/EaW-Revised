@@ -745,8 +745,12 @@ core::Result<void> session_detail::Tick::impacts() {
         auto hit = detail::area_hit(projectile, recipient, modifier, factor);
         if (!hit) return core::Result<void>::failure(hit.error());
         hit.value().take_damage_multiplier = target->second.take_damage_mode;
-        // WHE-51: modes are current at delivery; a removed shooter contributes identity.
-        if (source != staged.end()) hit.value().cause_damage_multiplier = source->second.cause_damage_mode;
+        // WHE-51: modes are current at delivery; a removed shooter contributes identity. WTA-46: the
+        // difficulty damage scale follows the projectile's owner, so it survives its shooter.
+        const auto caused = impl_->caused_damage(
+            source != staged.end() ? source->second.cause_damage_mode : math::Fixed::from_raw(math::Fixed::scale), projectile.owner);
+        if (!caused) return core::Result<void>::failure(caused.error());
+        hit.value().cause_damage_multiplier = caused.value();
         auto redirected = redirect_damage(recipient.id, hit.value(), [&](const EntityId id, Hit share) {
             return deliver_redirected(id, share, projectile.owner, projectile.shooter);
         });
@@ -926,7 +930,10 @@ core::Result<void> session_detail::Tick::impacts() {
             projectile.hitpoint_damage, hardpoint, projectile.allow_diminishing_firepower,
             projectile.internal_damage_misc, modifier, projectile.energy_damage};
         hit.take_damage_multiplier = target->second.take_damage_mode;
-        if (source != staged.end()) hit.cause_damage_multiplier = source->second.cause_damage_mode;
+        const auto caused = impl_->caused_damage(
+            source != staged.end() ? source->second.cause_damage_mode : math::Fixed::from_raw(math::Fixed::scale), projectile.owner);
+        if (!caused) return core::Result<void>::failure(caused.error());
+        hit.cause_damage_multiplier = caused.value();
         // WRB-06..WRB-10: after the combat damage modifier and before shields and hull, a Redirect_Blaster handler
         // of the target may deflect the shot: no direct damage, and a fresh projectile of the target's owner.
         if (source != staged.end() && !impl_->abilities.profiles.empty()) {
@@ -1160,7 +1167,9 @@ core::Result<void> session_detail::Tick::late_impacts() {
             + (defense == craft_defense.end() ? 0 : defense->second.raw())
             + (target->second.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0));
         Hit hit{nested->damage_per_frame, impl_->abilities.beam_damage_type, false, true, true, hardpoint, false, true, modifier};
-        hit.cause_damage_multiplier = source->second.cause_damage_mode;
+        const auto caused = impl_->caused_damage(source->second.cause_damage_mode, source->second.state.owner);
+        if (!caused) return core::Result<void>::failure(caused.error());
+        hit.cause_damage_multiplier = caused.value();
         hit.take_damage_multiplier = target->second.take_damage_mode;
         auto redirected = redirect_damage(service.target, hit, [&](const EntityId id, Hit share) {
             return deliver_redirected(id, share, source->second.state.owner, service.source);

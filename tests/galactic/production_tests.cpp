@@ -281,8 +281,17 @@ void offer_projection() {
                 expect(row.current && row.admission == galactic::ProductionAdmission::credits
                     && row.price == f(100), "poor offer stays listed, disabled, with its cost");
             submit(game, buy(0, 1));
+            auto previous_credits = initial->player_economy()->players.front().credits;
+            std::uint64_t rebuild_ticks{};
             for (std::uint64_t tick = 0; tick < 7; ++tick) {
                 const auto result = take(game.step(pool));
+                // The offer rows are rebuilt exactly when a state section they read changed: an idle tick reuses them.
+                const auto credits = result.snapshot->player_economy()->players.front().credits;
+                if (credits == previous_credits)
+                    expect(result.work.production_offer_rebuilds == 0 || tick == 0, "unchanged inputs reuse the published offer rows");
+                else expect(result.work.production_offer_rebuilds == 1, "a credit change rebuilds the offer rows once");
+                rebuild_ticks += result.work.production_offer_rebuilds;
+                previous_credits = credits;
                 if (workers == 1) hashes.push_back(result.state_hash.get());
                 else expect(result.state_hash.get() == hashes[static_cast<std::size_t>(tick)], "income and refusals equal on 1/2/4/8");
                 const bool funded = result.snapshot->player_economy()->players.front().credits >= f(100);
@@ -291,6 +300,7 @@ void offer_projection() {
                         && row.admission == (funded ? galactic::ProductionAdmission::allowed : galactic::ProductionAdmission::credits),
                         "credits arriving re-enable the same list entries at the fiscal boundary");
             }
+            expect(rebuild_ticks < 7, "idle ticks of the poor scenario reuse the offer rows");
             expect(game.snapshot()->production()->planets.front().queues[0].empty(), "poor direct purchase neither queues nor debits");
             expect(game.snapshot()->player_economy()->players.front().credits == f(130), "only income changed the poor account");
             const auto rows = game.snapshot()->production_offers();
@@ -1428,7 +1438,7 @@ void census_campaign_retained_counts() {
     content.victory.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
     content.victory.contenders = {1, 2}; content.victory.controlled_players = {1, 2};
     content.victory.humans = {1}; content.victory.relevant_types = {1000}; content.victory.countdown_frames = 1000;
-    cp::GameLoadOptions options;
+    cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
     options.content = [content](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success(content); };
     const auto identity = cp::game_identities(config);
     const auto owned = [](const campaign::GameSession& game) {
@@ -1461,7 +1471,7 @@ void census_campaign_retained_counts() {
         expect(blocked(tick) && blocked(loaded_tick) && loaded_tick.state_hash.get() == tick.state_hash.get(),
             "retained campaign identity still blocks a purchase after load");
         hashes.push_back(tick.state_hash.get());
-        if (auto staged = game.stage_battle(conflict, content); !staged) throw std::runtime_error(staged.error().message);
+        if (auto staged = game.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none); !staged) throw std::runtime_error(staged.error().message);
         hashes.push_back(take(game.step(pool)).state_hash.get());
         expect(game.mode() == campaign::SessionMode::battle && owned(game) == 2,
             "active retained and reserve conflict records do not double-count galactic identities");

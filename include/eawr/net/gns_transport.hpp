@@ -95,7 +95,10 @@ public:
     // error codes, nonce repeats, refresh timeouts), plus the reason every link stops (EAWR-NET-1507 included). Quiet in
     // a healthy match: a few lines per TURN refresh, never one per packet. Lines are queued from any thread and `poll`
     // hands them to the sink on the I/O owner's thread, so the sink needs no locking. An empty sink turns it off.
-    static void set_log_sink(GnsLogSink sink);
+    // The sink is process-wide. Installing one returns its generation (0 for an empty sink); clear_log_sink(generation) removes
+    // it only while it is still the installed one, so a match that was replaced or finished cannot silence its successor.
+    static std::uint64_t set_log_sink(GnsLogSink sink);
+    static void clear_log_sink(std::uint64_t generation);
     static core::Result<std::unique_ptr<GnsTransport>> host(std::string address = "0.0.0.0",
         std::uint16_t port = TcpOptions::default_port, GnsOptions options = {});
     static core::Result<std::unique_ptr<GnsTransport>> connect(std::string address,

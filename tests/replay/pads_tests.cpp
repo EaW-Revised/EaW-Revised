@@ -741,6 +741,7 @@ void test_construction() {
     auto ai_rules = rules();
     ai_rules.players.front().ai = true;
     ai_rules.pads.construction.front().ai_seconds = 2;
+    ai_rules.players.front().ai_build_time_multiplier = q(2);
     auto ai = session(start, ai_rules);
     expect(ai.submit({{0, 1, 0}, {3}, t::PadBuildPayload{30}}).has_value(), "AI direct construction delivers");
     steps(ai, 1, executor);
@@ -750,6 +751,72 @@ void test_construction() {
     expect(ai.pads().at(3).constructed == 0, "AI does not complete before its deadline");
     steps(ai, 61, executor);
     expect(ai.pads().at(3).constructed != 0, "AI completes on its fixed deadline");
+
+    {
+        // WTA-45 (#735): an AI player's Space_Build_Time_Multiplier scales its pad construction time (whole seconds,
+        // truncated) and its queue frames (rounded); Normal's 1 leaves both as authored.
+        auto slow_rules = rules();
+        slow_rules.players.front().ai = true;
+        slow_rules.pads.construction.front().seconds = 2;
+        slow_rules.pads.construction.front().ai_seconds = 2;
+        slow_rules.players.front().ai_build_time_multiplier = Fixed::from_raw(one * 3 / 2);
+        auto slow = session(start, slow_rules);
+        expect(slow.submit({{0, 1, 0}, {3}, t::PadBuildPayload{30}}).has_value(), "scaled AI construction delivers");
+        steps(slow, 1, executor);
+        expect(slow.construction().at(4).finish_frame == 90,
+            "WTA-45: 2 authored seconds at a 1.5 multiplier finish after 3 whole seconds");
+        expect(t::scaled_ai_frames(3, Fixed::from_raw(one / 2)) == 2,
+            "WTA-45: an exact half frame rounds up");
+        expect(t::scaled_ai_seconds(0, Fixed::from_raw(one / 2)) == 0
+                && t::scaled_ai_seconds(1, Fixed::from_raw(one / 2)) == 0,
+            "WBP-15: zero and subsecond durations remain zero");
+        expect(t::scaled_ai_frames(30, Fixed::from_raw(one)) == 30 && t::scaled_ai_frames(30, Fixed::from_raw(one * 3 / 2)) == 45
+                && t::scaled_ai_frames(1, Fixed::from_raw(one * 2 / 5)) == 1 && t::scaled_ai_seconds(7, Fixed::from_raw(one)) == 7
+                && t::scaled_ai_seconds(7, Fixed::from_raw(one * 9 / 10)) == 6,
+            "WTA-45: frames round to nearest and stay at least 1; seconds truncate; 1 is the identity");
+
+        auto normal_rules = rules();
+        normal_rules.players.front().ai = true;
+        normal_rules.pads.construction.front().ai_seconds = 9;
+        auto normal = session(start, normal_rules);
+        expect(normal.submit({{0, 1, 0}, {3}, t::PadBuildPayload{30}}).has_value(), "Normal AI construction delivers");
+        steps(normal, 1, executor);
+        expect(normal.construction().at(4).finish_frame == 30,
+            "WTA-45: Normal AI ignores the selected difficulty's nonidentity pad duration");
+
+        auto human_rules = slow_rules;
+        human_rules.players.front().ai = false;
+        auto human = session(start, human_rules);
+        expect(human.submit({{0, 1, 0}, {3}, t::PadBuildPayload{30}}).has_value(), "human construction delivers");
+        steps(human, 1, executor);
+        expect(human.construction().at(4).finish_frame == 60,
+            "WTA-45: human pad duration ignores an AI multiplier");
+
+        auto zero_rules = normal_rules;
+        zero_rules.players.front().ai_build_time_multiplier = Fixed::from_raw(one / 2);
+        auto zero = session(start, zero_rules);
+        expect(zero.submit({{0, 1, 0}, {3}, t::PadBuildPayload{30}}).has_value(), "subsecond construction request delivers");
+        steps(zero, 1, executor);
+        expect(zero.construction().empty() && zero.pads().at(3).under_construction == 0,
+            "WBP-15: a duration truncated to zero cannot produce a pad child");
+
+        auto option = normal_rules.menus.front().options.front();
+        option.build_frames = 7;
+        option.ai_build_frames = 3;
+        auto queue_player = normal_rules.players.front();
+        queue_player.ai_build_time_multiplier = Fixed::from_raw(one / 2);
+        t::PlayerEconomy queue_state;
+        queue_state.credits = q(1000);
+        expect(t::queue_build(queue_state, queue_player, normal_rules, option, 3, 10) == t::RejectReason::none
+                && queue_state.queues[0].front().frames == 2 && queue_state.queues[0].front().complete_frame == 12,
+            "WTA-45: queue_build applies the AI multiplier and rounds a half frame up");
+        queue_player.ai = false;
+        t::PlayerEconomy human_queue;
+        human_queue.credits = q(1000);
+        expect(t::queue_build(human_queue, queue_player, normal_rules, option, 3, 10) == t::RejectReason::none
+                && human_queue.queues[0].front().frames == 7 && human_queue.queues[0].front().complete_frame == 17,
+            "WTA-45: human queue_build uses authored human frames despite an AI multiplier");
+    }
 
     auto lethal_finish = session(start);
     expect(lethal_finish.submit({{0, 1, 0}, {3}, t::PadBuildPayload{30}}).has_value()

@@ -6747,6 +6747,31 @@ void category_team_table_order() {
         expected.push_back(std::move(upper));
     }
     expect(listed == expected, "PL-20: ai_setup lists the types in table order, not type-id order");
+    {
+        // WTA-47 (#735): a lobby AI carries its slot's level into the AI setup; a human carries none.
+        skirmish::SkirmishStart start;
+        for (std::uint32_t id = 1; id <= 4; ++id) {
+            skirmish::StartPlayer player;
+            player.player.player_id = id;
+            player.faction = "Empire";
+            player.lobby = true;
+            player.human = id == 1;
+            player.difficulty = id == 2 ? sim::tactical::AiLevel::easy : id == 3 ? sim::tactical::AiLevel::hard
+                : id == 1 ? sim::tactical::AiLevel::hard : sim::tactical::AiLevel::normal;
+            start.players.push_back(std::move(player));
+        }
+        skirmish::StartInputs inputs;
+        skirmish::StartFaction faction;
+        faction.name = "Empire";
+        faction.basic_ai = "BasicEmpire";
+        inputs.factions.push_back(faction);
+        const auto levelled = skirmish::ai_setup(start, inputs, tables);
+        expect(levelled.players.size() == 4 && levelled.players[0].difficulty == sim::tactical::AiLevel::normal
+                && levelled.players[1].difficulty == sim::tactical::AiLevel::easy
+                && levelled.players[2].difficulty == sim::tactical::AiLevel::hard
+                && levelled.players[3].difficulty == sim::tactical::AiLevel::normal,
+            "WTA-47: ai_setup gives each lobby AI its slot's level, and a human stays Normal");
+    }
 }
 
 void required_category_unions() {
@@ -10211,6 +10236,77 @@ end
     }
 }
 
+// WTA-45 to WTA-47 (#735): a lobby AI's level picks its player type's adjustment entry; Normal is the default.
+void ai_difficulty_levels() {
+    namespace foc = eawr::script::foc;
+    using Level = sim::tactical::AiLevel;
+    std::map<std::string, std::string, std::less<>> xml;
+    xml["data/xml/difficultyadjustments.xml"] = R"(<Difficulty_Adjustments>
+<Difficulty_Adjustment Name="Easy_Default"><Credit_Multiplier>0.5</Credit_Multiplier><Space_AI_Contrast_Multiplier>0.75</Space_AI_Contrast_Multiplier>
+<Space_Build_Time_Multiplier>1.5</Space_Build_Time_Multiplier><Damage_Multiplier>0.6</Damage_Multiplier><Health_Multiplier>0.4</Health_Multiplier>
+<Shield_Multiplier>0.3</Shield_Multiplier><Space_AI_Goal_Cycle_Sleep_Duration>15.0</Space_AI_Goal_Cycle_Sleep_Duration></Difficulty_Adjustment>
+<Difficulty_Adjustment Name="Normal_Default"><Credit_Multiplier>1.0</Credit_Multiplier><Space_AI_Goal_Cycle_Sleep_Duration>0.0</Space_AI_Goal_Cycle_Sleep_Duration></Difficulty_Adjustment>
+<Difficulty_Adjustment Name="Hard_Default"><Credit_Multiplier>1.2</Credit_Multiplier><Space_AI_Contrast_Multiplier>1.15</Space_AI_Contrast_Multiplier>
+<Space_Build_Time_Multiplier>0.9</Space_Build_Time_Multiplier><Damage_Multiplier>1.8</Damage_Multiplier><Health_Multiplier>0.75</Health_Multiplier>
+<Shield_Multiplier>0.5</Shield_Multiplier><Space_AI_Goal_Cycle_Sleep_Duration>0.0</Space_AI_Goal_Cycle_Sleep_Duration></Difficulty_Adjustment>
+<Difficulty_Adjustment Name="Mod_Only"><Damage_Multiplier>3.0</Damage_Multiplier></Difficulty_Adjustment>
+</Difficulty_Adjustments>)";
+    xml["data/xml/ai/players/full.xml"] = R"(<AIPlayerType><Name>FullType</Name><Difficulty_Adjustments>
+<Easy>Easy_Default</Easy><Normal>Normal_Default</Normal><Hard>Hard_Default</Hard></Difficulty_Adjustments></AIPlayerType>)";
+    xml["data/xml/ai/players/modded.xml"] = R"(<AIPlayerType><Name>ModdedType</Name><Difficulty_Adjustments>
+<Normal>Mod_Only</Normal><Hard>Missing_Entry</Hard></Difficulty_Adjustments></AIPlayerType>)";
+    const auto table = foc::AiDifficultyTable::load(xml);
+    expect(table.has_value(), "WTA-46: the difficulty table loads from the AI XML");
+    if (!table) return;
+    const auto is = [](ai::Real value, std::int64_t numerator, std::int64_t denominator = 1) {
+        return ai::to_single(value) == ai::to_single(ai::real(numerator) / ai::real(denominator));
+    };
+    const auto easy = table.value().resolve("fulltype", Level::easy);
+    expect(is(easy.health, 4, 10) && is(easy.shield, 3, 10)
+            && is(easy.damage, 6, 10) && is(easy.space_build_time, 15, 10)
+            && is(easy.credit, 5, 10) && is(easy.space_contrast, 75, 100)
+            && is(easy.space_goal_cycle_sleep, 15),
+        "WTA-46: Easy resolves to the Easy entry's health, shield, damage, build time, credit, contrast and sleep");
+    const auto hard = table.value().resolve("FullType", Level::hard);
+    expect(is(hard.damage, 18, 10) && is(hard.health, 75, 100)
+            && is(hard.shield, 5, 10) && is(hard.space_goal_cycle_sleep, 0),
+        "WTA-46: Hard keeps health 0.75, shield 0.5 and damage 1.8 as authored");
+    const auto normal = table.value().resolve("FullType", Level::normal);
+    expect(is(normal.health, 1) && is(normal.shield, 1) && is(normal.damage, 1)
+            && is(normal.space_build_time, 1) && is(normal.space_goal_cycle_sleep, 0),
+        "WTA-46: Normal leaves every multiplier at 1 and the sleep at 0, also for tags the entry omits");
+    {
+        // WTA-46 (#735): a start player's adjustment is its AI type's entry for the slot's level; humans get none.
+        eawr::skirmish::StartInputs inputs;
+        eawr::skirmish::StartFaction faction;
+        faction.name = "Empire";
+        faction.basic_ai = "FullType";
+        inputs.factions.push_back(faction);
+        inputs.difficulty = std::make_shared<const foc::AiDifficultyTable>(table.value());
+        eawr::skirmish::StartPlayer ai;
+        ai.faction = "Empire";
+        ai.lobby = true;
+        ai.difficulty = Level::easy;
+        const auto resolved = eawr::skirmish::player_difficulty(inputs, ai);
+        expect(is(resolved.health, 4, 10) && is(resolved.credit, 5, 10) && is(resolved.space_build_time, 15, 10),
+            "WTA-46: skirmish::player_difficulty resolves an Easy lobby AI through its faction's Basic_AI type");
+        eawr::skirmish::StartPlayer human = ai;
+        human.human = true;
+        const auto neutral = eawr::skirmish::player_difficulty(inputs, human);
+        expect(is(neutral.health, 1) && is(neutral.credit, 1) && is(neutral.damage, 1),
+            "WTA-47: a human player gets no adjustment, whatever its level field says");
+    }
+    const auto modded = table.value().resolve("ModdedType", Level::normal);
+    expect(is(modded.damage, 3) && is(modded.health, 1) && is(modded.shield, 1),
+        "WTA-46: an entry that omits tags keeps 1 for each multiplier");
+    const auto dummy = table.value().resolve("ModdedType", Level::hard);
+    expect(is(dummy.damage, 1) && is(dummy.health, 1) && is(dummy.credit, 1),
+        "WTA-46: a level with no entry gets the dummy adjustment, not the Normal entry");
+    const auto unknown = table.value().resolve("NoSuchType", Level::easy);
+    expect(is(unknown.health, 1) && is(unknown.credit, 1),
+        "WTA-46: a player type without data gets the dummy adjustment");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -10385,6 +10481,7 @@ int main(int argc, char** argv) {
     reinforcement_population_wait();
     ai_ability_bound();
     stealth_blind_queries();
+    ai_difficulty_levels();
     if (failures != 0) {
         std::cerr << failures << " FoC AI contract(s) failed\n";
         return 1;

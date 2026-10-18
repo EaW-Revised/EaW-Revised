@@ -197,6 +197,15 @@ struct MapMode::State final {
     std::shared_ptr<FontProvider> perf_fonts;
     std::uint64_t perf_last_tick{};
     void set_perf_overlay(bool shown);
+    // #4043: the network model behind the overlay's network section, the 5 s godot.log summary and the report. Runs for
+    // every online or LAN match whether or not the overlay is shown; it reads wall-clock timers and local transport
+    // observations only.
+    presentation::ui::PerfStats net_stats;
+    std::uint64_t net_last_tick{};
+    double net_log_clock{};
+    std::optional<presentation::ui::NetPerfReport> net_report;
+    void sync_net_perf(double delta);
+    [[nodiscard]] std::string net_perf_json() const;
     // Once per presented frame, before the view draws: hands the overlay the new tick costs.
     void sync_perf_overlay();
     // The report's "perf_overlay" line (always there: a run without the overlay reports it hidden).

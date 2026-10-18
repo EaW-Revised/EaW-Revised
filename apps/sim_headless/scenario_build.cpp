@@ -1,4 +1,5 @@
 #include "scenario_internal.hpp"
+#include "eawr/battle/start.hpp"
 
 namespace sim_headless::scenario_detail {
 
@@ -245,7 +246,7 @@ namespace sim_headless::scenario_detail {
         if (!x || !y || !z) return fail<tactical::Squadron>(type.id + " craft offset overflows");
         tactical::UnitState unit;
         unit.entity_id = static_cast<eawr::sim::EntityId>(setup.units.size() + 1);
-        unit.type_id = eawr::skirmish::type_id(craft->id);
+        unit.type_id = eawr::battle::type_id(craft->id);
         unit.owner = company.owner;
         unit.position = {x.value(), y.value(), z.value()};
         unit.rotation = company.rotation;
@@ -321,10 +322,10 @@ core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_p
         // map, so fog never hides a unit from targeting (space-targeting R-08).
         std::vector<tactical::TypeId> types;
         for (const auto& unit : scenario.units) {
-            types.push_back(eawr::skirmish::type_id(unit.type));
+            types.push_back(eawr::battle::type_id(unit.type));
             const auto* type = tables.value().find(unit.type);
             if (type == nullptr) continue;
-            for (const auto& member : type->members) types.push_back(eawr::skirmish::type_id(member.craft)); // #561
+            for (const auto& member : type->members) types.push_back(eawr::battle::type_id(member.craft)); // #561
         }
         sensors = eawr::skirmish::revealed_sensor_table(types);
     }
@@ -344,7 +345,7 @@ core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_p
             }
         }
         for (auto& profile : combat.value().profiles) {
-            if (profile.type_id != eawr::skirmish::type_id(unit.type)) continue;
+            if (profile.type_id != eawr::battle::type_id(unit.type)) continue;
             for (auto& weapon : profile.weapons) {
                 weapon.range = Fixed{};
                 weapon.category_restrictions = ~std::uint64_t{0};
@@ -362,7 +363,7 @@ core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_p
             for (const auto& member : type->members) affected.push_back(member.craft);
         }
         for (const auto& name : affected) {
-            const auto id = eawr::skirmish::type_id(name);
+            const auto id = eawr::battle::type_id(name);
             const auto [found, inserted] = protection.emplace(id, unit.invulnerable);
             if (!inserted && found->second != unit.invulnerable) {
                 return fail<ScenarioRun>("invulnerable on '" + unit.label

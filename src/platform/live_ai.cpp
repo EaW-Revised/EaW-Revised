@@ -1,4 +1,5 @@
 #include "eawr/platform/live_ai.hpp"
+#include "eawr/battle/start.hpp"
 
 #include "eawr/platform/live_scripts.hpp"
 #include "eawr/platform/battle_scoring.hpp"
@@ -6,7 +7,7 @@
 
 namespace eawr::platform {
 
-core::Result<LiveAi> live_ai(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs, const units::UnitTables& tables,
+core::Result<LiveAi> live_ai(const battle::BattleStart& start, const skirmish::StartInputs& inputs, const units::UnitTables& tables,
     const vfs::Vfs& files, std::shared_ptr<const BattleScoring> scoring,
     std::shared_ptr<script::foc::AiJournal> journal) {
     auto setup = skirmish::ai_setup(start, inputs, tables);

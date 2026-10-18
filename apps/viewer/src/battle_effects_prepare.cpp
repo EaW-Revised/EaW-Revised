@@ -4,7 +4,7 @@
 
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/scene/scene.hpp"
-#include "eawr/skirmish/start.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
 
 #include <algorithm>
@@ -245,7 +245,7 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
     };
     for (const auto& type : tables.units) for (const auto& ability : type.abilities) {
         if (ability.spawned_object.empty()) continue;
-        const auto id = skirmish::type_id(ability.spawned_object);
+        const auto id = battle::type_id(ability.spawned_object);
         types_[id].weapons.emplace(tactical::object_weapon, look_of(ability.spawned_object));
         if (ability.spawned_projectile_index < tables.projectiles.size())
             weaken_particles_[id] = tables.projectiles[ability.spawned_projectile_index].weaken.status_effect;
@@ -258,7 +258,7 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
         auto look = look_of(type.cluster_bomb->bomb_type);
         if (look.detonation.empty()) look.detonation = look.death_explosion;
         if (look.lifetime_detonation.empty()) look.lifetime_detonation = look.death_explosion;
-        types_[skirmish::type_id(type.cluster_bomb->bomb_type)].weapons.emplace(tactical::object_weapon,
+        types_[battle::type_id(type.cluster_bomb->bomb_type)].weapons.emplace(tactical::object_weapon,
             std::move(look));
     }
     std::map<std::string, std::string> ability_projectiles;
@@ -326,7 +326,7 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
         for (const auto& ability : type.abilities)
             if (ability.type == "REPLENISH_WINGMEN") looks.replenish_particle = ability.replenish_particle;
             else if (ability.type == "LURE") looks.lure_particle = ability.lure_particle;
-        const tactical::CombatProfile* profile = combat.find(skirmish::type_id(type.id));
+        const tactical::CombatProfile* profile = combat.find(battle::type_id(type.id));
         const auto ability_projectile = ability_projectiles.find(type.id);
         // The shot's frame step (Max_Speed per frame), for where its flight meets a shield (BP-19).
         const auto step_of = [profile](const std::uint32_t slot) {
@@ -393,7 +393,7 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
             looks.shield_hits = type_list(object.value(), "Shield_Hit_Particles");
             looks.asteroid_hits = type_list(object.value(), "Asteroid_Damage_Hit_Particles");
         }
-        const tactical::TypeId id = skirmish::type_id(type.id);
+        const tactical::TypeId id = battle::type_id(type.id);
         if (type.scale_factor) looks.scale = to_float(*type.scale_factor);
         // BP-17, BP-19: only a shield takes a hit whole, so only shielded types need their
         // collision meshes and whether they have a SHIELD sub-object.

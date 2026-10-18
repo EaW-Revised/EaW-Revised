@@ -186,7 +186,7 @@ void player_load(std::size_t workers, const std::string& directory) {
     // Compare to the checkpoint's explicit player prologue, never an implicit viewer resume.
     std::ifstream file(std::filesystem::path(directory) / "paused.eawrsave", std::ios::binary);
     const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)), {});
-    eawr::checkpoint::GameLoadOptions load; load.player_load = true; const eawr::sim::InlineExecutor executor;
+    eawr::checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.player_load = true; const eawr::sim::InlineExecutor executor;
     auto reference = take(eawr::checkpoint::load_game_checkpoint(bytes, eawr::checkpoint::game_identities(setup()), load, executor));
     std::vector<std::string> hashes;
     while (reference.session.completed_tick() < 8) hashes.push_back(take(reference.session.step(executor)).state_sha256);
@@ -210,7 +210,7 @@ platform::LiveGameSession::Options child_options(std::size_t workers, const std:
     content.victory.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
     content.victory.contenders = {1, 2}; content.victory.controlled_players = {1, 2};
     content.victory.humans = {1}; content.victory.countdown_frames = 2; content.victory.relevant_types = {hull.type_id};
-    value.entries.push_back({1, entry, content}); return value;
+    value.entries.push_back({1, entry, content, eawr::campaign::ScriptRequirement::none}); return value;
 }
 void child_roundtrip(std::size_t workers, const std::string& directory) {
     auto original_options = child_options(workers, directory); const auto entry = original_options.entries.front();
@@ -271,10 +271,11 @@ void pending_roundtrip(std::size_t workers, const std::string& directory) {
         return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
     };
     services->configure = [fixture, content, admission](auto& game) {
-        game.set_conflict_service(admission, content);
+        game.set_conflict_service(admission, content, {}, eawr::campaign::ScriptRequirement::none);
         return game.queue_conflict(fixture.conflict, {campaign::ConflictRoute::pending_tactical, false, false});
     };
     services->restore.content = content; services->restore.conflict_service = admission;
+    services->restore.script_requirement = eawr::campaign::ScriptRequirement::none;
     configured.services = services;
     auto live = take(platform::LiveGameSession::start(setup(), configured));
     live->advance_to(2); expect(live->wait_for(2, 5s) && live->frame().pending_conflict, "admitted pending conflict is published");

@@ -47,6 +47,11 @@ struct Frames final {
 [[nodiscard]] bool has_space_obstacle(Object& object);
 [[nodiscard]] std::vector<std::string> mask(const std::string_view text);
 
+struct AbilityFields final {
+    const data::XmlNode& node;
+    std::string operator()(std::string_view tag) const;
+};
+
 class Loader final {
 public:
     Loader(const LoadInput& input, UnitTables& tables, Report& report);
@@ -82,6 +87,22 @@ private:
     void load_spawner(Object& object, UnitType& unit);
 
     void load_abilities(Object& object, UnitType& unit);
+
+    void load_unit_abilities(Object& object, UnitType& unit);
+    void load_bounty_ability(UnitType& unit, const AbilityFields& child_text);
+    void load_cluster_bomb_ability(UnitType& unit, const std::string& name, const AbilityFields& child_text);
+    void load_buzz_droids_ability(UnitType& unit, const std::string& name, const AbilityFields& child_text);
+    void load_special_healing(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
+    void load_special_beam(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
+    void load_special_blast(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
+    void load_special_stealth(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
+    void load_special_leech(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
+    void load_special_corrupt(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
+    void load_special_laser_defense(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
+    void load_special_redirect(UnitType& unit, sim::tactical::SpecialAbilityProfile& special, const AbilityFields& child_text);
+    bool load_special_ability(UnitType& unit, const std::string& name, const AbilityFields& child_text);
+    void load_bonus_abilities(Object& object, UnitType& unit, const std::string& name, const AbilityFields& child_text);
+    void load_nested_abilities(Object& object, UnitType& unit);
 
     // #530 (docs/behaviour/space-purchasing.md PU-10 to PU-21, PU-31): what a station builds for
     // each faction, and what a type costs, takes and counts in a skirmish.

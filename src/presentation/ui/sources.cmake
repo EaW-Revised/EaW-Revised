@@ -26,6 +26,7 @@ set(EAWR_UI_MODEL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/message_box.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/minimap.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/perf_stats.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/net_perf.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/selection.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/skirmish_setup.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/time_controls.cpp"

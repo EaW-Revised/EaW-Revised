@@ -1,0 +1,94 @@
+[
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_object_turn",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_object_turn"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_native_scene",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_native_scene"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_attract_pool",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_attract_pool"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_beacon_rules",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_beacon_rules"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_skirmish_setup",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_skirmish_setup"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_queue_identities",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_queue_identities"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_garrison_disabled",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_garrison_disabled"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_free_garrison",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_free_garrison"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_multiplayer_departure",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_multiplayer_departure"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_first_free_id",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_first_free_id"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_campaign",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_campaign"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_carriers",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_carriers"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_match_identity",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_match_identity"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_cinematic_seats",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_cinematic_seats"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#replay_extension_match_policy",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_extension_match_policy"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#parse_replay",
+    "new": "src/sim/tactical/replay_parse_header.cpp#parse_fixed_header"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#Squadron",
+    "new": "src/sim/tactical/replay_parse_setup.cpp#parse_squadrons"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#minimum_command_record_size",
+    "new": "src/sim/tactical/replay_parse_records.cpp#parse_commands"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#ObjectTurnRecord",
+    "new": "src/sim/tactical/replay_parse_records.cpp#parse_object_turns"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#read_skirmish",
+    "new": "src/sim/tactical/replay_parse_header.cpp#read_skirmish"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#node",
+    "new": "src/sim/tactical/replay_parse_header.cpp#read_carried_object"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#read_vec3",
+    "new": "src/sim/tactical/replay_parse_internal.hpp#read_vec3"
+  },
+  {
+    "old": "src/sim/tactical/replay_parse.cpp#read_quat",
+    "new": "src/sim/tactical/replay_parse_setup.cpp#read_quat"
+  }
+]

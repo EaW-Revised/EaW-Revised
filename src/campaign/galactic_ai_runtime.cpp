@@ -876,7 +876,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
         });
         if (!child) return Result::failure(child.error());
         runtime->child_scripts = std::move(child).value();
-        if (!runtime->child_scripts.first || !runtime->child_scripts.second) return absent<Prepared>("paired child script services");
+        if (!runtime->child_scripts.parent_queries) return absent<Prepared>("child parent queries");
         host.find_target_queries = std::make_shared<ai::GalacticFindTargetQueries>(*runtime->engine, *runtime->world, nullptr, nullptr, ga::Mode::galactic);
         if (auto contrast = foc::tactical_ai_detail::load_contrast(host, input.modules); !contrast) return Result::failure(contrast.error());
         auth::ModuleManifest manifest;
@@ -1053,9 +1053,11 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
             }, [runtime](const auto& notice) { return runtime->battle(notice); }, std::move(measure));
             if (!installed) return core::Result<void>::failure(installed.error());
             runtime->native_state = installed.value();
-            if (!game.battle()) {
-                auto child = game.set_child_script_services(runtime->child_scripts.first, runtime->child_scripts.second);
-                if (!child) return child;
+            for (const auto layer : {BattleLayer::space, BattleLayer::land}) {
+                if (!game.has_conflict_parent_queries(layer)) {
+                    auto child = game.add_conflict_parent_queries(layer, runtime->child_scripts.parent_queries);
+                    if (!child) return child;
+                }
             }
             const auto manager = runtime->manager.lock();
             if (!manager) return absent<void>("retained manager");
@@ -1069,7 +1071,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
             return core::Result<void>::success();
         };
         return Result::success({{std::move(scripts).value(), std::move(story).value()}, std::move(install),
-            runtime->child_scripts.first, runtime->child_scripts.second});
+            {}, {}, runtime->child_scripts.parent_queries});
     } catch (const std::exception& error) { return absent<Prepared>(error.what()); }
 }
 core::Result<void> configure_galactic_ai_runtime(platform::CampaignServiceConfiguration& configuration,

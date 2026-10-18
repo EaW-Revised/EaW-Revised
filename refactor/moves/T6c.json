@@ -1,0 +1,90 @@
+[
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#submit",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#submit"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#publish",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#publish"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#world_for",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#world_for"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#unit_failure",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#unit_failure"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#start_sliced",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#start_sliced"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#land",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#land"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#plan_pending",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#plan_pending"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#spread_squadrons",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#spread_squadrons"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#plan_group",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#plan_group"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#plan_approach",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#plan_approach"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#replan",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#replan"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#queue_targeted_autofire",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#queue_targeted_autofire"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#prepare_paths",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#prepare_paths"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#prepare_commands",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#prepare_commands"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#finish",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#finish"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#scripted_damage",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#scripted_damage"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#apply_cinematic",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#apply_cinematic"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#apply_retreat",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#apply_retreat"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#apply_beacon",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#apply_beacon"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#apply_reveal",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#apply_reveal"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#reveal_range",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#reveal_range"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#AbilityKind::hunt",
+    "new": "src/sim/tactical/session_cmd_lanes.cpp#AbilityKind::hunt"
+  }
+]

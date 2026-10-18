@@ -61,6 +61,31 @@ def region_digest(source, region):
     return hashlib.sha256(source[first:last].encode("utf-8")).hexdigest()
 
 
+def relocate_regions(review, relocate):
+    """The review with each region key `path#name` that `relocate` maps moved to its new key and `path`.
+
+    `relocate(location)` returns the new `path#symbol` or None. Only the key and `path` change and a moved region keeps its slot in the file's order:
+    start, end and sha256_lf stay, so a region whose text moved verbatim still verifies and an edited one still stops the census
+    until it is re-reviewed. Returns (new review, [(old key, new key)]); raises ValueError on a key clash.
+    """
+    regions = {}
+    moved = []
+    for name, region in review["regions"].items():
+        new_name = relocate(name)
+        if new_name is None:
+            new_path = relocate(region["path"])
+            if new_path is not None:
+                region = dict(region, path=new_path)
+            new_name = name
+        else:
+            region = dict(region, path=new_name.partition("#")[0])
+            moved.append((name, new_name))
+        if new_name in regions:
+            raise ValueError(f"relocating {name!r} makes the region key {new_name!r} appear twice")
+        regions[new_name] = region
+    return dict(review, regions=regions), moved
+
+
 def changed_fingerprints(review, root=ROOT):
     changed = []
     for name, region in sorted(review["regions"].items()):

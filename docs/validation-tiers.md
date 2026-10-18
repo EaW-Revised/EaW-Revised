@@ -67,8 +67,9 @@ suite takes about ten minutes.
 Mixed changes take the stricter tier. Simulation or data changes together with viewer or
 presentation changes take `full`. The cheaper checks of the other areas are added to the
 list: a sim PR that also edits a tool also runs the whole Python suite. Every CMake
-edit takes `full`, including source-entry edits in `apps/viewer/CMakeLists.txt` or the
-shared `src/**/sources.cmake` lists. The root libraries and viewer consume the shared
+edit takes `full`, including source-entry edits in `apps/viewer/CMakeLists.txt`,
+`apps/viewer/src/**/sources.cmake`, or the shared `src/**/sources.cmake` lists.
+The root libraries and viewer consume the shared
 lists, so adding or removing a source requires validation of both builds.
 
 The only computed test list left is the GPU suites of a viewer change: the changed

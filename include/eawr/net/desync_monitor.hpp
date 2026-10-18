@@ -82,7 +82,8 @@ struct DesyncOptions {
 
 // Driven by LockstepSession: never polls the transport itself, sleeps or starts threads.
 // Route kinds 32/33 to receive(), including while waiting/frozen. Before the first
-// step record tick zero; after each step reuse state_hash and the canonical input
+// step record tick zero; after each step record the row hash (state_hash() on needs_encoding
+// ticks, the adapter's CompletedTick::state_sha256 otherwise) and the canonical input
 // encoding. Capture the session encoding only when needs_encoding(tick) is true.
 // can_step() gates only simulation advancement; transport service must continue.
 class DesyncMonitor final : public SessionMonitor {
@@ -93,7 +94,9 @@ public:
         std::span<const std::uint8_t> canonical_encoding = {},
         std::span<const std::uint8_t> canonical_inputs = {}, bool match_end = false) override;
     // Flush the last partial window when a match ends after an already recorded tick.
-    [[nodiscard]] core::Result<void> finish(std::span<const std::uint8_t> canonical_encoding = {});
+    // full_state_hash (when given) replaces the last row's hash, which a world-only adapter left cheap.
+    [[nodiscard]] core::Result<void> finish(std::span<const std::uint8_t> canonical_encoding = {},
+        std::string_view full_state_hash = {});
     [[nodiscard]] core::Result<void> on_link_repair(PeerIndex peer, std::function<bool(PeerIndex)> ownership = {}) override;
     [[nodiscard]] core::Result<void> on_departure(PeerIndex peer, std::uint64_t tick) override;
     [[nodiscard]] core::Result<void> on_input_delay(std::uint64_t delay, std::uint64_t retained_delay) override;

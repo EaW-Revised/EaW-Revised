@@ -1,4 +1,5 @@
 #include "eawr/campaign/auto_resolve_strength.hpp"
+#include "eawr/campaign/conflict_policy.hpp"
 
 #include "eawr/assets/map.hpp"
 #include "eawr/sim/world.hpp"
@@ -118,7 +119,7 @@ public:
         return false;
     }
     bool add(const PlayerId owner, AutoResolveCombatant combatant) {
-        if (owner != conflict_.invader && owner != conflict_.defender) return reject("a third combatant owner is invalid (WAR-12)");
+        if (!resolve_conflict_parties(nullptr, {.admitted = &conflict_}).contains(owner)) return reject("a third combatant owner is invalid (WAR-12)");
         if (!added_.insert(combatant.id).second) return reject("duplicate combatant (WAR-15)");
         const auto level = tech(owner);
         if (!level) return false;

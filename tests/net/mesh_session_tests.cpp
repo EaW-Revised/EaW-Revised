@@ -197,6 +197,7 @@ void departure_encoding_remains_required_after_setup() {
 struct Options {
     std::uint64_t input_delay{4}, final_tick{80};
     std::chrono::milliseconds grace{2000};
+    unsigned rounds{1}; // one window: these cases end at the first deadline; the rolling windows are in mesh_cascade_tests
     bool adaptive{}, monitored{};
     std::function<std::optional<std::uint32_t>(net::PeerIndex self, net::PeerIndex remote)> rtt;
     std::uint64_t pump_every{1}; // rounds (fake milliseconds) between pumps: 33 is the 30 Hz game
@@ -228,6 +229,7 @@ struct Rig {
             options.completeness_timeout_ms = (settings.slow_timeout_seats >> seat) & 1U ? 100'000'000 : settings.completeness_timeout;
             net::MeshIncidentOptions mesh;
             mesh.repair_grace = settings.grace;
+            mesh.rounds = settings.rounds;
             if (settings.rtt) mesh.rtt_ms = [&, seat](net::PeerIndex remote) { return setup.rtt(seat, remote); };
             options.mesh = mesh;
             if (settings.adaptive) { options.non_lan = true; options.adaptive_timing.emplace(); } // host 0, broadband, link-stats RTT

@@ -6,6 +6,7 @@
 // caller has them, the draw calls and visible units. It reads wall-clock timers only, ignores
 // the pointer and never touches the simulation or its hashes. While hidden it does nothing.
 
+#include "eawr/presentation/ui/net_perf.hpp"
 #include "eawr/presentation/ui/perf_stats.hpp"
 
 #include <godot_cpp/classes/control.hpp>
@@ -46,6 +47,9 @@ public:
                bool tick_source);
     void _notification(int what);
 
+    // #4043: the network section of an online or LAN match (nothing in a solo run). Drawn under the tick graph.
+    void set_network(std::optional<presentation::ui::NetPerfReport> report) { network_ = std::move(report); }
+
     // The report's "perf_overlay" object.
     [[nodiscard]] std::string report_json() const;
     [[nodiscard]] presentation::ui::PerfSummary summary() const { return stats_.summary(); }
@@ -69,6 +73,7 @@ private:
     double nominal_tps_{};
     std::optional<std::size_t> visible_units_;
     presentation::ui::PerfStats stats_;
+    std::optional<presentation::ui::NetPerfReport> network_;
     std::optional<Clock::time_point> last_frame_;
     double since_refresh_{1.0};
     double since_redraw_{1.0};

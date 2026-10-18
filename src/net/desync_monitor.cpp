@@ -125,13 +125,17 @@ core::Result<void> DesyncMonitor::record(std::uint64_t tick, std::string_view ha
     return core::Result<void>::success();
 }
 
-core::Result<void> DesyncMonitor::finish(std::span<const std::uint8_t> encoding) {
+core::Result<void> DesyncMonitor::finish(std::span<const std::uint8_t> encoding, std::string_view full_state_hash) {
     if (valid_ && !active_peers_[transport_.self()]) return core::Result<void>::success();
     if (!valid_ || !started_ || frozen_ || failed_) return fail("cannot finish an inactive or failed monitor");
     if (ended_) return core::Result<void>::success();
     if (waiting_) return fail("finish must wait for the pending exchange to agree");
     // An exact exchange boundary has already been compared; there is no new row.
     if (rows_.empty()) { ended_ = true; return core::Result<void>::success(); }
+    if (!full_state_hash.empty()) {
+        if (!valid_hash(full_state_hash)) return fail("state hash must be a canonical SHA-256 hex digest");
+        if (rows_.back().tick == completed_) rows_.back().state = std::string(full_state_hash);
+    }
     return exchange(true, encoding);
 }
 

@@ -1,4 +1,5 @@
 #include "galactic_mode_internal.hpp"
+#include "eawr/battle/start.hpp"
 #include "campaign_loading_hud.hpp"
 
 #include "eawr/campaign/conflict_entry.hpp"
@@ -445,7 +446,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         battle->tables = source.tables;
         battle->start = source.start;
         for (const auto& type : source.tables.units)
-            battle_tactical_types.emplace(skirmish::type_id(type.id), type.id);
+            battle_tactical_types.emplace(battle::type_id(type.id), type.id);
         prepared = std::move(battle);
         if (!battle_content) {
             auto mounted = std::make_shared<BattleContent>();
@@ -664,7 +665,7 @@ bool GalacticMode::State::prepare_handoff() {
         std::vector<campaign::ForcePlacement> placements;
         for (const auto owner : {1U, 2U}) {
             const auto ship = std::find_if(original->start->units.begin(), original->start->units.end(), [owner](const auto& unit) {
-                return unit.state.owner == owner && unit.role == skirmish::UnitRole::fleet && unit.craft == 0;
+                return unit.state.owner == owner && unit.role == battle::UnitRole::fleet && unit.craft == 0;
             });
             if (ship == original->start->units.end()) { failure = "synthetic conflict needs a fleet ship for each side"; return false; }
             const auto id = ++highest;

@@ -504,6 +504,9 @@ public:
         }
         for (const auto& [key, kind] : trace_commands_) trace_->executed(key, kind, context->completed_tick());
         advanced = !staging;
+        // Exchange rows carry the full hash (world + scripts, asked by the session); non-exchange rows are
+        // world-only and still enter their window digest.
+        if (context->world_hash) return core::Result<net::CompletedTick>::success({context->completed_tick(), context->world_hash(), true});
         return core::Result<net::CompletedTick>::success({context->completed_tick(), context->state_hash()});
     }
     bool is_departure(const net::SeatInput& input) const override {
@@ -529,9 +532,10 @@ public:
         if (handed_over_) return;
         // GNS/TURN lines (#4021) go to the same log. The process-wide sink owns its own copy of the logger (never this
         // match's diagnostics, which cancel() rewrites); the transport hands the lines over on the I/O owner's poll.
-        net::GnsTransport::set_log_sink(logger ? net::GnsLogSink(logger) : net::GnsLogSink{});
-        gns_log_owner_ = static_cast<bool>(logger);
+        // A match that was replaced or finished clears only its own sink: the generation says whose it is.
+        release_gns_log();
         diagnostics_->sink = std::move(logger);
+        install_gns_log();
         io_->transport.diagnostics = diagnostics_;
     }
     void set_recovery_policy(net::SetupRecoveryPolicy policy, LanCredentialProvider credentials = {}) override {
@@ -1244,6 +1248,9 @@ private:
     }
     void begin_online(bool hosting, std::string code, std::optional<net::OnlineRoomAdmission> admission = {}) {
         cancel();
+        // The screen configures its logger before host/join. cancel() retires the old sink but keeps that logger; the new
+        // online attempt must install it again before creating or polling GNS, including after a failed admission retry.
+        install_gns_log();
         if (online_retiring_ && !online_retiring_->finished.load()) {
             set_failure(diagnostic("EAWR-NET-1534", "The previous online request is still closing.")); return;
         }
@@ -1405,8 +1412,23 @@ public:
         if (view_.reconnect_enabled) view_.reconnect_unavailable.clear();
     }
     // No GNS line reaches a logger after the match that installed it is cancelled or gone.
+    void log_gns_sink(std::string_view action, std::uint64_t generation) {
+        if (!diagnostics_->sink) return;
+        try {
+            diagnostics_->sink("EAWR net event=gns sink " + std::string(action) + " gen=" + std::to_string(generation)
+                + " match=" + (online_options_ ? "online" : "lan"));
+        } catch (...) {} // A diagnostic consumer cannot end the match.
+    }
+    void install_gns_log() {
+        if (!diagnostics_->sink) return;
+        gns_log_generation_ = net::GnsTransport::set_log_sink(diagnostics_->sink);
+        log_gns_sink("install", gns_log_generation_);
+    }
     void release_gns_log() {
-        if (std::exchange(gns_log_owner_, false)) net::GnsTransport::set_log_sink({});
+        if (const auto generation = std::exchange(gns_log_generation_, std::uint64_t{})) {
+            net::GnsTransport::clear_log_sink(generation);
+            log_gns_sink("clear", generation);
+        }
     }
     void cancel() override {
         release_gns_log();
@@ -1719,7 +1741,7 @@ public:
                 if (!result && self->view().phase != LanPhase::ended) self->set_failure(result.error());
                 self->diagnostics_->tick = context.completed_tick();
                 self->diagnostics_->view(self->view());
-                if (self->view().phase == LanPhase::ended) self->diagnostics_->stall(false, now);
+                if (self->view().phase == LanPhase::ended) { self->diagnostics_->stall(false, now); self->diagnostics_->ledger.observe(now, false, 0); }
                 // Trace observers only record I/O failure; report it at the driver boundary.
                 if (self->trace_ && self->trace_->failed()) {
                     result = fail<bool>("Cannot open or write LAN acceptance trace.");
@@ -2334,6 +2356,7 @@ private:
         const bool waiting = (completeness && !completeness->peers.empty()) || !io_->monitor->waiting_for_peers().empty();
         const auto missing = completeness && !completeness->peers.empty() ? completeness->peers : io_->monitor->waiting_for_peers();
         if (diagnostics_->stall(waiting, now, missing)) input_progress("stall-start");
+        diagnostics_->ledger.observe(now, waiting, missing.empty() ? 0 : missing.front());
         if (!waiting) waiting_since_.reset();
         else {
             if (!waiting_since_) waiting_since_ = now;
@@ -2343,10 +2366,21 @@ private:
             const std::lock_guard lock(mutex_);
             view_.peer_confirmed_tick = io_->monitor->peer_confirmed_tick();
             view_.link_stats.reset();
+            view_.net_peers.clear();
+            // The ledger scan is bounded but the driver polls far more often than the overlay redraws.
+            if (!net_stall_at_ || now < *net_stall_at_ || now - *net_stall_at_ >= 100) {
+                view_.net_stall = diagnostics_->ledger.snapshot(now);
+                net_stall_at_ = now;
+            }
             for (net::PeerIndex peer = 0; peer < io_->transport.peer_count(); ++peer)
                 if (peer != io_->transport.self()) {
-                    if (const auto stats = io_->transport.link_stats(peer);
-                        stats && (!view_.link_stats || stats->smoothed_rtt > view_.link_stats->smoothed_rtt)) view_.link_stats = stats;
+                    const auto stats = io_->transport.link_stats(peer);
+                    if (stats && (!view_.link_stats || stats->smoothed_rtt > view_.link_stats->smoothed_rtt)) view_.link_stats = stats;
+                    constexpr double per_ms = 1.0 / 1000.0;
+                    view_.net_peers.push_back(stats
+                        ? presentation::ui::NetPeerLink{peer, true, static_cast<double>(stats->smoothed_rtt.count()) * per_ms,
+                                                        static_cast<double>(stats->jitter.count()) * per_ms, stats->loss_pct}
+                        : presentation::ui::NetPeerLink{peer, false, 0.0, 0.0, 0.0});
                 }
             if (view_.phase != LanPhase::ended) {
                 view_.message.clear(); view_.diagnostic_code.clear();
@@ -2481,7 +2515,7 @@ private:
               }
             }
             if (context.completed_tick() >= outcome.end_tick) {
-                auto ended = io_->monitor->finish(context.canonical_state());
+                auto ended = io_->monitor->finish(context.canonical_state(), context.state_hash());
                 if (!ended) { set_failure(ended.error()); return DriverResult::failure(ended.error()); }
             }
         }
@@ -2517,13 +2551,14 @@ private:
     std::optional<net::LockstepSession> rejoin_session_;
     std::unique_ptr<net::SessionAdapter> returning_adapter_;
     bool rejoin_requested_{};
-    bool gns_log_owner_{};
+    std::uint64_t gns_log_generation_{};
     std::optional<std::uint64_t> last_repair_ms_;
     std::optional<core::Diagnostic> repair_notice_;
     std::deque<net::Received> retained_rejoin_frames_;
     bool smoke_progress_{};
     std::optional<std::uint64_t> last_progress_;
     std::optional<std::uint64_t> offered_delay_, waiting_since_;
+    std::optional<std::uint64_t> net_stall_at_;
     mutable std::mutex mutex_;
     LanView view_;
     bool map_port_{};

@@ -4,6 +4,7 @@
 #include "eawr/net/gns_transport.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -103,6 +104,15 @@ int main(int argc, char** argv) {
         net::GnsTransport* observed_transport{};
         if (nine) options.transport_observer = [&](net::GnsTransport& transport) { observed_transport = &transport; };
         auto match = viewer::make_online_match(options);
+        struct LogProof {
+            std::atomic<unsigned> installs{}, clears{}, transport_lines{};
+        };
+        const auto log_proof = std::make_shared<LogProof>();
+        match->set_diagnostic_logger([log_proof](std::string_view line) {
+            if (line.starts_with("EAWR net event=gns sink install gen=") && line.ends_with(" match=online")) ++log_proof->installs;
+            else if (line.starts_with("EAWR net event=gns sink clear gen=") && line.ends_with(" match=online")) ++log_proof->clears;
+            else if (line.starts_with("EAWR net event=gns ")) ++log_proof->transport_lines;
+        });
         std::ofstream host_status;
         if (nine && host) {
             host_status.open(std::string(argv[4]) + ".host-status");
@@ -263,6 +273,8 @@ int main(int argc, char** argv) {
             }
         }
         if (role == "host-bad-setup") selected.slots.reset();
+        expect(log_proof->installs >= 2 && log_proof->clears >= 1,
+            "host/join clears the configured sink then installs a fresh online sink");
         bool written{}, saw_snapshot{}, ready_requested{}, attachment_written{}, row_move_requested{}, row_move_configured{};
         unsigned refill_stage{};
         std::uint64_t ready_revision{};
@@ -537,6 +549,12 @@ int main(int argc, char** argv) {
         // Keep both streams alive until the harness acknowledges both tick-zero and battle proofs.
         std::ofstream(std::string(argv[4]) + "." + role) << world.state_sha256();
         while (!std::filesystem::exists(std::string(argv[4]) + ".done")) { match->pump_setup(selected); pause(); }
-        driver = {}; match->cancel(); viewer::shutdown_lan_drains(); return 0;
+        driver = {};
+        if (nine && !leave_case && participant == 8)
+            expect(log_proof->transport_lines > 0, "real GNS repair diagnostics reach the configured online logger");
+        const auto clears = log_proof->clears.load();
+        match->cancel();
+        expect(log_proof->clears == clears + 1, "cancel records the active online sink generation being cleared");
+        viewer::shutdown_lan_drains(); return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; viewer::shutdown_lan_drains(); return 1; }
 }

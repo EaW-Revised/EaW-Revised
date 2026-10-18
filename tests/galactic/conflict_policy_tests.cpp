@@ -287,6 +287,55 @@ void counterattack_space_defender() {
     expect(presence.defender == 3 && station_owner_for(presence) == std::pair<gc::PlayerId, gc::PlayerId>(2, 3),
         std::string("3-player attack: a third party's starbase reduces its own owner's base but fights on the defender's side") + shown(presence));
 }
+void party_resolver() {
+    namespace gc = sim::galactic;
+    gc::GalacticSetup setup; setup.players = {{1, 1, 0}, {2, 2, 0}, {3, 3, 0}};
+    setup.planets = {{1, {}, 2}};
+    setup.rules.maximum_fleet_movement_distance = f(1);
+    setup.control.emplace(); auto& control = *setup.control;
+    control.change_seconds = f(1); control.max_ground_forces = 10;
+    control.players = {{1, false, true, 1}, {2, false, true, 2}, {3, true, false, 3}};
+    for (const auto& a : control.players) for (const auto& b : control.players)
+        control.relations.push_back({a.player, b.player, a.player == b.player});
+    gc::ControlPlanet surface; surface.planet = 1; surface.type = 30; surface.surface_accessible = true;
+    surface.starbase = {2, 1}; surface.ground_base = {3, 1}; control.planets = {surface};
+    gc::PlanetControl state; state.planet = 1; state.initialized = true;
+    state.current_player = state.target_player = 2; state.current = state.target = f(1); control.state = {state};
+    auto created = gc::GalacticSession::create(setup);
+    expect(bool(created), "party resolver fixture validates");
+    if (!created) return;
+    const auto snapshot = created.value().snapshot();
+    gc::GalacticEvent event; event.kind = gc::GalacticEventKind::movement_conflict; event.value = 1;
+    campaign::LayerPresence presence; presence.invader = 1; presence.starbase_owner = 2; presence.starbase_level = 1;
+    presence.attached_fleets = {{3, {}, {force(30, 3)}}, {2, {}, {force(20, 2)}}};
+    const auto resolve = [&] { return campaign::resolve_conflict_parties(snapshot.get(), {.arrival = &event, .presence = &presence}); };
+    auto parties = resolve();
+    expect(parties.defender == 3 && parties.station_owner == 2 && parties.station_side == 3,
+        "resolver keeps orbit order and third-party station ownership separate");
+    expect(parties.contains(1) && parties.contains(3) && !parties.contains(2), "WAR-12 refuses a third combatant owner");
+    std::swap(presence.attached_fleets[0], presence.attached_fleets[1]);
+    expect(resolve().defender == 2, "resolver consumes qualified orbit-entry order");
+    presence.attached_fleets[0].direct_members[0].skips_combat = true;
+    expect(resolve().defender == 3, "resolver skips stealth-only fleet");
+    presence.attached_fleets.clear();
+    expect(resolve().defender == 2, "resolver falls back to hostile starbase");
+    presence.starbase_level = 0;
+    expect(resolve().defender == 0, "resolver supplies no battle without a defender");
+    event.kind = gc::GalacticEventKind::land_conflict_requested;
+    expect(resolve().defender == 3, "land resolver chooses ground-base owner before target player");
+    gc::NativeInvasion invasion; invasion.invader = 1; invasion.defender = 2;
+    parties = campaign::resolve_conflict_parties(snapshot.get(), {.arrival = &event, .presence = &presence, .invasion = &invasion});
+    expect(parties.defender == 2, "prepared invasion retains its admitted defender");
+    campaign::ConflictRecord record; record.planet = 1; record.invader = 1; record.defender = 3; record.station_owner = 1;
+    parties = campaign::resolve_conflict_parties(snapshot.get(), {.admitted = &record});
+    expect(parties.invader == 1 && parties.defender == 3 && parties.station_side == 1 && parties.planet_owner == 2,
+        "admitted identities and station side survive a different political planet owner");
+    record.station_owner = 0;
+    expect(campaign::resolve_conflict_parties(nullptr, {.admitted = &record}).station_side == 3,
+        "unspecified station owner defaults to defender without a live snapshot");
+    parties = campaign::resolve_conflict_parties(snapshot.get(), {.admitted = &record, .current_station_owner = true});
+    expect(parties.station_owner == 2 && parties.station_side == 3, "live return retains current third-party starbase owner");
+}
 void pending_alert() {
     campaign::ConflictRecord conflict; conflict.invader = 1; conflict.defender = 2;
     campaign::PendingBattleAlertInputs inputs;
@@ -361,4 +410,4 @@ void mixed_defender_selection() {
 }
 
 }
-int main() { counterattack_space_defender(); mixed_defender_selection(); pending_alert(); admission(); arbitration(); selection(); defended_landing(); return galactic_test::failures ? 1 : 0; }
+int main() { party_resolver(); counterattack_space_defender(); mixed_defender_selection(); pending_alert(); admission(); arbitration(); selection(); defended_landing(); return galactic_test::failures ? 1 : 0; }

@@ -4,9 +4,9 @@
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 473 | 473 |
+| applied | 476 | 476 |
 | partial | 357 | 357 |
-| todo | 438 | 438 |
+| todo | 435 | 435 |
 | presentation-later | 0 | 0 |
 | foc-ignores | 42 | 42 |
 | deferred | 0 | 0 |
@@ -289,12 +289,12 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Damage_Multiplier | todo | application not recorded | — | 737 | — | — |
-| Health_Multiplier | todo | application not recorded | — | 737 | — | — |
+| Damage_Multiplier | applied | whole class (src/sim/tactical/session_lifecycle.cpp) | WTA-46 | — | src/sim/tactical/session_lifecycle.cpp | The shooter's owner's level scales projectile, area and beam damage with the cause-damage mode; delayed blast damage keeps WAD-26's no-multiplier route.; basis: reviewed |
+| Health_Multiplier | applied | whole class (src/sim/tactical/durability.cpp); whole class (src/sim/tactical/session_lifecycle.cpp) | WTA-46; WTA-46 | — | src/sim/tactical/durability.cpp; src/sim/tactical/session_lifecycle.cpp | The AI owner's level scales the maximum hull and every destroyable hardpoint's maximum health, at creation and on an ownership transfer (percentages restored).; basis: reviewed |
 | Land_AI_Contrast_Multiplier | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
 | Land_AI_Goal_Cycle_Sleep_Duration | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
 | Land_Build_Time_Multiplier | land-or-galactic | application not recorded | — | — | — | SCOPE-LAND |
-| Shield_Multiplier | todo | application not recorded | — | 737 | — | — |
+| Shield_Multiplier | applied | whole class (src/sim/tactical/durability.cpp); whole class (src/sim/tactical/session_lifecycle.cpp) | WTA-46; WTA-46 | — | src/sim/tactical/durability.cpp; src/sim/tactical/session_lifecycle.cpp | The AI owner's level scales the maximum shield; the refresh rate is unscaled.; basis: reviewed |
 
 ## EnumDefinition
 

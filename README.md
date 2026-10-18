@@ -60,7 +60,7 @@ What works today:
 - LAN lobbies and lockstep multiplayer, with desync detection and in-match reconnection, and online rooms
   through an online service you enter in Network Options (Windows downloads; an early preview).
 - A galactic campaign preview: the campaign map, fleets, production, and space and land battle entry, with an
-  early galactic AI (on by default, `--eawr-galactic-ai off` switches it off).
+  early galactic AI that is on by default (`--eawr-galactic-ai off` switches it off).
 - Reading a FoC installation: MEG archives and loose files through a virtual file system,
   the XML object registry, maps, models, textures and animations.
 - A headless deterministic simulation that builds a skirmish start from game data and

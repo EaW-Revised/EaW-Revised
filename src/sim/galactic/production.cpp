@@ -989,8 +989,34 @@ core::Result<void> GalacticSession::Impl::refresh_population(const PartitionExec
     return core::Result<void>::success();
 }
 
-std::vector<ObservedProductionOffer> GalacticSession::Impl::observed_production_offers(
+GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_offer_inputs(
     std::span<const ObservedPlanet> observations, std::span<const Fleet> fleet_inputs) const {
+    ProductionOfferInputs result;
+    if (!production || !economy || !observer) return result;
+    const auto local = observer->local_player;
+    const auto player = std::lower_bound(production->players.begin(), production->players.end(), local,
+        [](const auto& row, auto id) { return row.player < id; });
+    const auto account = std::lower_bound(economy->players.begin(), economy->players.end(), local,
+        [](const auto& row, auto id) { return row.player < id; });
+    if (player == production->players.end() || player->player != local || !player->human
+        || account == economy->players.end() || account->player != local) return result;
+    // WGUI-91: a raw production payload never supplies local-control knowledge.
+    // Index once, then query only the local player's admitted producer rows.
+    for (const auto& row : observations)
+        if (row.player == local && row.discovered && row.knowledge.ownership
+            && row.known_allegiance == std::optional(local)) result.visible.push_back(row.planet);
+    std::sort(result.visible.begin(), result.visible.end());
+    result.visible.erase(std::unique(result.visible.begin(), result.visible.end()), result.visible.end());
+    for (const auto& fleet : fleet_inputs) {
+        result.fleets.insert(result.fleets.end(), {fleet.id, fleet.owner, fleet.orbit, fleet.motion.transit ? 1U : 0U, fleet.members.size()});
+        for (const auto& member : fleet.members) result.fleets.push_back(member.type);
+    }
+    if (income) result.reductions = production_reduction_sources(live_income_inputs(), sorted_planets());
+    return result;
+}
+
+std::vector<ObservedProductionOffer> GalacticSession::Impl::observed_production_offers(
+    const ProductionOfferInputs& inputs, std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor) const {
     std::vector<ObservedProductionOffer> result;
     if (!production || !economy || !observer) return result;
     const auto local = observer->local_player;
@@ -1002,23 +1028,29 @@ std::vector<ObservedProductionOffer> GalacticSession::Impl::observed_production_
         || account == economy->players.end() || account->player != local) return result;
     const auto reservations = production_reservations(*production, local);
     const auto owners = sorted_planets();
-    const auto sources = income ? std::optional(live_income_inputs()) : std::nullopt;
+    const IncomeSetup* sources = income ? &live_income_inputs() : nullptr;
     // Gathered once for every visible offer below, not per offer (#3003).
-    const auto reductions = sources ? production_reduction_sources(*sources, owners) : std::vector<ProductionReductionSource>{};
+    const auto& reductions = inputs.reductions;
     const auto total = std::find_if(population.begin(), population.end(),
         [local](const auto& row) { return row.player == local; });
-    // WGUI-91: a raw production payload never supplies local-control knowledge.
-    // Index once, then query only the local player's admitted producer rows.
-    std::set<PlanetId> visible;
-    for (const auto& row : observations)
-        if (row.player == local && row.discovered && row.knowledge.ownership
-            && row.known_allegiance == std::optional(local)) visible.insert(row.planet);
+    // Each admitted producer's rows depend only on copied inputs, so producers are evaluated in partitions with
+    // disjoint outputs and joined in producer order (ADR-009): the rows are equal for any worker count.
+    struct Producer { const PlanetProduction* planet; const Planet* owner; };
+    std::vector<Producer> admitted;
     for (const auto& planet : production->planets) {
-        if (!visible.contains(planet.planet)) continue;
+        if (!std::binary_search(inputs.visible.begin(), inputs.visible.end(), planet.planet)) continue;
         const auto owner = std::lower_bound(owners.begin(), owners.end(), planet.planet,
             [](const auto& row, auto id) { return row.id < id; });
         if (owner == owners.end() || owner->id != planet.planet) continue;
         if (setup.census && total == population.end()) continue;
+        admitted.push_back({&planet, &*owner});
+    }
+    std::vector<std::vector<ObservedProductionOffer>> staged(admitted.size());
+    const auto evaluate = [&](const std::size_t index) {
+        const auto& planet = *admitted[index].planet;
+        const auto* owner = admitted[index].owner;
+        auto& rows = staged[index];
+        const auto unlocks = corruption_local_unlocks(planet.planet, local);
         for (const auto& original : planet.offers) {
             ObservedProductionOffer row;
             row.player = local; row.planet = planet.planet; row.type = original.type;
@@ -1027,22 +1059,30 @@ std::vector<ObservedProductionOffer> GalacticSession::Impl::observed_production_
             const auto& queue = planet.queues[static_cast<std::size_t>(original.domain)];
             row.already_in_production = std::any_of(queue.begin(), queue.end(),
                 [&](const auto& entry) { return entry.type == original.type; });
-            auto adjusted = prepared_production_offer(original, sources ? &*sources : nullptr,
-                reductions, planet.planet, local, economy_corruption ? &*economy_corruption : nullptr);
+            auto adjusted = prepared_production_offer(original, sources, reductions, planet.planet, local,
+                economy_corruption ? &*economy_corruption : nullptr);
             if (!adjusted) row.admission = ProductionAdmission::resource_limit;
             else {
                 row.price = adjusted.value().price; row.seconds = adjusted.value().seconds;
-                const ProductionAdmissionInputs inputs{*production, planet, *player, *account, fleet_inputs,
-                    owner->owner, setup.census ? &*total : nullptr, next_id, live_object_count, &reservations,
-                    corruption_local_unlocks(planet.planet, local)};
-                row.admission = production_admission(inputs, &adjusted.value(), original.domain);
-                row.current = queried_admission(inputs, &adjusted.value(), original.domain,
+                const ProductionAdmissionInputs admission_inputs{*production, planet, *player, *account, fleet_inputs,
+                    owner->owner, setup.census ? &*total : nullptr, next_id, live_object_count, &reservations, unlocks};
+                row.admission = production_admission(admission_inputs, &adjusted.value(), original.domain);
+                row.current = queried_admission(admission_inputs, &adjusted.value(), original.domain,
                     ProductionQuery::menu) == ProductionAdmission::allowed;
-                row.population_fits = production_population_fits(inputs, adjusted.value());
+                row.population_fits = production_population_fits(admission_inputs, adjusted.value());
             }
-            result.push_back(std::move(row));
+            rows.push_back(std::move(row));
         }
+    };
+    const auto phase = executor.execute_phase("galactic-production-offers", tick_partition_count, [&](const std::size_t partition) {
+        const auto range = partition_range(partition, admitted.size());
+        for (auto index = range.begin; index < range.end; ++index) evaluate(index);
+    });
+    if (!phase) {
+        // A failed phase never publishes partial rows: recompute every producer in order on this thread.
+        for (std::size_t index = 0; index < admitted.size(); ++index) { staged[index].clear(); evaluate(index); }
     }
+    for (auto& rows : staged) result.insert(result.end(), std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
     return result;
 }
 

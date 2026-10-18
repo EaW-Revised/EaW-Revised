@@ -71,7 +71,7 @@ galactic::TacticalLayerCommand input(const campaign::ConflictRecord& record, tac
     return {record.id, bytes[start + 20], std::vector<std::uint8_t>(bytes.begin() + static_cast<std::ptrdiff_t>(start), bytes.end())};
 }
 cp::GameLoadOptions load_options() {
-    cp::GameLoadOptions options;
+    cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
     options.content = [](const campaign::ConflictRecord& record) { return eawr::core::Result<tactical::TacticalContent>::success(content(record)); };
     return options;
 }
@@ -151,7 +151,7 @@ void roles_and_checkpoint() {
         const eawr::platform::ThreadWorkerAdapter executor(workers);
         for (const auto role : {galactic::BattleTeamRole::ai_side, galactic::BattleTeamRole::spectate, galactic::BattleTeamRole::ally}) {
             const auto config = setup(); const auto record = conflict(config); const auto tables = content(record);
-            auto game = take(campaign::GameSession::create(config)); check(game.stage_battle(record, tables));
+            auto game = take(campaign::GameSession::create(config)); check(game.stage_battle(record, tables, eawr::campaign::ScriptRequirement::none));
             (void)take(game.step(executor));
             expect(game.galaxy().seat_control()->battle->role == galactic::BattleTeamRole::pending, "manual human-AI entry awaits other team lead");
             expect(!game.battle_view({5}), "pending team sees no unapproved perspective");
@@ -214,7 +214,7 @@ void battle_start_events() {
     const auto record = conflict(config);
     auto ordinary = take(campaign::GameSession::create(config));
     auto staged = take(campaign::GameSession::create(config));
-    check(staged.stage_battle(record, content(record)));
+    check(staged.stage_battle(record, content(record), eawr::campaign::ScriptRequirement::none));
     for (auto* game : {&ordinary, &staged}) {
         check(game->submit({{0, {1}, 1}, galactic::SetSpeed{false, math::Fixed::from_raw(math::Fixed::scale)}}));
         check(game->submit({{0, {5}, 1}, galactic::AssignBattleTeamRole{record.id, galactic::BattleTeamRole::ally}}));
@@ -251,7 +251,7 @@ void unrelated_ai_activity() {
 void readiness_departure_and_return() {
     const eawr::sim::InlineExecutor executor;
     auto config = setup(); auto record = conflict(config); auto tables = content(record);
-    auto pending = take(campaign::GameSession::create(config)); check(pending.stage_battle(record, tables));
+    auto pending = take(campaign::GameSession::create(config)); check(pending.stage_battle(record, tables, eawr::campaign::ScriptRequirement::none));
     (void)take(pending.step(executor));
     for (std::uint32_t seat = 5; seat <= 8; ++seat) check(pending.submit({{1, {seat}, 1}, galactic::SeatLeave{}}));
     (void)take(pending.step(executor));
@@ -261,7 +261,7 @@ void readiness_departure_and_return() {
     roundtrip(pending, executor);
 
     auto versus = take(campaign::GameSession::create(config)); const auto human_battle = conflict(config, 2);
-    check(versus.stage_battle(human_battle, content(human_battle))); (void)take(versus.step(executor));
+    check(versus.stage_battle(human_battle, content(human_battle), eawr::campaign::ScriptRequirement::none)); (void)take(versus.step(executor));
     expect(!versus.galaxy().seat_control()->battle, "human-versus-human battle has no other-team role choice");
     const auto stop = input(human_battle, {{0, 1, 1}, {human_battle.forces.front().id}, tactical::StopPayload{}});
     check(versus.submit({{1, {1}, 1}, galactic::SeatLeave{}}));
@@ -275,7 +275,7 @@ void readiness_departure_and_return() {
     tables.victory.contenders = {1, 3}; tables.victory.controlled_players = {1, 3}; tables.victory.humans = {1};
     tables.victory.countdown_frames = 2;
     for (const auto& type : tables.durability.profiles) tables.victory.relevant_types.push_back(type.type_id);
-    auto game = take(campaign::GameSession::create(config)); check(game.stage_battle(record, tables));
+    auto game = take(campaign::GameSession::create(config)); check(game.stage_battle(record, tables, eawr::campaign::ScriptRequirement::none));
     (void)take(game.step(executor));
     check(game.submit({{1, {5}, 1}, galactic::AssignBattleTeamRole{record.id, galactic::BattleTeamRole::ally}}));
     (void)take(game.step(executor));
@@ -311,7 +311,7 @@ void all_peers_lockstep() {
         auto split = lockstep::split_by_issuer<Adapter>(commands, 8);
         std::vector<Peer> peers;
         for (std::size_t index = 0; index < 8; ++index) {
-            auto game = take(campaign::GameSession::create(config)); check(game.stage_battle(record, tables));
+            auto game = take(campaign::GameSession::create(config)); check(game.stage_battle(record, tables, eawr::campaign::ScriptRequirement::none));
             peers.push_back({std::move(game), &executor, std::move(split[index]), {}, {}});
             if (index != 0) peers.back().before_step = [](campaign::GameSession& session, std::uint64_t) { session.scramble_storage_for_testing(); };
         }

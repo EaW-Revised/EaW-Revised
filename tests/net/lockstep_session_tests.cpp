@@ -1080,7 +1080,7 @@ public:
     net::PeerIndex self() const override { return delegate_.self(); }
     std::uint32_t peer_count() const override { return delegate_.peer_count(); }
     std::optional<net::LinkStats> link_stats(net::PeerIndex) const override { ++reads; return stats; }
-    std::optional<net::LinkStats> stats{net::LinkStats{std::chrono::microseconds{330'000}, std::chrono::microseconds{330'000}, {}, 1}};
+    std::optional<net::LinkStats> stats{net::LinkStats{std::chrono::microseconds{330'000}, std::chrono::microseconds{330'000}, {}, 1, 0.0}};
     mutable unsigned reads{};
 private:
     FakeTransport delegate_;
@@ -1261,7 +1261,7 @@ void adaptive_wire_and_gate() {
     }
     {
         AdaptiveOpaque match(1000, false, {}, 2);
-        match.transports[0].stats = net::LinkStats{{}, {}, {}, 1};
+        match.transports[0].stats = net::LinkStats{{}, {}, {}, 1, 0.0};
         std::array<std::optional<std::uint64_t>, 2> applied;
         for (std::uint64_t round = 0; round < 140; ++round) {
             match.network.round = round;
@@ -1303,7 +1303,7 @@ void adaptive_wire_and_gate() {
         match.network.before_send = [&](auto, auto, auto bytes) { if (bytes.front() == net::timing_proposal_kind) ++proposals; };
         match.adapters[0].tick = 165;
         require(match.sessions[0].replay_timing_control(timing_frame(net::timing_proposal_kind, 165, 8)));
-        match.transports[0].stats = net::LinkStats{{}, {}, {}, 1};
+        match.transports[0].stats = net::LinkStats{{}, {}, {}, 1, 0.0};
         match.adapters[0].tick = 200;
         require(match.sessions[0].pump(1));
         expect(proposals == 0, "catch-up does not invent an off-cadence host policy pass");
@@ -2159,8 +2159,72 @@ void agreed_departures() {
 
 }
 
+// An adapter that hashes like the live viewer: step() returns only the cheap world part and state_hash()
+// adds the script part, which is what a Lua-only divergence changes.
+class SplitHashAdapter final : public net::SessionAdapter {
+public:
+    std::uint64_t tick{};
+    std::uint8_t script{};
+    std::uint64_t diverge_after{~0ULL};
+    mutable std::size_t full_hashes{};
+    std::uint64_t completed_tick() const override { return tick; }
+    std::string world_hash() const { return eawr::core::sha256_hex(std::vector<std::uint8_t>{static_cast<std::uint8_t>(tick)}); }
+    std::string state_hash() const override {
+        ++full_hashes;
+        return eawr::core::sha256_hex(std::vector<std::uint8_t>{static_cast<std::uint8_t>(tick), script});
+    }
+    std::vector<std::uint8_t> canonical_state() const override { return {static_cast<std::uint8_t>(tick), script}; }
+    eawr::core::Result<void> validate(const net::SeatInput&) const override { return eawr::core::Result<void>::success(); }
+    eawr::core::Result<void> install(std::span<const net::SeatInput>) override { return eawr::core::Result<void>::success(); }
+    eawr::core::Result<std::vector<std::uint8_t>> canonical_input() const override {
+        return eawr::core::Result<std::vector<std::uint8_t>>::success({});
+    }
+    eawr::core::Result<net::CompletedTick> step() override {
+        ++tick;
+        if (tick > diverge_after) script = 1;
+        return eawr::core::Result<net::CompletedTick>::success({tick, world_hash(), true});
+    }
+    bool is_departure(const net::SeatInput&) const override { return false; }
+};
+
+void script_hash_only_on_exchange_ticks() {
+    for (const std::uint64_t diverge_after : {~0ULL, 7ULL, 11ULL}) {
+        FakeNetwork network(2);
+        std::array<SplitHashAdapter, 2> adapters;
+        adapters[1].diverge_after = diverge_after;
+        std::vector<std::unique_ptr<FakeTransport>> transports;
+        std::vector<std::unique_ptr<net::DesyncMonitor>> monitors;
+        std::vector<net::LockstepSession> sessions;
+        const std::vector<net::PeerSeat> roster{{{1}, true}, {{2}, true}};
+        for (unsigned peer = 0; peer < 2; ++peer) {
+            transports.push_back(std::make_unique<FakeTransport>(network, peer));
+            net::DesyncOptions monitor_options; monitor_options.exchange_every = 5;
+            monitors.push_back(std::make_unique<net::DesyncMonitor>(*transports.back(), monitor_options));
+            net::SessionOptions options; options.final_tick_count = 12;
+            sessions.push_back(require(net::LockstepSession::create(adapters[peer], *transports.back(), roster, options, monitors.back().get())));
+        }
+        for (std::uint64_t round = 0; round < 200; ++round) {
+            network.round = round;
+            for (unsigned peer = 0; peer < 2; ++peer) require(sessions[peer].pump(round));
+        }
+        // Tick 0 and the exchange ticks 5, 10 and the end tick 12 hash the scripts; nothing else does.
+        // A divergence caught at tick 10 freezes both peers before tick 12.
+        const std::size_t hashed = diverge_after == 7 ? 3 : 4;
+        expect(adapters[0].full_hashes == hashed && adapters[1].full_hashes == hashed,
+            "script hash is computed only at tick zero, exchange ticks and the end tick");
+        if (diverge_after == ~0ULL) {
+            expect(!monitors[0]->report() && !monitors[1]->report(), "equal script state raises no desync report");
+        } else {
+            expect(monitors[0]->report() && monitors[1]->report(), "script-only divergence is detected at the next exchange");
+            const auto expected = diverge_after < 10 ? 10U : 12U;
+            expect(monitors[0]->report()->first_divergent_tick == expected, "script-only divergence is reported at the exchange row");
+        }
+    }
+}
+
 int main() {
     try {
+        script_hash_only_on_exchange_ticks();
         object_turn_only_command_log();
         chained_departures();
         target_timing_controls();

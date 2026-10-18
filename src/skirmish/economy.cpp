@@ -1,5 +1,7 @@
 #include "eawr/skirmish/start.hpp"
 
+#include "eawr/script/numeric/q24_boundary.hpp"
+#include "eawr/skirmish/ai.hpp"
 #include "eawr/skirmish/placement.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 #include "skirmish_internal.hpp"
@@ -21,6 +23,29 @@ using sim::math::Fixed;
 
 [[nodiscard]] core::Diagnostic failure(std::string message) {
     return detail::error(diagnostic_codes::input, "economy rules: " + std::move(message));
+}
+
+// WTA-45 (#735): what an AI player's difficulty does to its income and production time. Without a mounted
+// difficulty table (synthetic content) both come from the selected difficulty of the unit tables.
+struct AiEconomyScale final {
+    Fixed credit;
+    Fixed build_time;
+};
+
+[[nodiscard]] core::Result<AiEconomyScale> ai_economy_scale(
+    const StartInputs& inputs, const StartPlayer& player, const units::UnitTables& tables) {
+    using Result = core::Result<AiEconomyScale>;
+    const Fixed one = Fixed::from_raw(Fixed::scale);
+    AiEconomyScale scale{tables.ai_credit_multiplier.value_or(one), tables.pad_ai_build_multiplier.value_or(one)};
+    if (player.human || !player.lobby || !inputs.difficulty || ai_player_type(inputs, player).empty()) return Result::success(scale);
+    const auto adjustment = player_difficulty(inputs, player);
+    const auto credit = script::numeric::to_fixed(adjustment.credit);
+    const auto build_time = script::numeric::to_fixed(adjustment.space_build_time);
+    if (!credit || !build_time) return Result::failure(failure("AI difficulty multiplier is out of range"));
+    if (credit.value().raw() < 0 || build_time.value().raw() <= 0) return Result::failure(failure("AI difficulty multiplier is not positive"));
+    scale.credit = credit.value();
+    scale.build_time = build_time.value();
+    return Result::success(scale);
 }
 
 // PU-13: whole frames of `seconds` at 30 frames a second, rounded to nearest.
@@ -152,6 +177,8 @@ core::Result<tactical::EconomyRules> economy_rules(
         if (!player.human && !tables.ai_credit_multiplier) {
             return Result::failure(failure("AI credits require selected difficulty data"));
         }
+        const auto scale = ai_economy_scale(inputs, player, tables);
+        if (!scale) return Result::failure(scale.error());
         const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
             [&](const StartFaction& entry) { return detail::iequals(entry.name, player.faction); });
         // A demo player of a faction with no unit cap (neutral objects, or content that sets none) holds no
@@ -165,7 +192,8 @@ core::Result<tactical::EconomyRules> economy_rules(
                 player.player.player_id, Fixed{}, *faction->space_unit_cap, true, Fixed{}});
             rules.players.back().start_tech = static_cast<std::uint32_t>(start.match.start_tech);
             rules.players.back().max_tech = static_cast<std::uint32_t>(start.match.max_tech);
-            rules.players.back().credit_multiplier = tables.ai_credit_multiplier.value_or(Fixed::from_raw(Fixed::scale));
+            rules.players.back().credit_multiplier = scale.value().credit;
+            rules.players.back().ai_build_time_multiplier = rules.players.back().ai ? scale.value().build_time : Fixed::from_raw(Fixed::scale);
             continue;
         }
         const auto marker = std::find_if(start.markers.begin(), start.markers.end(), [&](const StartMarker& entry) {
@@ -178,7 +206,8 @@ core::Result<tactical::EconomyRules> economy_rules(
             player.player.player_id, *credits, *faction->space_unit_cap, !player.human, yaw});
         rules.players.back().start_tech = static_cast<std::uint32_t>(start.match.start_tech);
         rules.players.back().max_tech = static_cast<std::uint32_t>(start.match.max_tech);
-        rules.players.back().credit_multiplier = tables.ai_credit_multiplier.value_or(Fixed::from_raw(Fixed::scale));
+        rules.players.back().credit_multiplier = scale.value().credit;
+        rules.players.back().ai_build_time_multiplier = rules.players.back().ai ? scale.value().build_time : Fixed::from_raw(Fixed::scale);
     }
     std::sort(rules.players.begin(), rules.players.end(),
         [](const tactical::EconomyPlayer& left, const tactical::EconomyPlayer& right) { return left.player < right.player; });
@@ -218,7 +247,7 @@ core::Result<tactical::EconomyRules> economy_rules(
             const auto ai_time = sim::math::multiply(Fixed::from_raw(whole_seconds * Fixed::scale), *tables.pad_ai_build_multiplier);
             if (!ai_time) return Result::failure(ai_time.error());
             const auto ai_whole_seconds = ai_time.value().trunc_to_integer();
-            if (ai_whole_seconds <= 0 || ai_whole_seconds > 86400) return Result::failure(failure("AI pad build duration is out of range"));
+            if (ai_whole_seconds < 0 || ai_whole_seconds > 86400) return Result::failure(failure("AI pad build duration is out of range"));
             const auto ai_seconds = static_cast<std::uint32_t>(ai_whole_seconds);
             rules.pads.construction.push_back({type_id(type.id), type_id(type.constructed_type),
                 (campaign ? production.build_cost_campaign : production.build_cost_multiplayer).value_or(Fixed{}), seconds, ai_seconds, type.child_persists});

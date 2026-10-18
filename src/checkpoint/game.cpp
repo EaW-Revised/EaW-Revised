@@ -3,6 +3,7 @@
 #include "eawr/core/sha256.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "encoding_internal.hpp"
+#include "game_session_internal.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -608,9 +609,10 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
     }
     if (script_save.value() && !options.galactic_scripts && !options.prepare_galactic) return fail<GameRestore>("section scripts needs pinned scheduler resolver", path);
     detail::Reader context(saved.find(SectionId::session)->bytes);
-    const auto completed = context.u64(); const auto expected_hash = context.digest();
-    const auto strategic = context.u64(); const auto tactical = context.u64();
-    (void)blob(context); const auto replay_bytes = blob(context);
+    const auto prefix = detail::read_session_prefix(context);
+    const auto completed = prefix.completed; const auto expected_hash = prefix.expected_hash;
+    const auto strategic = prefix.strategic; const auto tactical = prefix.tactical;
+    const auto replay_bytes = prefix.replay;
     auto replay = gc::parse_replay(replay_bytes, path);
     if (!replay || context.failed()) return fail<GameRestore>("section session: invalid recording", path);
     campaign::GameRecording recording{std::move(replay).value(), {}, {}};
@@ -710,7 +712,7 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
         prepared_runtime.emplace(std::move(prepared).value());
     }
     const auto& child_scripts = prepared_runtime && prepared_runtime->child_scripts ? prepared_runtime->child_scripts : options.scripts;
-    auto created = campaign::GameSession::from_recording(recording, options.content, child_scripts);
+    auto created = campaign::GameSession::from_recording(recording, options.content, child_scripts, options.script_requirement);
     if (!created) return core::Result<GameRestore>::failure(created.error());
     auto session = std::move(created).value();
     if (!direct) session.begin_native_reconstruction();
@@ -718,10 +720,16 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
     session.set_auto_resolve_outcome_services(options.auto_resolve_outcomes);
     session.set_auto_resolver(options.auto_resolve); session.set_vote_progress(options.vote_progress);
     session.set_conflict_gate(options.conflict_gate);
-    if (options.conflict_service) session.set_conflict_service(options.conflict_service, options.content, options.scripts);
+    if (options.conflict_service) session.set_conflict_service(options.conflict_service, options.content, options.scripts, options.script_requirement);
     if (options.configure_session) {
         auto configured = options.configure_session(session);
         if (!configured) return core::Result<GameRestore>::failure(configured.error());
+    }
+    if (prepared_runtime && prepared_runtime->child_parent_queries) {
+        for (const auto layer : {campaign::BattleLayer::space, campaign::BattleLayer::land}) {
+            auto bound = session.add_conflict_parent_queries(layer, prepared_runtime->child_parent_queries);
+            if (!bound) return core::Result<GameRestore>::failure(bound.error());
+        }
     }
     if (prepared_runtime && prepared_runtime->child_scripts) {
         auto configured = session.set_child_script_services(prepared_runtime->child_scripts, prepared_runtime->configure_child);

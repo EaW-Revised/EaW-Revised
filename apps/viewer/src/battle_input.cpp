@@ -4,7 +4,7 @@
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
 #include "eawr/scene/scene.hpp"
-#include "eawr/skirmish/start.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/sim/tactical/space.hpp"
@@ -105,13 +105,13 @@ void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& populati
             shape.locomotion = type.locomotion;
             shape.decoration = type.decoration;
             shape.community_property = type.station_community_property;
-            pick_shapes_.insert_or_assign(skirmish::type_id(type.id), std::move(shape));
+            pick_shapes_.insert_or_assign(battle::type_id(type.id), std::move(shape));
         }
         for (const units::ObstacleType& type : live.tables()->obstacles) {
             PickShape shape;
             shape.selectable = type.selectable;
             shape.mouse_sensitive = type.mouse_sensitive;
-            pick_shapes_.insert_or_assign(skirmish::type_id(type.id), std::move(shape));
+            pick_shapes_.insert_or_assign(battle::type_id(type.id), std::move(shape));
         }
         pick_shapes_loaded_ = true;
     }
@@ -579,7 +579,7 @@ std::optional<sim::math::Vec3> BattleInput::ability_point(
             if (source == instances.end()) continue;
             const auto& types = live.tables()->units;
             const auto type = std::find_if(types.begin(), types.end(),
-                [&](const auto& unit) { return skirmish::type_id(unit.id) == source->type_id; });
+                [&](const auto& unit) { return battle::type_id(unit.id) == source->type_id; });
             if (type == types.end()) continue;
             for (const auto& special : type->special_abilities) {
                 if (special.kind != sim::tactical::SpecialAbilityKind::corrupt_systems) continue;
@@ -601,7 +601,7 @@ std::optional<sim::math::Vec3> BattleInput::ability_point(
             if (source == instances.end()) continue;
             const auto& types = live.tables()->units;
             const auto type = std::find_if(types.begin(), types.end(),
-                [&](const auto& unit) { return skirmish::type_id(unit.id) == source->type_id; });
+                [&](const auto& unit) { return battle::type_id(unit.id) == source->type_id; });
             if (type == types.end()) continue;
             const auto& buzz = type->team_buzz_droids ? type->team_buzz_droids : type->buzz_droids;
             if (!buzz) continue;
@@ -623,7 +623,7 @@ std::optional<sim::math::Vec3> BattleInput::ability_point(
         if (source == instances.end()) continue;
         const auto& types = live.tables()->units;
         const auto type = std::find_if(types.begin(), types.end(),
-            [&](const auto& unit) { return skirmish::type_id(unit.id) == source->type_id; });
+            [&](const auto& unit) { return battle::type_id(unit.id) == source->type_id; });
         if (type == types.end()) continue;
         const auto ability = std::find_if(type->abilities.begin(), type->abilities.end(),
             [](const auto& entry) { return entry.type == "WEAKEN_ENEMY"; });

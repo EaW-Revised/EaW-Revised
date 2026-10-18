@@ -119,6 +119,7 @@ include("${EAWR_ROOT}/src/presentation/sources.cmake")
 include("${EAWR_ROOT}/src/presentation/ui/sources.cmake")
 include("${EAWR_ROOT}/src/scene/sources.cmake")
 include("${EAWR_ROOT}/src/units/sources.cmake")
+include("${EAWR_ROOT}/src/battle/sources.cmake")
 include("${EAWR_ROOT}/src/skirmish/sources.cmake")
 include("${EAWR_ROOT}/src/platform/sources.cmake")
 include("${EAWR_ROOT}/src/platform/galactic/sources.cmake")
@@ -129,6 +130,9 @@ include("${EAWR_ROOT}/src/net/sources.cmake")
 include("${EAWR_ROOT}/cmake/EawrGns.cmake")
 include("${EAWR_ROOT}/src/script/sources.cmake")
 include("${EAWR_ROOT}/apps/viewer/src/galactic/sources.cmake")
+include("${EAWR_ROOT}/apps/viewer/src/sources.cmake")
+include("${EAWR_ROOT}/src/presentation/godot/sources.cmake")
+include("${EAWR_ROOT}/src/presentation/godot/ui/sources.cmake")
 
 add_library(eawr_viewer_script STATIC
     ${EAWR_SCRIPT_NUMERIC_SOURCES}
@@ -163,6 +167,7 @@ add_library(eawr_viewer_core STATIC
     ${EAWR_UI_MODEL_SOURCES}
     ${EAWR_SCENE_SOURCES}
     ${EAWR_UNITS_SOURCES}
+    ${EAWR_BATTLE_SOURCES}
     ${EAWR_SKIRMISH_SOURCES}
     ${EAWR_PLATFORM_SOURCES}
     ${EAWR_PLATFORM_GALACTIC_SOURCES}
@@ -190,174 +195,9 @@ target_link_libraries(eawr_viewer_core PUBLIC eawr::relay)
 target_link_libraries(eawr_viewer_script PUBLIC eawr_viewer_core)
 
 add_library(eawr_viewer SHARED
-    src/register_types.cpp
-    src/viewer_host.cpp
-    src/viewer_host_ready.cpp
-    src/viewer_host_config.cpp
-    src/viewer_host_scene.cpp
-    src/viewer_host_process.cpp
-    src/viewer_host_camera.cpp
-    src/viewer_host_camera_setup.cpp
-    src/viewer_host_camera_probe.cpp
-    src/viewer_host_camera_steps.cpp
-    src/viewer_host_exercises.cpp
-    src/viewer_host_exercises_renderer.cpp
-    src/viewer_host_exercises_effects.cpp
-    src/viewer_host_report.cpp
-    src/viewer_host_report_scene.cpp
-    src/model_preview.cpp
-    src/camera_binding_config.cpp
-    src/camera_binding_tokens.cpp
-    src/camera_binding_values.cpp
-    src/camera_binding_table.cpp
-    src/camera_input.cpp
-    src/map_camera.cpp
-    src/map_mode.cpp
-    src/map_mode_ready.cpp
-    src/map_mode_ready_terrain.cpp
-    src/map_mode_ready_population.cpp
-    src/map_mode_live.cpp
-    src/map_mode_camera_probe.cpp
-    src/map_mode_particles.cpp
-    src/map_mode_hud.cpp
-    src/map_mode_report.cpp
-    src/map_mode_report_scene.cpp
-    src/map_mode_report_effects.cpp
-    src/map_mode_report_live.cpp
-    src/map_mode_scene.cpp
-    src/map_mode_placements.cpp
-    src/map_mode_units.cpp
-    src/map_mode_assets.cpp
-    src/land_look.cpp
-    src/fog_mode.cpp
-    src/space_environment.cpp
-    src/space_environment_config.cpp
-    src/space_environment_prepare.cpp
-    src/space_environment_probe.cpp
-    src/space_environment_fog.cpp
-    src/space_environment_report.cpp
-    src/space_environment_report_surfaces.cpp
-    src/space_environment_view.cpp
-    src/space_environment_surfaces.cpp
-    src/space_environment_effects.cpp
-    src/space_fog.cpp
-    src/space_fog_units.cpp
-    src/space_fog_units_compose.cpp
-    src/space_populate.cpp
-    src/space_populate_compose.cpp
-    src/space_populate_materials.cpp
-    src/space_populate_animation.cpp
-    src/space_populate_report.cpp
-    src/space_populate_assets.cpp
-    src/audio_buses.cpp
-    src/battle_audio.cpp
-    src/battle_audio_prepare.cpp
-    src/battle_audio_events.cpp
-    src/battle_audio_report.cpp
-    src/battle_input.cpp
-    src/battle_input_cards.cpp
-    src/battle_input_special.cpp
-    src/battle_input_commands.cpp
-    src/battle_input_pick.cpp
-    src/battle_input_production.cpp
-    src/battle_input_replay.cpp
-    src/battle_input_report.cpp
-    src/battle_cursor.cpp
-    src/world_ui_view.cpp
-    src/world_ui_prepare.cpp
-    src/world_ui_groups.cpp
-    src/world_ui_bars.cpp
-    src/world_ui_report.cpp
-    src/overview_fade_view.cpp
-    src/battle_effects.cpp
-    src/battle_effects_prepare.cpp
-    src/battle_effects_projectiles.cpp
-    src/battle_effects_impacts.cpp
-    src/battle_effects_report.cpp
-    src/unit_emitters.cpp
-    src/unit_emitters_prepare.cpp
-    src/unit_emitters_frame.cpp
-    src/unit_emitters_report.cpp
-    src/perf_trace.cpp
-    src/debris_props.cpp
-    src/particle_workers.cpp
-    src/live_fog_view.cpp
-    src/live_session_view.cpp
-    src/battle_scoring.cpp
-    src/live_session_death.cpp
-    src/live_session_economy.cpp
-    src/live_session_fighters.cpp
-    src/live_session_frame.cpp
-    src/live_session_config.cpp
-    src/live_session_prepare.cpp
-    src/live_session_report.cpp
-    src/effect_mode.cpp
-    src/effect_mode_probe.cpp
-    src/effect_mode_report.cpp
-    src/effect_mode_report_probe.cpp
-    src/unit_mode.cpp
-    src/font_mode.cpp
-    src/font_provision.cpp
-    src/input_routing_mode.cpp
-    src/ui_gallery_mode.cpp
-    src/ui_gallery_controls.cpp
-    src/ui_gallery_box.cpp
-    src/ui_gallery_load_game.cpp
-    src/saved_games.cpp
-    src/ui_gallery_credits.cpp
-    src/ui_gallery_report.cpp
-    src/skirmish_setup_mode.cpp
-    src/campaign_setup_screen.cpp
-    src/front_end_mode.cpp
-    ${EAWR_VIEWER_GALACTIC_SOURCES}
-    src/skirmish_prepare.cpp
-    src/lan_match.cpp
-    src/online_match.cpp
-    src/lan_match_fake.cpp
-    src/lan_broadcast_source.cpp
-    src/lan_lobby_mode.cpp
-    src/lan_lobby_screen.cpp
-    src/loading_screen.cpp
-    src/loading_planet.cpp
-    src/attract_runner.cpp
-    src/attract_camera.cpp
-    src/options_mode.cpp
-    src/options_screen.cpp
-    src/settings_store.cpp
-    src/profile_store.cpp
-    "${EAWR_ROOT}/src/presentation/godot/renderer.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/renderer_fog.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/renderer_instances.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/renderer_upload.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/renderer_uniforms.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/renderer_materials.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/renderer_mesh_upload.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/fog_adapter.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/particle_adapter.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/font_provider.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/input_routing.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/kit.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/kit_text.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/kit_frames.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/kit_buttons.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/kit_controls.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/theme_builder.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud_shell.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud_build.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud_resources.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud_report.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/battle_overlay.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/production_view.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/perf_overlay_view.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/unit_cards_view.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/minimap_view.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/ability_buttons_view.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/dialog_builder.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/credits_view.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/load_game_view.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/message_box_view.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/ui/movie_player.cpp"
+    ${EAWR_VIEWER_SOURCES}
+    ${EAWR_GODOT_SOURCES}
+    ${EAWR_GODOT_UI_SOURCES}
 )
 target_include_directories(eawr_viewer PRIVATE
     src

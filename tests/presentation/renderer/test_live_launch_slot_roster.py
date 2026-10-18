@@ -15,6 +15,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'tools'))
 from native_cpp_fixture import compile_fixture, select_toolchain
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from viewer_mode_sources import source_text  # noqa: E402
 
 
 def extract_function(source, signature):
@@ -278,10 +280,10 @@ class LiveLaunchSlotRoster(unittest.TestCase):
         toolchain = select_toolchain()
         if toolchain is None:
             self.skipTest('requires C++ compiler')
-        source = (ROOT / 'apps/viewer/src/live_session_fighters.cpp').read_text(encoding='utf-8')
+        source = source_text('apps/viewer/src/live_session_fighters.cpp')
         prepare = extract_function(source, 'void LiveSessionView::prepare_launch_slots(')
         ship_of = extract_function(source, 'std::optional<std::size_t> LiveSessionView::ship_of(')
-        rows = extract_function((ROOT / 'apps/viewer/src/live_session_report.cpp').read_text(encoding='utf-8'),
+        rows = extract_function(source_text('apps/viewer/src/live_session_report.cpp'),
                                 'std::string LiveSessionView::slotless_report_rows() const')
         with tempfile.TemporaryDirectory(prefix='eawr-launch-slots-') as temp:
             directory = Path(temp)

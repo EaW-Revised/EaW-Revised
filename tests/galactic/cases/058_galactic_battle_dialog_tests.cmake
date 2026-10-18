@@ -1,0 +1,12 @@
+eawr_add_test_case(
+    NAME galactic_battle_dialog_tests
+    SOURCES battle_dialog_tests.cpp
+    INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/apps/viewer/src"
+    LIBS eawr::campaign eawr::presentation
+    TESTS galactic_battle_dialog_contracts
+)
+
+eawr_add_python_contract(python_presentation_renderer_galactic_battle_dialog_runtime tests.presentation.renderer.test_viewer_galactic_battle_dialog_runtime)
+set_tests_properties(python_presentation_renderer_galactic_battle_dialog_runtime PROPERTIES LABELS gpu)
+eawr_add_python_contract(python_presentation_renderer_galactic_campaign_score_runtime tests.presentation.renderer.test_viewer_galactic_campaign_score_runtime)
+set_tests_properties(python_presentation_renderer_galactic_campaign_score_runtime PROPERTIES LABELS gpu)

@@ -19,6 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
 
 import test_front_end as front  # noqa: E402
+from viewer_mode_sources import source_text  # noqa: E402
 
 SRC = ROOT / "apps/viewer/src"
 RUNTIME = os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST")
@@ -69,7 +70,7 @@ class InGameMenuContracts(unittest.TestCase):
         self.assertLess(leave.index("galactic_mode_.reset();"), leave.index("memdelete(galactic_host_);"))
         self.assertLess(leave.index("memdelete(galactic_host_);"), leave.index("front_end_->return_to_main_menu()"))
         # The menu Quit records the same intentional departure as the HUD quit.
-        session = read("apps/viewer/src/live_session_frame.cpp")
+        session = source_text("apps/viewer/src/live_session_frame.cpp")
         left = session.split("bool LiveSessionView::leave() {", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("quit();", left)
         front_end = read("apps/viewer/src/front_end_mode.cpp")

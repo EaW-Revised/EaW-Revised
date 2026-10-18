@@ -106,7 +106,7 @@ into implementation gaps below. There are **48 original audit rules: 6 same, 1 d
 
 Code locators used in the last column:
 
-- **types**: [`UnitType`, `UnitKind`](../../../include/eawr/units/unit_tables.hpp),
+- **types**: [`UnitType`](../../../include/eawr/units/unit_tables.hpp), [`UnitKind`](../../../include/eawr/units/unit_tables_combat.hpp),
   [`load_unit_tables`](../../../src/units/unit_tables.cpp); no company/rider/hero metadata or special-handler records.
 - **ability loader**: [`ability_table`](../../../src/units/unit_abilities.cpp); unknown kinds skipped, unsupported
   modifiers on recognised kinds rejected. **timers**: [`activate_ability`, `expire_abilities`, `ability_multiplier`](../../../src/sim/tactical/abilities.cpp).

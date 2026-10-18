@@ -36,7 +36,9 @@ enum class SetupText : std::uint8_t {
     game_type_space,
     game_type_land_control,
     open_player,
-    ai_player,
+    ai_player,      // the Normal (medium) AI row
+    ai_easy_player,
+    ai_hard_player,
     host_player,
     team_number,
     too_few_players,

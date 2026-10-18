@@ -1,4 +1,5 @@
 #include "eawr/campaign/space_rules.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/campaign/space_briefing.hpp"
 
 #include <algorithm>
@@ -16,7 +17,7 @@ template<class T> core::Result<T> fail(std::string message) {
 }
 const units::UnitType* type_of(const units::UnitTables& tables, tactical::TypeId id) {
     const auto found = std::find_if(tables.units.begin(), tables.units.end(),
-        [id](const auto& type) { return skirmish::type_id(type.id) == id; });
+        [id](const auto& type) { return battle::type_id(type.id) == id; });
     return found == tables.units.end() ? nullptr : &*found;
 }
 }
@@ -24,16 +25,16 @@ core::Result<void> bind_space_rules(const tactical::TacticalSetup& setup,
     const skirmish::StartInputs& inputs, tactical::TacticalContent& content) {
     if (!setup.campaign || !inputs.tables) return fail<void>("missing campaign binding or unit tables");
     if (auto valid = tactical::validate_setup(setup); !valid) return valid;
-    skirmish::SkirmishStart start;
+    battle::BattleStart start;
     start.setup = setup;
     start.match.free_starting_units = false;
     auto economy = skirmish::economy_rules(start, inputs, *inputs.tables, true);
     if (!economy) return core::Result<void>::failure(economy.error());
     for (const auto& faction : inputs.factions) if (faction.playable)
-        economy.value().campaign_playable_factions.push_back(skirmish::faction_id(faction.name));
+        economy.value().campaign_playable_factions.push_back(battle::faction_id(faction.name));
     std::sort(economy.value().campaign_playable_factions.begin(), economy.value().campaign_playable_factions.end());
     for (const auto& type : inputs.tables->units)
-        economy.value().campaign_population.emplace_back(skirmish::type_id(type.id),
+        economy.value().campaign_population.emplace_back(battle::type_id(type.id),
             units::population_in_space(type.production.population_value, type.production.space_override_population_value));
     std::sort(economy.value().campaign_population.begin(), economy.value().campaign_population.end());
     for (auto& menu : economy.value().menus) if (!menu.station_producer) for (auto& option : menu.options) {
@@ -62,15 +63,15 @@ core::Result<void> bind_space_rules(const tactical::TacticalSetup& setup,
     // The existing notification ledger stores source identities and qualified player effects.
     for (const auto& type : inputs.tables->units) {
         std::uint32_t slot{};
-        for (const auto& profile : economy.value().command_bonuses) if (profile.type == skirmish::type_id(type.id)) slot = std::max(slot, profile.slot + 1);
+        for (const auto& profile : economy.value().command_bonuses) if (profile.type == battle::type_id(type.id)) slot = std::max(slot, profile.slot + 1);
         for (const auto& bonus : type.production.battlefield_bonuses) {
             tactical::CommandBonusProfile profile;
-            profile.type = skirmish::type_id(type.id); profile.slot = slot++;
+            profile.type = battle::type_id(type.id); profile.slot = slot++;
             profile.battlefield = true; profile.all_allies = bonus.all_allies; profile.apply_to_self = true;
             for (const auto& player : setup.players) {
                 bool enabled = bonus.enabled;
                 for (const auto& lock : inputs.tables->campaign_ability_locks)
-                    if (lock.player == player.player_id && skirmish::type_id(lock.type) == profile.type && lock.name == bonus.name) enabled = lock.enabled;
+                    if (lock.player == player.player_id && battle::type_id(lock.type) == profile.type && lock.name == bonus.name) enabled = lock.enabled;
                 if (enabled) profile.enabled_players.push_back(player.player_id);
             }
             if (profile.enabled_players.empty()) continue;
@@ -129,7 +130,7 @@ core::Result<void> apply_space_rules(ConflictEntry& entry, const skirmish::Start
             [&](const auto& p) { return p.player_id == input.player; });
         if (declared == setup.players.end()) return fail<void>("account is not a scene player");
         const auto faction = std::find_if(content.factions.begin(), content.factions.end(),
-            [&](const auto& f) { return skirmish::faction_id(f.name) == declared->faction_id; });
+            [&](const auto& f) { return battle::faction_id(f.name) == declared->faction_id; });
         if (faction == content.factions.end() || (participant && !faction->space_unit_cap))
             return fail<void>("Space_Tactical_Unit_Cap is required");
         const auto owned = Fixed::from_integer(std::max(1U, input.owned_planets));
@@ -140,6 +141,8 @@ core::Result<void> apply_space_rules(ConflictEntry& entry, const skirmish::Start
             input.ai, input.reinforcement_yaw, input.tech, input.max_tech};
         player.credit_cap = !participant && input.strategic_credit_cap ? *input.strategic_credit_cap : credit_cap.value();
         player.credit_multiplier = tables.ai_credit_multiplier.value_or(Fixed::from_raw(Fixed::scale));
+        player.ai_build_time_multiplier = input.ai
+            ? tables.pad_ai_build_multiplier.value_or(Fixed::from_raw(Fixed::scale)) : Fixed::from_raw(Fixed::scale);
         // WGA-196..201: this campaign space child does not enter the land
         // goal lifecycle. Retain ordinary player cash; no category switch.
         binding.players.push_back(player);

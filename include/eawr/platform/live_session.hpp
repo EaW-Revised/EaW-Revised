@@ -204,6 +204,8 @@ struct LiveStepContext {
     // Simulation-owner-only: fresh local content/scripts, no replay presentation events.
     std::function<core::Result<std::shared_ptr<LiveStepContext>>()> rebuild{};
     std::function<core::Result<void>()> activate{};
+    // World hash of the completed tick without the script/AI part; empty = state_hash() is already cheap.
+    std::function<std::string()> world_hash{};
 };
 using LiveStepDriver = std::function<core::Result<bool>(
     LiveStepContext&, std::span<const sim::tactical::PlayerCommand>, std::uint64_t now_ms)>;

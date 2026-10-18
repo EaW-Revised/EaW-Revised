@@ -171,8 +171,8 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     }
     if (options_.lan && options_.lan_quit_tick) {
         const auto now = std::chrono::steady_clock::now();
-        if (!lan_progress_at_ || now - *lan_progress_at_ >= std::chrono::seconds(5)) {
-            lan_progress_at_ = now;
+        if (!lan_timing_.progress_at || now - *lan_timing_.progress_at >= std::chrono::seconds(5)) {
+            lan_timing_.progress_at = now;
             godot::UtilityFunctions::print("EAWR LAN frame peer=", player_, " frames=", frames_,
                 " tick=", session_->completed_tick(), " phase=", static_cast<int>(phase_),
                 " paused=", session_->paused(), " lan=", static_cast<int>(options_.lan->view().phase));
@@ -975,6 +975,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         pose.position = beacon.position;
         live.push_back(std::move(pose));
     }
+    record_draw_digest(live, clip_poses, latest->completed_tick());
     if (!population.pose_live(live, pose_workers_)) return fail(population.failure());
     pose_timer.finish();
     FrameTimer opacity_timer(trace_frames_ ? &opacity_ms_ : nullptr);
@@ -1175,8 +1176,8 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     if (options_.lan && options_.lan_quit_tick) {
         if (*options_.lan_quit_tick && session_->completed_tick() >= *options_.lan_quit_tick && phase_ == Phase::running) quit();
         if (options_.lan->view().phase == LanPhase::ended) {
-            if (!lan_end_frame_) lan_end_frame_ = frames_;
-            if (frames_ >= *lan_end_frame_ + 30) quit();
+            if (!lan_timing_.end_frame) lan_timing_.end_frame = frames_;
+            if (frames_ >= *lan_timing_.end_frame + 30) quit();
         }
     }
     update.quit = quit_;

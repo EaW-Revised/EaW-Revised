@@ -191,14 +191,16 @@
         "net_mesh_tests",
         "net_port_mapping_tests",
         "net_reconnect_tests",
-        "net_relay_server_tests", "net_relay_room_tests", "net_mesh_policy_tests", "net_mesh_incident_tests", "net_mesh_session_tests", "net_mesh_session_workers_tests", "net_relay_cloudflare_tests", "net_relay_disabled_tests", "net_online_lobby_source_tests",
+        "net_relay_server_tests", "net_relay_room_tests", "net_mesh_policy_tests", "net_mesh_incident_tests", "net_mesh_cascade_tests", "net_mesh_session_tests", "net_mesh_session_workers_tests", "net_relay_cloudflare_tests", "net_relay_disabled_tests", "net_online_lobby_source_tests",
         "net_viewer_online_tests", "net_lan_credentials_tests", "net_lobby_session_tests",
         "net_gns_setup_tests",
         "net_gns_lockstep_tests",
         "net_gns_desync_tests",
+        "tactical_live_session_tests",
         "eawr_relay_server",
         "eawr_online_test",
-        "online_test_unit_tests"
+        "online_test_unit_tests",
+        "ui_net_perf_tests"
       ],
       "jobs": 4
     },
@@ -226,7 +228,7 @@
         "net_mesh_tests",
         "net_port_mapping_tests",
         "net_reconnect_tests",
-        "net_relay_server_tests", "net_relay_room_tests", "net_mesh_policy_tests", "net_mesh_incident_tests", "net_mesh_session_tests", "net_mesh_session_workers_tests", "net_relay_cloudflare_tests", "net_relay_disabled_tests", "net_online_lobby_source_tests",
+        "net_relay_server_tests", "net_relay_room_tests", "net_mesh_policy_tests", "net_mesh_incident_tests", "net_mesh_cascade_tests", "net_mesh_session_tests", "net_mesh_session_workers_tests", "net_relay_cloudflare_tests", "net_relay_disabled_tests", "net_online_lobby_source_tests",
         "net_viewer_online_tests", "net_lan_credentials_tests", "net_lobby_session_tests",
         "net_gns_setup_tests",
         "net_gns_lockstep_tests",

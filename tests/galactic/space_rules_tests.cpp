@@ -356,6 +356,100 @@ void proof() {
     expect(tactical::change_credits(balance, setup.campaign->players[0], whole(10)) && balance.credits == whole(1000),
         "positive changes obey galactic credit cap");
 }
+void campaign_pad_difficulty() {
+    for (const bool ai : {false, true}) {
+        auto tables = synthetic_tables();
+        for (const auto& [tag, value] : {std::pair{"Tactical_Build_Time_Multiplier", 1},
+            {"Space_Elevated_Vulnerability_Factor", -3}, {"Space_Elevated_Vulnerability_Duration", 5},
+            {"Space_Reinforcement_Collision_Check_Distance", 10}, {"Credit_Cap_Per_Planet", 1000}, {"MP_Default_Credits", 1000}})
+            tables.constants.scalars.push_back({tag, whole(value), {}});
+        tables.ai_credit_multiplier = whole(1);
+        // A human also accepts selected-table metadata that truncates to zero.
+        tables.pad_ai_build_multiplier = ai ? whole(2) : Fixed::from_raw(Fixed::scale / 4);
+        for (auto& type : tables.units) {
+            type.production.population_value = 1;
+            if (type.id == "Pad") type.production.buildable_campaign = {{"Empire", {"PadUC"}}};
+        }
+        units::UnitType child;
+        child.id = "PadUC"; child.kind = units::UnitKind::station; child.hull = whole(100);
+        child.under_construction = true; child.constructed_type = "BuiltPad";
+        child.production.build_time_seconds = whole(2); child.production.build_cost_campaign = whole(100);
+        tables.units.push_back(child);
+        auto finished = child; finished.id = "BuiltPad"; finished.under_construction = false;
+        finished.constructed_type.clear(); finished.production = {};
+        tables.units.push_back(finished);
+        auto inputs = synthetic_inputs(tables);
+        inputs.factions[0].space_unit_cap = 10; inputs.factions[1].space_unit_cap = 10;
+        campaign::ConflictRecord conflict; conflict.id = 90; conflict.planet = 2;
+        conflict.invader = 1; conflict.defender = 2; conflict.map_identity = inputs.map;
+        conflict.station = 45; conflict.station_type = skirmish::type_id("Station");
+        conflict.forces = {{7, skirmish::type_id("Ship"), 1}, {21, skirmish::type_id("Ship"), 2},
+            {45, conflict.station_type, 2}, {79, skirmish::type_id("ReserveShip"), 1, 0, campaign::ForceRole::reinforcement}};
+        auto built = campaign::build_conflict_entry(conflict, fixture_for(inputs), inputs,
+            std::vector<campaign::ForcePlacement>{{7, 1}, {21, 2}, {45, 3}}, 100, 17);
+        expect(static_cast<bool>(built), "difficulty campaign entry builds");
+        if (!built) { std::cerr << built.error().message << '\n'; return; }
+        auto& entry = built.value();
+        const auto pad = std::find_if(entry.conflict.tactical.units.begin(), entry.conflict.tactical.units.end(),
+            [](const auto& unit) { return unit.type_id == skirmish::type_id("Pad"); });
+        expect(pad != entry.conflict.tactical.units.end(), "difficulty campaign has a pad");
+        if (pad == entry.conflict.tactical.units.end()) return;
+        pad->owner = 2;
+        const auto pad_id = pad->entity_id;
+        campaign::SpaceRuleInputs rules;
+        rules.players = {{1, whole(500), 0, 5, 1, {}, false, {}}, {2, whole(500), 0, 5, 1, {}, ai, {}}};
+        if (ai) rules.reserve_order = {79}; // cover both campaign payload shapes
+        const auto applied = campaign::apply_space_rules(entry, inputs, rules);
+        expect(static_cast<bool>(applied), "difficulty campaign rules bind");
+        if (!applied) { std::cerr << applied.error().message << '\n'; return; }
+        const auto& setup = entry.conflict.tactical;
+        const auto multiplier = ai ? whole(2) : whole(1);
+        expect(setup.campaign->players[1].ai_build_time_multiplier == multiplier
+            && entry.content.economy.players[1].ai_build_time_multiplier == multiplier,
+            "campaign AI gets the table build scale and humans retain one");
+        const auto deadline = ai ? 120U : 60U;
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            platform::ThreadWorkerAdapter executor(workers);
+            auto live = tactical::TacticalSession::create(setup, entry.content).value();
+            expect(static_cast<bool>(live.submit({{0, 2, 0}, {pad_id}, tactical::PadBuildPayload{skirmish::type_id("PadUC")}})),
+                "campaign difficulty pad request submits");
+            std::vector<std::string> hashes{live.step(executor).value().state_hash.get()};
+            const auto building = live.pads().at(pad_id).under_construction;
+            expect(building != 0 && live.construction().at(building).finish_frame == deadline,
+                "campaign AI pad takes scaled seconds while human pad takes authored seconds");
+            const auto encoded = tactical::write_replay(live.record()).value();
+            const auto replay = tactical::parse_replay(encoded).value();
+            expect(replay.setup == setup && replay.setup.campaign->players[1].ai_build_time_multiplier == multiplier,
+                "campaign replay retains the account build multiplier");
+            const checkpoint::TacticalSessionFactory factory = [&](const tactical::TacticalReplay& recorded) {
+                auto content = entry.content;
+                const auto rebound = campaign::bind_space_rules(recorded.setup, inputs, content);
+                if (!rebound) return core::Result<tactical::TacticalSession>::failure(rebound.error());
+                return tactical::TacticalSession::from_replay(recorded, content);
+            };
+            auto replayed = factory(replay).value();
+            expect(replayed.step(executor).value().state_hash.get() == hashes.front(), "campaign difficulty replay starts identically");
+            const auto identity = checkpoint::tactical_identities(setup.content_identity);
+            const auto saved = checkpoint::save_tactical_checkpoint(live, {}, checkpoint::default_seats(setup), identity).value();
+            auto restored = checkpoint::load_tactical_checkpoint(saved, identity, factory, executor).value();
+            for (std::uint32_t frame = 1; frame <= deadline; ++frame) {
+                const auto hash = live.step(executor).value().state_hash.get(); hashes.push_back(hash);
+                expect(replayed.step(executor).value().state_hash.get() == hash
+                    && restored.session.step(executor).value().state_hash.get() == hash,
+                    "campaign difficulty replay and checkpoint preserve construction timing");
+            }
+            expect(live.pads().at(pad_id).constructed != 0, "campaign difficulty construction completes at its deadline");
+            if (reference.empty()) reference = hashes; else expect(reference == hashes, "campaign difficulty agrees on 1/2/4/8 workers");
+            tactical::BuildOption option;
+            option.available = true; option.type = skirmish::type_id("Ship"); option.build_frames = option.ai_build_frames = 30;
+            tactical::PlayerEconomy queue;
+            expect(tactical::queue_build(queue, entry.content.economy.players[1], entry.content.economy, option, 45, 0)
+                    == tactical::RejectReason::none && queue.queues[0].front().frames == (ai ? 60U : 30U),
+                "campaign AI queues use the recorded scale and human queues retain authored frames");
+        }
+    }
+}
 void carrier_codec() {
     tactical::TacticalReplay replay;
     replay.setup.players = {{1, 1, 1, tactical::player_flag_commandable}};
@@ -516,7 +610,7 @@ void installed() {
 }
 }
 int main(int argc, char**) {
-    try { if (argc > 1) installed(); else { proof(); carrier_codec(); reserve_admission(); presentation_gates(); } }
+    try { if (argc > 1) installed(); else { proof(); campaign_pad_difficulty(); carrier_codec(); reserve_admission(); presentation_gates(); } }
     catch (const std::exception& error) { expect(false, error.what()); }
     return galactic_test::failures == 0 ? 0 : 1;
 }

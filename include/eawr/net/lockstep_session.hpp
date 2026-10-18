@@ -105,6 +105,10 @@ struct DepartureEvent {
 struct CompletedTick {
     std::uint64_t completed_tick{};
     std::string state_sha256;
+    // The adapter skipped its expensive (script) part. The session asks state_hash() for the full
+    // value on exchange ticks and the end tick; DesyncMonitor::finish() replaces the last row with
+    // the full value. Other rows stay world-only and still enter their window digest.
+    bool world_only{};
 };
 
 // Mode providers implement admission, canonical routing, stepping and hashing.

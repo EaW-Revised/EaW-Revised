@@ -40,6 +40,12 @@ namespace eawr::presentation::godot_backend {
 
 using namespace galactic_detail;
 
+namespace {
+// Project keyboard-pan binding; retail pan speed remains unverified.
+constexpr float keyboard_pan_fraction = 0.8F;
+constexpr double keyboard_pan_max_delta = 0.1;
+}
+
 bool GalacticMode::State::build_view() {
     if (options.native_ai_invalid) {
         failure = "--eawr-galactic-ai expects on or off";
@@ -1341,9 +1347,9 @@ std::optional<int> GalacticMode::process(const double delta) {
             if (key == KEY_S || key == KEY_DOWN) forward -= 1.0F;
         }
         if (right != 0.0F || forward != 0.0F) {
-            // GMC_InitialPullbackDistance supplies the scale; 0.8 is an unverified project keyboard-pan binding,
-            // with no walk rule or GameConstants source for that multiplier.
-            const float step = state.camera_constants.initial_pullback * 0.8F * static_cast<float>(std::clamp(delta, 0.0, 0.1));
+            // GMC_InitialPullbackDistance supplies the scale for the project keyboard-pan binding.
+            const float step = state.camera_constants.initial_pullback * keyboard_pan_fraction
+                * static_cast<float>(std::clamp(delta, 0.0, keyboard_pan_max_delta));
             state.seat_flight().pan(*state.galaxy, right * step, -forward * step);
         }
         state.apply_camera();

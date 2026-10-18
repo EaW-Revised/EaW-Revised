@@ -82,6 +82,7 @@ struct GalacticTick {
         std::uint64_t production_entries{}; // revalidation visits, at most each active entry once
         std::uint64_t discovery_records{}, discovery_targets{}; // deterministic observer work budget
         std::uint64_t observer_projection_records{}; // zero on clean snapshot publications
+        std::uint64_t production_offer_rebuilds{}; // zero while the offer rows' inputs are unchanged
     } work;
 };
 

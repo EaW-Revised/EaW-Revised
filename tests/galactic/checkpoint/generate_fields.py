@@ -7,6 +7,11 @@ struct requires either serialization or a documented derived-state exclusion.
 import argparse
 from pathlib import Path
 import re
+import sys
+
+# The shared source-reader map: a logical path reads all of its physical members.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "presentation/renderer"))
+from viewer_mode_sources import SOURCE_BUNDLES, source_text  # noqa: E402
 
 EXCLUDED = {
     "eawr::sim::tactical::session_detail::LiveUnit": {
@@ -28,16 +33,17 @@ OWNER_EXCLUSIONS = {
         "immutable setup encoded by the recording codec": "setup",
         "registry objects encoded by the world object sections": "registry planets routes fleets",
         "runtime callbacks rebound by the caller": "ability_consumption_handler conflict_tail control_handler corruption_completion_handler corruption_mission_handler corruption_result_handler credit_notification_handler hasher movement_access_provider native_actor_changes_handler native_movement_listener native_production_handler native_production_outcome_handler native_replayers planet_ruins_story_handler technology_notice_handler timeline_service",
-        "derived service inputs and indexes rebuilt on load": "ability_input_generation ability_work conflict_requests_enabled conflict_tail_outer_timer control_stealth_generation control_stealth_inputs economy_input_generation gathered_income_inputs graph income_control_generation income_edges income_forecast_cache income_gather_generation income_input_generation income_modifier_generation income_modifiers income_source_candidates movement_access_generation native_invasion_transport_count native_invasions_enabled observer_input_generation observer_neighbours observer_projection observer_projection_generation published_ability_results published_actor_records published_black_market_menus published_corruption_menu published_economy_input_generation published_hero_action_menus published_production_originals published_sale_types snapshot technology_price_expiry victory_tail_deferred black_market_publication_key",
-        "derived hash caches and host diagnostics": "cached_hash cached_hash_present digests dirty discovery_records discovery_targets income_forecast_rebuilds income_modifier_rebuilds income_sources_gathered observer_projection_records population_objects population_producers production_entries production_producers verify_cached_hash",
+        "derived service inputs and indexes rebuilt on load": "ability_input_generation ability_work conflict_requests_enabled conflict_tail_outer_timer control_stealth_generation control_stealth_inputs economy_input_generation gathered_income_inputs graph income_control_generation income_edges income_forecast_cache income_gather_generation income_input_generation income_modifier_generation income_modifiers income_source_candidates movement_access_generation native_invasion_transport_count native_invasions_enabled observer_input_generation observer_neighbours observer_projection observer_projection_generation published_ability_results published_actor_records published_black_market_menus published_corruption_menu published_economy_input_generation published_hero_action_menus offer_generation published_offer_inputs published_production published_production_generation published_production_offers published_production_originals published_sale_types snapshot technology_price_expiry victory_tail_deferred black_market_publication_key production_generation production_offer_key",
+        "derived hash caches and host diagnostics": "cached_hash cached_hash_present digests dirty discovery_records discovery_targets income_forecast_rebuilds income_modifier_rebuilds income_sources_gathered observer_projection_records population_objects population_producers production_entries production_offer_rebuilds production_producers verify_cached_hash",
         "immutable native setup schemas supplied with the session setup": "native_fiscal_schema native_income_schema native_population_schema",
         "native AI barrier publication state rebuilt after load": "corruption_publication_key native_barrier_active native_commit_publication native_commit_publications published_corruption_transitions",
         "runtime callbacks rebound by the caller (feedback)": "feedback_notice_handler",
         "unhealthy or in-flight state cannot reach a save barrier": "failed native_applying",
+        "applied native journal history is carried by the recording section; the owner keeps only its length (#4058)": "native_effects",
     },
     "eawr::campaign::GameSession::Impl": {
         "serialized separately by world, script, child and return owner codecs": "galaxy scripts child staged return_state live_hero_returns native_ai",
-        "runtime callbacks rebound by the caller": "applier auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech configure conflict_gate conflict_service content_resolver control_observer corruption_mission_service decorator entry_resolver hasher hero_placement hero_resolver hero_structures native_conflict_service outcome_services pending_alert script_factory story_handler vote_progress",
+        "runtime callbacks rebound by the caller": "auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech conflict_gate control_observer corruption_mission_service hasher hero_placement hero_resolver hero_structures layers outcome_services pending_alert story_handler vote_progress",
         "immutable content lookup tables rebound on load": "story_factions story_planets",
         "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index story_notices",
         "host-side diagnostic oracle trace session id": "native_oracle_session",
@@ -69,12 +75,19 @@ CUSTOM_CODECS = {
     "std::monostate",
 }
 
+# State owners can inherit private subsystem stores. Keep their lexical scope
+# and resolve inherited nested types just as qualified C++ lookup does.
+DECLARATION = re.compile(
+    r"\b(struct|class)\s+(\w+(?:::\w+)*)\s*(?:final\s*)?"
+    r"(?:\s*:\s*([^{};]+))?\s*\{")
+
 
 def scopes(source, header):
     """Track lexical namespace/class scopes, including out-of-class definitions."""
     openings = {}
     for match in re.finditer(
-        r"\b(?:namespace|struct|class)\s+(\w+(?:::\w+)*)\s*(?:final\s*)?\{", source
+        r"\b(?:namespace|struct|class)\s+(\w+(?:::\w+)*)\s*(?:final\s*)?"
+        r"(?:\s*:\s*[^{};]+)?\s*\{", source
     ):
         openings[match.end() - 1] = match[1]
     # Anonymous helper declarations in another header must not be mistaken
@@ -115,6 +128,10 @@ def resolve(name, scope, types, aliases, seen=None):
                     expanded = "::".join([resolved, *components[length:]])
                     if expanded in types:
                         return expanded
+                    if expanded in aliases and expanded not in seen:
+                        inherited = resolve("::" + expanded, "", types, aliases, seen | {alias})
+                        if inherited:
+                            return inherited
         if not prefixes:
             return None
         prefixes.pop()
@@ -128,10 +145,11 @@ def inventory(overrides):
     files += sorted((root / "src/sim").rglob("*.hpp"))
     for tree in ("include/eawr/campaign", "src/campaign", "include/eawr/script/authoritative", "include/eawr/script/numeric"):
         files += sorted((root / tree).rglob("*.hpp"))
-    files += [root / path for path in OWNERS]
+    files += [root / member for path in OWNERS for member in SOURCE_BUNDLES.get(path, (path,))]
     files = sorted(set(files) | {root / path for path in overrides
         if path.endswith(".hpp") and path.startswith(("include/eawr/", "src/"))})
     aliases = {}
+    inheritance = {}
     for file in files:
         path = file.relative_to(root).as_posix()
         source = overrides[path] if path in overrides else file.read_text(encoding="utf-8")
@@ -141,8 +159,13 @@ def inventory(overrides):
         for match in re.finditer(r"\busing\s+(\w+)\s*=\s*(\w+(?:::\w+)*)\s*;", source):
             scope = lexical[match.start()]
             aliases["::".join(filter(None, (scope, match[1])))] = (match[2], scope)
-        for match in re.finditer(r"\b(struct|class)\s+(\w+(?:::\w+)*)\s*(?:final\s*)?\{", source):
-            kind, local_name = match.groups()
+        for match in DECLARATION.finditer(source):
+            kind, local_name, bases = match.groups()
+            scope = lexical[match.start()]
+            name = "::".join(filter(None, (scope, local_name)))
+            if bases:
+                inheritance[name] = (scope, [re.sub(r"\b(public|protected|private|virtual)\b", "", base).strip()
+                    for base in bases.split(",")])
             if kind == "class" and local_name not in ("GameSession::Impl", "GalacticSession::Impl"):
                 name = "::".join(filter(None, (lexical[match.start()], local_name)))
                 types.setdefault(name, (None, None))
@@ -203,9 +226,28 @@ def inventory(overrides):
             types[name] = (fields, member_types)
         # Classes also establish lookup scopes and can be alias targets, although
         # only struct field lists are audited here.
-        for match in re.finditer(r"\bclass\s+(\w+(?:::\w+)*)\s*(?:final\s*)?\{", source):
-            name = "::".join(filter(None, (lexical[match.start()], match[1])))
+        for match in DECLARATION.finditer(source):
+            if match[1] != "class":
+                continue
+            name = "::".join(filter(None, (lexical[match.start()], match[2])))
             types.setdefault(name, (None, None))
+    # Files are discovered lexically, so all declarations must be collected
+    # before exporting base-class nested types into the derived lookup scope.
+    for _ in range(len(inheritance)):
+        additions = {}
+        for owner, (scope, bases) in inheritance.items():
+            for base in bases:
+                resolved = resolve(base, scope, types, aliases)
+                if not resolved:
+                    continue
+                for nested in types.keys() | aliases.keys():
+                    if nested.startswith(resolved + "::"):
+                        inherited = owner + nested[len(resolved):]
+                        if inherited not in types and inherited not in aliases:
+                            additions[inherited] = (nested, "")
+        if not additions:
+            break
+        aliases.update(additions)
     return root, types, aliases
 
 
@@ -227,7 +269,7 @@ def check(overrides=None):
             # both read/write branches of its existing payload codec.
             registered[name] = list(dict.fromkeys(fields)) if name == "eawr::sim::galactic::GameCommand" else fields
     for path, (function, name) in OWNERS.items():
-        source = overrides.get(path, (root / path).read_text(encoding="utf-8"))
+        source = overrides.get(path, source_text(path))
         match = re.search(r"void " + function + r"\(A& a, T& v\) \{(.*?)\n\}", source, re.S)
         if not match:
             raise ValueError(f"Owner field list {function} not found in {path}")

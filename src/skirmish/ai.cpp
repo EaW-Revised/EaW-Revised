@@ -191,13 +191,13 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         const bool named = !player.ai_player_type.empty();
         entry.ai = (player.lobby && !player.human) || named;
         entry.human = player.lobby && player.human;
+        entry.difficulty = entry.ai && player.lobby ? player.difficulty : sim::tactical::AiLevel::normal;
         for (const auto& faction : inputs.factions) {
             if (upper(faction.name) != entry.faction) continue;
             entry.neutral = faction.neutral;
-            // WSS-35, AI-11: every lobby AI uses its faction's authored Basic_AI.
-            if (entry.ai) entry.player_type = named ? player.ai_player_type : faction.basic_ai;
             break;
         }
+        entry.player_type = ai_player_type(inputs, player);
         setup.players.push_back(std::move(entry));
     }
     // PG-01: the declared extents, centred on the origin (Coruscant: 13000 x 13000 from -6500).
@@ -208,6 +208,71 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         setup.bounds = script::foc::AiBounds{-(width / half), height / half, width / half, -(height / half)};
     }
     return setup;
+}
+
+std::string ai_player_type(const StartInputs& inputs, const StartPlayer& player) {
+    const bool named = !player.ai_player_type.empty();
+    if (!((player.lobby && !player.human) || named)) return {};
+    // WSS-35, AI-11: every lobby AI uses its faction's authored Basic_AI; a demo map's named type applies
+    // only when the player's faction is known, as before the difficulty plumbing.
+    const std::string faction_name = upper(player.faction);
+    for (const auto& faction : inputs.factions)
+        if (upper(faction.name) == faction_name) return named ? player.ai_player_type : faction.basic_ai;
+    return {};
+}
+
+std::shared_ptr<const script::foc::AiDifficultyTable> load_difficulty_table(const vfs::Vfs& files) {
+    std::map<std::string, std::string, std::less<>> xml;
+    std::vector<std::string> paths;
+    constexpr std::string_view prefix = "data/xml/ai/players/";
+    auto entries = files.enumerate(prefix, ".xml");
+    if (!entries) return nullptr;
+    for (const auto& entry : entries.value())
+        if (entry.canonical_path.find('/', prefix.size()) == std::string::npos) paths.push_back(entry.canonical_path);
+    paths.emplace_back("data/xml/difficultyadjustments.xml");
+    for (const std::string& path : paths) {
+        auto bytes = files.open(path);
+        if (!bytes) {
+            if (path == "data/xml/difficultyadjustments.xml") return nullptr;
+            continue;
+        }
+        std::string text(bytes.value().size(), '\0');
+        std::transform(bytes.value().begin(), bytes.value().end(), text.begin(),
+            [](std::byte value) { return static_cast<char>(value); });
+        xml.emplace(path, std::move(text));
+    }
+    auto table = script::foc::AiDifficultyTable::load(xml);
+    if (!table) return nullptr;
+    return std::make_shared<const script::foc::AiDifficultyTable>(std::move(table).value());
+}
+
+script::foc::AiDifficultyAdjustment player_difficulty(const StartInputs& inputs, const StartPlayer& player) {
+    if (!inputs.difficulty || !player.lobby) return {};
+    const std::string type = ai_player_type(inputs, player);
+    if (type.empty()) return {};
+    return inputs.difficulty->resolve(type, player.difficulty);
+}
+
+core::Result<void> bind_difficulty(SessionContent& content, const SkirmishStart& start, const StartInputs& inputs) {
+    std::vector<sim::tactical::DifficultyScale> scales;
+    for (const StartPlayer& player : start.players) {
+        if (!player.lobby || player.human || player.difficulty == sim::tactical::AiLevel::normal) continue;
+        const script::foc::AiDifficultyAdjustment adjustment = player_difficulty(inputs, player);
+        auto health = script::numeric::to_fixed(adjustment.health);
+        auto shield = script::numeric::to_fixed(adjustment.shield);
+        auto damage = script::numeric::to_fixed(adjustment.damage);
+        if (!health) return core::Result<void>::failure(health.error());
+        if (!shield) return core::Result<void>::failure(shield.error());
+        if (!damage) return core::Result<void>::failure(damage.error());
+        const sim::tactical::DifficultyScale neutral{};
+        sim::tactical::DifficultyScale scale{player.player.player_id, health.value(), shield.value(), damage.value()};
+        if (scale.health == neutral.health && scale.shield == neutral.shield && scale.damage == neutral.damage) continue;
+        scales.push_back(scale);
+    }
+    std::sort(scales.begin(), scales.end(),
+        [](const auto& left, const auto& right) { return left.player < right.player; });
+    content.durability.difficulty = std::move(scales);
+    return core::Result<void>::success();
 }
 
 core::Result<void> enable_goal_system(const vfs::Vfs& files, script::foc::AiSetup& setup) {

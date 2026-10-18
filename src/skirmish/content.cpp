@@ -10,14 +10,15 @@
 namespace eawr::skirmish {
 
 core::Result<SessionContent> session_content(
-    const units::UnitTables& tables, const std::span<const sim::tactical::PlayerId> humans) {
+    const units::UnitTables& tables, const std::span<const sim::tactical::PlayerId> humans,
+    const units::SpawnPolicy& spawn_policy) {
     using ContentResult = core::Result<SessionContent>;
     SessionContent content;
     content.sensors = sensor_table(tables);
     auto durability = units::durability_table(tables);
     if (!durability) return ContentResult::failure(durability.error());
     content.durability = std::move(durability).value();
-    auto motion = units::motion_table(tables);
+    auto motion = units::motion_table(tables, spawn_policy);
     if (!motion) return ContentResult::failure(motion.error());
     content.motion = std::move(motion).value();
     auto combat = units::combat_table(tables);

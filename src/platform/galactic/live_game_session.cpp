@@ -194,9 +194,6 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::create
     auto configuration = std::make_shared<CampaignServiceConfiguration>();
     const auto space = provider.value();
     configuration->restore.content = [space](const auto& conflict) { return space->content(conflict); };
-    auto ai = campaign::space_entry_script_services(space);
-    configuration->restore.scripts = std::move(ai.scripts);
-    configuration->restore.configure_child = std::move(ai.bind);
     // The restore adapter retains the immutable mounted VFS independently of presentation.
     // All other provider inputs are copied once; every restore gets fresh deterministic adapters.
     configuration->restore.configure_session = [filesystem = std::move(filesystem_owner), catalog = std::make_shared<data::Catalog>(catalog),
@@ -892,7 +889,7 @@ public:
                     if (!in_battle) {
                         for (const auto& entry : options_.entries) {
                             if (entry.tick != tick) continue;
-                            if (auto staged = session_->stage_battle(entry.conflict, entry.content); !staged) {
+                            if (auto staged = session_->stage_battle(entry.conflict, entry.content, entry.script_requirement); !staged) {
                                 const std::lock_guard lock(mutex_);
                                 failure_ = staged.error();
                                 return;
@@ -1504,6 +1501,9 @@ core::Result<std::unique_ptr<PreparedLiveRestore>> LiveGameSession::prepare_load
         if (!options.configure_native_ai && services)
             options.configure_native_ai = services->configure_native_ai;
         if (options.content == nullptr && !entries.empty()) {
+            if (std::all_of(entries.begin(), entries.end(), [](const auto& entry) {
+                return entry.script_requirement == campaign::ScriptRequirement::none;
+            })) options.script_requirement = campaign::ScriptRequirement::none;
             options.content = [entries](const campaign::ConflictRecord& conflict) {
                 const auto at = std::find_if(entries.begin(), entries.end(), [&](const auto& e) { return e.conflict.id == conflict.id; });
                 if (at == entries.end()) return core::Result<sim::tactical::TacticalContent>::failure(

@@ -30,6 +30,9 @@ public:
         cut(closed_end, open_end, 0, 100'000'000);
         silent_[open_end][closed_end] = true;
     }
+    // Both directions of the pair swallow every frame while both ends still read it open and their sends succeed: the relay
+    // silence of #4021 before a watchdog notices. heal() ends it; cut() is what the watchdog does afterwards.
+    void go_silent(net::PeerIndex a, net::PeerIndex b) { silent_[a][b] = silent_[b][a] = true; }
     [[nodiscard]] bool is_silent(net::PeerIndex from, net::PeerIndex to) const { return silent_[from][to]; }
     void isolate(net::PeerIndex seat) {
         for (net::PeerIndex other = 0; other < cut_.size(); ++other) if (other != seat) cut(seat, other);

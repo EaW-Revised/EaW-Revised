@@ -11,6 +11,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools"))
 from native_cpp_fixture import compile_fixture, select_toolchain
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from viewer_mode_sources import source_text  # noqa: E402
 
 
 class RenderClockContract(unittest.TestCase):
@@ -95,7 +97,7 @@ int main() {
             print(result.stdout.strip())
 
     def test_every_fixed_tactical_consumer_reads_the_same_admission(self):
-        frame = (ROOT / "apps/viewer/src/live_session_frame.cpp").read_text()
+        frame = source_text("apps/viewer/src/live_session_frame.cpp")
         observe = frame.index("render_clock_.observe(latest->completed_tick())")
         sample = frame.index("population.defer_unit_sample(render_clock_.sample())")
         pose = frame.index("population.pose_pending_units(renderer)")

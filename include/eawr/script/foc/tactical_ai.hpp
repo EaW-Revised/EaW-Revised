@@ -19,6 +19,7 @@
 #include "eawr/script/authoritative/tactical_bridge.hpp"
 #include "eawr/script/authoritative/tactical_scoring.hpp"
 #include "eawr/script/numeric/lua_number.hpp"
+#include "eawr/sim/tactical/ai_level.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include <cstdint>
@@ -138,6 +139,36 @@ struct AiContent {
     std::map<std::string, std::uint64_t, std::less<>> properties; // upper-case name -> bit
 };
 
+// WTA-45..47: the multipliers one AI player's difficulty adjustment sets. 1 (and sleep 0) is Normal.
+// Plain numbers, no engine or presentation types: the AI service, the production rules and the
+// unit and damage setup all read the same resolved value.
+struct AiDifficultyAdjustment {
+    numeric::LuaNumber health{1};            // Health_Multiplier
+    numeric::LuaNumber shield{1};            // Shield_Multiplier
+    numeric::LuaNumber damage{1};            // Damage_Multiplier
+    numeric::LuaNumber space_build_time{1};  // Space_Build_Time_Multiplier
+    numeric::LuaNumber credit{1};            // Credit_Multiplier
+    numeric::LuaNumber space_contrast{1};    // Space_AI_Contrast_Multiplier
+    numeric::LuaNumber space_goal_cycle_sleep{0}; // Space_AI_Goal_Cycle_Sleep_Duration, seconds
+};
+
+// The AI player types' Difficulty_Adjustments (level -> entry name) and the difficulty entries of
+// difficultyadjustments.xml, read from the same frozen mounted XML as AiSetup::xml. resolve() is the
+// one place a tactical player's level becomes its adjustment: player type -> level -> entry. A level
+// the type authors no entry for, or an unknown type, gets the engine's dummy adjustment: every
+// multiplier 1 (not the Normal entry).
+class AiDifficultyTable final {
+public:
+    [[nodiscard]] static core::Result<AiDifficultyTable> load(
+        const std::map<std::string, std::string, std::less<>>& xml);
+    // `player_type` is an AIPlayerType name, any case.
+    [[nodiscard]] AiDifficultyAdjustment resolve(std::string_view player_type, sim::tactical::AiLevel level) const;
+
+private:
+    struct Data;
+    std::shared_ptr<const Data> data_;
+};
+
 struct AiPlayer {
     sim::tactical::PlayerId player{};
     std::string faction; // Get_Faction_Name, upper case
@@ -145,6 +176,7 @@ struct AiPlayer {
     bool ai{};           // runs the freestore
     std::string player_type; // AIPlayerType name (AI-11), e.g. BasicEmpire; empty: no goal system
     bool human{}; // active human lobby player; non-playable faction players are not humans
+    sim::tactical::AiLevel difficulty{}; // WTA-47: a lobby AI's level (#735)
 };
 
 // The tactical map's extent as the AI's perception grid covers it (#449, PG-01).

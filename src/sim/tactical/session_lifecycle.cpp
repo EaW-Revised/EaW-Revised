@@ -53,14 +53,27 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
     const MotionTable& motion_table, const std::optional<FogRules>& fog_rules, const CombatTable& combat_table,
     const VictoryRules& victory_rules, const AbilityTable& ability_table, const EconomyRules& economy_rules,
     const MapBox& box)
-    : setup(source), sensors(sensor_table.begin(), sensor_table.end()), durability(table), motion(motion_table),
-      combat(combat_table), victory(victory_rules), abilities(ability_table), economy(economy_rules), map_box(box),
-      squadrons(source.squadrons), rng_state(source.seed) {
+    : SessionStoreRules(source, sensor_table, table, motion_table, combat_table, victory_rules,
+          ability_table, economy_rules, box),
+      SessionStoreSquadronRoster(source), SessionStoreCommands(source) {
         if (source.campaign) {
             TacticalReplay recording; recording.setup = source;
             const auto encoded = write_replay(recording);
             if (!encoded) initialization_error = encoded.error();
             else campaign_binding = core::sha256(encoded.value());
+        }
+        for (const auto& entry : durability.difficulty) {
+            const auto one = math::Fixed::from_raw(math::Fixed::scale);
+            if (entry.health == one && entry.shield == one) continue;
+            OwnerProfiles scaled{entry.player, {}};
+            scaled.profiles.reserve(durability.profiles.size());
+            for (const auto& profile : durability.profiles) {
+                auto changed = scale_profile(profile, entry);
+                if (!changed) { initialization_error = changed.error(); break; }
+                scaled.profiles.push_back(std::move(changed).value());
+            }
+            if (initialization_error) break;
+            owner_profiles.push_back(std::move(scaled));
         }
         for (const auto& profile : combat.profiles) for (const auto& weapon : profile.weapons)
             if (weapon.requires_manual_target) manual_admission_profiles.emplace(
@@ -116,7 +129,6 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
         std::sort(ownership_keys.begin(), ownership_keys.end());
         ownership_counts.resize(ownership_keys.size());
         committed_ownership_counts.resize(ownership_keys.size());
-        ownership_parts.resize(tick_partition_count * ownership_keys.size());
         bonus_profiles.resize(ownership_keys.size());
         committed_bonus_profiles.resize(ownership_keys.size());
         bonus_parts.resize(tick_partition_count * bonus_categories.size());
@@ -284,7 +296,7 @@ std::optional<DurabilityState> TacticalSession::Impl::entering_durability(
     }
 
 LiveUnit TacticalSession::Impl::new_unit(const UnitState& unit, const std::uint64_t frame) const {
-        const auto* profile = durability.find(unit.type_id);
+        const auto* profile = base_profile(unit.owner, unit.type_id);
         const auto* fighting = combat.find(unit.type_id);
         auto live = LiveUnit{unit, entering_durability(profile, unit.entity_id, frame),
             motion.find(unit.type_id) != nullptr ? std::optional(MotionState{}) : std::nullopt, math::Fixed{},
@@ -305,7 +317,27 @@ LiveUnit TacticalSession::Impl::new_unit(const UnitState& unit, const std::uint6
     }
 
 const DurabilityProfile* TacticalSession::Impl::health_profile(const LiveUnit& unit) const noexcept {
-        return unit.upgraded_durability ? &*unit.upgraded_durability : durability.find(unit.state.type_id);
+        return unit.upgraded_durability ? &*unit.upgraded_durability : base_profile(unit.state.owner, unit.state.type_id);
+    }
+
+const DurabilityProfile* TacticalSession::Impl::base_profile(const PlayerId owner, const TypeId type) const noexcept {
+        if (!owner_profiles.empty()) {
+            const auto scaled = std::lower_bound(owner_profiles.begin(), owner_profiles.end(), owner,
+                [](const OwnerProfiles& entry, const PlayerId id) { return entry.owner < id; });
+            if (scaled != owner_profiles.end() && scaled->owner == owner) {
+                const auto at = std::lower_bound(durability.profiles.begin(), durability.profiles.end(), type,
+                    [](const DurabilityProfile& profile, const TypeId id) { return profile.type_id < id; });
+                if (at == durability.profiles.end() || at->type_id != type) return nullptr;
+                return &scaled->profiles[static_cast<std::size_t>(at - durability.profiles.begin())];
+            }
+        }
+        return durability.find(type);
+    }
+
+core::Result<math::Fixed> TacticalSession::Impl::caused_damage(const math::Fixed mode, const PlayerId owner) const {
+        const auto* scale = durability.difficulty.empty() ? nullptr : durability.difficulty_of(owner);
+        if (scale == nullptr || scale->damage.raw() == math::Fixed::scale) return core::Result<math::Fixed>::success(mode);
+        return math::multiply(mode, scale->damage);
     }
 
 TacticalSession::TacticalSession(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}

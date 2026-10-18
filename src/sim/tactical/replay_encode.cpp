@@ -27,7 +27,7 @@ namespace {
     sim::detail::append_u32(bytes, static_cast<std::uint32_t>(setup.slots.size()));
     for (const auto& slot : setup.slots) {
         sim::detail::append_u32(bytes, slot.player);
-        sim::detail::append_u32(bytes, slot.human ? 1U : 0U);
+        sim::detail::append_u32(bytes, (slot.human ? 1U : 0U) | (static_cast<std::uint32_t>(slot.difficulty) << 1U));
         sim::detail::append_u32(bytes, slot.colour_index.value_or(std::numeric_limits<std::uint32_t>::max()));
         sim::detail::append_u32(bytes, static_cast<std::uint32_t>(slot.fleet.size()));
         for (const auto& type : slot.fleet) text(type);
@@ -109,7 +109,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     }
     if (replay.setup.campaign) {
         const auto& binding = *replay.setup.campaign;
-        sim::detail::append_u32(campaign, binding.reserve_order.empty() ? 3U : 4U); // optional source pool order
+        sim::detail::append_u32(campaign, binding.reserve_order.empty() ? 5U : 6U); // account build-time scale; optional source pool order
         sim::detail::append_i64(campaign, binding.corruption_price_multiplier.raw());
         sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.players.size()));
         for (const auto& p : binding.players) {
@@ -121,6 +121,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             sim::detail::append_u32(campaign, p.start_tech);
             sim::detail::append_u32(campaign, p.max_tech);
             sim::detail::append_i64(campaign, p.credit_multiplier.raw());
+            sim::detail::append_i64(campaign, p.ai_build_time_multiplier.raw());
             sim::detail::append_i64(campaign, p.credit_cap->raw());
             sim::detail::append_i64(campaign, p.strategic_credits.value_or(math::Fixed{}).raw());
         }

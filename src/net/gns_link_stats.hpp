@@ -26,7 +26,7 @@ public:
     bool due(Clock::time_point now) const {
         return !attempted_ || now - *attempted_ >= std::chrono::seconds(1);
     }
-    void observe(Clock::time_point now, std::optional<int> ping_ms) {
+    void observe(Clock::time_point now, std::optional<int> ping_ms, std::optional<double> loss_pct = std::nullopt) {
         if (!due(now)) return;
         attempted_ = now;
         if (!ping_ms || *ping_ms < 0) return;
@@ -38,6 +38,7 @@ public:
             stats_.smoothed_rtt += (sample - stats_.smoothed_rtt) / 8;
         }
         stats_.last_rtt = sample;
+        if (loss_pct) stats_.loss_pct = *loss_pct;
         if (stats_.sample_count != std::numeric_limits<std::uint64_t>::max()) ++stats_.sample_count;
     }
     std::optional<LinkStats> cached() const {

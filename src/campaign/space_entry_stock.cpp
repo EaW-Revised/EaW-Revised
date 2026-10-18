@@ -1,4 +1,5 @@
 #include "eawr/campaign/space_entry.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/campaign/standalone_replay.hpp"
 #include "eawr/campaign/space_rules.hpp"
 #include "eawr/campaign/starting_forces.hpp"
@@ -66,7 +67,7 @@ core::Result<std::string> map_path(std::string name) {
     return vfs::canonicalize(name);
 }
 void add_type_root(const units::UnitTables& raw, tt::TypeId id, std::set<std::string>& roots) {
-    for (const auto& type : raw.units) if (skirmish::type_id(type.id) == id) { roots.insert(key(type.id)); return; }
+    for (const auto& type : raw.units) if (battle::type_id(type.id) == id) { roots.insert(key(type.id)); return; }
 }
 std::set<std::string> record_roots(const units::UnitTables& raw, const ConflictRecord& record) {
     std::set<std::string> roots;
@@ -93,7 +94,7 @@ std::set<std::string> record_roots(const units::UnitTables& raw, const ConflictR
     return roots;
 }
 core::Result<units::UnitTables> reachable_tables(const units::UnitTables& raw,
-    std::set<std::string> roots, const std::vector<skirmish::MapPlacement>& placements, bool check_capabilities,
+    std::set<std::string> roots, const std::vector<battle::MapPlacement>& placements, bool check_capabilities,
     bool diagnostics_only = false) {
     using Result = core::Result<units::UnitTables>;
     std::set<std::string> objects;
@@ -202,7 +203,7 @@ tt::ReplayNativeScene native_scene_selection(const units::LoadInput& source, con
 }
 
 core::Result<units::UnitTables> native_scene_tables(const units::UnitTables& source,
-    const tt::ReplayNativeScene& scene, const std::vector<skirmish::MapPlacement>& placements) {
+    const tt::ReplayNativeScene& scene, const std::vector<battle::MapPlacement>& placements) {
     if (!source.campaign_scene || source.campaign_multiplayer != scene.multiplayer)
         return fail<units::UnitTables>("standalone replay requires the recorded campaign content mode");
     std::set<std::string> roots;
@@ -282,7 +283,7 @@ struct StockSpaceEntry::Impl {
     std::vector<Briefing> briefings;
     // Presentation-only last-entry copy. Never part of a native checkpoint or hash.
     mutable std::mutex presentation_mutex;
-    mutable std::optional<skirmish::SkirmishStart> presentation_start;
+    mutable std::optional<battle::BattleStart> presentation_start;
     StockTacticalReturnServices returning;
     explicit Impl(const CampaignSetupPlan& value) : plan(value) {}
     const SpaceEntryType* type(gc::TypeId id) const {
@@ -371,7 +372,7 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
                     data::tag_trace::used(*node);
                     const auto fields = tokens(node->raw_text);
                     if (fields.size() != 4) return fail<std::shared_ptr<const StockSpaceEntry>>("invalid conditional briefing declaration");
-                    const auto id = [&](const auto& name) { return key(name) == "NONE" ? std::uint64_t{} : skirmish::type_id(name); };
+                    const auto id = [&](const auto& name) { return key(name) == "NONE" ? std::uint64_t{} : battle::type_id(name); };
                     rows.push_back({id(fields[0]), id(fields[1]), id(fields[2]), fields[3]});
                 }
             }
@@ -550,13 +551,13 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
     auto source_durability = units::durability_table(source_tables);
     if (!source_durability) return core::Result<ResolvedConflictEntry>::failure(source_durability.error());
     for (auto& type : input.types) if (const auto* table = input.map.tables->find(type.tactical)) {
-        if (const auto* profile = source_durability.value().find(skirmish::type_id(type.tactical))) {
+        if (const auto* profile = source_durability.value().find(battle::type_id(type.tactical))) {
             auto rating = sim::math::add(profile->max_hull, profile->max_shields);
             if (!rating) return core::Result<ResolvedConflictEntry>::failure(rating.error());
             type.source_flagship_rating = rating.value();
         }
         if (!table->deployed_space_type.empty() && type.unique_space_unit.empty() && !type.attach_to_flagship) {
-            type.purchase_type = skirmish::type_id(type.tactical);
+            type.purchase_type = battle::type_id(type.tactical);
             type.tactical = table->deployed_space_type;
         }
     }
@@ -572,7 +573,7 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
             if (at != impl_->global_upgrades.end()) player.galaxy.insert(player.galaxy.end(), at->second.begin(), at->second.end());
         }
         for (const auto& upgrade : record.upgrades) if (upgrade.owner == side.player && upgrade.holder == record.planet) {
-            for (const auto& row : impl_->types) if (skirmish::type_id(row.tactical) == upgrade.type)
+            for (const auto& row : impl_->types) if (battle::type_id(row.tactical) == upgrade.type)
                 player.planet.push_back(row.tactical);
         }
         input.upgrade_players.push_back(std::move(player));
@@ -639,7 +640,7 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
                         const auto* binding = impl_->type(object.type);
                         if (!binding) return fail<void>("missing nested passenger binding");
                         tt::CarriedObject carried; carried.entity_id = object.id;
-                        carried.type_id = skirmish::type_id(binding->tactical);
+                        carried.type_id = battle::type_id(binding->tactical);
                         carried.named_hero = binding->named_hero; carried.generic_hero = binding->generic_hero;
                         ConflictForce force{object.id, object.type, fleet.owner, fleet.id};
                         force.hero = binding->named_hero; force.tactical_type = carried.type_id; force.carrier = parent;
@@ -750,7 +751,7 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
         player.owned_planets = static_cast<std::uint32_t>(std::count_if(snapshot.planets().begin(), snapshot.planets().end(), [&](const auto& p) { return p.owner == side.player; }));
         player.ai = !side.human;
         if (side.player != record.invader && side.player != record.defender) player.strategic_credit_cap = account->credit_cap;
-        for (const auto& m : entry.value().start.markers) if (m.player == side.player && m.use == skirmish::MarkerUse::spawn) {
+        for (const auto& m : entry.value().start.markers) if (m.player == side.player && m.use == battle::MarkerUse::spawn) {
             player.reinforcement_yaw = m.yaw_degrees; break;
         }
         rules.players.push_back(player);
@@ -852,13 +853,13 @@ core::Result<script::foc::PreparedAiSession> StockSpaceEntry::prepare_ai(const C
     auto tables = reachable_tables(*map->second.tables, record_roots(*map->second.tables, record), map->second.inputs.placements, true);
     if (!tables) return core::Result<script::foc::PreparedAiSession>::failure(tables.error());
     auto inputs = map->second.inputs; inputs.tables = &tables.value();
-    skirmish::SkirmishStart start; start.setup = record.tactical; start.match = record.tactical.skirmish->match;
+    battle::BattleStart start; start.setup = record.tactical; start.match = record.tactical.skirmish->match;
     for (const auto& player : record.tactical.players) {
         const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(), [&](const auto& row) {
-            return skirmish::faction_id(row.name) == player.faction_id;
+            return battle::faction_id(row.name) == player.faction_id;
         });
         if (faction == inputs.factions.end()) return fail<script::foc::PreparedAiSession>("unbound AI faction");
-        skirmish::StartPlayer p; p.player = player; p.faction = faction->name;
+        battle::StartPlayer p; p.player = player; p.faction = faction->name;
         const auto slot = std::find_if(record.tactical.skirmish->slots.begin(), record.tactical.skirmish->slots.end(), [&](const auto& row) { return row.player == player.player_id; });
         p.lobby = slot != record.tactical.skirmish->slots.end(); p.human = p.lobby && slot->human;
         start.players.push_back(std::move(p));
@@ -903,14 +904,14 @@ SpaceEntryScriptServices space_entry_script_services(std::shared_ptr<const Stock
     };
     return services;
 }
-core::Result<skirmish::SkirmishStart> space_entry_presentation_start(
+core::Result<battle::BattleStart> space_entry_presentation_start(
     const ConflictRecord& record, const skirmish::StartInputs& inputs) {
     if (!record.tactical.skirmish || !inputs.tables
         || record.tactical.skirmish->map != inputs.map || record.tactical.skirmish->map_sha256 != inputs.map_sha256
         || record.tactical.content_identity != units::content_identity(*inputs.tables))
-        return fail<skirmish::SkirmishStart>("presentation scene identity differs");
+        return fail<battle::BattleStart>("presentation scene identity differs");
     // Selected fleet-marker IDs are not saved. Copy actors; never rerun placement.
-    skirmish::SkirmishStart start;
+    battle::BattleStart start;
     start.map = record.tactical.skirmish->map;
     start.map_sha256 = record.tactical.skirmish->map_sha256;
     start.setup = record.tactical;
@@ -918,9 +919,9 @@ core::Result<skirmish::SkirmishStart> space_entry_presentation_start(
     start.victory_condition = static_cast<tt::VictoryCondition>(record.tactical.skirmish->victory_condition);
     for (const auto& player : record.tactical.players) {
         const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
-            [&](const auto& row) { return skirmish::faction_id(row.name) == player.faction_id; });
-        if (faction == inputs.factions.end()) return fail<skirmish::SkirmishStart>("unbound presentation faction");
-        skirmish::StartPlayer visual;
+            [&](const auto& row) { return battle::faction_id(row.name) == player.faction_id; });
+        if (faction == inputs.factions.end()) return fail<battle::BattleStart>("unbound presentation faction");
+        battle::StartPlayer visual;
         visual.player = player; visual.faction = faction->name;
         const auto slot = std::find_if(record.tactical.skirmish->slots.begin(), record.tactical.skirmish->slots.end(),
             [&](const auto& row) { return row.player == player.player_id; });
@@ -929,16 +930,16 @@ core::Result<skirmish::SkirmishStart> space_entry_presentation_start(
         start.players.push_back(std::move(visual));
     }
     auto names = skirmish::map_object_type_names(inputs.placements);
-    for (const auto& type : inputs.tables->units) names.emplace(skirmish::type_id(type.id), type.id);
+    for (const auto& type : inputs.tables->units) names.emplace(battle::type_id(type.id), type.id);
     for (const auto& unit : record.tactical.units) {
         const auto name = names.find(unit.type_id);
-        if (name == names.end()) return fail<skirmish::SkirmishStart>("unbound presentation actor type");
-        skirmish::StartUnit visual;
+        if (name == names.end()) return fail<battle::BattleStart>("unbound presentation actor type");
+        battle::StartUnit visual;
         visual.state = unit; visual.type = name->second;
         const auto force = std::find_if(record.forces.begin(), record.forces.end(),
             [&](const auto& row) { return row.id == unit.entity_id; });
-            visual.role = unit.entity_id == record.station ? skirmish::UnitRole::station
-                : force != record.forces.end() ? skirmish::UnitRole::fleet : skirmish::UnitRole::free_unit;
+            visual.role = unit.entity_id == record.station ? battle::UnitRole::station
+                : force != record.forces.end() ? battle::UnitRole::fleet : battle::UnitRole::free_unit;
             if (const auto* type = inputs.tables->find(visual.type)) {
                 if (type->kind == units::UnitKind::squadron && !type->members.empty()) {
                     visual.craft = static_cast<std::uint32_t>(type->members.size());
@@ -946,7 +947,7 @@ core::Result<skirmish::SkirmishStart> space_entry_presentation_start(
                 }
                 // Render-slot metadata only: the native child owns the actual launch schedule.
                 if (type->spawner && unit.garrison_enabled) for (const auto& entry : type->spawner->starting) {
-                    skirmish::Launch launch;
+                    battle::Launch launch;
                     launch.spawner = unit.entity_id; launch.spawner_type = visual.type; launch.owner = unit.owner;
                     launch.squadron = entry.squadron; launch.count = entry.count;
                     launch.delay_seconds = type->spawner->delay_seconds;
@@ -955,7 +956,7 @@ core::Result<skirmish::SkirmishStart> space_entry_presentation_start(
             }
             start.units.push_back(std::move(visual));
     }
-    return core::Result<skirmish::SkirmishStart>::success(std::move(start));
+    return core::Result<battle::BattleStart>::success(std::move(start));
 }
 
 core::Result<std::shared_ptr<const platform::PreparedCampaignBattle>> StockSpaceEntry::presentation(
@@ -990,7 +991,7 @@ core::Result<std::shared_ptr<const platform::PreparedCampaignBattle>> StockSpace
         briefing.content = declaration.player == record.invader ? declaration.attacker : declaration.defender;
         for (const auto& force : record.forces) if (!force.destroy_after_tactical && force.role != ForceRole::escort) {
             const auto* type = impl_->type(force.type);
-            if (type && type->space_allowed) briefing.available_persistent_types.push_back(skirmish::type_id(type->tactical));
+            if (type && type->space_allowed) briefing.available_persistent_types.push_back(battle::type_id(type->tactical));
         }
         std::sort(briefing.available_persistent_types.begin(), briefing.available_persistent_types.end());
         briefing.available_persistent_types.erase(std::unique(briefing.available_persistent_types.begin(), briefing.available_persistent_types.end()), briefing.available_persistent_types.end());

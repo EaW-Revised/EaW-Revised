@@ -1481,7 +1481,7 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
 void loopback(bool abrupt, bool departed_ahead = false, bool closed_before_launch = false, int final_window = 0,
     bool speed_during_departure = false, std::shared_ptr<viewer::LanMatch> existing_host = {},
     std::shared_ptr<viewer::LanMatch> existing_join = {}, unsigned workers = 1, bool fail_recovery = false,
-    int policy_disagreement = 0) {
+    int policy_disagreement = 0, bool script_only = false) {
         stage = abrupt ? "abrupt connection" : "quit connection";
         auto initial = setup();
         initial.players[0].faction_id = eawr::skirmish::faction_id("Rebel");
@@ -1520,6 +1520,7 @@ void loopback(bool abrupt, bool departed_ahead = false, bool closed_before_launc
         unsigned catchup_batches{}, suppressed_repeats{};
         std::array<std::optional<std::uint64_t>, 2> early_seal_tick;
         std::array<bool, 2> failed{};
+        std::array<bool, 2> observed_hold{};
         struct PortHold {
             net::socket::Handle handle{net::socket::invalid};
             ~PortHold() { net::socket::close(handle); }
@@ -1593,8 +1594,11 @@ void loopback(bool abrupt, bool departed_ahead = false, bool closed_before_launc
             context.set_target_rate = [&, peer](std::uint32_t rate) {
                 rates[peer].emplace_back(worlds[peer].completed_tick(), rate);
             };
+            // script_only: the world hash stays equal and only the full (script) hash diverges from tick 136,
+            // so the last window is detected only if the finish row carries the full hash.
+            if (script_only) context.world_hash = [&, peer] { return worlds[peer].state_sha256(); };
             context.state_hash = [&, peer] {
-                if (final_window == 2 && peer == 1 && worlds[peer].completed_tick() == 136)
+                if (final_window == 2 && peer == 1 && (script_only ? worlds[peer].completed_tick() >= 136 : worlds[peer].completed_tick() == 136))
                     return std::string(64, 'b'); // only the final, non-periodic window diverges
                 return worlds[peer].state_sha256();
             };
@@ -1870,6 +1874,9 @@ void loopback(bool abrupt, bool departed_ahead = false, bool closed_before_launc
                         "LAN UI drain preserves its producer epoch");
                 }
                 auto result = drivers[peer](contexts[peer], commands, clock);
+                if (const auto seen = (peer == 0 ? host : join)->view().recovery;
+                    seen == viewer::LanRecovery::held || seen == viewer::LanRecovery::catching_up || seen == viewer::LanRecovery::proving)
+                    observed_hold[peer] = true; // Poll timing decides whether a survivor ever sees the hold.
                 if (!result && fail_recovery) {
                     failed[peer] = true;
                     const auto view = (peer == 0 ? host : join)->view();
@@ -1907,11 +1914,17 @@ void loopback(bool abrupt, bool departed_ahead = false, bool closed_before_launc
                 "recovery returns both battle HUDs to play");
             for (const auto& match : {host, join}) {
                 const auto view = match->view();
+                const bool survivor_saw_hold = observed_hold[match == host ? 0U : 1U];
                 if (final_window == 8 && view.active_adapter_publications == 0) {
                     const auto text = viewer::lan_message(view);
-                    expect(view.phase == viewer::LanPhase::running && view.recovery == viewer::LanRecovery::none
-                        && viewer::lan_gameplay_enabled(view) && !view.desync_tick
-                        && text.find("Game synchronized.") == std::string::npos && text.find("Incident at tick") == std::string::npos,
+                    if (view.phase != viewer::LanPhase::running || view.recovery != viewer::LanRecovery::none || view.desync_tick)
+                        std::cerr << "transient survivor view case=8 workers=" << workers << " phase=" << static_cast<int>(view.phase)
+                            << " recovery=" << static_cast<int>(view.recovery) << " desync_tick=" << (view.desync_tick ? static_cast<long long>(*view.desync_tick) : -1LL)
+                            << " publications=" << view.active_adapter_publications << " message=[" << text << "]\n";
+                    // Poll timing decides whether the survivor ever observed the hold; only then may it show the recovered notice.
+                    const bool clean = view.recovery == viewer::LanRecovery::none && text.find("Game synchronized.") == std::string::npos;
+                    expect(view.phase == viewer::LanPhase::running && (clean || (survivor_saw_hold && view.recovery == viewer::LanRecovery::recovered))
+                        && viewer::lan_gameplay_enabled(view) && !view.desync_tick && text.find("Incident at tick") == std::string::npos,
                         "transient-repair survivor resumes ordinary play with no stale recovery notice");
                 } else {
                     if (view.recovery != viewer::LanRecovery::recovered || !viewer::lan_gameplay_enabled(view))
@@ -2080,7 +2093,7 @@ void loopback(bool abrupt, bool departed_ahead = false, bool closed_before_launc
             if (final_window == 2) {
                 for (const auto& match : {host, join}) {
                     expect(match->view().reason == viewer::LanReason::desync, "final-only divergence is reported on both peers");
-                    expect(match->view().desync_tick == 136 && !match->view().bundle_path.empty(),
+                    expect(match->view().desync_tick == (script_only ? 137U : 136U) && !match->view().bundle_path.empty(),
                         "final rows locate the divergent tick and publish diagnostics before close");
                 }
             } else {
@@ -2398,6 +2411,12 @@ int main(int argc, char** argv) {
             std::cout << "pending input contracts passed on two peers and 1/2/4/8 workers\n";
             return 0;
         }
+        if (argc == 3 && std::string_view(argv[1]) == "--transient-repair-loop") {
+            for (int run = 0, count = std::atoi(argv[2]); run < count; ++run) loopback(false, false, false, 8);
+            viewer::shutdown_lan_drains();
+            std::cout << "transient-repair loop passed\n";
+            return 0;
+        }
         long_session_contracts();
         viewer::LanView measured;
         measured.connected = true; measured.remote_endpoint = "127.0.0.1:47624";
@@ -2406,7 +2425,7 @@ int main(int argc, char** argv) {
         viewer::apply_lan_lobby_ping(games, measured);
         expect(eawr::presentation::ui::lobby_row_text(games[0]).ping == "?", "unknown transport ping remains unknown");
         measured.link_stats = eawr::net::LinkStats{std::chrono::microseconds(82000), std::chrono::microseconds(80500),
-            std::chrono::microseconds(2000), 4};
+            std::chrono::microseconds(2000), 4, 0.0};
         viewer::apply_lan_lobby_ping(games, measured);
         expect(eawr::presentation::ui::lobby_row_text(games[0]).ping == "80ms" &&
             eawr::presentation::ui::lobby_row_text(games[1]).ping == "?", "only linked endpoint displays measured ping");
@@ -2478,6 +2497,7 @@ int main(int argc, char** argv) {
         for (const auto workers : {1U, 2U, 4U, 8U}) loopback(false, false, false, 5, false, {}, {}, workers, true);
         loopback(false, false, true);
         loopback(false, false, false, 2);
+        loopback(false, false, false, 2, false, {}, {}, 1, false, 0, true); // script-only divergence in the last window
         loopback(false, false, false, 1);
         loopback(false, false, false, 4);
         loopback(false);

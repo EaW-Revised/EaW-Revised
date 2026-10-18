@@ -1,4 +1,5 @@
 #include "eawr/campaign/conflict_entry.hpp"
+#include "eawr/battle/start.hpp"
 
 #include <algorithm>
 #include <map>
@@ -16,6 +17,14 @@ template <typename T> core::Result<T> fail(std::string message) {
 }
 core::Result<tactical::TacticalContent> conflict_entry_content(const tactical::TacticalSetup& setup,
     const skirmish::StartInputs& inputs) {
+    // Generic selected-force content retains scene ships with no authored reserves.
+    // Full space-entry binding supplies its owner-tech campaign policy explicitly.
+    units::SpawnPolicy policy;
+    if (inputs.tables && inputs.tables->campaign_scene) policy.mode = units::SpawnPolicy::Mode::campaign_scene;
+    return conflict_entry_content(setup, inputs, policy);
+}
+core::Result<tactical::TacticalContent> conflict_entry_content(const tactical::TacticalSetup& setup,
+    const skirmish::StartInputs& inputs, const units::SpawnPolicy& spawn_policy) {
     if (!inputs.tables || !setup.first_free_entity_id || !setup.skirmish
         || setup.skirmish->map != inputs.map || setup.skirmish->map_sha256 != inputs.map_sha256
         || setup.content_identity != units::content_identity(*inputs.tables))
@@ -24,7 +33,7 @@ core::Result<tactical::TacticalContent> conflict_entry_content(const tactical::T
         return core::Result<tactical::TacticalContent>::failure(valid.error());
     std::vector<tactical::PlayerId> humans;
     for (const auto& slot : setup.skirmish->slots) if (slot.human) humans.push_back(slot.player);
-    auto bound = skirmish::session_content(*inputs.tables, humans);
+    auto bound = skirmish::session_content(*inputs.tables, humans, spawn_policy);
     if (!bound) return core::Result<tactical::TacticalContent>::failure(bound.error());
     auto fog = skirmish::fog_rules(inputs);
     if (!fog) return core::Result<tactical::TacticalContent>::failure(fog.error());
@@ -59,7 +68,7 @@ core::Result<ConflictEntry> build_conflict_entry(const ConflictRecord& record,
             return fail<ConflictEntry>("conflict owners need explicit faction and team bindings");
     std::map<tactical::TypeId, std::string> names;
     for (const auto& type : inputs.tables->units) {
-        const auto [found, inserted] = names.emplace(skirmish::type_id(type.id), type.id);
+        const auto [found, inserted] = names.emplace(battle::type_id(type.id), type.id);
         if (!inserted && found->second != type.id) return fail<ConflictEntry>("ambiguous tactical type ID");
     }
     std::map<sim::EntityId, ForcePlacement> placement_by_id;
@@ -89,9 +98,9 @@ core::Result<ConflictEntry> build_conflict_entry(const ConflictRecord& record,
             continue;
         }
         if (placement == placement_by_id.end()) return fail<ConflictEntry>("deployed force is missing its marker selection");
-        const auto role = force.id == record.station ? skirmish::UnitRole::station : skirmish::UnitRole::fleet;
+        const auto role = force.id == record.station ? battle::UnitRole::station : battle::UnitRole::fleet;
         const auto type = force.tactical_type ? force.tactical_type : force.type;
-        if (role == skirmish::UnitRole::station && (force.type != record.station_type || force.owner != record.defender
+        if (role == battle::UnitRole::station && (force.type != record.station_type || force.owner != record.defender
             || inputs.tables->find(names.at(type))->kind != units::UnitKind::station))
             return fail<ConflictEntry>("station must retain its selected type and defender owner");
         selected.push_back({force.owner, names.at(type), role, placement->second.marker, placement->second.garrison_enabled});
@@ -143,7 +152,7 @@ core::Result<ConflictEntry> build_conflict_entry(const ConflictRecord& record,
     auto next = first_free;
     std::size_t selected_index{};
     for (const auto& unit : start.units) {
-        const bool chosen = unit.role == skirmish::UnitRole::station || unit.role == skirmish::UnitRole::fleet;
+        const bool chosen = unit.role == battle::UnitRole::station || unit.role == battle::UnitRole::fleet;
         if (!chosen && next == std::numeric_limits<sim::EntityId>::max())
             return fail<ConflictEntry>("battle-only entity allocator exhausted");
         remap.emplace(unit.state.entity_id, chosen ? persistent.at(selected_index++) : next++);

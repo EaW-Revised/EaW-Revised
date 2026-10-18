@@ -42,3 +42,5 @@ tests/galactic/fixtures/production-corpus/*.hashes.csv text eol=lf
 tests/galactic/fixtures/production-corpus/*.eawr-gcreplay binary
 # Double-click launchers in the online test kit must keep CRLF line endings.
 *.cmd text eol=crlf
+# git apply reads this patch on Windows checkouts as well: keep it LF.
+tools/viewer_hash/viewer-hook.patch text eol=lf

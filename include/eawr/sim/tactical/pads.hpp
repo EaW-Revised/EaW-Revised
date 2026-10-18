@@ -29,7 +29,7 @@ struct ConstructionProfile {
     TypeId constructed{};
     math::Fixed price{};
     std::uint32_t seconds{}; // WBP-15: whole seconds, no queue multiplier
-    std::uint32_t ai_seconds{};
+    std::uint32_t ai_seconds{}; // Selected-table metadata; timing uses the owning player's multiplier.
     bool child_persists{true};
     friend bool operator==(const ConstructionProfile&, const ConstructionProfile&) = default;
 };

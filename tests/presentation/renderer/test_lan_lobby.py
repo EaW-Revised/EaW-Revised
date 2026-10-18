@@ -63,7 +63,7 @@ class LanLobbyStructure(unittest.TestCase):
                                  str(path))
                 constructors += 1
         self.assertGreater(constructors, 0, "production match sites must be discovered")
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         self.assertRegex(screen, r"match_ = options_\.match;\s*if \(match_\) match_->configure_factions\(scene::faction_order\(\*")
 
     def test_the_mode_and_the_screen_are_wired_into_the_host_and_the_build(self):
@@ -81,7 +81,7 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertIn("lan_broadcast.cpp", net)
 
     def test_the_screen_reuses_the_dialog_builder_and_signals_its_close_and_start(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         self.assertIn("build_dialog(", screen)
         self.assertIn('ADD_SIGNAL(MethodInfo("closed"))', screen)
         self.assertIn('ADD_SIGNAL(MethodInfo("started"))', screen)
@@ -94,12 +94,12 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertNotIn("IDD_LAN_JOIN_DIALOG", screen)
 
     def test_the_staging_row_count_comes_from_the_dialog(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         self.assertIn("staging_row_count(ids)", screen)
         self.assertNotRegex(screen, r"dialog_rows\s*=\s*\d")
 
     def test_skirmish_humans_have_distinct_map_bounded_rows(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         self.assertIn("network_row_count(*map)", screen)
         self.assertIn("std::iota(impl_->human_owners.begin(), impl_->human_owners.end(), 1U)", screen)
         self.assertIn("row.kind != model::RowKind::human && row.kind != model::RowKind::open", screen)
@@ -108,7 +108,7 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertNotIn("human_team_splits(", screen)
 
     def test_host_count_preserves_the_password_and_teams_belong_to_staging(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         self.assertIn('label->set_text("Human players")', screen)
         self.assertNotIn("EAWR_LAN_HOST_TEAMS", screen)
         self.assertIn('impl.host_options.password = online && password != nullptr', screen)
@@ -121,7 +121,7 @@ class LanLobbyStructure(unittest.TestCase):
             self.assertNotIn("godot", header.lower(), name)
 
     def test_the_screen_reads_its_game_list_from_the_source_seam_only(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         self.assertIn("LobbyGameSource", (SRC / "lan_lobby_screen.hpp").read_text(encoding="utf-8"))
         self.assertIn("impl.source->games()", screen)
         self.assertNotIn("lan_broadcast", screen)
@@ -133,8 +133,9 @@ class LanLobbyStructure(unittest.TestCase):
                      "profile_store->save("):
             self.assertIn(call, mode)
         # UI-C2: the screen and the transport never see the profile record.
+        # lan_match.cpp is a bundle key: a split extends its tuple, so this reads every LAN match member.
         for name in ("lan_lobby_screen.cpp", "lan_match.cpp"):
-            self.assertNotIn("PlayerProfile", (SRC / name).read_text(encoding="utf-8"), name)
+            self.assertNotIn("PlayerProfile", source_text(f"apps/viewer/src/{name}"), name)
 
     def test_only_the_changed_fields_are_written_back_to_the_profile(self):
         mode = (SRC / "lan_lobby_mode.cpp").read_text(encoding="utf-8")
@@ -156,14 +157,14 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertNotIn("value.assign(reinterpret_cast", decoder)
 
     def test_the_lockstep_transport_is_reused_not_rewritten(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         for call in ("match_->host(", "match_->join(", "match_->pump_setup(", "match_->accept()", "match_->start(",
                      "match_->take_start()"):
             self.assertIn(call, screen)
 
     def test_room_chat_is_authoritative_even_before_the_first_snapshot(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
-        send = screen.split("void EawrLanLobby::send_chat(", 1)[1].split("void EawrLanLobby::announce", 1)[0]
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
+        send = (SRC / "lan_lobby_screen_chat.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::send_chat(", 1)[1].split("void EawrLanLobby::announce", 1)[0]
         self.assertIn("match_->lobby_enabled()", send)
         self.assertNotIn("page_ == Page::staging && match_->lobby_state()", send)
         self.assertIn('note_chat(model::ChatKind::notice, "TEXT_WAITING")', send)
@@ -171,21 +172,21 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertIn("if (!room->identity_pending && local !=", screen)
 
     def test_staging_uses_the_authoritative_core_and_shared_live_builder(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
-        bridge = (SRC / "lan_match.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
+        bridge = source_text("apps/viewer/src/lan_match.cpp")
         for call in ("LobbySession::host", "LobbySession::join", "configure_game(", "accept_setup()", "take_result()"):
             self.assertIn(call, bridge)
         self.assertIn("room->snapshot.seats", screen)
         self.assertIn("room->chat", screen)
         for name in ("lan_lobby_screen.cpp", "live_session_prepare.cpp"):
-            source = (SRC / name).read_text(encoding="utf-8")
+            source = source_text(f"apps/viewer/src/{name}")
             self.assertIn("prepare_skirmish(", source)
             self.assertIn("lan_recording_setup(", source)
         self.assertIn("src/skirmish_prepare.cpp", source_text("apps/viewer/CMakeLists.txt"))
         self.assertIn("skirmish_prepare.cpp", (ROOT / "tests/net/CMakeLists.txt").read_text(encoding="utf-8"))
 
     def test_online_service_uses_saved_settings_and_live_adapters(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         service = (SRC / "online_service_settings.hpp").read_text(encoding="utf-8")
         self.assertIn("make_live_online_source(configured.value())", screen)
         self.assertIn("make_online_match(std::move(configured).value()", screen)
@@ -194,7 +195,7 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertIn("match_ = lan_match_", screen)
 
     def test_the_online_half_binds_the_room_source_into_the_same_screen(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         header = (SRC / "lan_lobby_screen.hpp").read_text(encoding="utf-8")
         mode = (SRC / "lan_lobby_mode.cpp").read_text(encoding="utf-8")
         self.assertIn("std::shared_ptr<net::OnlineRoomSource> online_rooms;", header)
@@ -216,18 +217,18 @@ class LanLobbyStructure(unittest.TestCase):
         for control in ("EAWR_LOBBY_REFRESH", "EAWR_LOBBY_PREV_PAGE", "EAWR_LOBBY_NEXT_PAGE", "EAWR_LOBBY_PROMPT_PASSWORD",
                         "EAWR_LOBBY_JOIN_CODE", "EAWR_LOBBY_CANCEL_JOIN"):
             self.assertIn(control, screen)
-        self.assertIn("edit->set_secret(true);", screen.split("void EawrLanLobby::open_password_prompt", 1)[1])
+        self.assertIn("edit->set_secret(true);", (SRC / "lan_lobby_screen_list.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::open_password_prompt", 1)[1])
         self.assertIn("--eawr-online-room", mode)
         self.assertIn("FixedOnlineLobbySource", mode)
 
     def test_the_online_join_attaches_the_room_scope_with_the_directory_admission(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
-        pump = screen.split("void EawrLanLobby::pump_online()", 1)[1].split("// ---- Host options", 1)[0]
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
+        pump = (SRC / "lan_lobby_screen_list.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::pump_online()", 1)[1].split("// ---- Host options", 1)[0]
         self.assertIn("if (result.admission)", pump)
         self.assertIn("match_->join_admitted(*result.admission);", pump)
         self.assertIn("result.admission->member_capability.empty()", pump)
         self.assertIn("open_staging(false, game, {});", pump)
-        code = screen.split("void EawrLanLobby::join_code(", 1)[1].split("void EawrLanLobby::join_online_selected", 1)[0]
+        code = (SRC / "lan_lobby_screen_list.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::join_code(", 1)[1].split("void EawrLanLobby::join_online_selected", 1)[0]
         self.assertIn("match_->join(*canonical);", code)
         self.assertIn("normalize_short_code(code)", code)
         self.assertIn("skirmish::setup_row_count(map, false)", screen)
@@ -235,15 +236,15 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertNotIn("direct_seats = 2", code)
 
     def test_online_failures_show_curated_text_and_no_secret_reaches_logs(self):
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         mode = (SRC / "lan_lobby_mode.cpp").read_text(encoding="utf-8")
-        failure = screen.split("void EawrLanLobby::online_failure(", 1)[1].split("// One frame of the online half", 1)[0]
+        failure = (SRC / "lan_lobby_screen_list.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::online_failure(", 1)[1].split("// One frame of the online half", 1)[0]
         self.assertIn("online_failure_text(model::classify_online_failure(diagnostic.code))", failure)
         self.assertNotIn("diagnostic.message", failure)
-        pump = screen.split("void EawrLanLobby::pump_online()", 1)[1].split("// ---- Host options", 1)[0]
+        pump = (SRC / "lan_lobby_screen_list.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::pump_online()", 1)[1].split("// ---- Host options", 1)[0]
         self.assertNotIn("refusal->message", pump)
         self.assertNotIn("format_diagnostic", pump)
-        submit = screen.split("void EawrLanLobby::submit_password(", 1)[1].split("// A refused service call", 1)[0]
+        submit = (SRC / "lan_lobby_screen_list.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::submit_password(", 1)[1].split("// A refused service call", 1)[0]
         self.assertNotIn("note_chat(model::ChatKind::normal, password", submit)
         self.assertNotIn("password +", submit)
         self.assertIn("The password goes to the source and nowhere else", submit)
@@ -259,7 +260,7 @@ class LanLobbyStructure(unittest.TestCase):
         net = (ROOT / "include/eawr/net/online_lobby_source.hpp").read_text(encoding="utf-8")
         self.assertIn("class OnlineRoomSource : public presentation::ui::LobbyGameSource", net)
         self.assertNotIn("godot", net.lower())
-        screen = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         # LAN joins still go through the unchanged check without password support.
         self.assertIn("model::check_join(selected, impl.name);", screen)
 

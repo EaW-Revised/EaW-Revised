@@ -205,7 +205,9 @@ void partitioned_reports() {
 }
 
 void no_decider() {
-    Rig rig(4);
+    auto single = options();
+    single.rounds = 1;
+    Rig rig(4, single);
     rig.network.cut(0, 1); rig.network.cut(2, 3);
     rig.run(40'000);
     expect(rig.count(Kind::leave) == 4 && rig.count(Kind::departure) == 0 && rig.count(Kind::restored) == 0,
@@ -346,7 +348,9 @@ void restoration_before_removal() {
 void incident_clock_follows_the_earliest_start() {
     PairNetwork network(3);
     PairTransport transport(network, 2);
-    net::MeshIncident incident(transport, seats_of({0, 1, 2}), options());
+    auto single = options();
+    single.rounds = 1;
+    net::MeshIncident incident(transport, seats_of({0, 1, 2}), single);
     net::MeshLinkReport report;
     report.incident = 1; report.revision = 1; report.open = seats_of({2}); report.relay_failed = seats_of({1});
     const auto frame = require(net::encode_mesh_report(report, 6'000, seats_of({0, 1, 2})));
@@ -406,7 +410,9 @@ void half_open_pair_fails_closed() {
     // Seat a sees its pair to b closed and reports it failed; b still reads the pair open and its sends succeed but never
     // arrive. A remote claim never turns b's open link into a failed one (no mirror), so the pair is not lost at both ends:
     // nobody is removed on a's word alone.
-    Rig rig(3);
+    auto single = options();
+    single.rounds = 1;
+    Rig rig(3, single);
     rig.network.half_open(0, 1);
     rig.run(60'000);
     expect(rig.count(Kind::departure) == 0 && rig.count(Kind::restored) == 0, "a half-open pair removes nobody");
@@ -560,7 +566,7 @@ void steady_reports_feed_the_host() {
 
 // A seeded schedule of delays and duplicates on the control frames only; streams stay ordered, as TCP and GNS reliable
 // streams are. Whatever the schedule, the continuing seats hold one identical survivor set and everyone else leaves.
-void randomized_schedules() {
+void randomized_schedules(unsigned rounds) {
     for (std::uint32_t seed = 1; seed <= 150; ++seed) {
         std::mt19937 random(seed);
         const unsigned count = 4 + random() % 3;
@@ -572,7 +578,9 @@ void randomized_schedules() {
             const std::pair<unsigned, unsigned> pair{std::min(a, b), std::max(a, b)};
             if (std::find(cuts.begin(), cuts.end(), pair) == cuts.end()) cuts.push_back(pair);
         }
-        Rig rig(count, options(std::chrono::milliseconds(random() % 3000)));
+        auto settings = options(std::chrono::milliseconds(random() % 3000));
+        settings.rounds = rounds;
+        Rig rig(count, settings);
         rig.network.fault = [&](net::PeerIndex, net::PeerIndex, std::span<const std::uint8_t> frame) {
             eawr::testing::FakeDelivery action;
             if (frame.front() >= net::mesh_report_kind && frame.front() <= net::mesh_confirm_kind) {
@@ -583,7 +591,7 @@ void randomized_schedules() {
             return action;
         };
         for (const auto& [a, b] : cuts) rig.network.cut(a, b);
-        rig.run(60'000, 100);
+        rig.run(120'000, 100);
         std::optional<net::MeshSeats> agreed;
         bool consistent = true;
         for (unsigned seat = 0; seat < count; ++seat) {
@@ -601,7 +609,37 @@ void randomized_schedules() {
         if (agreed) for (unsigned seat = 0; seat < count; ++seat)
             if (!(*agreed & (1U << seat)) && (rig.results[seat].empty() || rig.results[seat].front().kind != Kind::leave)) consistent = false;
         for (unsigned seat = 0; seat < count; ++seat) if (!rig.errors[seat].empty()) consistent = false;
-        if (!consistent) { expect(false, "randomized schedule " + std::to_string(seed) + " broke agreement"); return; }
+        if (!consistent) { expect(false, "randomized schedule " + std::to_string(seed) + " rounds " + std::to_string(rounds) + " broke agreement"); return; }
+    }
+}
+
+// Delay final relay evidence so no seat can propose a departure. Healing in window two or three must restore every seat
+// on the same incident, even with delayed and duplicated control frames across the rollover boundaries.
+void rolled_windows_agree() {
+    for (const std::uint64_t heal_at : {55'000ULL, 85'000ULL}) {
+        auto settings = options(std::chrono::seconds(30));
+        settings.rounds = 3;
+        settings.relay_failed = [](net::PeerIndex) { return false; };
+        Rig rig(9, settings);
+        std::mt19937 random(static_cast<std::uint32_t>(heal_at));
+        rig.network.fault = [&](net::PeerIndex, net::PeerIndex, std::span<const std::uint8_t>) {
+            eawr::testing::FakeDelivery action;
+            action.ordered_delay = random() % 700;
+            action.duplicate = random() % 5 == 0;
+            action.duplicate_delay = random() % 300;
+            return action;
+        };
+        rig.network.cut(2, 7);
+        rig.run(heal_at);
+        for (const auto& seat : rig.results) expect(seat.empty(), "no decision before the later window heals");
+        rig.network.heal(2, 7);
+        rig.run(30'000);
+        for (const auto& seat : rig.results) {
+            expect(seat.size() == 1, "every peer decides after two or three windows");
+            if (seat.size() != 1) continue;
+            expect(seat.front().incident == 1 && seat.front().kind == Kind::restored && seat.front().survivors == seats_of({0, 1, 2, 3, 4, 5, 6, 7, 8}),
+                "every peer restores the same incident and survivor set after rollover");
+        }
     }
 }
 } // namespace
@@ -626,7 +664,9 @@ int main() {
         a_running_seat_feeds_only_matching_sets();
         malformed_and_unrelated_controls();
         steady_reports_feed_the_host();
-        randomized_schedules();
+        randomized_schedules(1);
+        randomized_schedules(3);
+        rolled_windows_agree();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

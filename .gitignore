@@ -34,3 +34,6 @@ config/build-hosts.local.json
 # Private relay configuration and locally generated certificate/key files.
 tools/relay/*.local.*
 tools/watchdog/config.local.json
+
+# Per-machine preview launcher paths (tools/preview/preview.local.example.json)
+tools/preview/preview.local.json

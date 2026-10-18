@@ -68,6 +68,7 @@ Run play(unsigned workers, const Scenario& scenario) {
     options.completeness_timeout_ms = 100'000;
     net::MeshIncidentOptions mesh;
     mesh.repair_grace = std::chrono::seconds(2);
+    mesh.rounds = 1; // these cases end at the first deadline
     options.mesh = mesh;
     std::vector<std::unique_ptr<PairTransport>> transports;
     std::vector<net::TacticalLockstepSession> sessions;

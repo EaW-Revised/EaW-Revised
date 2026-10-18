@@ -1,4 +1,5 @@
 #include "path_bench_internal.hpp"
+#include "eawr/battle/start.hpp"
 
 namespace path_bench {
 
@@ -56,7 +57,7 @@ namespace path_bench {
     if (!modules) return fail("the AI's Lua files do not load");
     out.modules = std::move(modules).value();
     for (const auto& type : tables.value().units) {
-        out.heights.emplace(skirmish::type_id(type.id), type.movement.layer_z_adjust.value_or(Fixed{}));
+        out.heights.emplace(eawr::battle::type_id(type.id), type.movement.layer_z_adjust.value_or(Fixed{}));
     }
     return out;
 }
@@ -201,7 +202,7 @@ void append_ship_rows(std::string& rows, const tactical::TacticalSession& world,
             }
         }
         for (const auto& [name, count] : owner_fleet) {
-            const auto type = skirmish::type_id(name);
+            const auto type = eawr::battle::type_id(name);
             if (motion.find(type) == nullptr) {
                 std::cerr << "path_bench: " << name << " has no motion profile\n";
                 return std::nullopt;
@@ -237,7 +238,7 @@ void append_ship_rows(std::string& rows, const tactical::TacticalSession& world,
         const auto origin = ships.front();
         int placed = 0;
         for (const auto& [name, count] : large_fleet) {
-            const auto type = skirmish::type_id(name);
+            const auto type = eawr::battle::type_id(name);
             if (motion.find(type) == nullptr) {
                 std::cerr << "path_bench: " << name << " has no motion profile; not staged\n";
                 continue;

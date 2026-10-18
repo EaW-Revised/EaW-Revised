@@ -185,6 +185,18 @@ struct SkirmishSetupMode::State final {
     [[nodiscard]] String caption(model::SetupText id);
     [[nodiscard]] std::size_t live_rows() const;
     [[nodiscard]] bool row_live(std::size_t row) const { return row < live_rows(); }
+    // WSS-14: the controller combo lists Open, Easy, Normal and Hard AI (indices 0 to 3); an occupied AI row is any
+    // index above Open. The index picks the AI's difficulty level (WTA-47).
+    static constexpr int controller_open = 0, controller_easy = 1, controller_normal = 2, controller_hard = 3;
+    [[nodiscard]] static int controller_index(const skirmish::LobbySlot& record) noexcept {
+        if (record.slot == 1) return controller_open;
+        return record.difficulty == sim::tactical::AiLevel::easy ? controller_easy
+            : record.difficulty == sim::tactical::AiLevel::hard ? controller_hard : controller_normal;
+    }
+    [[nodiscard]] static sim::tactical::AiLevel controller_level(int index) noexcept {
+        return index == controller_easy ? sim::tactical::AiLevel::easy
+            : index == controller_hard ? sim::tactical::AiLevel::hard : sim::tactical::AiLevel::normal;
+    }
     void resolve_factions();
     void fill_map_list();
     void idle_row(std::size_t row);
@@ -639,8 +651,10 @@ bool SkirmishSetupMode::State::build() {
             controller[slot_index]->set_disabled(true);
         } else {
             controller[slot_index]->add_item(caption(model::SetupText::open_player));
+            controller[slot_index]->add_item(caption(model::SetupText::ai_easy_player));
             controller[slot_index]->add_item(caption(model::SetupText::ai_player));
-            controller[slot_index]->select(slot_index == 1 ? 1 : 0);
+            controller[slot_index]->add_item(caption(model::SetupText::ai_hard_player));
+            controller[slot_index]->select(slot_index == 1 ? controller_normal : controller_open);
         }
     }
 
@@ -870,7 +884,7 @@ void SkirmishSetupMode::State::refresh_map(const int index) {
             team[slot]->add_item(text(model::setup_team_caption(team_word, side.team)), static_cast<int>(side.team));
         const auto record = std::find_if(selection.slots.begin(), selection.slots.end(),
             [&](const auto& entry) { return entry.slot == slot + 1; });
-        if (slot != 0) controller[slot]->select(record == selection.slots.end() ? 0 : 1);
+        if (slot != 0) controller[slot]->select(record == selection.slots.end() ? controller_open : controller_index(*record));
         const auto chosen = record == selection.slots.end() ? (slot == 0 ? 0U : 1U) : record->team;
         for (int i = 0; i < team[slot]->get_item_count(); ++i)
             if (team[slot]->get_item_id(i) == static_cast<int>(chosen)) team[slot]->select(i);
@@ -938,7 +952,7 @@ void SkirmishSetupMode::State::validate() {
     std::vector<std::uint32_t> edited_colours;
     const String unavailable = caption(model::SetupText::unavailable);
     for (std::size_t slot = 0; slot < skirmish::setup_row_count(map); ++slot) {
-        const bool active = slot == 0 || controller[slot]->get_selected() == 1;
+        const bool active = slot == 0 || controller[slot]->get_selected() >= controller_easy;
         faction[slot]->set_disabled(!active);
         team[slot]->set_disabled(!active);
         colour[slot]->set_disabled(!active);
@@ -965,6 +979,8 @@ void SkirmishSetupMode::State::validate() {
         skirmish::LobbySlot record;
         record.slot = static_cast<std::uint32_t>(slot + 1);
         record.human = slot == 0;
+        // WTA-47: the AI row's level; the LAN peer's row is a human seat.
+        if (slot != 0 && !(connection->get_selected() == 1 && slot == 1)) record.difficulty = controller_level(controller[slot]->get_selected());
         record.team = team[slot]->get_selected() >= 0 ? static_cast<std::uint32_t>(team[slot]->get_selected_id()) : sim::tactical::max_players;
         const int chosen_faction = faction[slot]->get_selected();
         if (chosen_faction >= 0 && static_cast<std::size_t>(chosen_faction) < faction_names.size())
@@ -1024,11 +1040,11 @@ void SkirmishSetupMode::State::process_lan() {
             for (std::size_t i = 0; i < maps.size(); ++i) if (maps[i].path.ends_with("_mp_space_coruscant.ted")) {
                 list->select(static_cast<int>(i)); refresh_map(static_cast<int>(i)); break;
             }
-            controller[2]->select(1);
+            controller[2]->select(controller_normal);
             selection.slots.push_back({3, "Rebel", 0, false, {}});
             faction[2]->select(0); team[2]->select(0);
             if (lan_acceptance) {
-                controller[3]->select(1);
+                controller[3]->select(controller_normal);
                 selection.slots.push_back({4, "Empire", 1, false, {}});
                 faction[3]->select(1); team[3]->select(1);
             }
@@ -1045,7 +1061,8 @@ void SkirmishSetupMode::State::process_lan() {
     if (!enabled) {
         if (lan) { lan->cancel(); lan.reset(); }
         controller[0]->set_item_text(0, text(local_name));
-        controller[1]->set_item_text(1, caption(model::SetupText::ai_player));
+        controller[1]->set_item_text(controller_easy, caption(model::SetupText::ai_easy_player));
+        controller[1]->select(controller_normal);
         official->set_disabled(false); custom->set_disabled(false); advanced->set_disabled(false);
         list->set_mouse_filter(Control::MOUSE_FILTER_STOP); list->set_focus_mode(Control::FOCUS_ALL);
         for (std::size_t row = 1; row < skirmish::local_setup_rows; ++row) controller[row]->set_disabled(!row_live(row));
@@ -1111,7 +1128,8 @@ void SkirmishSetupMode::State::process_lan() {
             for (std::size_t row = 0; row < skirmish::local_setup_rows; ++row) {
                 const auto slot = std::find_if(offered->slots->begin(), offered->slots->end(),
                     [&](const auto& value) { return value.slot == row + 1; });
-                controller[row]->select(row == 0 ? 0 : slot == offered->slots->end() ? 0 : 1);
+                controller[row]->select(row == 0 ? controller_open : slot == offered->slots->end() ? controller_open
+                    : row == 1 ? 1 : controller_index(*slot));
                 if (slot == offered->slots->end()) continue;
                 colour[row]->select(static_cast<int>(slot->colour_index.value_or(slot->slot - 1)));
                 for (std::size_t i = 0; i < faction_names.size(); ++i)
@@ -1333,7 +1351,7 @@ void SkirmishSetupMode::process() {
             };
             const auto report_row = [&](const std::size_t row) {
                 UtilityFunctions::print("EAWR setup slot ", static_cast<int64_t>(row),
-                    ": active=", row == 0 || state.controller[row]->get_selected() == 1 ? 1 : 0,
+                    ": active=", row == 0 || state.controller[row]->get_selected() >= State::controller_easy ? 1 : 0,
                     " faction=", state.faction[row]->get_text(), " team=", state.team[row]->get_text());
             };
             if (state.frames == 41) {
@@ -1360,7 +1378,7 @@ void SkirmishSetupMode::process() {
             else if (state.frames == 56) key(KEY_ENTER);
             else if (state.frames == 57) report_row(1);
             else if (state.frames == 58) click(state.controller[1]->get_global_rect().get_center());
-            else if (state.frames >= 59 && state.frames <= 61) navigate_popup(state.controller[1], 1);
+            else if (state.frames >= 59 && state.frames <= 61) navigate_popup(state.controller[1], State::controller_normal);
             else if (state.frames == 62) key(KEY_ENTER);
             else if (state.frames == 64) click(state.advanced->get_global_rect().get_center());
             else if (state.frames == 70) {
@@ -1401,14 +1419,14 @@ void SkirmishSetupMode::process() {
                         key(state.selected < static_cast<int>(i) ? KEY_DOWN : KEY_UP);
                 }
             } else if (state.frames == 50) click(state.controller[2]->get_global_rect().get_center());
-            else if (state.frames >= 52 && state.frames <= 54) navigate_popup(state.controller[2], 1);
+            else if (state.frames >= 52 && state.frames <= 54) navigate_popup(state.controller[2], State::controller_normal);
             else if (state.frames == 56 || state.frames == 64 || state.frames == 72 || state.frames == 80) key(KEY_ENTER);
             else if (state.frames == 58) click(state.team[2]->get_global_rect().get_center());
             else if (state.frames >= 60 && state.frames <= 62) navigate_popup(state.team[2], 0);
             else if (state.frames == 66) click(state.faction[2]->get_global_rect().get_center());
             else if (state.frames >= 68 && state.frames <= 70) navigate_popup(state.faction[2], 0);
             else if (state.frames == 74) click(state.controller[3]->get_global_rect().get_center());
-            else if (state.frames >= 76 && state.frames <= 78) navigate_popup(state.controller[3], 1);
+            else if (state.frames >= 76 && state.frames <= 78) navigate_popup(state.controller[3], State::controller_normal);
             else if (state.frames == 96) click(state.start->get_global_rect().get_center());
             return;
         }
@@ -1480,7 +1498,7 @@ void SkirmishSetupMode::process() {
             // send navigation keys into the still-focused map list.
             if (!state.row_live(2) && state.frames != 98) return;
             if (state.frames == 62) click(state.controller[2]->get_global_rect().get_center());
-            else if (state.frames == 64 || state.frames == 65) navigate_popup(state.controller[2], 1);
+            else if (state.frames == 64 || state.frames == 65) navigate_popup(state.controller[2], State::controller_normal);
             else if (state.frames == 66 || state.frames == 74 || state.frames == 80) key(KEY_ENTER);
             else if (state.frames == 68) click(state.team[2]->get_global_rect().get_center());
             else if (state.frames >= 70 && state.frames <= 72) navigate_popup(state.team[2], 2);

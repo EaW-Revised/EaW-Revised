@@ -34,6 +34,7 @@
 // passes it by more than one parent, and no slice passes the slice size by more than one parent
 // (a sliced search that has not ended at its landing would). Without the game data it prints
 #include "path_bench_internal.hpp"
+#include "eawr/battle/start.hpp"
 
 using namespace path_bench;
 
@@ -69,7 +70,7 @@ int main(const int argc, const char* const argv[]) {
     if (options->list) {
         for (const auto& unit : content->start.units) {
             const auto* footprint = content->content.motion.footprint(unit.state.type_id);
-            std::cout << "start " << unit.state.entity_id << ' ' << unit.type << " role " << skirmish::to_string(unit.role)
+            std::cout << "start " << unit.state.entity_id << ' ' << unit.type << " role " << eawr::battle::to_string(unit.role)
                       << " owner " << unit.state.owner << " at (" << unit.state.position.x.raw() / Fixed::scale << ", "
                       << unit.state.position.y.raw() / Fixed::scale << ")"
                       << (footprint != nullptr ? " layer " + std::to_string(static_cast<int>(footprint->layer)) : std::string())
@@ -78,7 +79,7 @@ int main(const int argc, const char* const argv[]) {
         for (const auto name : {"Corellian_Corvette", "Corellian_Gunboat", "Nebulon_B_Frigate", "Alliance_Assault_Frigate",
                  "Tartan_Patrol_Cruiser", "Acclamator_Assault_Ship", "Broadside_Class_Cruiser", "Interdictor_Cruiser",
                  "Star_Destroyer", "Victory_Destroyer", "Calamari_Cruiser", "Marauder_Missile_Cruiser", "Home_One"}) {
-            const auto type = skirmish::type_id(name);
+            const auto type = eawr::battle::type_id(name);
             const auto* footprint = content->content.motion.footprint(type);
             std::cout << "type " << name << (content->content.motion.find(type) != nullptr ? " moves" : " no motion")
                       << (footprint != nullptr ? " layer " + std::to_string(static_cast<int>(footprint->layer)) : std::string())

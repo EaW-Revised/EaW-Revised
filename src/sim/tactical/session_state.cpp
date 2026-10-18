@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "session_encoding.hpp"
+#include "session_canonical.hpp"
 #include "checkpoint_fields_internal.hpp"
 
 namespace eawr::sim::tactical {
@@ -442,6 +443,22 @@ void TacticalSession::Impl::append_canonical_unit(std::vector<std::uint8_t>& byt
     }
 }
 
+namespace {
+// Walk a map once to retain fixed-range boundaries, without copying any record.
+template <typename Map>
+auto canonical_map_ranges(const Map& values) {
+    std::array<typename Map::const_iterator, tick_partition_count + 1> ranges;
+    auto next = values.begin();
+    for (std::size_t partition = 0; partition < tick_partition_count; ++partition) {
+        ranges[partition] = next;
+        const auto range = partition_range(partition, values.size());
+        std::advance(next, static_cast<typename Map::difference_type>(range.end - range.begin));
+    }
+    ranges.back() = next;
+    return ranges;
+}
+} // namespace
+
 std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const PartitionExecutor& executor) const {
     std::vector<std::pair<EntityId, entt::entity>> order;
     std::vector<LiveUnit> units;
@@ -451,6 +468,18 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const Partition
         units.resize(order.size());
     }
     std::array<std::vector<std::uint8_t>, tick_partition_count> encoded_units;
+    std::array<CanonicalCounts, tick_partition_count> sparse_counts;
+    CanonicalEncoding encoding;
+    auto& craft_parts = encoding.crafts;
+    auto& mind_parts = encoding.minds;
+    auto& projectile_parts = encoding.projectiles;
+    auto& ability_parts = encoding.abilities;
+    const auto craft_ranges = canonical_map_ranges(crafts);
+    const auto mind_ranges = canonical_map_ranges(minds);
+    const auto tree_ranges = canonical_map_ranges(collection.state_trees());
+    const auto projectile_tree_ranges = canonical_map_ranges(projectile_collection.state_trees());
+    auto& tree_parts = encoding.trees;
+    auto& projectile_tree_parts = encoding.projectile_trees;
     // The registry is frozen after the ordered commit. Each fixed range owns its
     // copied records and byte buffer; only pointer metadata is gathered serially.
     const auto prepared = executor.execute_phase("canonical-records", tick_partition_count,
@@ -461,14 +490,37 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const Partition
             for (auto index = range.begin; index < range.end; ++index) {
                 units[index] = live_at(order[index].first, order[index].second);
                 append_canonical_unit(bytes, units[index]);
+                sparse_counts[partition].add(units[index]);
+                if (units[index].abilities) {
+                    sim::detail::append_u64(ability_parts[partition], units[index].state.entity_id);
+                    append_abilities(ability_parts[partition], *units[index].abilities);
+                }
             }
             encoded_units[partition] = std::move(bytes);
+            for (auto it = craft_ranges[partition]; it != craft_ranges[partition + 1]; ++it)
+                append_craft(craft_parts[partition], it->first, it->second);
+            for (auto it = mind_ranges[partition]; it != mind_ranges[partition + 1]; ++it)
+                append_squadron_state(mind_parts[partition], it->second);
+            if (durability.damage) {
+                const auto projectiles_range = partition_range(partition, projectiles.size());
+                for (auto index = projectiles_range.begin; index < projectiles_range.end; ++index)
+                    detail::append_projectile(projectile_parts[partition], projectiles[index]);
+            }
+            const auto encode_trees = [&](const auto& ranges, auto& parts) {
+                for (auto it = ranges[partition]; it != ranges[partition + 1]; ++it) {
+                    sim::detail::append_u64(parts[partition], it->first);
+                    it->second->append_state(parts[partition]);
+                }
+            };
+            if (!collection.empty()) encode_trees(tree_ranges, tree_parts);
+            if (projectile_collection.has_history()) encode_trees(projectile_tree_ranges, projectile_tree_parts);
         });
     // This phase only accelerates publication of an already committed tick. A
     // failed read-only worker pass must not leave that tick without its hash and
     // snapshot; discard its partial buffers and use the existing serial encoder.
     if (!prepared) return canonical_bytes();
-    return canonical_bytes(units, encoded_units);
+    for (const auto& part : sparse_counts) encoding.counts.add(part);
+    return canonical_bytes(units, encoded_units, &encoding);
 }
 
 std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
@@ -480,11 +532,17 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
     }
 
 std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span<const LiveUnit> units,
-    const std::span<const std::vector<std::uint8_t>> encoded_units) const {
+    const std::span<const std::vector<std::uint8_t>> encoded_units,
+    const CanonicalEncoding* encoding) const {
         core::tick_profile::Scope encoding_profile_scope("serial.tactical.finish.encoding");
         std::vector<std::uint8_t> bytes;
-        bytes.reserve(120 + setup.players.size() * detail::player_record_size
-            + units.size() * (detail::unit_record_size + detail::order_record_size));
+        auto capacity = std::size_t{120} + setup.players.size() * detail::player_record_size;
+        if (encoded_units.empty()) capacity += units.size() * (detail::unit_record_size + detail::order_record_size);
+        else for (const auto& part : encoded_units) capacity += part.size();
+        if (encoding) for (const auto buffers : {&encoding->crafts, &encoding->minds, &encoding->projectiles,
+                &encoding->abilities, &encoding->trees, &encoding->projectile_trees})
+            for (const auto& part : *buffers) capacity += part.size();
+        bytes.reserve(capacity);
         bytes.insert(bytes.end(), state_magic.begin(), state_magic.end());
         sim::detail::append_u32(bytes, tactical_state_encoding_version);
         sim::detail::append_u32(bytes, tactical_rules_version);
@@ -506,1016 +564,75 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         for (const auto& player : setup.players) {
             detail::append_player(bytes, player);
         }
-        sim::detail::append_u64(bytes, units.size());
-        if (encoded_units.empty()) {
-            for (const auto& unit : units) append_canonical_unit(bytes, unit);
-        } else {
-            // Fixed contiguous ranges concatenate in exactly the serial entity order.
-            for (const auto& part : encoded_units) bytes.insert(bytes.end(), part.begin(), part.end());
-        }
-        std::uint64_t disabled_garrisons = 0;
-        for (const auto& unit : units) disabled_garrisons += unit.state.garrison_enabled ? 0U : 1U;
-        // FL-13: sparse GSPN keeps every all-enabled session's canonical bytes unchanged.
-        if (disabled_garrisons != 0) {
-            bytes.insert(bytes.end(), {'G', 'S', 'P', 'N'});
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, disabled_garrisons);
-            for (const auto& unit : units) {
-                if (!unit.state.garrison_enabled) sim::detail::append_u64(bytes, unit.state.entity_id);
-            }
-        }
-        std::uint64_t manual_weapons = 0;
-        if (!named_ability_locks.empty()) {
-            bytes.insert(bytes.end(), {'N', 'L', 'C', 'K'});
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, named_ability_locks.size());
-            for (const auto& [key, locked] : named_ability_locks) {
-                const auto& [owner, type, name] = key;
-                sim::detail::append_u32(bytes, owner);
-                sim::detail::append_u64(bytes, type);
-                sim::detail::append_u64(bytes, name.size());
-                bytes.insert(bytes.end(), name.begin(), name.end());
-                sim::detail::append_u32(bytes, locked ? 1U : 0U);
-            }
-        }
-        // WSW-14/19: coordinator-reserved optional block; ordinary sessions retain their bytes.
-        if (!special_weapons.empty() || !special_disabled_by_hardpoint.empty()) {
-            bytes.insert(bytes.end(), {'S', 'W', 'P', 'N'});
-            sim::detail::append_u32(bytes, special_disabled_by_hardpoint.empty() ? 1U : 2U);
-            sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, special_weapons.size());
-            for (const auto& [id, state] : special_weapons) {
-                sim::detail::append_u64(bytes, id);
-                sim::detail::append_u64(bytes, state.recharge_started);
-                sim::detail::append_u64(bytes, state.recharge_until);
-                sim::detail::append_u64(bytes, state.next_pulse_frame);
-                sim::detail::append_u64(bytes, state.target);
-                sim::detail::append_u32(bytes, state.pulses_left);
-                sim::detail::append_u32(bytes, state.instances);
-            }
-            if (!special_disabled_by_hardpoint.empty()) {
-                sim::detail::append_u64(bytes, special_disabled_by_hardpoint.size());
-                for (const auto player : special_disabled_by_hardpoint) sim::detail::append_u32(bytes, player);
-            }
-        }
-        if (!free_garrisons.empty()) {
-            bytes.insert(bytes.end(), {'G', 'A', 'R', 'R'});
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, free_garrisons.size());
-            for (const auto& state : free_garrisons) {
-                sim::detail::append_u32(bytes, state.setup.player);
-                sim::detail::append_u32(bytes, state.setup.delay_frames);
-                sim::detail::append_u64(bytes, state.setup.templates.size());
-                for (const auto type : state.setup.templates) sim::detail::append_u64(bytes, type);
-                sim::detail::append_u64(bytes, state.registered.size());
-                for (const auto id : state.registered) sim::detail::append_u64(bytes, id);
-                sim::detail::append_u32(bytes, state.due_frame ? 1U : 0U);
-                sim::detail::append_u32(bytes, 0);
-                sim::detail::append_u64(bytes, state.due_frame.value_or(0));
-                sim::detail::append_u64(bytes, state.pending.size());
-                for (const auto type : state.pending) sim::detail::append_u64(bytes, type);
-            }
-        }
-        for (const auto& unit : units) {
-            if (!unit.combat) continue;
-            for (const auto& weapon : unit.combat->weapons) manual_weapons += weapon.manual ? 1 : 0;
-        }
-        // WAD-39/40: MANN exists only with manual weapons/clocks; all old sessions keep their bytes.
-        if (manual_weapons != 0 || !manual_clocks.empty()) {
-            bytes.insert(bytes.end(), {'M', 'A', 'N', 'N'});
-            sim::detail::append_u64(bytes, manual_weapons);
-            for (const auto& unit : units) {
-                if (!unit.combat) continue;
-                for (std::uint32_t index = 0; index < unit.combat->weapons.size(); ++index) {
-                    const auto& weapon = unit.combat->weapons[index];
-                    if (!weapon.manual) continue;
-                    const auto& state = *weapon.manual;
-                    sim::detail::append_u64(bytes, unit.state.entity_id);
-                    sim::detail::append_u32(bytes, index);
-                    sim::detail::append_u32(bytes, state.requesting_player);
-                    sim::detail::append_u64(bytes, state.target);
-                    sim::detail::append_u64(bytes, state.assigned_frame);
-                    for (const auto angle : {state.yaw, state.pitch, state.desired_yaw, state.desired_pitch}) append_fixed(bytes, angle);
-                }
-            }
-            sim::detail::append_u64(bytes, manual_clocks.size());
-            for (const auto& [player, clock] : manual_clocks) {
-                sim::detail::append_u32(bytes, player);
-                sim::detail::append_u32(bytes, clock.cooldown_frames);
-                sim::detail::append_u64(bytes, clock.last_fired_frame);
-            }
-        }
-        std::uint64_t turret_count = 0;
-        for (const auto& unit : units) {
-            if (!unit.combat) continue;
-            for (const auto& weapon : unit.combat->weapons) turret_count += weapon.turret ? 1 : 0;
-        }
-        if (turret_count != 0) {
-            bytes.insert(bytes.end(), {'O', 'T', 'U', 'R'});
-            sim::detail::append_u64(bytes, turret_count);
-            for (const auto& unit : units) {
-                if (!unit.combat) continue;
-                for (std::uint32_t index = 0; index < unit.combat->weapons.size(); ++index) {
-                    const auto& turret = unit.combat->weapons[index].turret;
-                    if (!turret) continue;
-                    sim::detail::append_u64(bytes, unit.state.entity_id);
-                    sim::detail::append_u32(bytes, index);
-                    sim::detail::append_u64(bytes, turret->target);
-                    for (const auto angle : {turret->yaw, turret->pitch, turret->desired_yaw, turret->desired_pitch})
-                        append_fixed(bytes, angle);
-                    bytes.push_back(turret->ready ? 1 : 0);
-                    bytes.push_back(turret->rest_started_frame ? 1 : 0);
-                    sim::detail::append_u64(bytes, turret->rest_started_frame.value_or(0));
-                    bytes.push_back(turret->returning_to_rest ? 1 : 0);
-                }
-            }
-        }
-        // Squadron membership (#271) and fog cells (#274) follow as tagged blocks, only when
-        // present, so a session without them hashes exactly as before.
-        if (!squadrons.empty()) {
-            bytes.insert(bytes.end(), squadron_tag.begin(), squadron_tag.end());
-            sim::detail::append_u64(bytes, squadrons.size());
-            for (const auto& squadron : squadrons) {
-                sim::detail::append_u64(bytes, squadron.container);
-                sim::detail::append_u64(bytes, squadron.members.size());
-                for (const auto member : squadron.members) {
-                    sim::detail::append_u64(bytes, member);
-                }
-            }
-        }
-        if (fog) {
-            bytes.insert(bytes.end(), fog_tag.begin(), fog_tag.end());
-            fog->append_state(bytes);
-            if (setup.campaign) {
-                bytes.insert(bytes.end(),{'G','C','F','W'});
-                sim::detail::append_u64(bytes,setup.players.size());
-                for(std::size_t i=0;i<setup.players.size();++i) sim::detail::append_i64(bytes,last_fog_multipliers[i].raw());
-            }
-        }
-        if (motion.avoidance) {
-            bytes.insert(bytes.end(), tracking_tag.begin(), tracking_tag.end());
-            for (const auto anchor : tracking_anchor) {
-                sim::detail::append_u64(bytes, anchor);
-            }
-        }
-        // Rolled units (#351): only those whose roll is not zero, so a session in which no unit
-        // ever banked hashes as before.
-        std::uint64_t rolled = 0;
-        for (const auto& unit : units) {
-            rolled += unit.roll.raw() != 0 ? 1 : 0;
-        }
-        if (rolled != 0) {
-            bytes.insert(bytes.end(), roll_tag.begin(), roll_tag.end());
-            sim::detail::append_u64(bytes, rolled);
-            for (const auto& unit : units) {
-                if (unit.roll.raw() != 0) {
-                    sim::detail::append_u64(bytes, unit.state.entity_id);
-                    append_fixed(bytes, unit.roll);
-                }
-            }
-        }
-        // Projectiles in flight (#74), with damage rules only.
-        if (durability.damage) {
-            bytes.insert(bytes.end(), projectile_tag.begin(), projectile_tag.end());
-            sim::detail::append_u64(bytes, next_projectile);
-            sim::detail::append_u64(bytes, projectiles.size());
-            for (const auto& projectile : projectiles) {
-                detail::append_projectile(bytes, projectile);
-            }
-        }
-        // Waiting group members (#344), sliced searches (PC-08), and failed searches (FC-68), each
-        if (!pending_blast_damage.empty()) {
-            constexpr std::array<std::uint8_t, 4> blast_tag{'D', 'D', 'M', 'G'};
-            bytes.insert(bytes.end(), blast_tag.begin(), blast_tag.end());
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, pending_blast_damage.size());
-            std::vector<std::size_t> order(pending_blast_damage.size());
-            for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
-            std::stable_sort(order.begin(), order.end(), [&](const auto left, const auto right) {
-                return pending_blast_damage[left].due < pending_blast_damage[right].due;
-            });
-            for (const auto index : order) {
-                const auto& queued = pending_blast_damage[index];
-                sim::detail::append_u64(bytes, queued.due);
-                sim::detail::append_u64(bytes, queued.recipient);
-                append_fixed(bytes, queued.amount);
-                sim::detail::append_u32(bytes, queued.owner);
-                sim::detail::append_u32(bytes, queued.damage_type);
-                sim::detail::append_u32(bytes, queued.internal_damage_misc ? 1U : 0U);
-                sim::detail::append_u32(bytes, static_cast<std::uint32_t>(queued.contacted_mesh.size()));
-                bytes.insert(bytes.end(), queued.contacted_mesh.begin(), queued.contacted_mesh.end());
-            }
-        }
-        // Waiting group members (#344), then ships waiting for a sliced search (PC-08), each
-        // ascending ID, only while any wait.
-        for (const unsigned group : {0U, 1U, 2U}) {
-            std::vector<std::pair<EntityId, const FormationWait*>> waits;
-            for (const auto& unit : units) {
-                if (!unit.formation) continue;
-                const auto wait_group = unit.formation->failure_frame ? 2U : (unit.formation->sliced ? 1U : 0U);
-                if (wait_group == group) waits.emplace_back(unit.state.entity_id, &*unit.formation);
-            }
-            if (waits.empty()) continue;
-            const auto& tag = group == 2U ? path_retry_tag : (group == 1U ? sliced_tag : formation_tag);
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            if (group == 2U) sim::detail::append_u32(bytes, path_retry_block_version);
-            sim::detail::append_u64(bytes, waits.size());
-            for (const auto& [id, wait] : waits) {
-                sim::detail::append_u64(bytes, id);
-                sim::detail::append_u64(bytes, wait->frame);
-                append_fixed(bytes, wait->destination.x);
-                append_fixed(bytes, wait->destination.y);
-                append_fixed(bytes, wait->destination.z);
-                append_fixed(bytes, wait->max_speed);
-                sim::detail::append_u64(bytes, wait->order.tick);
-                sim::detail::append_u32(bytes, wait->order.player_id);
-                sim::detail::append_u64(bytes, wait->order.sequence);
-                sim::detail::append_u32(bytes, wait->rank);
-                if (group == 2U) sim::detail::append_u64(bytes, *wait->failure_frame);
-            }
-        }
-        // Approach mappings (#452), ascending ID, only while any unit has one.
-        std::vector<std::pair<EntityId, const Approach*>> approaches;
-        for (const auto& unit : units) {
-            if (unit.approach) approaches.emplace_back(unit.state.entity_id, &*unit.approach);
-        }
-        if (!approaches.empty()) {
-            bytes.insert(bytes.end(), approach_tag.begin(), approach_tag.end());
-            sim::detail::append_u64(bytes, approaches.size());
-            for (const auto& [id, approach] : approaches) {
-                sim::detail::append_u64(bytes, id);
-                sim::detail::append_u64(bytes, approach->prediction_frame);
-            }
-        }
-        // WMV-13 (#719): last observed order targets, ascending ID, only while any unit keeps one.
-        std::vector<std::pair<EntityId, const Sighting*>> sightings;
-        for (const auto& unit : units) {
-            if (unit.sighting) sightings.emplace_back(unit.state.entity_id, &*unit.sighting);
-        }
-        if (!sightings.empty()) {
-            bytes.insert(bytes.end(), sighting_tag.begin(), sighting_tag.end());
-            sim::detail::append_u64(bytes, sightings.size());
-            for (const auto& [id, sighting] : sightings) {
-                sim::detail::append_u64(bytes, id);
-                sim::detail::append_u64(bytes, sighting->target);
-                append_fixed(bytes, sighting->point.x);
-                append_fixed(bytes, sighting->point.y);
-                append_fixed(bytes, sighting->point.z);
-            }
-        }
-        // WU-37, GRSN v1: independent object and team birth marks, in stable ID order.
-        const auto marked_units = std::count_if(units.begin(), units.end(),
-            [](const auto& unit) { return unit.garrison_unit; });
-        const auto marked_teams = std::count_if(minds.begin(), minds.end(),
-            [](const auto& entry) { return entry.second.garrison_unit; });
-        if (marked_units != 0 || marked_teams != 0) {
-            bytes.insert(bytes.end(), garrison_tag.begin(), garrison_tag.end());
-            sim::detail::append_u32(bytes, garrison_block_version);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(marked_units));
-            for (const auto& unit : units) if (unit.garrison_unit)
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(marked_teams));
-            for (const auto& [id, mind] : minds) if (mind.garrison_unit)
-                sim::detail::append_u64(bytes, id);
-        }
-        // Squadron flight, orders and hangars (#75), each only when present.
-        if (!crafts.empty()) {
-            bytes.insert(bytes.end(), craft_tag.begin(), craft_tag.end());
-            sim::detail::append_u64(bytes, crafts.size());
-            for (const auto& [id, craft] : crafts) {
-                append_craft(bytes, id, craft);
-            }
-        }
-        if (!minds.empty()) {
-            bytes.insert(bytes.end(), squadron_state_tag.begin(), squadron_state_tag.end());
-            sim::detail::append_u64(bytes, minds.size());
-            for (const auto& [container, state] : minds) {
-                static_cast<void>(container);
-                append_squadron_state(bytes, state);
-            }
-        }
-        // SQAP v2 retains route facing/mapping and member annotations.
-        const auto attack_paths = std::count_if(minds.begin(), minds.end(),
-            [](const auto& entry) { return entry.second.attack_path.has_value(); });
-        if (attack_paths != 0) {
-            bytes.insert(bytes.end(), squadron_attack_path_tag.begin(), squadron_attack_path_tag.end());
-            sim::detail::append_u32(bytes, 2);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(attack_paths));
-            for (const auto& [id, state] : minds) {
-                if (!state.attack_path) continue;
-                const auto& path = *state.attack_path;
-                sim::detail::append_u64(bytes, id);
-                sim::detail::append_u64(bytes, path.target);
-                append_vec3(bytes, path.cached_position);
-                sim::detail::append_u64(bytes, path.next_refresh_frame);
-                sim::detail::append_u64(bytes, path.collision_identity);
-                sim::detail::append_u64(bytes, path.stack_changed_frame);
-                sim::detail::append_u64(bytes, path.escorted_destination);
-                sim::detail::append_u32(bytes, path.initialization_pending ? 1U : 0U);
-                sim::detail::append_u32(bytes, path.failure_frame ? 1U : 0U);
-                if (path.failure_frame) sim::detail::append_u64(bytes, *path.failure_frame);
-                sim::detail::append_u64(bytes, path.stack.size());
-                for (const auto& route : path.stack) {
-                    sim::detail::append_u64(bytes, route.identity);
-                    append_fixed(bytes, route.aside);
-                    append_vec3(bytes, route.start_facing);
-                    append_fixed(bytes, route.ahead);
-                    sim::detail::append_u64(bytes, route.nodes.size());
-                    for (const auto& node : route.nodes) append_vec3(bytes, node);
-                    sim::detail::append_u64(bytes, route.node_speeds.size());
-                    for (const auto speed : route.node_speeds) append_fixed(bytes, speed);
-                    sim::detail::append_u64(bytes, route.trackers.size());
-                    for (const auto& [member, tracker] : route.trackers) {
-                        sim::detail::append_u64(bytes, member);
-                        sim::detail::append_u32(bytes, tracker.segment);
-                        sim::detail::append_u32(bytes, tracker.started ? 1U : 0U);
-                        append_fixed(bytes, tracker.turn_scale);
-                        append_fixed(bytes, tracker.speed_scale);
-                    }
-                }
-            }
-        }
-        if (!spawners.empty()) {
-            bytes.insert(bytes.end(), hangar_tag.begin(), hangar_tag.end());
-            sim::detail::append_u64(bytes, spawners.size());
-            for (const auto& [id, state] : spawners) {
-                append_spawner(bytes, id, state);
-            }
-        }
-        if (!collection.empty()) {
-            bytes.insert(bytes.end(), collection_tag.begin(), collection_tag.end());
-            collection.append_state(bytes);
-        }
-        if (projectile_collection.has_history()) {
-            bytes.insert(bytes.end(), projectile_collection_tag.begin(), projectile_collection_tag.end());
-            projectile_collection.append_state(bytes);
-        }
-        // Skirmish purchasing (#530): the ledgers with economy rules, arrivals and population
-        // shares while any; a session without an economy hashes as before.
-        if (!economy.empty()) {
-            bytes.insert(bytes.end(), economy_tag.begin(), economy_tag.end());
-            sim::detail::append_u64(bytes, ledgers.size());
-            for (const auto& ledger : ledgers) {
-                append_ledger(bytes, ledger);
-            }
-        }
-        if (!arrivals.empty()) {
-            bytes.insert(bytes.end(), arrival_tag.begin(), arrival_tag.end());
-            sim::detail::append_u64(bytes, arrivals.size());
-            for (const auto& [id, arrival] : arrivals) {
-                sim::detail::append_u64(bytes, id);
-                sim::detail::append_u32(bytes, arrival.frame);
-                sim::detail::append_u32(bytes, 0);
-                append_vec3(bytes, arrival.exit);
-                append_vec3(bytes, arrival.direction);
-            }
-        }
-        if (!pads.empty() || !construction.empty() || !respawns.empty()) {
-            constexpr std::array<std::uint8_t, 4> tag{'P', 'A', 'D', 'S'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, 2);
-            sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, pads.size());
-            for (const auto& [id, state] : pads) {
-                sim::detail::append_u64(bytes, id);
-                sim::detail::append_u32(bytes, state.target);
-                sim::detail::append_u32(bytes, state.contents_locked ? 1U : 0U);
-                sim::detail::append_i64(bytes, state.progress.raw());
-                sim::detail::append_u64(bytes, state.under_construction);
-                sim::detail::append_u64(bytes, state.constructed);
-                sim::detail::append_u64(bytes, state.cooldown_until);
-                sim::detail::append_u64(bytes, state.cooldown_start);
-            }
-            sim::detail::append_u64(bytes, construction.size());
-            for (const auto& [id, state] : construction) {
-                sim::detail::append_u64(bytes, id);
-                sim::detail::append_u64(bytes, state.parent);
-                sim::detail::append_u32(bytes, state.builder);
-                sim::detail::append_u32(bytes, 0);
-                sim::detail::append_u64(bytes, state.finish_frame);
-                sim::detail::append_i64(bytes, state.increment.raw());
-                sim::detail::append_u64(bytes, state.start_frame);
-            }
-            sim::detail::append_u64(bytes, respawns.size());
-            for (const auto& [due, batch] : respawns) {
-                sim::detail::append_u64(bytes, due);
-                sim::detail::append_u64(bytes, batch.objects.size());
-                for (const auto& request : batch.objects) {
-                    sim::detail::append_u64(bytes, request.type);
-                    sim::detail::append_u32(bytes, request.owner);
-                    sim::detail::append_u32(bytes, 0);
-                    append_vec3(bytes, request.position);
-                    for (const auto component : {request.rotation.x, request.rotation.y, request.rotation.z, request.rotation.w}) {
-                        append_fixed(bytes, component);
-                    }
-                }
-            }
-        }
-        if (!shares.empty()) {
-            bytes.insert(bytes.end(), population_tag.begin(), population_tag.end());
-            sim::detail::append_u64(bytes, shares.size());
-            for (const auto& [id, share] : shares) {
-                sim::detail::append_u64(bytes, id);
-                sim::detail::append_u32(bytes, share.owner);
-                sim::detail::append_u32(bytes, 0);
-                sim::detail::append_i64(bytes, share.share);
-            }
-        }
-        // WR-41: AVUL v1, coordinator-reserved. Only active independent defense timers;
-        // the initial records and sessions without arrivals retain their existing encoding.
-        const auto vulnerable = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.arrival_vulnerable_until.has_value();
-        });
-        if (vulnerable != 0) {
-            constexpr std::array<std::uint8_t, 4> tag{'A', 'V', 'U', 'L'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(vulnerable));
-            for (const auto& unit : units) {
-                if (!unit.arrival_vulnerable_until) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u64(bytes, *unit.arrival_vulnerable_until);
-            }
-        }
-        // WPR-02/22/51/52: UPGD v1, coordinator-reserved. Omitted for empty upgrade state.
-        const auto modified = [](const LiveUnit& unit) {
-            return unit.upgrade_bonuses != CombatBonuses{} || (unit.durability
-                && (std::any_of(unit.durability->disabled.begin(), unit.durability->disabled.end(), [](const bool value) { return value; })
-                    || std::any_of(unit.durability->repairing_players.begin(), unit.durability->repairing_players.end(),
-                        [](const auto& players) { return !players.empty(); })));
+        append_canonical_units_state(bytes, units, encoded_units);
+        const auto* counts = encoding ? &encoding->counts : nullptr;
+        const auto parts = [encoding](auto member) -> std::span<const std::vector<std::uint8_t>> {
+            if (!encoding) return {};
+            return encoding->*member;
         };
-        const auto account_state = [&](const PlayerEconomy& account) {
-            const auto* initial = economy.player(account.player);
-            return (initial != nullptr && account.tech_level != initial->start_tech) || !account.completed.empty()
-                || std::any_of(account.lifetime.begin(), account.lifetime.end(), [&](const auto& built) {
-                    return economy.upgrade(built.first) != nullptr && built.second != 0;
-                });
-        };
-        const auto modified_count = std::count_if(units.begin(), units.end(), modified);
-        const auto account_count = std::count_if(ledgers.begin(), ledgers.end(), account_state);
-        if (modified_count != 0 || account_count != 0) {
-            constexpr std::array<std::uint8_t, 4> tag{'U', 'P', 'G', 'D'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, 1); sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(account_count));
-            for (const auto& account : ledgers) {
-                if (!account_state(account)) continue;
-                sim::detail::append_u32(bytes, account.player); sim::detail::append_u32(bytes, account.tech_level);
-                sim::detail::append_u64(bytes, account.lifetime.size());
-                for (const auto& [type, count] : account.lifetime) {
-                    sim::detail::append_u64(bytes, type); sim::detail::append_u64(bytes, count);
-                }
-                sim::detail::append_u64(bytes, account.completed.size());
-                for (const auto& held : account.completed) {
-                    sim::detail::append_u64(bytes, held.type); sim::detail::append_u64(bytes, held.station);
-                    sim::detail::append_u64(bytes, held.object);
-                }
-            }
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(modified_count));
-            for (const auto& unit : units) {
-                if (!modified(unit)) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                for (const auto percentage : unit.upgrade_bonuses) append_fixed(bytes, percentage);
-                sim::detail::append_u64(bytes, unit.durability ? unit.durability->hardpoints.size() : 0);
-                if (!unit.durability) continue;
-                for (std::size_t slot = 0; slot < unit.durability->hardpoints.size(); ++slot) {
-                    sim::detail::append_u32(bytes, hardpoint_disabled(*unit.durability, slot) ? 1U : 0U);
-                    const auto* repairing = slot < unit.durability->repairing_players.size()
-                        ? &unit.durability->repairing_players[slot] : nullptr;
-                    sim::detail::append_u32(bytes, repairing != nullptr ? static_cast<std::uint32_t>(repairing->size()) : 0U);
-                    if (repairing != nullptr) for (const auto player : *repairing) sim::detail::append_u32(bytes, player);
-                }
-            }
-        }
-        // WSL-31: LSVC v1, coordinator-reserved; only pending held level-up deadlines.
-        std::uint64_t level_up_services = 0;
-        for (const auto& account : ledgers) for (const auto& held : account.completed)
-            level_up_services += held.level_up_service_frame.has_value() ? 1U : 0U;
-        if (level_up_services != 0) {
-            constexpr std::array<std::uint8_t, 4> tag{'L', 'S', 'V', 'C'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, 1); sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, level_up_services);
-            for (const auto& account : ledgers) for (const auto& held : account.completed) {
-                if (!held.level_up_service_frame) continue;
-                sim::detail::append_u32(bytes, account.player); sim::detail::append_u32(bytes, 0);
-                sim::detail::append_u64(bytes, held.object);
-                sim::detail::append_u64(bytes, *held.level_up_service_frame);
-            }
-        }
-        // WBP-44..46: IMOD v1 is omitted when no modifier object has state.
-        // Active ownership remains in UPGD; reverse termination effects live only here.
-        std::uint64_t modifier_objects = 0;
-        for (const auto& account : ledgers) {
-            for (const auto& held : account.completed) modifier_objects += !held.income_modifiers.empty() ? 1U : 0U;
-            for (const auto& held : account.income_residuals) modifier_objects += !held.income_modifiers.empty() ? 1U : 0U;
-        }
-        if (modifier_objects != 0) {
-            constexpr std::array<std::uint8_t, 4> tag{'I', 'M', 'O', 'D'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, 1); sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, modifier_objects);
-            const auto append = [&](const PlayerId owner, const CompletedBuild& held, const bool residual) {
-                if (held.income_modifiers.empty()) return;
-                sim::detail::append_u32(bytes, owner); sim::detail::append_u32(bytes, residual ? 1U : 0U);
-                sim::detail::append_u64(bytes, held.type); sim::detail::append_u64(bytes, held.station);
-                sim::detail::append_u64(bytes, held.object); sim::detail::append_u64(bytes, held.income_modifiers.size());
-                for (const auto& state : held.income_modifiers) {
-                    sim::detail::append_u32(bytes, state.initialized ? 1U : 0U); sim::detail::append_u32(bytes, 0);
-                    sim::detail::append_u64(bytes, state.next_scan_frame); sim::detail::append_u64(bytes, state.attached.size());
-                    for (const auto stream : state.attached) sim::detail::append_u64(bytes, stream);
-                }
-            };
-            for (const auto& account : ledgers) {
-                for (const auto& held : account.completed) append(account.player, held, false);
-                for (const auto& held : account.income_residuals) append(account.player, held, true);
-            }
-        }
-        // The decided battle (#77); an undecided session hashes as before.
-        if (outcome) {
-            append_outcome(bytes, *outcome);
-        }
-        // Unit abilities (#76), ascending ID, only when a live unit's type has abilities.
-        std::uint64_t able = 0;
-        for (const auto& unit : units) able += unit.abilities ? 1 : 0;
-        if (able != 0) {
-            bytes.insert(bytes.end(), ability_tag.begin(), ability_tag.end());
-            sim::detail::append_u64(bytes, able);
-            for (const auto& unit : units) {
-                if (!unit.abilities) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                append_abilities(bytes, *unit.abilities);
-            }
-        }
-        // Cloaks (#1887, WST-03), ascending ID, only while one is on: the last detection frame.
-        const auto cloaked = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.abilities && unit.abilities->stealth_on;
-        });
-        if (cloaked != 0) {
-            bytes.insert(bytes.end(), stealth_tag.begin(), stealth_tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(cloaked));
-            for (const auto& unit : units) {
-                if (!unit.abilities || !unit.abilities->stealth_on) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u64(bytes, unit.abilities->stealth_detected);
-            }
-        }
-        // Cloaks with their own end (#1906, WST-03), ascending ID, only while one is on.
-        const auto lengthened = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.abilities && unit.abilities->stealth_on && unit.abilities->stealth_end != 0;
-        });
-        if (lengthened != 0) {
-            bytes.insert(bytes.end(), stealth_end_tag.begin(), stealth_end_tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(lengthened));
-            for (const auto& unit : units) {
-                if (!unit.abilities || !unit.abilities->stealth_on || unit.abilities->stealth_end == 0) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u64(bytes, unit.abilities->stealth_end);
-            }
-        }
-        // Krayt object scripts (WSD-09), ascending ID, once a live unit's script has run.
-        const auto scripted = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.abilities && unit.abilities->self_destruct_script;
-        });
-        if (scripted != 0) {
-            bytes.insert(bytes.end(), self_destruct_script_tag.begin(), self_destruct_script_tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(scripted));
-            for (const auto& unit : units) {
-                if (!unit.abilities || !unit.abilities->self_destruct_script) continue;
-                const auto& script = *unit.abilities->self_destruct_script;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_i64(bytes, script.last_service);
-                sim::detail::append_u32(bytes, script.nearby);
-                sim::detail::append_i64(bytes, script.threat.raw());
-                sim::detail::append_u32(bytes, script.armed ? 1U : 0U);
-            }
-        }
-        // FC-57/58: only initialized MC30 scripts add this optional state block.
-        const auto mc30_scripts = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.abilities && unit.abilities->mc30_script;
-        });
-        if (mc30_scripts != 0) {
-            bytes.insert(bytes.end(), mc30_script_tag.begin(), mc30_script_tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(mc30_scripts));
-            for (const auto& unit : units) {
-                if (!unit.abilities || !unit.abilities->mc30_script) continue;
-                const auto& script = *unit.abilities->mc30_script;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_i64(bytes, script.last_service);
-                sim::detail::append_u32(bytes, script.nearby);
-                sim::detail::append_i64(bytes, script.threat.raw());
-                sim::detail::append_u32(bytes, script.human ? 1U : 0U);
-                sim::detail::append_u32(bytes, script.armed ? 1U : 0U);
-            }
-        }
-        // Ion stuns (#561), ascending ID, only while a live unit has one.
-        std::uint64_t stunned = 0;
-        for (const auto& unit : units) stunned += unit.ion_stun ? 1 : 0;
-        if (stunned != 0) {
-            bytes.insert(bytes.end(), ion_stun_tag.begin(), ion_stun_tag.end());
-            sim::detail::append_u64(bytes, stunned);
-            for (const auto& unit : units) {
-                if (!unit.ion_stun) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                append_ion_stun(bytes, *unit.ion_stun);
-            }
-        }
-        const auto hazard_moves = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.state.order.through_hazards;
-        });
-        if (hazard_moves != 0) {
-            bytes.insert(bytes.end(), hazard_move_tag.begin(), hazard_move_tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(hazard_moves));
-            for (const auto& unit : units) if (unit.state.order.through_hazards) sim::detail::append_u64(bytes, unit.state.entity_id);
-        }
-        const auto contacts = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.asteroid_contact.has_value();
-        });
-        if (contacts != 0) {
-            bytes.insert(bytes.end(), asteroid_tag.begin(), asteroid_tag.end());
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(contacts));
-            for (const auto& unit : units) {
-                if (!unit.asteroid_contact) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u64(bytes, *unit.asteroid_contact);
-            }
-        }
-        const auto disabled_engines = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.durability && unit.durability->engines_disabled_until;
-        });
-        if (disabled_engines != 0) {
-            bytes.insert(bytes.end(), engine_disable_tag.begin(), engine_disable_tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(disabled_engines));
-            for (const auto& unit : units) {
-                if (!unit.durability || !unit.durability->engines_disabled_until) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u64(bytes, *unit.durability->engines_disabled_until);
-            }
-        }
-        const auto nebulas = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) { return unit.nebula.has_value(); });
-        if (nebulas != 0) {
-            bytes.insert(bytes.end(), nebula_tag.begin(), nebula_tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(nebulas));
-            for (const auto& unit : units) {
-                if (!unit.nebula) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                bytes.push_back(unit.nebula->present ? 1 : 0);
-                bytes.push_back(unit.nebula->frame ? 1 : 0);
-                sim::detail::append_u64(bytes, unit.nebula->frame.value_or(0));
-            }
-        }
-        const auto storms = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.durability && unit.durability->ion_storm_contact;
-        });
-        if (storms != 0) {
-            bytes.insert(bytes.end(), storm_tag.begin(), storm_tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(storms));
-            for (const auto& unit : units) {
-                if (!unit.durability || !unit.durability->ion_storm_contact) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u64(bytes, *unit.durability->ion_storm_contact);
-            }
-        }
-        // Damage tracking (WCC-82), ascending ID, only while a live unit's window or rate is not zero.
-        const auto tracking = [](const LiveUnit& unit) {
-            return unit.durability && (unit.durability->window_damage.raw() != 0 || unit.durability->damage_rate.raw() != 0);
-        };
-        if (const auto tracked = std::count_if(units.begin(), units.end(), tracking); tracked != 0) {
-            bytes.insert(bytes.end(), damage_tracking_tag.begin(), damage_tracking_tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(tracked));
-            for (const auto& unit : units) {
-                if (!tracking(unit)) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_i64(bytes, unit.durability->window_damage.raw());
-                sim::detail::append_i64(bytes, unit.durability->damage_rate.raw());
-            }
-        }
-        if (!command_ledger.sources.empty()) {
-            // Coordinator-reserved HBON; station-only sessions keep their exact encoding.
-            constexpr std::array<std::uint8_t, 4> tag{'H', 'B', 'O', 'N'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u64(bytes, command_ledger.sources.size());
-            for (const auto& source : command_ledger.sources) {
-                sim::detail::append_u64(bytes, source.id);
-                sim::detail::append_u64(bytes, source.host);
-                const auto& profile = economy.command_bonuses[source.profile];
-                sim::detail::append_u64(bytes, profile.type);
-                sim::detail::append_u32(bytes, profile.slot);
-                sim::detail::append_u64(bytes, source.targets.size());
-                for (const auto target : source.targets) sim::detail::append_u64(bytes, target);
-            }
-        }
-        // Killed craft spinning away (#447); a session without any hashes as before.
-        const auto heroes = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.state.purchase_type != 0 || !unit.state.contained.empty();
-        });
-        if (heroes != 0) {
-            // coordinator-reserved HERO: absent in sessions without converted purchases.
-            constexpr std::array<std::uint8_t, 4> tag{'H', 'E', 'R', 'O'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(heroes));
-            const auto append_rider = [&](auto&& self, const CarriedObject& rider) -> void {
-                sim::detail::append_u64(bytes, rider.entity_id);
-                sim::detail::append_u64(bytes, rider.type_id);
-                sim::detail::append_u64(bytes, rider.parent);
-                const auto flags = (rider.named_hero ? 1U : 0U) | (rider.generic_hero ? 2U : 0U)
-                    | (rider.limbo ? 4U : 0U) | (rider.model_visible ? 8U : 0U)
-                    | (rider.collidable ? 16U : 0U) | (rider.selected ? 32U : 0U)
-                    | (rider.movement_coordinated ? 64U : 0U) | (rider.combat_preserved ? 128U : 0U);
-                bytes.push_back(static_cast<std::uint8_t>(flags));
-                sim::detail::append_u64(bytes, rider.members.size());
-                for (const auto& member : rider.members) self(self, member);
-            };
-            for (const auto& unit : units) {
-                if (unit.state.purchase_type == 0 && unit.state.contained.empty()) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u64(bytes, unit.state.purchase_type);
-                sim::detail::append_u64(bytes, unit.state.contained.size());
-                for (const auto& rider : unit.state.contained) append_rider(append_rider, rider);
-            }
-        }
-        if (!projectile_defence_order.empty()) {
-            // Coordinator-reserved PDEF: source IDs in registration order, never sorted.
-            constexpr std::array<std::uint8_t, 4> tag{'P', 'D', 'E', 'F'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u64(bytes, projectile_defence_order.size());
-            for (const auto id : projectile_defence_order) sim::detail::append_u64(bytes, id);
-        }
-        const auto special_owners = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.abilities && !unit.abilities->special.slots.empty();
-        });
-        if (special_owners != 0) {
-            // Coordinator-reserved SPAB, after HERO and before SPIN, in stable owner order.
-            constexpr std::array<std::uint8_t, 4> tag{'S', 'P', 'A', 'B'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(special_owners));
-            for (const auto& unit : units) {
-                if (!unit.abilities || unit.abilities->special.slots.empty()) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                append_special_abilities(bytes, unit.abilities->special);
-            }
-        }
-        const auto concentrate_owners = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.abilities && !unit.abilities->concentrate_recruits.empty();
-        });
-        if (concentrate_owners != 0) {
-            constexpr std::array<std::uint8_t, 4> tag{'C', 'F', 'I', 'R'}; // coordinator-reserved
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(concentrate_owners));
-            for (const auto& unit : units) {
-                if (!unit.abilities || unit.abilities->concentrate_recruits.empty()) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u64(bytes, unit.abilities->concentrate_recruits.size());
-                for (const auto id : unit.abilities->concentrate_recruits) sim::detail::append_u64(bytes, id);
-            }
-        }
-        if (!ability_spawns.empty()) {
-            constexpr std::array<std::uint8_t, 4> tag{'H', 'A', 'B', 'L'}; // coordinator-reserved
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u64(bytes, ability_spawns.size());
-            for (const auto& spawn : ability_spawns) {
-                sim::detail::append_u64(bytes, spawn.id);
-                sim::detail::append_u64(bytes, spawn.type);
-                sim::detail::append_u32(bytes, static_cast<std::uint32_t>(spawn.kind));
-                sim::detail::append_u32(bytes, spawn.owner);
-                sim::detail::append_u64(bytes, spawn.source);
-                append_vec3(bytes, spawn.position);
-                append_fixed(bytes, spawn.rotation.x);
-                append_fixed(bytes, spawn.rotation.y);
-                append_fixed(bytes, spawn.rotation.z);
-                append_fixed(bytes, spawn.rotation.w);
-                sim::detail::append_u64(bytes, spawn.due);
-                sim::detail::append_u32(bytes, spawn.detonated ? 1 : 0);
-                sim::detail::append_u64(bytes, spawn.recipients.size());
-                for (const auto& recipient : spawn.recipients) {
-                    sim::detail::append_u64(bytes, recipient.target);
-                    sim::detail::append_u64(bytes, recipient.expires);
-                }
-            }
-        }
-        const auto buzz_requests = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
-            return unit.abilities && unit.abilities->pending_buzz_position;
-        });
-        if (buzz_requests != 0) {
-            constexpr std::array<std::uint8_t, 4> tag{'B', 'Z', 'Q', 'R'}; // coordinator-reserved
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(buzz_requests));
-            for (const auto& unit : units) if (unit.abilities && unit.abilities->pending_buzz_position) {
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                append_vec3(bytes, *unit.abilities->pending_buzz_position);
-            }
-        }
-        if (!buzz_droids.empty()) {
-            constexpr std::array<std::uint8_t, 4> tag{'B', 'U', 'Z', 'Z'}; // coordinator-reserved
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u64(bytes, buzz_droids.size());
-            for (const auto& droid : buzz_droids) {
-                sim::detail::append_u64(bytes, droid.droid);
-                sim::detail::append_u64(bytes, droid.source_type);
-                append_vec3(bytes, droid.start);
-                sim::detail::append_u64(bytes, droid.active_from);
-            }
-        }
-        if (!spins.empty()) {
-            bytes.insert(bytes.end(), spin_tag.begin(), spin_tag.end());
-            sim::detail::append_u64(bytes, spins.size());
-            for (const auto& spin : spins) {
-                append_spin(bytes, spin);
-            }
-        }
-        if (setup.departure_policy) {
-            constexpr std::array<std::uint8_t, 4> tag{'M', 'P', 'D', 'P'}; // coordinator-reserved
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(setup.departure_policy->humans.size()));
-            for (const auto id : setup.departure_policy->humans) sim::detail::append_u32(bytes, id);
-            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(departure_controls.size()));
-            for (const auto& control : departure_controls) {
-                sim::detail::append_u32(bytes, control.player);
-                sim::detail::append_u32(bytes, control.controller);
-                sim::detail::append_u64(bytes, control.tick);
-                sim::detail::append_u32(bytes, control.basic_ai ? 1U : 0U);
-            }
-        }
-        if (!quits.empty()) {
-            // coordinator-reserved QUIT: absent status keeps all existing state pins.
-            constexpr std::array<std::uint8_t, 4> tag{'Q', 'U', 'I', 'T'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u64(bytes, quits.size());
-            for (const auto& quit : quits) {
-                sim::detail::append_u32(bytes, quit.player);
-                sim::detail::append_u64(bytes, quit.tick);
-            }
-        }
-        // coordinator-reserved PTOK: counters remain authoritative after the last pool entry leaves.
-        const auto token_accounts = std::count_if(ledgers.begin(), ledgers.end(), [](const auto& ledger) {
-            return ledger.next_pool_token != 1;
-        });
-        const auto token_units = std::count_if(units.begin(), units.end(), [](const auto& unit) {
-            return unit.state.purchase_token != 0;
-        });
-        if (token_accounts != 0 || token_units != 0) {
-            constexpr std::array<std::uint8_t, 4> tag{'P', 'T', 'O', 'K'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(token_accounts));
-            for (const auto& ledger : ledgers) {
-                if (ledger.next_pool_token == 1) continue;
-                sim::detail::append_u32(bytes, ledger.player);
-                sim::detail::append_u64(bytes, ledger.next_pool_token);
-                sim::detail::append_u64(bytes, ledger.pool_tokens.size());
-                for (const auto token : ledger.pool_tokens) sim::detail::append_u64(bytes, token);
-            }
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(token_units));
-            for (const auto& unit : units) {
-                if (unit.state.purchase_token == 0) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u64(bytes, unit.state.purchase_token);
-            }
-        }
-        if (setup.queue_identities && !economy.empty()) {
-            // coordinator-reserved QIDS: retain the counter even after every queued entry leaves.
-            constexpr std::array<std::uint8_t, 4> tag{'Q', 'I', 'D', 'S'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, ledgers.size());
-            for (const auto& ledger : ledgers) {
-                sim::detail::append_u32(bytes, ledger.player);
-                sim::detail::append_u32(bytes, 0);
-                sim::detail::append_u64(bytes, ledger.next_queue_entry_id);
-                for (const auto& queue : ledger.queues) {
-                    sim::detail::append_u64(bytes, queue.size());
-                    for (const auto& entry : queue) sim::detail::append_u64(bytes, entry.entry_id);
-                }
-            }
-        }
-        if (!setup.cinematic_seats.empty()) {
-            constexpr std::array<std::uint8_t, 4> tag{'C', 'I', 'N', 'S'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(setup.cinematic_seats.size()));
-            for (const auto& seat : setup.cinematic_seats) {
-                sim::detail::append_u32(bytes, seat.player);
-                sim::detail::append_u32(bytes, seat.cinematics_enabled ? 1U : 0U);
-            }
-        }
-        if (setup.campaign) {
-            bytes.insert(bytes.end(), {'B','O','U','N','T','Y',1});
-            for (const auto& ledger : ledgers) sim::detail::append_i64(bytes, ledger.collected_bounty.raw());
-            constexpr std::array<std::uint8_t, 4> tag{'C', 'A', 'M', 'C'};
-            bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, 1);
-            bytes.insert(bytes.end(), campaign_binding.begin(), campaign_binding.end());
-            sim::detail::append_u64(bytes, ledgers.size());
-            for (const auto& ledger : ledgers) {
-                sim::detail::append_u32(bytes, ledger.player);
-                sim::detail::append_i64(bytes, ledger.campaign_extra_releases.raw());
-            }
-        }
-        const auto corrupt_count = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) { return unit.corrupt.has_value(); });
-        std::uint64_t corrupt_casts = 0;
-        for (const auto& unit : units) if (unit.abilities)
-            for (const auto& slot : unit.abilities->slots) corrupt_casts += slot.position ? 1U : 0U;
-        if (corrupt_count != 0 || corrupt_casts != 0) {
-            bytes.insert(bytes.end(), corrupt_tag.begin(), corrupt_tag.end());
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(corrupt_count));
-            for (const auto& unit : units) if (unit.corrupt) {
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u64(bytes, unit.corrupt->source_type);
-                sim::detail::append_u64(bytes, unit.corrupt->started_tick);
-                sim::detail::append_u64(bytes, unit.corrupt->expires_tick);
-                append_fixed(bytes, unit.corrupt->drain_per_frame);
-                append_fixed(bytes, unit.corrupt->inaccuracy);
-            }
-            sim::detail::append_u64(bytes, corrupt_casts);
-            for (const auto& unit : units) if (unit.abilities)
-                for (std::size_t slot = 0; slot < unit.abilities->slots.size(); ++slot) if (unit.abilities->slots[slot].position) {
-                    sim::detail::append_u64(bytes, unit.state.entity_id);
-                    sim::detail::append_u32(bytes, static_cast<std::uint32_t>(slot));
-                    append_vec3(bytes, *unit.abilities->slots[slot].position);
-                }
-        }
-        const auto blast_count = std::count_if(units.begin(), units.end(), [](const auto& unit) {
-            return unit.abilities && unit.abilities->charged_blast;
-        });
-        if (blast_count != 0) {
-            bytes.insert(bytes.end(), charged_blast_tag.begin(), charged_blast_tag.end());
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(blast_count));
-            for (const auto& unit : units) if (unit.abilities && unit.abilities->charged_blast) {
-                const auto& blast = *unit.abilities->charged_blast;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u32(bytes, blast.charge_remaining);
-                sim::detail::append_u32(bytes, blast.shots_remaining);
-                sim::detail::append_u32(bytes, blast.charged_presentation ? 1U : 0U);
-            }
-        }
-        const auto waypoint_count = std::count_if(units.begin(), units.end(), [](const auto& unit) {
-            return unit.waypoints.has_value();
-        });
-        if (waypoint_count != 0) {
-            constexpr std::array<std::uint8_t, 4> waypoint_tag{'W', 'Y', 'P', 'T'};
-            bytes.insert(bytes.end(), waypoint_tag.begin(), waypoint_tag.end());
-            sim::detail::append_u32(bytes, 2);
-            sim::detail::append_u32(bytes, motion.rules.max_waypoints);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(waypoint_count));
-            for (const auto& unit : units) {
-                if (!unit.waypoints) continue;
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                sim::detail::append_u32(bytes, unit.waypoints->coordinator ? 1U : 0U);
-                if (unit.waypoints->coordinator) {
-                    const auto& key = *unit.waypoints->coordinator;
-                    sim::detail::append_u32(bytes, key.player_id);
-                    sim::detail::append_u64(bytes, key.tick);
-                    sim::detail::append_u64(bytes, key.sequence);
-                }
-                sim::detail::append_u32(bytes, unit.waypoints->active ? 1U : 0U);
-                sim::detail::append_u32(bytes, static_cast<std::uint32_t>(unit.waypoints->points.size()));
-                for (const auto& point : unit.waypoints->points) {
-                    append_vec3(bytes, point.move.destination);
-                    sim::detail::append_u32(bytes, (point.move.through_hazards ? 1U : 0U) | (point.repeat ? 2U : 0U));
-                    sim::detail::append_u32(bytes, point.key.player_id);
-                    sim::detail::append_u64(bytes, point.key.tick);
-                    sim::detail::append_u64(bytes, point.key.sequence);
-                }
-            }
-        }
-        if (!beacons.empty()) {
-            constexpr std::array<std::uint8_t, 4> beacon_tag{'B', 'E', 'C', 'N'};
-            bytes.insert(bytes.end(), beacon_tag.begin(), beacon_tag.end());
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(beacons.size()));
-            for (const auto& beacon : beacons) {
-                sim::detail::append_u32(bytes, beacon.player);
-                sim::detail::append_u32(bytes, 0);
-                sim::detail::append_u64(bytes, beacon.type);
-                append_vec3(bytes, beacon.position);
-                sim::detail::append_u64(bytes, beacon.placed_tick);
-                sim::detail::append_u64(bytes, beacon.expires_tick);
-                sim::detail::append_u64(bytes, beacon.sequence);
-            }
-        }
-        const auto history_count = std::count_if(units.begin(), units.end(),
-            [](const LiveUnit& unit) { return unit.position_history.has_value(); });
-        if (history_count != 0) {
-            bytes.insert(bytes.end(), {'P', 'H', 'S', 'T'});
-            sim::detail::append_u32(bytes, 1);
-            sim::detail::append_u32(bytes, 0);
-            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(history_count));
-            for (const auto& unit : units) if (unit.position_history) {
-                sim::detail::append_u64(bytes, unit.state.entity_id);
-                append_vec3(bytes, unit.position_history->previous);
-                append_vec3(bytes, unit.position_history->before_previous);
-            }
-        }
+        append_canonical_garrison_enabled_state(bytes, units, counts);
+        append_canonical_named_locks_state(bytes);
+        append_canonical_special_weapons_state(bytes);
+        append_canonical_garrisons_state(bytes);
+        append_canonical_manual_weapons_state(bytes, units, counts);
+        append_canonical_turrets_state(bytes, units, counts);
+        append_canonical_squadrons_state(bytes);
+        append_canonical_fog_state(bytes);
+        append_canonical_tracking_state(bytes);
+        append_canonical_roll_state(bytes, units, counts);
+        append_canonical_projectiles_state(bytes, parts(&CanonicalEncoding::projectiles));
+        append_canonical_blast_damage_state(bytes);
+        append_canonical_formation_state(bytes, units, counts);
+        append_canonical_approach_state(bytes, units, counts);
+        append_canonical_sightings_state(bytes, units, counts);
+        append_canonical_garrison_marks_state(bytes, units, counts);
+        append_canonical_craft_state(bytes, parts(&CanonicalEncoding::crafts));
+        append_canonical_squadron_orders_state(bytes, parts(&CanonicalEncoding::minds));
+        append_canonical_attack_paths_state(bytes);
+        append_canonical_hangars_state(bytes);
+        append_canonical_collection_state(bytes, parts(&CanonicalEncoding::trees));
+        append_canonical_projectile_collection_state(bytes, parts(&CanonicalEncoding::projectile_trees));
+        append_canonical_economy_state(bytes);
+        append_canonical_arrivals_state(bytes);
+        append_canonical_pads_state(bytes);
+        append_canonical_population_state(bytes);
+        append_canonical_arrival_defence_state(bytes, units, counts);
+        append_canonical_upgrades_state(bytes, units, counts);
+        append_canonical_level_up_state(bytes);
+        append_canonical_income_state(bytes);
+        append_canonical_outcome_state(bytes);
+        append_canonical_abilities_state(bytes, units, counts, parts(&CanonicalEncoding::abilities));
+        append_canonical_stealth_state(bytes, units, counts);
+        append_canonical_stealth_end_state(bytes, units, counts);
+        append_canonical_self_destruct_state(bytes, units, counts);
+        append_canonical_mc30_state(bytes, units, counts);
+        append_canonical_ion_stuns_state(bytes, units, counts);
+        append_canonical_hazard_moves_state(bytes, units, counts);
+        append_canonical_asteroids_state(bytes, units, counts);
+        append_canonical_engine_disable_state(bytes, units, counts);
+        append_canonical_nebula_state(bytes, units, counts);
+        append_canonical_storms_state(bytes, units, counts);
+        append_canonical_damage_tracking_state(bytes, units, counts);
+        append_canonical_command_bonuses_state(bytes);
+        append_canonical_heroes_state(bytes, units, counts);
+        append_canonical_projectile_defence_state(bytes);
+        append_canonical_special_abilities_state(bytes, units, counts);
+        append_canonical_concentrate_state(bytes, units, counts);
+        append_canonical_ability_spawns_state(bytes);
+        append_canonical_buzz_requests_state(bytes, units, counts);
+        append_canonical_buzz_droids_state(bytes);
+        append_canonical_spins_state(bytes);
+        append_canonical_departure_state(bytes);
+        append_canonical_quits_state(bytes);
+        append_canonical_pool_tokens_state(bytes, units, counts);
+        append_canonical_queue_identities_state(bytes);
+        append_canonical_cinematic_seats_state(bytes);
+        append_canonical_campaign_state(bytes);
+        append_canonical_corruption_state(bytes, units, counts);
+        append_canonical_charged_blast_state(bytes, units, counts);
+        append_canonical_waypoints_state(bytes, units, counts);
+        append_canonical_beacons_state(bytes);
+        append_canonical_order_history_state(bytes, units, counts);
         return bytes;
     }
 

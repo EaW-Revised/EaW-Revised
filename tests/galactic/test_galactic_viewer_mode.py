@@ -39,7 +39,9 @@ class GalacticModeStructure(unittest.TestCase):
         self.assertIn("galactic_mode_->input(event)", camera)
         manifest = (ROOT / "apps/viewer/CMakeLists.txt").read_text(encoding="utf-8")
         self.assertEqual(manifest.count('include("${EAWR_ROOT}/apps/viewer/src/galactic/sources.cmake")'), 1)
-        self.assertEqual(manifest.count("${EAWR_VIEWER_GALACTIC_SOURCES}"), 1)
+        self.assertEqual(manifest.count("${EAWR_VIEWER_SOURCES}"), 1)
+        viewer_sources = (ROOT / "apps/viewer/src/sources.cmake").read_text(encoding="utf-8")
+        self.assertEqual(viewer_sources.count("${EAWR_VIEWER_GALACTIC_SOURCES}"), 1)
         listed = re.findall(r'"\$\{CMAKE_CURRENT_LIST_DIR\}/([^"]+)"',
                             (GALACTIC / "sources.cmake").read_text(encoding="utf-8"))
         self.assertEqual(sorted(listed), sorted(path.name for path in GALACTIC.glob("*.cpp")))

@@ -61,7 +61,6 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
     auto& survivors = surviving_.value().survivors.value();
     auto& pads = impl_->pad_stage.values;
     auto& construction = impl_->construction_stage.values;
-    const auto& durability = impl_->durability;
     // WBP-16/18/19: ordered lifecycle commit of the partitioned object services.
     // Damage has resolved first; lethal damage wins over a same-frame deadline (U-BP-1).
     const auto pad_survivor = [&](const EntityId id) -> LiveUnit* {
@@ -132,7 +131,7 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
         impl_->construction_stage.touch(id);
         impl_->pad_stage.touch(state.parent);
         const auto* profile = impl_->economy.pads.child(child->state.type_id);
-        const auto* final_health = profile != nullptr ? durability.find(profile->constructed) : nullptr;
+        const auto* final_health = profile != nullptr ? impl_->base_profile(state.builder, profile->constructed) : nullptr;
         if (profile != nullptr && final_health != nullptr && next_id != invalid_entity_id
             && pad->second.under_construction == id) {
             const auto final_id = next_id;
@@ -143,7 +142,8 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
             position.z = raised.value();
             auto final = impl_->new_unit(UnitState{final_id, profile->constructed, state.builder,
                 position, parent->state.rotation, {}}, tick);
-            const auto fraction = math::divide(child->durability->hull, durability.find(child->state.type_id)->max_hull);
+            const auto fraction = math::divide(child->durability->hull,
+                impl_->base_profile(child->state.owner, child->state.type_id)->max_hull);
             if (!fraction) return core::Result<void>::failure(fraction.error());
             const auto hull = math::multiply(final_health->max_hull, fraction.value());
             if (!hull) return core::Result<void>::failure(hull.error());
