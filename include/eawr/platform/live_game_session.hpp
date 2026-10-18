@@ -156,6 +156,11 @@ struct LiveAutoResolveOutcome {
     campaign::BattleResult result;
     std::vector<LiveAutoResolveRecordEntry> record;
 };
+// WGS-P01: value-only adapters for an optional presentation-hint snapshot.
+[[nodiscard]] core::Result<std::vector<std::uint8_t>> encode_auto_summary_hint(
+    const LiveAutoResolveOutcome& summary, std::string planet_type);
+[[nodiscard]] core::Result<std::shared_ptr<const LiveAutoResolveOutcome>> decode_auto_summary_hint(
+    const std::vector<std::uint8_t>& bytes);
 struct LiveAutoResolveProgress {
     std::uint64_t conflict{};
     double elapsed_seconds{}, display_seconds{};

@@ -1,13 +1,20 @@
 #include "galactic_support.hpp"
 #include "galactic/live_battle_dialog_view.hpp"
+#include "galactic/galactic_save_hints.hpp"
+#include "galactic/auto_summary_hint.hpp"
 #include "galactic/live_battle_bounty.hpp"
 #include "galactic/galactic_mode_seats.hpp"
 #include "eawr/campaign/conflict_policy.hpp"
+#include "eawr/platform/campaign_service_configuration.hpp"
+#include "eawr/checkpoint/game.hpp"
 
 #include <algorithm>
 #include <utility>
 #include <vector>
 #include <stdexcept>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 
 namespace {
 namespace gc = eawr::sim::galactic;
@@ -17,6 +24,246 @@ using galactic_test::expect;
 template<class T> T checked(eawr::core::Result<T> result) {
     if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
     return std::move(result).value();
+}
+// A retained land defeat and a later returned space victory must both drain.
+void retained_results_drain() {
+    eawr::platform::LiveGameFrame frame;
+    auto land = std::make_shared<eawr::platform::LiveAutoResolveOutcome>();
+    land->land = true; land->planet = 2; land->invader = 2; land->defender = 1;
+    land->result.conflict = 70; land->result.winner = 2;
+    frame.auto_resolve_outcome = land;
+    auto space = std::make_shared<cp::ConflictRecord>();
+    space->id = 80; space->planet = 2; space->invader = 1; space->defender = 2;
+    frame.result_conflict = space;
+    cp::BattleResult victory; victory.conflict = 80; victory.winner = 1;
+    frame.result = victory;
+    view::LiveBattleDialogNames names;
+    names.planet = [](auto) { return std::string("Lost planet"); };
+    names.side = [](auto) { return view::BattleDialogSide{}; };
+    names.type = [](auto) { return view::CampaignResultType{}; };
+    view::BattleSummaryAcknowledgements acknowledged;
+    std::vector<std::uint64_t> shown;
+    for (unsigned close = 0; close < 4; ++close) {
+        const auto dialog = view::live_battle_dialog_view(frame, {1}, 1, acknowledged, names);
+        if (dialog.phase == view::BattleDialogPhase::hidden) break;
+        shown.push_back(dialog.conflict);
+        expect(view::acknowledge_battle_summary(acknowledged, frame, dialog.conflict), "published summary can be acknowledged");
+    }
+    for (const auto id : shown) std::cout << "result-screen " << id << '\n';
+    expect(shown == std::vector<std::uint64_t>{80, 70}, "retained_results_drain: each result presents exactly once");
+    expect(view::live_battle_dialog_view(frame, {1}, 1, acknowledged, names).phase == view::BattleDialogPhase::hidden,
+        "retained_results_drain: closing both results leaves the presentation queue empty");
+    const view::ViewHints hints{acknowledged, 2, 9, true, {{10, 3}, {20, 5}}};
+    const auto bytes = view::view_hints(hints);
+    const auto restored = view::view_hints(bytes);
+    expect(restored == hints, "save hints round trip both acknowledgements and the existing UI state");
+    expect(view::live_battle_dialog_view(frame, {1}, 1, restored.acknowledgement, names).phase == view::BattleDialogPhase::hidden,
+        "loading the drained summary state cannot reopen either result");
+    for (std::size_t size = 0; size < bytes.size(); ++size)
+        expect(view::view_hints(std::vector<std::uint8_t>(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(size))) == view::ViewHints{},
+            "truncated save hints never restore a partial acknowledgement");
+    auto invalid = bytes; invalid.push_back(0);
+    expect(view::view_hints(invalid) == view::ViewHints{}, "save hints reject trailing bytes");
+    invalid = bytes; invalid[7] = 3;
+    expect(view::view_hints(invalid) == view::ViewHints{}, "old single-acknowledgement hints use no legacy reader");
+    invalid[7] = 4;
+    expect(view::view_hints(invalid) == view::ViewHints{}, "previous hints without a summary snapshot use no legacy reader");
+    const auto dismissed = acknowledged;
+    expect(!view::acknowledge_battle_summary(acknowledged, frame, 999) && acknowledged == dismissed,
+        "stale callbacks cannot replace either acknowledgement");
+    view::LiveBattleSummaryPublication publication;
+    expect(!publication.reuse(frame, {1}, 1, {}, 0) && publication.reuse(frame, {1}, 1, {}, 0),
+        "unchanged dual-slot summaries reuse their projection");
+    expect(!publication.reuse(frame, {1}, 1, {80, 0}, 0), "closing victory invalidates cached projection to show the land defeat");
+    expect(!publication.reuse(frame, {1}, 1, acknowledged, 0), "closing the land defeat invalidates cached summary to hide it");
+    auto next = std::make_shared<eawr::platform::LiveAutoResolveOutcome>(*land);
+    next->result.conflict = 90;
+    frame.auto_resolve_outcome = next;
+    expect(view::live_battle_dialog_view(frame, {1}, 1, acknowledged, names).conflict == 90,
+        "a new automatic result is eligible without reopening the acknowledged returned result");
+    expect(view::acknowledge_battle_summary(acknowledged, frame, 90)
+        && view::live_battle_dialog_view(frame, {1}, 1, acknowledged, names).phase == view::BattleDialogPhase::hidden,
+        "a third result drains without losing the other slot's acknowledgement");
+    frame.result->conflict = 90; space->id = 90;
+    acknowledged = {};
+    expect(view::acknowledge_battle_summary(acknowledged, frame, 90)
+        && acknowledged.returned == 90 && acknowledged.automatic == 90
+        && view::live_battle_dialog_view(frame, {1}, 1, acknowledged, names).phase == view::BattleDialogPhase::hidden,
+        "one result published in both slots is dismissed once");
+}
+void saved_auto_summary_roundtrip() {
+    namespace platform = eawr::platform;
+    using namespace std::chrono_literals;
+    auto initial = gc::synthetic_galaxy({7, 2, 2, 1, 1, true});
+    const auto planet = initial.planets.front().id;
+    auto services = std::make_shared<platform::CampaignServiceConfiguration>();
+    services->restore.script_requirement = cp::ScriptRequirement::none;
+    services->configure = [planet](auto& game) {
+        cp::AutoResolveOutcomeApplication outcome;
+        outcome.planet = planet; outcome.planet_type = "Mod_Planet";
+        outcome.invader = 1; outcome.defender = 2; outcome.result.conflict = 9000; outcome.result.winner = 2;
+        outcome.record = {{"Mod_Ship", 1}, {"Mod_Station", 2}};
+        cp::AutoResolveOutcomeServices apply;
+        apply.control = [](auto&, const auto&) { return eawr::core::Result<void>::success(); };
+        game.set_auto_resolve_outcome_services(std::move(apply));
+        return game.stage_auto_resolve_outcome(outcome);
+    };
+    const auto directory = std::filesystem::temp_directory_path()
+        / ("eawr-summary-hints-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    platform::LiveGameSession::Options options;
+    options.pacing = platform::LiveGameSession::Pacing::driven; options.services = services;
+    const auto utf8_directory = directory.u8string();
+    options.saves.directory.assign(reinterpret_cast<const char*>(utf8_directory.data()), utf8_directory.size());
+    auto live = checked(platform::LiveGameSession::start(initial, options));
+    live->advance_to(2); expect(live->wait_for(2, 5s), "automatic summary reaches its save boundary");
+    const auto source = live->frame().auto_resolve_outcome;
+    if (!source) throw std::runtime_error("summary save fixture has no automatic outcome");
+    view::ViewHints hints;
+    hints.automatic_summary = checked(view::encode_auto_summary_hint(*source, "Mod_Planet"));
+    const auto save = [](auto& owner, const std::string& name, const view::ViewHints& ui) {
+        const auto target = owner.completed_tick() + 1;
+        platform::LiveSaveRequest request; request.seat = {1}; request.name = name;
+        request.presentation_hints = view::view_hints(ui);
+        const auto token = owner.request_save(std::move(request)); owner.advance_to(target);
+        expect(owner.wait_for(target, 5s) && owner.wait_save(token, 5s), "summary hint save reaches disk");
+        const auto result = owner.terminal_save_outcome(token);
+        expect(result && result->phase == platform::LiveSavePhase::completed, "summary hint save is completed");
+    };
+    save(*live, "summary", hints);
+    // Compare the same explicit player-load prologue with and without the
+    // optional UI section; comparing with the pre-load snapshot skips WGS-43.
+    const auto without_hints = [&] {
+        std::ifstream file(directory / "summary.eawrsave", std::ios::binary);
+        const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)), {});
+        auto checkpoint = checked(eawr::checkpoint::parse_checkpoint(bytes));
+        std::erase_if(checkpoint.sections, [](const auto& section) {
+            return section.id == static_cast<std::uint16_t>(eawr::checkpoint::SectionId::presentation_hints);
+        });
+        return checked(eawr::checkpoint::write_checkpoint(checkpoint));
+    }();
+    {
+        std::ofstream file(directory / "plain.eawrsave", std::ios::binary);
+        file.write(reinterpret_cast<const char*>(without_hints.data()), static_cast<std::streamsize>(without_hints.size()));
+    }
+    const auto reference = checked(live->prepare_load("plain"));
+    auto prepared = checked(live->prepare_load("summary"));
+    expect(prepared->state_sha256() == reference->state_sha256(),
+        "presentation snapshot does not alter the player-loaded galaxy or session");
+    const auto loaded = view::view_hints(prepared->presentation_hints());
+    expect(loaded == hints, "unacknowledged summary payload survives the existing checkpoint hint section");
+    auto fallback = checked(view::decode_auto_summary_hint(loaded.automatic_summary));
+    expect(fallback->result == source->result && fallback->planet == source->planet
+        && fallback->record.size() == 2 && fallback->record.front().original_type == "Mod_Ship",
+        "summary snapshot retains its result, planet and authored casualty names");
+    auto restored = checked(platform::LiveGameSession::start(std::move(prepared), options));
+    expect(!restored->frame().auto_resolve_outcome, "runtime history ring stays absent after checkpoint restore");
+    auto frame = view::frame_with_auto_summary(restored->frame(), fallback);
+    view::LiveBattleDialogNames names;
+    names.planet = [](auto) { return std::string("Mod_Planet"); };
+    names.side = [](auto) { return view::BattleDialogSide{}; };
+    names.type = [](auto) { return view::CampaignResultType{}; };
+    view::BattleSummaryAcknowledgements acknowledged;
+    const auto dialog = view::live_battle_dialog_view(frame, {1}, 1, acknowledged, names);
+    expect(dialog.phase == view::BattleDialogPhase::summary && dialog.conflict == source->result.conflict,
+        "first restored presentation shows the same unacknowledged summary with Continue");
+    save(*restored, "resaved", loaded);
+    const auto again = checked(restored->prepare_load("resaved"));
+    expect(view::view_hints(again->presentation_hints()) == loaded, "saving after a summary restore retains its snapshot");
+    expect(view::acknowledge_battle_summary(acknowledged, frame, dialog.conflict), "restored summary Continue is admitted");
+    for (unsigned sample = 0; sample < 4; ++sample)
+        expect(view::live_battle_dialog_view(frame, {1}, 1, acknowledged, names).phase == view::BattleDialogPhase::hidden,
+            "acknowledged restored summary stays drained");
+    auto newer = std::make_shared<platform::LiveAutoResolveOutcome>(*fallback); newer->result.conflict = 9001;
+    frame.auto_resolve_outcome = newer;
+    expect(view::frame_with_auto_summary(frame, fallback).auto_resolve_outcome == newer,
+        "a current live automatic result takes precedence over the saved snapshot");
+    auto invalid = hints.automatic_summary; invalid.pop_back();
+    expect(!view::decode_auto_summary_hint(invalid), "truncated summary payload is rejected by the existing outcome codec");
+    auto truncated = view::view_hints(hints); truncated.pop_back();
+    expect(view::view_hints(truncated) == view::ViewHints{}, "truncated summary hint footer restores no partial UI state");
+    live->stop(); restored->stop(); std::filesystem::remove_all(directory);
+}
+void live_retained_results_drain() {
+    namespace platform = eawr::platform;
+    namespace tactical = eawr::sim::tactical;
+    using Fixed = eawr::sim::math::Fixed;
+    using namespace std::chrono_literals;
+    auto initial = gc::synthetic_galaxy({7, 2, 2, 1, 1, true});
+    const auto planet = initial.planets.front().id;
+    initial.planets.front().owner = 2; // Fixture starts at the losing land return.
+    for (auto& fleet : initial.fleets) fleet.orbit = planet;
+    cp::ConflictRecord space; space.id = 2000; space.planet = planet; space.invader = 1; space.defender = 2;
+    space.tactical.content_identity = initial.content_identity;
+    space.tactical.first_free_entity_id = space.id + 1;
+    space.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+    space.seats = {{{1}, 1}, {{2}, 2}};
+    tactical::TacticalContent content;
+    for (const auto& fleet : initial.fleets) for (const auto& member : fleet.members) {
+        space.forces.push_back({member.id, member.type, fleet.owner, fleet.id});
+        tactical::UnitState unit; unit.entity_id = member.id; unit.type_id = member.type; unit.owner = fleet.owner;
+        space.tactical.units.push_back(unit);
+        if (std::find(content.victory.relevant_types.begin(), content.victory.relevant_types.end(), member.type)
+            == content.victory.relevant_types.end()) {
+            tactical::DurabilityProfile hull; hull.type_id = member.type; hull.max_hull = Fixed::from_raw(100 * Fixed::scale);
+            content.durability.profiles.push_back(hull);
+            content.victory.relevant_types.push_back(member.type);
+        }
+    }
+    content.victory.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
+    content.victory.contenders = {1, 2}; content.victory.controlled_players = {1, 2};
+    content.victory.humans = {1}; content.victory.countdown_frames = 2;
+    auto services = std::make_shared<platform::CampaignServiceConfiguration>();
+    services->configure = [planet](auto& game) {
+        cp::AutoResolveOutcomeApplication land;
+        land.planet = planet; land.planet_type = "FixturePlanet"; land.land = true;
+        land.invader = 2; land.defender = 1; land.result.conflict = 1000; land.result.winner = 2;
+        cp::AutoResolveOutcomeServices outcomes;
+        outcomes.control = [](auto&, const auto&) { return eawr::core::Result<void>::success(); };
+        game.set_auto_resolve_outcome_services(std::move(outcomes));
+        return game.stage_auto_resolve_outcome(land);
+    };
+    platform::LiveGameSession::Options options;
+    options.pacing = platform::LiveGameSession::Pacing::driven; options.services = services;
+    options.entries.push_back({5, space, content, cp::ScriptRequirement::none});
+    auto live = checked(platform::LiveGameSession::start(initial, options));
+    live->advance_to(2);
+    expect(live->wait_for(2, 5s), "live land outcome application completes");
+    auto frame = live->frame();
+    expect(frame.auto_resolve_outcome && frame.auto_resolve_outcome->land
+        && frame.auto_resolve_outcome->result.winner == 2 && !frame.pending_conflict,
+        "host publishes one completed land defeat with no pending conflict");
+    view::LiveBattleDialogNames names;
+    names.planet = [](auto) { return std::string("Lost planet"); };
+    names.side = [](auto) { return view::BattleDialogSide{}; };
+    names.type = [](auto) { return view::CampaignResultType{}; };
+    view::BattleSummaryAcknowledgements acknowledged;
+    auto dialog = view::live_battle_dialog_view(frame, {1}, 1, acknowledged, names);
+    expect(dialog.conflict == 1000 && !dialog.won && view::acknowledge_battle_summary(acknowledged, frame, dialog.conflict),
+        "land defeat is shown and dismissed through the production projection and acknowledgement");
+    live->advance_to(6);
+    expect(live->wait_for(6, 5s), "retaking fleet enters its space child");
+    auto feed = live->battle_feed(space.id, {1});
+    if (!feed) throw std::runtime_error("retaking fleet has no child feed");
+    const auto defender = space.forces.back().id;
+    feed->command_source([defender](std::uint64_t tick) {
+        if (tick != 1) return std::vector<tactical::PlayerCommand>{};
+        return std::vector<tactical::PlayerCommand>{{{tick, 1, 1}, {defender}, tactical::DamagePayload{Fixed::from_raw(1000 * Fixed::scale)}}};
+    });
+    feed->set_paused(false); live->battle_ready(space.id);
+    live->advance_to(14);
+    expect(live->wait_for(14, 5s), "won space battle returns to the galaxy");
+    frame = live->frame();
+    expect(frame.result && frame.result->conflict == space.id && frame.result->winner == 1
+        && frame.auto_resolve_outcome && frame.auto_resolve_outcome->result.conflict == 1000
+        && !frame.pending_conflict && !frame.conflict, "live host retains both results while its conflict queue is empty");
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, acknowledged, names);
+    expect(dialog.conflict == space.id && dialog.won && view::acknowledge_battle_summary(acknowledged, frame, dialog.conflict),
+        "returned space victory is shown and dismissed once");
+    for (unsigned sample = 0; sample < 4; ++sample)
+        expect(view::live_battle_dialog_view(frame, {1}, 1, acknowledged, names).phase == view::BattleDialogPhase::hidden,
+            "live host retained land defeat cannot requeue after victory acknowledgement");
+    live->stop(); feed->stop();
+    expect(!live->failure() && live->rejected_orders().empty(), "live result drain has no simulation failures or refused orders");
 }
 void campaign_seats() {
     view::GalaxySnapshotStub authored;
@@ -84,7 +331,7 @@ void bounty_mapping() {
     names.type = [](auto) { return view::CampaignResultType{}; };
     names.bounty = view::live_campaign_bounty_namer(frame, text);
     const auto summary = [&](gc::PlayerId local) {
-        const auto dialog = view::live_battle_dialog_view(frame, {1}, local, 0, names);
+        const auto dialog = view::live_battle_dialog_view(frame, {1}, local, {}, names);
         expect(dialog.phase == view::BattleDialogPhase::summary, "bounty contract exercises the published summary");
         return dialog;
     };
@@ -143,41 +390,41 @@ void publication() {
     names.type = [](std::string_view name) {
         return view::CampaignResultType{std::string(name), name != "unscored", name == "hero", 2, 5};
     };
-    auto dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names);
+    auto dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
     expect(dialog.phase == view::BattleDialogPhase::choice && !dialog.choice_ready && !dialog.auto_allowed,
         "announcement is visible without enabling input");
     pending->choice_ready = true;
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
     expect(dialog.choice_ready && dialog.auto_allowed && !dialog.tactical_available && !dialog.retreat_allowed
         && dialog.planet == "Kamino" && dialog.sides[0].combatants == std::vector<std::string>{"1001"}
         && dialog.sides[1].combatants == std::vector<std::string>{"1000"},
         "ready publication exposes only supported choice and defender/invader forces");
     pending->arbitration.forced_tactical = true;
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
     expect(!dialog.auto_allowed && !dialog.refusal.empty(), "forced tactical conflict keeps its explicit unavailable-provider refusal");
     pending->arbitration.forced_tactical = false;
     frame.tactical_refusal_code = "fixture.space.capability";
     frame.tactical_refusal = "reachable ship has an unsupported rocket curve";
     pending->arbitration.forced_tactical = true;
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
     const auto diagnostic_report = view::battle_tactical_report_json(dialog,
         [](std::string_view value) { return '"' + std::string(value) + '"'; });
     expect(dialog.refusal == frame.tactical_refusal
         && diagnostic_report.find("\"code\":\"fixture.space.capability\"") != std::string::npos
         && diagnostic_report.find("\"reason\":\"reachable ship has an unsupported rocket curve\"") != std::string::npos,
         "a refused forced conflict reports its actual provider code and reason");
-    const auto observer = view::live_battle_dialog_view(frame, {3}, 3, 0, names);
+    const auto observer = view::live_battle_dialog_view(frame, {3}, 3, {}, names);
     expect(observer.tactical_refusal.empty() && observer.tactical_refusal_code.empty(),
         "an uninvolved observer receives no local capability diagnostic");
     auto active_refusal = frame;
     active_refusal.pending_conflict.reset();
     active_refusal.conflict = std::make_shared<const cp::ConflictRecord>(pending->conflict);
-    expect(view::live_battle_dialog_view(active_refusal, {1}, 1, 0, names).tactical_refusal_code
+    expect(view::live_battle_dialog_view(active_refusal, {1}, 1, {}, names).tactical_refusal_code
         == frame.tactical_refusal_code,
         "child presentation preparation refusal remains reportable after pending choice closes");
     pending->arbitration.forced_tactical = false;
     frame.battle_choice_responses = {{70, 3, {1}, "unavailable"}, {70, 4, {2}, "other seat"}};
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
     expect(dialog.response_revision == 3 && dialog.refusal == "unavailable" && dialog.choice_ready && dialog.auto_allowed,
         "the local authoritative refusal keeps a ready choice and carries its response revision");
     eawr::platform::LiveAutoResolveProgress progress; progress.conflict = 70;
@@ -216,12 +463,12 @@ void publication() {
     frame.auto_resolve_progress.reset();
     alert.tutorial_forced = true;
     pending->alert = cp::pending_battle_alert_view(pending->conflict, alert, true);
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names, true);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names, true);
     expect(dialog.single_button && !dialog.retreat_allowed,
         "owner-published Begin-only selection uses the pending shell without retreat");
     alert.tutorial_forced = false;
     pending->alert = cp::pending_battle_alert_view(pending->conflict, alert, true, true);
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names, true);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names, true);
     expect(!dialog.single_button && dialog.waiting_for_opponent,
         "waiting-for-opponent stays in the ordinary two-button alert");
     view::LivePendingBattlePublication pending_publication;
@@ -234,7 +481,7 @@ void publication() {
     expect(!pending_publication.reuse(frame, {1}, 1, 0), "local refusal revision refreshes pending projection");
     frame.auto_resolve_progress = std::make_shared<const eawr::platform::LiveAutoResolveProgress>(progress);
     pending->alert.reset();
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
     expect(dialog.phase == view::BattleDialogPhase::progress && !dialog.auto_allowed && !dialog.fight_allowed
         && dialog.elapsed_seconds == 2 && dialog.display_seconds == 10
         && dialog.sides[0].combatants == std::vector<std::string>{"ship"},
@@ -249,7 +496,7 @@ void publication() {
     roster[1].queue = {{2, "history", "one"}, {2, "history", ""}, {2, "history", "two"},
         {2, "history", "two"}, {2, "history", "four"}};
     roster[0].queue = {{1, "history", "attacker"}};
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
     expect(dialog.roster_complete && dialog.retreat_allowed
         && dialog.sides[0].combatants == std::vector<std::string>{"current", "escort", "one", "two", "two", "four"}
         && dialog.sides[1].combatants == std::vector<std::string>{"attacker"},
@@ -259,11 +506,11 @@ void publication() {
     observed_names.planet = [&](auto) { ++observer_names; return std::string{}; };
     observed_names.side = [&](auto) { ++observer_names; return view::BattleDialogSide{}; };
     observed_names.type = [&](auto) { ++observer_names; return view::CampaignResultType{}; };
-    const auto solo_observer = view::live_battle_dialog_view(frame, {3}, 3, 0, observed_names);
+    const auto solo_observer = view::live_battle_dialog_view(frame, {3}, 3, {}, observed_names);
     expect(solo_observer.phase == view::BattleDialogPhase::hidden && observer_names == 0,
         "WAR-02/WGM-173 a solo conflict the local seat is not part of opens no progress dialog");
     full_progress->withdraw_admitted = false;
-    expect(!view::live_battle_dialog_view(frame, {1}, 1, 0, names).retreat_allowed,
+    expect(!view::live_battle_dialog_view(frame, {1}, 1, {}, names).retreat_allowed,
         "first recorded withdrawal disables subsequent local admission");
     const auto solo_snapshot = frame.latest;
     auto multiplayer_setup = gc::synthetic_galaxy(); multiplayer_setup.victory.emplace();
@@ -274,12 +521,12 @@ void publication() {
         multiplayer_setup.victory->context.planets.push_back({planet.id, 1000, planet.owner, planet.owner, planet.owner});
     auto multiplayer_session = checked(gc::GalacticSession::create(multiplayer_setup));
     frame.latest = multiplayer_session.snapshot();
-    expect(view::live_battle_dialog_view(frame, {1}, 1, 0, names).phase == view::BattleDialogPhase::hidden,
+    expect(view::live_battle_dialog_view(frame, {1}, 1, {}, names).phase == view::BattleDialogPhase::hidden,
         "WGM-178 pinned multiplayer space initializer bypasses both progress resources without a seat-count guess");
     pending->conflict.layer = cp::BattleLayer::land;
-    expect(view::live_battle_dialog_view(frame, {1}, 1, 0, names).phase == view::BattleDialogPhase::progress,
+    expect(view::live_battle_dialog_view(frame, {1}, 1, {}, names).phase == view::BattleDialogPhase::progress,
         "space multiplayer bypass does not invent a universal land-dialog bypass");
-    const auto progress_observer = view::live_battle_dialog_view(frame, {3}, 3, 0, observed_names);
+    const auto progress_observer = view::live_battle_dialog_view(frame, {3}, 3, {}, observed_names);
     expect(progress_observer.phase == view::BattleDialogPhase::progress && !progress_observer.involved
         && progress_observer.planet.empty() && !progress_observer.retreat_allowed
         && progress_observer.sides[0].combatants.empty() && progress_observer.sides[1].combatants.empty()
@@ -297,7 +544,7 @@ void publication() {
         bounty_queries.emplace_back(static_cast<std::uint64_t>(conflict), static_cast<std::uint64_t>(local));
         return view::CampaignBounty{false,true,"Collected: 0"};
     };
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
     expect(bounty_queries.size() == 1 && bounty_queries.front() == std::pair<std::uint64_t, std::uint64_t>{70, 1},
         "bounty query is scoped to result and local observer");
     expect(dialog.auto_resolved && dialog.bounty && view::campaign_bounty_visible(dialog.bounty),
@@ -308,9 +555,9 @@ void publication() {
         && dialog.results.score_cost == std::array<double, 2>{2, 4}
         && dialog.results.combat_power == std::array<double, 2>{5, 10},
         "summary groups confirmed original types, filters unscored/unrelated losses and separates heroes");
-    expect(view::live_battle_dialog_view(frame, {1}, 1, 70, names).phase == view::BattleDialogPhase::hidden,
+    expect(view::live_battle_dialog_view(frame, {1}, 1, {70, 70}, names).phase == view::BattleDialogPhase::hidden,
         "Continue acknowledgement hides the summary without a simulation command");
-    expect(view::live_battle_dialog_view(frame, {3}, 3, 0, names).phase == view::BattleDialogPhase::hidden,
+    expect(view::live_battle_dialog_view(frame, {3}, 3, {}, names).phase == view::BattleDialogPhase::hidden,
         "uninvolved observer never receives a local loss summary");
     const auto returned = pending->conflict;
     frame.auto_resolve_outcome.reset();
@@ -322,13 +569,13 @@ void publication() {
     result.invasion_offers = {{2, 80, 1, {300}}, {2, 81, 2, {301}}};
     frame.result = result;
     frame.result_conflict = std::make_shared<const cp::ConflictRecord>(returned);
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names, true, &returned);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names, true, &returned);
     expect(!dialog.invasion_fleet, "prepared candidates never stand in for admitted visible permission");
     auto offer = std::make_shared<cp::ObservedInvasionOffer>();
     offer->conflict = returned.id; offer->observer = 1; offer->candidates = {result.invasion_offers.front()};
     offer->visible_admitted = offer->accept_permitted = true;
     frame.invasion_offer = offer;
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names, true, &returned);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names, true, &returned);
     expect(dialog.phase == view::BattleDialogPhase::summary && dialog.won && dialog.planet == "Kamino"
         && dialog.results.elapsed_milliseconds == 61500 && dialog.results.totals == std::array<std::uint64_t, 2>{1, 2}
         && dialog.results.heroes[0].front().type == "hero" && dialog.invasion_fleet == 80 && dialog.picture == "1win",
@@ -336,10 +583,10 @@ void publication() {
     expect(!dialog.auto_resolved && dialog.bounty && dialog.bounty->caption == "Collected: 0",
         "tactical summary consumes the same copied local bounty without credit mutation");
     offer->observer = 2;
-    expect(!view::live_battle_dialog_view(frame, {1}, 1, 0, names).invasion_fleet,
+    expect(!view::live_battle_dialog_view(frame, {1}, 1, {}, names).invasion_fleet,
         "another observer's invasion permission is never projected");
     offer->observer = 1; offer->accept_permitted = false;
-    expect(!view::live_battle_dialog_view(frame, {1}, 1, 0, names).invasion_fleet,
+    expect(!view::live_battle_dialog_view(frame, {1}, 1, {}, names).invasion_fleet,
         "revoked acceptance suppresses a previously visible action");
     offer->accept_permitted = true;
     view::LiveBattleSummaryPublication publication;
@@ -347,8 +594,8 @@ void publication() {
     const auto original_type = names.type;
     names.type = [&](auto type) { ++type_reads; return original_type(type); };
     const auto update = [&](unsigned metadata = 1, unsigned local = 1) {
-        if (!publication.reuse(frame, {1}, local, 0, metadata, &returned))
-            dialog = view::live_battle_dialog_view(frame, {1}, local, 0, names, true, &returned);
+        if (!publication.reuse(frame, {1}, local, {}, metadata, &returned))
+            dialog = view::live_battle_dialog_view(frame, {1}, local, {}, names, true, &returned);
     };
     update();
     const auto initial_reads = type_reads;
@@ -371,16 +618,16 @@ void publication() {
     expect(publication.builds() == 7 && !dialog.invasion_fleet,
         "changed immutable invasion permission invalidates the cached summary");
     frame.invasion_offer = offer; update(2, 1);
-    expect(view::live_battle_dialog_view(frame, {1}, 1, 70, names, true, &returned).phase == view::BattleDialogPhase::hidden,
+    expect(view::live_battle_dialog_view(frame, {1}, 1, {70, 70}, names, true, &returned).phase == view::BattleDialogPhase::hidden,
         "tactical acknowledgement is presentation-only and once per conflict");
-    expect(view::live_battle_dialog_view(frame, {1}, 1, 0, names).results.totals == dialog.results.totals,
+    expect(view::live_battle_dialog_view(frame, {1}, 1, {}, names).results.totals == dialog.results.totals,
         "restored publication describes first-frame summary without presentation-retained child context");
     frame.result->winner = 2;
-    dialog = view::live_battle_dialog_view(frame, {1}, 1, 0, names, true, &returned);
+    dialog = view::live_battle_dialog_view(frame, {1}, 1, {}, names, true, &returned);
     expect(!dialog.won && !dialog.invasion_fleet && dialog.picture == "1loss",
         "loss picture stays local and an opponent's victory never grants an invasion action");
     frame.result->conflict = 71;
-    expect(view::live_battle_dialog_view(frame, {1}, 1, 0, names, true, &returned).phase == view::BattleDialogPhase::hidden,
+    expect(view::live_battle_dialog_view(frame, {1}, 1, {}, names, true, &returned).phase == view::BattleDialogPhase::hidden,
         "stale retained context cannot describe another battle result");
     expect(std::all_of(bounty_queries.begin(), bounty_queries.end(), [](const auto& query) {
         return query.first == 70 && (query.second == 1 || query.second == 2); }),
@@ -414,7 +661,7 @@ void uninvolved_conflict_lifecycle() {
     unsigned opened = 0, changes = 0;
     auto previous = view::BattleDialogPhase::hidden;
     const auto sample = [&](gc::PlayerId local) {
-        const auto dialog = view::live_battle_dialog_view(frame, {local}, local, 0, names, true);
+        const auto dialog = view::live_battle_dialog_view(frame, {local}, local, {}, names, true);
         if (dialog.phase != view::BattleDialogPhase::hidden) ++opened;
         if (dialog.phase != previous) ++changes;
         previous = dialog.phase;
@@ -443,7 +690,7 @@ void uninvolved_conflict_lifecycle() {
 }
 }
 int main() {
-    try { campaign_seats(); bounty_mapping(); publication(); uninvolved_conflict_lifecycle(); }
+    try { retained_results_drain(); saved_auto_summary_roundtrip(); live_retained_results_drain(); campaign_seats(); bounty_mapping(); publication(); uninvolved_conflict_lifecycle(); }
     catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

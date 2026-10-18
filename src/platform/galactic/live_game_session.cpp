@@ -347,6 +347,21 @@ std::shared_ptr<const galactic::GalacticSnapshot> PreparedLiveCampaign::snapshot
 const std::vector<PreparedLiveCampaign::NativeAiPlayer>& PreparedLiveCampaign::native_ai_players() const noexcept { return impl_->native_ai_players; }
 bool PreparedLiveCampaign::native_ai_installed() const noexcept { return impl_->root.game()->native_ai_installed(); }
 
+core::Result<std::vector<std::uint8_t>> encode_auto_summary_hint(
+    const LiveAutoResolveOutcome& summary, std::string planet_type) {
+    campaign::AutoResolveOutcomeApplication value;
+    value.planet = summary.planet; value.invader = summary.invader; value.defender = summary.defender;
+    value.land = summary.land; value.result = summary.result; value.planet_type = std::move(planet_type);
+    for (const auto& row : summary.record) value.record.push_back({row.original_type, row.owner});
+    return campaign::encode_auto_resolve_outcome(value);
+}
+core::Result<std::shared_ptr<const LiveAutoResolveOutcome>> decode_auto_summary_hint(
+    const std::vector<std::uint8_t>& bytes) {
+    using Result = core::Result<std::shared_ptr<const LiveAutoResolveOutcome>>;
+    auto decoded = campaign::decode_auto_resolve_outcome(bytes);
+    if (!decoded) return Result::failure(decoded.error());
+    return Result::success(outcome_view(decoded.value()));
+}
 class PreparedLiveRestore::Impl {
 public:
     checkpoint::GameRestore restored;

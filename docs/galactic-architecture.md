@@ -83,6 +83,12 @@ each other's source lists, and puts the only component that knows both layers
   A section re-encodes and re-hashes only in ticks that change it (its commit marks it
   dirty); a clean section reuses its digest. The digest equals a from-scratch encoding,
   which the tests check on every tick of the corpus. Encoding name: `eawr-galactic-state-v1`.
+  Production's hash input uses domain byte 8: each producer's immutable offer table is
+  replaced by SHA-256 of its complete version-7 offer-row encoding, including the row
+  count. The digest is computed once per owner and folded into every changed production
+  section; mutable queues, payments, objects and player state remain fully encoded.
+  Independent verification recomputes the offer digests. Replay, checkpoint and
+  `canonical_state_bytes()` still contain the complete version-7 production encoding.
 - **GC-specific diagnostics** in a new block, `EAWR-SIM-05xx`, and checkpoint diagnostics
   `EAWR-CKP-01xx`.
 

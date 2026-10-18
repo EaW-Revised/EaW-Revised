@@ -32,20 +32,22 @@ void save_input_contract() {
         save_input_action(profile, "F6", true, true, false), save_input_action(profile, "F6", true, false, true),
         save_input_action({"F6", "F6"}, "F6", true, false, false)})
         expect(action == SaveInputAction::none, "release/repeat/modifier/colliding bindings do not issue quick input");
-    expect(!manual_save_load_allowed(true, false) && manual_save_load_allowed(false, false)
-        && !manual_save_load_allowed(false, true)
-        && save_input_action(profile, "F6", true, false, false) == SaveInputAction::quick_save,
-        "WGS-98 pending menu gate is separate from quick-save admission");
     expect(save_menu_enabled({}).open && save_menu_enabled({}).save && save_menu_enabled({}).load,
         "WGS-152 solo galaxy admits Escape/save/load");
     for (auto member : {&SaveMenuAdmission::cinematic, &SaveMenuAdmission::letterbox,
-        &SaveMenuAdmission::pending_battle, &SaveMenuAdmission::tutorial, &SaveMenuAdmission::multiplayer_skirmish}) {
+        &SaveMenuAdmission::tutorial, &SaveMenuAdmission::multiplayer_skirmish}) {
         SaveMenuAdmission facts; facts.*member = true; const auto menu = save_menu_enabled(facts);
         expect(!menu.save && !menu.load, "each WGS-152 both-entry gate works independently");
     }
     SaveMenuAdmission child; child.tactical = true;
     expect(save_menu_enabled(child).save && save_menu_enabled(child).load,
         "active solo tactical is not a general refusal");
+    SaveMenuAdmission pending; pending.pending_battle = true;
+    expect(save_menu_enabled(pending).open && save_menu_enabled(pending).save && save_menu_enabled(pending).load,
+        "WGS-P01 pending choice/progress allows both manual recovery routes");
+    pending.tactical = true;
+    expect(save_menu_enabled(pending).save && save_menu_enabled(pending).load,
+        "WGS-P01 pending and tactical publications together still allow solo recovery");
     child.multiplayer_campaign = true;
     expect(!save_menu_enabled(child).save && !save_menu_enabled(child).load, "multiplayer child refuses both");
     child.tactical = false;
@@ -290,12 +292,20 @@ void pending_roundtrip(std::size_t workers, const std::string& directory) {
     expect(player->frame().pending_conflict && player->frame().latest->clock().pause_depth == 1,
         "player load reestablishes the pending battle's one pause token");
     expect(restored->completed_tick() == frontier && restored->frame().pending_conflict
+        && restored->frame().pending_conflict->conflict == live->frame().pending_conflict->conflict
         && restored->frame().pending_conflict->choice_ready == live->frame().pending_conflict->choice_ready,
         "first restored frame retains pending choice and its conflict pause");
     for (auto* owner : {live.get(), restored.get(), player.get()}) {
         owner->submit(platform::LiveGameOrder{{1}, galactic::BattleChoice{fixture.conflict.id, true}, {}});
         owner->advance_to(frontier + 1); expect(owner->wait_for(frontier + 1, 5s), "restored pending choice selects its recorded child");
         expect(owner->frame().battle && !owner->frame().pending_conflict, "pending load does not recreate campaign startup");
+        const auto child = owner->battle_feed(fixture.conflict.id, {1});
+        expect(bool(child), "selected child exposes its local presentation feed");
+        if (child) child->set_paused(false);
+        owner->battle_ready(fixture.conflict.id);
+        owner->advance_to(frontier + 2); expect(owner->wait_for(frontier + 2, 5s), "selected child continues once");
+        expect(owner->frame().battle && owner->frame().conflict->id == fixture.conflict.id
+            && !owner->frame().pending_conflict, "consumed prompt does not return on the next publication");
         owner->stop();
     }
     expect(live->tick_hashes().back() == restored->tick_hashes().back(), "pending continuation preserves canonical selection");

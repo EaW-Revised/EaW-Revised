@@ -44,6 +44,14 @@ void encode_census(std::vector<std::uint8_t>&, const PopulationCensus&);
 void encode_population(std::vector<std::uint8_t>&, std::span<const PopulationTotal>);
 [[nodiscard]] std::optional<PopulationCensus> decode_census(std::span<const std::uint8_t>);
 void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& production);
+// Hash domain 8 replaces each immutable offer table with its SHA-256 digest.
+// Replay/checkpoint/canonical-state encodings continue to carry the complete tables.
+using ProductionOfferDigests = std::vector<std::array<std::uint8_t, 32>>;
+[[nodiscard]] ProductionOfferDigests production_offer_digests(const ProductionSetup&);
+void encode_production_hash(std::vector<std::uint8_t>&, const ProductionSetup&, const ProductionOfferDigests&);
+// Mutable admission inputs, excluding offer content and queue payment/countdown fields.
+void encode_production_menu_inputs(std::vector<std::uint8_t>&, const ProductionSetup&, PlayerId,
+    std::span<const PlanetId> visible);
 [[nodiscard]] std::optional<ProductionSetup> decode_production(std::span<const std::uint8_t> bytes);
 void encode_observer(std::vector<std::uint8_t>&, const ObserverSetup&);
 void encode_planet_access(std::vector<std::uint8_t>&, const PlanetAccessState&);

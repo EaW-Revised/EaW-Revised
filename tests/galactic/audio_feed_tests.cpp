@@ -407,7 +407,7 @@ void frozen_galaxy_control_events(const galactic::GalacticSetup& initial) {
     content.victory.contenders = {1, 2}; content.victory.controlled_players = {1, 2}; content.victory.humans = {1};
     LiveGameSession::Options options;
     options.pacing = LiveGameSession::Pacing::driven;
-    options.entries.push_back({0, entry, content});
+    options.entries.push_back({0, entry, content, campaign::ScriptRequirement::none});
     auto live = LiveGameSession::start(initial, options).value();
     live->advance_to(1);
     expect(live->wait_for(1, 10s), "child entry reaches its readiness gate");

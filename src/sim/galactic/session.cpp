@@ -147,6 +147,7 @@ core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::u
         }
         impl_->rebuild_technology_price_expiry();
         impl_->published_actor_records.reset(); impl_->published_production_originals.reset();
+        impl_->production_offer_hashes.reset(); impl_->published_production_offers.reset();
         impl_->published_economy_input_generation.reset();
         impl_->published_black_market_menus.reset(); impl_->published_ability_results.reset();
         impl_->published_corruption_transitions.reset();
@@ -398,6 +399,18 @@ std::vector<std::uint8_t> GalacticSession::Impl::encode_section(const StateSecti
         }
         break;
     }
+    }
+    return bytes;
+}
+
+std::vector<std::uint8_t> GalacticSession::Impl::encode_hash_section(StateSection section, bool reuse) const {
+    if (section != StateSection::production) return encode_section(section);
+    std::vector<std::uint8_t> bytes;
+    if (reuse) {
+        if (!production_offer_hashes) production_offer_hashes = detail::production_offer_digests(*production);
+        detail::encode_production_hash(bytes, *production, *production_offer_hashes);
+    } else {
+        detail::encode_production_hash(bytes, *production, detail::production_offer_digests(*production));
     }
     return bytes;
 }
@@ -848,18 +861,14 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     part.emplace(gc_profile::Phase::snap_offers);
     const auto observations_for_offers = observer_projection
         ? std::span<const ObservedPlanet>(*observer_projection) : std::span<const ObservedPlanet>{};
-    // The rows read the sections counted by offer_generation (the dirty flags the cached state hash trusts), the
-    // counters below and the exact values in ProductionOfferInputs; anything else that moves (fleet positions in
-    // transit, observer records) leaves them unchanged. Hash verification recomputes every reused result.
-    const std::array<std::uint64_t, 5> offer_key{offer_generation, ability_input_generation, next_id, live_object_count,
-        observer ? observer->local_player : 0};
+    // The key contains the exact admission inputs, excluding queue progress and other players' bills.
+    // Hash verification independently recomputes every reused result.
     InlineExecutor offer_inline_executor;
     const auto& offer_workers = executor ? *executor : static_cast<const PartitionExecutor&>(offer_inline_executor);
     auto offer_inputs = production_offer_inputs(observations_for_offers, live_fleets);
-    if (!published_production_offers || production_offer_key != offer_key || published_offer_inputs != offer_inputs) {
+    if (!published_production_offers || published_offer_inputs != offer_inputs) {
         published_production_offers = std::make_shared<const std::vector<ObservedProductionOffer>>(
             observed_production_offers(offer_inputs, live_fleets, offer_workers));
-        production_offer_key = offer_key;
         published_offer_inputs = std::move(offer_inputs);
         ++production_offer_rebuilds;
     } else if (verify_cached_hash && *published_production_offers != observed_production_offers(offer_inputs, live_fleets, offer_workers)) {
@@ -2026,9 +2035,6 @@ void GalacticSession::Impl::refresh_economy_input_generation() const {
     // Inactive optional sections retain their initial dirty bit: only present
     // native owners contribute inputs to this derived publication.
     if (production && changed(StateSection::production)) ++production_generation;
-    if (changed(StateSection::planets) || (production && changed(StateSection::production)) || changed(StateSection::players)
-        || (setup.census && changed(StateSection::census)) || (economy_corruption && changed(StateSection::economy_corruption))
-        || (ability_host && changed(StateSection::ability_host))) ++offer_generation;
     const bool census = changed(StateSection::planets) || (production && changed(StateSection::production))
         || changed(StateSection::fleets) || (setup.movement && changed(StateSection::movement))
         || (control && changed(StateSection::control)) || (setup.census && changed(StateSection::census))
@@ -2053,7 +2059,8 @@ StateHash GalacticSession::Impl::refresh_hash(GalacticTick::Work* work) {
             if (work) ++work->sections_reused;
             continue;
         }
-        auto bytes = encode_section(static_cast<StateSection>(section));
+        auto bytes = encode_hash_section(static_cast<StateSection>(section));
+        if (work && section == static_cast<std::size_t>(StateSection::production)) work->production_hash_bytes += bytes.size();
         digests[section] = hasher ? hasher->hash(std::move(bytes)) : StateHash(core::sha256_hex(bytes));
         // Only the ordinary world step consumes these flags: it also uses
         // them to invalidate population preparation. Barrier reads must leave
@@ -2086,7 +2093,7 @@ StateHash GalacticSession::Impl::refresh_hash(GalacticTick::Work* work) {
 void GalacticSession::Impl::verify_hash() const {
     if (!verify_cached_hash) return;
     std::array<std::string, state_section_count> hex;
-    for (const auto section : section_ids()) hex[section] = core::sha256_hex(encode_section(static_cast<StateSection>(section)));
+    for (const auto section : section_ids()) hex[section] = core::sha256_hex(encode_hash_section(static_cast<StateSection>(section), false));
     if (cached_hash.get() != combine(hex, section_ids())) throw std::runtime_error("galactic cached hash differs from independent full state hash");
 }
 StateHash GalacticSession::cached_state_hash() const { return impl_->refresh_hash(); }
@@ -2094,7 +2101,7 @@ void GalacticSession::set_hash_verification(bool enabled) noexcept { impl_->veri
 std::string GalacticSession::state_sha256() const {
     std::array<std::string, state_section_count> hex;
     for (const auto section : impl_->section_ids()) {
-        hex[section] = core::sha256_hex(impl_->encode_section(static_cast<StateSection>(section)));
+        hex[section] = core::sha256_hex(impl_->encode_hash_section(static_cast<StateSection>(section), false));
     }
     return combine(hex, impl_->section_ids());
 }

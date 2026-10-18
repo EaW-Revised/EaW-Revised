@@ -200,6 +200,7 @@ bool GalacticMode::State::service_space_cycle_proof() {
         }
         if (!proof_move_submitted) { failure = "Space cycle proof found no hostile authored fleet route"; return false; }
     }
+    const bool prompt_save = options.space_cycle_proof == "prompt-save";
     if (!proof_fight_enabled && frame.pending_conflict && frame.pending_conflict->choice_ready && battle_dialog
         && battle_dialog->view().phase == galactic_view::BattleDialogPhase::choice
         && battle_dialog->view().choice_ready
@@ -210,7 +211,13 @@ bool GalacticMode::State::service_space_cycle_proof() {
         }
         proof_fight_enabled = true;
         capture_space_cycle_stage("fight");
-        battle_dialog->activate(galactic_view::BattleChoice::fight);
+        if (!prompt_save) battle_dialog->activate(galactic_view::BattleChoice::fight);
+    }
+    // Explicit GPU save qualification: leave the real pending choice and its
+    // subsequent auto-resolve summary to native player input, also after load.
+    if (prompt_save) {
+        proof_save_ready = proof_save_ready || proof_fight_enabled;
+        return failure.empty();
     }
     // Save/Load owns the next input after the same real Move/Fight/map path.
     // Leave the ordinary live clock and native controls running, including
@@ -685,7 +692,7 @@ bool GalacticMode::State::prepare_handoff() {
         battle->victory = tactical_content.victory;
         battle->economy = tactical_content.economy;
         battles.push_back(battle);
-        live_options.entries.push_back({entry_tick, entry, tactical_content});
+        live_options.entries.push_back({entry_tick, entry, tactical_content, campaign::ScriptRequirement::none});
         entry_ticks.push_back(entry_tick);
         highest = *entry.tactical.first_free_entity_id - 1;
         entry_tick += options.battle_frames + tactical_content.victory.countdown_frames + 10;

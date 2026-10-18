@@ -307,7 +307,8 @@ struct PausedPlanning final : auth::GalacticScriptEngine {
 // taken in that window must restore, a save written after such a restore must restore again, and the resolution
 // that ends the pause must close the lead (#4068). `resolve_tick` 0 keeps the conflict pending for the whole run;
 // `paused_planning` installs an AI engine that also services paused ticks, so the lead grows past one.
-void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paused_planning) {
+void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paused_planning,
+    const bool published_progress = false) {
     const auto config = victory_setup(); const auto identities = cp::game_identities(config);
     campaign::ConflictRecord conflict; conflict.id = 9000; conflict.planet = config.planets.front().id;
     conflict.invader = 1; conflict.defender = 2; conflict.tactical.first_free_entity_id = 9001;
@@ -329,7 +330,22 @@ void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paus
         session.set_conflict_service([](const auto&, const auto&, auto) {
             return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
         }, no_content, {}, eawr::campaign::ScriptRequirement::none);
-        session.set_auto_resolver(solver);
+        if (published_progress) {
+            auto progress = std::make_shared<campaign::AutoResolveProgress>();
+            progress->conflict = conflict.id;
+            session.set_auto_resolver([solver, progress](const auto& record, const auto& snapshot, const auto& executor) {
+                progress->initiated = true;
+                return solver(record, snapshot, executor);
+            });
+            session.set_auto_resolve_progress_reader([progress] { return std::optional(*progress); });
+            session.set_auto_resolve_checkpoint_services([progress] {
+                galactic::checkpoint_detail::Writer out; out(*progress);
+                return eawr::core::Result<Bytes>::success(std::move(out.bytes));
+            }, [progress](std::span<const std::uint8_t> bytes, const auto&, const auto&) {
+                galactic::checkpoint_detail::Reader in(bytes); in(*progress);
+                return eawr::core::Result<void>::success();
+            });
+        } else session.set_auto_resolver(solver);
         campaign::AutoResolveOutcomeServices outcomes;
         outcomes.control = [](auto&, const auto&) { return eawr::core::Result<void>::success(); };
         session.set_auto_resolve_outcome_services(std::move(outcomes));
@@ -388,8 +404,10 @@ void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paus
             expect(lead(session) == leads[tick] && paused_now(session) == paused[tick],
                 "restored session keeps the reference AI lead and pause");
         }
+        if (published_progress) expect(!session.pending_conflict() && !paused_now(session),
+            "a save loaded during initiated auto-resolve progress finishes and resumes the galaxy");
     };
-    std::size_t windowed = 0, resaved_windowed = 0;
+    std::size_t windowed = 0, resaved_windowed = 0, progress_windowed = 0;
     for (const auto workers : {std::size_t{1}, std::size_t{4}}) {
         const eawr::platform::ThreadWorkerAdapter pool(workers);
         for (int barrier = 0; barrier <= last_barrier; ++barrier) {
@@ -401,6 +419,19 @@ void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paus
             }
             const auto saved = take(cp::save_game_checkpoint(original, identities));
             auto restored = take(cp::load_game_checkpoint(saved, identities, options, pool));
+            if (published_progress && original.auto_resolve_progress() && original.auto_resolve_progress()->initiated) {
+                ++progress_windowed;
+                expect(restored.session.auto_resolve_progress() && restored.session.auto_resolve_progress()->initiated
+                    && restored.session.auto_resolve_progress()->conflict == conflict.id,
+                    "mid-progress save restores the same initiated resolver before continuing");
+                auto player_options = options; player_options.player_load = true;
+                auto player = take(cp::load_game_checkpoint(saved, identities, player_options, pool));
+                expect(player.session.auto_resolve_progress() && player.session.auto_resolve_progress()->initiated,
+                    "explicit player-load prologue retains the initiated resolver");
+                while (player.session.completed_tick() < horizon) (void)take(player.session.step(pool));
+                expect(!player.session.pending_conflict() && !paused_now(player.session),
+                    "player load during auto-resolve progress resolves and can continue");
+            }
             expect(take(cp::save_game_checkpoint(restored.session, identities)) == saved, "pending-conflict checkpoint bytes are canonical");
             while (restored.session.completed_tick() < static_cast<std::uint64_t>(std::min(barrier + 5, last_resave))) {
                 const auto tick = restored.session.completed_tick();
@@ -417,10 +448,12 @@ void pending_conflict_barriers(const std::uint64_t resolve_tick, const bool paus
         }
     }
     expect(windowed > 0 && resaved_windowed > 0, "barriers and re-saves were taken inside the pause window");
+    if (published_progress) expect(progress_windowed > 0, "the progress save/load completion proof exercised initiated windows");
 }
 void pending_conflict_resave() {
     for (const auto resolve_tick : {std::uint64_t{0}, std::uint64_t{20}})
         for (const auto paused_planning : {false, true}) pending_conflict_barriers(resolve_tick, paused_planning);
+    pending_conflict_barriers(20, false, true);
 }
 void story_clock_refusals() {
     const auto config = setup(); const auto identities = cp::game_identities(config);

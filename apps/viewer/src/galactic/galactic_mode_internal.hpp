@@ -651,6 +651,8 @@ struct GalacticMode::State final {
     std::shared_ptr<const BattleContent> battle_content;
     std::shared_ptr<const LiveSessionView::PreparedBattle> prepared;
     std::shared_ptr<const campaign::ConflictRecord> presented_conflict;
+    std::shared_ptr<const platform::LiveAutoResolveOutcome> restored_auto_summary;
+    [[nodiscard]] platform::LiveGameFrame battle_dialog_frame() const;
     std::unique_ptr<platform::LiveGameSession> game;
     std::unique_ptr<GalacticSaveControls> save_controls;
     std::unique_ptr<GalacticAudio> audio;
@@ -674,7 +676,7 @@ struct GalacticMode::State final {
     std::map<std::string, galactic_view::CampaignResultType> battle_result_types;
     std::map<sim::tactical::TypeId, std::string> battle_tactical_types;
     std::map<sim::galactic::PlayerId, std::array<std::string, 2>> battle_space_pictures;
-    std::uint64_t acknowledged_battle_summary{};
+    galactic_view::BattleSummaryAcknowledgements acknowledged_battle_summary{};
     galactic_view::LiveBattleSummaryPublication battle_summary_publication;
     galactic_view::LivePendingBattlePublication battle_pending_publication;
     std::uint64_t battle_metadata_generation{};

@@ -2,6 +2,7 @@
 // gate; --installed proves stock preparation and explicit unavailable refusal.
 #include "galactic_support.hpp"
 #include "eawr/core/gc_profile.hpp"
+#include "eawr/core/sha256.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/campaign/galactic_ai_runtime.hpp"
@@ -1677,7 +1678,8 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks) {
             }
         };
         advance(1);
-        struct Row { std::uint64_t tick{}; double wall_ms{}, step_ms{}; gp::Snapshot phases{}; };
+        struct Row { std::uint64_t tick{}; double wall_ms{}, step_ms{}; gp::Snapshot phases{}; std::string snapshot_hash; };
+        const bool state_digest = environment_or("EAWR_TICK_PROFILE_STATE_DIGEST", "0") == "1";
         std::vector<Row> rows;
         rows.reserve(ticks);
         const bool was_enabled = gp::enabled.exchange(true, std::memory_order_relaxed);
@@ -1690,21 +1692,47 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks) {
             row.wall_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
             row.phases = gp::difference(before, gp::snapshot());
             for (const auto& cost : live->tick_costs_after(tick - 1)) if (cost.tick == tick) row.step_ms = cost.total_ms;
+            // Outside the timing interval: the full snapshot codec is independent of the tick hash format.
+            if (state_digest) row.snapshot_hash = live->frame().latest->sha256();
             rows.push_back(row);
         }
         gp::enabled.store(was_enabled, std::memory_order_relaxed);
-        live->stop();
         const auto label = mode + "-w" + worker_text;
+        if (state_digest) {
+            // A direct owner checkpoint and native AI state prove simulation equality across hash domains.
+            // Save after the timed window; no cached section digest is part of these owner payloads.
+            eawr::platform::LiveSaveRequest request;
+            request.seat = fixture.human; request.name = "state-equality"; request.overwrite = true;
+            const auto token = live->request_save(std::move(request));
+            advance(live->completed_tick() + 1);
+            if (!live->wait_save(token, std::chrono::minutes(5))) throw std::runtime_error("profile state save timed out");
+            const auto outcome = live->terminal_save_outcome(token);
+            if (!outcome || outcome->phase != eawr::platform::LiveSavePhase::completed)
+                throw std::runtime_error("profile state save failed");
+            namespace ck = eawr::checkpoint;
+            const auto saved = must(ck::parse_checkpoint(must(eawr::platform::save_detail::read(
+                options.saves.directory, "state-equality"))));
+            std::ofstream evidence(directory / ("state-" + label + ".txt"));
+            for (auto id : {ck::SectionId::galactic_owner, ck::SectionId::galactic_ai}) {
+                const auto* section = saved.find(id);
+                if (id == ck::SectionId::galactic_owner && !section)
+                    throw std::runtime_error("profile state save lacks direct owner state");
+                evidence << static_cast<unsigned>(id) << ','
+                    << (section ? eawr::core::sha256_hex(section->bytes) : "absent") << '\n';
+            }
+        }
+        live->stop();
         const auto hashes_all = live->tick_hashes();
         {
             std::ofstream csv(directory / ("ticks-" + label + ".csv"), std::ios::trunc);
             csv << "tick,wall_ms,step_ms";
             for (std::size_t i = 0; i < phase_count; ++i) csv << ',' << gp::names[i] << "_incl_ms," << gp::names[i] << "_excl_ms";
-            csv << ",hash\n";
+            csv << ",hash,snapshot_sha256\n";
             for (const auto& row : rows) {
                 csv << row.tick << ',' << row.wall_ms << ',' << row.step_ms;
                 for (const auto& value : row.phases) csv << ',' << static_cast<double>(value.inclusive_ns) / 1e6 << ',' << static_cast<double>(value.exclusive_ns) / 1e6;
-                csv << ',' << (row.tick >= 1 && row.tick <= hashes_all.size() ? hashes_all[row.tick - 1] : std::string()) << '\n';
+                csv << ',' << (row.tick >= 1 && row.tick <= hashes_all.size() ? hashes_all[row.tick - 1] : std::string())
+                    << ',' << row.snapshot_hash << '\n';
             }
         }
         std::uint64_t digest = 1469598103934665603ULL;

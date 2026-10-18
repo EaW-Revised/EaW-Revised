@@ -16,6 +16,15 @@ namespace eawr::viewer::galactic {
 
 enum class BattleDialogPhase { hidden, choice, progress, summary };
 enum class BattleChoice { fight, auto_resolve, retreat, continue_galaxy, invade };
+// The owner retains the last returned result and the last automatic outcome
+// independently. Dismissing one must keep the other slot's dismissal intact.
+struct BattleSummaryAcknowledgements {
+    std::uint64_t returned{}, automatic{};
+    [[nodiscard]] bool contains(std::uint64_t conflict) const noexcept {
+        return conflict != 0 && (returned == conflict || automatic == conflict);
+    }
+    friend bool operator==(const BattleSummaryAcknowledgements&, const BattleSummaryAcknowledgements&) = default;
+};
 struct BattleDialogSide {
     std::string name, icon;
     std::array<float, 3> colour{1, 1, 1};

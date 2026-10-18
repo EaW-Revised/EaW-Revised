@@ -1008,10 +1008,58 @@ GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_o
     std::sort(result.visible.begin(), result.visible.end());
     result.visible.erase(std::unique(result.visible.begin(), result.visible.end()), result.visible.end());
     for (const auto& fleet : fleet_inputs) {
+        if (!std::binary_search(result.visible.begin(), result.visible.end(), fleet.orbit)) continue;
         result.fleets.insert(result.fleets.end(), {fleet.id, fleet.owner, fleet.orbit, fleet.motion.transit ? 1U : 0U, fleet.members.size()});
         for (const auto& member : fleet.members) result.fleets.push_back(member.type);
     }
     if (income) result.reductions = production_reduction_sources(live_income_inputs(), sorted_planets());
+    auto& bytes = result.admission;
+    detail::put_u32(bytes, local);
+    detail::put_u64(bytes, next_id);
+    detail::put_u64(bytes, live_object_count);
+    detail::put_i64(bytes, account->credits.raw());
+    detail::put_i64(bytes, account->current_tech);
+    detail::put_i64(bytes, account->maximum_tech);
+    detail::encode_production_menu_inputs(bytes, *production, local, result.visible);
+    // Reservations include this player's queues on every producer, including hidden ones.
+    const auto reservations = production_reservations(*production, local);
+    detail::put_i64(bytes, reservations.population.raw());
+    detail::put_u64(bytes, reservations.counts.size());
+    for (const auto& [type, count] : reservations.counts) {
+        detail::put_u64(bytes, type); detail::put_u64(bytes, count);
+    }
+    detail::put_u8(bytes, setup.census ? 1 : 0);
+    if (setup.census) {
+        const auto total = std::find_if(population.begin(), population.end(),
+            [local](const auto& row) { return row.player == local; });
+        const auto found = total != population.end();
+        detail::put_u8(bytes, found ? 1 : 0);
+        if (found) detail::encode_population(bytes, std::span<const PopulationTotal>(&*total, 1));
+    }
+    const auto owners = sorted_planets();
+    for (auto planet : result.visible) {
+        const auto owner = std::lower_bound(owners.begin(), owners.end(), planet,
+            [](const auto& row, auto id) { return row.id < id; });
+        detail::put_u32(bytes, owner != owners.end() && owner->id == planet ? owner->owner : 0);
+        const auto unlocks = corruption_local_unlocks(planet, local);
+        detail::put_u64(bytes, unlocks.size());
+        for (auto type : unlocks) detail::put_u64(bytes, type);
+    }
+    detail::put_u8(bytes, economy_corruption ? 1 : 0);
+    if (economy_corruption) {
+        detail::put_u8(bytes, economy_corruption->tutorial ? 1 : 0);
+        for (const auto& row : economy_corruption->players) if (row.player == local) {
+            detail::put_u8(bytes, row.benefits ? 1 : 0);
+            for (auto value : row.price) detail::put_i64(bytes, value.raw());
+            for (auto value : row.time) detail::put_i64(bytes, value.raw());
+            detail::put_i64(bytes, row.tech_purchase_multiplier.raw());
+        }
+        for (const auto& row : economy_corruption->planets)
+            if (std::binary_search(result.visible.begin(), result.visible.end(), row.planet)) {
+                detail::put_u64(bytes, row.planet);
+                detail::put_u8(bytes, row.corruption != corruption_fixture::Type::none ? 1 : 0);
+            }
+    }
     return result;
 }
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "encoding.hpp"
 #include "native_income_projection.hpp"
 #include "native_population_projection.hpp"
 
@@ -199,13 +200,11 @@ public:
     // Derived canonical gather for WGM-110; excludes recursive member build-limit quotas.
     std::map<PlayerId, std::map<TypeId, std::uint64_t>> original_owned_counts;
     mutable std::shared_ptr<const std::vector<CensusObject>> published_production_originals;
-    // Derived observer-local offer rows (never hashed). Recomputed only when a state section they read changed
-    // (the same dirty-flag generations that guard the economy forecast) or an id/object counter moved.
+    // Offers are immutable for the owner's lifetime, including after a checkpoint load.
+    // The independent hash path recomputes these digests to verify the cache.
+    mutable std::optional<detail::ProductionOfferDigests> production_offer_hashes;
+    // Derived observer-local offer rows (never hashed), keyed by their admission inputs.
     mutable std::shared_ptr<const std::vector<ObservedProductionOffer>> published_production_offers;
-    mutable std::array<std::uint64_t, 5> production_offer_key{};
-    // Counts the changes of the sections the rows read (planets, production, players, census, corruption,
-    // abilities), taken from the dirty flags before the state hash consumes them.
-    mutable std::uint64_t offer_generation{1};
     mutable std::uint64_t production_offer_rebuilds{};
     // Published production state: copied again only after the production section changed (its dirty flag is
     // counted before the hash consumes it, like the economy input generation).
@@ -247,13 +246,14 @@ public:
     std::uint64_t production_producers{}, production_entries{};
     void execute_production(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_object_sale(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&);
-    // What the observer's offer rows read besides the production/economy sections, as exact values: the producers
-    // the observer controls and sees, the fleet facts production admission reads (id, owner, orbit, transit flag,
-    // member types) and the income reductions. Rows are rebuilt only when these or a tracked section changed.
+    // Exact local admission inputs: queue membership, local account/population/limits,
+    // visible producers, fleet prerequisites, reductions and local corruption unlocks.
+    // Queue countdowns and AI account payments do not affect these rows.
     struct ProductionOfferInputs {
         std::vector<PlanetId> visible;
         std::vector<std::uint64_t> fleets;
         std::vector<ProductionReductionSource> reductions;
+        std::vector<std::uint8_t> admission;
         friend bool operator==(const ProductionOfferInputs&, const ProductionOfferInputs&) = default;
     };
     mutable ProductionOfferInputs published_offer_inputs;
@@ -419,6 +419,7 @@ public:
         bool pending_local_conflict = false);
 
     [[nodiscard]] std::vector<std::uint8_t> encode_section(StateSection section) const;
+    [[nodiscard]] std::vector<std::uint8_t> encode_hash_section(StateSection section, bool reuse = true) const;
     // Owner-thread publication only: const authoritative reads may rebuild the
     // mutable derived projection cache. Never call from partition workers.
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> publish_native_snapshot(std::vector<GalacticEvent> events) const;

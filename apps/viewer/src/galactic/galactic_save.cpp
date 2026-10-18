@@ -1,4 +1,6 @@
 #include "galactic_save.hpp"
+#include "auto_summary_hint.hpp"
+#include "galactic_save_hints.hpp"
 #include "save_input.hpp"
 #include "options_screen.hpp"
 #include "galactic_mode_internal.hpp"
@@ -30,50 +32,8 @@ using namespace godot;
 namespace eawr::presentation::godot_backend {
 namespace {
 std::string utf8(const String& text) { return std::string(text.utf8().get_data()); }
-struct ViewHints {
-    std::uint64_t acknowledgement{}, selected{}, briefing{};
-    bool briefing_done{};
-    std::map<std::uint64_t, std::int64_t> fleet_indices{};
-};
-std::vector<std::uint8_t> view_hints(ViewHints hints) {
-    std::vector<std::uint8_t> bytes{'E', 'A', 'W', 'R', 'U', 'I', 'S', 3};
-    for (const auto value : {hints.acknowledgement, hints.selected, hints.briefing})
-        for (unsigned b = 0; b < 8; ++b) bytes.push_back(static_cast<std::uint8_t>(value >> (8U * b)));
-    bytes.push_back(hints.briefing_done ? 1 : 0);
-    const auto count = static_cast<std::uint32_t>(hints.fleet_indices.size());
-    for (unsigned b = 0; b < 4; ++b) bytes.push_back(static_cast<std::uint8_t>(count >> (8U * b)));
-    for (const auto& [id, index] : hints.fleet_indices) {
-        for (const auto value : {id, static_cast<std::uint64_t>(index)})
-            for (unsigned b = 0; b < 8; ++b) bytes.push_back(static_cast<std::uint8_t>(value >> (8U * b)));
-    }
-    return bytes;
-}
-ViewHints view_hints(const std::vector<std::uint8_t>& bytes) {
-    const auto header = view_hints(ViewHints{});
-    if (bytes.size() < header.size() || !std::equal(header.begin(), header.begin() + 8, bytes.begin()) || bytes[32] > 1) return {};
-    ViewHints values;
-    for (unsigned b = 0; b < 8; ++b) {
-        values.acknowledgement |= static_cast<std::uint64_t>(bytes[8 + b]) << (8U * b);
-        values.selected |= static_cast<std::uint64_t>(bytes[16 + b]) << (8U * b);
-        values.briefing |= static_cast<std::uint64_t>(bytes[24 + b]) << (8U * b);
-    }
-    values.briefing_done = bytes[32] != 0;
-    std::uint32_t count{};
-    for (unsigned b = 0; b < 4; ++b) count |= static_cast<std::uint32_t>(bytes[33 + b]) << (8U * b);
-    if (count > sim::galactic::galactic_max_objects || static_cast<std::size_t>(count) * 16 != bytes.size() - header.size()) return {};
-    std::uint64_t previous{};
-    for (std::uint32_t row = 0; row < count; ++row) {
-        std::uint64_t id{}, index{};
-        const auto at = header.size() + static_cast<std::size_t>(row) * 16;
-        for (unsigned b = 0; b < 8; ++b) {
-            id |= static_cast<std::uint64_t>(bytes[at + b]) << (8U * b);
-            index |= static_cast<std::uint64_t>(bytes[at + 8 + b]) << (8U * b);
-        }
-        if (id <= previous || index > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) return {};
-        values.fleet_indices.emplace(id, static_cast<std::int64_t>(index)); previous = id;
-    }
-    return values;
-}
+using galactic_view::ViewHints;
+using galactic_view::view_hints;
 }
 std::filesystem::path save_directory(const GalacticMode::Options& options) {
     if (options.restore_save && !options.restore_save->directory.empty()) return options.restore_save->directory;
@@ -197,8 +157,22 @@ void GalacticSaveControls::publish_save() {
     }
     platform::LiveSaveRequest request; request.seat = sim::SeatId{state_.galaxy->local.seat};
     request.name = pending_name_; request.overwrite = pending_overwrite_; request.quick = pending_quick_;
-    request.presentation_hints = view_hints(ViewHints{state_.acknowledged_battle_summary, state_.map_input.selected,
-        state_.briefing_conflict, state_.briefing_done, state_.fleet_order_for_save()});
+    ViewHints hints{state_.acknowledged_battle_summary, state_.map_input.selected,
+        state_.briefing_conflict, state_.briefing_done, state_.fleet_order_for_save()};
+    const auto frame = state_.battle_dialog_frame();
+    if (frame.auto_resolve_outcome
+        && (frame.auto_resolve_outcome->invader == state_.galaxy->local.player || frame.auto_resolve_outcome->defender == state_.galaxy->local.player)
+        && !hints.acknowledgement.contains(frame.auto_resolve_outcome->result.conflict)) {
+        const auto planet = std::find_if(state_.metadata.planets.begin(), state_.metadata.planets.end(),
+            [&](const auto& row) { return row.id == frame.auto_resolve_outcome->planet; });
+        if (planet == state_.metadata.planets.end()) {
+            show_modal(Modal::acknowledgement, "The battle summary's planet is unavailable."); return;
+        }
+        auto encoded = viewer::galactic::encode_auto_summary_hint(*frame.auto_resolve_outcome, planet->name);
+        if (!encoded) { show_modal(Modal::acknowledgement, core::format_diagnostic(encoded.error())); return; }
+        hints.automatic_summary = std::move(encoded).value();
+    }
+    request.presentation_hints = view_hints(std::move(hints));
     token_ = state_.game->request_save(std::move(request));
     save_dialog_->frame->hide(); screen_ = Screen::escape;
     if (!state_.interactive) state_.game->advance_to(state_.game->completed_tick() + 1);
@@ -240,6 +214,12 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     const auto restored_hash = prepared->state_sha256();
     platform::LiveGameSession::Options options; options.workers = state_.game->worker_count();
     const auto hints = view_hints(prepared->presentation_hints());
+    std::shared_ptr<const platform::LiveAutoResolveOutcome> saved_summary;
+    if (!hints.automatic_summary.empty()) {
+        auto decoded = viewer::galactic::decode_auto_summary_hint(hints.automatic_summary);
+        if (!decoded) return refuse_load(core::format_diagnostic(decoded.error()), at_start);
+        saved_summary = std::move(decoded).value();
+    }
     options.pacing = state_.interactive ? platform::LiveGameSession::Pacing::real_time : platform::LiveGameSession::Pacing::driven;
     options.await_presentation = true;
     auto started = platform::LiveGameSession::start(std::move(prepared), options);
@@ -253,6 +233,7 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     observe_world_selection();
     state_.release_battle_presentation(); state_.game->stop(); state_.game = std::move(started).value();
     state_.owner_lifetime = state_.game->lifetime(); galaxy_pause_ = false; paused_child_ = 0;
+    state_.restored_auto_summary = std::move(saved_summary);
     state_.audio_event_cursor = 0; state_.acknowledged_battle_summary = hints.acknowledgement; state_.presented_conflict.reset();
     state_.briefing_conflict = hints.briefing; state_.briefing_done = hints.briefing_done;
     state_.fleet_gui_indices = hints.fleet_indices; state_.fleet_layout_dirty = true;

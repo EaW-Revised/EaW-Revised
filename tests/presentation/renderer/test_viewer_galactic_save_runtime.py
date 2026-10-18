@@ -441,6 +441,156 @@ func finish(error):
     def test_retained_child_save_load_and_corrupt_refusal(self):
         self.roundtrip(child=True)
 
+    def test_save_load_during_pending_prompt_and_summary(self):
+        """WGS-P01: manual recovery at both real live conflict presentation barriers."""
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-prompt-save-"))
+        driver = r'''extends SceneTree
+var instance
+var elapsed = 0.0
+var beat = 0.0
+var phase = 0
+var summary = false
+var resaved = false
+var original = []
+var restored = []
+var quiet_since = 0.0
+var roundtrips = []
+func _initialize():
+    instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func key(code):
+    for pressed in [true, false]:
+        var event = InputEventKey.new()
+        event.keycode = code
+        event.pressed = pressed
+        Input.parse_input_event(event)
+func control(parent, name):
+    return null if parent == null else parent.find_child(name, true, false)
+func ready(node):
+    return node != null and node.is_visible_in_tree() and not node.is_disabled()
+func click(parent, name):
+    var node = control(parent, name)
+    if not ready(node): return false
+    for pressed in [true, false]:
+        var event = InputEventMouseButton.new()
+        event.position = node.get_global_rect().get_center()
+        event.global_position = event.position
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = pressed
+        Input.parse_input_event(event)
+    return true
+func captions(node):
+    var result = []
+    if node == null: return result
+    if node is Control and node.is_visible_in_tree() and node.has_meta("battle_caption"):
+        result.append(str(node.get_meta("battle_caption")))
+    for child in node.get_children(): result.append_array(captions(child))
+    return result
+func finish(error):
+    var file = FileAccess.open(TRACE, FileAccess.WRITE)
+    file.store_string(JSON.stringify({"error": error, "phase": phase, "original": original, "restored": restored, "roundtrips": roundtrips}))
+    file.close()
+    instance.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+    quit(0 if error == "" else 2)
+func _process(delta):
+    elapsed += delta
+    beat += delta
+    if elapsed > 300: finish("prompt save timed out"); return false
+    if beat < 0.2: return false
+    beat = 0
+    var battle = control(instance, "CampaignBattleDialog")
+    var menu = control(instance, "GalacticSaveMenu")
+    var esc = control(menu, "IDD_GAME_OPTIONS_DIALOG")
+    var save = control(menu, "IDD_SAVE_GAME_DIALOG")
+    var load_panel = control(menu, "IDD_LOAD_GAME_DIALOG")
+    var modal = control(menu, "SaveModal")
+    var slot = "Prompt Resaved" if resaved else ("Prompt Summary" if summary else "Prompt Pending")
+    match phase:
+        0:
+            if not ready(control(battle, "choice_button_right")): return false
+            original = captions(battle)
+            root.get_texture().get_image().save_png(OUTPUT + "/pending-before.png")
+            key(KEY_ESCAPE); phase = 1
+        1:
+            if not ready(control(esc, "IDC_SAVE_GAME")) or not ready(control(esc, "IDC_LOAD_GAME")): return false
+            if click(esc, "IDC_SAVE_GAME"): phase = 2
+        2:
+            var name = control(save, "SaveName")
+            if name != null and name.is_visible_in_tree():
+                name.text = slot
+                if click(save, "IDC_SAVE_GAME_BUTTON"): phase = 3
+        3:
+            var caption = control(modal, "IDC_CAPTION")
+            if caption != null and caption.is_visible_in_tree() and caption.get_meta("save_caption", "") == "Game Saved":
+                if click(modal, "IDC_DIALOG_BOX_BUTTON_LEFT"): phase = 4
+        4:
+            if click(esc, "IDC_LOAD_GAME"): phase = 5
+        5:
+            var rows = control(load_panel, "IDC_SAVE_GAME_LIST")
+            if rows == null: return false
+            for row in range(rows.item_count):
+                if rows.get_item_text(row) == slot:
+                    var point = rows.get_global_rect().position + rows.get_item_rect(row).get_center()
+                    for pressed in [true, false]:
+                        var event = InputEventMouseButton.new()
+                        event.position = point
+                        event.global_position = point
+                        event.button_index = MOUSE_BUTTON_LEFT
+                        event.pressed = pressed
+                        Input.parse_input_event(event)
+                    phase = 6
+                    break
+        6:
+            if click(load_panel, "IDC_LOAD_GAME_BUTTON"): phase = 7
+        7:
+            if menu != null and not menu.visible:
+                if not ready(control(battle, "IDC_CONTINUE_BUTTON" if summary else "choice_button_right")): return false
+                restored = captions(battle)
+                roundtrips.append({"summary": summary, "before": original, "after": restored})
+                if original.is_empty() or restored != original: finish("restored prompt captions differ"); return false
+                var restored_image = "/resaved-summary-restored.png" if resaved else ("/summary-restored.png" if summary else "/pending-restored.png")
+                root.get_texture().get_image().save_png(OUTPUT + restored_image)
+                if summary and not resaved:
+                    resaved = true; original = restored
+                    key(KEY_ESCAPE); phase = 1; return false
+                if click(battle, "IDC_CONTINUE_BUTTON" if summary else "choice_button_right"):
+                    phase = 9 if summary else 8
+                    quiet_since = elapsed
+        8:
+            if ready(control(battle, "IDC_CONTINUE_BUTTON")):
+                summary = true
+                original = captions(battle)
+                root.get_texture().get_image().save_png(OUTPUT + "/summary-before.png")
+                key(KEY_ESCAPE); phase = 1
+        9:
+            if battle != null and battle.is_visible_in_tree():
+                if elapsed - quiet_since > 1: finish("acknowledged summary reappeared"); return false
+            elif elapsed - quiet_since > 4:
+                finish("")
+    return false
+'''.replace("TRACE", json.dumps((directory / "trace.json").as_posix())).replace(
+            "OUTPUT", json.dumps(directory.as_posix()))
+        result, data = self.run_viewer(directory, driver, qualified_campaign_arguments("prompt-save"))
+        self.assertEqual(result.returncode, 0, data.get("failure") or (directory / "report-0.log").read_text(encoding="utf-8"))
+        self.assertTrue((directory / "trace.json").is_file(), data.get("failure"))
+        trace = json.loads((directory / "trace.json").read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, trace)
+        self.assertEqual(trace["error"], "")
+        self.assertEqual([row["summary"] for row in trace["roundtrips"]], [False, True, True])
+        for row in trace["roundtrips"]:
+            self.assertTrue(row["before"])
+            self.assertEqual(row["before"], row["after"])
+        self.assertEqual(data["save_controls"]["saved"], 3)
+        self.assertEqual(data["save_controls"]["loaded"], 3)
+        self.assertEqual(data["save_controls"]["world_leaks"], 0)
+        self.assertEqual(data["battle_dialog"]["phase"], "hidden")
+        self.assertEqual(data["battle_dialog"]["choices"], 2, "one auto resolve and one summary acknowledgement")
+        self.assertEqual(data["failure"], "")
+        for name in ("pending-before", "pending-restored", "summary-before", "summary-restored", "resaved-summary-restored"):
+            self.assertTrue((directory / (name + ".png")).is_file())
+        print("prompt save captures:", directory)
+
 
 if __name__ == "__main__":
     unittest.main()

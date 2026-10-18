@@ -1,4 +1,5 @@
 #include "encoding.hpp"
+#include "eawr/core/sha256.hpp"
 #include "../replay_internal.hpp"
 #include <algorithm>
 #include <limits>
@@ -202,7 +203,7 @@ bool decode_row(Reader& in, ProductionPlayer& v) {
         && rows(in, v.locked)
         && rows(in, v.unlocked);
 }
-void encode_row(std::vector<std::uint8_t>& bytes, const PlanetProduction& v) {
+void encode_planet_inputs(std::vector<std::uint8_t>& bytes, const PlanetProduction& v) {
     put_u64(bytes, v.planet);
     put_u32(bytes, v.target_owner);
     put_u32(bytes, v.starbase_owner);
@@ -219,6 +220,9 @@ void encode_row(std::vector<std::uint8_t>& bytes, const PlanetProduction& v) {
     put_u8(bytes, v.enabled ? 1 : 0);
     put_u8(bytes, v.surface_accessible ? 1 : 0);
     put_u8(bytes, v.starbase_blocked ? 1 : 0);
+}
+void encode_row(std::vector<std::uint8_t>& bytes, const PlanetProduction& v) {
+    encode_planet_inputs(bytes, v);
     rows(bytes, v.offers);
     for (const auto& queue : v.queues) rows(bytes, queue);
     rows(bytes, v.objects);
@@ -245,10 +249,21 @@ bool decode_row(Reader& in, PlanetProduction& v) {
         && rows(in, v.queues[1])
         && rows(in, v.objects);
 }
-void encode_row(std::vector<std::uint8_t>& bytes, const ProductionSetup& v) {
+void encode_production_rows(std::vector<std::uint8_t>& bytes, const ProductionSetup& v,
+    const ProductionOfferDigests* digests) {
     put_u32(bytes, v.maximum_human_queue);
     rows(bytes, v.players);
-    rows(bytes, v.planets);
+    if (!digests) rows(bytes, v.planets);
+    else {
+        put_u32(bytes, static_cast<std::uint32_t>(v.planets.size()));
+        for (std::size_t i = 0; i < v.planets.size(); ++i) {
+            const auto& planet = v.planets[i];
+            encode_planet_inputs(bytes, planet);
+            put_bytes(bytes, digests->at(i));
+            for (const auto& queue : planet.queues) rows(bytes, queue);
+            rows(bytes, planet.objects);
+        }
+    }
     put_u32(bytes, static_cast<std::uint32_t>(v.technology_types.size()));
     for (const auto& type : v.technology_types) {
         put_u64(bytes, type.type); put_i64(bytes, type.tech);
@@ -256,6 +271,9 @@ void encode_row(std::vector<std::uint8_t>& bytes, const ProductionSetup& v) {
         put_u32(bytes, static_cast<std::uint32_t>(type.affiliated_players.size()));
         for (auto player : type.affiliated_players) put_u32(bytes, player);
     }
+}
+void encode_row(std::vector<std::uint8_t>& bytes, const ProductionSetup& v) {
+    encode_production_rows(bytes, v, nullptr);
 }
 bool decode_row(Reader& in, ProductionSetup& v) {
     std::uint32_t count{}; std::size_t affiliations{}; TypeId previous{};
@@ -397,9 +415,11 @@ void encode_population(std::vector<std::uint8_t>& bytes, std::span<const Populat
     }
 }
 
-void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& production) {
-    put_u8(bytes, 7); // GHUD-S84: authored sale permission; older project formats are unsupported
-    encode_row(bytes, production);
+static void encode_production_impl(std::vector<std::uint8_t>& bytes, const ProductionSetup& production,
+    const ProductionOfferDigests* digests) {
+    put_u8(bytes, digests ? 8 : 7); // distinct production hash domain; wire format remains 7
+    if (digests) encode_production_rows(bytes, production, digests);
+    else encode_row(bytes, production);
     put_u8(bytes, production.fleet_blockers ? 1 : 0);
     if (production.fleet_blockers) rows(bytes, *production.fleet_blockers);
     put_u8(bytes, production.nested_creation ? 1 : 0);
@@ -418,6 +438,40 @@ void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& 
         for (const auto& row : setup.relations) {
             put_u32(bytes, row.player); put_u32(bytes, row.other); put_u8(bytes, row.enemy ? 1 : 0);
         }
+    }
+}
+void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& production) {
+    encode_production_impl(bytes, production, nullptr);
+}
+ProductionOfferDigests production_offer_digests(const ProductionSetup& production) {
+    ProductionOfferDigests result;
+    result.reserve(production.planets.size());
+    for (const auto& planet : production.planets) {
+        std::vector<std::uint8_t> bytes;
+        rows(bytes, planet.offers);
+        result.push_back(core::sha256(bytes));
+    }
+    return result;
+}
+void encode_production_hash(std::vector<std::uint8_t>& bytes, const ProductionSetup& production,
+    const ProductionOfferDigests& digests) {
+    encode_production_impl(bytes, production, &digests);
+}
+void encode_production_menu_inputs(std::vector<std::uint8_t>& bytes, const ProductionSetup& production,
+    PlayerId local, std::span<const PlanetId> visible) {
+    put_u32(bytes, production.maximum_human_queue);
+    for (const auto& player : production.players) if (player.player == local) encode_row(bytes, player);
+    put_u8(bytes, production.fleet_blockers ? 1 : 0);
+    if (production.fleet_blockers) rows(bytes, *production.fleet_blockers);
+    for (const auto& planet : production.planets) {
+        if (!std::binary_search(visible.begin(), visible.end(), planet.planet)) continue;
+        encode_planet_inputs(bytes, planet);
+        // Admission reads queue membership and types, never countdown or money paid.
+        for (const auto& queue : planet.queues) {
+            put_u32(bytes, static_cast<std::uint32_t>(queue.size()));
+            for (const auto& entry : queue) put_u64(bytes, entry.type);
+        }
+        rows(bytes, planet.objects);
     }
 }
 std::optional<ProductionSetup> decode_production(std::span<const std::uint8_t> bytes) {
