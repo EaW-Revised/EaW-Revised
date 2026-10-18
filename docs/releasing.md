@@ -1,8 +1,8 @@
 # Releasing
 
-Releases are built on the public repository's GitHub-hosted runners by
-`.github/workflows/release.yml`. Nothing is published automatically: the workflow opens a
-**draft** release, and a maintainer reviews and publishes it.
+Release assets are built on the pool from the exact public tag. The public repository's
+`.github/workflows/release.yml` only verifies native Linux ARM64 and Apple Silicon after publication. Nothing is published automatically: a maintainer
+reviews and publishes the **draft** release.
 
 ## Current candidate: v0.2.5
 
@@ -12,38 +12,69 @@ online multiplayer and a partially working Galactic Conquest. The galactic AI is
 in live campaigns; `--eawr-galactic-ai off` switches it off. Keep a candidate local until the
 owner approves the public sync.
 
-## Cutting a release
+## Cutting a release: one-hour aim, three-hour deadline
 
-1. Prepare the public snapshot through a sync pull request. Wait for its CI to pass
-   before merging it into public `main`; the private source commit must match the
-   tested preview. Draft tester-facing release notes describing new features,
-   known issues and how to report feedback: bugs as issues, new ideas on the
-   [Ideas board](ideas.md).
-2. Package the candidate locally and extract the player archive into a fresh,
-   writable folder (the viewer archive with `play-demo.cmd` / `play-demo.sh` is the
-   second route). Double-click `EAWR.exe` with an installed expansion. Verify map and
-   faction selection, starting a skirmish against AI, buying a unit, and earning
-   income from a completed mine, then start the debug archive's `EAWR.exe` once.
-   Retest the final candidate if its source commit changes.
-3. Before tester releases, run an AI-versus-AI progression check. Verify that both
-   sides develop their economies, advance station technology, field mixed fleets
-   and engage in combat. Record the setup and seed alongside technology and fleet
-   composition timelines for review.
-4. Make sure `main` is green in CI (build and tests on every platform, the publish scan).
-   The release workflow also scans on Windows: pinned text fixtures must retain
-   their reviewed LF bytes after checkout.
-5. Tag the commit with a version and push the tag:
+T0 is the last feature merge. Before T0, the maintainer prepares the public sync PR,
+public CI, release-core qualification, notes and AI-versus-AI progression proof on the
+near-final head. Record setup, seed, economy development, station technology, mixed
+fleets and combat. Reserve pool/GPU capacity. Keep the public clone's push URL disabled;
+only the maintainer pushes through an explicit public URL after approval. Never tag
+while the owner has paused release work.
 
-   ```text
-   git tag -s v0.2.0 -m "EaW Revised v0.2.0"
-   git push origin v0.2.0
-   ```
+| Time from T0 | Work (parallel unless a dependency is named) | Aim / deadline |
+| --- | --- | --- |
+| 0–10 min | Delta re-export, all publish scans, review/update/merge the sync PR. Record private/public commit mapping; review the delta against pre-T0 qualification. | 10 / 30 min |
+| 10–15 min | Maintainer explicitly pushes the signed tag on reviewed public main. Pool checks out this exact public tag; tagging does not dispatch hosted work. | 15 / 35 min |
+| 15–40 min | Incremental pool Release/Debug tools and online-enabled viewers, package and hash. ARM/Apple hosted verification starts only after publication, outside this critical path. | 40 / 120 min |
+| As pool archives finish | Fresh-user harness on exact player and Debug bytes; prepare draft, upload tested archives, sums, notes and pool provenance. | 55 / 150 min |
+| After all gates below | Owner approves; maintainer publishes manually. | T0+60 / T0+180 min |
+| After publication | ARM/Apple verification may open a follow-up ticket; it never blocks or pulls a release. | Outside publication path |
 
-6. The Release workflow runs the publish scan, builds and tests the core, builds the viewer
-   extension, packages the archives, attests their build provenance and creates the draft.
-7. Review the draft: the tester-facing notes, the archives and `SHA256SUMS.txt`. Publish it by hand.
+The **critical path** is delta export/review → exact tag → pool build/package →
+fresh-user checks → approval/publication. Pool core/viewer work should use separate output trees and run concurrently when capacity permits. Escalate capacity or
+delta-qualification risk at T0+30 minutes; candidate bytes must exist by T0+120 for
+final checks. Cold public CI plus cold hosted builds can exceed three hours and is
+not the planned fast route. No gate is removed to meet a clock.
 
-A failed run leaves no release. Fix the problem on `main`, delete the tag and tag again.
+### Pool assets are the primary publication route
+
+The release owner accepts builds from our own machines. Hosted completion is **not** a
+publication gate. The pool route requires all of these conditions:
+
+- Run public CI and release-core qualification before T0. Review the final delta
+  explicitly and test affected code on the final candidate; rerun broad qualification
+  when the delta invalidates it. Earlier green receipts alone do not prove later
+  changes. Required public checks still apply.
+- Build pool assets from the **exact public tagged commit**, not an approximately
+  equivalent private head. Record tag object, commit/tree, build commands,
+  compiler/dependency identities, logs and archive SHA-256 hashes in the release
+  receipt. Run publish scans and existing packaging/runtime-pin checks. Keep relay
+  and networking enabled in Windows Release and Debug viewers; isolate their outputs.
+- Fresh-user harness passes **9/9 on the player and 9/9 on the Debug archive** actually
+  uploaded. Use fresh folders including spaces/non-ASCII text; check hashes,
+  first/repeated launch, fonts in user data, unchanged package files, setup, AI combat,
+  unit purchase, mine income and the LAN/Online selector.
+- Download draft assets and verify their hashes match tested bytes and SHA256SUMS.
+  Review known issues and feedback links ([Ideas board](ideas.md)); all feature-specific
+  release gates must pass and the owner must approve publication. Describe pool
+  provenance honestly: a hosted attestation never applies to different pool bytes.
+- Hosted verification starts only on the `release: published` event: no tag-triggered
+  or pre-publication hosted jobs. Its native Linux ARM64 and Apple Silicon jobs are
+  non-blocking and file follow-up tickets on failure. **They can never block or pull
+  a release.** The x64 assets are proven by the pool route, without duplicate hosted work.
+
+The maintainer creates the pool draft with `gh release create <tag> --draft --verify-tag`
+and uploads tested archives, `SHA256SUMS.txt` and provenance with
+`gh release upload <tag> <files> --repo <public-repo>` without `--clobber`. Download and
+verify those exact bytes, then publish manually after owner approval. Hosted jobs have
+no release-write permission and never create, replace, publish or delete release assets.
+
+Pool builds retain publish scans, full applicable core CTest, tagged-main ancestry,
+online-enabled Windows viewers, runtime/content checks, Debug symbols and checksums.
+Core and viewer compilation run concurrently when capacity permits. Restore only
+verified pinned dependencies; keep Release/Debug outputs isolated. Hosted attestations
+are not claimed for pool bytes: attach honest pool source/build/hash provenance.
+Preliminary fresh-user checks start as soon as candidate bytes exist.
 
 ## What a release contains
 
@@ -95,13 +126,13 @@ The acceptance checklist for a candidate (clean machine plus a normal user) is a
 viewer builds write the same `apps/viewer/project/bin`, so package the Release archives first and build the Debug
 viewer last). It is laid out like the player folder with the viewer extension and the headless tools built in the
 Debug configuration and their PDBs (`tools/`), plus `DEBUG-BUILD.md` ([the debug build guide](debug-build.md)). The
-hosted workflow builds it in its own job: `cmake --preset windows-msvc -B out/build/windows-msvc-debug
+pool build uses: `cmake --preset windows-msvc -B out/build/windows-msvc-debug
 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF`, the tool targets in
 Debug, then `apps/viewer` with `--config Debug`. The static debug C runtime keeps the programs runnable on a PC without
 Visual Studio. The Debug archive is not a gate and is not performance-representative.
 
-Each archive carries `LICENSE`, `THIRD_PARTY_NOTICES.md` and `README.md`. The provenance
-attestations can be checked with `gh attestation verify <archive> --repo EaW-Revised/EaW-Revised`.
+Each archive carries `LICENSE`, `THIRD_PARTY_NOTICES.md` and `README.md`. Pool assets
+carry a source/build/hash receipt; do not claim a hosted attestation for these bytes.
 
 ## What a release does not contain
 
