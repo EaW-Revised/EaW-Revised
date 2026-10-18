@@ -1,297 +1,92 @@
-# Core qualification and viewer compilation run concurrently. Every original test, scan,
-# pin check, packaging check and provenance attestation remains mandatory before the draft.
-# No build outputs are cached; restored dependency sources are verified before use.
-name: Release
-# Pool-built assets are the primary route. Hosted verification is opt-in so a tag
-# does not spend hosted minutes or delay publication.
+# Pool-built x64 assets are the release gate. Hosted ARM/Apple verification runs
+# only after publication; it cannot block, modify or pull a release.
+name: Post-release verification
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing public version tag to verify
-        required: true
-        type: string
+  release:
+    types: [published]
 permissions:
   contents: read
 concurrency:
-  group: release-${{ inputs.tag }}
+  group: post-release-${{ github.event.release.tag_name }}
   cancel-in-progress: false
-env:
-  GODOT_CPP_TAG: 10.0.0-stable
-  GODOT_CPP_COMMIT: 507ed9d840c01a3c5b2a39af8bb4000bfac30bf5
 jobs:
-  core:
-    name: core-${{ matrix.platform }}-${{ matrix.variant }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { platform: linux-x64, os: ubuntu-latest, preset: linux-x64-gcc, config: Release, variant: release }
-          - { platform: windows-x64, os: windows-2022, preset: windows-msvc, config: Release, variant: release }
-          - { platform: windows-x64, os: windows-2022, preset: windows-msvc, config: Debug, variant: debug }
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: refs/tags/${{ inputs.tag }}
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Require the tagged commit on main
-        shell: bash
-        env:
-          WORKFLOW_REF: ${{ github.ref }}
-          TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          test "$WORKFLOW_REF" = "refs/tags/$TAG"
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git merge-base --is-ancestor HEAD origin/main
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-      - name: Install the Linux toolchain
-        if: ${{ runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build g++-14 clang-18
-      - name: Publish scan
-        if: ${{ matrix.variant == 'release' }}
-        run: python tools/publish_scan/publish_scan.py --gitleaks
-
-      - name: Build and test the core
-        if: ${{ matrix.variant == 'release' }}
-        shell: bash
-        env:
-          PRESET: ${{ matrix.preset }}
-        run: |
-          set -euo pipefail
-          python -m pip install -r requirements-dev.txt
-          cmake --preset "$PRESET"
-          cmake --build --preset "$PRESET"
-          ctest --preset "$PRESET" -LE "game-data|installed-required"
-
-      - name: Build Debug tools and the launcher
-        if: ${{ matrix.variant == 'debug' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake --preset windows-msvc -B out/build/windows-msvc-debug -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF
-          cmake --build out/build/windows-msvc-debug --config Debug --parallel --target sim_headless sim_bench path_bench asset_scan asset_validate xml_scan scene_scan sky_scan unit_scan script_smoke hud_movie_prepare
-          cmake --build out/build/windows-msvc-debug --config Release --parallel --target eawr_launcher
-
-      - name: Stage only the packaged core binaries
-        shell: bash
-        env:
-          PRESET: ${{ matrix.preset }}
-          PLATFORM: ${{ matrix.platform }}
-          CONFIG: ${{ matrix.config }}
-          VARIANT: ${{ matrix.variant }}
-        run: |
-          set -euo pipefail
-          python tools/release/stage_core.py --build-dir "out/build/${PRESET}$([ "$VARIANT" = debug ] && echo -debug || true)" --platform "$PLATFORM" --config "$CONFIG" --out out/core
-
-      - name: Upload core payload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: core-${{ matrix.platform }}-${{ matrix.variant }}
-          path: out/core/
-          if-no-files-found: error
-          retention-days: 7
-
-  viewer:
-    name: viewer-${{ matrix.platform }}-${{ matrix.variant }}
+  verify:
+    name: Verify ${{ matrix.name }} (non-blocking)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { platform: linux-x64, os: ubuntu-latest, preset: linux-x64-gcc, config: Release, variant: release }
-          - { platform: windows-x64, os: windows-2022, preset: windows-msvc, config: Release, variant: release }
-          - { platform: windows-x64, os: windows-2022, preset: windows-msvc, config: Debug, variant: debug }
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: refs/tags/${{ inputs.tag }}
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Install the Linux toolchain
-        if: ${{ runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build g++-14 clang-18
-      - name: Cache the pinned godot-cpp source
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: out/godot/deps/godot-cpp
-          key: release-godot-cpp-${{ env.GODOT_CPP_COMMIT }}
-
-      - name: Fetch or verify the pinned godot-cpp
-        shell: bash
-        run: |
-          set -euo pipefail
-          dep=out/godot/deps/godot-cpp
-          if [ ! -d "$dep/.git" ]; then
-            git clone --depth 1 --branch "$GODOT_CPP_TAG" https://github.com/godotengine/godot-cpp.git "$dep"
-          fi
-          test "$(git -C "$dep" rev-parse HEAD)" = "$GODOT_CPP_COMMIT"
-          git -C "$dep" diff --exit-code HEAD
-          test -z "$(git -C "$dep" ls-files --others --exclude-standard)"
-
-      - name: Build the viewer extension (Linux)
-        if: ${{ runner.os == 'Linux' }}
-        run: |
-          cmake -S apps/viewer -B out/build/viewer -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14
-          cmake --build out/build/viewer --target eawr_viewer
-
-      - name: Build the viewer extension (Windows, online enabled)
-        if: ${{ runner.os == 'Windows' }}
-        env:
-          CONFIG: ${{ matrix.config }}
-        run: |
-          cmake -S apps/viewer -B out/build/viewer -G "Visual Studio 17 2022" -A x64 -DEAWR_ENABLE_RELAY=ON -DEAWR_ENABLE_GNS=ON
-          cmake --build out/build/viewer --config "$env:CONFIG" --target eawr_viewer
-
-      - name: Upload the extension and Debug symbols
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: viewer-${{ matrix.platform }}-${{ matrix.variant }}
-          path: |
-            apps/viewer/project/bin/*.dll
-            apps/viewer/project/bin/*.so
-            apps/viewer/project/bin/*.pdb
-          if-no-files-found: error
-          retention-days: 7
-
-  package:
-    name: package-${{ matrix.platform }}-${{ matrix.variant }}
-    needs: [core, viewer]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    continue-on-error: true
     permissions:
       contents: read
-      id-token: write
-      attestations: write
+      issues: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x64, os: ubuntu-latest, preset: linux-x64-gcc, config: Release, variant: release }
-          - { platform: windows-x64, os: windows-2022, preset: windows-msvc, config: Release, variant: release }
-          - { platform: windows-x64, os: windows-2022, preset: windows-msvc, config: Debug, variant: debug }
+          - { name: linux-arm64-gcc, os: ubuntu-24.04-arm }
+          - { name: macos-clang, os: macos-15 }
     steps:
-      - name: Check out source
+      - name: Check out the published tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: refs/tags/${{ github.event.release.tag_name }}
           persist-credentials: false
-          fetch-depth: 0
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Download this run's core payload
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: core-${{ matrix.platform }}-${{ matrix.variant }}
-          path: out/core
 
-      - name: Download this run's viewer payload
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: viewer-${{ matrix.platform }}-${{ matrix.variant }}
-          path: apps/viewer/project/bin
-
-      - name: Cache the pinned Godot runtime download
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ runner.os == 'Windows' }}
-        with:
-          path: out/godot-runtime/*.zip
-          key: release-godot-windows-4.7.2-83decd58fdf67b9d
-
-      - name: Verify and extract the pinned Godot runtime
-        if: ${{ runner.os == 'Windows' }}
-        shell: pwsh
-        run: |
-          $exe = ./tools/release/fetch_pinned_godot.ps1 -Out out/godot-runtime
-          "GODOT_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Package with the existing runtime and content checks
+      - name: Require a native ARM machine
         shell: bash
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          VARIANT: ${{ matrix.variant }}
-          VERSION: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          args=()
-          if [ "$PLATFORM" = windows-x64 ]; then
-            args+=(--godot "$GODOT_EXE" --launcher out/core/apps/launcher/Release/EAWR.exe)
-          else
-            # Artifact downloads do not preserve executable mode.
-            chmod +x out/core/apps/*/Release/*
-          fi
-          if [ "$VARIANT" = debug ]; then args+=(--debug); fi
-          python tools/release/package_release.py --build-dir out/core --platform "$PLATFORM" --version "$VERSION" --out out/release "${args[@]}"
+          case "$(uname -m)" in arm64|aarch64) ;; *) echo "Expected native ARM" >&2; exit 1 ;; esac
 
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: out/release/*.zip
+      - name: Install the Linux toolchain
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++-14
 
-      - name: Upload the archives
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-${{ matrix.platform }}-${{ matrix.variant }}
-          path: out/release/*.zip
-          if-no-files-found: error
-          retention-days: 7
+      - name: Install the Apple toolchain
+        if: ${{ runner.os == 'macOS' }}
+        run: brew install ninja
 
-  draft-release:
-    name: Draft release
-    needs: [package]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: refs/tags/${{ inputs.tag }}
-          persist-credentials: false
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
 
-      - name: Download the archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: release-*
-          path: out/release
-          merge-multiple: true
+      - name: Verify Linux ARM64
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --preset linux-arm64-gcc
+          cmake --build --preset linux-arm64-gcc
+          ctest --preset linux-arm64-gcc -LE "game-data|installed-required"
 
-      - name: SHA-256 sums
-        run: python tools/release/package_release.py --sums-only --out out/release
+      - name: Verify Apple Silicon
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B out/build/macos -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DEAWR_WARNINGS_AS_ERRORS=ON -DEAWR_ENABLE_SIM_BOUNDARY_CHECK=ON
+          cmake --build out/build/macos --parallel 3
+          ctest --test-dir out/build/macos --output-on-failure -LE "game-data|installed-required"
 
-      - name: Create the draft or preserve the approved pool release
+      - name: File a non-blocking verification ticket
+        if: ${{ failure() }}
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-        shell: bash
+          TAG: ${{ github.event.release.tag_name }}
+          PLATFORM: ${{ matrix.name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          # A maintainer may have uploaded and qualified exact-tag pool bytes already.
-          # Hosted bytes remain in this run's artifacts with their own attestations.
-          # Never replace published or tested pool assets with a different rebuild.
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url; then
-            echo "Existing release preserved; hosted proof succeeded. Review this run's artifacts separately." >> "$GITHUB_STEP_SUMMARY"
-          else
-            gh release create "$TAG" out/release/*.zip out/release/SHA256SUMS.txt \
-              --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes --title "EaW Revised $TAG" \
-              --notes "Needs your own installation of Empire at War: Forces of Corruption. The player archive bundles the pinned Godot 4.7.2; the other archives need it separately. Nothing is code-signed; see docs/releasing.md and the player guide."
+          title="Post-release verification: $TAG / $PLATFORM"
+          # Repeat attempts reuse the open ticket. Never touch release assets or state.
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title $title" --json title --jq '.[].title')
+          if ! printf '%s\n' "$existing" | grep -Fxq "$title"; then
+            printf 'Non-blocking ARM/Apple verification failed after publication.\n\nRun: %s\n\nInvestigate and fix forward; this result cannot block or pull the release.\n' "$RUN_URL" > issue-body.txt
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file issue-body.txt
           fi
