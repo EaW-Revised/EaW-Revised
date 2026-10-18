@@ -34,5 +34,8 @@ struct ConflictEntry {
 // metadata identify a selected-force child. No skirmish purchase/default-force economy is inferred.
 [[nodiscard]] core::Result<sim::tactical::TacticalContent> conflict_entry_content(
     const sim::tactical::TacticalSetup& setup, const skirmish::StartInputs& inputs);
+[[nodiscard]] core::Result<sim::tactical::TacticalContent> conflict_entry_content(
+    const sim::tactical::TacticalSetup& setup, const skirmish::StartInputs& inputs,
+    const units::SpawnPolicy& spawn_policy);
 
 } // namespace eawr::campaign

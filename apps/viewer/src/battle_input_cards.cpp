@@ -1,4 +1,5 @@
 #include "battle_input.hpp"
+#include "eawr/battle/start.hpp"
 
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/world_ui.hpp"
@@ -70,7 +71,7 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
     if (card_tables_ != tables) {
         card_tables_ = tables;
         card_types_.clear();
-        for (const units::UnitType& type : tables->units) card_types_.emplace(skirmish::type_id(type.id), &type);
+        for (const units::UnitType& type : tables->units) card_types_.emplace(battle::type_id(type.id), &type);
     }
     const auto& instances = live.snapshot_index();
     if (const auto entity = pad_palette_.entity(); entity && !selection_.contains(*entity)) pad_palette_.close();

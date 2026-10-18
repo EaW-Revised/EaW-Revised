@@ -148,6 +148,21 @@ MeshIncident::MeshIncident(MessageTransport& transport, MeshSeats active, MeshIn
 
 core::Diagnostic MeshIncident::malformed(std::string message) const { return diagnostic(mesh_errors::malformed, std::move(message)); }
 
+MeshIncident::Time MeshIncident::round_deadline() const {
+    return round_ == 0 ? options_.repair_grace + decision_window : decision_window * 2;
+}
+
+void MeshIncident::next_round() {
+    // No seat can still act on the window that just closed: its decider stopped resending at the deadline and its pledged seats
+    // gave up ten seconds later, which is what the caller waited for.
+    round_offset_ += round_deadline() + decision_window + mesh_receiver_tolerance;
+    ++round_;
+    policy_.emplace(self_, active_, incident_, Time{0}, round_deadline());
+    have_report_ = false; sent_confirmation_ = false; confirmed_ = false;
+    proposal_.reset(); frozen_.reset();
+    last_report_ = last_resend_ = Time{0};
+}
+
 MeshLossState MeshIncident::state() const { return policy_ ? policy_->state() : MeshLossState::settled; }
 
 bool MeshIncident::owns_closed_link(PeerIndex seat) const {
@@ -176,7 +191,7 @@ void MeshIncident::set_active(MeshSeats active) {
         phase_ = Phase::quiet; policy_.reset(); have_report_ = false;
         return;
     }
-    policy_.emplace(self_, active_, incident_, Time{0}, options_.repair_grace + decision_window);
+    policy_.emplace(self_, active_, incident_, Time{0}, round_deadline());
     // The revision stays monotonic across the restart: peers that kept their policy reject an older revision of this seat.
     have_report_ = false; sent_confirmation_ = false;
 }
@@ -241,11 +256,11 @@ void MeshIncident::note_losses(Time now) {
 core::Result<void> MeshIncident::begin(Time now, Time elapsed) {
     if (phase_ != Phase::quiet || std::popcount(active_) < 3) return core::Result<void>::success();
     base_ = now - std::min(elapsed, Time{max_elapsed_ms});
-    policy_.emplace(self_, active_, incident_, Time{0}, options_.repair_grace + decision_window);
+    round_ = 0; round_offset_ = Time{0};
+    policy_.emplace(self_, active_, incident_, Time{0}, round_deadline());
     phase_ = Phase::running;
     revision_ = 0; have_report_ = false; proposal_.reset(); frozen_.reset(); sent_confirmation_ = false; confirmed_ = false;
     send_failed_ = 0;
-    tail_.reset();
     last_report_ = last_resend_ = Time{0};
     return core::Result<void>::success();
 }
@@ -296,7 +311,7 @@ core::Result<void> MeshIncident::receive(const Received& frame, Time now) {
         if (phase_ == Phase::quiet) return core::Result<void>::success(); // fewer than three active seats
         const Time claimed = now - Time{decoded.value().elapsed_ms};
         if (claimed < base_) base_ = claimed; // the incident began earlier than this seat noticed
-        policy_->report(sender, report, relative(now));
+        policy_->report(sender, report, policy_time(now));
         return core::Result<void>::success();
     }
     if (kind != mesh_proposal_kind && kind != mesh_pledge_kind && kind != mesh_confirm_kind)
@@ -306,7 +321,7 @@ core::Result<void> MeshIncident::receive(const Received& frame, Time now) {
         if (!decoded) return core::Result<void>::failure(decoded.error());
         if (sender >= max_match_seats || sender == self_ || !(active_ & mesh_seat(sender)) || !policy_
             || decoded.value().proposal.incident != incident_) return core::Result<void>::success();
-        if (policy_->commit(sender, decoded.value(), relative(now))) confirmed_ = true;
+        if (policy_->commit(sender, decoded.value(), policy_time(now))) confirmed_ = true;
         return core::Result<void>::success();
     }
     auto decoded = decode_mesh_decision(kind, frame.frame);
@@ -321,10 +336,10 @@ core::Result<void> MeshIncident::receive(const Received& frame, Time now) {
     }
     if (kind == mesh_pledge_kind) {
         // A pledge that is not the exact proposal is ignored: one bad pledge must not end the decider's incident.
-        if (policy_->decision() && decision == *policy_->decision()) policy_->acknowledge(sender, decision, relative(now));
+        if (policy_->decision() && decision == *policy_->decision()) policy_->acknowledge(sender, decision, policy_time(now));
         return core::Result<void>::success();
     }
-    if (policy_->accept(sender, decision, relative(now))) {
+    if (policy_->accept(sender, decision, policy_time(now))) {
         auto pledge = encode_mesh_decision(mesh_pledge_kind, decision);
         if (!pledge) return core::Result<void>::failure(pledge.error());
         return send(decision.decider, pledge.value());
@@ -335,12 +350,12 @@ core::Result<void> MeshIncident::receive(const Received& frame, Time now) {
 core::Result<void> MeshIncident::service(Time now, bool receive_drained) {
     if (phase_ == Phase::left) return core::Result<void>::success();
     note_losses(now);
-    if (tail_) {
-        if (now >= tail_until_) tail_.reset();
-        else if (now - last_resend_ >= options_.report_interval) {
-            auto frame = encode_mesh_confirmation(*tail_);
+    std::erase_if(tails_, [now](const Tail& tail) { return now >= tail.until; });
+    for (auto& tail : tails_) {
+        if (now - tail.last_sent >= options_.report_interval) {
+            auto frame = encode_mesh_confirmation(tail.confirmation);
             if (!frame) return core::Result<void>::failure(frame.error());
-            last_resend_ = now;
+            tail.last_sent = now;
             if (auto sent = broadcast(static_cast<MeshSeats>(active_ & ~mesh_seat(self_)), frame.value()); !sent) return sent;
         }
     }
@@ -363,7 +378,8 @@ core::Result<void> MeshIncident::service(Time now, bool receive_drained) {
             return core::Result<void>::success();
         }
     }
-    const auto rel = relative(now);
+    const auto elapsed = relative(now);
+    const auto rel = policy_time(now);
     auto row = local_row(now);
     const bool changed = !have_report_ || row.open != row_.open || row.relay_failed != row_.relay_failed;
     if (changed) ++revision_;
@@ -378,12 +394,12 @@ core::Result<void> MeshIncident::service(Time now, bool receive_drained) {
     }
     policy_->report(self_, row_, rel);
     if (changed || now - last_report_ >= options_.report_interval) {
-        auto frame = encode_mesh_report(row_, static_cast<std::uint32_t>(std::min<std::int64_t>(rel.count(), max_elapsed_ms)), active_);
+        auto frame = encode_mesh_report(row_, static_cast<std::uint32_t>(std::min<std::int64_t>(elapsed.count(), max_elapsed_ms)), active_);
         if (!frame) return core::Result<void>::failure(frame.error());
         last_report_ = now;
         if (auto sent = broadcast(active_, frame.value()); !sent) return sent;
     }
-    const auto deadline = options_.repair_grace + decision_window;
+    const auto deadline = round_deadline();
     if (phase_ == Phase::running) {
         if (auto decision = policy_->decide(rel)) {
             proposal_ = *decision;
@@ -427,7 +443,7 @@ core::Result<void> MeshIncident::service(Time now, bool receive_drained) {
         finish(std::move(result));
         ++incident_;
         // The decider keeps resending the frozen confirmation until the pledge window closes (a late seat may still need it).
-        if (frozen_) { tail_ = *frozen_; tail_until_ = base_ + deadline + decision_window; last_resend_ = now; }
+        if (frozen_) tails_.push_back({*frozen_, base_ + round_offset_ + deadline + decision_window, now});
         phase_ = Phase::quiet; policy_.reset(); proposal_.reset(); frozen_.reset(); confirmed_ = false;
         break;
     }
@@ -451,7 +467,14 @@ core::Result<void> MeshIncident::service(Time now, bool receive_drained) {
         if (phase_ == Phase::settling) leave(mesh_errors::overlap, "A further connection loss happened while a player was being removed.");
         else if (confirmed_ && decision && !(decision->survivors & mesh_seat(self_)) && decision->outcome == MeshLossOutcome::departure)
             leave(mesh_errors::left, "This player was removed because a connection could not be restored.");
-        else if (!decision) leave(mesh_errors::no_majority, "No player could decide which connection to give up.");
+        else if (!decision) {
+            // Nobody pledged and nothing was confirmed to this seat: the window passed without a decision. While the pairs are
+            // still being repaired, the next window is a new chance (every seat counts the same incident time, so all of them
+            // start it together); only after the last round does the match end.
+            if (round_ + 1 < std::max(1U, options_.rounds) && !confirmed_ && rel >= deadline) {
+                if (rel >= deadline + decision_window + mesh_receiver_tolerance) next_round();
+            } else leave(mesh_errors::no_majority, "No player could decide which connection to give up.");
+        }
         else leave(mesh_errors::no_decision, "The decision on the lost connection did not arrive in time.");
         break;
     }

@@ -43,7 +43,7 @@ template <class A, class T> void checkpoint_owner(A& a, T& v) {
         v.population_stale, v.live_object_count, v.applied_outcomes,
         v.pending, v.last_submitted, v.executed,
         v.next_native_invasion, v.native_invasions, v.native_invasion_queue,
-        v.native_effects, v.native_replay, v.native_replay_cursor, v.native_sequence,
+        v.native_replay, v.native_replay_cursor, v.native_sequence,
         v.native_replay_end, v.native_replaying,
         v.corruption_due, v.active_producers, v.original_owned_counts, v.owned_planet_counts,
         v.income_blocker_next_expiry);
@@ -95,6 +95,9 @@ core::Result<std::vector<std::uint8_t>> GalacticSession::save_checkpoint_state()
         Writer out;
         out(impl_->sorted_planets(), impl_->sorted_routes(), impl_->sorted_fleets());
         checkpoint_owner(out, *impl_);
+        // The applied journal is history: the recording section carries it, so the owner keeps only its length (#4058).
+        // The not yet applied part of a staged recording (native_replay) stays here: no recording carries it.
+        out(static_cast<std::uint64_t>(impl_->native_effects.size()));
         out(impl_->snapshot->events());
         return core::Result<std::vector<std::uint8_t>>::success(std::move(out.bytes));
     } catch (const Invalid& error) {
@@ -109,7 +112,15 @@ core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::u
         Reader in(bytes);
         std::vector<Planet> planets; std::vector<Route> routes; std::vector<Fleet> fleets;
         in(planets, routes, fleets);
+        // The recording the session was built from staged the applied journal; direct restore adopts it as applied.
+        auto journal = std::move(impl_->native_replay);
+        impl_->native_replay.clear();
         checkpoint_owner(in, *impl_);
+        std::uint64_t journal_entries{}; in(journal_entries);
+        if (journal_entries != journal.size() || impl_->native_sequence != journal.size() + 1U
+            || (!journal.empty() && journal.back().frontier > impl_->completed_tick))
+            throw Invalid("owner journal differs from the recording it restores");
+        impl_->native_effects = std::move(journal);
         std::vector<GalacticEvent> events; in(events);
         if (in.remaining() || impl_->completed_tick > galactic_max_ticks
             || !impl_->next_id
@@ -656,14 +667,17 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     const PartitionExecutor* executor) const {
     gc_profile::Scope profile_scope(gc_profile::Phase::make_snapshot);
     gc_profile::Scope context_scope(gc_profile::Phase::snapshot_other, gc_profile::Phase::snapshot_ai);
+    std::optional<gc_profile::Scope> part(std::in_place, gc_profile::Phase::snap_sorted);
     refresh_economy_input_generation();
     auto live_fleets = sorted_fleets();
+    part.emplace(gc_profile::Phase::snap_observer);
     if (observer && observer_projection_generation != observer_input_generation) {
         observer_projection = std::make_shared<const std::vector<ObservedPlanet>>(
             observed_planets(*observer, live_fleets, movement_inputs.get(), actor_inputs()));
         observer_projection_generation = observer_input_generation;
         observer_projection_records += observer->records.size();
     }
+    part.emplace(gc_profile::Phase::snap_menus);
     auto published = clock;
     // WGEP-140/141: rebuild derived copied menus only when producer inputs change.
     // Reuse the same immutable vector across idle ticks and render frames.
@@ -737,6 +751,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
         black_market_publication_key = market_key;
     }
     published.session_tick = completed_tick;
+    part.emplace(gc_profile::Phase::snap_economy_input);
     const auto current_planets = sorted_planets();
     if (published_economy_input_generation != economy_input_generation) {
         auto input = *economy_input_generation; input.income.reset();
@@ -752,6 +767,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
         economy_input_generation = std::make_shared<const EconomyInputGeneration>(std::move(input));
         published_economy_input_generation = economy_input_generation;
     }
+    part.emplace(gc_profile::Phase::snap_forecast);
     std::optional<EconomyForecast> forecast;
     if (setup.fiscal && observer) {
         InlineExecutor startup_executor;
@@ -811,6 +827,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     }
     // WGP-19/47: copy committed state only after observer admission. Timers are
     // retained values, so idle ticks share storage while the reader computes age.
+    part.emplace(gc_profile::Phase::snap_corruption);
     const std::array<std::uint64_t, 3> corruption_key{ability_input_generation,
         observer_input_generation, observer ? observer->local_player : 0};
     if (!published_corruption_transitions || corruption_publication_key != corruption_key) {
@@ -828,8 +845,27 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     }
     // Offer admission consumes this publication's current projection; it must
     // not bypass the generation cache with a second full observer projection.
-    auto offers = observed_production_offers(observer_projection
-        ? std::span<const ObservedPlanet>(*observer_projection) : std::span<const ObservedPlanet>{}, live_fleets);
+    part.emplace(gc_profile::Phase::snap_offers);
+    const auto observations_for_offers = observer_projection
+        ? std::span<const ObservedPlanet>(*observer_projection) : std::span<const ObservedPlanet>{};
+    // The rows read the sections counted by offer_generation (the dirty flags the cached state hash trusts), the
+    // counters below and the exact values in ProductionOfferInputs; anything else that moves (fleet positions in
+    // transit, observer records) leaves them unchanged. Hash verification recomputes every reused result.
+    const std::array<std::uint64_t, 5> offer_key{offer_generation, ability_input_generation, next_id, live_object_count,
+        observer ? observer->local_player : 0};
+    InlineExecutor offer_inline_executor;
+    const auto& offer_workers = executor ? *executor : static_cast<const PartitionExecutor&>(offer_inline_executor);
+    auto offer_inputs = production_offer_inputs(observations_for_offers, live_fleets);
+    if (!published_production_offers || production_offer_key != offer_key || published_offer_inputs != offer_inputs) {
+        published_production_offers = std::make_shared<const std::vector<ObservedProductionOffer>>(
+            observed_production_offers(offer_inputs, live_fleets, offer_workers));
+        production_offer_key = offer_key;
+        published_offer_inputs = std::move(offer_inputs);
+        ++production_offer_rebuilds;
+    } else if (verify_cached_hash && *published_production_offers != observed_production_offers(offer_inputs, live_fleets, offer_workers)) {
+        throw std::runtime_error("galactic cached production offers differ from an independent recomputation");
+    }
+    const auto offers = published_production_offers;
     (void)actor_inputs();
     if (!published_production_originals) {
         auto originals = production_originals;
@@ -838,8 +874,15 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     }
     if (setup.census && !published_sale_types)
         published_sale_types = std::make_shared<const std::vector<CensusType>>(setup.census->types);
+    part.emplace(gc_profile::Phase::snap_construct);
+    if (!published_production || published_production_generation != production_generation) {
+        published_production = std::make_shared<const std::optional<ProductionSetup>>(production);
+        published_production_generation = production_generation;
+    } else if (verify_cached_hash && *published_production != production) {
+        throw std::runtime_error("galactic published production differs from the live production state");
+    }
     return std::make_shared<const GalacticSnapshot>(
-        completed_tick, published, setup.players, current_planets, sorted_routes(), std::move(live_fleets), std::move(events), setup.rules.maximum_fleet_movement_distance, setup.fleet_control ? std::optional(fleet_control_state()) : std::nullopt, movement_inputs, seat_control, seats, economy, production, control, control_effects, population, observer, income, victory, std::move(offers), observer_projection, std::move(forecast), published_production_originals, std::nullopt, std::nullopt, economy_corruption, planet_access, observer_input_generation, economy_input_generation, published_actor_records, published_black_market_menus, published_ability_results, published_hero_action_menus, published_corruption_menu, published_sale_types, published_corruption_transitions);
+        completed_tick, published, setup.players, current_planets, sorted_routes(), std::move(live_fleets), std::move(events), setup.rules.maximum_fleet_movement_distance, setup.fleet_control ? std::optional(fleet_control_state()) : std::nullopt, movement_inputs, seat_control, seats, economy, std::nullopt, control, control_effects, population, observer, income, victory, std::vector<ObservedProductionOffer>{}, observer_projection, std::move(forecast), published_production_originals, std::nullopt, std::nullopt, economy_corruption, planet_access, observer_input_generation, economy_input_generation, published_actor_records, published_black_market_menus, published_ability_results, published_hero_action_menus, published_corruption_menu, published_sale_types, published_corruption_transitions, offers, published_production);
 }
 
 GalacticSession::GalacticSession(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -1267,12 +1310,14 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
     const auto projection_records_before = impl.observer_projection_records;
     const auto income_sources_before = impl.income_sources_gathered;
     const auto income_modifiers_before = impl.income_modifier_rebuilds;
+    const auto offer_rebuilds_before = impl.production_offer_rebuilds;
     impl.population_objects = 0; impl.population_producers = 0;
     impl.control_effects.clear();
 
     // Commands of this tick, canonical order, serial commit.
     std::vector<GalacticEvent> events;
     const auto executing = impl.completed_tick;
+    std::optional<gc_profile::Scope> commands_scope(std::in_place, gc_profile::Phase::tick_commands);
     while (!impl.pending.empty() && impl.pending.begin()->first.tick == executing) {
         auto command = std::move(impl.pending.begin()->second);
         impl.pending.erase(impl.pending.begin());
@@ -1285,9 +1330,10 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
         impl.executed.push_back(std::move(command));
     }
 
+    commands_scope.reset();
     // GFD-23 / GFSC-13: discovery reads prior committed presence before movement.
     // WGUI-01: paused passes reset orbit counters; allied/corruption reveal still qualifies.
-    if (auto result = impl.service_discovery(executor, executing, events); !result) {
+    if (auto result = gc_profile::timed(gc_profile::Phase::tick_discovery, [&] { return impl.service_discovery(executor, executing, events); }); !result) {
         impl.failed = true; return core::Result<GalacticTick>::failure(result.error());
     }
     tick.work.discovery_records = impl.discovery_records;
@@ -1299,6 +1345,7 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
         tick.work.serviced = true;
         // galactic-gather: every object's state copied into its ascending-ID slot, the immutable
         // input of the per-object phases that follow it (galactic architecture, section 10).
+        std::optional<gc_profile::Scope> stage_scope(std::in_place, gc_profile::Phase::tick_gather);
         const auto objects = impl.sorted_objects();
         std::vector<GatheredObject> gathered(objects.size());
         const auto partitions = objects.size() < gather_single_partition_below ? std::size_t{1} : tick_partition_count;
@@ -1313,6 +1360,7 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
             return fail<GalacticTick>(diagnostic_codes::worker_failure, "galactic-gather failed: " + phase.error().message);
         }
         tick.work.gathered_objects = gathered.size();
+        stage_scope.emplace(gc_profile::Phase::tick_movement);
         // WGM-89: movement object service precedes fiscal processing.
         if (auto access = refresh_movement_access(executor); !access) {
             impl.failed = true; return core::Result<GalacticTick>::failure(access.error());
@@ -1322,6 +1370,7 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
             return core::Result<GalacticTick>::failure(moved.error());
         }
         if (impl.dirty[static_cast<std::size_t>(StateSection::fleets)]) impl.population_stale = true;
+        stage_scope.emplace(gc_profile::Phase::tick_control);
 
         // GFD-02/05: committed ownership listeners and immediate credit-cap clamp
         // precede fiscal; its consumer must gather fresh post-control inputs.
@@ -1376,10 +1425,12 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
         // income_production_turn_order: gambling sample before production is
         // placed in the GFS-19 ability turn; RNG/source lifecycle remains GFS-U05.
         // Its order against production completion is unqualified.
+        stage_scope.emplace(gc_profile::Phase::tick_income);
         if (auto serviced = impl.service_income(executor, executing, events); !serviced) {
             impl.failed = true;
             return fail<GalacticTick>(diagnostic_codes::worker_failure, serviced.error().message);
         }
+        stage_scope.emplace(gc_profile::Phase::tick_production);
         if (auto serviced = impl.service_production(executor, executing, events, pending_local_conflict); !serviced) {
             impl.failed = true;
             return core::Result<GalacticTick>::failure(serviced.error());
@@ -1391,6 +1442,7 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
     // It also progresses paused pending/auto-resolve states; no ordinary object service
     // is admitted by that progression (WGT-02, WGM-47).
     if (impl.conflict_tail) {
+        gc_profile::Scope tail_scope(gc_profile::Phase::tick_conflict_tail);
         const auto forecast_before = impl.income_forecast_rebuilds;
         impl.snapshot = impl.make_snapshot(events, &executor);
         tick.work.income_forecast_rebuilds = impl.income_forecast_rebuilds - forecast_before;
@@ -1420,6 +1472,7 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
         // payment (WGEP-03..17) hooks in here with the fiscal ledger.
         const auto duration = impl.setup.rules.fiscal_cycle_frames;
         if (duration != 0 && clock.galactic_frame >= clock.fiscal_end) {
+            gc_profile::Scope fiscal_scope(gc_profile::Phase::tick_fiscal);
             if (impl.setup.fiscal) {
                 const auto& fiscal = *impl.setup.fiscal;
                 // GFD-02/05/08: current owners and sources after political/production commits.
@@ -1518,6 +1571,7 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
         // victory and destroyed-planet notices hook in here with their tickets).
         if (frame_admitted && clock.galactic_frame % periodic_check_frames == 0) ++tick.work.periodic_checks;
         if (impl.victory) {
+            gc_profile::Scope victory_scope(gc_profile::Phase::tick_victory);
             // WGM-03/04: fiscal and leader callbacks are distinct admissions.
             if (tick.work.fiscal_cycles) {
                 const std::array kinds{VictoryKind::cycles};
@@ -1545,19 +1599,20 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
     if (impl.dirty[static_cast<std::size_t>(StateSection::planets)]
         || impl.dirty[static_cast<std::size_t>(StateSection::fleets)]
         || impl.dirty[static_cast<std::size_t>(StateSection::production)]) impl.population_stale = true;
-    if (auto refreshed = impl.refresh_population(executor); !refreshed) {
+    if (auto refreshed = gc_profile::timed(gc_profile::Phase::tick_population, [&] { return impl.refresh_population(executor); }); !refreshed) {
         impl.failed = true; return core::Result<GalacticTick>::failure(refreshed.error());
     }
     tick.work.population_objects = impl.population_objects;
     tick.work.population_producers = impl.population_producers;
     impl.dirty[static_cast<std::size_t>(StateSection::session)] = true;
 
-    tick.state_hash = impl.refresh_hash(&tick.work);
+    tick.state_hash = gc_profile::timed(gc_profile::Phase::tick_state_hash, [&] { return impl.refresh_hash(&tick.work); });
     if (!impl.hasher) tick.state_sha256 = tick.state_hash.get();
     tick.completed_tick = impl.completed_tick;
     const auto forecast_before = impl.income_forecast_rebuilds;
     impl.snapshot = impl.make_snapshot(std::move(events), &executor);
-    if (auto delivered = impl.deliver_actor_changes(); !delivered) return core::Result<GalacticTick>::failure(delivered.error());
+    if (auto delivered = gc_profile::timed(gc_profile::Phase::tick_actor_delivery, [&] { return impl.deliver_actor_changes(); }); !delivered)
+        return core::Result<GalacticTick>::failure(delivered.error());
     // Project reconstruction: external native admissions see the completed
     // ordinary publication. Their census invalidation belongs to the next
     // refresh, exactly as it does when admitted after a live step returns.
@@ -1569,6 +1624,7 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
         if (!impl.hasher) tick.state_sha256 = tick.state_hash.get();
     }
     tick.work.observer_projection_records = impl.observer_projection_records - projection_records_before;
+    tick.work.production_offer_rebuilds = impl.production_offer_rebuilds - offer_rebuilds_before;
     tick.work.income_forecast_rebuilds = impl.income_forecast_rebuilds - forecast_before;
     tick.work.income_sources_gathered = impl.income_sources_gathered - income_sources_before;
     tick.work.income_modifier_rebuilds = impl.income_modifier_rebuilds - income_modifiers_before;
@@ -1969,6 +2025,10 @@ void GalacticSession::Impl::refresh_economy_input_generation() const {
     const auto changed = [&](StateSection section) { return dirty[static_cast<std::size_t>(section)]; };
     // Inactive optional sections retain their initial dirty bit: only present
     // native owners contribute inputs to this derived publication.
+    if (production && changed(StateSection::production)) ++production_generation;
+    if (changed(StateSection::planets) || (production && changed(StateSection::production)) || changed(StateSection::players)
+        || (setup.census && changed(StateSection::census)) || (economy_corruption && changed(StateSection::economy_corruption))
+        || (ability_host && changed(StateSection::ability_host))) ++offer_generation;
     const bool census = changed(StateSection::planets) || (production && changed(StateSection::production))
         || changed(StateSection::fleets) || (setup.movement && changed(StateSection::movement))
         || (control && changed(StateSection::control)) || (setup.census && changed(StateSection::census))

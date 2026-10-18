@@ -27,9 +27,9 @@ view, not a census of tags used in a particular battle.
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 1881 | 1881 |
+| applied | 1886 | 1886 |
 | partial | 1032 | 1032 |
-| todo | 1258 | 1258 |
+| todo | 1253 | 1253 |
 | presentation-later | 0 | 457 |
 | foc-ignores | 251 | 251 |
 | deferred | 75 | 75 |

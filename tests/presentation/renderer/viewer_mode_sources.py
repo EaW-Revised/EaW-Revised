@@ -90,6 +90,7 @@ class _MultiMemberSource(str):
 # Keys retain the original reader scope. Production moves extend only the
 # corresponding tuple, so a contract never searches unrelated source files.
 SOURCE_BUNDLES = {
+    "apps/viewer/src/lan_lobby_screen.cpp": ('apps/viewer/src/lan_lobby_screen.cpp', 'apps/viewer/src/lan_lobby_screen_internal.hpp', 'apps/viewer/src/lan_lobby_screen_list.cpp', 'apps/viewer/src/lan_lobby_screen_chat.cpp', 'apps/viewer/src/lan_lobby_screen_staging.cpp', 'apps/viewer/src/lan_lobby_screen_options.cpp', 'apps/viewer/src/lan_lobby_screen_refresh.cpp'),
     "apps/viewer/src/world_ui_view.cpp": (
         "apps/viewer/src/world_ui_view.cpp",
         "apps/viewer/src/world_ui_prepare.cpp",
@@ -178,6 +179,79 @@ SOURCE_BUNDLES = {
         "src/presentation/godot/ui/tactical_hud_report.cpp",
         "src/presentation/godot/ui/tactical_hud_internal.hpp",
     ),
+    # Sources the refactor window moves (tickets T6-T14, T16-T21). These entries are identity mappings:
+    # each logical path lists its physical members, today just the file itself, so they change no text
+    # and only reserve the key. A split PR adds the new files to the tuple, so a test that reads the
+    # logical path keeps its scope (test_bundle_members_exist checks the members). Tests read these
+    # through source_text(); tools/rig/rig_case_preflight.py (live_session_config.cpp, T13) reads a
+    # staged repo copy by literal path and is the T13 worker's to convert.
+    "apps/viewer/src/live_session_view.hpp": (
+        "apps/viewer/src/live_session_view.hpp",
+        "apps/viewer/src/live_session_options.hpp",
+        "apps/viewer/src/live_session_slots.hpp",
+        "apps/viewer/src/live_session_economy_view.hpp",
+        "apps/viewer/src/live_session_lan.hpp",
+        "apps/viewer/src/live_session_report.hpp",
+    ),
+    "apps/viewer/src/live_session_prepare.cpp": ("apps/viewer/src/live_session_prepare.cpp",),
+    "apps/viewer/src/live_session_config.cpp": ("apps/viewer/src/live_session_config.cpp",),
+    "apps/viewer/src/live_session_fighters.cpp": ("apps/viewer/src/live_session_fighters.cpp",),
+    "apps/viewer/src/live_session_report.cpp": ("apps/viewer/src/live_session_report.cpp",),
+    "apps/viewer/src/live_session_frame.cpp": ("apps/viewer/src/live_session_frame.cpp",),
+    "apps/viewer/src/space_populate_compose.cpp": ("apps/viewer/src/space_populate_compose.cpp",),
+    "apps/viewer/src/lan_match.cpp": ("apps/viewer/src/lan_match.cpp",),
+    "apps/viewer/src/lan_match.hpp": ("apps/viewer/src/lan_match.hpp",),
+    "src/sim/tactical/session_step_commands.cpp": ("src/sim/tactical/session_step_commands.cpp", "src/sim/tactical/session_cmd_orders.cpp", "src/sim/tactical/session_cmd_lanes.cpp", "src/sim/tactical/session_cmd_economy.cpp", "src/sim/tactical/session_cmd_abilities.cpp", "src/sim/tactical/session_cmd_targeted.cpp"),
+    "src/sim/tactical/session_step_fighters.cpp": ("src/sim/tactical/session_step_fighters.cpp",),
+    "src/sim/tactical/session_state.cpp": (
+        "src/sim/tactical/session_state.cpp",
+        "src/sim/tactical/session_state_units.cpp",
+        "src/sim/tactical/session_state_economy.cpp",
+        "src/sim/tactical/session_state_combat.cpp",
+        "src/sim/tactical/session_state_squadrons.cpp",
+        "src/sim/tactical/session_state_fog.cpp",
+        "src/sim/tactical/session_state_abilities.cpp",
+        "src/sim/tactical/session_state_paths.cpp",
+        "src/sim/tactical/session_state_world.cpp",
+        "src/sim/tactical/session_state_players.cpp",
+    ),
+    "src/sim/tactical/session_impl.hpp": (
+        "src/sim/tactical/session_impl.hpp",
+        "src/sim/tactical/session_store_outcome.hpp",
+        "src/sim/tactical/session_store_abilities.hpp",
+        "src/sim/tactical/session_store_bonuses.hpp",
+        "src/sim/tactical/session_store_diagnostics.hpp",
+        "src/sim/tactical/session_store_economy.hpp",
+        "src/sim/tactical/session_store_rules.hpp",
+        "src/sim/tactical/session_store_environment.hpp",
+        "src/sim/tactical/session_store_healing.hpp",
+        "src/sim/tactical/session_store_publication.hpp",
+        "src/sim/tactical/session_store_squadrons.hpp",
+        "src/sim/tactical/session_store_visibility.hpp",
+        "src/sim/tactical/session_store_reinforcements.hpp",
+        "src/sim/tactical/session_store_paths.hpp",
+        "src/sim/tactical/session_store_projectiles.hpp",
+        "src/sim/tactical/session_store_station_spawn.hpp",
+        "src/sim/tactical/session_store_registry.hpp",
+        "src/sim/tactical/session_store_commands.hpp",
+    ),
+    "src/sim/tactical/replay_parse.cpp": ("src/sim/tactical/replay_parse.cpp", "src/sim/tactical/replay_parse_header.cpp", "src/sim/tactical/replay_parse_setup.cpp", "src/sim/tactical/replay_parse_records.cpp", "src/sim/tactical/replay_parse_internal.hpp"),
+    "include/eawr/units/unit_tables.hpp": ("include/eawr/units/unit_tables.hpp", "include/eawr/units/unit_tables_common.hpp", "include/eawr/units/unit_tables_combat.hpp", "include/eawr/units/unit_tables_abilities.hpp", "include/eawr/units/unit_tables_spawner.hpp", "include/eawr/units/unit_tables_galactic.hpp", "include/eawr/units/unit_tables_presentation.hpp"),
+    "src/units/unit_tables_profiles.cpp": (
+        "src/units/unit_tables_profiles.cpp",
+        "src/units/unit_tables_abilities_nested.cpp",
+        "src/units/unit_tables_abilities_special.cpp",
+        "src/units/unit_tables_abilities_bonuses.cpp",
+    ),
+    "src/units/unit_motion.cpp": ("src/units/unit_motion.cpp",),
+    "include/eawr/campaign/game_session.hpp": ("include/eawr/campaign/game_session.hpp",),
+    "src/campaign/game_session.cpp": ("src/campaign/game_session.cpp",),
+    "src/campaign/live_setup.cpp": ("src/campaign/live_setup.cpp",),
+    "src/campaign/auto_resolve_live.cpp": ("src/campaign/auto_resolve_live.cpp",),
+    "src/campaign/galactic_ai_runtime.cpp": ("src/campaign/galactic_ai_runtime.cpp",),
+    "src/campaign/space_entry.cpp": ("src/campaign/space_entry.cpp",),
+    "src/campaign/space_entry_stock.cpp": ("src/campaign/space_entry_stock.cpp",),
+    "src/campaign/conflict_policy.cpp": ("src/campaign/conflict_policy.cpp",),
 }
 
 MODE_SOURCES = {
@@ -244,9 +318,21 @@ def viewer_build_source() -> str:
     lists = {}
     for name in re.findall(r'include\("\$\{EAWR_ROOT\}/([^"\n]+/sources\.cmake)"\)', text):
         manifest = ROOT / name
-        contents = manifest.read_text(encoding="utf-8")
+        contents = re.sub(r"#[^\n]*", "", manifest.read_text(encoding="utf-8"))
         for variable, body in re.findall(r"set\((EAWR_\w+_SOURCES)\s+(.*?)\)", contents, re.DOTALL):
-            paths = re.findall(r'"\$\{CMAKE_CURRENT_LIST_DIR\}/([^"\n]+)"', body)
-            lists[variable] = "\n".join((manifest.parent / member).relative_to(ROOT).as_posix()
-                                        for member in paths)
-    return re.sub(r"\$\{(EAWR_\w+_SOURCES)\}", lambda match: lists[match[1]], text)
+            # Generated at configure time, with no repository source text to read.
+            # The reader has always omitted this build-identity translation unit.
+            body = body.replace('"${EAWR_BUILD_IDENTITY_CPP}"', "")
+            token = r'"\$\{CMAKE_CURRENT_LIST_DIR\}/([^"\n]+)"|\$\{(EAWR_\w+_SOURCES)\}'
+            if re.sub(token, "", body).strip():
+                raise ValueError(f"Unsupported source expression in {name}: {variable}")
+            lists[variable] = "\n".join(
+                (manifest.parent / member).relative_to(ROOT).as_posix() if member
+                else "${" + nested + "}"
+                for member, nested in re.findall(token, body))
+
+    def expand(contents: str) -> str:
+        return re.sub(r"\$\{(EAWR_\w+_SOURCES)\}",
+                      lambda match: expand(lists[match[1]]), contents)
+
+    return expand(text)

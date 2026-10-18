@@ -1,0 +1,44 @@
+[
+  {
+    "old": "src/units/unit_tables_profiles.cpp#Projectile_Types_Override",
+    "new": "src/units/unit_tables_abilities_nested.cpp#Projectile_Types_Override"
+  },
+  {
+    "old": "src/units/unit_tables_profiles.cpp#Battlefield_Modifier_Ability",
+    "new": "src/units/unit_tables_abilities_bonuses.cpp#Battlefield_Modifier_Ability"
+  },
+  {
+    "old": "src/units/unit_tables_profiles.cpp#excluded_containers",
+    "new": "src/units/unit_tables_abilities_bonuses.cpp#excluded_containers"
+  },
+  {
+    "old": "src/units/unit_tables_profiles.cpp#load_abilities",
+    "new": "src/units/unit_tables_abilities_bonuses.cpp#load_bonus_abilities",
+    "tag": "Abilities/Battlefield_Modifier_Ability/Activation_Style"
+  },
+  {
+    "old": "src/units/unit_tables_profiles.cpp#load_abilities",
+    "new": "src/units/unit_tables_abilities_bonuses.cpp#load_bonus_abilities",
+    "tag": "Abilities/Battlefield_Modifier_Ability/Apply_To_All_Allies"
+  },
+  {
+    "old": "src/units/unit_tables_profiles.cpp#load_abilities",
+    "new": "src/units/unit_tables_abilities_bonuses.cpp#load_bonus_abilities",
+    "tag": "Abilities/Battlefield_Modifier_Ability/Enable_Special_Weapons"
+  },
+  {
+    "old": "src/units/unit_tables_profiles.cpp#load_abilities",
+    "new": "src/units/unit_tables_abilities_nested.cpp#load_nested_abilities",
+    "tag": "Abilities/Laser_Defense_Ability/@Name"
+  },
+  {
+    "old": "src/units/unit_tables_profiles.cpp#load_abilities",
+    "new": "src/units/unit_tables_abilities_nested.cpp#load_special_ability",
+    "tag": "Abilities/Laser_Defense_Ability/Activation_Style"
+  },
+  {
+    "old": "src/units/unit_tables_profiles.cpp#load_abilities",
+    "new": "src/units/unit_tables_abilities_nested.cpp#load_nested_abilities",
+    "tag": "Abilities/Redirect_Blaster_Ability/@Name"
+  }
+]

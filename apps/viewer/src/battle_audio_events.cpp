@@ -4,7 +4,7 @@
 
 #include "eawr/presentation/space/debris.hpp"
 #include "eawr/presentation/space/space.hpp"
-#include "eawr/skirmish/start.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/data/tag_trace.hpp"
 
 #include <godot_cpp/classes/audio_effect_hard_limiter.hpp>
@@ -1453,7 +1453,7 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
     }
     // WPJ-35/37/40: only successful lifetime-effect receipts enter ordinary detonation audio.
     for (const auto& terminal : terminal_sounds) {
-        const auto cue = terminal_detonations_.find(skirmish::type_id(terminal.projectile));
+        const auto cue = terminal_detonations_.find(battle::type_id(terminal.projectile));
         if (cue != terminal_detonations_.end()) {
             play(cue->second, audio::Vec3{terminal.position[0], terminal.position[1], terminal.position[2]},
                 false, terminal.death_payload ? "death_projectile_detonation" : "lifetime_detonation");

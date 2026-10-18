@@ -3,10 +3,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from viewer_mode_sources import source_text  # noqa: E402
 
 def function_body(text, signature):
     begin = text.index("{", text.index(signature))
@@ -21,10 +24,11 @@ def function_body(text, signature):
 class LanRecoveryWiring(unittest.TestCase):
     """Headless architecture contracts for routes that require Godot to construct."""
     def test_actual_economy_beacon_quit_routes_use_the_live_gate(self):
+        # These inline methods remain in the physical class header.
         header = (ROOT / "apps/viewer/src/live_session_view.hpp").read_text(encoding="utf-8")
         economy = (ROOT / "apps/viewer/src/live_session_economy.cpp").read_text(encoding="utf-8")
-        frame = (ROOT / "apps/viewer/src/live_session_frame.cpp").read_text(encoding="utf-8")
-        prepare = (ROOT / "apps/viewer/src/live_session_prepare.cpp").read_text(encoding="utf-8")
+        frame = source_text("apps/viewer/src/live_session_frame.cpp")
+        prepare = source_text("apps/viewer/src/live_session_prepare.cpp")
         self.assertIn("input_sink_ ? input_sink_.get() : scheduler_.get()", function_body(header, "command_sink()"))
         for method in ("sell_pad_structure", "special_fire", "repair_hardpoint", "buy", "cancel_build", "reinforce"):
             with self.subTest(method=method):
@@ -59,7 +63,7 @@ class LanRecoveryWiring(unittest.TestCase):
         self.assertIn("save_diagnostic_details()", body)
 
     def test_controllers_and_hud_read_the_published_adapter(self):
-        source = (ROOT / "apps/viewer/src/lan_match.cpp").read_text(encoding="utf-8")
+        source = source_text("apps/viewer/src/lan_match.cpp")
         activate = function_body(source, "core::Result<void> activate_adapter(")
         self.assertIn("core_session().active_adapter() != &adapter", activate)
         self.assertIn("adapter.staging->activate()", activate)
@@ -68,22 +72,22 @@ class LanRecoveryWiring(unittest.TestCase):
         drive = function_body(source, "DriverResult drive(")
         self.assertIn("session.active_adapter()", drive)
         self.assertIn("activate_adapter(*published)", drive)
-        frame = (ROOT / "apps/viewer/src/live_session_frame.cpp").read_text(encoding="utf-8")
+        frame = source_text("apps/viewer/src/live_session_frame.cpp")
         self.assertIn("session_->frame()", frame)
         platform = (ROOT / "src/platform/live_session.cpp").read_text(encoding="utf-8")
         self.assertIn("frame_ = {snapshot, snapshot, Clock::now()}", platform)
         self.assertIn("event_log_ = LiveEventLog", platform)
 
     def test_drop_feedback_and_speed_admission(self):
-        source = (ROOT / "apps/viewer/src/lan_match.cpp").read_text(encoding="utf-8")
+        source = source_text("apps/viewer/src/lan_match.cpp")
         self.assertIn("lan_gameplay_enabled(view_)", function_body(source, "bool request_speed("))
         drop = function_body(source, "void discard_command(")
         self.assertIn("observer(command.key.sequence)", drop)
         self.assertIn("view_.input_feedback", drop)
-        gate = (ROOT / "apps/viewer/src/lan_match.hpp").read_text(encoding="utf-8")
+        gate = source_text("apps/viewer/src/lan_match.hpp")
         gate_issue = function_body(gate, "core::Result<void> issue(")
         self.assertLess(gate_issue.index("acknowledge_input_feedback()"), gate_issue.index("sink_.issue(intent)"))
-        frame = (ROOT / "apps/viewer/src/live_session_frame.cpp").read_text(encoding="utf-8")
+        frame = source_text("apps/viewer/src/live_session_frame.cpp")
         self.assertIn("if (lan_gameplay_enabled(view)) recovery_input_feedback_.clear()", frame)
 
 

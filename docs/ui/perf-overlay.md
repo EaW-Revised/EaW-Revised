@@ -68,3 +68,19 @@ The galactic live pacer (`LiveGameSession`, ADR-013) runs one parent step per in
 pause or speed change starts a fresh schedule; a backlog beyond `max_catch_up` (5, the tactical pacer's value)
 is dropped, so a world whose ticks cost more than the interval is bound by its tick cost and never spirals.
 The factor itself is data: WGM-210 (4x), `galactic::fast_forward_factor_raw`.
+
+## Network section (legacy EAWR-4043)
+
+In an online or LAN match the panel gains a network section: a one-line verdict, the lockstep waits (waits per
+second, milliseconds waited in the last second, the longest wait in the last 10 s), the seat the simulation waits
+for right now, and per remote seat the round trip, jitter and packet loss (`rtt -` until the transport has a
+sample; loss is 0 where the transport cannot tell). Every wait counts, however short: the `stall-start` log line
+only fires after a second. The verdict reads `network: waiting on peer 1 640 ms` when waits add up to 100 ms or
+more in the last second (or one runs that long now), `game: frame 48 ms, sim 31 ms` when the frame or tick average
+is over one 30 Hz tick, otherwise `ok`. "network" means this machine waited for that peer's inputs: a slow link and a slow peer PC look the same.
+
+While a match runs, godot.log gets one line every 5 s whether or not the overlay is shown:
+`EAWR net summary seat=0 verdict=ok wait_peer=- wait_ms=0 stalls_per_s=0 stalled_ms_1s=0 longest_ms_10s=0 frame_ms=8.0 sim_ms=5.0 peers=1:rtt_ms=80,jitter_ms=5,loss_pct=0.0`.
+Map reports carry the latest numbers as a `net_perf` object (the last match's numbers; `null` if no match ran). The model is
+`include/eawr/presentation/ui/net_perf.hpp`, covered by `tests/ui/net_perf_tests.cpp`. Presentation only: it never
+touches lockstep, the simulation or any hash.

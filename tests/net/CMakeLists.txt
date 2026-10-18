@@ -164,6 +164,13 @@ target_link_libraries(net_mesh_incident_tests PRIVATE eawr::net Threads::Threads
 eawr_target_project_warnings(net_mesh_incident_tests)
 add_test(NAME net_mesh_incident_contracts COMMAND net_mesh_incident_tests)
 set_tests_properties(net_mesh_incident_contracts PROPERTIES TIMEOUT 300)
+# Relay churn at six and nine seats (#4021): silent pairs during a pending restoration, churn that outlasts a window, a dead pair
+# amid churn, and seeded cascades. In-process, no GNS.
+add_executable(net_mesh_cascade_tests mesh_cascade_tests.cpp)
+target_link_libraries(net_mesh_cascade_tests PRIVATE eawr::net Threads::Threads)
+eawr_target_project_warnings(net_mesh_cascade_tests)
+add_test(NAME net_mesh_cascade_contracts COMMAND net_mesh_cascade_tests)
+set_tests_properties(net_mesh_cascade_contracts PROPERTIES TIMEOUT 600)
 add_executable(net_mesh_session_tests mesh_session_tests.cpp)
 target_link_libraries(net_mesh_session_tests PRIVATE eawr::net eawr::platform Threads::Threads)
 eawr_target_project_warnings(net_mesh_session_tests)

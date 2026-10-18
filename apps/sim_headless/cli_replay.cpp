@@ -1,4 +1,5 @@
 #include "cli_internal.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/campaign/conflict_entry.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 #include <cctype>
@@ -96,7 +97,7 @@ int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes)
                     [](const unsigned char a, const unsigned char b) { return std::tolower(a) == std::tolower(b); });
             };
             const auto need = [&](const std::string& type) {
-                if ((setup.first_free_entity_id || !eawr::skirmish::roster_disabled_types().contains(eawr::skirmish::type_id(type)))
+                if ((setup.first_free_entity_id || !eawr::skirmish::roster_disabled_types().contains(eawr::battle::type_id(type)))
                     && !tables.find(type)) missing.insert(type);
             };
             for (const auto& slot : fixture.value().slots) {
@@ -149,6 +150,8 @@ int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes)
                 auto bound = eawr::skirmish::session_content(tables, eawr::skirmish::human_slots(fixture.value()));
                 if (!bound) return fail(bound.error());
                 content = std::move(bound).value();
+                if (auto levels = eawr::skirmish::bind_difficulty(content, start.value(), inputs.value()); !levels)
+                    return fail(levels.error());
                 auto fog = eawr::skirmish::fog_rules(inputs.value());
                 if (!fog) return fail(fog.error());
                 content.fog = fog.value();
@@ -169,12 +172,12 @@ int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes)
                 std::vector<std::string> extra;
                 for (const auto& unit : replay.value().setup.units) {
                     const bool known = std::any_of(tables.units.begin(), tables.units.end(),
-                        [&](const auto& type) { return eawr::skirmish::type_id(type.id) == unit.type_id; });
+                        [&](const auto& type) { return eawr::battle::type_id(type.id) == unit.type_id; });
                     if (known) continue;
                     std::vector<std::string> matches;
                     for (const auto& definition : catalog.definitions()) {
                         if (definition.namespace_winner && definition.category == eawr::data::Category::game_object
-                            && eawr::skirmish::type_id(definition.id) == unit.type_id) matches.push_back(definition.id);
+                            && eawr::battle::type_id(definition.id) == unit.type_id) matches.push_back(definition.id);
                     }
                     if (matches.size() != 1) {
                         std::cerr << "recorded scenario type does not resolve uniquely in installed content\n";

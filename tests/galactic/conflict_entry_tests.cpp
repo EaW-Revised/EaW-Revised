@@ -132,7 +132,7 @@ void queued_pending_alerts() {
             return core::Result<std::optional<campaign::RecordedAdmission>>::success({});
         }, [](const auto&) {
             return core::Result<tactical::TacticalContent>::success({});
-        });
+        }, {}, eawr::campaign::ScriptRequirement::none);
         game.set_auto_resolver([](const auto& conflict, const auto&, const auto&) {
             campaign::AutoResolveOutcomeApplication outcome;
             outcome.planet = conflict.planet;
@@ -428,7 +428,7 @@ void handoff_corpus(bool fiscal_enabled = false) {
     for (const auto workers : std::array<std::size_t, 4>{1, 2, 4, 8}) {
         auto services = std::make_shared<platform::CampaignServiceConfiguration>();
         services->configure = [&](campaign::GameSession& owner) {
-            owner.set_conflict_service(service, content);
+            owner.set_conflict_service(service, content, {}, eawr::campaign::ScriptRequirement::none);
             return core::Result<void>::success();
         };
         platform::LiveGameSession::Options live_options;
@@ -451,14 +451,14 @@ void handoff_corpus(bool fiscal_enabled = false) {
         live->stop();
         expect(!live->galactic_events_after(0).events.empty(), "pending publication survives owner stop");
         const platform::ThreadWorkerAdapter executor(workers);
-        auto game = campaign::GameSession::create(galaxy).value(); game.set_conflict_service(service, content);
+        auto game = campaign::GameSession::create(galaxy).value(); game.set_conflict_service(service, content, {}, eawr::campaign::ScriptRequirement::none);
         const auto fiscal_paid_once = [&] {
             if (!fiscal_enabled) return true;
             const auto& accounts = game.galaxy().snapshot()->player_economy()->players;
             return accounts[0].credits == whole(11) && accounts[1].credits == whole(13);
         };
         const auto identities = checkpoint::game_identities(galaxy);
-        checkpoint::GameLoadOptions initial_options; initial_options.content = content; initial_options.conflict_service = service;
+        checkpoint::GameLoadOptions initial_options; initial_options.script_requirement = eawr::campaign::ScriptRequirement::none; initial_options.content = content; initial_options.conflict_service = service;
         auto initial_saved = checkpoint::save_game_checkpoint(game, identities).value();
         auto initial_loaded = checkpoint::load_game_checkpoint(initial_saved, identities, initial_options, executor);
         expect(bool(initial_loaded) && initial_loaded.value().session.recording().conflict_services
@@ -505,7 +505,7 @@ void handoff_corpus(bool fiscal_enabled = false) {
             "GFD26 pending pause does not repeat the retained frame fiscal payment");
         expect(fiscal_paid_once(), "pending pause does not repeat configured fiscal credits");
         const auto saved = checkpoint::save_game_checkpoint(game, identities).value();
-        checkpoint::GameLoadOptions options; options.content = content;
+        checkpoint::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none; options.content = content;
         options.apply_result = [&](auto&, const auto&) { ++applied; return core::Result<void>::success(); };
         auto loaded = checkpoint::load_game_checkpoint(saved, identities, options, executor);
         expect(bool(loaded), "pending conflict checkpoint restores");
@@ -546,7 +546,7 @@ void handoff_corpus(bool fiscal_enabled = false) {
         expect(game.galaxy().clock().galactic_frame == paused_frame + 1, "galaxy resumes after child/result return");
         expect(fiscal_paid_once(), "result return and resume preserve the one paid fiscal window");
         const auto recording = game.recording();
-        auto replayed = campaign::GameSession::from_recording(recording, content).value();
+        auto replayed = campaign::GameSession::from_recording(recording, content, {}, eawr::campaign::ScriptRequirement::none).value();
         std::vector<std::string> replay_hashes;
         while (replayed.completed_tick() < recording.commands.final_tick_count) {
             replayed.scramble_storage_for_testing(); auto step = replayed.step(executor);
@@ -567,7 +567,7 @@ void handoff_corpus(bool fiscal_enabled = false) {
             auto selected = service(snapshot, event, next);
             if (selected && selected.value()) selected.value()->arbitration = {campaign::ConflictRoute::instant_auto, true, false};
             return selected;
-        }, content);
+        }, content, {}, eawr::campaign::ScriptRequirement::none);
         expect(bool(game.submit({{0, {1}, 1}, gc::MoveFleet{10, {1, 2}, {}}})), "automatic movement accepted");
         while (!game.pending_conflict() && game.completed_tick() < 20) {
             auto tick = game.step(executor); expect(bool(tick), "automatic admission succeeds");
@@ -595,7 +595,7 @@ void handoff_corpus(bool fiscal_enabled = false) {
             auto selected = service(snapshot, event, next);
             if (selected && selected.value()) selected.value()->arbitration = {campaign::ConflictRoute::pending_tactical, true, false};
             return selected;
-        }, content);
+        }, content, {}, eawr::campaign::ScriptRequirement::none);
         game.set_vote_progress([](const auto&, const auto&) {
             return core::Result<std::optional<bool>>::success(false);
         });
@@ -744,7 +744,7 @@ int export_installed(const std::filesystem::path& root, const std::filesystem::p
                 << ",\"foreign_survived\":false,\"units\":" << built.value().start.units.size() << "}\n";
         }
         auto game = campaign::GameSession::create(galaxy).value();
-        auto staged = game.stage_battle(built.value().conflict, built.value().content);
+        auto staged = game.stage_battle(built.value().conflict, built.value().content, eawr::campaign::ScriptRequirement::none);
         if (!staged) { std::cerr << staged.error().message << '\n'; return 1; }
         auto entered = game.step(executor); if (!entered) return 1;
         std::ostringstream hashes; hashes << "tick,sha256\n";

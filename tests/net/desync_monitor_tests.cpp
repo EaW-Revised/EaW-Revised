@@ -275,6 +275,21 @@ void malformed_and_bounds(const std::filesystem::path& directory) {
     good(partial.left.finish(encoding)); good(partial.right.finish(encoding)); partial.drain();
     check_report(partial, 4, 7);
 
+    // A world-only tail row is replaced by the full hash at finish, so a script-only divergence in
+    // the last partial window is still caught.
+    Pair script_tail(directory);
+    for (std::uint64_t tick = 0; tick <= 7; ++tick) {
+        good(script_tail.left.record(tick, digest(tick), encoding));
+        good(script_tail.right.record(tick, digest(tick), encoding));
+        script_tail.drain();
+    }
+    good(script_tail.left.finish(encoding, digest(7))); good(script_tail.right.finish(encoding, digest(7, true))); script_tail.drain();
+    check_report(script_tail, 7, 7);
+    Pair bad_tail(directory);
+    good(bad_tail.left.record(0, digest(0), encoding)); good(bad_tail.right.record(0, digest(0), encoding)); bad_tail.drain();
+    good(bad_tail.left.record(1, digest(1), encoding));
+    require(!bad_tail.left.finish(encoding, "not-a-state-digest"), "invalid finish hash accepted");
+
     Pair invalid_tick(directory);
     require(!invalid_tick.left.record(1, digest(1)), "nonzero initial tick accepted");
     Pair invalid_hash(directory);

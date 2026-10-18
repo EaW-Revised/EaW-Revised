@@ -201,7 +201,7 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
     for (std::size_t index = 0; index < rules.pads.construction.size(); ++index) {
         const auto& child = rules.pads.construction[index];
         if ((index != 0 && child.type <= rules.pads.construction[index - 1].type)
-            || child.constructed == 0 || child.seconds == 0 || child.ai_seconds == 0
+            || child.constructed == 0 || child.seconds == 0
             || child.seconds > 86400 || child.ai_seconds > 86400 || !amount(child.price)) return invalid("invalid construction profile");
     }
     for (std::size_t index = 1; index < rules.pads.influence.size(); ++index) {
@@ -225,6 +225,8 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
             return invalid("retained strategic credits require an AI and a valid balance");
         if (entry.start_tech > entry.max_tech) return invalid("starting tech exceeds maximum");
         if (!amount(entry.credit_multiplier)) return invalid("credit multiplier out of range");
+        if (!amount(entry.ai_build_time_multiplier) || entry.ai_build_time_multiplier.raw() <= 0)
+            return invalid("AI build time multiplier out of range");
     }
     for (std::size_t index = 0; index < rules.menus.size(); ++index) {
         const auto& menu = rules.menus[index];
@@ -344,11 +346,27 @@ RejectReason queue_build(PlayerEconomy& state, const EconomyPlayer& player, cons
         if (state.credits < option.price) return RejectReason::insufficient_credits;
         state.credits = math::Fixed::from_raw(state.credits.raw() - option.price.raw());
     }
-    QueueEntry entry{option.type, station, option.price, player.ai ? option.ai_build_frames : option.build_frames, 0};
+    QueueEntry entry{option.type, station, option.price,
+        player.ai ? scaled_ai_frames(option.ai_build_frames, player.ai_build_time_multiplier) : option.build_frames, 0};
     entry.entry_id = state.next_queue_entry_id++;
     if (queue.empty()) entry.complete_frame = frame + entry.frames;
     queue.push_back(entry);
     return RejectReason::none;
+}
+
+std::uint32_t scaled_ai_frames(const std::uint32_t frames, const math::Fixed multiplier) noexcept {
+    if (multiplier.raw() == math::Fixed::scale) return frames;
+    const auto product = math::multiply(math::Fixed::from_raw(std::int64_t{frames} * math::Fixed::scale), multiplier);
+    if (!product) return frames;
+    const auto rounded = (product.value().raw() + math::Fixed::scale / 2) / math::Fixed::scale;
+    return static_cast<std::uint32_t>(std::clamp<std::int64_t>(rounded, 1, 86400 * 30));
+}
+
+std::uint32_t scaled_ai_seconds(const std::uint32_t seconds, const math::Fixed multiplier) noexcept {
+    if (multiplier.raw() == math::Fixed::scale) return seconds;
+    const auto product = math::multiply(math::Fixed::from_raw(std::int64_t{seconds} * math::Fixed::scale), multiplier);
+    if (!product) return seconds;
+    return static_cast<std::uint32_t>(std::clamp<std::int64_t>(product.value().trunc_to_integer(), 0, 86400));
 }
 
 core::Result<void> change_credits(PlayerEconomy& state, const EconomyPlayer& player, math::Fixed amount) {

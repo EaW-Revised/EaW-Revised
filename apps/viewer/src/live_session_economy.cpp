@@ -246,10 +246,11 @@ const tactical::EconomyView* LiveSessionView::local_economy() const {
     for (const tactical::EconomyView& view : battle_frame_.latest->economy()) {
         if (view.player != player_) continue;
         const auto revision = pending_revision();
-        if (pending_economy_tick_ != battle_frame_.latest->completed_tick() || pending_economy_revision_ != revision) {
+        if (pending_economy_state_.tick != battle_frame_.latest->completed_tick()
+            || pending_economy_state_.revision != revision) {
             const auto rows = scheduler_ ? scheduler_->reservations() : std::vector<ui::PendingCommand>{};
-            if (rows.empty()) pending_economy_.reset();
-            else pending_economy_ = ui::pending_economy(view, rows, [this](const sim::EntityId station, const tactical::TypeId type) -> const tactical::BuildOption* {
+            if (rows.empty()) pending_economy_state_.view.reset();
+            else pending_economy_state_.view = ui::pending_economy(view, rows, [this](const sim::EntityId station, const tactical::TypeId type) -> const tactical::BuildOption* {
                 if (station) {
                     const auto* instance = space::find_instance(*battle_frame_.latest, station);
                     const auto faction = local_faction_id();
@@ -259,10 +260,10 @@ const tactical::EconomyView* LiveSessionView::local_economy() const {
                 for (const auto& menu : economy_.menus) if (const auto* option = menu.find(type)) return option;
                 return nullptr;
             }, battle_frame_.latest->completed_tick());
-            pending_economy_tick_ = battle_frame_.latest->completed_tick();
-            pending_economy_revision_ = revision;
+            pending_economy_state_.tick = battle_frame_.latest->completed_tick();
+            pending_economy_state_.revision = revision;
         }
-        return pending_economy_ ? &*pending_economy_ : &view;
+        return pending_economy_state_.view ? &*pending_economy_state_.view : &view;
     }
     return nullptr;
 }

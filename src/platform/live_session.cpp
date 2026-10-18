@@ -747,6 +747,8 @@ private:
                         if (replay.commands.empty() && replay.object_turns.empty()) return core::Result<std::vector<std::uint8_t>>::success({});
                         return tactical::write_replay(replay);
                     }, [this](std::uint32_t rate) { set_target_rate(rate); }};
+                // Same value state_hash() starts from; the scripts are only hashed for exchanged rows.
+                context.world_hash = [&] { return driver_tick ? driver_tick->state_hash.get() : world().state_sha256(); };
                 context.rebuild = [this, &executor, &driver_lock] {
                     driver_lock.unlock();
                     try { auto rebuilt = recovery_context(executor); driver_lock.lock(); return rebuilt; }
@@ -866,6 +868,7 @@ private:
             }
             return core::sha256_hex({reinterpret_cast<const std::uint8_t*>(hash.data()), hash.size()});
         };
+        context->world_hash = [staged] { return staged->world().state_sha256(); };
         context->canonical_state = [staged] { return staged->world().canonical_state_bytes(); };
         context->snapshot = [staged] { return staged->world().snapshot(); };
         context->departures = [staged] { const auto controls = staged->world().departure_controls();

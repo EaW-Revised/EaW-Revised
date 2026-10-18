@@ -8,6 +8,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -569,12 +570,95 @@ class ShardTests(Fixture):
         self.assertEqual(main["shards"], [self.galactic.name])
         self.assertEqual(next(r for r in child["rows"] if r["tag"].startswith("Abilities/"))["ticket"], 777)
 
+    def add_area_shards(self) -> None:
+        for area in tr.AREAS:
+            name = f"statuses-{area}.json"
+            self.main["shards"].append(name)
+            tr.write_text(self.root / name, tr.dumps_registry(registry()))
+        self.save()
+
+    def test_area_writes_route_new_rows_changed_areas_and_preserve_domain_owners(self) -> None:
+        self.add_area_shards()
+        combined = tr.load_registry(self.statuses)
+        combined["rows"].append(dict(tag="New_Tag", classes=["SpaceUnit"], status="todo", area="fighters", ticket=888))
+        tr.write_registry(self.statuses, combined)
+        self.assertEqual(tr.load_shard(self.statuses)["rows"], [])
+        self.assertEqual(tr.load_shard(self.root / "statuses-fighters.json")["rows"][0]["tag"], "New_Tag")
+        self.assertEqual(tr.load_shard(self.galactic)["rows"], self.child["rows"])
+        combined = tr.load_registry(self.statuses)
+        for row in combined["rows"]:
+            if row["tag"] == "Junk_Tag":
+                row["area"] = "presentation"
+        expected = tr.dumps_registry(combined)
+        tr.write_registry(self.statuses, combined)
+        self.assertEqual(tr.load_shard(self.root / "statuses-combat.json")["rows"], [])
+        self.assertEqual(tr.load_shard(self.root / "statuses-presentation.json")["rows"][0]["tag"], "Junk_Tag")
+        self.assertEqual(tr.dumps_registry(tr.load_registry(self.statuses)), expected)
+
+    def test_tactical_auto_resolve_gate_runs_on_area_shards(self) -> None:
+        self.add_area_shards()
+        combined = tr.load_registry(self.statuses)
+        row = next(row for row in combined["rows"] if row["tag"] == "Max_Speed")
+        row["applied"][0]["code"] = "src/campaign/auto_resolve_strength.cpp#max_speed"
+        target = self.root / "src/campaign/auto_resolve_strength.cpp"
+        target.parent.mkdir(parents=True)
+        target.write_text(CODE_TEXT, encoding="utf-8")
+        tr.write_registry(self.statuses, combined)
+        self.assertTrue(any("auto-resolve" in problem for problem in self.gate()))
+        row["applied"].append(applied())
+        tr.write_registry(self.statuses, combined)
+        self.assertEqual(self.gate(), [])
+
+    def test_noop_area_write_preserves_evidence_and_does_not_write(self) -> None:
+        self.add_area_shards()
+        combined = tr.load_registry(self.statuses)
+        tr.write_registry(self.statuses, combined)
+        snapshot = {path: path.read_bytes() for path, _shard in tr.registry_shards(self.statuses)}
+        with mock.patch.object(tr, "write_text") as write:
+            tr.write_registry(self.statuses, tr.load_registry(self.statuses))
+            write.assert_not_called()
+        self.assertEqual({path: path.read_bytes() for path in snapshot}, snapshot)
+        self.assertEqual(tr.load_registry(self.statuses), combined)
+
+    def test_independent_area_shard_roots_still_validate(self) -> None:
+        self.add_area_shards()
+        tr.write_registry(self.statuses, tr.load_registry(self.statuses))
+        root = tr.load_shard(self.statuses)
+        paths = [self.statuses] + [self.root / name for name in root.pop("shards")]
+        tr.write_text(self.statuses, tr.dumps_registry(root))
+        self.assertEqual(tr.gate_problems(paths, self.inventory, self.root)[0], [])
+
+    def test_area_layout_gate_rejects_root_rows_missing_area_and_misplacement(self) -> None:
+        self.add_area_shards()
+        self.assertTrue(any("root rows must be empty" in problem for problem in self.gate()))
+        tr.write_registry(self.statuses, tr.load_registry(self.statuses))
+        movement = self.root / "statuses-movement.json"
+        shard = tr.load_shard(movement)
+        shard["rows"][0]["area"] = "combat"
+        tr.write_text(movement, tr.dumps_registry(shard))
+        self.assertTrue(any("belongs to area" in problem for problem in self.gate()))
+        root = tr.load_shard(self.statuses)
+        root["shards"].remove("statuses-fighters.json")
+        tr.write_text(self.statuses, tr.dumps_registry(root))
+        self.assertTrue(any("'fighters' has no listed" in problem for problem in self.gate()))
+        combined = tr.load_registry(self.statuses)
+        combined["rows"].append(dict(tag="New_Tag", classes=["SpaceUnit"], status="todo", area="fighters", ticket=888))
+        before = {path: path.read_bytes() for path, _shard in tr.registry_shards(self.statuses)}
+        with self.assertRaisesRegex(tr.RegistryError, "fighters.*no listed"):
+            tr.write_registry(self.statuses, combined)
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+
 
 class CheckedInRegistryTests(unittest.TestCase):
     def test_galactic_shard_owns_campaign_planet_and_trade_route(self) -> None:
         root = tr.load_shard(tr.DEFAULT_STATUSES)
         child = tr.load_shard(tr.DEFAULT_STATUSES.with_name("statuses-galactic.json"))
-        self.assertEqual(root["shards"], ["statuses-galactic.json"])
+        self.assertEqual(set(root["shards"]), {"statuses-galactic.json"} |
+                         {f"statuses-{area}.json" for area in tr.AREAS})
+        self.assertEqual(root["rows"], [])
+        for area in tr.AREAS:
+            shard = tr.load_shard(tr.DEFAULT_STATUSES.with_name(f"statuses-{area}.json"))
+            self.assertTrue(all(row["area"] == area for row in shard["rows"]))
         classes = {"Campaign", "Planet", "TradeRoute"}
         self.assertFalse(any(classes.intersection(row["classes"]) for row in root["rows"]))
         self.assertTrue(classes.issubset({c for c, _t, _r in tr.expand(child)}))

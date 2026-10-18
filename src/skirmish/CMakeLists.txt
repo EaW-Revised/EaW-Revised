@@ -15,6 +15,6 @@ target_include_directories(
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
-target_link_libraries(eawr_skirmish PUBLIC eawr::script_foc eawr::units eawr::scene eawr::assets eawr::data eawr::ui_data eawr::sim eawr::vfs eawr::core)
+target_link_libraries(eawr_skirmish PUBLIC eawr::battle eawr::script_foc eawr::units eawr::scene eawr::assets eawr::data eawr::ui_data eawr::sim eawr::vfs eawr::core)
 target_compile_features(eawr_skirmish PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_skirmish)

@@ -103,6 +103,7 @@ std::optional<int> MapMode::process(const double delta) {
         && state.loading->take_begin()) {
         state.begin_battle();
     }
+    state.sync_net_perf(delta);
     state.sync_perf_overlay();
     if (state.space) {
         const std::optional<int> finished = state.space->process(delta);

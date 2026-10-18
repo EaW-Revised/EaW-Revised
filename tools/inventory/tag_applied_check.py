@@ -32,6 +32,11 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable
 
+if __package__ in (None, ""):
+    from tag_registry import load_registry, registry_shards, row_order
+else:
+    from .tag_registry import load_registry, registry_shards, row_order
+
 # The object types foc_tag_perturb can change, and the classes whose objects are not units.
 TYPES = ("station", "ship", "squadron", "craft", "hardpoint", "projectile", "faction", "constants")
 GALACTIC_TYPES = {"campaign": "campaign", "planet": "planet", "traderoute": "route",
@@ -377,19 +382,28 @@ def git_commit() -> str:
 
 
 def write_plan(args: argparse.Namespace) -> list[dict[str, Any]]:
-    registry = json.loads(Path(args.registry).read_text(encoding="utf-8"))
+    header = json.loads(Path(args.registry).read_text(encoding="utf-8"))
     if args.scene is None:
-        args.scene = "galactic" if isinstance(registry, dict) and str(registry.get("note", "")).startswith("Perturbation scene: galactic.") else "m2"
+        args.scene = "galactic" if isinstance(header, dict) and str(header.get("note", "")).startswith("Perturbation scene: galactic.") else "m2"
+    registry = load_registry(Path(args.registry)) if isinstance(header, dict) and header.get("schema_version") == 2 else header
+    if args.scene == "m2" and isinstance(header, dict) and header.get("shards"):
+        # The M2 root plan historically covers tactical rows; GC has its own plan.
+        registry["rows"] = sorted((row for path, shard in registry_shards(Path(args.registry))
+                                   if path.name != "statuses-galactic.json" for row in shard["rows"]), key=row_order)
     if args.scene == "galactic" and Path(args.registry).name == "statuses-galactic.json":
         # Shared classes (factions, units, abilities, constants and UI) remain
-        # in the root shard. Include their GC targets without changing statuses.
+        # in the area shards. Include their GC targets without changing statuses.
         root = Path(args.registry).with_name("statuses.json")
         if root.is_file():
-            shared = json.loads(root.read_text(encoding="utf-8"))
-            registry["rows"] += [row for row in registry_rows(shared) if any(
-                "/galactic/" in str(target.get("code", "")) or str(target.get("code", "")).startswith("src/campaign/")
-                or any(str(rule).startswith(("WG", "GFD", "GFS")) for rule in target.get("rules", []))
-                for target in row.get("applied", []) if isinstance(target, dict))]
+            shared = load_registry(root)
+            owned = {(fold(c), fold(row["tag"])) for row in registry_rows(registry) for c in row.get("classes", [])}
+            for row in registry_rows(shared):
+                classes = [c for c in row.get("classes", []) if (fold(c), fold(row["tag"])) not in owned]
+                if classes and any(
+                    "/galactic/" in str(target.get("code", "")) or str(target.get("code", "")).startswith("src/campaign/")
+                    or any(str(rule).startswith(("WG", "GFD", "GFS")) for rule in target.get("rules", []))
+                    for target in row.get("applied", []) if isinstance(target, dict)):
+                    registry["rows"].append(dict(row, classes=classes))
     checks = expand(registry_rows(registry), load_hints(args.hints), args.scene)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "plan.json").write_text(json.dumps(

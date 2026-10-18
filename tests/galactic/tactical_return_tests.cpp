@@ -446,7 +446,7 @@ void parent_return(const bool nonadjacent = false) {
     std::vector<std::string> reference;
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         eawr::platform::ThreadWorkerAdapter executor(workers);
-        auto game = checked(campaign::GameSession::create(setup)); hero(game); okay(game.stage_battle(c, content(c)));
+        auto game = checked(campaign::GameSession::create(setup)); hero(game); okay(game.stage_battle(c, content(c), eawr::campaign::ScriptRequirement::none));
         std::vector<std::string> hashes; hashes.push_back(checked(game.step(executor)).state_hash.get());
         std::uint64_t seq1{}, seq2{};
         const auto issue = [&](const std::uint32_t player, tactical::CommandPayload payload, std::vector<eawr::sim::EntityId> units = {}) {
@@ -514,7 +514,7 @@ void parent_return(const bool nonadjacent = false) {
         expect(game.latest_tactical_result() && game.latest_tactical_context(), "latest summary retains its original type context");
         const auto returned = checked(game.save_return_state());
         expect(checked(campaign::decode_tactical_return_state(returned)) == game.return_state(), "authoritative return codec roundtrip");
-        auto replayed = checked(campaign::GameSession::from_recording(game.recording(), resolve_content)); hero(replayed);
+        auto replayed = checked(campaign::GameSession::from_recording(game.recording(), resolve_content, {}, eawr::campaign::ScriptRequirement::none)); hero(replayed);
         std::vector<std::string> replay_hashes;
         while (replayed.completed_tick() < game.completed_tick()) { replayed.scramble_storage_for_testing(); replay_hashes.push_back(checked(replayed.step(executor)).state_hash.get()); }
         expect(replay_hashes == hashes, "full parent recording reproduces the return and hero scheduling");
@@ -533,7 +533,7 @@ void parent_return(const bool nonadjacent = false) {
 void selected_recording() {
     const auto setup = galaxy(); auto c = conflict(setup); auto unresolved = c; unresolved.tactical.units.clear();
     auto game = checked(campaign::GameSession::create(setup));
-    game.set_conflict_service([](const auto&, const auto&, auto) { return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({}); }, resolve_content);
+    game.set_conflict_service([](const auto&, const auto&, auto) { return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({}); }, resolve_content, {}, eawr::campaign::ScriptRequirement::none);
     unsigned resolutions{};
     game.set_entry_resolver([&](const auto&, const auto&, auto) { ++resolutions; return eawr::core::Result<campaign::ResolvedConflictEntry>::success({c, content(c)}); });
     okay(game.queue_conflict(unresolved, {campaign::ConflictRoute::pending_tactical}));
@@ -550,7 +550,7 @@ void selected_recording() {
     auto replay = checked(campaign::GameSession::from_recording(game.recording(), [&](const auto& record) {
         expect(!record.tactical.units.empty(), "recording reuses the selected resolved record");
         return eawr::core::Result<tactical::TacticalContent>::success(content(record));
-    }));
+    }, {}, eawr::campaign::ScriptRequirement::none));
     std::vector<std::string> again;
     while (replay.completed_tick() < game.completed_tick()) again.push_back(checked(replay.step(executor)).state_hash.get());
     expect(again == hashes, "admission/choice/save barrier parent replay hashes agree");
@@ -620,7 +620,7 @@ void squadron_return(const campaign::StockTacticalReturnServices* stock = nullpt
             "WR-85 completion preserves every live craft of an escaped bought squadron");
         expect(std::none_of(live.begin(), live.end(), [](const auto& u) { return u.entity_id >= 100; }),
             "temporary carrier fighters do not become persistent retreat survivors");
-        auto game = checked(campaign::GameSession::create(setup)); okay(game.stage_battle(c, binding));
+        auto game = checked(campaign::GameSession::create(setup)); okay(game.stage_battle(c, binding, eawr::campaign::ScriptRequirement::none));
         checked(game.step(executor));
         okay(game.submit({{game.completed_tick(), {1}, 1}, envelope(c, {{0, 1, 1}, {}, tactical::RetreatPayload{tactical::RetreatAction::start}})}));
         std::optional<campaign::BattleResult> returned;
@@ -667,7 +667,7 @@ void deployed_reserve() {
     auto controlled = galaxy(); controlled.seat_control.emplace();
     controlled.seat_control->teams = {{1, {1}, false}};
     controlled.seat_control->controllers = {{1, gc::FactionControl::human, gc::FactionControl::ai, {}, {}}, {2, gc::FactionControl::ai, gc::FactionControl::ai, {}, {}}};
-    auto game = checked(campaign::GameSession::create(controlled)); okay(game.stage_battle(c, binding));
+    auto game = checked(campaign::GameSession::create(controlled)); okay(game.stage_battle(c, binding, eawr::campaign::ScriptRequirement::none));
     std::vector<std::string> parent_hashes{checked(game.step(executor)).state_hash.get()};
     expect(!game.submit({{game.completed_tick(), {1}, 1}, envelope(c, {{0, 1, 1}, {},
         tactical::ReinforcePayload{1, {f(-500), {}, {}}, 21}})}), "human campaign envelope refuses an unknown reserve token");
@@ -693,7 +693,7 @@ void deployed_reserve() {
         tactical::ReinforcePayload{1, {f(-500), {}, {}}, 22}})}), "human campaign envelope refuses a consumed reserve token");
     auto replayed = checked(campaign::GameSession::from_recording(game.recording(), [&](const auto&) {
         return eawr::core::Result<tactical::TacticalContent>::success(binding);
-    }));
+    }, {}, eawr::campaign::ScriptRequirement::none));
     for (const auto& hash : parent_hashes) expect(checked(replayed.step(executor)).state_hash.get() == hash,
         "trusted reserve admission reproduces from the parent recording");
     auto session = checked(tactical::TacticalSession::create(c.tactical, binding));

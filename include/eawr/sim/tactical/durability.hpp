@@ -122,11 +122,27 @@ struct DurabilityRules {
 // An empty table binds no durability: no unit has health, takes damage or dies. A table without
 // damage rules keeps the #72 behaviour: shots are events only, scripted damage is raw and no
 // unit has a shield.
+// WTA-46: one AI player's difficulty adjustment of what its objects are made of and deal. The
+// health scale multiplies the maximum hull and every destroyable hardpoint's maximum health, the
+// shield scale the maximum shield, the damage scale the damage the player's objects deal (the
+// combat damage modifier). A player without an entry plays Normal (all three 1).
+struct DifficultyScale {
+    PlayerId player{};
+    math::Fixed health{math::Fixed::from_raw(math::Fixed::scale)};
+    math::Fixed shield{math::Fixed::from_raw(math::Fixed::scale)};
+    math::Fixed damage{math::Fixed::from_raw(math::Fixed::scale)};
+    friend bool operator==(const DifficultyScale&, const DifficultyScale&) = default;
+};
+
 struct DurabilityTable {
     DurabilityRules rules;
     std::optional<DamageRules> damage;
     std::vector<DurabilityProfile> profiles; // strictly increasing type_id
+    // Content, not replay data: resolved by the setup code from each AI slot's level and the
+    // difficulty XML. Strictly increasing player; empty keeps every player at Normal.
+    std::vector<DifficultyScale> difficulty;
     [[nodiscard]] const DurabilityProfile* find(TypeId type_id) const noexcept;
+    [[nodiscard]] const DifficultyScale* difficulty_of(PlayerId player) const noexcept;
     friend bool operator==(const DurabilityTable&, const DurabilityTable&) = default;
 };
 
@@ -140,6 +156,11 @@ inline constexpr std::int64_t max_durability_health = std::int64_t{1} << 20;
 // speeds and the three rules are >= 0 and bounded by max_durability_health, and the speed
 // modifier and the damaged fraction are at most 1.
 [[nodiscard]] core::Result<void> validate_durability(const DurabilityTable& table);
+
+// WTA-46: `profile` as `factors.player`'s objects have it: the maximum hull and each destroyable
+// hardpoint's maximum health times the health scale, the maximum shield times the shield scale
+// (one rounding per product). Fails only on an arithmetic overflow.
+[[nodiscard]] core::Result<DurabilityProfile> scale_profile(const DurabilityProfile& profile, const DifficultyScale& factors);
 
 // A durable unit's health: its hull and each hardpoint's health by index (zero for a hardpoint
 // that is not destroyable). Hashed state.

@@ -428,8 +428,22 @@ executed by our host as scripts. What matters for this walk is what the engine c
   | Normal | 1.0 | 1.0 | 1.0 | 1.0 | 0 |
   | Hard | 0.75 | 0.5 | 1.8 | 1.15 | 0 |
 
-- **WTA-47** (data; SK-42) `Get_Difficulty()` answers the AI player's level. M2 fixes Normal, where
-  every multiplier is 1 and the sleep is 0.
+- **WTA-47** (data; SK-42; debug build, skirmish and LAN staging) `Get_Difficulty()` answers the AI player's
+  level. A lobby AI slot's level is chosen in its row: the three AI entries of the row list are Easy, Normal and
+  Hard, in that order, and the staging screens turn them into the level numbers Easy 0, Normal 1, Hard 2. How the
+  level reaches the player:
+  - the level is set on the AI controller that the slot's faction `Basic_AI` player type creates; the controller
+    reads the adjustment entry that its own player type names for that level (`Difficulty_Adjustments`), so the
+    mapping from level to entry is per player type (data), not one global table;
+  - a player type that authors no entry for a level gets a neutral adjustment, where every multiplier is 1, not
+    its Normal entry;
+  - only AI controllers have a level: a human player has no AI controller, so a human's slot never applies an
+    adjustment, and a level set for all AI players skips human players;
+  - changing the level rescales what the player owns (WSS-43): current hull and living hardpoints by the new
+    health multiplier over the old one, current shields by the new shield multiplier over the old one; an
+    invalid previous level counts as 1.
+  Without a chosen level (a demo battle's AI, a recording with no level) the level is Normal, where every
+  multiplier is 1 and the sleep is 0.
 
 ## Existing notes against this walk
 
@@ -485,7 +499,7 @@ Ours:
 | WTA-41 to WTA-43 | data | same |
 | WTA-44 | `Get_Credits` answers 0; the build goals score 0 or fail | same for M2 |
 | WTA-45 | no AI production | missing (not in M2; G-07) |
-| WTA-46 | only the contrast multiplier and the goal-cycle sleep are read | missing for Easy and Hard (G-07) |
+| WTA-46 | the contrast multiplier and the goal-cycle sleep are read; the maximum hull, hardpoint health and shield and the damage dealt follow the owner's level (`DurabilityTable::difficulty`, scaled profiles per owner, the damage scale joins the cause-damage mode of the shooter's owner) | same for projectile, area and beam damage; delayed blast damage keeps WAD-26's no-multiplier route (G-07) |
 | WTA-47 | `Get_Difficulty` answers "Normal" | same for M2 |
 
 Counts over the 47 rules: **same 40**, **differs 2** (WTA-38,

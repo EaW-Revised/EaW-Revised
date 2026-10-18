@@ -314,6 +314,7 @@ public:
             std::uint64_t tick{};
             campaign::ConflictRecord conflict;
             sim::tactical::TacticalContent content;
+            campaign::ScriptRequirement script_requirement{campaign::ScriptRequirement::required};
         };
         std::vector<Entry> entries{};
         // Opaque engine-owned startup services. Presentation cannot access the owning

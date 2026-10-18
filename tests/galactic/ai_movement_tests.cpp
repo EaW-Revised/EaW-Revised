@@ -245,7 +245,7 @@ void invasion_queue_disk() {
             auto session = take(cp::GameSession::create(setup)); gc::GalacticSession* world{};
             unsigned provider_calls{};
             const auto configure = [&](cp::GameSession& game) {
-                game.set_conflict_service({}, [](const cp::ConflictRecord&) { return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({}); });
+                game.set_conflict_service({}, [](const cp::ConflictRecord&) { return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({}); }, {}, eawr::campaign::ScriptRequirement::none);
                 game.set_native_conflict_service([&, source = fixture_invasion_provider()](const auto& snapshot, const auto& request, auto first_free) {
                     ++provider_calls; return source(snapshot, request, first_free);
                 }); game.set_conflict_gate([](const auto&) { return false; });
@@ -262,7 +262,7 @@ void invasion_queue_disk() {
                 "queued invasion retains explicit transport identities after its original fleet is merged away");
             const auto build = eawr::checkpoint::game_identities(setup);
             const auto queued_bytes = take(eawr::checkpoint::save_game_checkpoint(session, build));
-            eawr::checkpoint::GameLoadOptions load; load.configure_session = configure;
+            eawr::checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.configure_session = configure;
             load.content = [](const cp::ConflictRecord&) { return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({}); };
             auto restored = take(eawr::checkpoint::load_game_checkpoint(queued_bytes, build, load, executor));
             expect(restored.session.state_sha256() == session.state_sha256(), "disk load restores an admitted native invasion before its first queue service");
@@ -342,7 +342,7 @@ void invasion_retention() {
             "accept queues transports from every prepared fleet rather than only the first fleet");
         expect(!game.accept_invasion_offer({1}, 90), "accepted selection cannot enqueue twice");
         const auto build = eawr::checkpoint::game_identities(setup);
-        eawr::checkpoint::GameLoadOptions load; load.configure_session = configure_summary;
+        eawr::checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.configure_session = configure_summary;
         auto restored = take(eawr::checkpoint::load_game_checkpoint(take(eawr::checkpoint::save_game_checkpoint(game, build)), build, load, executor));
         expect(restored.session.state_sha256() == game.state_sha256(), "retained admission journal survives disk reconstruction");
         (void)take(game.step(executor)); (void)take(restored.session.step(executor));
@@ -403,7 +403,7 @@ void invasion_retention() {
         expect(section_size(*world, 18) == 24, "section18 remains constant sized across a long sequence of released terminal invasions");
     }
     const auto build = eawr::checkpoint::game_identities(fixture());
-    eawr::checkpoint::GameLoadOptions load; load.configure_session = configure;
+    eawr::checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.configure_session = configure;
     auto restored = take(eawr::checkpoint::load_game_checkpoint(take(eawr::checkpoint::save_game_checkpoint(session, build)), build, load, executor));
     expect(restored.session.state_sha256() == session.state_sha256(), "reader release journal reconstructs pruning without remapping the monotonic request allocator");
 
@@ -491,7 +491,7 @@ void equal_owner_invasion_block() {
         poll(0); poll(1);
         expect(!world->native_invasion(request) && engine->block(id)->finished && !engine->block(id)->result,
             "equal-owner terminal poll retires its record while retaining a false block result");
-        const auto build = eawr::checkpoint::game_identities(fixture()); eawr::checkpoint::GameLoadOptions load; load.configure_session = configure;
+        const auto build = eawr::checkpoint::game_identities(fixture()); eawr::checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.configure_session = configure;
         auto restored = take(eawr::checkpoint::load_game_checkpoint(take(eawr::checkpoint::save_game_checkpoint(session, build)), build, load, executor));
         expect(restored.session.state_sha256() == session.state_sha256()
             && restored.session.record().native_effects == session.record().native_effects,

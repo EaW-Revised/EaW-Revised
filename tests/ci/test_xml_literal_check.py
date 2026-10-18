@@ -27,8 +27,8 @@ class Repo:
         _DIRS.append(self.dir)
         self.root = pathlib.Path(self.dir.name)
         (self.root / "docs/tag-coverage").mkdir(parents=True)
-        rows = [{"tag": tag, "status": "todo"} for tag in TAGS] + [{"tag": "*", "status": "todo"}]
-        (self.root / gate.STATUSES_PATH).write_text(json.dumps({"rows": rows}), encoding="utf-8")
+        rows = [{"tag": tag, "classes": ["SpaceUnit"], "status": "todo"} for tag in TAGS + ["*"]]
+        (self.root / gate.STATUSES_PATH).write_text(json.dumps({"schema_version": 2, "rows": rows}), encoding="utf-8")
         (self.root / "src").mkdir()
         (self.root / "src/a.cpp").write_text(source, encoding="utf-8")
         entries = entries or []
@@ -52,6 +52,34 @@ def tearDownModule():
 
 
 class LiteralGateTests(unittest.TestCase):
+    def test_local_reader_component_counts_are_not_authored_values(self):
+        for name, declaration in (("components", "std::string_view tag"), ("numbers", "const Node* node")):
+            reader = f"std::vector<float> {name}({declaration}, std::size_t count) {{ if (values.size() != count) fail(); return values; }}\n"
+            argument = '"Volume_Saturation_Distance"' if name == "components" else 'child(root, "Volume_Saturation_Distance")'
+            call = f"auto values = {name}({argument}, 8);"
+            self.assertEqual(Repo(reader + call + "\n").check(), [])
+            self.assertEqual(len(Repo(reader + call + " double copy = 300.0;\n").check()), 1)
+        self.assertEqual(len(Repo('auto value = components("Volume_Saturation_Distance", 300);\n').check()), 1)
+        for reader in (
+            '[[nodiscard]] std::vector<float> components(const char* tag, std::size_t count) const { if (values.size() != count) fail(); return values; }',
+            'const auto components = [&](const char* tag, std::size_t count) -> std::optional<std::vector<float>> { return values.size() == count ? values : fail(); };',
+        ):
+            call = '\nauto values = components("Volume_Saturation_Distance", 4);'
+            self.assertEqual(Repo(reader + call).check(), [])
+            self.assertEqual(len(Repo(reader + call + ' double copy = 300.0;').check()), 1)
+
+    def test_literal_tag_in_area_shard_is_still_flagged(self):
+        repo = Repo("double d{300.0};  // Volume_Saturation_Distance\n")
+        root = repo.root / gate.STATUSES_PATH
+        registry = json.loads(root.read_text(encoding="utf-8"))
+        shard = root.with_name("statuses-presentation.json")
+        shard.write_text(json.dumps(registry), encoding="utf-8")
+        root.write_text(json.dumps({"schema_version": 2, "rows": [], "shards": [shard.name]}), encoding="utf-8")
+        self.assertEqual(gate.load_tags(repo.root), set(TAGS))
+        problems = repo.check()
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Volume_Saturation_Distance", problems[0])
+
     def test_tag_in_trailing_comment_with_literal_is_flagged(self):
         repo = Repo("double d{300.0};  // Volume_Saturation_Distance\n")
         problems = repo.check()

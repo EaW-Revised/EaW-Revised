@@ -14,6 +14,8 @@ public:
     std::function<void(std::string_view)> sink;
     net::PeerIndex seat{};
     std::uint64_t tick{};
+    // #4043: counts every lockstep wait, however short (stall() above only reports waits of a second or more).
+    presentation::ui::NetStallLedger ledger;
     void emit(std::string_view event, std::string_view reason, net::PeerIndex peer,
             std::string_view detail = {}) const {
         if (!sink) return;

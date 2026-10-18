@@ -14,11 +14,15 @@ check-data
 render   writes the report (counts, partial rows, top todo) from statuses.json to out/tag-coverage/statuses.md;
          it is generated on demand and never committed.
 format   rewrites statuses.json in its canonical layout.
+relocate --map moves.json
+         rewrites the `path#identifier` code anchors (and the region anchors of data/census/mechanic-review.json)
+         after code moved, so a file split or rename keeps its evidence; see docs/tag-coverage.md, "Moving code".
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -221,11 +225,32 @@ def load_registry(paths: Path | Sequence[Path]) -> dict[str, Any]:
 
 
 def write_registry(path: Path, registry: dict[str, Any]) -> None:
-    """Update existing shards without moving their pairs; new pairs belong to the root."""
+    """Write area rows to registered area shards, retaining other shards' pair ownership."""
     if not path.exists():
         write_text(path, dumps_registry(registry))
         return
     shards = registry_shards(path)
+    distribute_rows(shards, registry)
+    for target, shard in shards:
+        text = dumps_registry(shard)
+        if target.read_text(encoding="utf-8") != text:
+            write_text(target, text)
+
+
+def distribute_rows(shards: Sequence[tuple[Path, dict[str, Any]]], registry: dict[str, Any]) -> None:
+    """Route root/new rows and changed areas; domain shards such as galactic keep their pairs."""
+    root = shards[0][0]
+    areas = {area: index for index, (target, _shard) in enumerate(shards)
+             for area in AREAS if target == root.with_name(f"statuses-{area}.json")}
+    area_layout = bool(areas) or root.resolve() == DEFAULT_STATUSES.resolve()
+    evidence = registry.get("evidence", {})
+    existing = {name for _target, shard in shards for name in shard.get("evidence", {})}
+    for _target, shard in shards:
+        for name in shard.get("evidence", {}):
+            if name in evidence:
+                shard["evidence"][name] = evidence[name]
+    for name in evidence.keys() - existing:
+        shards[0][1].setdefault("evidence", {})[name] = evidence[name]
     owners = {pair_key(c, tag): index for index, (_path, shard) in enumerate(shards)
               for c, tag, _row in expand(shard)}
     for _path, shard in shards:
@@ -233,16 +258,16 @@ def write_registry(path: Path, registry: dict[str, Any]) -> None:
     for row in registry["rows"]:
         groups: dict[int, list[str]] = defaultdict(list)
         for object_class in row["classes"]:
-            groups[owners.get(pair_key(object_class, row["tag"]), 0)].append(object_class)
+            owner = owners.get(pair_key(object_class, row["tag"]), 0)
+            if owner == 0 or owner in areas.values():
+                if area_layout and row.get("area") not in areas:
+                    raise RegistryError(f"area {row.get('area')!r} has no listed registry shard")
+                owner = areas.get(row.get("area"), owner)
+            groups[owner].append(object_class)
         for index, classes in groups.items():
             shards[index][1]["rows"].append(dict(row, classes=classes))
-    for target, shard in shards:
+    for _target, shard in shards:
         shard["rows"].sort(key=row_order)
-        for row in shard["rows"]:
-            name = row.get("evidence")
-            if name in registry.get("evidence", {}):
-                shard.setdefault("evidence", {})[name] = registry["evidence"][name]
-        write_text(target, dumps_registry(shard))
 
 
 def pair_key(object_class: str, tag: str) -> tuple[str, str]:
@@ -664,7 +689,25 @@ def gate_problems(statuses: Path | Sequence[Path], inventory: Path, root: Path |
     registry = load_registry(statuses)
     universe = load_universe(load_inventory(inventory))
     problems = registry_problems(registry, universe, root)
-    for path, shard in registry_shards(statuses):
+    shards = registry_shards(statuses)
+    roots = [statuses] if isinstance(statuses, Path) else statuses
+    for registry_root in roots:
+        tree = registry_shards(registry_root)
+        listed = {path for path, _shard in tree}
+        expected = {registry_root.resolve().with_name(f"statuses-{area}.json"): area for area in AREAS}
+        is_area_shard = registry_root.resolve() in expected
+        if not is_area_shard and (registry_root.resolve() == DEFAULT_STATUSES.resolve() or listed.intersection(expected)):
+            for missing in expected.keys() - listed:
+                problems.append(f"{registry_root.name}: area {expected[missing]!r} has no listed registry shard")
+            for path, shard in tree:
+                if path == registry_root.resolve() and shard["rows"]:
+                    problems.append(f"{path.name}: root rows must be empty; route rows with write_registry or relocate")
+        for path, shard in tree:
+            if path in expected:
+                for row in shard["rows"]:
+                    if row.get("area") != expected[path]:
+                        problems.append(f"{path.name}: row {row.get('tag')!r} belongs to area {row.get('area')!r}")
+    for path, shard in shards:
         if shard["rows"] != sorted(shard["rows"], key=row_order):
             problems.append(f"{path.name}: rows are not sorted; run format")
         if path.read_text(encoding="utf-8") != dumps_registry(shard):
@@ -764,10 +807,210 @@ def format_command(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- Moving code ----------------------------------------------------------------------------------
+
+DEFAULT_CENSUS_REVIEW = ROOT / "data" / "census" / "mechanic-review.json"
+
+
+@dataclass(frozen=True)
+class CodeMove:
+    old: str
+    new: str
+    tag: str | None = None
+
+    @property
+    def label(self) -> str:
+        return self.old if self.tag is None else f"{self.old} [tag={self.tag}]"
+
+
+def load_moves(path: Path) -> list[CodeMove]:
+    """A list of {old, new} moves, optionally scoped to an exact registry `tag` path.
+
+    File moves keep each anchor's symbol. Tag-scoped moves take precedence over unscoped moves and never
+    apply to census regions; within either scope, a symbol move wins over a file move.
+    """
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, list):
+        raise RegistryError(f"{path}: moves must be a list of {{old, new}} objects")
+    moves: list[CodeMove] = []
+    seen: set[tuple[str, str | None]] = set()
+    for index, move in enumerate(value):
+        if (not isinstance(move, dict) or set(move) not in ({"old", "new"}, {"old", "new", "tag"})
+                or not all(isinstance(move[key], str) and move[key] for key in move)):
+            raise RegistryError(f'{path}: move {index} must be {{"old": ..., "new": ...}} with optional "tag" '
+                                'and non-empty strings')
+        old, new = move["old"], move["new"]
+        tag = move.get("tag")
+        if ("#" in old) != ("#" in new):
+            raise RegistryError(f"{path}: move {index} {old!r} -> {new!r}: both sides are path#symbol or both are a path")
+        if "#" in old and not (old.partition("#")[2] and new.partition("#")[2]):
+            raise RegistryError(f"{path}: move {index} {old!r} -> {new!r}: empty symbol")
+        if not old.partition("#")[0] or not new.partition("#")[0]:
+            raise RegistryError(f"{path}: move {index} {old!r} -> {new!r}: empty path (a move names a file)")
+        if old == new:
+            raise RegistryError(f"{path}: move {index} moves {old!r} onto itself")
+        if (old, tag) in seen:
+            raise RegistryError(f"{path}: {CodeMove(old, new, tag).label!r} is moved twice")
+        seen.add((old, tag))
+        moves.append(CodeMove(old, new, tag))
+    return moves
+
+
+class Relocator:
+    """Follows each anchor through the moves to its final location, so A -> B and B -> C end at C (a cycle is an
+    error); remembers which moves matched something."""
+
+    def __init__(self, moves: Sequence[CodeMove]) -> None:
+        self.moves = {(move.tag, move.old): move for move in moves}
+        self.used: set[CodeMove] = set()
+        # Validate each effective chain, including cycles crossing scoped and unscoped moves.
+        for tag in [None, *sorted({move.tag for move in moves if move.tag is not None})]:
+            for move in moves:
+                self(move.old, tag)
+        self.used.clear()
+
+    def step(self, location: str, tag: str | None) -> tuple[CodeMove, str] | None:
+        path, hash_mark, identifier = location.partition("#")
+        for scope in (tag, None) if tag is not None else (None,):
+            if move := self.moves.get((scope, location)):
+                return move, move.new
+            if move := self.moves.get((scope, path)):
+                return move, move.new + hash_mark + identifier
+        return None
+
+    def __call__(self, location: str, tag: str | None = None) -> str | None:
+        current = location
+        seen = {location}
+        while (step := self.step(current, tag)) is not None:
+            self.used.add(step[0])
+            current = step[1]
+            if current in seen:
+                raise RegistryError(f"the moves form a cycle through {current!r}")
+            seen.add(current)
+        return current if current != location else None
+
+    def unused(self, moves: Sequence[CodeMove]) -> list[str]:
+        return [move.label for move in moves if move not in self.used]
+
+
+def relocate_registry(shards: Sequence[tuple[Path, dict[str, Any]]], relocate: Relocator,
+                      finals: set[str] | None = None) -> tuple[list[Path], int]:
+    """Rewrite the applied code anchors of every shard in place; (changed shard paths, anchors moved).
+    `finals` collects the new location of every moved anchor."""
+    changed: list[Path] = []
+    count = 0
+    for path, shard in shards:
+        before = count
+        for row in shard["rows"]:
+            codes = [str(target.get("code", "")) for target in row.get("applied", ())]
+            for target in row.get("applied", ()):
+                new = relocate(str(target.get("code", "")), tag=row.get("tag"))
+                if new is not None:
+                    target["code"] = new
+                    count += 1
+                    if finals is not None:
+                        finals.add(new)
+            after = [str(target.get("code", "")) for target in row.get("applied", ())]
+            if len(set(after)) < len(set(codes)):
+                raise RegistryError(f"{path.name}: row {row.get('tag')!r}: the moves leave two applied entries on the "
+                                    f"same anchor {sorted(c for c in set(after) if after.count(c) > codes.count(c))}")
+        if count != before:
+            changed.append(path)
+    return changed, count
+
+
+def missing_anchors(codes: Iterable[str], repo: Path) -> list[str]:
+    """Relocated registry anchors whose final file is not in the tree or does not mention the identifier."""
+    problems = []
+    texts: dict[str, str | None] = {}
+    for code in sorted(set(codes)):
+        path, _hash, identifier = code.partition("#")
+        if path not in texts:
+            file = repo / path
+            texts[path] = uncomment_cpp(file.read_text(encoding="utf-8", errors="replace")) if file.is_file() else None
+        if texts[path] is None:
+            problems.append(f"{code!r}: {path} is not a file under {repo}")
+        elif identifier and not identifier_pattern(identifier).search(texts[path]):
+            problems.append(f"{code!r}: {path} does not mention {identifier}")
+    return problems
+
+
+def with_eol(original: bytes | None, text: str) -> bytes:
+    """`text` as bytes, in the line ending the file had (the writers emit LF)."""
+    data = text.encode("utf-8")
+    return data.replace(b"\n", b"\r\n") if original and b"\r\n" in original else data
+
+
+def write_all(files: dict[Path, bytes]) -> None:
+    """Write every file or none: temp siblings first, then replace each, restoring the replaced ones on failure."""
+    originals = {path: path.read_bytes() for path in files}
+    temps: dict[Path, Path] = {}
+    replaced: list[Path] = []
+    try:
+        for path, data in files.items():
+            temp = path.with_name(path.name + ".relocate-tmp")
+            temp.write_bytes(data)
+            temps[path] = temp
+        for path, temp in temps.items():
+            os.replace(temp, path)
+            replaced.append(path)
+    except BaseException:
+        for path in replaced:
+            path.write_bytes(originals[path])
+        raise
+    finally:
+        for temp in temps.values():
+            temp.unlink(missing_ok=True)
+
+
+def relocate_command(args: argparse.Namespace) -> int:
+    if __package__ in (None, ""):
+        sys.path.insert(0, str(ROOT))  # census_review imports tools.inventory.*
+        from census_review import relocate_regions
+    else:
+        from .census_review import relocate_regions
+    moves = load_moves(args.map)
+    relocate = Relocator(moves)
+    shards = registry_shards(args.statuses)
+    finals: set[str] = set()
+    changed, count = relocate_registry(shards, relocate, finals)
+    # only the final location of each moved registry anchor is checked; census keys are logical names (text-checked)
+    problems = missing_anchors(finals, args.repo)
+    merged = {"rows": [row for _path, shard in shards for row in shard["rows"]]}
+    distribute_rows(shards, merged)
+    outputs: dict[Path, bytes] = {}
+    for path, shard in shards:
+        original = path.read_bytes()
+        updated = with_eol(original, dumps_registry(shard))
+        if updated != original:
+            outputs[path] = updated
+    census_moved: list[tuple[str, str]] = []
+    if args.census.is_file():
+        original = args.census.read_bytes()
+        review, census_moved = relocate_regions(json.loads(original.decode("utf-8")), relocate)
+        if census_moved:
+            outputs[args.census] = with_eol(original, json.dumps(review, indent=2, ensure_ascii=False) + "\n")
+    if not args.allow_unmatched:
+        problems += [f"{old!r} matches no registry or census anchor" for old in relocate.unused(moves)]
+    if problems:
+        for problem in problems:
+            print(f"tag_registry: relocate: {problem}", file=sys.stderr)
+        print("tag_registry: relocate: nothing written", file=sys.stderr)
+        return 2
+    for old in relocate.unused(moves):
+        print(f"tag_registry: relocate: {old!r} matches no registry or census anchor", file=sys.stderr)
+    if not args.dry_run:
+        write_all(outputs)
+    verb = "would move" if args.dry_run else "moved"
+    print(f"tag_registry: relocate: {verb} {count} registry anchors in {len(changed)} shards "
+          f"and {len(census_moved)} census regions")
+    return 0
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("check", "check-data", "render", "format"):
+    for name in ("check", "check-data", "render", "format", "relocate"):
         sub = commands.add_parser(name)
         sub.add_argument("--statuses", type=Path, action="append",
                          help="registry shard or root with a relative shards list; repeat for multiple roots")
@@ -778,10 +1021,19 @@ def main(argv: Iterable[str] | None = None) -> int:
                              help="where the report goes; it is generated, never committed")
         if name == "check-data":
             sub.add_argument("--game-root", required=True, type=Path)
+        if name == "relocate":
+            sub.add_argument("--map", required=True, type=Path,
+                             help="moves.json: [{old: path#symbol, new: path#symbol, tag?: exact registry tag path}]; "
+                                  "tag-scoped entries never move census regions")
+            sub.add_argument("--census", type=Path, default=DEFAULT_CENSUS_REVIEW,
+                             help="the census review whose region anchors move too (skipped when the file is absent)")
+            sub.add_argument("--dry-run", action="store_true", help="count what would move, write nothing")
+            sub.add_argument("--allow-unmatched", action="store_true",
+                             help="report, instead of failing on, a move that matches no anchor (default: exit 2, nothing written)")
     args = parser.parse_args(list(argv) if argv is not None else None)
     args.statuses = args.statuses or [DEFAULT_STATUSES]
     handlers = {"check": check_command, "check-data": check_data_command, "render": render_command,
-                "format": format_command}
+                "format": format_command, "relocate": relocate_command}
     try:
         return handlers[args.command](args)
     except (RegistryError, OSError, KeyError, ValueError) as exc:

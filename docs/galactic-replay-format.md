@@ -71,10 +71,20 @@ trailing bytes fail. The aggregate replay limit remains 256 MiB.
 
 Barrier effects replay after the preceding world commit and before the next world service.
 World-service consumers read their recorded payment/outcome facts at the actual callback,
-without running the AI decision again. Fleet, launch, landing and orbit-recheck replay use the
+without running the AI decision again. A production bill (kind 8) journals only the answer the
+producer callback gave: build u64, accepted u8, payer u32 and the charge as raw Fixed i64 (21 bytes);
+its inputs are rebuilt by the replayed world, so a replay that disagrees on the build or on a charge
+above the price fails. The decoder does not compare the rebuilt player, requested amount,
+remaining work or planet owner, or compare the payer against the input player; divergence
+in those inputs is caught by the resulting state hashes, not the compact decoder.
+Direct restore cross-checks the owner's journal length and next sequence against the
+recording. The reconstruction oracle skips the owner section and does not cross-check
+that length; it executes the recording and verifies the resulting state instead.
+Fleet, launch, landing and orbit-recheck replay use the
 same owned world validators and require exact recorded admission receipts. Launch records its
 logical containment change, suppressing its nested fleet admission. Runtime replayers are
-rebound before reconstruction; they are not saved. The journal itself is reconstruction input;
+rebound before reconstruction; they are not saved. The journal itself is reconstruction input (a galaxy checkpoint's owner section keeps only its length; the
+recording section carries the entries, so a save holds the journal once);
 world and native state hashes still cover the resulting owned state. Galaxy checkpoint sections
 are version 6; older galaxy checkpoints are refused. Replay format 1 adds the optional
 tag 16 through its existing extension table, preserving ordinary command bytes.

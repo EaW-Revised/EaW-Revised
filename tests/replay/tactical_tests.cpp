@@ -4,6 +4,7 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/tactical/admission.hpp"
+#include "../../src/sim/tactical/checkpoint_access_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -67,6 +68,7 @@ public:
 // Fail only the read-only publication accelerator, after producing partial output.
 class FailingCanonicalExecutor final : public eawr::sim::PartitionExecutor {
 public:
+    explicit FailingCanonicalExecutor(std::string_view phase = "canonical-records") : phase_(phase) {}
     [[nodiscard]] std::size_t worker_count() const noexcept override { return 2; }
     [[nodiscard]] eawr::core::Result<void> execute(const std::size_t count,
         const std::function<void(std::size_t)>& partition) const override {
@@ -74,12 +76,14 @@ public:
     }
     [[nodiscard]] eawr::core::Result<void> execute_phase(const std::string_view phase,
         const std::size_t count, const std::function<void(std::size_t)>& partition) const override {
-        if (phase != "canonical-records") return execute(count, partition);
+        if (phase != phase_) return execute(count, partition);
         reached = true;
         for (std::size_t index = 0; index < count / 2; ++index) partition(index);
         return FailingExecutor{}.execute(count, partition);
     }
     mutable bool reached{};
+private:
+    std::string_view phase_;
 };
 
 // Reports any worker count and runs the partitions inline, last partition first.
@@ -490,7 +494,8 @@ void test_skirmish_setup_format(const std::string& fixtures) {
         + 2U + metadata.match.space_win_condition.size();
     rejects(victory, 3, "non-lobby victory condition rejects");
     rejects(victory + 4U, 65, "oversized SKSU slot count rejects");
-    rejects(victory + 12U, 2, "non-boolean role rejects");
+    rejects(victory + 12U, 3, "human role with an AI level rejects");
+    rejects(victory + 12U, 6, "out-of-range role rejects");
     auto truncated = written.value(); truncated.resize(115);
     expect(!tactical::parse_replay(truncated), "truncated SKSU rejects");
     const auto header = static_cast<std::size_t>(written.value()[10]) + 256U * written.value()[11];
@@ -1112,6 +1117,7 @@ void test_beacons() {
         expect(other.snapshot()->visible_beacons(3).empty(), "rejected beacons create no presentation record");
     }
 }
+#include "canonical_encoder_oracle.hpp"
 }
 
 int main(const int argc, const char* const argv[]) {
@@ -1145,6 +1151,7 @@ int main(const int argc, const char* const argv[]) {
     test_native_scene_format(fixtures);
     test_golden_across_workers(fixtures, golden);
     test_phase_map(fixtures);
+    test_canonical_encoder_oracle(fixtures);
     test_live_submission_and_recording(fixtures, golden);
     test_submit_diagnostics(fixtures);
     test_atomicity_and_snapshots(fixtures);

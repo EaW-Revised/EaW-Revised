@@ -1,4 +1,5 @@
 #include "ai_data.hpp"
+#include "eawr/script/foc/tactical_ai.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -249,6 +250,17 @@ std::vector<std::string> ai_xml_files() {
     };
 }
 
+Difficulty resolve_difficulty(const AiData& data, const PlayerType* type, std::string_view level) {
+    // The engine's dummy adjustment: every multiplier 1. (The engine's sleep default for an absent tag is 1 s; this
+    // loader reads an absent sleep tag as 0 everywhere, so the dummy sleeps 0 too.)
+    const Difficulty dummy;
+    if (type == nullptr) return dummy;
+    const auto named = type->difficulty.find(level.empty() ? std::string("NORMAL") : upper_case(level));
+    if (named == type->difficulty.end()) return dummy;
+    const auto found = data.difficulties.find(named->second);
+    return found == data.difficulties.end() ? dummy : found->second;
+}
+
 core::Result<AiData> load_ai_data(
     const std::map<std::string, std::string, std::less<>>& xml, const ConverterFunction& converters) {
     // AI-16: the host freezes the mounted directory inventory. Do not reduce it
@@ -400,6 +412,10 @@ core::Result<AiData> load_ai_data_files(
                 if (const auto value = number(element.child_text("Galactic_Build_Time_Multiplier"))) difficulty.galactic_build_time_multiplier = *value;
                 if (const auto value = number(element.child_text("Galactic_AI_Goal_Cycle_Sleep_Duration"))) difficulty.galactic_goal_cycle_sleep = *value;
                 if (const auto value = number(element.child_text("Credit_Multiplier"))) difficulty.credit_multiplier = *value;
+                if (const auto value = number(element.child_text("Health_Multiplier"))) difficulty.health_multiplier = *value;
+                if (const auto value = number(element.child_text("Shield_Multiplier"))) difficulty.shield_multiplier = *value;
+                if (const auto value = number(element.child_text("Damage_Multiplier"))) difficulty.damage_multiplier = *value;
+                if (const auto value = number(element.child_text("Space_Build_Time_Multiplier"))) difficulty.space_build_time_multiplier = *value;
                 data.difficulties.emplace(upper_case(element.name_attribute), difficulty);
             }
         }
@@ -411,3 +427,49 @@ core::Result<AiData> load_ai_data_files(
 }
 
 } // namespace eawr::script::foc::ai
+
+namespace eawr::script::foc {
+
+struct AiDifficultyTable::Data {
+    ai::AiData data;
+};
+
+core::Result<AiDifficultyTable> AiDifficultyTable::load(const std::map<std::string, std::string, std::less<>>& xml) {
+    std::vector<std::string> paths;
+    for (const auto& [path, text] : xml) {
+        static_cast<void>(text);
+        std::string normal = path;
+        std::transform(normal.begin(), normal.end(), normal.begin(), [](char c) {
+            return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c;
+        });
+        if (normal.starts_with("data/xml/ai/players/") || normal == "data/xml/difficultyadjustments.xml") {
+            paths.push_back(std::move(normal));
+        }
+    }
+    const ai::ConverterFunction none = [](std::string_view, std::string_view) { return std::optional<ai::Real>{}; };
+    auto loaded = ai::load_ai_data_files(xml, none, paths);
+    if (!loaded) return core::Result<AiDifficultyTable>::failure(loaded.error());
+    AiDifficultyTable table;
+    auto data = std::make_shared<Data>();
+    data->data = std::move(loaded).value();
+    table.data_ = std::move(data);
+    return core::Result<AiDifficultyTable>::success(std::move(table));
+}
+
+AiDifficultyAdjustment AiDifficultyTable::resolve(std::string_view player_type, sim::tactical::AiLevel level) const {
+    if (!data_) return {};
+    const auto type = data_->data.players.find(ai::upper_case(player_type));
+    const ai::Difficulty entry = ai::resolve_difficulty(
+        data_->data, type == data_->data.players.end() ? nullptr : &type->second, sim::tactical::to_string(level));
+    AiDifficultyAdjustment out;
+    out.health = entry.health_multiplier;
+    out.shield = entry.shield_multiplier;
+    out.damage = entry.damage_multiplier;
+    out.space_build_time = entry.space_build_time_multiplier;
+    out.credit = entry.credit_multiplier;
+    out.space_contrast = entry.space_contrast_multiplier;
+    out.space_goal_cycle_sleep = entry.space_goal_cycle_sleep;
+    return out;
+}
+
+} // namespace eawr::script::foc

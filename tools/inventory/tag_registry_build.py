@@ -89,7 +89,7 @@ OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
         "status": "land-or-galactic", "evidence": "SCOPE-GALACTIC", "area": "movement",
         "note": "the only Container that authors it is Galactic_Fleet"},
     **{(space_class, "layer_z_adjust"): applied(
-        "src/skirmish/start.cpp#layer_position", rules=["LZ-01", "LZ-02"],
+        "src/battle/start.cpp#layer_position", rules=["LZ-01", "LZ-02"],
         note="#718: every start object is created at its placement point raised by its type's height")
        for space_class in ("spaceunit", "uniqueunit", "transportunit", "starbase", "spacestructure",
                            "secondarystructure", "specialstructure", "miscobject")},
@@ -105,7 +105,7 @@ OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("spaceprop", "scale_factor"): {**applied("src/units/unit_motion.cpp#scale_factor",
                                               note="the map-object footprint loader reads it under an unrecorded trace"),
                                     "trace": "unrecorded"},
-    ("*", "projectile_types_override"): applied("src/units/unit_tables_profiles.cpp#Projectile_Types_Override",
+    ("*", "projectile_types_override"): applied("src/units/unit_tables_abilities_nested.cpp#Projectile_Types_Override",
                                                 note="a team ability's projectile list, read by load_team"),
     ("*", "sfxevent_gui_unit_ability_activated"): applied("apps/viewer/src/battle_audio_prepare.cpp#ability_voices"),
     ("*", "sfxevent_gui_unit_ability_deactivated"): applied("apps/viewer/src/battle_audio_prepare.cpp#ability_voices"),

@@ -2,7 +2,7 @@
 #include "presentation_constants.hpp"
 
 #include "eawr/scene/scene.hpp"
-#include "eawr/skirmish/start.hpp"
+#include "eawr/battle/start.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -163,7 +163,7 @@ void DebrisProps::prepare(const units::UnitTables& tables, const tactical::Comba
         const sim::EntityId unit = placed_ships[index].live_entity;
         const auto type = types.find(lower(unit_type));
         if (unit == 0 || type == types.end()) continue;
-        const tactical::CombatProfile* profile = combat.find(skirmish::type_id(type->second->id));
+        const tactical::CombatProfile* profile = combat.find(battle::type_id(type->second->id));
         for (std::uint32_t hardpoint = 0; hardpoint < type->second->hardpoints.size(); ++hardpoint) {
             const std::string& id = type->second->hardpoints[hardpoint].id;
             auto object = catalog_->resolve(id, data::Category::hardpoint);

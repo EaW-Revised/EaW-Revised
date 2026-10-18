@@ -16,7 +16,9 @@ namespace eawr::checkpoint {
 // v30 (coordinator-reserved, GHUD-S61, WGP-97..103): the campaign-scoring section retains the
 // raw build/death/planet-change counters and the quit table the authored scoring module reads.
 // v32: complete direct owner/barrier payload; recordings retain history only.
-inline constexpr std::uint16_t galaxy_section_version = 32;
+// v33 (#4058): the owner keeps only the native journal's length (the recording carries its entries), and a
+// production bill journals just its outcome (build, accepted, payer, charge).
+inline constexpr std::uint16_t galaxy_section_version = 33;
 
 [[nodiscard]] Identities game_identities(const sim::galactic::GalacticSetup& setup);
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_game_checkpoint(
@@ -28,6 +30,7 @@ struct GameLoadOptions {
     std::function<core::Result<void>(campaign::GameSession&)> configure_session;
     campaign::GameSession::ContentResolver content;
     campaign::GameSession::ScriptFactory scripts;
+    campaign::ScriptRequirement script_requirement{campaign::ScriptRequirement::required};
     campaign::GameSession::ResultApplier apply_result;
     campaign::AutoResolveOutcomeServices auto_resolve_outcomes;
     campaign::GameSession::ChildConfigurator configure_child;
@@ -45,6 +48,7 @@ struct GameLoadOptions {
         std::function<core::Result<void>(campaign::GameSession&)> configure_native_ai;
         campaign::GameSession::ScriptFactory child_scripts;
         campaign::GameSession::ChildConfigurator configure_child;
+        campaign::GalacticParentQueryFactory child_parent_queries{};
     };
     std::function<core::Result<PreparedGalacticScripts>()> prepare_galactic;
     std::function<core::Result<void>(script::authoritative::ScriptedGalacticSession&)> configure_galactic;

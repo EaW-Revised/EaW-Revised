@@ -37,6 +37,11 @@ enum class Phase : std::size_t {
     world_visibility, world_economy, world_observed, world_input, world_view, world_release,
     compare_production, view_moved, freestore_publish, selection, goal_record_maintenance, usability_record_maintenance,
     barrier_commit, layer_replay, shadow_view, policy_snapshot,
+    // Tick-cost attribution scopes (serial, wall): the galactic session step and the script host around it.
+    tick_galaxy_step, tick_commands, tick_discovery, tick_gather, tick_movement, tick_control, tick_income,
+    tick_production, tick_conflict_tail, tick_fiscal, tick_victory, tick_population, tick_state_hash,
+    tick_actor_delivery, tick_story_service, tick_game_step,
+    snap_sorted, snap_observer, snap_menus, snap_economy_input, snap_forecast, snap_corruption, snap_offers, snap_construct,
     perception, perception_record_maintenance, perception_lock_wait, economy_lock_wait, count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::count)> names{
@@ -48,6 +53,10 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::co
     "world_visibility", "world_economy", "world_observed", "world_input", "world_view", "world_release",
     "compare_production", "view_moved", "freestore_publish", "selection", "goal_record_maintenance", "usability_record_maintenance",
     "barrier_commit", "layer_replay", "shadow_view", "policy_snapshot",
+    "tick_galaxy_step", "tick_commands", "tick_discovery", "tick_gather", "tick_movement", "tick_control", "tick_income",
+    "tick_production", "tick_conflict_tail", "tick_fiscal", "tick_victory", "tick_population", "tick_state_hash",
+    "tick_actor_delivery", "tick_story_service", "tick_game_step",
+    "snap_sorted", "snap_observer", "snap_menus", "snap_economy_input", "snap_forecast", "snap_corruption", "snap_offers", "snap_construct",
     "perception", "perception_record_maintenance", "perception_lock_wait", "economy_lock_wait"};
 struct Values { std::uint64_t calls{}, inclusive_ns{}, exclusive_ns{}; };
 struct Counter { std::atomic<std::uint64_t> calls{}, inclusive_ns{}, exclusive_ns{}; };
@@ -90,6 +99,10 @@ private:
     std::chrono::steady_clock::time_point start_{};
 };
 
+template<class Function> auto timed(Phase phase, Function&& function) {
+    Scope scope(phase);
+    return std::forward<Function>(function)();
+}
 template<class Function> auto timed_ai(Function&& function) {
     if (!enabled.load(std::memory_order_relaxed)) return std::forward<Function>(function)();
     struct Context final {

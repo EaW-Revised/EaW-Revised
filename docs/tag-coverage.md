@@ -64,8 +64,9 @@ The authored-pair registry below still covers exactly the stock inventory. A cat
 entry adds no status row: application coverage needs a row only when authored data
 introduces that pair. Recognition alone never implies `applied` or `foc-ignores`.
 
-`docs/tag-coverage/statuses.json`, `schema_version` 2, one row per line, sorted by tag then first class. A row covers every
-class it lists:
+`docs/tag-coverage/statuses.json` holds the schema version, shared evidence and shard list, with no rows.
+Its `statuses-<area>.json` shards use `schema_version` 2, one row per line, sorted by tag then first class.
+A row covers every class it lists:
 
 ```json
 {"applied": [{"code": "src/units/unit_motion.cpp#max_thrust", "rules": ["ESU-16"], "types": ["craft"]}],
@@ -148,7 +149,7 @@ while craft preserve the debug build's default of no layer (AV-21). Neither defa
 `SpaceUnit/Victory_Relevant` is deferred with combat tag coverage (legacy EAWR-650) for other victory conditions: the M2 default uses only stations
 (VT-01 to VT-03). The station row remains applied even though the perturbation run did not change its result.
 
-## Galactic shard
+## Registry shards
 
 `docs/tag-coverage/statuses.json` lists `statuses-galactic.json` in its `shards` array. Shard names
 are relative to the containing file. Registry readers combine the rows and evidence before checking coverage,
@@ -157,8 +158,14 @@ duplicate pairs, missing shards and repeated shard references fail the gate.
 
 The galactic shard owns Campaign, Planet and TradeRoute pairs and the GameConstants and Faction pairs
 already identified by `SCOPE-GALACTIC`. This split preserves every status, target, ticket and evidence value;
-it does not claim that a deferred mechanic is applied. Shared tactical or land rows stay in the root file.
+it does not claim that a deferred mechanic is applied. Other rows live in the shard named by their `area`:
+`movement`, `combat`, `fighters`, `ai`, `presentation`, `economy` or `data`.
 When applying a galactic tag, edit its existing row in `statuses-galactic.json`.
+
+`write_registry` routes new pairs and rows whose area changes to the listed area shard; existing galactic
+pairs retain their ownership. New evidence definitions go in the root header, and existing definitions stay
+where they are. A no-op write preserves the files. `relocate --map` uses the same row routing and evidence
+ownership. Missing area references, rows in the root, or an area row in the wrong shard fail the gate.
 
 `check`, `check-data`, `render` and `format` follow the shard list by default. Each file retains its own
 canonical layout, and `format` sorts each shard without changing ownership. For independent registry files,
@@ -168,12 +175,18 @@ repeat `--statuses path` to supply a list of roots. Report and census readers us
 
 - **Public report** (`docs/tag-coverage/report/`, generated, no game data): not a per-PR gate. Many PRs edit
   `statuses.json` at once, so the generated pages are refreshed in the batch on main:
-  `python tools/inventory/tag_report.py`, then `python tools/inventory/tag_report.py --check`.
+  `python tools/inventory/tag_report.py --batch`, then `python tools/inventory/tag_report.py --check`.
+  The per-PR form is `python tools/inventory/tag_report.py --pr --base origin/main`: it loads `statuses.json`
+  to validate its format and renderability, and rejects changed report pages that differ from regeneration;
+  a stale, untouched `report/` passes. This command does not check missing (class, tag) pairs or application
+  coverage: keep `python tools/inventory/tag_registry.py check` as the per-PR coverage gate.
+  The bare `python tools/inventory/tag_report.py` command is the older regeneration form, equivalent to
+  writing the pages without the batch command's convergence check.
 
 - **`ci_tag_registry`** (label `ci-tools`, runs everywhere, no game data): every pair of the universe has a row, no row is
   stale, no pair has two rows, each status has what its table row above requires, every `applied` code location exists
   (the file, and the identifier in it), every rule ID is in a `docs/behaviour` note, rows are sorted and
-  `statuses.json` is in its canonical layout. A defective row is reported by name with what it lacks; the gate does not
+  each shard is in its canonical layout and has its rows in the correct area. A defective row is reported by name with what it lacks; the gate does not
   stop at the first. `inventory_contracts` runs the same checks on synthetic fixtures.
 - **`ci_xml_literal_gate`** (label `ci-tools`, no game data): `tools/inventory/xml_literal_check.py` fails when code under `src/`,
   `include/` or `apps/` names a registry tag (in a string, a trailing comment, or the comment block directly above a
@@ -227,13 +240,34 @@ The gate caps these notes at 30 rows and requires a tracking ticket on each TODO
 
 A PR that starts applying a tag (or stops):
 
-1. Change the tag's row in `statuses.json`: `status`, `applied` (the code that applies it and the rule IDs of your
+1. Change the tag's row in `statuses-<area>.json` (or its existing galactic shard): `status`, `applied` (the code that applies it and the rule IDs of your
    behaviour note), drop `ticket` and `note` that no longer hold. To split a row (a tag now applied for one class only),
    move the class into a new row.
+   For bulk edits or an area change, load the merged registry with `load_registry` and write it with
+   `write_registry` so the rows are routed automatically; do not add rows to the root.
 2. `python tools/inventory/tag_registry.py format`.
 3. `python tools/inventory/tag_registry.py check`. It names every missing row, stale row, defective row and dead code
    location.
 4. Keep `todo` rows honest: a mechanic you find missing gets one issue and its rows link it.
+
+### Moving code
+
+A PR that moves or renames code a row cites (`applied[].code` is `path#identifier`) or a census region
+(`data/census/mechanic-review.json`) relocates the anchors with the move, not by hand:
+
+1. Write `moves.json`, a list of `{"old": "path#symbol", "new": "path#symbol"}`. An entry with no `#` on either side
+   renames a whole file: every anchor in `old` keeps its symbol and takes the new path. A symbol entry wins over a
+   file entry for the same anchor. Entries chain (A to B, then B to C, ends at C); a cycle is an error.
+2. `python tools/inventory/tag_registry.py relocate --map moves.json` rewrites every registry shard and the census
+   regions in one step (only the files that change are written, in their canonical layout and line ending, and
+   region order is kept). It fails with exit 2, writing nothing, when an `old` matches no anchor, a moved registry anchor's final file (after chains) is
+   missing or does not mention its symbol (census keys are logical names, checked by region text instead), or a move leaves two applied entries of a row on one anchor; the files
+   are written all or none. `--dry-run` runs every check and counts what would move without writing;
+   `--allow-unmatched` only reports a move that matches no anchor; `--census PATH` picks another review file.
+   `data/census/space-units.json` is not rewritten: its anchors are constants in `tools/inventory/unit_census.py`, so
+   update them there and regenerate with `unit_census.py --output`.
+3. `python tools/inventory/tag_registry.py check`. A region's `start`, `end` and `sha256_lf` are not touched: text that
+   moved verbatim still verifies, and text that changed stops the census until it is re-reviewed.
 
 **Open PRs.** A PR that applies a tag updates that tag's row in the same PR; the gate will not tell you if you forget.
 Rows are one per line and sorted, so two PRs conflict only when they edit the same tag. After
@@ -297,8 +331,9 @@ python tools/inventory/tag_registry.py check                 # the gate, no game
 python tools/inventory/tag_registry.py check-data --game-root <install>
 python tools/inventory/tag_registry.py format                # canonical layout of statuses.json
 python tools/inventory/tag_registry.py render                # out/tag-coverage/statuses.md: counts, partial rows, top todo
-python tools/inventory/tag_report.py                         # committed public report
-python tools/inventory/tag_report.py --check                 # report freshness gate
+python tools/inventory/tag_report.py --batch                 # batch job: regenerate the committed public report
+python tools/inventory/tag_report.py --check                 # batch/release freshness gate (not per PR)
+python tools/inventory/tag_report.py --pr --base origin/main # per-PR gate: report/ untouched or exact regen
 python tools/inventory/tag_registry_reclassify_ground.py --game-xml <effective Data/XML> [--write]  # todo rows only ground/galactic objects carry -> land-or-galactic
 sim_headless --skirmish m2 --game-root <install> --tag-trace-out <abs>/out/tag-coverage/m2-tag-trace.json
 python tools/inventory/tag_coverage.py scene --game-root <install> --trace <abs>/out/tag-coverage/m2-tag-trace.json \

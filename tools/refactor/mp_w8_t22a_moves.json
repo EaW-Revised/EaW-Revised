@@ -1,0 +1,318 @@
+[
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#GameTypeEntry",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::GameTypeEntry"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLobbyGameList",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#EawrLobbyGameList"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::Resources",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#EawrLanLobby::Resources"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::PageState",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#EawrLanLobby::PageState"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::Impl",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#EawrLanLobby::Impl"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#screen_layer",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::screen_layer"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#lobby_width",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::lobby_width"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#lobby_height",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::lobby_height"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#game_types",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::game_types"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#lobby_dialog",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::lobby_dialog"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#host_dialog",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::host_dialog"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#staging_dialog",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::staging_dialog"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#filter_dialog",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::filter_dialog"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#direct_dialog",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::direct_dialog"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#direct_button",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::direct_button"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#lan_source_button",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::lan_source_button"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#online_source_button",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::online_source_button"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#invitation_edit",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::invitation_edit"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#cancel_join_button",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::cancel_join_button"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#refresh_button",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::refresh_button"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#prev_button",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::prev_button"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#next_button",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::next_button"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#page_label",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::page_label"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#code_button",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::code_button"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#online_notice_label",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::online_notice_label"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#prompt_panel",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::prompt_panel"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#prompt_edit",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::prompt_edit"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#prompt_title_label",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::prompt_title_label"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#prompt_error_label",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::prompt_error_label"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#prompt_ok_button",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::prompt_ok_button"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#prompt_cancel_button",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::prompt_cancel_button"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#text",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::text"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#utf8",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::utf8"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#same_ci",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::same_ci"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#within_one_edit",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::within_one_edit"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#default_font_cache",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::default_font_cache"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#colour_name",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::colour_name"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#same_slots",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::same_slots"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#network_row_count",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::network_row_count"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#staging_options",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::staging_options"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#now_ms",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::now_ms"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#cast",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::cast"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#local_rect",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::local_rect"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#find_gadget",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::find_gadget"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#resolved",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#resolved"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#fit_control_caption",
+    "new": "apps/viewer/src/lan_lobby_screen_internal.hpp#lan_lobby_detail::fit_control_caption"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_lobby",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::open_lobby"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::refresh_lobby",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::refresh_lobby"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::join_selected",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::join_selected"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::join_address",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::join_address"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::cancel_join",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::cancel_join"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::refresh_online_rooms",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::refresh_online_rooms"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::select_source",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::select_source"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::configure_online_match",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::configure_online_match"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::join_code",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::join_code"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::join_online_selected",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::join_online_selected"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::begin_online_join",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::begin_online_join"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_password_prompt",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::open_password_prompt"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::close_password_prompt",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::close_password_prompt"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::submit_password",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::submit_password"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::online_failure",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::online_failure"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::pump_online",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::pump_online"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::on_rows_chosen",
+    "new": "apps/viewer/src/lan_lobby_screen_list.cpp#EawrLanLobby::on_rows_chosen"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::draw_chat",
+    "new": "apps/viewer/src/lan_lobby_screen_chat.cpp#EawrLanLobby::draw_chat"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::commit_name_from_edit",
+    "new": "apps/viewer/src/lan_lobby_screen_chat.cpp#EawrLanLobby::commit_name_from_edit"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::note_chat",
+    "new": "apps/viewer/src/lan_lobby_screen_chat.cpp#EawrLanLobby::note_chat"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::play_sound",
+    "new": "apps/viewer/src/lan_lobby_screen_chat.cpp#EawrLanLobby::play_sound"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::commit_name",
+    "new": "apps/viewer/src/lan_lobby_screen_chat.cpp#EawrLanLobby::commit_name"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::commit_colour",
+    "new": "apps/viewer/src/lan_lobby_screen_chat.cpp#EawrLanLobby::commit_colour"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::send_chat",
+    "new": "apps/viewer/src/lan_lobby_screen_chat.cpp#EawrLanLobby::send_chat"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::announce",
+    "new": "apps/viewer/src/lan_lobby_screen_chat.cpp#EawrLanLobby::announce"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::fill_host_seats",
+    "new": "apps/viewer/src/lan_lobby_screen_staging.cpp#EawrLanLobby::fill_host_seats"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::prepare_host_rows",
+    "new": "apps/viewer/src/lan_lobby_screen_staging.cpp#EawrLanLobby::prepare_host_rows"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::begin_hosting",
+    "new": "apps/viewer/src/lan_lobby_screen_staging.cpp#EawrLanLobby::begin_hosting"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::publish_staging_selection",
+    "new": "apps/viewer/src/lan_lobby_screen_staging.cpp#EawrLanLobby::publish_staging_selection"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::configure_staging",
+    "new": "apps/viewer/src/lan_lobby_screen_staging.cpp#EawrLanLobby::configure_staging"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_staging",
+    "new": "apps/viewer/src/lan_lobby_screen_staging.cpp#EawrLanLobby::open_staging"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::fill_map_list",
+    "new": "apps/viewer/src/lan_lobby_screen_staging.cpp#EawrLanLobby::fill_map_list"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::leave_staging",
+    "new": "apps/viewer/src/lan_lobby_screen_staging.cpp#EawrLanLobby::leave_staging"
+  }
+]

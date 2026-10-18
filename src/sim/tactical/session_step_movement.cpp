@@ -49,10 +49,15 @@ core::Result<void> session_detail::Tick::gather() {
     // The map walk gathers only stable handles. Workers gather each unit's component values,
     // initial position and optional craft view together into disjoint ascending-ID slots.
     mark("sorted_live", true);
-    const std::vector<std::pair<EntityId, entt::entity>> handles(impl_->handles.begin(), impl_->handles.end());
-    auto& moving = gather_.value().moving.emplace(handles.size());
-    auto& starts = gather_.value().starts.emplace(handles.size());
-    auto& gathered_crafts = gather_.value().gathered_crafts.emplace(handles.size());
+    auto& scratch = impl_->gather_scratch;
+    auto& handles = scratch.handles;
+    handles.assign(impl_->handles.begin(), impl_->handles.end());
+    auto& moving = gather_.value().moving.emplace(std::move(scratch.units));
+    moving.resize(handles.size());
+    auto& starts = gather_.value().starts.emplace(std::move(scratch.starts));
+    starts.resize(handles.size());
+    auto& gathered_crafts = gather_.value().gathered_crafts.emplace(std::move(scratch.crafts));
+    gathered_crafts.assign(handles.size(), std::nullopt);
     const bool all_units = impl_->victory.condition == VictoryCondition::all_enemy_units_destroyed;
     if (all_units) gather_.value().victory_parts.emplace();
     // Below 256 units, the quiet melee sample's gather took more time on four workers than

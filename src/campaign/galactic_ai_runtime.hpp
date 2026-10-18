@@ -100,8 +100,6 @@ struct GalacticAiRuntimeProviders {
     std::function<core::Result<void>(GameSession&, sim::galactic::GalacticSession&, Actions&, std::shared_ptr<Engine>,
         std::shared_ptr<World>, std::function<const sim::PartitionExecutor*()>)> bind_actions;
     struct ChildScripts {
-        GameSession::ScriptFactory first;
-        GameSession::ChildConfigurator second;
         GalacticParentQueryFactory parent_queries;
     };
     // Entry/restore prepares each fixed child reader before equations run. The

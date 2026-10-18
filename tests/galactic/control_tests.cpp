@@ -915,7 +915,7 @@ void native_capture_notices() {
             && tick.observer_story_notices(0).empty(), "observer publication reveals ownership notices only to the involved owner");
         const auto identities = cp::game_identities(s);
         std::size_t restored_callbacks = 0;
-        cp::GameLoadOptions options;
+        cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
         options.configure_session = [&](auto& restored_game) {
             restored_game.set_story_notice_handler([&](const auto&) {
                 ++restored_callbacks; return eawr::core::Result<void>::success();
@@ -1059,7 +1059,7 @@ void capture_build_and_ground_views() {
             content.victory.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
             content.victory.contenders = content.victory.controlled_players = {1, 2};
             content.victory.humans = {1}; content.victory.relevant_types = {2}; content.victory.countdown_frames = 2;
-            cp::GameLoadOptions load;
+            cp::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none;
             load.content = [content](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success(content); };
             load.auto_resolve_outcomes.control = [](auto& galaxy, const auto& application) {
                 gc::ControlBattleReturn returned; returned.planet = application.planet;
@@ -1080,7 +1080,7 @@ void capture_build_and_ground_views() {
                 capture_checked(game.stage_auto_resolve_outcome(a));
             } else {
                 // M3 menu admission routes land to the solver; direct staging exercises the child return itself.
-                game.stage_battle(conflict, content).value(); (void)capture_checked(game.step(executor));
+                game.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none).value(); (void)capture_checked(game.step(executor));
                 tactical::TacticalReplay damage; damage.setup.players = conflict.tactical.players; damage.final_tick_count = 1;
                 damage.commands.push_back({{0, 1, 1}, {22}, tactical::DamagePayload{f(1000)}});
                 const auto bytes = capture_checked(tactical::write_replay(damage));
@@ -1580,13 +1580,13 @@ void child_battle_control() {
     const auto start = header + damage.setup.players.size() * 24 + 4;
     gc::TacticalLayerCommand input{conflict.id, bytes[start + 20],
         {bytes.begin() + static_cast<std::ptrdiff_t>(start), bytes.end()}};
-    cp::GameLoadOptions options;
+    cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
     options.content = [content](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success(content); };
     const auto identities = cp::game_identities(s); const eawr::sim::InlineExecutor serial;
     auto game = campaign::GameSession::create(s).value();
     // FT-08 currently admits space children; land admission belongs to #1115.
     // The direct return contract above covers WGM-58's land-result adapter.
-    game.stage_battle(conflict, content).value();
+    game.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none).value();
     (void)game.step(serial).value();
     expect(bool(game.submit({{2, gc::SeatId{1}, 1}, input})), "space child damage enters through authenticated command envelope");
     const auto saved = cp::save_game_checkpoint(game, identities).value();
@@ -1624,7 +1624,7 @@ void child_battle_control() {
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         const eawr::platform::ThreadWorkerAdapter pool(workers);
         auto controlled = campaign::GameSession::create(s).value();
-        controlled.stage_battle(conflict, content).value();
+        controlled.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none).value();
         (void)controlled.step(pool).value();
         controlled.submit({{2, gc::SeatId{1}, 1}, input}).value();
         controlled.submit({{landing_tick - 1, gc::SeatId{1}, 2}, gc::PauseGalaxy{}}).value();

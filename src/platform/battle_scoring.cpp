@@ -6,7 +6,7 @@
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 #include "eawr/sim/world.hpp"
-#include "eawr/skirmish/start.hpp"
+#include "eawr/battle/start.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -179,7 +179,7 @@ core::Result<std::unique_ptr<BattleScoring>> BattleScoring::create(const vfs::Vf
                 else return Result::failure(parsed.error());
             }
         }
-        state->types.emplace(skirmish::type_id(unit.id), std::move(type));
+        state->types.emplace(battle::type_id(unit.id), std::move(type));
     }
     return initialize(std::move(state));
 }

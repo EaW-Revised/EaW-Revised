@@ -113,6 +113,10 @@ bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog
         failure = "live session content: " + core::format_diagnostic(content.error());
         return false;
     }
+    if (auto bound = skirmish::bind_difficulty(content.value(), start.value(), inputs.value()); !bound) {
+        failure = "live session difficulty: " + core::format_diagnostic(bound.error());
+        return false;
+    }
     // #495: the map's fog grid. #507's live `--eawr-live-reveal` is a draw-time bypass only
     // (interpolate_units, LiveFogView, the minimap) and must never change what the session itself
     // binds: every session keeps its real sensor table on reveal, so skipping fog here
@@ -460,6 +464,11 @@ bool LiveSessionView::prepare_replay(const vfs::Vfs& filesystem, const data::Cat
         }
         auto start = skirmish::build_start(replay_fixture, inputs.value());
         if (!start) { failure = core::format_diagnostic(start.error()); return false; }
+        // WTA-46 (#735): the recorded slot levels rebuild the live session's difficulty scales.
+        if (auto bound = skirmish::bind_difficulty(content.value(), start.value(), inputs.value()); !bound) {
+            failure = "--eawr-live-replay: " + core::format_diagnostic(bound.error());
+            return false;
+        }
         if (setup.skirmish) {
             if (inputs.value().map_sha256 != setup.skirmish->map_sha256) {
                 failure = "--eawr-live-replay: the recorded map identity differs from the mounted map";

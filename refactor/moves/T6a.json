@@ -1,0 +1,18 @@
+[
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#order_for",
+    "new": "src/sim/tactical/session_cmd_orders.cpp#order_for"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#point_move",
+    "new": "src/sim/tactical/session_cmd_orders.cpp#point_move"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#approach_target_of",
+    "new": "src/sim/tactical/session_cmd_orders.cpp#approach_target_of"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#max_waypoints",
+    "new": "src/sim/tactical/session_cmd_orders.cpp#max_waypoints"
+  }
+]

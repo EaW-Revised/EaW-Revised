@@ -170,7 +170,9 @@ void EawrPerfOverlay::draw_overlay() {
     const float big_row = font->get_height(big) * 1.05F;
     const float small_row = font->get_height(small) * 1.05F;
     const float height = pad * 2.0F + (big_row + small_row + graph_height + gap) * 2.0F + small_row + small_row
-        + (tick_source_ ? small_row : 0.0F) + big_row;
+        + (tick_source_ ? small_row : 0.0F) + big_row
+        + (network_ ? small_row * static_cast<float>(3 + network_->peers.size()) + gap : 0.0F);
+
     panel_rect_ = Rect2(margin, margin, width, height);
     draw_rect(panel_rect_, Color(0.0F, 0.0F, 0.0F, 0.62F), true);
     draw_rect(panel_rect_, Color(1.0F, 1.0F, 1.0F, 0.18F), false, 1.0F);
@@ -255,6 +257,33 @@ void EawrPerfOverlay::draw_overlay() {
     }
     graph(stats_.tick_graph(graph_columns), nice_scale(now.tick_worst_ms, tick_scales));
     y += graph_height + gap;
+    // #4043: network section, the verdict first.
+    if (network_) {
+        const model::NetVerdict verdict = model::net_verdict(*network_);
+        text(String("Network"), small, text_colour, HORIZONTAL_ALIGNMENT_LEFT);
+        text(String(verdict.text.c_str()), small,
+             verdict.blame == model::NetBlame::network ? bad_colour : verdict.blame == model::NetBlame::game ? warn_colour : good_colour,
+             HORIZONTAL_ALIGNMENT_RIGHT);
+        y += small_row;
+        const model::NetStallSnapshot& stall = network_->stall;
+        text(format("stalls %u/s  %llu ms/s", stall.stalls_last_second, static_cast<unsigned long long>(stall.stalled_ms_last_second)),
+             small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+        text(format("longest %llu ms / 10 s", static_cast<unsigned long long>(stall.longest_ms_10s)), small, dim_colour,
+             HORIZONTAL_ALIGNMENT_RIGHT);
+        y += small_row;
+        text(stall.waiting ? format("waiting on peer %u  %llu ms", stall.wait_peer, static_cast<unsigned long long>(stall.wait_ms))
+                           : String("no input wait"),
+             small, stall.waiting ? warn_colour : dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+        y += small_row;
+        for (const model::NetPeerLink& peer : network_->peers) {
+            text(format("peer %u", peer.peer), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+            text(peer.measured ? format("rtt %.0f  jitter %.0f  loss %.1f%%", peer.rtt_ms, peer.jitter_ms, peer.loss_pct)
+                               : String("rtt -"),
+                 small, dim_colour, HORIZONTAL_ALIGNMENT_RIGHT);
+            y += small_row;
+        }
+        y += gap;
+    }
     // Render counts, and the overlay's own cost.
     text(format("draw calls %llu", static_cast<unsigned long long>(draw_calls_)), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
     text(visible_units_ ? format("units %zu", *visible_units_) : String("units -"), small, dim_colour,

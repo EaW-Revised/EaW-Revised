@@ -148,6 +148,12 @@ vectors. No original gameplay fidelity is implied by equal hashes.
 
 # Tactical replay format v2
 
+The format versions, header extension tags, command opcodes and state-block tags are also kept machine-readable in
+[`docs/registries/replay-numbers.json`](registries/replay-numbers.json); `tools/check_replay_numbers.py` (CTest
+`ci_replay_numbers`) fails when this document, the registry and the code constants disagree. A change that adds a
+number adds its registry row in the same commit; the registry's `documented` flag records rows this prose does not
+describe yet. The registry covers the tactical replay (versions 2-5) only, not the v1 synthetic section or the galactic replay.
+
 Replay v2 records the player commands of a tactical session
 (`eawr/sim/tactical/`). It shares the v1 container rules: fixed-width little-endian
 integers, two's complement int64, no padding, strings or floating values, and unknown
@@ -203,7 +209,9 @@ in order:
   auto resolve, Q24 win float. The five integral match fields must fit int32.
 - Win condition and space win condition as strings.
 - Uint32 lobby victory condition (1 starbase, 2 all enemy units), then uint32 slot count.
-- Each slot: uint32 player ID, uint32 human flag (0/1), uint32 palette index
+- Each slot: uint32 player ID, uint32 control word (bit 0: human; bits 1-2: the AI level of a
+  non-human slot, 0 Normal, 1 Easy, 2 Hard; a human slot carries level 0, and the other values are
+  refused, so a Normal slot's word is the old 0/1), uint32 palette index
   (`0xffffffff` for the authored slot default), uint32 fleet count, then fleet type strings.
 
 Every string is a uint16 byte length followed by at most 1,024 non-NUL bytes. The map
@@ -1352,6 +1360,12 @@ The tactical tagged header retains shared allocator 6, match identity 7, multipl
 departure 8 and beacon rules 9. Campaign setup, carried-object metadata and cinematic
 seats use tags 10, 11 and 12 respectively. Writers emit every enabled tag in
 increasing order; the existing replay container versions 2/3/4/5 are unchanged.
+
+Campaign setup tag 10 uses payload version 5 without a reserve order and version 6
+with an explicit reserve order. Each account stores its Q24 AI build-time multiplier
+immediately after its credit multiplier. Replay and checkpoint loading retain this
+recorded production scale when rebinding campaign economy rules. Payload versions
+3/4 are rejected; ordinary skirmish recordings omit this tag and retain their bytes.
 
 Tag 13, `ATRC` (MAT-15, coordinator-reserved), marks the main-menu demo battle's pool return
 (docs/behaviour/main-menu-attract.md). Its body is a uint32 version (1), a uint32 count and

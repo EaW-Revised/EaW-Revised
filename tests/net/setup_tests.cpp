@@ -70,6 +70,19 @@ void encoding() {
     auto decoded = require(net::decode_setup_offer(encoded));
     expect(require(net::encode_setup_offer(decoded)) == encoded, "offer round trip must be canonical");
     expect(require(net::decode_skirmish_setup(decoded.setup)) == setup(), "SKSU and full setup survive offer");
+    {
+        // WTA-47 (#735): an AI slot's level rides in the slot's human word; Normal leaves the bytes as they were.
+        auto leveled = setup();
+        const auto plain = require(net::encode_skirmish_setup(leveled));
+        for (auto& slot : leveled.skirmish->slots) if (!slot.human) { slot.difficulty = tactical::AiLevel::hard; break; }
+        const auto hard = require(net::encode_skirmish_setup(leveled));
+        expect(hard != plain && hard.size() == plain.size(), "a Hard AI slot changes only the slot word");
+        expect(require(net::decode_skirmish_setup(hard)) == leveled, "an AI slot's level survives encode and decode");
+        for (auto& slot : leveled.skirmish->slots) slot.difficulty = tactical::AiLevel::normal;
+        expect(require(net::encode_skirmish_setup(leveled)) == plain, "Normal slots encode exactly as before the level existed");
+        for (auto& slot : leveled.skirmish->slots) if (slot.human) { slot.difficulty = tactical::AiLevel::easy; break; }
+        expect(!net::encode_skirmish_setup(leveled), "a human slot carries no AI level");
+    }
     for (std::size_t size = 0; size < encoded.size(); ++size)
         expect(!net::decode_setup_offer(std::span(encoded).first(size)), "every truncated offer must be rejected");
     auto tampered = encoded; tampered[50] ^= 1;

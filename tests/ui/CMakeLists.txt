@@ -200,4 +200,11 @@ target_compile_features(ui_player_profile_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_player_profile_tests)
 add_test(NAME ui_player_profile_contracts COMMAND ui_player_profile_tests)
 
+# #4043: the overlay's network model (stall ledger, verdict, godot.log summary line).
+add_executable(ui_net_perf_tests net_perf_tests.cpp)
+target_link_libraries(ui_net_perf_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_net_perf_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_net_perf_tests)
+add_test(NAME ui_net_perf_contracts COMMAND ui_net_perf_tests)
+
 eawr_label_tests()

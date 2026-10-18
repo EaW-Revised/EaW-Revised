@@ -151,13 +151,14 @@ std::array<AutoResolveProgress::SideRoster, 2> live_auto_resolve_progress_roster
 
 std::vector<ConflictForce> live_conflict_force_manifest(const ConflictRecord& conflict, const LayerPresence& presence) {
     const bool land = conflict.layer == BattleLayer::land;
+    const auto parties = resolve_conflict_parties(nullptr, {.admitted = &conflict});
     std::map<sim::EntityId, ConflictForce> forces;
     for (const auto* rows : {&presence.invading_forces, &presence.orbital_forces, &presence.landed}) {
         // WAR-14: raids add listed invaders and planet forces, excluding orbit fleets.
         if ((!land && rows == &presence.landed)
             || (land && conflict.raid && rows == &presence.orbital_forces)) continue;
         for (const auto& row : *rows) {
-            if (row.force.owner != conflict.invader && row.force.owner != conflict.defender) continue;
+            if (!parties.contains(row.force.owner)) continue;
             if (land ? !row.ground_capable : !row.space_allowed) continue;
             forces.emplace(row.force.id, row.force);
         }
@@ -173,7 +174,8 @@ core::Result<AutoResolveRoster> collect_live_auto_resolve_roster(const ConflictR
     AutoResolveRoster out; out.planet.id = conflict.planet;
     const auto planet = std::find_if(snapshot.planets().begin(), snapshot.planets().end(), [&](const auto& row) { return row.id == conflict.planet; });
     if (planet == snapshot.planets().end()) return fail<AutoResolveRoster>("missing conflict planet");
-    out.planet.owner = planet->owner;
+    const auto parties = resolve_conflict_parties(&snapshot, {.admitted = &conflict});
+    out.planet.owner = parties.planet_owner;
     if (!snapshot.player_economy()) return fail<AutoResolveRoster>("missing current player tech");
     for (const auto& row : snapshot.player_economy()->players) {
         if (row.current_tech < 0 || row.current_tech > std::numeric_limits<std::uint32_t>::max()) return fail<AutoResolveRoster>("invalid current tech");
@@ -214,13 +216,13 @@ core::Result<AutoResolveRoster> collect_live_auto_resolve_roster(const ConflictR
         return core::Result<void>::success();
     };
     std::vector<const gc::Fleet*> orbit;
-    for (const auto& fleet : snapshot.fleets()) if (fleet.orbit == conflict.planet && (fleet.owner == conflict.invader || fleet.owner == conflict.defender)) orbit.push_back(&fleet);
+    for (const auto& fleet : snapshot.fleets()) if (fleet.orbit == conflict.planet && parties.contains(fleet.owner)) orbit.push_back(&fleet);
     std::stable_sort(orbit.begin(), orbit.end(), [](const auto* a, const auto* b) { return std::pair(a->motion.orbit_entry, a->id) < std::pair(b->motion.orbit_entry, b->id); });
     for (const auto* fleet : orbit) {
         AutoResolveFleet entry; entry.fleet = *fleet; entry.space_capable = true;
         for (const auto& member : fleet->members) { auto added = add(add, member, fleet->owner, 0); if (!added) return core::Result<AutoResolveRoster>::failure(added.error()); }
         out.fleets.push_back(std::move(entry)); out.orbit_fleets.push_back(fleet->id);
-        (fleet->owner == conflict.invader ? out.invader_entries : out.defender_entries).push_back(fleet->id);
+        (fleet->owner == parties.invader ? out.invader_entries : out.defender_entries).push_back(fleet->id);
     }
     if (const auto* control = control_planet(snapshot, conflict.planet)) {
         for (const auto& force : control->landed) {
@@ -231,7 +233,7 @@ core::Result<AutoResolveRoster> collect_live_auto_resolve_roster(const ConflictR
     if (snapshot.production()) for (const auto& production : snapshot.production()->planets) if (production.planet == conflict.planet) {
         if (conflict.layer == BattleLayer::space && production.starbase_type) {
             const auto* base = bound(plan, types, production.starbase_type); if (!base) return fail<AutoResolveRoster>("unbound starbase type"); out.planet.base_type = base->name;
-            out.planet.owner = station_side(conflict);
+            out.planet.owner = parties.station_side;
         }
         // WAR-14: ordinary galactic ground specials retain their own actor identity.
         for (const auto& object : production.objects) if (object.domain == gc::ProductionDomain::ground && object.kind == gc::ProductionKind::structure) {
@@ -249,9 +251,9 @@ core::Result<AutoResolveRoster> collect_live_auto_resolve_roster(const ConflictR
         }
     }
     if (conflict.layer == BattleLayer::space && out.planet.base_type.empty() && conflict.station_type) {
-        const auto* base = bound(plan, types, conflict.station_type); if (!base) return fail<AutoResolveRoster>("unbound conflict base"); out.planet.base_type = base->name; out.planet.owner = station_side(conflict);
+        const auto* base = bound(plan, types, conflict.station_type); if (!base) return fail<AutoResolveRoster>("unbound conflict base"); out.planet.base_type = base->name; out.planet.owner = parties.station_side;
     }
-    if (conflict.raid) for (const auto& force : conflict.forces) if (force.owner == conflict.invader) out.raid_entries.push_back(force.id);
+    if (conflict.raid) for (const auto& force : conflict.forces) if (force.owner == parties.invader) out.raid_entries.push_back(force.id);
     for (auto& [id, object] : objects) { (void)id; out.objects.push_back(std::move(object)); }
     return core::Result<AutoResolveRoster>::success(std::move(out));
 }
@@ -515,7 +517,9 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         returned.winner = a.result.winner; returned.land = a.land; returned.station_level = a.result.station_level; returned.destroyed = a.destroyed;
         const auto snapshot = galaxy.snapshot();
         // WGM-202: the station stands for the planet's own starbase, whoever fought as the defender.
-        if (const auto* surface = control_planet(*snapshot, a.planet); surface && surface->starbase.level) returned.station_owner = surface->starbase.owner;
+        ConflictRecord admitted; admitted.planet = a.planet; admitted.invader = a.invader; admitted.defender = a.defender;
+        const auto parties = resolve_conflict_parties(snapshot.get(), {.admitted = &admitted, .current_station_owner = true});
+        returned.invader = parties.invader; returned.defender = parties.defender; returned.station_owner = parties.station_owner;
         for (const auto id : a.land_invaders) {
             std::optional<gc::SurfaceForce> force;
             if (const auto* planet = control_planet(*snapshot, a.planet)) for (const auto& row : planet->landed) if (row.id == id) force = row;
@@ -588,8 +592,9 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         if (!(land ? admits_land_conflict(presence.value()) : admits_space_conflict(presence.value()))) return core::Result<std::optional<RecordedAdmission>>::success({});
         if (first_free == std::numeric_limits<sim::EntityId>::max()) return fail<std::optional<RecordedAdmission>>("conflict allocator exhausted");
         ConflictRecord record; record.id = first_free; record.layer = land ? BattleLayer::land : BattleLayer::space; record.planet = event.value;
-        record.invader = presence.value().invader; record.defender = presence.value().defender; record.station_level = presence.value().starbase_level;
-        record.station_owner = presence.value().starbase_level ? presence.value().starbase_owner : 0; // WGM-202: the real starbase owner
+        const auto parties = resolve_conflict_parties(&snapshot, {.arrival = &event, .presence = &presence.value(), .invasion = explicit_invasion});
+        record.invader = parties.invader; record.defender = parties.defender; record.station_level = presence.value().starbase_level;
+        record.station_owner = parties.station_owner;
         record.tactical.first_free_entity_id = first_free + 1;
         record.tactical.content_identity = p->plan.galaxy().content_identity;
         record.forces = live_conflict_force_manifest(record, presence.value());
@@ -628,7 +633,7 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     std::pair<GameSession::AutoResolveStateWriter, GameSession::AutoResolveStateReader> checkpoint;
     auto adapters = make_stock_auto_resolver(filesystem, catalog, data, types, plan, census ? std::span<const gc::CensusObject>(census->objects) : std::span<const gc::CensusObject>{}, std::move(time), &checkpoint);
     if (!adapters) return core::Result<void>::failure(adapters.error());
-    GameSession::ScriptFactory scripts;
+    GameSession::ConflictLayerServices layer;
     if (!content || space) {
         if (!space) {
             auto prepared = prepare_stock_space_entry(filesystem, catalog, data, types, plan);
@@ -636,16 +641,16 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
             space = std::move(prepared).value();
         }
         if (!content) content = [space](const ConflictRecord& record) { return space->content(record); };
-        game.set_entry_resolver([space](const ConflictRecord& record, const gc::GalacticSnapshot& snapshot, sim::EntityId first_free) {
+        layer.entry = [space](const ConflictRecord& record, const gc::GalacticSnapshot& snapshot, sim::EntityId first_free) {
             return space->resolve(record, snapshot, first_free);
-        });
-        game.set_result_decorator([space](const ConflictRecord& record, const sim::tactical::TacticalSession& battle, BattleResult& result) {
+        };
+        layer.decorate = [space](const ConflictRecord& record, const sim::tactical::TacticalSession& battle, BattleResult& result) {
             return space->decorate_result(record, battle, result);
-        });
+        };
         if (auto bound = space->bind_game(game); !bound) return bound;
-        auto ai = space_entry_script_services(space);
-        scripts = std::move(ai.scripts);
-        game.set_child_configurator(std::move(ai.bind));
+        auto ai = space_entry_script_services(space, game.conflict_parent_queries(BattleLayer::space));
+        layer.scripts = std::move(ai.scripts);
+        layer.configure = std::move(ai.bind);
     }
     game.set_movement_access_provider(std::move(adapters.value().access));
     game.set_auto_resolve_progress_reader(std::move(adapters.value().progress));
@@ -653,8 +658,18 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     game.set_auto_resolver(std::move(adapters.value().resolve));
     game.set_auto_resolve_checkpoint_services(std::move(checkpoint.first), std::move(checkpoint.second));
     game.set_auto_resolve_outcome_services(std::move(adapters.value().outcomes));
-    game.set_conflict_service(std::move(adapters.value().admission), std::move(content), std::move(scripts));
-    game.set_native_conflict_service(std::move(adapters.value().native_admission));
-    return core::Result<void>::success();
+    layer.admission = std::move(adapters.value().admission);
+    layer.content = std::move(content);
+    layer.native_admission = std::move(adapters.value().native_admission);
+    // Preserve the former shared hooks for both layers. Land selection still
+    // has its existing entry capability checks; registration does not invent one.
+    auto land = layer;
+    if (space) {
+        auto ai = space_entry_script_services(space, game.conflict_parent_queries(BattleLayer::land));
+        land.scripts = std::move(ai.scripts);
+        land.configure = std::move(ai.bind);
+    }
+    if (auto installed = game.install_conflict_layer(BattleLayer::space, std::move(layer)); !installed) return installed;
+    return game.install_conflict_layer(BattleLayer::land, std::move(land));
 }
 } // namespace eawr::campaign

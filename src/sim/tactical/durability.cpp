@@ -156,6 +156,32 @@ const DurabilityProfile* DurabilityTable::find(const TypeId type_id) const noexc
     return found != profiles.end() && found->type_id == type_id ? &*found : nullptr;
 }
 
+const DifficultyScale* DurabilityTable::difficulty_of(const PlayerId player) const noexcept {
+    const auto found = std::lower_bound(difficulty.begin(), difficulty.end(), player,
+        [](const DifficultyScale& entry, const PlayerId id) { return entry.player < id; });
+    return found != difficulty.end() && found->player == player ? &*found : nullptr;
+}
+
+core::Result<DurabilityProfile> scale_profile(const DurabilityProfile& profile, const DifficultyScale& factors) {
+    using Result = core::Result<DurabilityProfile>;
+    auto scaled = profile;
+    const auto hull = math::multiply(profile.max_hull, factors.health);
+    if (!hull) return Result::failure(hull.error());
+    scaled.max_hull = hull.value();
+    for (auto& hardpoint : scaled.hardpoints) {
+        if (!hardpoint.destroyable) continue;
+        const auto health = math::multiply(hardpoint.max_health, factors.health);
+        if (!health) return Result::failure(health.error());
+        hardpoint.max_health = health.value();
+    }
+    if (profile.max_shields.raw() > 0) {
+        const auto shields = math::multiply(profile.max_shields, factors.shield);
+        if (!shields) return Result::failure(shields.error());
+        scaled.max_shields = shields.value();
+    }
+    return Result::success(std::move(scaled));
+}
+
 core::Result<void> validate_durability(const DurabilityTable& table) {
     const auto invalid = [](const std::string& message) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, message));
@@ -194,6 +220,34 @@ core::Result<void> validate_durability(const DurabilityTable& table) {
             if (hardpoint.repair_amount_per_frame.raw() < 0 || hardpoint.repair_cost_per_frame.raw() < 0
                 || hardpoint.repair_amount_per_frame.raw() > health_limit_raw) {
                 return invalid(where + ": repair values must be >= 0 and bounded by the health limit");
+            }
+        }
+    }
+    for (std::size_t index = 0; index < table.difficulty.size(); ++index) {
+        const auto& entry = table.difficulty[index];
+        const auto context = "difficulty scale of player " + std::to_string(entry.player);
+        if (index != 0 && entry.player <= table.difficulty[index - 1].player) {
+            return invalid("difficulty player IDs must strictly increase at index " + std::to_string(index));
+        }
+        const auto bounded = [](const math::Fixed value) {
+            return value.raw() >= 0 && value.raw() <= max_damage_multiplier * math::Fixed::scale;
+        };
+        if (entry.health.raw() <= 0 || !bounded(entry.health) || !bounded(entry.shield) || !bounded(entry.damage)) {
+            return invalid(context + ": the health scale must be in (0, " + std::to_string(max_damage_multiplier)
+                + "], the shield and damage scales in [0, " + std::to_string(max_damage_multiplier) + "]");
+        }
+        for (const auto& profile : table.profiles) {
+            const auto scaled = scale_profile(profile, entry);
+            if (!scaled) return invalid(context + ": " + scaled.error().message);
+            if (!within_health(scaled.value().max_hull)) {
+                return invalid(context + ": the scaled hull of type " + std::to_string(profile.type_id)
+                    + " must be in (0, " + std::to_string(max_durability_health) + "]");
+            }
+            for (const auto& hardpoint : scaled.value().hardpoints) {
+                if (hardpoint.destroyable && !within_health(hardpoint.max_health)) {
+                    return invalid(context + ": a scaled hardpoint health of type " + std::to_string(profile.type_id)
+                        + " must be in (0, " + std::to_string(max_durability_health) + "]");
+                }
             }
         }
     }

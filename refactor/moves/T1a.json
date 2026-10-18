@@ -1,0 +1,426 @@
+[
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ability_host_tests",
+    "new": "tests/galactic/cases/000_galactic_ability_host_tests.cmake#galactic_ability_host_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ability_theft_tests",
+    "new": "tests/galactic/cases/001_galactic_ability_theft_tests.cmake#galactic_ability_theft_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ability_corruption_tests",
+    "new": "tests/galactic/cases/002_galactic_ability_corruption_tests.cmake#galactic_ability_corruption_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ability_ruins_tests",
+    "new": "tests/galactic/cases/003_galactic_ability_ruins_tests.cmake#galactic_ability_ruins_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ability_hack_tests",
+    "new": "tests/galactic/cases/004_galactic_ability_hack_tests.cmake#galactic_ability_hack_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ability_destruction_tests",
+    "new": "tests/galactic/cases/005_galactic_ability_destruction_tests.cmake#galactic_ability_destruction_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_corruption_model_tests",
+    "new": "tests/galactic/cases/006_galactic_corruption_model_tests.cmake#galactic_corruption_model_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_s2_loop_tests",
+    "new": "tests/galactic/cases/007_galactic_s2_loop_tests.cmake#galactic_s2_loop_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_live_battle_ai_tests",
+    "new": "tests/galactic/cases/008_galactic_live_battle_ai_tests.cmake#galactic_live_battle_ai_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_live_campaign_setup_tests",
+    "new": "tests/galactic/cases/009_galactic_live_campaign_setup_tests.cmake#galactic_live_campaign_setup_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_income_tests",
+    "new": "tests/galactic/cases/010_galactic_income_tests.cmake#galactic_income_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_income_blocker_tests",
+    "new": "tests/galactic/cases/011_galactic_income_blocker_tests.cmake#galactic_income_blocker_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_map_input_tests",
+    "new": "tests/galactic/cases/012_galactic_map_input_tests.cmake#galactic_map_input_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_audio_tests",
+    "new": "tests/galactic/cases/013_galactic_audio_tests.cmake#galactic_audio_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_audio_feed_tests",
+    "new": "tests/galactic/cases/014_galactic_audio_feed_tests.cmake#galactic_audio_feed_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_auto_resolve_outcome_tests",
+    "new": "tests/galactic/cases/015_galactic_auto_resolve_outcome_tests.cmake#galactic_auto_resolve_outcome_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_observer_tests",
+    "new": "tests/galactic/cases/016_galactic_observer_tests.cmake#galactic_observer_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_fleet_intelligence_tests",
+    "new": "tests/galactic/cases/017_galactic_fleet_intelligence_tests.cmake#galactic_fleet_intelligence_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_fleet_hud_fixture_tests",
+    "new": "tests/galactic/cases/018_galactic_fleet_hud_fixture_tests.cmake#galactic_fleet_hud_fixture_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_weapon_action_live_fixture_tests",
+    "new": "tests/galactic/cases/019_galactic_weapon_action_live_fixture_tests.cmake#galactic_weapon_action_live_fixture_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_conflict_policy_tests",
+    "new": "tests/galactic/cases/020_galactic_conflict_policy_tests.cmake#galactic_conflict_policy_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_auto_resolve_round_tests",
+    "new": "tests/galactic/cases/021_galactic_auto_resolve_round_tests.cmake#galactic_auto_resolve_round_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_auto_resolve_strength_tests",
+    "new": "tests/galactic/cases/022_galactic_auto_resolve_strength_tests.cmake#galactic_auto_resolve_strength_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#gc_lockstep_loopback_tests",
+    "new": "tests/galactic/cases/023_gc_lockstep_loopback_tests.cmake#gc_lockstep_loopback_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_viewer_view_tests",
+    "new": "tests/galactic/cases/024_galactic_viewer_view_tests.cmake#galactic_viewer_view_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_scene_tests",
+    "new": "tests/galactic/cases/025_galactic_scene_tests.cmake#galactic_scene_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_session_tests",
+    "new": "tests/galactic/cases/026_galactic_session_tests.cmake#galactic_session_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_replay_tests",
+    "new": "tests/galactic/cases/027_galactic_replay_tests.cmake#galactic_replay_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_clock_tests",
+    "new": "tests/galactic/cases/028_galactic_clock_tests.cmake#galactic_clock_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_game_session_tests",
+    "new": "tests/galactic/cases/029_galactic_game_session_tests.cmake#galactic_game_session_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_tactical_return_tests",
+    "new": "tests/galactic/cases/030_galactic_tactical_return_tests.cmake#galactic_tactical_return_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_live_game_session_tests",
+    "new": "tests/galactic/cases/031_galactic_live_game_session_tests.cmake#galactic_live_game_session_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_campaign_score_tests",
+    "new": "tests/galactic/cases/032_galactic_campaign_score_tests.cmake#galactic_campaign_score_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_campaign_scoring_tests",
+    "new": "tests/galactic/cases/033_galactic_campaign_scoring_tests.cmake#galactic_campaign_scoring_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_live_save_tests",
+    "new": "tests/galactic/cases/034_galactic_live_save_tests.cmake#galactic_live_save_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_scripted_session_tests",
+    "new": "tests/galactic/cases/035_galactic_scripted_session_tests.cmake#galactic_scripted_session_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_game_checkpoint_tests",
+    "new": "tests/galactic/cases/036_galactic_game_checkpoint_tests.cmake#galactic_game_checkpoint_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_shared_control_tests",
+    "new": "tests/galactic/cases/037_galactic_shared_control_tests.cmake#galactic_shared_control_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_replay_corpus_generate",
+    "new": "tests/galactic/cases/038_galactic_replay_corpus_generate.cmake#galactic_replay_corpus_generate"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_route_tests",
+    "new": "tests/galactic/cases/039_galactic_route_tests.cmake#galactic_route_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_conflict_entry_tests",
+    "new": "tests/galactic/cases/040_galactic_conflict_entry_tests.cmake#galactic_conflict_entry_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_galaxy_graph_tests",
+    "new": "tests/galactic/cases/041_galactic_galaxy_graph_tests.cmake#galactic_galaxy_graph_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_fleet_tests",
+    "new": "tests/galactic/cases/042_galactic_fleet_tests.cmake#galactic_fleet_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_campaign_setup_tests",
+    "new": "tests/galactic/cases/043_galactic_campaign_setup_tests.cmake#galactic_campaign_setup_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_starting_forces_tests",
+    "new": "tests/galactic/cases/044_galactic_starting_forces_tests.cmake#galactic_starting_forces_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_reference_pages_tests",
+    "new": "tests/galactic/cases/045_galactic_reference_pages_tests.cmake#galactic_reference_pages_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_planet_hud_tests",
+    "new": "tests/galactic/cases/046_galactic_planet_hud_tests.cmake#galactic_planet_hud_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_fleet_stacks_tests",
+    "new": "tests/galactic/cases/047_galactic_fleet_stacks_tests.cmake#galactic_fleet_stacks_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_clock_input_tests",
+    "new": "tests/galactic/cases/048_galactic_clock_input_tests.cmake#galactic_clock_input_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_campaign_economy_tests",
+    "new": "tests/galactic/cases/049_galactic_campaign_economy_tests.cmake#galactic_campaign_economy_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_production_tests",
+    "new": "tests/galactic/cases/050_galactic_production_tests.cmake#galactic_production_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_seat_roles_tests",
+    "new": "tests/galactic/cases/051_galactic_seat_roles_tests.cmake#galactic_seat_roles_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_movement_tests",
+    "new": "tests/galactic/cases/052_galactic_movement_tests.cmake#galactic_movement_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_fiscal_tests",
+    "new": "tests/galactic/cases/053_galactic_fiscal_tests.cmake#galactic_fiscal_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_control_tests",
+    "new": "tests/galactic/cases/054_galactic_control_tests.cmake#galactic_control_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_surface_launch_tests",
+    "new": "tests/galactic/cases/055_galactic_surface_launch_tests.cmake#galactic_surface_launch_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_victory_tests",
+    "new": "tests/galactic/cases/057_galactic_victory_tests.cmake#galactic_victory_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_battle_dialog_tests",
+    "new": "tests/galactic/cases/058_galactic_battle_dialog_tests.cmake#galactic_battle_dialog_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_auto_resolve_live_tests",
+    "new": "tests/galactic/cases/059_galactic_auto_resolve_live_tests.cmake#galactic_auto_resolve_live_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_capture_return_tests",
+    "new": "tests/galactic/cases/060_galactic_capture_return_tests.cmake#galactic_capture_return_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_live_battle_dialog_tests",
+    "new": "tests/galactic/cases/061_galactic_live_battle_dialog_tests.cmake#galactic_live_battle_dialog_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_uninvolved_conflict_ui_tests",
+    "new": "tests/galactic/cases/062_galactic_uninvolved_conflict_ui_tests.cmake#galactic_uninvolved_conflict_ui_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_invasion_publication_tests",
+    "new": "tests/galactic/cases/063_galactic_invasion_publication_tests.cmake#galactic_invasion_publication_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_space_entry_tests",
+    "new": "tests/galactic/cases/064_galactic_space_entry_tests.cmake#galactic_space_entry_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_space_rules_tests",
+    "new": "tests/galactic/cases/065_galactic_space_rules_tests.cmake#galactic_space_rules_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_story_adapters_tests",
+    "new": "tests/galactic/cases/066_galactic_story_adapters_tests.cmake#galactic_story_adapters_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_funding_tests",
+    "new": "tests/galactic/cases/067_galactic_ai_funding_tests.cmake#galactic_ai_funding_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_story_goals_tests",
+    "new": "tests/galactic/cases/068_galactic_story_goals_tests.cmake#galactic_story_goals_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_plans_tests",
+    "new": "tests/galactic/cases/069_galactic_ai_plans_tests.cmake#galactic_ai_plans_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_plan_loading_tests",
+    "new": "tests/galactic/cases/070_galactic_ai_plan_loading_tests.cmake#galactic_ai_plan_loading_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_funding_live_tests",
+    "new": "tests/galactic/cases/071_galactic_ai_funding_live_tests.cmake#galactic_ai_funding_live_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_campaign_tests",
+    "new": "tests/galactic/cases/072_galactic_ai_campaign_tests.cmake#galactic_ai_campaign_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_profile_tests",
+    "new": "tests/galactic/cases/073_galactic_ai_profile_tests.cmake#galactic_ai_profile_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_composed_state_tests",
+    "new": "tests/galactic/cases/074_galactic_ai_composed_state_tests.cmake#galactic_ai_composed_state_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_selector_runtime_tests",
+    "new": "tests/galactic/cases/075_galactic_ai_selector_runtime_tests.cmake#galactic_ai_selector_runtime_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_frontier_runtime_tests",
+    "new": "tests/galactic/cases/076_galactic_ai_frontier_runtime_tests.cmake#galactic_ai_frontier_runtime_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_perception_encoding_tests",
+    "new": "tests/galactic/cases/077_galactic_ai_perception_encoding_tests.cmake#galactic_ai_perception_encoding_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_selector_stock_tests",
+    "new": "tests/galactic/cases/078_galactic_ai_selector_stock_tests.cmake#galactic_ai_selector_stock_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_economic_replay_tests",
+    "new": "tests/galactic/cases/079_galactic_ai_economic_replay_tests.cmake#galactic_ai_economic_replay_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_checkpoint_tests",
+    "new": "tests/galactic/cases/080_galactic_ai_checkpoint_tests.cmake#galactic_ai_checkpoint_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_interface_tests",
+    "new": "tests/galactic/cases/081_galactic_ai_interface_tests.cmake#galactic_ai_interface_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_lifecycle_tests",
+    "new": "tests/galactic/cases/082_galactic_ai_lifecycle_tests.cmake#galactic_ai_lifecycle_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_policy_snapshot_tests",
+    "new": "tests/galactic/cases/083_galactic_ai_policy_snapshot_tests.cmake#galactic_ai_policy_snapshot_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_execution_tests",
+    "new": "tests/galactic/cases/084_galactic_ai_execution_tests.cmake#galactic_ai_execution_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_freestore_tests",
+    "new": "tests/galactic/cases/085_galactic_ai_freestore_tests.cmake#galactic_ai_freestore_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_movement_tests",
+    "new": "tests/galactic/cases/086_galactic_ai_movement_tests.cmake#galactic_ai_movement_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_usability_tests",
+    "new": "tests/galactic/cases/087_galactic_ai_usability_tests.cmake#galactic_ai_usability_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_usability_stock_tests",
+    "new": "tests/galactic/cases/088_galactic_ai_usability_stock_tests.cmake#galactic_ai_usability_stock_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_perception_stock_tests",
+    "new": "tests/galactic/cases/089_galactic_ai_perception_stock_tests.cmake#galactic_ai_perception_stock_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_economy_tokens_tests",
+    "new": "tests/galactic/cases/090_galactic_ai_economy_tokens_tests.cmake#galactic_ai_economy_tokens_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_corruption_actions_tests",
+    "new": "tests/galactic/cases/091_galactic_corruption_actions_tests.cmake#galactic_corruption_actions_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_corruption_views_tests",
+    "new": "tests/galactic/cases/092_galactic_corruption_views_tests.cmake#galactic_corruption_views_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_hero_actions_tests",
+    "new": "tests/galactic/cases/093_galactic_hero_actions_tests.cmake#galactic_hero_actions_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_hero_action_views_tests",
+    "new": "tests/galactic/cases/094_galactic_hero_action_views_tests.cmake#galactic_hero_action_views_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_economy_corruption_tests",
+    "new": "tests/galactic/cases/095_galactic_economy_corruption_tests.cmake#galactic_economy_corruption_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_markup_tests",
+    "new": "tests/galactic/cases/096_galactic_ai_markup_tests.cmake#galactic_ai_markup_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_markup_stock_tests",
+    "new": "tests/galactic/cases/097_galactic_ai_markup_stock_tests.cmake#galactic_ai_markup_stock_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_access_tests",
+    "new": "tests/galactic/cases/098_galactic_ai_access_tests.cmake#galactic_ai_access_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_stream_ids_tests",
+    "new": "tests/galactic/cases/099_galactic_ai_stream_ids_tests.cmake#galactic_ai_stream_ids_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_partition_order_tests",
+    "new": "tests/galactic/cases/100_galactic_ai_partition_order_tests.cmake#galactic_ai_partition_order_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_player_state_tests",
+    "new": "tests/galactic/cases/101_galactic_ai_player_state_tests.cmake#galactic_ai_player_state_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_perception_shards_tests",
+    "new": "tests/galactic/cases/102_galactic_ai_perception_shards_tests.cmake#galactic_ai_perception_shards_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_world_reader_tests",
+    "new": "tests/galactic/cases/103_galactic_ai_world_reader_tests.cmake#galactic_ai_world_reader_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_synchronized_day_tests",
+    "new": "tests/galactic/cases/104_galactic_ai_synchronized_day_tests.cmake#galactic_ai_synchronized_day_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_ai_underworld_day_tests",
+    "new": "tests/galactic/cases/105_galactic_ai_underworld_day_tests.cmake#galactic_ai_underworld_day_tests"
+  },
+  {
+    "old": "tests/galactic/CMakeLists.txt#galactic_notice_text_tests",
+    "new": "tests/galactic/cases/106_galactic_notice_text_tests.cmake#galactic_notice_text_tests"
+  }
+]

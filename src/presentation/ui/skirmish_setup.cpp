@@ -34,9 +34,10 @@ constexpr std::array<SetupTextKey, static_cast<std::size_t>(SetupText::count_)> 
     {SetupText::game_type_space, "TEXT_GAME_TYPE_TEAM_SPACE"},
     {SetupText::game_type_land_control, "TEXT_GAME_TYPE_CAPTURE_CONTROL_POINTS"},
     {SetupText::open_player, "TEXT_OPEN_PLAYER"},
-    // The AI's difficulty is Normal until the selected level reaches the battle (WSS-36); its caption is
-    // the medium one.
+    // WSS-14, WSS-36: the AI rows are Easy, Normal and Hard; Normal's caption is the medium one.
     {SetupText::ai_player, "TEXT_AI_MEDIUM_PLAYER_NAME"},
+    {SetupText::ai_easy_player, "TEXT_AI_EASY_PLAYER_NAME"},
+    {SetupText::ai_hard_player, "TEXT_AI_HARD_PLAYER_NAME"},
     // The local player's own name stands in the first row; this is the fallback when the host gives none.
     {SetupText::host_player, "TEXT_HOST_PREFIX"},
     {SetupText::team_number, "TEXT_MP_TEAM_NUMBER"},

@@ -426,7 +426,7 @@ def scene_command(args: argparse.Namespace) -> int:
     if len(failures) > 50:
         print(f"tag_coverage: ... and {len(failures) - 50} more", file=sys.stderr)
     if failures:
-        print("tag_coverage: update docs/tag-coverage/statuses.json (docs/tag-coverage.md, 'Changing a row')",
+        print("tag_coverage: update the row's area shard under docs/tag-coverage/ (docs/tag-coverage.md, 'Changing a row')",
               file=sys.stderr)
     return 1 if failures or problems else 0
 

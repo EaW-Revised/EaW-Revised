@@ -177,7 +177,10 @@ bool MeshLossPolicy::report(PeerIndex from, const MeshLinkReport& value, Time no
             reports_[from] = value; seen_[from] = now; return true;
         }
     }
-    if (decision_ && (state_ == MeshLossState::agreeing || state_ == MeshLossState::settling)
+    // A restoration removes nobody, so a pair lost while it is pending is not its problem: it commits and the loss opens the
+    // next incident. A departure needs its survivors to stay a clique until they have settled.
+    if (decision_ && decision_->outcome == MeshLossOutcome::departure
+        && (state_ == MeshLossState::agreeing || state_ == MeshLossState::settling)
         && (decision_->survivors & mesh_seat(from))) {
         const auto remaining = static_cast<MeshSeats>(decision_->survivors & ~mesh_seat(from));
         if ((value.open & remaining) != remaining) state_ = MeshLossState::leave;
@@ -233,6 +236,14 @@ bool MeshLossPolicy::accept(PeerIndex sender, const MeshLossDecision& value, Tim
         || !value.rejoin_allowed) return false;
     const auto expected = selection(active_, value.reported, incident_, value.reports);
     if (!expected || *expected != value) return false;
+    // A restoration is the decider's own snapshot of an all-open mesh and removes nobody. A seat whose view of some pair is
+    // older than the snapshot (that pair is silent towards it, the situation that makes restoration necessary) must still be
+    // able to pledge: the snapshot above already proved it is exactly what the selection rule yields for its reports.
+    if (value.outcome == MeshLossOutcome::restored) {
+        decision_ = value;
+        acknowledged_ = mesh_seat(self_); state_ = MeshLossState::agreeing;
+        return true;
+    }
     if (value.rule == MeshLossRule::all_open && !all_open(sender, active_, reports_[sender])) return false;
     if (value.rule == MeshLossRule::majority_clique
         && (reports_[sender].open & value.survivors) != (value.survivors & ~mesh_seat(sender))) return false;

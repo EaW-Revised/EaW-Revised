@@ -5,7 +5,7 @@
 
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/diagnostic.hpp"
-#include "eawr/skirmish/start.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/data/ui/command_bar.hpp"
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/ui/layout.hpp"
@@ -232,7 +232,7 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
     const sim::tactical::DurabilityTable* durability = live.durability();
     if (tables == nullptr) return;
     for (const units::UnitType& type : tables->units) {
-        const sim::tactical::TypeId id = skirmish::type_id(type.id);
+        const sim::tactical::TypeId id = battle::type_id(type.id);
         TypeUi ui_type;
         ui_type.selectable = type.selectable;
         ui_type.bar_admitted = type.bar_admitted;

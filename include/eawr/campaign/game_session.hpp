@@ -19,12 +19,15 @@
 #include "eawr/sim/state_hash.hpp"
 #include "eawr/sim/world.hpp"
 
+#include "eawr/script/numeric/lua_number.hpp"
+
 #include <cstdint>
 #include <memory>
 #include <map>
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 
 // The game session (ADR-012, ADR-014; docs/galactic-architecture.md section 3): the one component
 // that knows both simulation layers. It owns the galaxy and its optional scripted child battle;
@@ -129,6 +132,10 @@ struct SeatBattleView {
 // Pure presentation boundary; works on published LiveGameSession ticks without a live owner.
 [[nodiscard]] core::Result<SeatBattleView> seat_battle_view(const GameTick& tick, sim::SeatId seat);
 
+using GalacticParentQuery = std::function<std::optional<script::numeric::LuaNumber>(std::string_view, sim::tactical::PlayerId)>;
+using GalacticParentQueryFactory = std::function<GalacticParentQuery(const ConflictRecord&)>;
+inline constexpr std::string_view missing_conflict_scripts = "EAWR-CONFLICT-MISSING-SCRIPTS";
+
 class GameSession final {
 public:
     GameSession(GameSession&&) noexcept;
@@ -167,12 +174,13 @@ public:
     using ContentResolver = std::function<core::Result<sim::tactical::TacticalContent>(const ConflictRecord&)>;
     using EntryResolver = std::function<core::Result<ResolvedConflictEntry>(
         const ConflictRecord&, const sim::galactic::GalacticSnapshot&, sim::EntityId)>;
+    // Assembly seams for synthetic owners; a complete layer install seals these setters.
     void set_entry_resolver(EntryResolver resolver);
     [[nodiscard]] bool has_entry_resolver() const noexcept;
     using ScriptFactory = std::function<core::Result<script::authoritative::ScriptScheduler>(const ConflictRecord&)>;
     // Resolvers rebuild pinned content/scripts without embedding content tables in replay state.
     [[nodiscard]] static core::Result<GameSession> from_recording(const GameRecording& recording,
-        ContentResolver content, ScriptFactory scripts = {});
+        ContentResolver content, ScriptFactory scripts = {}, ScriptRequirement requirement = ScriptRequirement::required);
     [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_checkpoint_state() const;
     [[nodiscard]] core::Result<void> load_checkpoint_state(std::span<const std::uint8_t>);
     using AutoResolveStateWriter = std::function<core::Result<std::vector<std::uint8_t>>()>;
@@ -198,7 +206,9 @@ public:
     // This is not a player-input path. The caller supplies immutable content matching its identity.
     [[nodiscard]] core::Result<void> stage_battle(ConflictRecord record, const sim::tactical::TacticalContent& content,
         script::authoritative::ScriptScheduler scripts);
-    [[nodiscard]] core::Result<void> stage_battle(ConflictRecord record, const sim::tactical::TacticalContent& content);
+    // An explicit scriptless synthetic stage cannot bypass an installed layer's requirement.
+    [[nodiscard]] core::Result<void> stage_battle(ConflictRecord record, const sim::tactical::TacticalContent& content,
+        ScriptRequirement requirement = ScriptRequirement::required);
     using ResultApplier = std::function<core::Result<void>(sim::galactic::GalacticSession&, const BattleResult&)>;
     using ResultDecorator = std::function<core::Result<void>(const ConflictRecord&,
         const sim::tactical::TacticalSession&, BattleResult&)>;
@@ -271,10 +281,27 @@ public:
     // record. No distance heuristic, map default, frame schedule or solver is inferred here.
     using ConflictService = std::function<core::Result<std::optional<RecordedAdmission>>(
         const sim::galactic::GalacticSnapshot&, const sim::galactic::GalacticEvent&, sim::EntityId)>;
-    void set_conflict_service(ConflictService service, ContentResolver content, ScriptFactory scripts = {});
+    void set_conflict_service(ConflictService service, ContentResolver content, ScriptFactory scripts = {}, ScriptRequirement requirement = ScriptRequirement::required);
     using NativeConflictService = std::function<core::Result<std::optional<RecordedAdmission>>(
         const sim::galactic::GalacticSnapshot&, const sim::galactic::GalacticSession::NativeInvasion&, sim::EntityId)>;
     void set_native_conflict_service(NativeConflictService service);
+    struct ConflictLayerServices {
+        EntryResolver entry;
+        ContentResolver content;
+        ScriptFactory scripts;
+        ChildConfigurator configure;
+        ResultDecorator decorate;
+        ResultApplier apply;
+        ConflictService admission;
+        NativeConflictService native_admission;
+        ScriptRequirement script_requirement{ScriptRequirement::required};
+    };
+    // One complete install per layer, before child construction. Parent queries are additive.
+    [[nodiscard]] core::Result<void> install_conflict_layer(BattleLayer, ConflictLayerServices);
+    [[nodiscard]] core::Result<void> add_conflict_parent_queries(BattleLayer, GalacticParentQueryFactory);
+    [[nodiscard]] bool has_conflict_parent_queries(BattleLayer) const noexcept;
+    [[nodiscard]] GalacticParentQueryFactory conflict_parent_queries(BattleLayer) const;
+
     using CorruptionMissionService = std::function<core::Result<std::optional<RecordedAdmission>>(
         const sim::galactic::GalacticSnapshot&, const sim::galactic::LiveCorruptionMission&,
         const sim::galactic::CorruptionChoice&, sim::EntityId)>;

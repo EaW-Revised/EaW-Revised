@@ -1,6 +1,22 @@
 #pragma once
 
-#include "session_types.hpp"
+#include "session_store_outcome.hpp"
+#include "session_store_abilities.hpp"
+#include "session_store_bonuses.hpp"
+#include "session_store_diagnostics.hpp"
+#include "session_store_economy.hpp"
+#include "session_store_rules.hpp"
+#include "session_store_environment.hpp"
+#include "session_store_healing.hpp"
+#include "session_store_publication.hpp"
+#include "session_store_squadrons.hpp"
+#include "session_store_visibility.hpp"
+#include "session_store_reinforcements.hpp"
+#include "session_store_paths.hpp"
+#include "session_store_projectiles.hpp"
+#include "session_store_station_spawn.hpp"
+#include "session_store_registry.hpp"
+#include "session_store_commands.hpp"
 #include "blast_internal.hpp"
 #include "combat_internal.hpp"
 #include "staging.hpp"
@@ -11,6 +27,8 @@
 #include <tuple>
 
 namespace eawr::sim::tactical {
+
+namespace session_detail { struct CanonicalCounts; struct CanonicalEncoding; }
 
 using namespace session_detail;
 
@@ -41,11 +59,41 @@ inline constexpr std::uint64_t synthesised_command_bit = std::uint64_t{1} << 63;
     }
 }
 
-class TacticalSession::Impl final {
+// Base order preserves the original field construction and reverse destruction order.
+// Canonical state and checkpoints enumerate named fields, never object layout.
+class TacticalSession::Impl final
+    : public session_detail::SessionStoreRetreat,
+      public session_detail::SessionStoreAbilityLocks,
+      public session_detail::SessionStoreBonuses,
+      public session_detail::SessionStoreInitialization,
+      public session_detail::SessionStoreIncomeService,
+      public session_detail::SessionStoreAbilityEffects,
+      public session_detail::SessionStoreRules,
+      public session_detail::SessionStorePads,
+      public session_detail::SessionStoreEnvironment,
+      public session_detail::SessionStoreHealing,
+      public session_detail::SessionStoreEconomy,
+      public session_detail::SessionStoreOutcome,
+      public session_detail::SessionStoreHistory,
+      public session_detail::SessionStoreSquadronRoster,
+      public session_detail::SessionStoreVisibility,
+      public session_detail::SessionStoreReinforcements,
+      public session_detail::SessionStorePaths,
+      public session_detail::SessionStoreProjectiles,
+      public session_detail::SessionStoreFlightScratch,
+      public session_detail::SessionStoreTickWork,
+      public session_detail::SessionStoreChaseScratch,
+      public session_detail::SessionStoreFlights,
+      public session_detail::SessionStoreStationSpawn,
+      public session_detail::SessionStoreDeathSpins,
+      public session_detail::SessionStoreCollections,
+      public session_detail::SessionStoreProjectileIds,
+      public session_detail::SessionStoreRegistry,
+      public session_detail::SessionStoreCommands,
+      public session_detail::SessionStoreObjectTurn,
+      public session_detail::SessionStoreSpecialWeapons,
+      public session_detail::SessionStorePublication {
 public:
-    std::optional<RetreatConfig> retreat;
-    RetreatState retreat_state;
-    std::optional<PlayerId> midbattle_solve;
     [[nodiscard]] RetreatGate retreat_gate(PlayerId player) const;
     [[nodiscard]] std::vector<RetreatView> retreat_views() const;
     [[nodiscard]] std::vector<RetreatActor> retreat_actors(const UnitStage* staged = nullptr) const;
@@ -68,43 +116,19 @@ public:
 
     [[nodiscard]] LiveUnit new_unit(const UnitState& unit, const std::uint64_t frame) const;
 
-    NamedAbilityLocks named_ability_locks;
-    // Derived from canonical unit types; sparse lifecycle hooks maintain it during a battle.
-    using RadarRoster = std::map<EntityId, std::vector<std::size_t>>;
-    RadarRoster radar_roster;
     [[nodiscard]] std::vector<std::size_t> radar_slots(TypeId type) const;
     [[nodiscard]] core::Result<std::vector<SnapshotPlayer>> publish_named_abilities(
         std::vector<LiveUnit>& units, const NamedAbilityLocks&, const RadarRoster&, const PartitionExecutor&) const;
 
     [[nodiscard]] const DurabilityProfile* health_profile(const LiveUnit& unit) const noexcept;
+    // WTA-46: a type's profile as `owner`'s objects have it, before any upgrade bonus: the table's
+    // profile, or the owner's difficulty-scaled copy. Resolved at the current owner, so a transfer
+    // between players of different levels changes it (apply_bonuses restores the percentages).
+    [[nodiscard]] const DurabilityProfile* base_profile(PlayerId owner, TypeId type) const noexcept;
+    // WTA-46: a cause-damage mode (WHE-51; 1 for a shooter that is gone) times the difficulty damage
+    // scale of the shooter's owner. A Normal owner returns the mode itself.
+    [[nodiscard]] core::Result<math::Fixed> caused_damage(math::Fixed mode, PlayerId owner) const;
 
-    // WPR-51: component-wise largest per stacking category, then sum distinct categories.
-    using OwnershipKey = std::pair<PlayerId, TypeId>;
-    std::vector<OwnershipKey> ownership_keys;
-    std::vector<std::uint64_t> ownership_counts;
-    std::vector<std::uint64_t> committed_ownership_counts;
-    std::vector<std::uint64_t> ownership_parts;
-    std::vector<std::uint32_t> bonus_categories;
-    std::vector<CombatBonuses> bonus_profiles;
-    std::vector<CombatBonuses> committed_bonus_profiles;
-    std::vector<CombatBonuses> bonus_parts;
-    std::vector<IncomeCategory> income_category_parts;
-    struct CommandSource {
-        EntityId id{}, host{};
-        std::size_t profile{};
-        std::vector<EntityId> targets;
-        friend bool operator==(const CommandSource&, const CommandSource&) = default;
-    };
-    struct CommandLedger {
-        std::vector<CommandSource> sources;
-        std::map<EntityId, std::vector<std::size_t>> recipients;
-        std::map<PlayerId, std::vector<std::pair<std::uint32_t, math::Fixed>>> battlefield_defence;
-        std::vector<std::pair<PlayerId, math::Fixed>> reveal_multipliers;
-    };
-    CommandLedger command_ledger;
-    // WGT-50: last multiplier consumed by fog, indexed by bounded setup player order.
-    std::array<math::Fixed, max_players> last_fog_multipliers{};
-    bool fog_modifiers_dirty{}; // derived event hint; no checkpoint field
     [[nodiscard]] std::array<math::Fixed, max_players> fog_multipliers(const CommandLedger& ledger) const {
         std::array<math::Fixed, max_players> values{};
         for (std::size_t i = 0; i < setup.players.size(); ++i) {
@@ -116,7 +140,6 @@ public:
         }
         return values;
     }
-    std::optional<core::Diagnostic> initialization_error;
     [[nodiscard]] core::Result<CommandLedger> update_command_ledger(const std::vector<LiveUnit>& live,
         const EntityId first_new, const PartitionExecutor& executor) const;
     [[nodiscard]] CombatBonuses command_bonuses_for(const LiveUnit& unit, const CommandLedger& ledger,
@@ -125,15 +148,6 @@ public:
         bool targeted_effects = true, std::optional<PlayerId> owner = std::nullopt) const;
     [[nodiscard]] core::Result<void> apply_command_bonuses(std::vector<LiveUnit>& live, const CommandLedger& ledger,
         const std::vector<PlayerEconomy>& accounts, const EntityId first, const PartitionExecutor& executor) const;
-    struct IncomeServiceRef {
-        PlayerId owner{};
-        EntityId object{};
-        std::size_t slot{};
-        const IncomeModifier* profile{};
-        IncomeModifierState* state{};
-        bool residual{};
-    };
-    std::vector<IncomeServiceRef> income_service_refs;
     [[nodiscard]] core::Result<void> service_income_modifiers(std::vector<PlayerEconomy>& accounts,
         std::span<const LiveUnit> live, std::span<const std::pair<EntityId, PlayerId>> streams,
         std::uint64_t frame, const PartitionExecutor& executor, bool initialization_only = false);
@@ -161,8 +175,10 @@ public:
 
     // WPR-51: a changed maximum adds its delta to current hull/shield/energy; hardpoints scale.
     enum class BonusAdjustment { legacy, gain, loss, ownership };
+    // `previous` (ownership only): the profile the unit had before the transfer, when the new owner's
+    // difficulty scales it differently (WTA-46); the percentages restore against it.
     [[nodiscard]] core::Result<void> apply_bonuses(LiveUnit& unit, const CombatBonuses& bonuses,
-        BonusAdjustment adjustment = BonusAdjustment::legacy) const;
+        BonusAdjustment adjustment = BonusAdjustment::legacy, const DurabilityProfile* previous = nullptr) const;
     [[nodiscard]] core::Result<void> transfer_owner(LiveUnit& unit, PlayerId owner,
         const CombatBonuses& bonuses) const;
 
@@ -172,26 +188,6 @@ public:
     // #76: a unit whose type has abilities enters with every one off and ready (AB-10).
     [[nodiscard]] std::optional<AbilityState> entering_abilities(const TypeId type, const PlayerId owner) const;
     void refresh_damage_modes(session_detail::LiveUnit& unit) const;
-    struct ConcentrateEffect {
-        EntityId target{}, source{};
-        std::uint32_t category{};
-        math::Fixed defense{};
-        math::Fixed speed{};
-        AbilityKind kind{AbilityKind::concentrate_fire};
-        math::Fixed cause{};
-        friend bool operator==(const ConcentrateEffect&, const ConcentrateEffect&) = default;
-    };
-    // Derived source references; only activation recruits, service never scans recipients.
-    std::vector<ConcentrateEffect> concentrate_effects;
-    std::set<EntityId> concentrate_changed_targets;
-    std::size_t concentrate_service_census{};
-    EntityId concentrate_service_last_id{};
-    mutable std::map<EntityId, std::vector<CombatBonuses>> impact_bonus_bases;
-    mutable std::map<EntityId, TypeId> impact_bonus_containers;
-    mutable bool impact_bonus_containers_ready{};
-    std::vector<EntityId> beam_replans;
-    std::vector<AbilitySpawnState> ability_spawns; // ascending shared projectile IDs; HABL
-    std::vector<BuzzDroidState> buzz_droids; // WAB-71..74: ascending droid entity IDs; BUZZ
     [[nodiscard]] const BuzzDroidsProfile* buzz_profile(TypeId source) const;
     [[nodiscard]] const SpawnedAbilityProfile* spawn_profile(TypeId) const;
     [[nodiscard]] core::Result<void> service_weaken(std::vector<LiveUnit>&, std::uint64_t, const PartitionExecutor&);
@@ -432,15 +428,6 @@ public:
     [[nodiscard]] core::Result<void> plan_path(LiveUnit& unit, const math::Vec3 target, const std::uint64_t start,
         const CollisionWorld* world, const std::optional<math::Fixed> max_speed, PathSearchStats* const stats) const;
 
-    // What plan_path plans from (PC-08): the unit's position, yaw and speed, and its limits
-    // under a group move's `max_speed`.
-    struct PathInputs {
-        math::Vec3 position{};
-        math::Fixed yaw{};
-        math::Fixed speed{};
-        MotionProfile limits{};
-        friend bool operator==(const PathInputs&, const PathInputs&) noexcept = default;
-    };
     [[nodiscard]] core::Result<PathInputs> path_inputs(const LiveUnit& unit, const std::optional<math::Fixed> max_speed) const;
 
     // plan_path's last step: the unit takes `plan`.
@@ -453,19 +440,6 @@ public:
         const CollisionWorld* world, const std::optional<math::Fixed> max_speed, PathSearchStats* const stats,
         const std::optional<std::uint64_t> budget) const;
 
-    // A path search that runs in slices and lands at `frame` (PC-08, #520): the plan the unit
-    // would make at `frame` towards `target`, from where its current plan puts it then, against
-    // its layer and the static layer as `world` holds them now. `inputs` is what it plans from;
-    // the landing takes the plan only while the unit still plans from exactly that.
-    struct SlicedSearch {
-        SlicedPathSearch search;
-        std::uint64_t frame{};
-        math::Vec3 target{};
-        std::optional<math::Fixed> max_speed;
-        PathInputs inputs;
-        // PC-09: the plan, once the search has ended; its unit's layer predicts it from then on.
-        std::optional<MotionState> plan;
-    };
     [[nodiscard]] core::Result<SlicedSearch> start_sliced(const LiveUnit& unit, const math::Vec3 target,
         const std::optional<math::Fixed> max_speed, const std::uint64_t now, const std::uint64_t frame,
         const CollisionWorld& world) const;
@@ -560,128 +534,84 @@ public:
     [[nodiscard]] std::vector<std::uint8_t> canonical_bytes() const;
     [[nodiscard]] std::vector<std::uint8_t> canonical_bytes(const PartitionExecutor& executor) const;
     [[nodiscard]] std::vector<std::uint8_t> canonical_bytes(std::span<const LiveUnit> units,
-        std::span<const std::vector<std::uint8_t>> encoded_units) const;
+        std::span<const std::vector<std::uint8_t>> encoded_units,
+        const CanonicalEncoding* encoding = nullptr) const;
     void append_canonical_unit(std::vector<std::uint8_t>& bytes, const LiveUnit& unit) const;
+    void append_canonical_units_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const std::span<const std::vector<std::uint8_t>> encoded_units) const;
+    void append_canonical_garrison_enabled_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_named_locks_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_special_weapons_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_garrisons_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_manual_weapons_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_turrets_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_squadrons_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_fog_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_tracking_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_roll_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_projectiles_state(std::vector<std::uint8_t>& bytes,
+        std::span<const std::vector<std::uint8_t>> encoded = {}) const;
+    void append_canonical_blast_damage_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_formation_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_approach_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_sightings_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_garrison_marks_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_craft_state(std::vector<std::uint8_t>& bytes,
+        std::span<const std::vector<std::uint8_t>> encoded = {}) const;
+    void append_canonical_squadron_orders_state(std::vector<std::uint8_t>& bytes,
+        std::span<const std::vector<std::uint8_t>> encoded = {}) const;
+    void append_canonical_attack_paths_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_hangars_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_collection_state(std::vector<std::uint8_t>& bytes,
+        std::span<const std::vector<std::uint8_t>> encoded = {}) const;
+    void append_canonical_projectile_collection_state(std::vector<std::uint8_t>& bytes,
+        std::span<const std::vector<std::uint8_t>> encoded = {}) const;
+    void append_canonical_economy_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_arrivals_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_pads_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_population_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_arrival_defence_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_upgrades_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_level_up_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_income_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_outcome_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_abilities_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr,
+        std::span<const std::vector<std::uint8_t>> encoded = {}) const;
+    void append_canonical_stealth_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_stealth_end_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_self_destruct_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_mc30_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_ion_stuns_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_hazard_moves_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_asteroids_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_engine_disable_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_nebula_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_storms_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_damage_tracking_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_command_bonuses_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_heroes_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_projectile_defence_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_special_abilities_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_concentrate_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_ability_spawns_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_buzz_requests_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_buzz_droids_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_spins_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_departure_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_quits_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_pool_tokens_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_queue_identities_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_cinematic_seats_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_campaign_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_corruption_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_charged_blast_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_waypoints_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_beacons_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_order_history_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     [[nodiscard]] bool special_weapons_enabled(PlayerId player, const std::vector<PlayerEconomy>& accounts,
         const UnitStage* live = nullptr, const std::set<PlayerId>* staged_disabled = nullptr) const;
 
-    TacticalSetup setup;
-    std::vector<SensorProfile> sensors;
-    DurabilityTable durability;
-    MotionTable motion;
-    CombatTable combat;
-    std::map<std::pair<TypeId, std::uint32_t>, std::shared_ptr<const WeaponProfile>> manual_admission_profiles;
-    VictoryRules victory;
-    AbilityTable abilities;
-    EconomyRules economy;                           // #530
-    MapBox map_box;                                 // WDF-05: the fighter grids' low corner
-    std::map<EntityId, PadState> pads;
-    std::map<EntityId, ConstructionState> construction;
-    ObjectStage<PadState> pad_stage;
-    ObjectStage<ConstructionState> construction_stage;
-    std::vector<CaptureJob> capture_jobs; // pad-sized, retained; no world-sized outputs
-    std::vector<CaptureCandidate> capture_inputs;
-    std::array<CaptureScratch, tick_partition_count> capture_scratch;
-    AsteroidScratch asteroid_scratch; // retained scratch, never canonical state
-    NebulaScratch nebula_scratch;
-    struct HealingPulse { std::size_t source{}, target{}, slot{}; std::uint32_t hardpoint{hull_target}; };
-    struct HealingJob { std::size_t target{}, begin{}, end{}; };
-    struct HealingScratch {
-        std::vector<math::Fixed> fractions;
-        std::array<std::vector<HealingPulse>, tick_partition_count> outputs;
-        std::vector<HealingPulse> pulses;
-        std::vector<HealingJob> jobs;
-        std::vector<std::optional<core::Diagnostic>> errors;
-    } healing_scratch;
     core::Result<void> service_healing(std::vector<LiveUnit>& units, const std::map<EntityId, ArrivalState>& arrivals,
         std::uint64_t tick, const PartitionExecutor& executor, std::vector<CombatEvent>& events);
-    std::vector<PlayerEconomy> ledgers;             // #530: per economy player, ascending ID
-    std::map<EntityId, ArrivalState> arrivals;      // #530: arriving units (PU-35)
-    std::map<EntityId, PopulationShare> shares;     // #530: reinforced units' population (PU-21)
-    std::vector<std::pair<EntityId, PlayerId>> earners; // #530: live income stations, ascending ID
-    std::vector<IncomePayment> income_payments; // retained partition outputs, never canonical state
-    std::map<EntityId, RespawnBatch> respawns; // due frame -> creation requests, in death order
-    std::vector<StarbaseEntry> starbases;   // counted star bases standing, ascending ID (#77)
-    std::optional<BattleOutcome> outcome;   // hashed once decided (#77)
-    std::vector<DepartureControl> departure_controls;
-    std::vector<PlayerId> basic_ai; // MP-37: departed factions retaining ownership under an AI controller
-    std::vector<PlayerQuit> quits; // WBF-48: committed departure status, ascending player ID
-    std::vector<BeaconState> beacons; // HCB-12: at most one active beacon per issuer.
-    // WBF-45: immutable history is shared by snapshots between sparse notification commits.
-    std::shared_ptr<const std::vector<BattleLoss>> losses = std::make_shared<const std::vector<BattleLoss>>();
-    std::shared_ptr<const std::vector<BattleProduction>> productions = std::make_shared<const std::vector<BattleProduction>>();
-    std::shared_ptr<const std::vector<BattleEconomyCue>> economy_cues = std::make_shared<const std::vector<BattleEconomyCue>>();
-    std::vector<SnapshotPlayer> snapshot_players;
-    std::map<PlayerId, TeamId> teams;
-    std::vector<Squadron> squadrons; // live, ascending container ID (#271)
-    std::optional<FogCells> fog;     // bound fog rules only (#274)
-    // Per dynamic tracking layer (#71, AV-03): the frame of its last rebuild; its windows roll
-    // every tracking interval from there.
-    std::array<std::uint64_t, 4> tracking_anchor{};
-    std::map<CommandKey, TacticalSession::ReinforcementSearch> reinforcement_searches;
-    std::array<std::uint8_t, 32> campaign_binding{}; // derived from the sealed initial replay setup
-    std::map<std::pair<PlayerId, std::uint64_t>, TacticalSession::ReinforcementSearchResult> reinforcement_search_results;
-    // Path searches running in slices (PC-08, #520), by unit; each unit waits for its search
-    // with a sliced FormationWait of the same frame. A search's copied views and progress are a
-    // function of the ticks before it, and its wait is hashed.
-    std::map<EntityId, SlicedSearch> searches;
-    std::vector<Projectile> projectiles; // in flight, ascending ID (#74)
-    struct PendingBlastDamage {
-        std::uint64_t due{};
-        PlayerId owner{};
-        std::uint32_t damage_type{no_type_index};
-        bool internal_damage_misc{true};
-        EntityId recipient{};
-        math::Fixed amount{};
-        std::string contacted_mesh;
-    };
-    std::vector<PendingBlastDamage> pending_blast_damage;
-    // #636: the projectile phase's candidate buffers, one per partition, kept from tick to tick
-    // (not state: they only hold capacity and the tick's work counts).
-    std::array<detail::ProjectileScratch, tick_partition_count> projectile_scratch;
-    std::map<EntityId, math::TrigCache> craft_trig; // scratch; one writer per craft
-    TacticalSession::TickWork tick_work{};
-    // #893: query buffers belong exclusively to their phase partition; staged
-    // lists retain their high-water capacity and are committed in scanner order.
-    std::array<ChaseQueryScratch, tick_partition_count> chase_scratch;
-    std::vector<std::vector<EntityId>> chase_candidates;
-    std::map<EntityId, CraftState> crafts;     // #75: squadron craft that fly by a craft profile
-    std::map<EntityId, SquadronState> minds;   // #75: by container, squadrons of a known type
-    std::map<EntityId, SpawnerState> spawners; // #75: hangars of SPAWN_SQUADRON units
-    struct FreeGarrisonState {
-        FreeGarrisonSetup setup;
-        std::vector<EntityId> registered;
-        std::optional<std::uint64_t> due_frame;
-        std::vector<TypeId> pending;
-    };
-    std::vector<FreeGarrisonState> free_garrisons; // FL-14: player order, committed only after successful ticks
-    std::vector<DeathSpin> spins;              // #447: killed craft spinning away, ascending ID
-    detail::CollectionTrees collection;        // #469: the candidate order of target scans
-    detail::CollectionTrees projectile_collection; // DG-30: owned projectile-collidable history
-    std::uint64_t next_projectile{1};
-    entt::registry registry;
-    std::map<EntityId, entt::entity> handles;
-    std::uint64_t completed_tick{};
-    EntityId next_id{};
-    std::uint64_t rng_state{};
-    std::map<CommandKey, PlayerCommand> pending;
-    std::map<PlayerId, std::pair<std::uint64_t, std::uint64_t>> last_submitted;
-    std::vector<PlayerCommand> executed;
-    // #3644 object turn: the provider (not state), the re-entrancy guard held while it runs, the replayed
-    // uses that wait for their tick's seam, and the uses already applied (the replay's object_turns).
-    std::shared_ptr<ObjectTurnService> object_turn;
-    bool object_turn_running{};
-    std::map<std::tuple<std::uint64_t, EntityId, std::uint64_t>, ObjectTurnRecord> object_turn_pending;
-    std::vector<ObjectTurnRecord> object_turns_executed;
-    std::map<PlayerId, ManualPlayerClock> manual_clocks; // WAD-40: shared across stations
-    std::map<EntityId, SpecialWeaponState> special_weapons; // WSW-14/19: persistent planetary sources.
-    std::set<PlayerId> special_disabled_by_hardpoint; // WSW-48: absence is the default enabled permission
-    std::vector<EntityId> projectile_defence_order; // coordinator-reserved PDEF; empty implies static creation order
-    bool waypoint_queues_present{}; // Derived component-commit gate, outside canonical state.
-    std::shared_ptr<const TacticalSnapshot> current_snapshot;
-    std::uint64_t registry_emplacement_count{};
-    std::function<void(std::string_view, bool)> commit_observer;
-    std::shared_ptr<StateHasher> hasher; // #637: null hashes on the stepping thread
 };
 
 } // namespace eawr::sim::tactical

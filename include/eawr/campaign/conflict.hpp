@@ -16,6 +16,7 @@ namespace eawr::campaign {
 // Value records for the boundary in galactic architecture section 3. No health crosses it
 // (WGT-24); roster selection, map placement and reconciliation remain their rule owners' work.
 enum class BattleLayer { space, land };
+enum class ScriptRequirement { required, none }; // none is an explicit synthetic, scriptless owner
 enum class ForceRole { deployed, reinforcement, escort, rider, retained, orbital };
 struct ConflictForce {
     sim::EntityId id{};
@@ -62,9 +63,7 @@ struct ConflictRecord {
 };
 
 // WGM-202: the tactical station fights for its starbase owner when that is a battle side, otherwise for the defender.
-[[nodiscard]] constexpr sim::galactic::PlayerId station_side(const ConflictRecord& record) noexcept {
-    return record.station_owner == record.invader || record.station_owner == record.defender ? record.station_owner : record.defender;
-}
+[[nodiscard]] sim::galactic::PlayerId station_side(const ConflictRecord& record) noexcept;
 
 enum class ForceDisposition { survived, destroyed, retreated, destroy_after_tactical };
 struct ForceResult {

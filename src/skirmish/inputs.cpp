@@ -1,4 +1,5 @@
 #include "eawr/skirmish/start.hpp"
+#include "eawr/skirmish/ai.hpp"
 #include "eawr/skirmish/setup.hpp"
 
 #include "eawr/assets/map.hpp"
@@ -659,6 +660,7 @@ core::Result<StartInputs> read_start_inputs(
     if (!identity) return Result::failure(identity.error());
     inputs.script_manifest_digest = identity.value().script_manifest_digest;
     inputs.ai_data_digest = identity.value().ai_data_digest;
+    inputs.difficulty = load_difficulty_table(filesystem);
 
     auto record = filesystem.stat(fixture.map);
     if (!record) return Result::failure(record.error());

@@ -90,7 +90,7 @@ void journal_selection() {
     std::optional<std::string> hash;
     for (const std::size_t count : {1U, 2U, 4U, 8U}) {
         eawr::platform::ThreadWorkerAdapter executor(count); auto game = take(cp::GameSession::create(setup));
-        game.set_conflict_service([](const auto&, const auto&, auto) { return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({}); }, unused_tactical_content());
+        game.set_conflict_service([](const auto&, const auto&, auto) { return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({}); }, unused_tactical_content(), {}, eawr::campaign::ScriptRequirement::none);
         std::size_t calls{}, applications{}, legacy_calls{};
         game.set_result_applier([&](auto&, const auto&) { ++legacy_calls; return eawr::core::Result<void>::success(); });
         game.set_auto_resolver([&](const auto& record, const auto&, const auto&) {
@@ -418,7 +418,7 @@ void installed() {
         for (const std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter executor(count); auto game = take(cp::GameSession::create(fixture.setup));
             auto adapters = take(cp::make_stock_auto_resolver(filesystem, catalog.catalog, data, types, plan, fixture.originals));
-            game.set_conflict_service([](const auto&, const auto&, auto) { return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({}); }, unused_tactical_content());
+            game.set_conflict_service([](const auto&, const auto&, auto) { return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({}); }, unused_tactical_content(), {}, eawr::campaign::ScriptRequirement::none);
             game.set_movement_access_provider(std::move(adapters.access));
             game.set_auto_resolver(std::move(adapters.resolve)); game.set_auto_resolve_progress_reader(std::move(adapters.progress)); game.set_auto_resolve_outcome_services(std::move(adapters.outcomes));
             if (scenario == 0) {
@@ -449,7 +449,7 @@ void installed() {
                     "real stock solver publishes initiation and first-withdraw admission");
                 const auto identities = eawr::checkpoint::game_identities(native_setup);
                 const auto initial = take(eawr::checkpoint::save_game_checkpoint(native, identities));
-                eawr::checkpoint::GameLoadOptions load; load.content = unused_tactical_content(); load.configure_session = configure;
+                eawr::checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.content = unused_tactical_content(); load.configure_session = configure;
                 auto ready = take(eawr::checkpoint::load_game_checkpoint(initial, identities, load, executor));
                 expect(ready.session.state_sha256() == native.state_sha256() && ready.session.auto_resolve_progress()->withdraw_admitted,
                     "stock reload reinstalls progress and withdrawal before resumed input");
@@ -540,7 +540,7 @@ void withdrawal_command() {
         auto game = take(cp::GameSession::create(setup));
         game.set_conflict_service([](const auto&, const auto&, auto) {
             return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({});
-        }, unused_tactical_content());
+        }, unused_tactical_content(), {}, eawr::campaign::ScriptRequirement::none);
         cp::AutoResolveProgress progress; progress.conflict = 100;
         persist_progress(game, progress);
         game.set_auto_resolve_progress_reader([&] { return std::optional(progress); });
@@ -569,7 +569,7 @@ void withdrawal_command() {
         const auto identities = eawr::checkpoint::game_identities(setup);
         const auto saved = take(eawr::checkpoint::save_game_checkpoint(game, identities));
         cp::AutoResolveProgress restored_progress; restored_progress.conflict = 100;
-        eawr::checkpoint::GameLoadOptions load; load.content = unused_tactical_content();
+        eawr::checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.content = unused_tactical_content();
         load.configure_session = [&](cp::GameSession& session) {
             persist_progress(session, restored_progress);
             session.set_auto_resolve_progress_reader([&] { return std::optional(restored_progress); });

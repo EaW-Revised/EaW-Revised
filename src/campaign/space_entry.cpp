@@ -1,4 +1,5 @@
 #include "eawr/campaign/space_entry.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/script/authoritative/clock_rng.hpp"
 #include "eawr/sim/math/trig.hpp"
 #include "eawr/sim/tactical/motion.hpp"
@@ -37,12 +38,12 @@ const SpaceEntryType* named_type(const SpaceEntryInputs& input, std::string_view
     });
     return at == input.types.end() ? nullptr : &*at;
 }
-std::vector<const skirmish::MapPlacement*> markers(const skirmish::StartInputs& map, std::string_view name) {
-    std::vector<const skirmish::MapPlacement*> result;
+std::vector<const battle::MapPlacement*> markers(const skirmish::StartInputs& map, std::string_view name) {
+    std::vector<const battle::MapPlacement*> result;
     for (const auto& p : map.placements) if (p.marker && folded(p.type) == folded(name)) result.push_back(&p);
     return result;
 }
-bool usable(const skirmish::MapPlacement& p) {
+bool usable(const battle::MapPlacement& p) {
     return p.position && p.orientation_degrees && p.orientation_degrees->x == Fixed{}
         && p.orientation_degrees->y == Fixed{};
 }
@@ -217,7 +218,7 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
         for (const auto& s : structures) {
             const auto* type = type_of(input, s.type);
             if (type->orbital) {
-                std::vector<const skirmish::MapPlacement*> candidates;
+                std::vector<const battle::MapPlacement*> candidates;
                 for (const auto& p : input.map.placements) if (p.marker && !used.contains(p.record)
                     && std::any_of(p.marker_for.begin(), p.marker_for.end(), [&](const auto& c) {
                         return folded(c.type) == folded(type->every_marker_type.empty() ? type->tactical : type->every_marker_type);
@@ -251,7 +252,7 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
             if (type->special_weapon) {
                 // WGT-13: first source, or the origin without one. Synthesize a marker from
                 // its copied pose; source backdrops need not be designer markers.
-                skirmish::MapPlacement source;
+                battle::MapPlacement source;
                 const auto at = std::find_if(input.map.placements.begin(), input.map.placements.end(), [](const auto& p) { return p.special_weapon_source; });
                 source.position = Vec3{}; source.orientation_degrees = Vec3{};
                 if (at != input.map.placements.end()) source = *at;
@@ -293,7 +294,7 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
         const auto* type = type_of(input, force->type);
         const auto& initial = initial_forces.at(force->owner);
         if (type->transport || type->superweapon || std::find(initial.begin(), initial.end(), force->id) == initial.end()) continue;
-        const auto* profile = durability_table.value().find(type->purchase_type ? type->purchase_type : skirmish::type_id(type->tactical));
+        const auto* profile = durability_table.value().find(type->purchase_type ? type->purchase_type : battle::type_id(type->tactical));
         if (!type->source_flagship_rating && !profile) return fail<SpaceEntryPlan>("flagship source durability profile is absent for " + type->tactical);
         auto rating = type->source_flagship_rating ? core::Result<Fixed>::success(*type->source_flagship_rating)
             : sim::math::add(profile ? profile->max_hull : Fixed{}, profile ? profile->max_shields : Fixed{});
@@ -307,7 +308,7 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
         // WGT-52/53: absent markers skip this side's initial objects and escorts.
         // No defender source preserves the authored attacker sequence in plan.map.
         const auto* source = owner == record.defender ? (defenders.empty() ? nullptr : defenders.front()) : attack;
-        std::vector<const skirmish::MapPlacement*> sequence;
+        std::vector<const battle::MapPlacement*> sequence;
         if (owner == record.defender) sequence = defenders;
         else if (defenders.empty()) sequence = attackers;
         else if (source) sequence.push_back(source);
@@ -372,7 +373,7 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
         const auto transport = std::find_if(plan.conflict.forces.begin(), plan.conflict.forces.end(), [&](const auto& f) { return f.id == rider.transport; });
         if (transport == plan.conflict.forces.end() || transport->owner != rider.force.owner)
             return fail<SpaceEntryPlan>("passenger has no owning transport");
-        rider.force.tactical_type = skirmish::type_id(rider.tactical);
+        rider.force.tactical_type = battle::type_id(rider.tactical);
         rider.force.carrier = rider.transport;
         rider.force.role = transport->role == ForceRole::retained ? ForceRole::retained : ForceRole::reinforcement;
         if (transport->role == ForceRole::deployed) {
@@ -417,7 +418,7 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
         if (force.role == ForceRole::rider || force.carrier) continue; // passenger type is its contained identity
         const auto* type = type_of(input, force.type);
         if (!type) return fail<SpaceEntryPlan>("missing final tactical type binding");
-        force.tactical_type = skirmish::type_id(type->tactical);
+        force.tactical_type = battle::type_id(type->tactical);
         force.purchase_type = type->purchase_type;
     }
     // WGT-113/114: allocate child-only objects in the final creation sequence,
@@ -480,7 +481,7 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
     }
     for (const auto& retained : record.upgrades) {
         const auto type = std::find_if(input.map.tables->units.begin(), input.map.tables->units.end(), [&](const auto& t) {
-            return skirmish::type_id(t.id) == retained.type;
+            return battle::type_id(t.id) == retained.type;
         });
         if (type != input.map.tables->units.end() && type->production.upgrade_object) {
             active.insert(retained.owner); legacy_map_owners.erase(retained.owner);
@@ -576,12 +577,12 @@ struct SceneMath {
     Fixed half(Fixed a) { return Fixed::from_raw(a.raw() / 2); }
 };
 }
-core::Result<SpaceFormationResult> form_space_entry(skirmish::SkirmishStart& scene,
+core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
     const SpaceEntryInputs& input, const SpaceEntryPlan& plan, std::optional<Vec3> invader_target) {
     using Result = core::Result<SpaceFormationResult>;
     SceneMath math;
     auto staged = scene.units;
-    const auto find = [&](sim::EntityId id) -> skirmish::StartUnit* {
+    const auto find = [&](sim::EntityId id) -> battle::StartUnit* {
         const auto at = std::find_if(staged.begin(), staged.end(), [id](const auto& u) { return u.state.entity_id == id; });
         return at == staged.end() ? nullptr : &*at;
     };
@@ -625,7 +626,7 @@ core::Result<SpaceFormationResult> form_space_entry(skirmish::SkirmishStart& sce
     std::set<sim::EntityId> registered;
     for (const auto& marker : plan.map.placements) {
         if (!marker.marker || !marker.position || !marker.orientation_degrees) continue;
-        std::array<std::vector<skirmish::StartUnit*>, 6> buckets; // capital, medium, empty screen, small, transports, super
+        std::array<std::vector<battle::StartUnit*>, 6> buckets; // capital, medium, empty screen, small, transports, super
         auto placements = plan.placements;
         std::stable_sort(placements.begin(), placements.end(), [](const auto& a, const auto& b) { return a.creation_order < b.creation_order; });
         for (const auto& placement : placements) {
@@ -652,7 +653,7 @@ core::Result<SpaceFormationResult> form_space_entry(skirmish::SkirmishStart& sce
         }
         auto& small = buckets[3];
         // WGT-45: balanced interleave, retaining registration order within each kind.
-        std::vector<skirmish::StartUnit*> fighters, bombers;
+        std::vector<battle::StartUnit*> fighters, bombers;
         for (auto* object : small) {
             const auto* type = input.map.tables->find(object->type);
             if (type->kind == units::UnitKind::squadron && !type->members.empty()) type = input.map.tables->find(type->members.front().craft);
@@ -676,7 +677,7 @@ core::Result<SpaceFormationResult> form_space_entry(skirmish::SkirmishStart& sce
         const auto yaw = marker.orientation_degrees->z;
         const auto basis = sim::math::sin_cos_turn(math.div(math.add(yaw, math.number(270)), math.number(360)));
         const auto facing = math.take(tt::yaw_rotation(yaw));
-        const auto place = [&](skirmish::StartUnit& object, Fixed x, Fixed y) {
+        const auto place = [&](battle::StartUnit& object, Fixed x, Fixed y) {
             object.state.position.x = math.add(marker.position->x, math.sub(math.mul(x, basis.cosine), math.mul(y, basis.sine)));
             object.state.position.y = math.add(marker.position->y, math.add(math.mul(x, basis.sine), math.mul(y, basis.cosine)));
             object.state.rotation = facing; object.state.order = {}; object.yaw_degrees = yaw;
@@ -766,9 +767,9 @@ core::Result<SpaceFormationResult> form_space_entry(skirmish::SkirmishStart& sce
             const auto* type = object ? input.map.tables->find(object->type) : nullptr;
             if (!type || !type->tactical_super_weapon) continue;
             const auto side = std::find_if(input.sides.begin(), input.sides.end(), [&](const auto& s) { return s.player == force->owner; });
-            const auto targets = skirmish::tactical_super_weapon_targets(plan.map.placements, side == input.sides.end() ? std::string_view{} : std::string_view{side->faction});
+            const auto targets = battle::tactical_super_weapon_targets(plan.map.placements, side == input.sides.end() ? std::string_view{} : std::string_view{side->faction});
             if (!targets) return Result::failure(targets.error());
-            const auto started = skirmish::tactical_super_weapon_start(*type->tactical_super_weapon, object->state.position,
+            const auto started = battle::tactical_super_weapon_start(*type->tactical_super_weapon, object->state.position,
                 targets.value(), force->owner == plan.conflict.defender);
             if (!started) return Result::failure(started.error());
             object->state.position = started.value().position;
@@ -784,14 +785,14 @@ core::Result<SpaceFormationResult> form_space_entry(skirmish::SkirmishStart& sce
 std::vector<ReturnedUpgrade> space_entry_unbound_upgrades(const ConflictRecord& record, const units::UnitTables& tables) {
     std::vector<ReturnedUpgrade> unbound;
     for (const auto& retained : record.upgrades) {
-        const auto type = std::find_if(tables.units.begin(), tables.units.end(), [&](const auto& row) { return skirmish::type_id(row.id) == retained.type; });
+        const auto type = std::find_if(tables.units.begin(), tables.units.end(), [&](const auto& row) { return battle::type_id(row.id) == retained.type; });
         if (type == tables.units.end() || !type->production.upgrade_object) unbound.push_back(retained);
     }
     return unbound;
 }
 
 core::Result<std::vector<tt::CampaignUpgrade>> space_entry_upgrades(const ConflictRecord& record,
-    const SpaceEntryInputs& input, const SpaceEntryPlan& plan, skirmish::SkirmishStart& scene) {
+    const SpaceEntryInputs& input, const SpaceEntryPlan& plan, battle::BattleStart& scene) {
     using Result = core::Result<std::vector<tt::CampaignUpgrade>>;
     std::vector<tt::CampaignUpgrade> result;
     const auto& tables = *input.map.tables;
@@ -805,24 +806,24 @@ core::Result<std::vector<tt::CampaignUpgrade>> space_entry_upgrades(const Confli
         return false;
     };
     const auto preforce = [&](const auto& unit) {
-        return unit.role == skirmish::UnitRole::map_object || unit.state.entity_id == plan.conflict.station
+        return unit.role == battle::UnitRole::map_object || unit.state.entity_id == plan.conflict.station
             || std::any_of(plan.fixed_poses.begin(), plan.fixed_poses.end(), [&](const auto& pose) { return pose.first == unit.state.entity_id; });
     };
-    std::vector<skirmish::StartUnit> frozen;
+    std::vector<battle::StartUnit> frozen;
     for (const auto& unit : scene.units) if (preforce(unit)) frozen.push_back(unit);
-    std::vector<const skirmish::StartUnit*> existing;
+    std::vector<const battle::StartUnit*> existing;
     for (const auto& unit : frozen) existing.push_back(&unit);
     // Map load first, then prepared station/structure registration order, never ID sorting.
     std::stable_sort(existing.begin(), existing.end(), [&](const auto* a, const auto* b) {
         const auto order = [&](const auto* u) {
-            if (u->role == skirmish::UnitRole::map_object) return std::pair{0U, u->record};
+            if (u->role == battle::UnitRole::map_object) return std::pair{0U, u->record};
             const auto at = std::find_if(plan.placements.begin(), plan.placements.end(), [&](const auto& p) { return p.force == u->state.entity_id; });
             return std::pair{1U, at == plan.placements.end() ? 0U : at->creation_order};
         };
         return order(a) < order(b);
     });
     for (const auto& retained : record.upgrades) {
-        const auto type = std::find_if(tables.units.begin(), tables.units.end(), [&](const auto& row) { return skirmish::type_id(row.id) == retained.type; });
+        const auto type = std::find_if(tables.units.begin(), tables.units.end(), [&](const auto& row) { return battle::type_id(row.id) == retained.type; });
         // WGT-14, WGCH-163: an entry with no upgrade object in this layer (planetary corruption markers, a mod's
         // galactic-only upgrade) is not admitted and is never a reason to refuse the battle.
         if (type == tables.units.end() || !type->production.upgrade_object) continue;
@@ -849,9 +850,9 @@ core::Result<std::vector<tt::CampaignUpgrade>> space_entry_upgrades(const Confli
         if (next == std::numeric_limits<sim::EntityId>::max()) return fail<void>("upgrade allocator exhausted");
         if (std::none_of(scene.setup.players.begin(), scene.setup.players.end(), [&](const auto& p) { return p.player_id == owner.player; }))
             return fail<void>("origin upgrade owner needs an explicit scene player/team binding");
-        skirmish::StartUnit unit;
-        unit.state.entity_id = next++; unit.state.type_id = skirmish::type_id(type.id); unit.state.owner = owner.player;
-        unit.type = type.id; unit.role = skirmish::UnitRole::map_object;
+        battle::StartUnit unit;
+        unit.state.entity_id = next++; unit.state.type_id = battle::type_id(type.id); unit.state.owner = owner.player;
+        unit.type = type.id; unit.role = battle::UnitRole::map_object;
         scene.units.push_back(unit);
         result.push_back({unit.state.type_id, unit.state.entity_id, owner.player});
         return core::Result<void>::success();
@@ -867,7 +868,7 @@ core::Result<std::vector<tt::CampaignUpgrade>> space_entry_upgrades(const Confli
             bool owned{}; std::set<std::string> visited;
             for (const auto* level = type; level && visited.insert(folded(level->id)).second;
                 level = level->production.next_upgrade.empty() ? nullptr : tables.find(level->production.next_upgrade)) {
-                const auto id = skirmish::type_id(level->id);
+                const auto id = battle::type_id(level->id);
                 owned |= std::any_of(existing.begin(), existing.end(), [&](const auto* u) { return u->state.owner == owner_id && u->state.type_id == id; });
                 owned |= std::any_of(result.begin(), result.end(), [&](const auto& u) { return u.owner == owner_id && u.type == id; });
             }
@@ -951,7 +952,7 @@ core::Result<ConflictEntry> build_space_entry(const ConflictRecord& record, cons
             auto normalized = sim::math::normalize(facing.value());
             if (!normalized) return core::Result<ConflictEntry>::failure(normalized.error());
             unit.state.rotation = normalized.value();
-            if (type->special_weapon) unit.role = skirmish::UnitRole::special_weapon;
+            if (type->special_weapon) unit.role = battle::UnitRole::special_weapon;
         } else if (type->hover_offset && !type->squadron && force->id != plan.conflict.station) {
             const auto* table = input.map.tables->find(type->tactical);
             if (!sim::math::try_subtract(unit.state.position.z, table->movement.layer_z_adjust.value_or(Fixed{}), unit.state.position.z)
@@ -987,50 +988,11 @@ core::Result<ConflictEntry> build_space_entry(const ConflictRecord& record, cons
 }
 
 core::Result<tt::TacticalContent> space_entry_content(const tt::TacticalSetup& setup, const skirmish::StartInputs& inputs) {
-    auto content = conflict_entry_content(setup, inputs);
-    if (!content) return content;
-    // WGT-10/WSL-10..18: campaign objects use authored reserve counts, including
-    // unlimited (-1). The shared skirmish table deliberately leaves these at zero.
-    for (auto& profile : content.value().motion.squadrons.spawners) {
-        const auto unit = std::find_if(inputs.tables->units.begin(), inputs.tables->units.end(), [&](const auto& row) { return skirmish::type_id(row.id) == profile.type_id; });
-        if (unit == inputs.tables->units.end() || !unit->spawner) continue;
-        for (auto& entry : profile.entries) {
-            const auto reserve = std::find_if(unit->spawner->reserves.begin(), unit->spawner->reserves.end(), [&](const auto& row) { return skirmish::type_id(row.squadron) == entry.squadron; });
-            if (reserve != unit->spawner->reserves.end()) entry.reserve = reserve->count;
-        }
-    }
-    if (setup.campaign) for (const auto& owner : setup.campaign->players) {
-        if (owner.start_tech > 5) return fail<tt::TacticalContent>("garrison owner tech outside 0..5");
-        auto selected = *inputs.tables;
-        for (auto& type : selected.units) if (type.spawner) {
-            const auto select = [&](const auto& tiers, const auto& fallback) {
-                const bool authored = std::any_of(tiers.begin(), tiers.end(), [](const auto& rows) { return !rows.empty(); });
-                if (!authored) return fallback; // explicit synthetic Tech0 profiles
-                for (auto tech = static_cast<int>(owner.start_tech); tech >= 0; --tech)
-                    if (!tiers[static_cast<std::size_t>(tech)].empty()) return tiers[static_cast<std::size_t>(tech)];
-                return std::vector<units::SpawnEntry>{};
-            };
-            type.spawner->starting = select(type.spawner->campaign_starting, type.spawner->starting);
-            type.spawner->reserves = select(type.spawner->campaign_reserves, type.spawner->reserves);
-        }
-        auto adapted = units::motion_table(selected); if (!adapted) return core::Result<tt::TacticalContent>::failure(adapted.error());
-        for (auto profile : adapted.value().squadrons.spawners) {
-            const auto type = std::find_if(selected.units.begin(), selected.units.end(), [&](const auto& row) { return skirmish::type_id(row.id) == profile.type_id; });
-            if (type==selected.units.end() || !type->spawner) return fail<tt::TacticalContent>("selected garrison profile has no source spawner");
-            for (auto& entry : profile.entries) {
-                const auto reserve = std::find_if(type->spawner->reserves.begin(), type->spawner->reserves.end(), [&](const auto& row) { return skirmish::type_id(row.squadron) == entry.squadron; });
-                entry.reserve = reserve == type->spawner->reserves.end() ? 0 : reserve->count;
-            }
-            content.value().motion.squadrons.campaign_spawners.emplace(std::pair{profile.type_id, owner.player}, std::move(profile));
-        }
-        // Empty selected starting lists must override a populated lower-tier base profile too.
-        for (const auto& profile : content.value().motion.squadrons.spawners)
-            if (!content.value().motion.squadrons.campaign_spawners.contains({profile.type_id, owner.player})) {
-                auto empty = profile; empty.entries.clear();
-                content.value().motion.squadrons.campaign_spawners.emplace(std::pair{profile.type_id, owner.player}, std::move(empty));
-            }
-    }
-    return content;
+    units::SpawnPolicy policy;
+    policy.mode = units::SpawnPolicy::Mode::campaign;
+    if (setup.campaign) for (const auto& owner : setup.campaign->players)
+        policy.owners.push_back({owner.player, owner.start_tech});
+    return conflict_entry_content(setup, inputs, policy);
 }
 
 } // namespace eawr::campaign

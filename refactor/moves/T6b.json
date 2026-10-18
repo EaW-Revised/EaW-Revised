@@ -1,0 +1,54 @@
+[
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#ordinary_ability_holders",
+    "new": "src/sim/tactical/session_cmd_abilities.cpp#ordinary_ability_holders"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#apply_ability",
+    "new": "src/sim/tactical/session_cmd_abilities.cpp#apply_ability"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#apply_area_ability",
+    "new": "src/sim/tactical/session_cmd_targeted.cpp#apply_area_ability"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#apply_manual_target",
+    "new": "src/sim/tactical/session_cmd_targeted.cpp#apply_manual_target"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#special_fire",
+    "new": "src/sim/tactical/session_cmd_targeted.cpp#special_fire"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#repair_hardpoint",
+    "new": "src/sim/tactical/session_cmd_economy.cpp#repair_hardpoint"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#economy",
+    "new": "src/sim/tactical/session_cmd_economy.cpp#economy"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#supports_autofire",
+    "new": "src/sim/tactical/session_cmd_abilities.cpp#supports_autofire"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#buzz.max_range",
+    "new": "src/sim/tactical/session_cmd_abilities.cpp#buzz.max_range"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#buzz.min_range",
+    "new": "src/sim/tactical/session_cmd_abilities.cpp#buzz.min_range"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#buzz.droid_type",
+    "new": "src/sim/tactical/session_cmd_abilities.cpp#buzz.droid_type"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#target_z_offset",
+    "new": "src/sim/tactical/session_cmd_targeted.cpp#target_z_offset"
+  },
+  {
+    "old": "src/sim/tactical/session_step_commands.cpp#consume_after_special_fire",
+    "new": "src/sim/tactical/session_cmd_targeted.cpp#consume_after_special_fire"
+  }
+]

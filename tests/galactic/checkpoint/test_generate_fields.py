@@ -3,10 +3,28 @@ from pathlib import Path
 import unittest
 import re
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "presentation/renderer"))
 import generate_fields
+from viewer_mode_sources import source_text  # noqa: E402
 
 
 class FieldCompletenessTests(unittest.TestCase):
+    def test_inherited_store_nested_member_requires_serialization(self):
+        path = "src/sim/tactical/session_store_projectiles.hpp"
+        source = source_text(path).replace(
+            "struct PendingBlastDamage {", "struct PendingBlastDamage {\n        std::uint64_t future_deadline{};")
+        errors, _ = generate_fields.check({path: source})
+        self.assertTrue(any("PendingBlastDamage: missing=['future_deadline']" in error for error in errors), errors)
+
+    def test_inherited_store_nested_field_omission_fails(self):
+        path = "src/sim/tactical/checkpoint_fields_internal.hpp"
+        source = source_text(path).replace("a(v.due, v.owner, v.damage_type,", "a(v.owner, v.damage_type,")
+        self.assertNotEqual(source, source_text(path))
+        errors, _ = generate_fields.check({path: source})
+        self.assertTrue(any("PendingBlastDamage: missing=['due']" in error for error in errors), errors)
+
     def test_current_fields_are_complete(self):
         errors, count = generate_fields.check()
         self.assertEqual(errors, [])
@@ -22,7 +40,7 @@ class FieldCompletenessTests(unittest.TestCase):
             ("src/campaign/game_session.cpp", "withdrawing_player", "GameSession::Impl"),
         ):
             with self.subTest(path=path):
-                source = re.sub(r"\bv\." + field + r",\s*", "", (root / path).read_text(encoding="utf-8"))
+                source = re.sub(r"\bv\." + field + r",\s*", "", source_text(path))
                 errors, _ = generate_fields.check({path: source})
                 self.assertTrue(any(owner + ": missing=['" + field + "']" in error for error in errors), errors)
 
@@ -33,7 +51,7 @@ class FieldCompletenessTests(unittest.TestCase):
             ("src/campaign/game_session.cpp", "class GameSession::Impl {"),
         ):
             with self.subTest(path=path):
-                source = (root / path).read_text(encoding="utf-8").replace(
+                source = source_text(path).replace(
                     declaration, declaration + "\n    std::uint64_t future_cursor{};")
                 errors, _ = generate_fields.check({path: source})
                 self.assertTrue(any("missing=['future_cursor']" in error for error in errors), errors)

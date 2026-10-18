@@ -15,6 +15,9 @@ class Tick final {
     using Impl = TacticalSession::Impl;
 public:
     Tick(TacticalSession& session, Impl* impl, const PartitionExecutor& executor);
+    ~Tick();
+    Tick(const Tick&) = delete;
+    Tick& operator=(const Tick&) = delete;
     core::Result<TacticalTick> run();
 
 private:
@@ -44,6 +47,9 @@ private:
         std::vector<UnitState>& killed, const DamageRules* damage_rules);
     core::Result<void> service_self_destruct(UnitStage& staged, std::vector<Event>& events,
         std::vector<UnitState>& killed, std::vector<Projectile>& projectiles, std::uint64_t& next_projectile);
+    struct CommandOrders;
+    struct CommandHandlers;
+    struct PlanLanes;
     core::Result<void> commands();
     core::Result<void> service_retreat_flight(UnitStage&, std::vector<Event>&, std::vector<UnitState>&);
     core::Result<void> retreat_service();

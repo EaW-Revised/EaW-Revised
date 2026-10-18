@@ -1,0 +1,166 @@
+[
+  {
+    "old": "include/eawr/units/unit_tables.hpp#UnitKind",
+    "new": "include/eawr/units/unit_tables_combat.hpp#UnitKind"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#HardpointType",
+    "new": "include/eawr/units/unit_tables_combat.hpp#HardpointType"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#InaccuracyEntry",
+    "new": "include/eawr/units/unit_tables_combat.hpp#InaccuracyEntry"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#Weapon",
+    "new": "include/eawr/units/unit_tables_combat.hpp#Weapon"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#Hardpoint",
+    "new": "include/eawr/units/unit_tables_combat.hpp#Hardpoint"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#Projectile",
+    "new": "include/eawr/units/unit_tables_combat.hpp#Projectile"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#Movement",
+    "new": "include/eawr/units/unit_tables_combat.hpp#Movement"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#HazardProfile",
+    "new": "include/eawr/units/unit_tables_combat.hpp#HazardProfile"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#SpaceFootprint",
+    "new": "include/eawr/units/unit_tables_combat.hpp#SpaceFootprint"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#ObstacleType",
+    "new": "include/eawr/units/unit_tables_combat.hpp#ObstacleType"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#PriorityMatch",
+    "new": "include/eawr/units/unit_tables_combat.hpp#PriorityMatch"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#PriorityEntry",
+    "new": "include/eawr/units/unit_tables_combat.hpp#PriorityEntry"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#TargetingPrioritySet",
+    "new": "include/eawr/units/unit_tables_combat.hpp#TargetingPrioritySet"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#DamageToArmor",
+    "new": "include/eawr/units/unit_tables_combat.hpp#DamageToArmor"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#NamedConstant",
+    "new": "include/eawr/units/unit_tables_combat.hpp#NamedConstant"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#CombatConstants",
+    "new": "include/eawr/units/unit_tables_combat.hpp#CombatConstants"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#ModMultiplier",
+    "new": "include/eawr/units/unit_tables_abilities.hpp#ModMultiplier"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#ModFlag",
+    "new": "include/eawr/units/unit_tables_abilities.hpp#ModFlag"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#Ability",
+    "new": "include/eawr/units/unit_tables_abilities.hpp#Ability"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#BuzzDroids",
+    "new": "include/eawr/units/unit_tables_abilities.hpp#BuzzDroids"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#ClusterBomb",
+    "new": "include/eawr/units/unit_tables_abilities.hpp#ClusterBomb"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#CombatBonus",
+    "new": "include/eawr/units/unit_tables_abilities.hpp#CombatBonus"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#BattlefieldBonus",
+    "new": "include/eawr/units/unit_tables_abilities.hpp#BattlefieldBonus"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#StealthDurationBonus",
+    "new": "include/eawr/units/unit_tables_abilities.hpp#StealthDurationBonus"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#AbilityEnable",
+    "new": "include/eawr/units/unit_tables_abilities.hpp#AbilityEnable"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#SpawnEntry",
+    "new": "include/eawr/units/unit_tables_spawner.hpp#SpawnEntry"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#Spawner",
+    "new": "include/eawr/units/unit_tables_spawner.hpp#Spawner"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#SquadronMember",
+    "new": "include/eawr/units/unit_tables_spawner.hpp#SquadronMember"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#IncomeStream",
+    "new": "include/eawr/units/unit_tables_galactic.hpp#IncomeStream"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#IncomeBonus",
+    "new": "include/eawr/units/unit_tables_galactic.hpp#IncomeBonus"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#BuildGroup",
+    "new": "include/eawr/units/unit_tables_galactic.hpp#BuildGroup"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#Production",
+    "new": "include/eawr/units/unit_tables_galactic.hpp#Production"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#CampaignAbilityLock",
+    "new": "include/eawr/units/unit_tables_galactic.hpp#CampaignAbilityLock"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#BonePoint",
+    "new": "include/eawr/units/unit_tables_presentation.hpp#BonePoint"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#CollisionBounds",
+    "new": "include/eawr/units/unit_tables_presentation.hpp#CollisionBounds"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#CollisionMesh",
+    "new": "include/eawr/units/unit_tables_presentation.hpp#CollisionMesh"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#UnitType::ObjectTurret",
+    "new": "include/eawr/units/unit_tables_combat.hpp#table_rows::ObjectTurret"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#UnitType::PlanetaryWeapon",
+    "new": "include/eawr/units/unit_tables_combat.hpp#table_rows::PlanetaryWeapon"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#UnitType::TacticalSuperWeapon",
+    "new": "include/eawr/units/unit_tables_combat.hpp#table_rows::TacticalSuperWeapon"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#UnitType::SpecialUnlock",
+    "new": "include/eawr/units/unit_tables_abilities.hpp#table_rows::SpecialUnlock"
+  },
+  {
+    "old": "include/eawr/units/unit_tables.hpp#UnitType::CompanyMember",
+    "new": "include/eawr/units/unit_tables_galactic.hpp#table_rows::CompanyMember"
+  }
+]

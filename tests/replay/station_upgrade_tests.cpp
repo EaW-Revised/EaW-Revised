@@ -1589,6 +1589,60 @@ void test_respawn_inherits_upgrade() {
         }
     }
 }
+// The per-tick production recount (count_owned) against a plain oracle through live ownership changes.
+void test_census_recount() {
+    auto rules = economy();
+    for (auto& menu : rules.menus) {
+        menu.options.front().requirements.current_player = 100;
+        menu.options.front().requirements.current_allies = 100;
+    }
+    rules.pads.neutral = 4;
+    rules.pads.capture = {{41, whole(100), whole(1), {100, 200}, false, true, false}};
+    rules.pads.influence = {{41, false}};
+    auto initial = setup();
+    const m::Vec3 remote{whole(1000), {}, {}};
+    initial.units.push_back({6, 41, 4, remote, m::identity_quat(), {}});
+    initial.units.push_back({7, 10, 3, remote, m::identity_quat(), {}});
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto made = t::TacticalSession::create(initial, {}, durability(), {}, std::nullopt, {}, {}, {}, rules);
+        expect(static_cast<bool>(made), "recount fixture creates");
+        if (!made) return;
+        auto world = std::move(made).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (unsigned sequence = 0; sequence < 6; ++sequence) expect(static_cast<bool>(world.submit(buy(0, 1, sequence, 1, 10))), "recount buy submits");
+        expect(static_cast<bool>(world.submit(buy(0, 2, 0, 2, 10))), "allied key buy submits");
+        expect(static_cast<bool>(world.submit({{15, 2, 1}, {4}, t::DamagePayload{whole(10000)}})), "recount lethal damage submits");
+        expect(world.ownership_census_matches_recount_for_testing(executor), "recount matches oracle before the first tick");
+        for (unsigned tick = 0; tick < 100; ++tick) {
+            if (tick == 10) expect(static_cast<bool>(world.stage_remove(5)), "recount: unit removed between ticks");
+            if (tick == 20) for (const auto owner : {1U, 2U, 3U}) expect(static_cast<bool>(world.stage_spawn({0, 10, owner, {}, m::identity_quat(), {}})), "recount: allied units spawned between ticks");
+            if (tick == 40) expect(static_cast<bool>(world.stage_remove(7)), "recount: capture influence removed");
+            if (tick == 50) {
+                const auto saved = world.save_checkpoint_state();
+                expect(static_cast<bool>(saved), "recount checkpoint saves");
+                if (!saved) return;
+                auto restored = t::TacticalSession::from_replay(world.record(), {}, durability(), {}, std::nullopt, {}, {}, {}, rules);
+                expect(static_cast<bool>(restored), "recount restore fixture creates");
+                if (!restored) return;
+                const auto loaded = restored.value().load_checkpoint_state(saved.value());
+                expect(static_cast<bool>(loaded), "recount checkpoint restores");
+                if (!loaded) return;
+                expect(restored.value().state_sha256() == world.state_sha256(), "restore retains canonical state");
+                world = std::move(restored).value();
+            }
+            expect(world.ownership_census_matches_recount_for_testing(executor), "recount matches before stepping staged changes or restored state");
+            const auto stepped = world.step(executor); expect(static_cast<bool>(stepped), "recount tick steps"); if (!stepped) return;
+            expect(world.ownership_census_matches_recount_for_testing(executor), "recount matches after every tick through births, deaths, transfers and restore");
+            if (tick == 15) expect(!world.unit_state(4), "recount fixture exercises combat death");
+            if (tick == 35) expect(world.unit_state(6) && world.unit_state(6)->owner == 3, "recount fixture captures neutral key for an allied owner");
+            if (tick == 99) expect(world.unit_state(6) && world.unit_state(6)->owner == 4, "recount fixture returns captured key to neutral");
+            const auto hash = world.state_sha256();
+            if (workers == 1) reference.push_back(hash);
+            else expect(hash == reference[tick], "recount transitions and restore agree at 1/2/4/8 workers");
+        }
+    }
+}
 void test_production_work() {
     auto rules = economy();
     for (auto& menu : rules.menus) menu.options.front().requirements.current_player = 100;
@@ -2064,7 +2118,7 @@ int main() {
     test_free_garrison_replay();
     test_teammate_level_up();
     test_teammate_level_up_one_at_a_time();
-    test_no_upgrade_layout(); test_replacement_attack(); test_order_after_reinforcement(); test_replacement_projectiles(); test_destroyed_station(); test_hangar_replacement(); test_production_work();
+    test_no_upgrade_layout(); test_replacement_attack(); test_order_after_reinforcement(); test_replacement_projectiles(); test_destroyed_station(); test_hangar_replacement(); test_production_work(); test_census_recount();
     test_staged_source_removal();
     test_upgrade_holder_loss();
     test_respawn_inherits_upgrade();

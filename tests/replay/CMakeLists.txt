@@ -288,6 +288,7 @@ add_executable(tactical_damage_tests
     damage_shields_tests.cpp
     damage_hits_tests.cpp
     damage_missile_tests.cpp
+    damage_difficulty_tests.cpp
 )
 target_link_libraries(tactical_damage_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_damage_tests PRIVATE cxx_std_20)

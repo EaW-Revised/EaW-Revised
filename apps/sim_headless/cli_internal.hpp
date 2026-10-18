@@ -11,6 +11,7 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/world.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -88,7 +89,7 @@ std::string trace_header(
 int publish(const std::vector<eawr::platform::PublishedFile>& outputs);
 eawr::core::Result<std::unique_ptr<LoadedTables>> load_tables(const Options& options);
 int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes);
-void list_start(std::ostream& output, const eawr::skirmish::SkirmishStart& start, const std::string& state_sha256);
+void list_start(std::ostream& output, const eawr::battle::BattleStart& start, const std::string& state_sha256);
 int run_scenario_mode(const Options& options);
 int run_skirmish(const Options& options);
 int run_replay(const std::optional<Options>& options);

@@ -3,7 +3,7 @@
 #include "audio_output.hpp"
 
 #include "eawr/presentation/space/space.hpp"
-#include "eawr/skirmish/start.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/data/tag_trace.hpp"
 
 #include <godot_cpp/classes/audio_effect_hard_limiter.hpp>
@@ -156,10 +156,10 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     while (changed) {
         const auto count = first_types.size();
         const auto add_index = [&](const std::uint32_t index) {
-            if (index < tables.units.size()) first_types.insert(skirmish::type_id(tables.units[index].id));
+            if (index < tables.units.size()) first_types.insert(battle::type_id(tables.units[index].id));
         };
         for (const auto& type : tables.units) {
-            if (!first_types.contains(skirmish::type_id(type.id))) continue;
+            if (!first_types.contains(battle::type_id(type.id))) continue;
             for (const auto& member : type.members) add_index(member.craft_index);
             if (type.spawner) {
                 for (const auto& entry : type.spawner->starting) if (entry.count > 0) add_index(entry.squadron_index);
@@ -355,11 +355,11 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
                     // BA-70: retain a matching blank override; it must not turn
                     // into the generic fallback by dropping an empty token.
                     const auto name = trim(std::string_view(item.raw_text).substr(0, comma));
-                    if (!name.empty()) spotted.try_emplace(skirmish::type_id(name),
+                    if (!name.empty()) spotted.try_emplace(battle::type_id(name),
                         event(trim(std::string_view(item.raw_text).substr(comma + 1)), std::string(local_faction)));
                 } else {
                     const auto pair = audio::split_list(item.raw_text);
-                    if (pair.size() == 2) spotted.try_emplace(skirmish::type_id(pair[0]), event(pair[1], std::string(local_faction)));
+                    if (pair.size() == 2) spotted.try_emplace(battle::type_id(pair[0]), event(pair[1], std::string(local_faction)));
                 }
             }
         }
@@ -367,16 +367,16 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
 
     for (const units::Projectile& projectile : tables.projectiles) {
         if (auto object = catalog_->resolve(projectile.id, data::Category::game_object)) {
-            projectile_detonations_.emplace(skirmish::type_id(projectile.id),
+            projectile_detonations_.emplace(battle::type_id(projectile.id),
                 event(tag(object.value(), "Death_SFXEvent_Start_Die"), projectile.id));
-            terminal_detonations_.emplace(skirmish::type_id(projectile.id),
+            terminal_detonations_.emplace(battle::type_id(projectile.id),
                 event(tag(object.value(), "Projectile_SFXEvent_Detonate"), projectile.id));
         }
     }
     // WCB-01: real bomb terminals use their authored object death cue.
     for (const units::UnitType& type : tables.units) {
         if (!type.cluster_bomb) continue;
-        const auto id = skirmish::type_id(type.cluster_bomb->bomb_type);
+        const auto id = battle::type_id(type.cluster_bomb->bomb_type);
         const auto cue = projectile_detonations_.find(id);
         if (cue == projectile_detonations_.end()) continue;
         if (terminal_detonations_[id] == nullptr) terminal_detonations_[id] = cue->second;
@@ -398,7 +398,7 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     }
     binding_unit = true;
     for (const units::UnitType& type : tables.units) {
-        first_type = first_types.contains(skirmish::type_id(type.id));
+        first_type = first_types.contains(battle::type_id(type.id));
         // WAB-75: the droid object's arming cue comes from the ability that creates it.
         for (const auto* buzz : {&type.buzz_droids, &type.team_buzz_droids}) {
             if (!*buzz || (*buzz)->object_type.empty()) continue;
@@ -407,7 +407,7 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
                 ? static_cast<std::uint64_t>(seconds.raw()) * tactical::logical_frames_per_second
                     / static_cast<std::uint64_t>(sim::math::Fixed::scale)
                 : 0U;
-            droid_arming_.try_emplace(skirmish::type_id((*buzz)->object_type),
+            droid_arming_.try_emplace(battle::type_id((*buzz)->object_type),
                 DroidArming{event((*buzz)->activate_sfx, type.id), frames});
         }
         TypeSounds sounds;
@@ -417,7 +417,7 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         auto object = catalog_->resolve(type.id, data::Category::game_object);
         if (!object) {
             problems_.push_back("unit " + type.id + ": " + core::format_diagnostic(object.error()));
-            types_.emplace(skirmish::type_id(type.id), std::move(sounds));
+            types_.emplace(battle::type_id(type.id), std::move(sounds));
             continue;
         }
         const data::EffectiveObject& value = object.value();
@@ -435,7 +435,7 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
             sounds.announce_sighting = same(trim(sighting->value.raw_text), "true")
                 || same(trim(sighting->value.raw_text), "yes") || trim(sighting->value.raw_text) == "1";
         }
-        const auto spotted_type = spotted.find(skirmish::type_id(type.id));
+        const auto spotted_type = spotted.find(battle::type_id(type.id));
         sounds.spotted = spotted_type == spotted.end() ? generic_spotted : spotted_type->second;
         const auto production_speech = [this, &value](const std::string_view key) {
             const auto field = value.single(key);
@@ -603,7 +603,7 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
                 tactical::death_projectile_slot_flag | static_cast<std::uint32_t>(index));
         if (!type.retreat_self_destruct.empty()) projectile_events(type.retreat_self_destruct, tactical::retreat_explosion_slot_flag);
         sounds.hardpoint_points.assign(type.hardpoints.size(), sim::math::Vec3{});
-        if (const tactical::CombatProfile* profile = combat.find(skirmish::type_id(type.id))) {
+        if (const tactical::CombatProfile* profile = combat.find(battle::type_id(type.id))) {
             for (const tactical::WeaponProfile& weapon : profile->weapons) {
                 if (weapon.ability_shot) {
                     if (const auto override = ability_projectiles.find(type.id); override != ability_projectiles.end())
@@ -618,7 +618,7 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
                 if (point.hardpoint < sounds.hardpoint_points.size()) sounds.hardpoint_points[point.hardpoint] = point.position;
             }
         }
-        types_.emplace(skirmish::type_id(type.id), std::move(sounds));
+        types_.emplace(battle::type_id(type.id), std::move(sounds));
     }
     start_rows_.reserve(256);
     binding_unit = false;

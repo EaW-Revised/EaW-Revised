@@ -65,7 +65,9 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
     std::shared_ptr<const HeroActionMenus> live_hero_action_menus,
     std::shared_ptr<const CorruptionMenu> live_corruption_menu,
     std::shared_ptr<const std::vector<CensusType>> sale_types,
-    std::shared_ptr<const std::vector<LiveCorruptionTransition>> corruption_transitions)
+    std::shared_ptr<const std::vector<LiveCorruptionTransition>> corruption_transitions,
+    std::shared_ptr<const std::vector<ObservedProductionOffer>> shared_production_offers,
+    std::shared_ptr<const std::optional<ProductionSetup>> shared_production)
     : completed_tick_(completed_tick),
       clock_(clock),
       commissioned_originals_(std::move(commissioned_originals)),
@@ -74,10 +76,13 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
       planets_(std::move(planets)),
       routes_(std::move(routes)),
       fleets_(std::move(fleets)),
-      events_(std::move(events)), maximum_movement_distance_(maximum_movement_distance), fleet_control_(std::move(fleet_control)), movement_(std::move(movement)), seat_control_(std::move(seat_control)), seats_(std::move(seats)), player_economy_(std::move(player_economy)), production_(std::move(production)), control_(std::move(control)), control_effects_(std::move(control_effects)), population_(std::move(population)), observer_(std::move(observer)), income_(std::move(income)), victory_(std::move(victory)) {
+      events_(std::move(events)), maximum_movement_distance_(maximum_movement_distance), fleet_control_(std::move(fleet_control)), movement_(std::move(movement)), seat_control_(std::move(seat_control)), seats_(std::move(seats)), player_economy_(std::move(player_economy)), control_(std::move(control)), control_effects_(std::move(control_effects)), population_(std::move(population)), observer_(std::move(observer)), income_(std::move(income)), victory_(std::move(victory)) {
     if (observer_) observations_ = observations ? std::move(observations)
         : std::make_shared<const std::vector<ObservedPlanet>>(observed_planets(*observer_, fleets_, movement_.get(), this->actor_records()));
-    production_offers_ = std::move(production_offers);
+    production_ = shared_production ? std::move(shared_production)
+        : std::make_shared<const std::optional<ProductionSetup>>(std::move(production));
+    production_offers_ = shared_production_offers ? std::move(shared_production_offers)
+        : std::make_shared<const std::vector<ObservedProductionOffer>>(std::move(production_offers));
     planet_access_ = std::move(planet_access);
     observer_input_generation_ = observer_input_generation;
     economy_input_generation_ = std::move(economy_input_generation);

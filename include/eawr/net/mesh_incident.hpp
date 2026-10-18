@@ -47,6 +47,11 @@ struct MeshIncidentOptions {
     // it is open again, so the agreement cannot oscillate with it. Zero turns the hold-down off.
     unsigned flap_limit{3};
     std::chrono::milliseconds flap_window{std::chrono::minutes{2}};
+    // A window (the repair grace plus the decision window) that ends without any decision, on a seat that pledged to nothing
+    // and was confirmed nothing, is followed by another one regardless of repair state (every seat counts the same
+    // incident time, so all of them start it together); a later window only has the decision window's twenty seconds. The
+    // match ends with EAWR-NET-1780 only after this many windows (1 = the first window is the last).
+    unsigned rounds{3};
     // The pair has no repair left: the adapter's GnsPairDiagnostic::relay_failed. With no TURN configured the direct failure
     // is the whole evidence, so a closed link is final. Empty means every closed link counts as final.
     std::function<bool(PeerIndex)> relay_failed;
@@ -139,6 +144,11 @@ public:
 private:
     enum class Phase : std::uint8_t { quiet, running, settling, left };
     [[nodiscard]] Time relative(Time now) const { return now > base_ ? now - base_ : Time{0}; }
+    // The policy's own clock: incident time since the current window (round) began.
+    [[nodiscard]] Time policy_time(Time now) const { const auto rel = relative(now); return rel > round_offset_ ? rel - round_offset_ : Time{0}; }
+    // The first window is the repair grace plus the decision window; a later one only has to decide (the grace is spent).
+    [[nodiscard]] Time round_deadline() const;
+    void next_round();
     [[nodiscard]] MeshLinkReport local_row(Time now);
     [[nodiscard]] core::Result<void> send(PeerIndex to, const std::vector<std::uint8_t>& frame);
     [[nodiscard]] core::Result<void> broadcast(MeshSeats to, const std::vector<std::uint8_t>& frame);
@@ -152,12 +162,15 @@ private:
     PeerIndex self_{};
     MeshSeats active_{}, removed_{}, flapping_{}, was_open_{}, send_failed_{};
     std::uint64_t incident_{1}, revision_{};
+    unsigned round_{};
+    Time round_offset_{};
     Phase phase_{Phase::quiet};
     Time base_{}, last_report_{}, last_resend_{}, last_steady_{};
     bool have_report_{}, sent_confirmation_{}, confirmed_{};
-    // The restoration confirmation the decider keeps resending until the pledge window closes (the N1 contract).
-    std::optional<MeshLossConfirmation> tail_;
-    Time tail_until_{};
+    // A later incident may start before every pledged seat received an earlier restoration. Each confirmation keeps its
+    // own resend window; starting or completing another incident must not strand those seats on the earlier incident id.
+    struct Tail { MeshLossConfirmation confirmation; Time until{}, last_sent{}; };
+    std::deque<Tail> tails_;
     MeshLinkReport row_;
     std::optional<MeshLossPolicy> policy_;
     std::optional<MeshLossDecision> proposal_;

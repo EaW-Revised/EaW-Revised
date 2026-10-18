@@ -57,6 +57,7 @@ struct ProductionReductionSource {
     bool planet_source{}, intimidation{}, galaxy_wide{};
     std::uint32_t category{};
     math::Fixed reduction;
+    friend bool operator==(const ProductionReductionSource&, const ProductionReductionSource&) = default;
 };
 [[nodiscard]] std::vector<ProductionReductionSource> production_reduction_sources(const IncomeSetup&, std::span<const Planet>);
 [[nodiscard]] core::Result<math::Fixed> income_production_multiplier(std::span<const ProductionReductionSource>,

@@ -1,4 +1,5 @@
 #include "live_battle_bounty.hpp"
+#include "eawr/battle/start.hpp"
 #include "galactic_mode_internal.hpp"
 #include "eawr/data/ui/dialog_catalog.hpp"
 #include "eawr/data/ui/text_database.hpp"
@@ -64,7 +65,7 @@ bool GalacticMode::State::build_battle_dialog() {
         if (const auto* value = resolved.value().value("Is_Named_Hero"))
             info.hero = data::retail::boolean(value->value.raw_text).value_or(false);
         battle_result_types.emplace(name, std::move(info));
-        battle_tactical_types.emplace(skirmish::type_id(name), name);
+        battle_tactical_types.emplace(battle::type_id(name), name);
     }
     style.texture = [this](std::string_view type) {
         const auto art = production_art.find(std::string(type));

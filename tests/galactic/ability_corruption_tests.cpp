@@ -270,7 +270,7 @@ void accepted_space_mission(const eawr::sim::PartitionExecutor& pool, std::vecto
     const auto install = [&](campaign::GameSession& game) {
         game.set_conflict_service([](const auto&, const auto&, auto) {
             return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
-        }, [](const campaign::ConflictRecord&) { return eawr::core::Result<tactical::TacticalContent>::success(mission_content()); });
+        }, [](const campaign::ConflictRecord&) { return eawr::core::Result<tactical::TacticalContent>::success(mission_content()); }, {}, eawr::campaign::ScriptRequirement::none);
         game.set_corruption_mission_service([](const auto&, const auto& mission, const auto& choice, auto next) {
             campaign::Arbitration arbitration; arbitration.route = campaign::ConflictRoute::tactical; arbitration.forced_tactical = true;
             return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success(
@@ -292,7 +292,7 @@ void accepted_space_mission(const eawr::sim::PartitionExecutor& pool, std::vecto
     expect(game.return_state().heroes.size() == 1 && !game.galaxy().ability_state()->transitions[0].transition.active(),
         "mission consumes the actor into the shared return state without starting the transition");
     const auto ids = cp::game_identities(config); const auto saved = take(cp::save_game_checkpoint(game, ids));
-    cp::GameLoadOptions load; load.configure_session = [&](campaign::GameSession& session) { install(session); return eawr::core::Result<void>::success(); };
+    cp::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.configure_session = [&](campaign::GameSession& session) { install(session); return eawr::core::Result<void>::success(); };
     load.content = [](const campaign::ConflictRecord&) { return eawr::core::Result<tactical::TacticalContent>::success(mission_content()); };
     auto fresh = take(cp::load_game_checkpoint(saved, ids, load, pool));
     expect(fresh.session.battle() && take(cp::save_game_checkpoint(fresh.session, ids)) == saved,

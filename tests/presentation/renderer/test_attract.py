@@ -87,7 +87,7 @@ class AttractStructure(unittest.TestCase):
         # MAT-15/16 (legacy #3021): the demo start carries the pool-return record in its setup (the
         # skirmish start sets it, the live session keeps the start's setup), so a normal skirmish,
         # LAN and a replay never see it; nothing in the viewer gates the sim.
-        prepare = (SRC / "live_session_prepare.cpp").read_text(encoding="utf-8")
+        prepare = source_text("apps/viewer/src/live_session_prepare.cpp")
         self.assertIn("setup_ = start_->setup;", prepare)
         start = (ROOT / "src/skirmish/start.cpp").read_text(encoding="utf-8")
         self.assertIn("start_.setup.attract_pool = std::move(pool);", start)
@@ -95,7 +95,7 @@ class AttractStructure(unittest.TestCase):
         economy = (ROOT / "src/skirmish/economy.cpp").read_text(encoding="utf-8")
         self.assertIn("start.setup.attract_pool.has_value()", economy)
         for name in ("session_step_commands.cpp", "session_step_fighters.cpp"):
-            text = (ROOT / "src/sim/tactical" / name).read_text(encoding="utf-8")
+            text = source_text(f"src/sim/tactical/{name}")
             self.assertIn("if (impl_->setup.attract_pool)", text, name)
 
     def test_the_camera_is_a_presentation_only_seam_behind_the_saved_camera(self):

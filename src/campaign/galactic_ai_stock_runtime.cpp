@@ -397,7 +397,7 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
             }, std::move(gates.global), [parent = &galaxy](auto player, auto actor) { return parent->recheck_native_orbit(player, actor); });
             return core::Result<void>::success();
         };
-        out.prepare_child_scripts = [space](auto engine, auto world, auto bind_timeline) {
+        out.prepare_child_scripts = [](auto engine, auto world, auto bind_timeline) {
             GalacticParentQueryFactory parent_queries = [engine, world, bind_timeline](const ConflictRecord& conflict) {
                 const ModeId mode{SessionMode::battle, conflict.id};
                 auto timeline = bind_timeline(mode);
@@ -410,9 +410,8 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
                         {engine.get(), world.get(), planet, true, {}, value.value().value}, equation, player);
                 });
             };
-            auto pair = space_entry_script_services(space, parent_queries);
             return core::Result<GalacticAiRuntimeProviders::ChildScripts>::success(
-                {std::move(pair.scripts), std::move(pair.bind), std::move(parent_queries)});
+                {std::move(parent_queries)});
         };
         out.prepare_battle = [observe_battle](auto actions, auto engine, auto scheduler) {
             auto native = ga::retained_movement_battle_listener(std::move(actions), std::move(engine), std::move(scheduler));

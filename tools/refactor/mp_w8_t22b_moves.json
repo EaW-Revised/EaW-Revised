@@ -1,0 +1,46 @@
+[
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_host_options",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::open_host_options"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::build_options_overlay",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::build_options_overlay"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_options",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::open_options"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::show_options_values",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::show_options_values"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::close_options",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::close_options"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::process_options",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::process_options"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_filter",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::open_filter"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::open_direct_connect",
+    "new": "apps/viewer/src/lan_lobby_screen_options.cpp#EawrLanLobby::open_direct_connect"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::refresh_staging",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::refresh_staging"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::run_action",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::run_action"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen.cpp#EawrLanLobby::condition",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::condition"
+  }
+]

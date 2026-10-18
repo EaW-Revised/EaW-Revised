@@ -1,5 +1,11 @@
 #pragma once
 
+#include "eawr/units/unit_tables_combat.hpp"
+#include "eawr/units/unit_tables_abilities.hpp"
+#include "eawr/units/unit_tables_spawner.hpp"
+#include "eawr/units/unit_tables_galactic.hpp"
+#include "eawr/units/unit_tables_presentation.hpp"
+
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/data/xml.hpp"
@@ -29,11 +35,6 @@
 // pure function of its inputs. Loading rules are in docs/unit-data.md.
 namespace eawr::units {
 
-using sim::math::Fixed;
-using sim::math::Vec3;
-
-inline constexpr std::uint32_t no_index = 0xffffffffU;
-
 // The #64 scan list in its unit-table order: stations, ships, the squadrons
 // the lobby or the fleet places, then the SK-23 spawned squadrons. Craft are
 // reached through squadron composition.
@@ -42,435 +43,14 @@ inline constexpr std::uint32_t no_index = 0xffffffffU;
 // non-prop placements of the fixture map (SK-04) that are not already pinned types.
 [[nodiscard]] std::span<const std::string_view> pinned_m2_obstacles() noexcept;
 
-enum class UnitKind : std::uint8_t { station, ship, squadron, craft };
-
-enum class HardpointType : std::uint8_t {
-    unknown,
-    weapon_laser,
-    weapon_missile,
-    weapon_torpedo,
-    weapon_ion_cannon,
-    shield_generator,
-    engine,
-    fighter_bay,
-    tractor_beam,
-    gravity_well,
-    enable_special_ability,
-    dummy_art,
-    weapon_mass_driver, // MD-01: append to preserve existing content-identity enum values.
-    weapon_special, // WAD-31: ordinary weapon type, distinct from enable_special_ability.
-};
-
-struct InaccuracyEntry final {
-    std::string category;
-    Fixed distance;
-    bool operator==(const InaccuracyEntry&) const = default;
-};
-
-// One way of firing: a weapon hardpoint's Fire_* tags, or a craft's own
-// Projectile_* tags (object weapon). Missing values stay nullopt and appear in
-// the unresolved list when the table requires them.
-struct Weapon final {
-    std::string projectile;
-    std::uint32_t projectile_index{no_index};
-    std::string charged_projectile; // WAD-35: Blast_Ability_Fire_Projectile_Type
-    std::uint32_t charged_projectile_index{no_index};
-    std::optional<Fixed> min_recharge_seconds;
-    std::optional<Fixed> max_recharge_seconds;
-    std::optional<std::uint32_t> pulse_count;
-    std::optional<Fixed> pulse_delay_seconds;
-    std::optional<Fixed> range;              // Fire_Range_Distance (hardpoint weapons only)
-    std::optional<Fixed> cone_width_degrees; // Fire_Cone_Width
-    std::optional<Fixed> cone_height_degrees;
-    std::string damage_type;                 // authored Damage_Type, empty when absent
-    std::optional<Fixed> damage;             // a hardpoint's own Projectile_Damage (DG-25)
-    std::vector<std::string> category_restrictions;
-    std::vector<InaccuracyEntry> inaccuracy;
-    bool opportunity_fire_when_targeting{};
-    bool opportunity_fire_when_idle{};
-    std::optional<std::uint32_t> appearance_delay_frames; // WAD-37/40, hardpoint only
-    std::optional<Fixed> full_salvo_delay_multiplier; // Full_Salvo_Weapon_Delay_Multiplier, hardpoint only (WAB-80)
-    bool operator==(const Weapon&) const = default;
-};
-
-// A model-space point of a named ALO bone: the translation of the bone's bind
-// frame composed root-to-bone in Q24 (docs/unit-data.md), in asset units and
-// before the owner's Scale_Factor.
-struct BonePoint final {
-    std::string bone;
-    std::optional<Vec3> position;
-    bool from_attached_model{}; // found in Model_To_Attach, placed at the attachment bone
-    // The same bind frame's x, y and z axes in model space (its rotation columns, unnormalized);
-    // set whenever position is. A fixed hardpoint's fire cone opens along Fire_Bone_A's x axis
-    // (docs/behaviour/space-weapon-fire.md W-07).
-    std::optional<std::array<Vec3, 3>> axes;
-    bool operator==(const BonePoint&) const = default;
-};
-
-struct Hardpoint final {
-    std::string id;
-    HardpointType type{HardpointType::unknown};
-    std::string type_name;
-    bool targetable{};
-    bool destroyable{};
-    std::optional<Fixed> health;
-    std::optional<Fixed> repair_amount_per_frame; // Repair_Amount_Per_Frame (station hardpoints, #72)
-    std::optional<Fixed> repair_cost_per_frame;   // Repair_Cost_Per_Frame
-    std::optional<Weapon> weapon;
-    std::string model_to_attach;
-    std::string collision_mesh; // Collision_Mesh: the mesh whose hits damage it (#536, DG-11)
-    BonePoint attachment;
-    BonePoint fire_a;
-    BonePoint fire_b;
-    std::string special_ability_name;
-    std::optional<Fixed> fighter_bay_flyout_distance;
-    // HARD_POINT_FIGHTER_BAY (#75): the X axis of the attachment bone's bind frame, model space.
-    std::optional<Vec3> bay_axis;
-    bool requires_manual_target{}; // WAD-39: no automatic shot without a manual assignment
-    bool allows_special_weapon_use{}; // WSW-48: allied permission lifecycle notifications
-    std::optional<Fixed> manual_cooldown_seconds;
-    bool manual_is_turret{};
-    BonePoint manual_turret;
-    BonePoint manual_barrel;
-    Vec3 manual_rest{};
-    Vec3 manual_offset{};
-    std::optional<Fixed> manual_rotate_speed;
-    std::optional<Fixed> manual_yaw_extent;
-    std::optional<Fixed> manual_pitch_extent;
-    bool operator==(const Hardpoint&) const = default;
-};
-
-struct Projectile final {
-    std::string id;
-    std::optional<Fixed> damage;
-    std::string damage_type;
-    std::optional<Fixed> max_speed;
-    std::optional<Fixed> max_rate_of_turn;
-    std::optional<Fixed> max_flight_distance;
-    std::string category;
-    bool does_shield_damage{};
-    bool does_energy_damage{};
-    bool disables_engines_when_power_drained{};
-    std::optional<Fixed> disable_engines_duration;
-    bool does_hitpoint_damage{};
-    std::optional<Fixed> energy_per_shot;
-    std::optional<Fixed> ai_combat_power; // weighs a hardpoint's share of its unit's (#361)
-    // Ion stun on detonation (#561, docs/behaviour/space-damage.md IS-01 to IS-09): the
-    // Projectile_Ion_Stun_* tags. The reductions are fractions (0.5 halves the value).
-    bool ion_stun{};
-    std::optional<Fixed> ion_stun_duration; // seconds
-    std::optional<Fixed> ion_stun_speed_reduction;
-    std::optional<Fixed> ion_stun_shot_rate_reduction;
-    bool ion_stun_stack_duration{};
-    std::optional<Fixed> ion_stun_radius;
-    sim::tactical::BlastProfile blast{};
-    std::string blast_immune_faction;
-    std::optional<Fixed> max_lifetime{};
-    std::optional<bool> explode_at_target_radius{};
-    std::optional<Fixed> rocket_curve_distance{};
-    std::optional<Fixed> rocket_curve_offset{};
-    std::optional<Fixed> rocket_straight_distance{};
-    sim::tactical::WeakenProfile weaken{};
-    Fixed damage_delay{}; // Projectile_Damage_Delay_Secs, WAD-26
-    std::optional<Fixed> reveal_range{};
-    Fixed dense_reveal_multiplier{Fixed::from_raw(Fixed::scale)};
-    bool operator==(const Projectile&) const = default;
-};
-
-struct ModMultiplier final {
-    std::string modifier;
-    Fixed value;
-    bool operator==(const ModMultiplier&) const = default;
-};
-
-struct ModFlag final {
-    std::string modifier;
-    bool value{};
-    bool operator==(const ModFlag&) const = default;
-};
-
-struct Ability final {
-    std::string type;          // upper-case, as the engine's ability enum is spelled
-    std::string authored_type; // as written (`power_to_weapons` on the Acclamator)
-    std::optional<Fixed> expiration_seconds;
-    std::optional<Fixed> recharge_seconds;
-    std::vector<ModMultiplier> modifiers;
-    std::vector<ModFlag> modifier_flags;
-    bool supports_autofire{};
-    // #561: the projectile the ability fires instead of the weapons' own (Projectile_Types_Override),
-    // resolved to its index in the projectile table.
-    std::string projectile_override;
-    std::uint32_t projectile_index{no_index};
-    std::optional<Fixed> effective_radius;
-    std::string gui_activated_ability_name;
-    std::optional<Fixed> fixed_inaccuracy{};
-    std::optional<Fixed> target_z_offset{};
-    std::string spawned_object;
-    std::uint32_t spawned_projectile_index{no_index};
-    std::optional<Fixed> bomb_countdown_seconds, target_position_z_offset;
-    std::string replenish_particle;
-    // WLU-01: LURE's pulse data as authored (Target_Types names, the pulse period and count, the
-    // Is_Pulsing flag the service never reads, and the presentation particle).
-    std::vector<std::string> target_types;
-    std::optional<Fixed> pulse_frequency_seconds;
-    std::optional<std::uint32_t> max_pulses;
-    std::optional<bool> is_pulsing;
-    std::string lure_particle;
-    bool disable_movement{}; // WIN-02, WMS-02: authored movement lock while deployed
-    bool operator==(const Ability&) const = default;
-};
-
-// WAB-70/71: a nested Buzz_Droids_Ability as authored (the droid object it creates at a point,
-// that object's arming delay, chase and damage radii and per-second damage).
-struct BuzzDroids final {
-    std::string name;
-    std::optional<Fixed> min_range, max_range, chase_radius, damage_radius;
-    std::optional<Fixed> enemy_damage_per_second, own_damage_per_second, activation_seconds;
-    std::string object_type;
-    std::string activate_sfx; // presentation: the droids' own arming cue (WAB-75)
-    bool operator==(const BuzzDroids&) const = default;
-};
-
-// WCB-01..03: a named self-targeted ring launcher, independent of the unit ability's radius.
-struct ClusterBomb final {
-    std::string name, bomb_type;
-    sim::tactical::SpecialActivationStyle style{};
-    std::uint32_t projectile_index{no_index}, count{1};
-    Fixed detonation_seconds{Fixed::from_raw(Fixed::scale)};
-    bool operator==(const ClusterBomb&) const = default;
-};
-
-struct SpawnEntry final {
-    std::string squadron;
-    std::uint32_t squadron_index{no_index};
-    std::int32_t count{};
-    bool operator==(const SpawnEntry&) const = default;
-};
-
-// SPAWN_SQUADRON lists. SK-23 launches `starting` once after
-// `delay_seconds`; SK-36 keeps `reserves` read but unused (reserves_used is
-// always false in M2).
-struct Spawner final {
-    std::vector<SpawnEntry> starting;
-    std::optional<Fixed> delay_seconds;
-    std::vector<SpawnEntry> reserves;
-    bool reserves_used{false};
-    std::array<std::vector<SpawnEntry>, 6> campaign_starting, campaign_reserves;
-    bool operator==(const Spawner&) const = default;
-};
-
-struct SquadronMember final {
-    std::string craft;
-    std::uint32_t craft_index{no_index};
-    std::optional<Vec3> offset; // Squadron_Offsets by member order
-    bool operator==(const SquadronMember&) const = default;
-};
-
-struct Movement final {
-    std::optional<Fixed> max_speed;
-    std::optional<Fixed> min_speed;
-    std::optional<Fixed> max_rate_of_turn;
-    std::optional<Fixed> max_rate_of_roll;
-    std::optional<Fixed> bank_turn_angle;
-    std::optional<Fixed> max_thrust;
-    std::optional<Fixed> max_lift;
-    std::optional<Fixed> acceleration; // OverrideAcceleration
-    std::optional<Fixed> deceleration; // OverrideDeceleration
-    std::string space_layer;
-    std::optional<Fixed> layer_z_adjust;
-    bool operator==(const Movement&) const = default;
-};
-
-// A model-space box before Scale_Factor: the union of the model's collidable meshes, each
-// mesh's bounds placed by its bone's bind frame (docs/behaviour/space-damage.md DG-31).
-struct CollisionBounds final {
-    Vec3 min;
-    Vec3 max;
-    bool operator==(const CollisionBounds&) const = default;
-};
 // WGM-128: strict reference-pose collision box for model-backed GC objects.
 // Reuses the shared model/bone loader; no collidable meshes yield [-1,1]^3.
 // Malformed bounds, bones and arithmetic overflow refuse rather than falling back.
 [[nodiscard]] core::Result<CollisionBounds> prepare_galactic_collision_bounds(const assets::Model&);
 
-// A collidable mesh a projectile hits (#536, docs/behaviour/space-damage.md DG-36): its ALO name
-// and its triangles in model space, bind pose, before Scale_Factor. `hardpoint` is the index of
-// the hardpoint whose Model_To_Attach it comes from (no_index: the unit's own model).
-struct CollisionMesh final {
-    std::string name;
-    std::uint32_t hardpoint{no_index};
-    std::vector<std::array<Vec3, 3>> triangles;
-    bool operator==(const CollisionMesh&) const = default;
-};
-
-// How the tracking system and the path finder see a type (#71, docs/unit-data.md, research
-// E71-15, E71-17, E71-18). The collision box is the model's collision bounds: the union of its
-// collidable meshes' boxes in the bind pose, half extents before Scale_Factor; a model without
-// a collidable mesh has the box +-1.
-struct HazardProfile final {
-    std::vector<std::string> behavior;
-    std::vector<std::string> space_behavior;
-    bool asteroid_field{};
-    bool ion_storm{};
-    bool nebula{};
-    bool impassable_asteroid{};
-    bool asteroid_damage{};
-    bool nebula_service{};
-    Vec3 obstacle_offset{};
-    bool operator==(const HazardProfile&) const = default;
-};
-
-struct SpaceFootprint final {
-    bool space_obstacle{};                    // SPACE_OBSTACLE in Behavior or SpaceBehavior
-    std::optional<Fixed> custom_hard_x;       // Custom_Hard_XExtent
-    std::optional<Fixed> custom_hard_y;       // Custom_Hard_YExtent
-    std::optional<Fixed> custom_soft_radius;  // Custom_Soft_Footprint_Radius
-    std::optional<Fixed> obstacle_radius;     // Space_Obstacle_Radius
-    std::optional<Fixed> collision_x;         // model collision half extents, unscaled
-    std::optional<Fixed> collision_y;
-    HazardProfile hazard; // WHZ-01: independent flags and authored service attachment
-    bool operator==(const SpaceFootprint&) const = default;
-};
-
-// A map object type the unit tables load only for its footprint (#71).
-struct ObstacleType final {
-    std::string id;
-    std::string xml_type;
-    std::string space_layer;
-    std::optional<Fixed> scale_factor;
-    std::string model_path;
-    SpaceFootprint footprint;
-    bool influences_capture{true};
-    bool construction_blocker{true};
-    bool living_projectile_collision{}; // WBP-50: false by default for map objects
-    bool selectable{}; // WSU-21: presentation fields do not enter content identity
-    bool mouse_sensitive{}; // WSU-13: map props use the same admission as live units
-    bool last_state_visible_under_fow{};
-    bool initial_state_visible_under_fow{};
-    bool operator==(const ObstacleType&) const = default;
-};
-
-// #530 (docs/behaviour/space-purchasing.md): a skirmish station's `Income_Stream_Ability`
-// (PU-02, PU-03) and `Income_Stream_Mod_Ability` (PU-04) sub-objects, by Name.
-struct IncomeStream final {
-    std::string name;
-    std::optional<Fixed> base_value;       // Base_Income_Value
-    std::optional<Fixed> interval_seconds; // Base_Interval_In_Secs
-    bool split_with_allies{};              // Split_Income_With_Allies
-    bool full_amount_to_everyone{};        // Full_Amount_To_Everyone
-    bool operator==(const IncomeStream&) const = default;
-};
-
-struct IncomeBonus final {
-    std::string name;
-    std::optional<Fixed> additive;   // Income_Additive_Value
-    std::optional<Fixed> multiplier; // Income_Multiplier
-    std::string target_source;       // Target_Stream_Source
-    std::optional<Fixed> interval_multiplier;
-    std::string activation_style;
-    std::uint32_t stacking_category{};
-    bool all_allied_sources{};
-    bool reverse{};
-    bool operator==(const IncomeBonus&) const = default;
-};
-
-// One faction's group of Tactical_Buildable_Objects_Multiplayer (PU-10), in authored order.
-struct BuildGroup final {
-    std::string faction;
-    std::vector<std::string> types;
-    bool operator==(const BuildGroup&) const = default;
-};
-
-// WPR-51: automatic combat bonuses authored on an upgrade object.
-struct CombatBonus final {
-    std::uint32_t stacking_category{};
-    std::vector<std::string> types;
-    std::vector<std::string> categories;
-    std::array<Fixed, 6> percentages{}; // health, damage, energy, shield, defense, speed
-    std::string name;
-    sim::tactical::SpecialAbilityFilter filter;
-    std::string specific_faction;
-    bool enabled{true};
-    std::vector<sim::tactical::TypeId> excluded_containers;
-    bool operator==(const CombatBonus&) const = default;
-};
-
-// WGT-49/50: source-owned player effects; independent from Combat_Bonus_Ability.
-struct BattlefieldBonus final {
-    std::string name;
-    std::uint32_t category{};
-    Fixed defence{}, reveal_delta{};
-    bool all_allies{}, enabled{true};
-    bool operator==(const BattlefieldBonus&) const = default;
-};
-// WST-03: a Space_Automatic Battlefield_Modifier_Ability's Stealth_Duration_Multiplier, for its owner
-// (and its allies with Apply_To_All_Allies).
-struct StealthDurationBonus final {
-    std::uint32_t stacking_category{};
-    Fixed multiplier{};
-    bool all_allies{};
-    bool operator==(const StealthDurationBonus&) const = default;
-};
-
-// WRB-05: an Enable_Ability authored on an upgrade object: it enables the named nested ability on
-// the listed types (or categories) of its holder, and of the holder's allies when `all_allies`.
-struct AbilityEnable final {
-    std::string ability_name;
-    std::vector<std::string> types;
-    std::vector<std::string> categories;
-    bool all_allies{};
-    bool operator==(const AbilityEnable&) const = default;
-};
-
-// What a type builds and costs in a skirmish (#530, PU-10 to PU-21, PU-31).
-struct Production final {
-    // WGCH-164: authored source-owned tactical salvage modifier.
-    struct Bounty {
-        Fixed percentage{};
-        std::int32_t category{};
-        std::vector<std::string> factions{};
-        bool all_allies{};
-        bool operator==(const Bounty&) const = default;
-    };
-    std::vector<Bounty> bounties{};
-    std::vector<BuildGroup> buildable;                   // Tactical_Buildable_Objects_Multiplayer
-    std::optional<Fixed> build_cost_multiplayer;         // Tactical_Build_Cost_Multiplayer
-    std::vector<BuildGroup> buildable_campaign;          // WGT-26
-    std::optional<Fixed> build_cost_campaign;
-    std::optional<Fixed> build_time_seconds;             // Tactical_Build_Time_Seconds
-    std::string production_queue;                        // Tactical_Production_Queue
-    std::optional<std::uint32_t> population_value;       // Population_Value
-    std::optional<std::uint32_t> space_override_population_value; // negative authored sentinel becomes absent
-    std::optional<Fixed> reinforcement_prevention_radius; // Reinforcement_Prevention_Radius
-    std::vector<IncomeStream> income;
-    std::vector<IncomeBonus> income_bonuses;
-    std::optional<std::uint32_t> lifetime_player;
-    std::optional<std::uint32_t> current_player;
-    std::optional<std::uint32_t> lifetime_allies;
-    std::optional<std::uint32_t> current_allies;
-    std::vector<std::string> prerequisites;
-    std::string next_level;
-    bool upgrade_object{};
-    bool level_up{};
-    bool increments_tech{};
-    std::string removes_previous;
-    std::string next_upgrade; // WPR-63: menu metadata, outside content identity
-    std::vector<CombatBonus> combat_bonuses;
-    std::vector<StealthDurationBonus> stealth_duration_bonuses;
-    std::vector<BattlefieldBonus> battlefield_bonuses;
-    std::vector<AbilityEnable> ability_enables; // WRB-05
-    bool operator==(const Production&) const = default;
-};
-
 struct UnitType final {
     std::optional<Fixed> bounty_sp{}, bounty_mp{}; // WGCH-65: negative means category fallback
-    struct ObjectTurret {
-        BonePoint turret, barrel;
-        Vec3 rest{};
-        std::optional<Fixed> speed, yaw_extent, pitch_extent, rest_delay;
-        bool xy_only{};
-        bool operator==(const ObjectTurret&) const = default;
-    };
+    using ObjectTurret = table_rows::ObjectTurret;
     std::string id;
     // Position in the type table: the object's file in registry order, then its place in the file.
     // The AI's category teams enumerate in this order (PL-20); it is not part of the content identity.
@@ -609,24 +189,13 @@ struct UnitType final {
     bool target_stealth_units{}; // WST-07: Target_Stealth_Units
     bool special_weapon{}; // effective SPECIAL_WEAPON behavior
     // WSW-01/14: a standalone planetary source, separate from station manual weapons.
-    struct PlanetaryWeapon {
-        std::uint32_t index{}, target_action{};
-        std::uint64_t valid_targets{};
-        bool operator==(const PlanetaryWeapon&) const = default;
-    };
+    using PlanetaryWeapon = table_rows::PlanetaryWeapon;
     std::optional<PlanetaryWeapon> planetary_weapon;
     // TSW-01: an effective TACTICAL_SUPER_WEAPON behaviour's start placement data. The debug build repositions
     // the object once, at its first service, relative to the nearest enemy-owned super weapon target.
-    struct TacticalSuperWeapon {
-        Fixed start_distance{}, attack_distance{}, z_adjust{};
-        bool start_pos_match_target_z{};
-        bool operator==(const TacticalSuperWeapon&) const = default;
-    };
+    using TacticalSuperWeapon = table_rows::TacticalSuperWeapon;
     std::optional<TacticalSuperWeapon> tactical_super_weapon;
-    struct SpecialUnlock {
-        bool enable{}, all_allies{}, reverse{};
-        bool operator==(const SpecialUnlock&) const = default;
-    };
+    using SpecialUnlock = table_rows::SpecialUnlock;
     std::vector<SpecialUnlock> special_unlocks{}; // WSW-10/46: space-automatic battlefield effects.
     bool consume_after_special_fire{}; // WSW-09: authored marker, independent of unlock kind.
     bool star_base{}; // effective DUMMY_STAR_BASE behavior
@@ -661,13 +230,7 @@ struct UnitType final {
     bool special_weapon_in_space{}; // WTA-36: Is_Special_Weapon_In_Space, a hero to the AI's type query
     bool team_named_hero{};
     bool team_generic_hero{};
-    struct CompanyMember {
-        std::string type;
-        bool named_hero{}, generic_hero{};
-        bool attach_to_flagship{};
-        std::string unique_space_unit;
-        bool operator==(const CompanyMember&) const = default;
-    };
+    using CompanyMember = table_rows::CompanyMember;
     std::vector<CompanyMember> company_members;
     std::string company_transport;
     std::string deployed_space_type; // WHE-49: ship or automatically formed team
@@ -684,62 +247,12 @@ struct UnitType final {
     bool operator==(const UnitType&) const = default;
 };
 
-// What an Attack_Priorities name matches (#270, docs/unit-data.md): a GameObjectCategoryType
-// name, else a GameObjectPropertiesType name, else an exact object type.
-enum class PriorityMatch : std::uint8_t { category, property, type };
-
-struct PriorityEntry final {
-    std::string name;
-    Fixed weight;
-    PriorityMatch match{PriorityMatch::category};
-    std::uint64_t bits{}; // category or property bits; 0 for a type entry
-    bool operator==(const PriorityEntry&) const = default;
-};
-
-struct TargetingPrioritySet final {
-    std::string id;
-    std::vector<PriorityEntry> attack_priorities;
-    std::vector<std::string> hard_point_priorities;
-    std::vector<std::string> category_exclusions;
-    std::vector<std::string> property_exclusions;
-    std::vector<std::string> unit_exclusions;
-    std::vector<std::string> hard_point_exclusions;
-    std::uint64_t category_exclusion_bits{};
-    std::uint64_t property_exclusion_bits{};
-    bool operator==(const TargetingPrioritySet&) const = default;
-};
-
 // One value of a dynamic enum file (data/xml/enum/*.xml). The x64 FoC build reads them as
 // 64-bit masks (the Steam patch sets `All` to 0xFFFFFFFFFFFFFFFF).
 struct EnumValue final {
     std::string name;
     std::uint64_t value{};
     bool operator==(const EnumValue&) const = default;
-};
-
-struct DamageToArmor final {
-    std::string damage_type;
-    std::string armor_type;
-    Fixed multiplier;
-    bool operator==(const DamageToArmor&) const = default;
-};
-
-// gameconstants.xml values the M2 combat tickets read (#70-#76). Scalars are
-// listed by tag name in unit_tables.cpp; the damage table holds only the rows
-// whose damage and armor types the fleet uses.
-struct NamedConstant final {
-    std::string tag;
-    std::optional<Fixed> value;
-    std::string text; // authored text, for the boolean constants
-    bool operator==(const NamedConstant&) const = default;
-};
-
-struct CombatConstants final {
-    struct Bounty { std::uint64_t category{}; Fixed value{}; bool operator==(const Bounty&) const = default; };
-    std::vector<Bounty> bounty_sp{}, bounty_mp{};
-    std::vector<NamedConstant> scalars;
-    std::vector<DamageToArmor> damage_to_armor;
-    bool operator==(const CombatConstants&) const = default;
 };
 
 // One thing the scan could not resolve. `field` is a tag or a reference kind
@@ -762,13 +275,6 @@ struct InputFile final {
     bool operator==(const InputFile&) const = default;
 };
 
-// Explicit GC player type/name locks; the story/corruption producer is an input seam.
-struct CampaignAbilityLock final {
-    std::uint32_t player{};
-    std::string type, name;
-    bool enabled{};
-    bool operator==(const CampaignAbilityLock&) const = default;
-};
 struct UnitTables final {
     bool campaign_scene{}; // opt-in identity for GC-only scene metadata
     bool campaign_multiplayer{}; // WGCH-65: tactical bounty table selection
@@ -847,6 +353,17 @@ struct DamageTypeIndex final {
 inline constexpr Fixed unlisted_priority = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
 [[nodiscard]] std::optional<Fixed> attack_priority(const TargetingPrioritySet& set, const UnitType& candidate);
 [[nodiscard]] std::optional<Fixed> hard_point_priority(const TargetingPrioritySet& set, HardpointType type);
+// WSL-16: generic campaign scenes allow ships but retain zero reserves.
+// Full campaign space entries also bind authored reserves and owner tech tiers.
+struct SpawnPolicy final {
+    enum class Mode { skirmish, campaign_scene, campaign };
+    struct OwnerTech final {
+        sim::tactical::PlayerId owner{};
+        std::uint32_t tech{};
+    };
+    Mode mode{Mode::skirmish};
+    std::vector<OwnerTech> owners;
+};
 // The motion table of loaded tables (#70, docs/behaviour/space-movement.md MV-01): one profile
 // per ship with a Max_Speed, keyed like durability_table. With the #71 path finder constants it
 // also carries the avoidance rules and one footprint per type with a Space_Layer (ships,
@@ -858,7 +375,11 @@ inline constexpr Fixed unlisted_priority = Fixed::from_raw(std::numeric_limits<s
 // MaxRotationsSpace and XYExpansionDistanceSpace. Fails when a scalar it needs is missing, two
 // types share a type ID or validate_motion rejects the table. Craft fly with the squadron
 // locomotor (#75) and have no profile.
-[[nodiscard]] core::Result<sim::tactical::MotionTable> motion_table(const UnitTables& tables);
+// The resulting squadrons.spawners and campaign_spawners are the shared arrival
+// roster: skirmish uses starting squadrons only; campaign includes authored
+// reserves, single ships and each owner's selected tech tier (WGT-10, WSL-16).
+[[nodiscard]] core::Result<sim::tactical::MotionTable> motion_table(
+    const UnitTables& tables, const SpawnPolicy& spawn_policy = {});
 
 // The combat table of loaded tables (#73, docs/behaviour/space-weapon-fire.md): one profile per
 // station, ship and craft, keyed like durability_table, with its CategoryMask bits,

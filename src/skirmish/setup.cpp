@@ -230,6 +230,7 @@ core::Result<void> validate_setup_slots(const std::span<const LobbySlot> slots,
             return fail("Occupied player rows must be distinct, ordered and within range.");
         previous = slot.slot;
         if (local_controls && slot.slot != 1 && slot.human) return fail("Other local rows support AI or Open only.");
+        if (slot.human && slot.difficulty != sim::tactical::AiLevel::normal) return fail("A human row has no AI difficulty level.");
         if (slot.team >= metadata.start_positions->size()) return fail("The selected team has no authored start on this map.");
         const auto [team, inserted] = factions.emplace(slot.team, slot.faction);
         if (complete_teams && !inserted && !detail::iequals(team->second, slot.faction))

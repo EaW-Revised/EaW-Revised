@@ -191,6 +191,12 @@ struct PadSaleProfile {
     friend bool operator==(const PadSaleProfile&, const PadSaleProfile&) = default;
 };
 
+// WTA-45: an AI player's production time under its difficulty's Space_Build_Time_Multiplier. A queue entry's
+// frames round to nearest (PU-13) and stay at least 1; a pad's whole seconds truncate (WBP-15). A multiplier of
+// 1 returns the authored value unchanged.
+[[nodiscard]] std::uint32_t scaled_ai_frames(std::uint32_t frames, math::Fixed multiplier) noexcept;
+[[nodiscard]] std::uint32_t scaled_ai_seconds(std::uint32_t seconds, math::Fixed multiplier) noexcept;
+
 // A lobby player's economy (PU-01, PU-14, PU-18, PU-21, PU-34).
 struct EconomyPlayer {
     PlayerId player{};
@@ -201,6 +207,8 @@ struct EconomyPlayer {
     std::uint32_t start_tech{};       // WPR-02
     std::uint32_t max_tech{};
     math::Fixed credit_multiplier{math::Fixed::from_raw(math::Fixed::scale)}; // WPR-12: positive AI changes only
+    // WTA-45: the AI difficulty's Space_Build_Time_Multiplier on this AI player's production time; 1 is Normal.
+    math::Fixed ai_build_time_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
     std::optional<math::Fixed> credit_cap{}; // WGT-27: absent in skirmish
     std::optional<math::Fixed> strategic_credits{}; // WGA-53/54: retained AI balance
     friend constexpr bool operator==(const EconomyPlayer&, const EconomyPlayer&) noexcept = default;

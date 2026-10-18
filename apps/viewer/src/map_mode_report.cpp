@@ -142,6 +142,7 @@ bool MapMode::State::write_report() const {
     gpu_memory_trace.write(output);
     if (hud) output << "  \"hud\": " << hud->report_json() << ",\n";
     output << "  \"perf_overlay\": " << perf_report_json() << ",\n";
+    output << "  \"net_perf\": " << net_perf_json() << ",\n";
     write_report_scene(output);
     write_report_lighting(output);
     write_report_fog(output);

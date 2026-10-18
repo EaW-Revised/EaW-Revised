@@ -82,22 +82,38 @@ void TacticalSession::Impl::adjust_owned(const UnitState& unit, const bool added
     }
 
 core::Result<void> TacticalSession::Impl::count_owned(const std::vector<LiveUnit>& units, const PartitionExecutor& executor) {
-        std::fill(ownership_parts.begin(), ownership_parts.end(), 0);
+        // Workers resolve each unit's key slot into its own scratch entry; the totals are one ordered
+        // O(units) pass, not a tick_partition_count x keys counter table that is filled and reduced.
+        ownership_slots.resize(units.size());
         const auto counted = executor.execute_phase("production-counts", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, units.size());
             for (auto index = range.begin; index < range.end; ++index) {
                 const auto& state = units[index].state;
-                const auto slot = ownership_slot(state.owner, purchase_identity(state));
-                if (slot != ownership_keys.size()) ++ownership_parts[partition * ownership_keys.size() + slot];
+                ownership_slots[index] = static_cast<std::uint32_t>(ownership_slot(state.owner, purchase_identity(state)));
             }
         });
         if (!counted) return counted;
         std::fill(ownership_counts.begin(), ownership_counts.end(), 0);
-        for (std::size_t partition = 0; partition < tick_partition_count; ++partition) {
-            for (std::size_t slot = 0; slot < ownership_keys.size(); ++slot) ownership_counts[slot] += ownership_parts[partition * ownership_keys.size() + slot];
+        for (const auto slot : ownership_slots) {
+            if (slot != ownership_keys.size()) ++ownership_counts[slot];
         }
         return core::Result<void>::success();
     }
+
+bool TacticalSession::ownership_census_matches_recount_for_testing(const PartitionExecutor& executor) {
+    const auto live = impl_->sorted_live();
+    std::vector<std::uint64_t> expected(impl_->ownership_keys.size());
+    for (const auto& unit : live) {
+        const auto key = std::make_pair(unit.state.owner, purchase_identity(unit.state));
+        const auto found = std::find(impl_->ownership_keys.begin(), impl_->ownership_keys.end(), key);
+        if (found != impl_->ownership_keys.end()) ++expected[static_cast<std::size_t>(found - impl_->ownership_keys.begin())];
+    }
+    const auto saved = impl_->ownership_counts;
+    const bool counted = static_cast<bool>(impl_->count_owned(live, executor));
+    const bool match = counted && impl_->ownership_counts == expected && impl_->committed_ownership_counts == expected;
+    impl_->ownership_counts = saved;
+    return match;
+}
 
 CombatBonuses TacticalSession::Impl::bonuses_for(const LiveUnit& unit, const bool committed) const {
         const auto slot = ownership_slot(unit.state.owner, unit.state.type_id);
@@ -301,7 +317,7 @@ CombatBonuses TacticalSession::Impl::command_bonuses_for(const LiveUnit& unit, c
             bonus.stacking_category) - bonus_categories.begin());
         auto contribution = bonus.percentages;
         if (!unit.durability || !health_profile(unit)->powered) contribution[2] = {};
-        if (!unit.durability || durability.find(unit.state.type_id)->max_shields.raw() == 0) contribution[3] = {};
+        if (!unit.durability || health_profile(unit)->max_shields.raw() == 0) contribution[3] = {};
         accumulate_combat_bonus(categories[category], contribution);
     }
     const auto battlefield = ledger.battlefield_defence.find(owner.value_or(unit.state.owner));
@@ -404,18 +420,25 @@ bool TacticalSession::Impl::prune_upgrade_holders(std::vector<PlayerEconomy>& ac
 
 core::Result<void> TacticalSession::Impl::transfer_owner(LiveUnit& unit, const PlayerId owner,
     const CombatBonuses& bonuses) const {
+    // WTA-46: a unit moving between players whose difficulty scales its health or shield differently
+    // keeps its hull and shield percentages against the new owner's maxima (WNO-42).
+    std::optional<DurabilityProfile> before;
+    if (!owner_profiles.empty() && unit.durability && unit.state.owner != owner
+        && base_profile(unit.state.owner, unit.state.type_id) != base_profile(owner, unit.state.type_id))
+        if (const auto* current = health_profile(unit)) before = *current;
     return session_detail::transfer_owner(unit, owner, [&](LiveUnit& changed) {
-        return apply_bonuses(changed, bonuses, BonusAdjustment::ownership);
+        return apply_bonuses(changed, bonuses, BonusAdjustment::ownership, before ? &*before : nullptr);
     });
 }
 
-core::Result<void> TacticalSession::Impl::apply_bonuses(LiveUnit& unit, const CombatBonuses& bonuses, const BonusAdjustment adjustment) const {
+core::Result<void> TacticalSession::Impl::apply_bonuses(LiveUnit& unit, const CombatBonuses& bonuses,
+    const BonusAdjustment adjustment, const DurabilityProfile* const previous) const {
         using Void = core::Result<void>;
-        if (unit.upgrade_bonuses == bonuses) return Void::success();
-        const auto* base = durability.find(unit.state.type_id);
+        if (unit.upgrade_bonuses == bonuses && previous == nullptr) return Void::success();
+        const auto* base = base_profile(unit.state.owner, unit.state.type_id);
         if (base != nullptr && unit.durability) {
             auto changed = *base;
-            const auto old = *health_profile(unit);
+            const auto old = previous != nullptr ? *previous : *health_profile(unit);
             const auto raise = [&](const math::Fixed initial, const std::size_t stat) {
                 return math::multiply(initial, math::Fixed::from_raw(math::Fixed::scale + bonuses[stat].raw()));
             };
@@ -431,20 +454,20 @@ core::Result<void> TacticalSession::Impl::apply_bonuses(LiveUnit& unit, const Co
                 return math::Fixed::from_raw(std::clamp(current.raw() + delta,
                     std::int64_t{0}, after.raw()));
             };
+            // WNO-23/42: owner notifications update maxima before restoring percentages.
+            // Use one rounded ratio, including the zero-shield case.
+            const auto restore = [](const math::Fixed current, const math::Fixed before, const math::Fixed after) {
+                if (before.raw() <= 0 || after.raw() <= 0) return math::Fixed{};
+                std::int64_t raw{};
+                static_cast<void>(math::detail::rounded_divide_to_raw(math::detail::SignedWide::product(
+                    std::clamp(current.raw(), std::int64_t{0}, before.raw()), after.raw()),
+                    math::detail::from_u64(static_cast<std::uint64_t>(before.raw())), raw));
+                return math::Fixed::from_raw(raw);
+            };
             auto state = *unit.durability;
             state.hull = adjust(state.hull, old.max_hull, changed.max_hull);
             state.shields = adjust(state.shields, old.max_shields, changed.max_shields);
             if (adjustment == BonusAdjustment::ownership) {
-                // WNO-23/42: owner notifications update maxima before restoring percentages.
-                // Use one rounded ratio, including the zero-shield case.
-                const auto restore = [](const math::Fixed current, const math::Fixed before, const math::Fixed after) {
-                    if (before.raw() <= 0 || after.raw() <= 0) return math::Fixed{};
-                    std::int64_t raw{};
-                    static_cast<void>(math::detail::rounded_divide_to_raw(math::detail::SignedWide::product(
-                        std::clamp(current.raw(), std::int64_t{0}, before.raw()), after.raw()),
-                        math::detail::from_u64(static_cast<std::uint64_t>(before.raw())), raw));
-                    return math::Fixed::from_raw(raw);
-                };
                 state.hull = restore(unit.durability->hull, old.max_hull, changed.max_hull);
                 state.shields = restore(unit.durability->shields, old.max_shields, changed.max_shields);
             }
@@ -458,6 +481,12 @@ core::Result<void> TacticalSession::Impl::apply_bonuses(LiveUnit& unit, const Co
                 if (!maximum || !current) return Void::failure(!maximum ? maximum.error() : current.error());
                 changed.hardpoints[index].max_health = maximum.value();
                 // WNO-42 restores object hull/shields; hardpoints keep notification arithmetic.
+                // WTA-46: a transfer that rescales the owner's health restores them by percentage too.
+                if (previous != nullptr && adjustment == BonusAdjustment::ownership && index < old.hardpoints.size()) {
+                    state.hardpoints[index] = restore(state.hardpoints[index], old.hardpoints[index].max_health,
+                        changed.hardpoints[index].max_health);
+                    continue;
+                }
                 state.hardpoints[index] = adjustment == BonusAdjustment::gain
                     || ((adjustment == BonusAdjustment::legacy || adjustment == BonusAdjustment::ownership)
                         && bonuses[0] >= unit.upgrade_bonuses[0]) ? current.value()
@@ -1013,7 +1042,8 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
             // WBP-10: debit precedes creation and has no cancellation/refund transaction.
             if (!player->ai) ledger->credits = math::Fixed::from_raw(ledger->credits.raw() - child->price.raw());
             const auto* health = durability.find(child->type);
-            const auto seconds = player->ai ? child->ai_seconds : child->seconds;
+            const auto seconds = !player->ai ? child->seconds
+                : scaled_ai_seconds(child->seconds, player->ai_build_time_multiplier);
             if (health == nullptr || seconds == 0 || stage.next_id == invalid_entity_id) return finish(RejectReason::cannot_produce);
             const auto transform = math::to_matrix(pad->second.state.rotation, pad->second.state.position);
             if (!transform) return Void::failure(transform.error());

@@ -81,6 +81,21 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     return context.run();
 }
 
+// The gather buffers return with their capacity; only units are cleared. The next tick refills them.
+session_detail::Tick::~Tick() {
+    auto& scratch = impl_->gather_scratch;
+    if (gather_) {
+        if (gather_->starts) scratch.starts = std::move(*gather_->starts);
+        if (gather_->gathered_crafts) scratch.crafts = std::move(*gather_->gathered_crafts);
+    }
+    for (auto* units : {gather_ && gather_->moving ? &*gather_->moving : nullptr,
+             surviving_ && surviving_->survivors ? &*surviving_->survivors : nullptr}) {
+        if (units == nullptr || units->capacity() <= scratch.units.capacity()) continue;
+        units->clear();
+        scratch.units = std::move(*units);
+    }
+}
+
 namespace {
 
 // A failure from deep inside a tick carries only its arithmetic message; the phase names where it came from.

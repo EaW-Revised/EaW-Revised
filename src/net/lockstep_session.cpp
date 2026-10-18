@@ -2388,8 +2388,10 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
         auto input = std::move(encoded).value();
         const auto& completed = *result.completed;
         const bool end = completed.completed_tick == options_.final_tick_count;
-        const auto encoding = monitor_->needs_encoding(completed.completed_tick, end) ? adapter_->canonical_state() : Bytes{};
-        auto recorded = monitor_->record(completed.completed_tick, completed.state_sha256, encoding, input, end);
+        const bool exchange = monitor_->needs_encoding(completed.completed_tick, end);
+        const auto encoding = exchange ? adapter_->canonical_state() : Bytes{};
+        auto recorded = monitor_->record(completed.completed_tick,
+            completed.world_only && exchange ? adapter_->state_hash() : completed.state_sha256, encoding, input, end);
         if (!recorded) return fail(recorded.error());
     }
     if (departure_handler_ && !result.departures.empty()) {

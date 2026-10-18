@@ -97,8 +97,13 @@ core::Result<tactical::Footprint> detail::space_footprint(const std::string& id,
     return core::Result<tactical::Footprint>::success(*footprint);
 }
 
-core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
+core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const SpawnPolicy& spawn_policy) {
     using Result = core::Result<tactical::MotionTable>;
+    const bool campaign = spawn_policy.mode == SpawnPolicy::Mode::campaign;
+    const bool single_ships = spawn_policy.mode != SpawnPolicy::Mode::skirmish;
+    for (const auto& owner : spawn_policy.owners)
+        if (owner.tech >= Spawner{}.campaign_starting.size())
+            return Result::failure(failure("garrison owner tech outside 0..5"));
     const auto scalar = [&tables](const std::string_view tag) -> std::optional<Fixed> {
         for (const auto& constant : tables.constants.scalars) {
             if (constant.tag == tag) return constant.value;
@@ -325,24 +330,35 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
         if (!unit.spawner || (unit.kind != UnitKind::ship && unit.kind != UnitKind::station)) continue;
         tactical::SpawnerProfile spawner;
         spawner.type_id = assets::object_type_crc(unit.id);
-        for (const auto& entry : unit.spawner->starting) {
-            const auto id = assets::object_type_crc(entry.squadron);
-            // WSL-16/WGT-10: a campaign station also launches a type without squadron members as one single
-            // ship; skirmish tables keep dropping such entries (the owner's station-spawn decision).
-            const auto* spawned = tables.campaign_scene && !has_squadron(id) ? tables.find(entry.squadron) : nullptr;
-            const bool ship = spawned != nullptr && spawned->kind == UnitKind::ship;
-            if (!has_squadron(id) && !ship) continue;
-            tactical::SpawnEntryProfile row;
-            row.squadron = id;
-            row.ship = ship;
-            row.arrival = ship && spawned->campaign_hyperspace;
-            row.starting = entry.count;
-            // SK-36 (owner, #179 Q2): the M2 fixture ignores Reserve_Spawned_Units_Tech_0, so each
-            // entry launches its starting squadrons once and a lost one is not replaced. The
-            // hangar keeps the retail reserve rule (FL-02, FL-08) for a table that sets one.
-            row.reserve = 0;
-            spawner.entries.push_back(row);
-        }
+        const auto entries = [&](const auto& starting, const auto& reserves) {
+            std::vector<tactical::SpawnEntryProfile> result;
+            for (const auto& entry : starting) {
+                const auto id = assets::object_type_crc(entry.squadron);
+                // WSL-16/WGT-10: a campaign station also launches a type without squadron members as one single
+                // ship; skirmish tables keep dropping such entries (the owner's station-spawn decision).
+                const auto* spawned = single_ships && !has_squadron(id) ? tables.find(entry.squadron) : nullptr;
+                const bool ship = spawned != nullptr && spawned->kind == UnitKind::ship;
+                if (!has_squadron(id) && !ship) continue;
+                tactical::SpawnEntryProfile row;
+                row.squadron = id;
+                row.ship = ship;
+                row.arrival = ship && spawned->campaign_hyperspace;
+                row.starting = entry.count;
+                // SK-36 (owner, #179 Q2): the M2 fixture ignores Reserve_Spawned_Units_Tech_0, so each
+                // entry launches its starting squadrons once and a lost one is not replaced. The
+                // hangar keeps the retail reserve rule (FL-02, FL-08) for a table that sets one.
+                row.reserve = 0;
+                if (campaign) {
+                    const auto reserve = std::find_if(reserves.begin(), reserves.end(), [&](const auto& candidate) {
+                        return assets::object_type_crc(candidate.squadron) == id;
+                    });
+                    if (reserve != reserves.end()) row.reserve = reserve->count;
+                }
+                result.push_back(row);
+            }
+            return result;
+        };
+        spawner.entries = entries(unit.spawner->starting, unit.spawner->reserves);
         const auto delay = times(unit.spawner->delay_seconds.value_or(Fixed{}), Fixed::from_raw(30 * Fixed::scale),
                                  unit.id + " Spawned_Squadron_Delay_Seconds");
         spawner.delay_frames = delay.raw() > 0 ? static_cast<std::uint32_t>(delay.raw() / Fixed::scale) : 0U;
@@ -370,8 +386,24 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
             return std::any_of(names.begin(), names.end(), [](const auto& name) { return detail::iequals(name, "DUMMY_STAR_BASE"); });
         };
         spawner.starbase = starbase(unit.footprint.hazard.behavior) || starbase(unit.footprint.hazard.space_behavior);
-        if (!spawner.entries.empty() || (spawner.starbase && !spawner.bays.empty()))
-            squadrons.spawners.push_back(std::move(spawner));
+        const bool base_present = !spawner.entries.empty() || (spawner.starbase && !spawner.bays.empty());
+        if (campaign) for (const auto& owner : spawn_policy.owners) {
+            const auto select = [&](const auto& tiers, const auto& fallback) -> const std::vector<SpawnEntry>& {
+                const bool authored = std::any_of(tiers.begin(), tiers.end(), [](const auto& rows) { return !rows.empty(); });
+                if (!authored) return fallback; // explicit synthetic Tech0 profiles
+                for (auto tech = static_cast<int>(owner.tech); tech >= 0; --tech)
+                    if (!tiers[static_cast<std::size_t>(tech)].empty()) return tiers[static_cast<std::size_t>(tech)];
+                static const std::vector<SpawnEntry> empty;
+                return empty;
+            };
+            auto selected = spawner;
+            selected.entries = entries(select(unit.spawner->campaign_starting, unit.spawner->starting),
+                select(unit.spawner->campaign_reserves, unit.spawner->reserves));
+            // An empty selected tier overrides a populated base profile as well.
+            if (base_present || !selected.entries.empty())
+                squadrons.campaign_spawners.emplace(std::pair{selected.type_id, owner.owner}, std::move(selected));
+        }
+        if (base_present) squadrons.spawners.push_back(std::move(spawner));
     }
     std::sort(squadrons.spawners.begin(), squadrons.spawners.end(),
               [](const auto& left, const auto& right) { return left.type_id < right.type_id; });

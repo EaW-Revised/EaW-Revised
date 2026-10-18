@@ -6,6 +6,7 @@
 // <pid> samples another process, such as the viewer playing the melee (sampler.hpp).
 
 #include "melee.hpp"
+#include "eawr/battle/start.hpp"
 #include "sampler.hpp"
 
 #include "eawr/data/xml.hpp"
@@ -75,7 +76,7 @@ struct Options {
 };
 
 struct Content {
-    skirmish::SkirmishStart start;
+    eawr::battle::BattleStart start;
     skirmish::SessionContent content;
     tactical::VictoryRules victory;
     foc::AiSetup ai;

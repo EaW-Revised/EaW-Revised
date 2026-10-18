@@ -295,6 +295,9 @@ public:
 
     // Test seam: changes only private ECS storage order. Authoritative ordering is unchanged.
     void scramble_storage_for_testing();
+    // Test seam: runs the production census over the live units on `executor` and compares its per-key totals,
+    // and the incrementally maintained committed totals, with a plain recount. Leaves every state unchanged.
+    [[nodiscard]] bool ownership_census_matches_recount_for_testing(const PartitionExecutor& executor);
 
     // Scenario staging seam (sim_headless --scenario, docs/traces.md): adds a unit with the next
     // stable ID, or removes a live unit, between two ticks, as the original-game recorder does.

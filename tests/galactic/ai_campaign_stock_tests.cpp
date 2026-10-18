@@ -14,12 +14,21 @@
 #include "eawr/campaign/starting_forces.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "../../src/platform/galactic/save_repository.hpp"
+#include "../../src/checkpoint/game_session_internal.hpp"
 
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <numeric>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <memory>
+#include <set>
+#include <string>
+#include <string_view>
+#include <vector>
 #include <stdexcept>
 
 namespace {
@@ -630,8 +639,7 @@ void real_factory_contracts(bool configured_cadence = false) {
         providers.bind_actions = [](auto&, auto&, auto&, auto, auto, auto) { return eawr::core::Result<void>::success(); };
         providers.prepare_child_scripts = [](auto, auto, auto) {
             cp::GalacticAiRuntimeProviders::ChildScripts pair;
-            pair.first = [](const auto&) -> eawr::core::Result<auth::ScriptScheduler> { throw std::runtime_error("fixture must not create child scripts"); };
-            pair.second = [](auto&) -> eawr::core::Result<void> { throw std::runtime_error("fixture must not configure a child"); };
+            pair.parent_queries = [](const auto&) { return cp::GalacticParentQuery{}; };
             return eawr::core::Result<cp::GalacticAiRuntimeProviders::ChildScripts>::success(std::move(pair));
         };
         providers.prepare_battle = [](auto, auto, auto) {
@@ -1292,6 +1300,49 @@ void authored_selection_contracts() {
     expect(!cp::select_live_galactic_ai_players(data, plan, ai_data, "Missing_Adjustment"),
         "missing difficulty mapping refuses instead of assuming Normal");
 }
+// The installed Equal Footing campaign as the viewer lays it out: every faction a seat, one human, the rest AI.
+struct InstalledLive final {
+    std::shared_ptr<const eawr::vfs::Vfs> files;
+    eawr::data::LoadResult loaded;
+    eawr::data::galactic::GalacticData data;
+    eawr::units::GalacticTypeTable types;
+    static constexpr std::string_view campaign = "Sandbox_Equal_Footing_Underworld";
+    cp::CampaignSetupOptions setup;
+    galactic::SeatId human{};
+    std::set<galactic::PlayerId> ai_players;
+    static std::shared_ptr<const eawr::vfs::Vfs> mount_installed() {
+        std::vector<eawr::vfs::MountSpec> mounts;
+        for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+            mounts.push_back(must(eawr::vfs::resolve_manifest_mount(id, game_root() / folder / "Data")).mount);
+        return std::make_shared<const eawr::vfs::Vfs>(must(eawr::vfs::Vfs::mount(mounts)));
+    }
+    InstalledLive() : files(mount_installed()), loaded(must(eawr::data::load_catalog(*files, eawr::data::Profile::foc))),
+        data(must(eawr::data::galactic::load_galactic_data(*files, loaded.catalog))),
+        types(eawr::units::galactic_type_table(loaded.catalog)) {
+        const auto* source = data.campaign(campaign);
+        if (!source) throw std::runtime_error("installed live AI campaign missing");
+        setup.seed = 42;
+        for (const auto& faction : data.factions) {
+            const auto id = static_cast<galactic::PlayerId>(setup.players.size() + 1);
+            const bool local = faction.name == source->starting_active_player;
+            const bool playable = faction.is_playable.value_or(false);
+            setup.players.push_back({{id, id, 0}, faction.name, true});
+            // Match the viewer's full seat layout, including its neutral/nonplayable
+            // AI metadata. Only playable opponents supply the progression witnesses.
+            setup.seats.push_back({galactic::SeatId{id}, id, local ? galactic::SeatKind::human : galactic::SeatKind::ai, id - 1, true, local ? id : 0});
+            if (local) { setup.local_observer = id; human = {id}; }
+            else if (playable) ai_players.insert(id);
+        }
+        expect(human.value != 0 && !ai_players.empty(), "installed production case has actual human and AI controllers");
+        std::vector<std::string> originals;
+        for (const auto& type : types.types) originals.push_back(type.name);
+        std::sort(originals.begin(), originals.end());
+        for (const auto& name : originals) setup.types.push_back({setup.types.size() + 1, name});
+    }
+    [[nodiscard]] auto prepare(bool install_native_ai, ga::ServicePeriods periods = ga::retail_service_periods) const {
+        return must(eawr::platform::PreparedLiveCampaign::create(files, loaded.catalog, data, types, campaign, setup, "Normal_Default", install_native_ai, periods));
+    }
+};
 struct ProfileEvidence final {
     std::vector<std::vector<std::string>> hashes{};
     std::vector<std::string> galaxy_sha{};
@@ -1304,38 +1355,16 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
     if (cadence_window && frames < (short_record_contract ? 32U : 600U))
         throw std::runtime_error("cadence proof requires at least two perception deadlines");
     const bool profiling = eawr::gc_profile::enabled.exchange(false, std::memory_order_relaxed);
-    std::vector<eawr::vfs::MountSpec> mounts;
-    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
-        mounts.push_back(must(eawr::vfs::resolve_manifest_mount(id, game_root() / folder / "Data")).mount);
-    auto files = std::make_shared<const eawr::vfs::Vfs>(must(eawr::vfs::Vfs::mount(mounts)));
-    const auto loaded = must(eawr::data::load_catalog(*files, eawr::data::Profile::foc));
-    const auto data = must(eawr::data::galactic::load_galactic_data(*files, loaded.catalog));
-    const auto types = eawr::units::galactic_type_table(loaded.catalog);
-    constexpr std::string_view campaign = "Sandbox_Equal_Footing_Underworld";
-    const auto* source = data.campaign(campaign);
-    if (!source) throw std::runtime_error("installed live AI campaign missing");
-    cp::CampaignSetupOptions setup; setup.seed = 42;
-    galactic::SeatId human{};
-    std::set<galactic::PlayerId> ai_players;
-    for (const auto& faction : data.factions) {
-        const auto id = static_cast<galactic::PlayerId>(setup.players.size() + 1);
-        const bool local = faction.name == source->starting_active_player;
-        const bool playable = faction.is_playable.value_or(false);
-        setup.players.push_back({{id, id, 0}, faction.name, true});
-        // Match the viewer's full seat layout, including its neutral/nonplayable
-        // AI metadata. Only playable opponents supply the progression witnesses.
-        setup.seats.push_back({galactic::SeatId{id}, id, local ? galactic::SeatKind::human : galactic::SeatKind::ai, id - 1, true, local ? id : 0});
-        if (local) { setup.local_observer = id; human = {id}; }
-        else if (playable) ai_players.insert(id);
-    }
-    expect(human.value != 0 && !ai_players.empty(), "installed production case has actual human and AI controllers");
-    std::vector<std::string> originals;
-    for (const auto& type : types.types) originals.push_back(type.name);
-    std::sort(originals.begin(), originals.end());
-    for (const auto& name : originals) setup.types.push_back({setup.types.size() + 1, name});
-    const auto prepare = [&](bool install_native_ai) {
-        return must(eawr::platform::PreparedLiveCampaign::create(files, loaded.catalog, data, types, campaign, setup, "Normal_Default", install_native_ai, periods));
-    };
+    const InstalledLive fixture;
+    const auto& files = fixture.files;
+    const auto& loaded = fixture.loaded;
+    const auto& data = fixture.data;
+    const auto& types = fixture.types;
+    const auto campaign = fixture.campaign;
+    const auto& setup = fixture.setup;
+    const auto human = fixture.human;
+    const auto& ai_players = fixture.ai_players;
+    const auto prepare = [&](bool install_native_ai) { return fixture.prepare(install_native_ai, periods); };
     const auto advance = [](Live& live, std::uint64_t tick) {
         live.advance_to(tick);
         if (!live.wait_for(tick, std::chrono::minutes(30))) {
@@ -1457,7 +1486,14 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
                 if (!owner) throw std::runtime_error("profile equality needs the direct owner checkpoint");
                 // Reconstruct only the existing owner payload, outside the timed
                 // window, to read canonical galaxy SHA without a new live API.
-                auto imported = must(cp::GameSession::create(live_layout));
+                // The owner keeps only the journal's length: the session section's recording supplies its entries (#4058).
+                const auto* recorded = saved.find(ck::SectionId::session);
+                if (!recorded) throw std::runtime_error("profile equality needs the session recording");
+                ck::detail::Reader context(recorded->bytes);
+                const auto prefix = ck::detail::read_session_prefix(context);
+                if (context.failed()) throw std::runtime_error("profile equality needs a valid session prefix");
+                const auto replay = must(galactic::parse_replay(prefix.replay));
+                auto imported = must(cp::GameSession::from_recording(cp::GameRecording{replay, {}, {}}, {}, {}));
                 must(imported.load_checkpoint_state(owner->bytes));
                 boundary_galaxy_sha = imported.galaxy().state_sha256();
             }
@@ -1595,9 +1631,149 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
     report << "],\"passed\":" << (failures ? "false" : "true") << "}\n";
     return failures ? 1 : 0;
 }
+// GC tick cost (#4049): the live galactic step stepped one tick at a time, AI off and on, with the per-tick wall time
+// the performance overlay reads and the gc_profile phase attribution of every tick. Diagnostics only: nothing here
+// feeds the simulation, and the tick hashes are written out so a later head can be compared with BASE.
+std::vector<std::string> split_list(std::string_view text) {
+    std::vector<std::string> parts;
+    while (!text.empty()) {
+        const auto cut = text.find(',');
+        parts.emplace_back(text.substr(0, cut));
+        text = cut == std::string_view::npos ? std::string_view{} : text.substr(cut + 1);
+    }
+    return parts;
+}
+std::string environment_or(const char* name, std::string fallback) {
+#ifdef _MSC_VER
+    char* value{}; std::size_t size{};
+    if (_dupenv_s(&value, &size, name) || !value) return fallback;
+    std::string text(value); std::free(value); return text.empty() ? fallback : text;
+#else
+    const auto* value = std::getenv(name);
+    return value && *value ? std::string(value) : fallback;
+#endif
+}
+int tick_profile(std::filesystem::path directory, std::uint64_t ticks) {
+    using Live = eawr::platform::LiveGameSession;
+    namespace gp = eawr::gc_profile;
+    directory = environment_or("EAWR_TICK_PROFILE_DIR", directory.string());
+    ticks = std::stoull(environment_or("EAWR_TICK_PROFILE_TICKS", std::to_string(ticks)));
+    const auto modes = split_list(environment_or("EAWR_TICK_PROFILE_MODES", "off,on"));
+    const auto worker_counts = split_list(environment_or("EAWR_TICK_PROFILE_WORKERS", "1"));
+    std::filesystem::create_directories(directory);
+    const InstalledLive fixture;
+    constexpr auto phase_count = static_cast<std::size_t>(gp::Phase::count);
+    constexpr auto cpu_begin = static_cast<std::size_t>(gp::Phase::perception);
+    for (const auto& mode : modes) for (const auto& worker_text : worker_counts) {
+        const std::size_t workers = std::stoull(worker_text);
+        Live::Options options; options.workers = workers; options.pacing = Live::Pacing::driven;
+        options.saves.directory = (directory / ("saves-" + mode + "-w" + worker_text)).string();
+        auto live = must(Live::start(fixture.prepare(mode == "on"), options));
+        const auto advance = [&](std::uint64_t tick) {
+            live->advance_to(tick);
+            if (!live->wait_for(tick, std::chrono::minutes(30))) {
+                const auto error = live->failure();
+                throw std::runtime_error(error ? eawr::core::format_diagnostic(*error) : "tick profile frame timed out");
+            }
+        };
+        advance(1);
+        struct Row { std::uint64_t tick{}; double wall_ms{}, step_ms{}; gp::Snapshot phases{}; };
+        std::vector<Row> rows;
+        rows.reserve(ticks);
+        const bool was_enabled = gp::enabled.exchange(true, std::memory_order_relaxed);
+        for (std::uint64_t index = 0; index < ticks; ++index) {
+            const auto tick = live->completed_tick() + 1;
+            const auto before = gp::snapshot();
+            const auto begin = std::chrono::steady_clock::now();
+            advance(tick);
+            Row row; row.tick = tick;
+            row.wall_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+            row.phases = gp::difference(before, gp::snapshot());
+            for (const auto& cost : live->tick_costs_after(tick - 1)) if (cost.tick == tick) row.step_ms = cost.total_ms;
+            rows.push_back(row);
+        }
+        gp::enabled.store(was_enabled, std::memory_order_relaxed);
+        live->stop();
+        const auto label = mode + "-w" + worker_text;
+        const auto hashes_all = live->tick_hashes();
+        {
+            std::ofstream csv(directory / ("ticks-" + label + ".csv"), std::ios::trunc);
+            csv << "tick,wall_ms,step_ms";
+            for (std::size_t i = 0; i < phase_count; ++i) csv << ',' << gp::names[i] << "_incl_ms," << gp::names[i] << "_excl_ms";
+            csv << ",hash\n";
+            for (const auto& row : rows) {
+                csv << row.tick << ',' << row.wall_ms << ',' << row.step_ms;
+                for (const auto& value : row.phases) csv << ',' << static_cast<double>(value.inclusive_ns) / 1e6 << ',' << static_cast<double>(value.exclusive_ns) / 1e6;
+                csv << ',' << (row.tick >= 1 && row.tick <= hashes_all.size() ? hashes_all[row.tick - 1] : std::string()) << '\n';
+            }
+        }
+        std::uint64_t digest = 1469598103934665603ULL;
+        {
+            std::ofstream hashes(directory / ("hashes-" + label + ".txt"), std::ios::trunc);
+            for (const auto& hash : hashes_all) {
+                hashes << hash << '\n';
+                for (const unsigned char c : hash) digest = (digest ^ c) * 1099511628211ULL;
+            }
+        }
+        const auto stats = [](std::vector<double> values) {
+            std::sort(values.begin(), values.end());
+            const auto at = [&](std::size_t percent) { return values[(values.size() * percent + 99) / 100 - 1]; };
+            return std::array<double, 5>{std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(values.size()),
+                at(50), at(95), at(99), values.back()};
+        };
+        std::vector<double> step, wall;
+        for (const auto& row : rows) { step.push_back(row.step_ms); wall.push_back(row.wall_ms); }
+        const auto step_stats = stats(step), wall_stats = stats(wall);
+        std::cout << "TICK-PROFILE " << label << " ticks=" << rows.size() << " hash_fnv=" << digest
+            << " hashes=" << hashes_all.size() << " step_ms avg/p50/p95/p99/max=" << step_stats[0] << '/' << step_stats[1]
+            << '/' << step_stats[2] << '/' << step_stats[3] << '/' << step_stats[4]
+            << " wall_ms avg/p50/p95/p99/max=" << wall_stats[0] << '/' << wall_stats[1] << '/' << wall_stats[2] << '/' << wall_stats[3]
+            << '/' << wall_stats[4] << std::endl;
+        for (std::size_t i = 0; i < phase_count; ++i) {
+            std::vector<double> incl, excl;
+            for (const auto& row : rows) {
+                incl.push_back(static_cast<double>(row.phases[i].inclusive_ns) / 1e6);
+                excl.push_back(static_cast<double>(row.phases[i].exclusive_ns) / 1e6);
+            }
+            const auto inclusive = stats(incl);
+            if (inclusive[4] == 0.0) continue;
+            const auto exclusive = stats(excl);
+            std::uint64_t calls{};
+            for (const auto& row : rows) calls += row.phases[i].calls;
+            std::cout << "TICK-PHASE " << label << ' ' << gp::names[i] << (i >= cpu_begin ? " (worker-summed)" : "")
+                << " calls/tick=" << static_cast<double>(calls) / static_cast<double>(rows.size())
+                << " incl avg/p95/max=" << inclusive[0] << '/' << inclusive[2] << '/' << inclusive[4]
+                << " excl avg/p95/max=" << exclusive[0] << '/' << exclusive[2] << '/' << exclusive[4] << std::endl;
+        }
+        // The worst ticks: where in the 300/30 cadence they sit and which wall phases carry them.
+        std::vector<std::size_t> order(rows.size());
+        std::iota(order.begin(), order.end(), std::size_t{});
+        std::sort(order.begin(), order.end(), [&](auto a, auto b) { return rows[a].step_ms > rows[b].step_ms; });
+        for (std::size_t rank = 0; rank < std::min<std::size_t>(12, order.size()); ++rank) {
+            const auto& row = rows[order[rank]];
+            std::vector<std::size_t> top(cpu_begin);
+            std::iota(top.begin(), top.end(), std::size_t{});
+            std::sort(top.begin(), top.end(), [&](auto a, auto b) { return row.phases[a].exclusive_ns > row.phases[b].exclusive_ns; });
+            std::cout << "TICK-WORST " << label << " tick=" << row.tick << " mod300=" << row.tick % 300 << " mod30=" << row.tick % 30
+                << " step_ms=" << row.step_ms;
+            for (std::size_t k = 0; k < 4; ++k)
+                std::cout << ' ' << gp::names[top[k]] << '=' << static_cast<double>(row.phases[top[k]].exclusive_ns) / 1e6;
+            std::cout << std::endl;
+        }
+        // Mean step cost per 300-tick window, so a slow drift shows next to the spikes.
+        for (std::size_t from = 0; from < rows.size(); from += 300) {
+            double sum{}; std::size_t count{};
+            for (std::size_t i = from; i < std::min(rows.size(), from + 300); ++i) { sum += rows[i].step_ms; ++count; }
+            std::cout << "TICK-WINDOW " << label << " from_tick=" << rows[from].tick << " avg_step_ms=" << sum / static_cast<double>(count) << std::endl;
+        }
+    }
+    return failures ? 1 : 0;
+}
 } // namespace
 int main(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string_view(argv[1]) == "--tick-profile")
+            return tick_profile(argc > 2 ? argv[2] : "out/galactic-tick-profile", argc > 3 ? std::stoull(argv[3]) : 30);
         if (argc > 1 && std::string_view(argv[1]) == "--live-record-contracts") {
             // Exercise the real composed owners and cross-worker midpoint restore in a short
             // window. Accelerated service periods cross several deadlines; this is not timing evidence.

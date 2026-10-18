@@ -619,6 +619,7 @@ int main(int argc, char** argv) {
     test_recharge_phase();
     test_missile_homing();
     test_missile_lock_loss();
+    test_difficulty();
     test_mass_driver_damage();
     test_mass_driver_flight();
     test_battle(argv[1], update);

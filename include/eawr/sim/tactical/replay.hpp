@@ -2,6 +2,7 @@
 
 #include "eawr/core/result.hpp"
 #include "eawr/sim/match_identity.hpp"
+#include "eawr/sim/tactical/ai_level.hpp"
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/object_turn.hpp"
@@ -60,6 +61,7 @@ struct ReplayLobbySlot final {
     bool human{};
     std::optional<std::uint32_t> colour_index;
     std::vector<std::string> fleet;
+    AiLevel difficulty{}; // WTA-47 (#735): recorded in the human word's bits 1-2, so a Normal slot's bytes are unchanged
     bool operator==(const ReplayLobbySlot&) const = default;
 };
 

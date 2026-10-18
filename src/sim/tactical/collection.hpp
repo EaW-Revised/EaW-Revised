@@ -86,6 +86,8 @@ public:
     void ray_collect(PlayerId owner, const math::Vec3& from, const math::Vec3& to, std::vector<EntityId>& out) const;
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] bool has_history() const noexcept { return !trees_.empty(); }
+    // Frozen publication inputs, in canonical player order. No ownership or tree edits.
+    [[nodiscard]] const auto& state_trees() const noexcept { return trees_; }
     void append_state(std::vector<std::uint8_t>& bytes) const;
 
 private:

@@ -163,7 +163,7 @@ galactic::TacticalLayerCommand damage(const campaign::ConflictRecord& record) {
     return {record.id, bytes[start + 20], Bytes(bytes.begin() + static_cast<std::ptrdiff_t>(start), bytes.end())};
 }
 cp::GameLoadOptions load_options(std::shared_ptr<FixtureState>& restored) {
-    cp::GameLoadOptions options;
+    cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
     options.content = [](const auto& record) { return eawr::core::Result<tactical::TacticalContent>::success(content(record)); };
     options.configure_native_ai = [&restored](auto& game) {
         restored = std::make_shared<FixtureState>(); install(game, restored);
@@ -217,7 +217,7 @@ void checkpoint_boundaries(std::size_t workers, std::vector<std::string>& refere
         expect(!cp::load_game_checkpoint(take(cp::write_checkpoint(container)), identities, options, pool), "mismatched native clock refused before reconstruction");
     };
     boundary(); // reservation and dead-goal marked obligation
-    take(game.stage_battle(record, content(record)));
+    take(game.stage_battle(record, content(record), eawr::campaign::ScriptRequirement::none));
     std::vector<std::string> hashes;
     hashes.push_back(take(game.step(pool)).state_hash.get());
     expect(native->entered == 1 && native->state.at(1).tactical.switched, "real child activation notifies retained native state once");
@@ -269,7 +269,7 @@ void auto_return(std::size_t workers) {
     auto game = take(campaign::GameSession::create(config)); auto native = std::make_shared<FixtureState>(); install(game, native);
     game.set_conflict_service([](const auto&, const auto&, auto) {
         return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
-    }, [](const auto& row) { return eawr::core::Result<tactical::TacticalContent>::success(content(row)); });
+    }, [](const auto& row) { return eawr::core::Result<tactical::TacticalContent>::success(content(row)); }, {}, eawr::campaign::ScriptRequirement::none);
     // Explicit fixture outcome: tests the existing journal's confirmed return,
     // not installed auto-resolve combat/AI or terminal campaign acceptance.
     game.set_auto_resolver([](const auto& row, const auto&, const auto&) {

@@ -1,0 +1,258 @@
+[
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/units",
+    "new": "src/sim/tactical/session_state_units.cpp#TacticalSession::Impl::append_canonical_units_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/garrison_enabled",
+    "new": "src/sim/tactical/session_state_units.cpp#TacticalSession::Impl::append_canonical_garrison_enabled_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/named_locks",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_named_locks_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/special_weapons",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_special_weapons_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/garrisons",
+    "new": "src/sim/tactical/session_state_squadrons.cpp#TacticalSession::Impl::append_canonical_garrisons_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/manual_weapons",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_manual_weapons_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/turrets",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_turrets_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/squadrons",
+    "new": "src/sim/tactical/session_state_squadrons.cpp#TacticalSession::Impl::append_canonical_squadrons_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/fog",
+    "new": "src/sim/tactical/session_state_fog.cpp#TacticalSession::Impl::append_canonical_fog_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/tracking",
+    "new": "src/sim/tactical/session_state_fog.cpp#TacticalSession::Impl::append_canonical_tracking_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/roll",
+    "new": "src/sim/tactical/session_state_units.cpp#TacticalSession::Impl::append_canonical_roll_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/projectiles",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_projectiles_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/blast_damage",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_blast_damage_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/formation",
+    "new": "src/sim/tactical/session_state_paths.cpp#TacticalSession::Impl::append_canonical_formation_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/approach",
+    "new": "src/sim/tactical/session_state_paths.cpp#TacticalSession::Impl::append_canonical_approach_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/sightings",
+    "new": "src/sim/tactical/session_state_paths.cpp#TacticalSession::Impl::append_canonical_sightings_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/garrison_marks",
+    "new": "src/sim/tactical/session_state_units.cpp#TacticalSession::Impl::append_canonical_garrison_marks_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/craft",
+    "new": "src/sim/tactical/session_state_squadrons.cpp#TacticalSession::Impl::append_canonical_craft_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/squadron_orders",
+    "new": "src/sim/tactical/session_state_squadrons.cpp#TacticalSession::Impl::append_canonical_squadron_orders_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/attack_paths",
+    "new": "src/sim/tactical/session_state_squadrons.cpp#TacticalSession::Impl::append_canonical_attack_paths_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/hangars",
+    "new": "src/sim/tactical/session_state_squadrons.cpp#TacticalSession::Impl::append_canonical_hangars_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/collection",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_collection_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/projectile_collection",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_projectile_collection_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/economy",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_economy_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/arrivals",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_arrivals_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/pads",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_pads_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/population",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_population_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/arrival_defence",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_arrival_defence_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/upgrades",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_upgrades_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/level_up",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_level_up_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/income",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_income_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/outcome",
+    "new": "src/sim/tactical/session_state_players.cpp#TacticalSession::Impl::append_canonical_outcome_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/abilities",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_abilities_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/stealth",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_stealth_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/stealth_end",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_stealth_end_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/self_destruct",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_self_destruct_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/mc30",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_mc30_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/ion_stuns",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_ion_stuns_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/hazard_moves",
+    "new": "src/sim/tactical/session_state_paths.cpp#TacticalSession::Impl::append_canonical_hazard_moves_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/asteroids",
+    "new": "src/sim/tactical/session_state_world.cpp#TacticalSession::Impl::append_canonical_asteroids_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/engine_disable",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_engine_disable_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/nebula",
+    "new": "src/sim/tactical/session_state_world.cpp#TacticalSession::Impl::append_canonical_nebula_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/storms",
+    "new": "src/sim/tactical/session_state_world.cpp#TacticalSession::Impl::append_canonical_storms_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/damage_tracking",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_damage_tracking_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/command_bonuses",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_command_bonuses_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/heroes",
+    "new": "src/sim/tactical/session_state_units.cpp#TacticalSession::Impl::append_canonical_heroes_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/projectile_defence",
+    "new": "src/sim/tactical/session_state_combat.cpp#TacticalSession::Impl::append_canonical_projectile_defence_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/special_abilities",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_special_abilities_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/concentrate",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_concentrate_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/ability_spawns",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_ability_spawns_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/buzz_requests",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_buzz_requests_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/buzz_droids",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_buzz_droids_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/spins",
+    "new": "src/sim/tactical/session_state_squadrons.cpp#TacticalSession::Impl::append_canonical_spins_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/departure",
+    "new": "src/sim/tactical/session_state_players.cpp#TacticalSession::Impl::append_canonical_departure_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/quits",
+    "new": "src/sim/tactical/session_state_players.cpp#TacticalSession::Impl::append_canonical_quits_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/pool_tokens",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_pool_tokens_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/queue_identities",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_queue_identities_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/cinematic_seats",
+    "new": "src/sim/tactical/session_state_players.cpp#TacticalSession::Impl::append_canonical_cinematic_seats_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/campaign",
+    "new": "src/sim/tactical/session_state_economy.cpp#TacticalSession::Impl::append_canonical_campaign_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/corruption",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_corruption_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/charged_blast",
+    "new": "src/sim/tactical/session_state_abilities.cpp#TacticalSession::Impl::append_canonical_charged_blast_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/waypoints",
+    "new": "src/sim/tactical/session_state_paths.cpp#TacticalSession::Impl::append_canonical_waypoints_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/beacons",
+    "new": "src/sim/tactical/session_state_world.cpp#TacticalSession::Impl::append_canonical_beacons_state"
+  },
+  {
+    "old": "src/sim/tactical/session_state.cpp#TacticalSession::Impl::canonical_bytes/order_history",
+    "new": "src/sim/tactical/session_state_units.cpp#TacticalSession::Impl::append_canonical_order_history_state"
+  }
+]

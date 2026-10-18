@@ -1,0 +1,10 @@
+[
+  {
+    "old": "include/eawr/campaign/space_entry.hpp#GalacticParentQuery",
+    "new": "include/eawr/campaign/game_session.hpp#GalacticParentQuery"
+  },
+  {
+    "old": "include/eawr/campaign/space_entry.hpp#GalacticParentQueryFactory",
+    "new": "include/eawr/campaign/game_session.hpp#GalacticParentQueryFactory"
+  }
+]
