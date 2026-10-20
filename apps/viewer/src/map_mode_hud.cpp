@@ -478,6 +478,12 @@ void MapMode::State::fill_type_names() {
 
 void MapMode::State::sync_cards() {
     if (!hud || !battle) return;
+    if (live_session) {
+        const auto research = live_session->team_research_view();
+        // Name lookup is shared with production; no unit/world census for the dock.
+        fill_type_names();
+        hud->set_team_dock(research, live_session->economy().upgrades, minimap_type_names);
+    }
     if (live_session && live_session->order_input()) {
         const auto mode = live_session->order_input()->mode();
         hud->set_order_mode(mode == ui::OrderMode::attack ? "attack" : mode == ui::OrderMode::attack_move ? "attack_move"
@@ -512,8 +518,28 @@ void MapMode::State::sync_cards() {
         hud->set_unit_cards(battle->card_layout(), battle->card_units());
     }
     hud->set_ability_bar(battle->ability_bar());
+    // #944 (WHE-44): the hero tray follows the snapshot; its icons are rebuilt only when the roster changed.
+    if (hud->hero_tray() != nullptr && live_session) {
+        battle->refresh_heroes(*live_session);
+        if (hero_tray_revision != battle->hero_revision()) {
+            hero_tray_revision = battle->hero_revision();
+            fill_type_names();
+            const auto icons = [&](const std::vector<presentation::ui::HeroEntry>& entries) {
+                std::vector<EawrHeroTray::Icon> out;
+                out.reserve(entries.size());
+                for (const presentation::ui::HeroEntry& entry : entries) {
+                    const auto name = minimap_type_names.find(entry.type);
+                    out.push_back({name != minimap_type_names.end() ? name->second : std::to_string(entry.type), entry.health, 0,
+                                   entry.automatic, entry.hero, entry.represented});
+                }
+                return out;
+            };
+            hud->set_hero_tray(icons(battle->hero_roster().friendly), icons(battle->hero_roster().hostile));
+        }
+    }
+    const bool dock_hover = hud->team_dock_hovered();
     bool ability_hover{};
-    if (auto* abilities = hud->ability_buttons(); abilities && hud->shell_shown()) {
+    if (auto* abilities = hud->ability_buttons(); abilities && hud->shell_shown() && !dock_hover) {
         if (const auto index = abilities->hovered_button()) {
             const auto& button = abilities->bar().buttons[*index];
             if (!button.units.empty()) {
@@ -528,17 +554,17 @@ void MapMode::State::sync_cards() {
             }
         }
     }
-    if (hud->unit_cards() && !ability_hover) {
+    if (hud->unit_cards() && !ability_hover && !dock_hover) {
         const auto hovered = hud->shell_shown() ? battle->encyclopedia_unit() : std::nullopt;
         const auto identity = hovered ? std::optional(std::pair{hovered->entity, hovered->type}) : std::nullopt;
-        if (identity != encyclopedia_world_hover || encyclopedia_ability_hover) {
+        if (identity != encyclopedia_world_hover || encyclopedia_ui_hover) {
             encyclopedia_world_hover = identity;
             const auto name = hovered ? minimap_type_names.find(hovered->type) : minimap_type_names.end();
             hud->set_world_hover(hovered && name != minimap_type_names.end()
                 ? std::optional(std::pair{static_cast<std::uint64_t>(hovered->entity), name->second}) : std::nullopt);
         }
     }
-    encyclopedia_ability_hover = ability_hover;
+    encyclopedia_ui_hover = ability_hover || dock_hover;
 }
 
 void MapMode::State::sync_production() {

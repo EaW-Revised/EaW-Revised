@@ -6,6 +6,7 @@
 #include "eawr/net/port_mapping.hpp"
 #include "eawr/net/transport.hpp"
 #include "eawr/net/setup.hpp"
+#include "eawr/net/galactic_lobby.hpp"
 #include "eawr/net/lobby_session.hpp"
 #include "eawr/net/online_lobby.hpp"
 #include "eawr/presentation/ui/lan_lobby.hpp"
@@ -245,6 +246,15 @@ using MatchSetup = skirmish::FixtureOptions;
 [[nodiscard]] net::LobbyReason lan_lobby_reason(const core::Diagnostic&);
 [[nodiscard]] std::string lan_admission_name(const net::LobbySnapshot&, net::PeerIndex);
 using LanLobbyBuilder = std::function<core::Result<sim::tactical::TacticalSetup>(const MatchSetup&)>;
+class GalacticLobbyBackend;
+// GCMP-07 (#4363): a Galactic Conquest room that reached its Start phase. This is the seam to the galactic lockstep
+// driver (GCMP-03): the room holds the frozen revision and the tick-zero barrier is still open; the driver binds the
+// desync monitor, accepts the offer on guests and takes the committed result. No tactical setup exists for it.
+struct GalacticLobbyStart {
+    net::GalacticLobbyOptions options;           // the agreed options of the frozen revision
+    std::shared_ptr<net::LobbySession> room;
+    std::shared_ptr<GalacticLobbyBackend> backend; // holds the session each peer derived at tick zero
+};
 struct LanLobbyState {
     net::LobbySnapshot snapshot;
     std::deque<net::LobbyChat> chat;
@@ -276,6 +286,17 @@ public:
     virtual bool lobby_kick(net::PeerIndex) { return false; }
     virtual void lobby_leave() {}
     virtual std::optional<LanLobbyState> lobby_state() const { return {}; }
+    // GCMP-07 (#4363): Galactic Conquest mode. The host owns the mode, and it holds for the room's lifetime: set_galactic_game
+    // right after host() (which discards any earlier room) and before the first pump opens the room in GC mode. The options
+    // travel in LobbyGame::options, so every peer reads the same mode from the same revision; a room that never gets it is a
+    // skirmish room, byte for byte as before. Every peer calls configure_galactic with its own installed content before
+    // host()/join(); a GC room is refused without it.
+    virtual void configure_galactic(std::shared_ptr<GalacticLobbyBackend>) {}
+    virtual bool set_galactic_game(net::GalacticLobbyOptions) { return false; }
+    virtual bool lobby_galactic_game(const net::GalacticLobbyOptions&) { return false; }
+    // Whether the live room is in GC mode, and the Start seam once it froze (host after Start, guests when the host started).
+    virtual bool galactic_room() const { return false; }
+    virtual std::optional<GalacticLobbyStart> galactic_start() const { return {}; }
     // Stable transport seat order; shared entries control the same faction owner.
     // Call before Host/Join. A joining client only selects the advertised count;
     // its authoritative owner comes from the host's validated offer.

@@ -1055,7 +1055,8 @@ core::Result<void> GalacticSession::Impl::refresh_population(const PartitionExec
 }
 
 GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_offer_inputs(
-    std::span<const ObservedPlanet> observations, std::span<const Fleet> fleet_inputs) const {
+    std::span<const ObservedPlanet> observations, std::span<const Fleet> fleet_inputs,
+    std::span<const Planet> owners) const {
     ProductionOfferInputs result;
     if (!production || !economy || !observer) return result;
     const auto local = observer->local_player;
@@ -1077,7 +1078,7 @@ GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_o
         result.fleets.insert(result.fleets.end(), {fleet.id, fleet.owner, fleet.orbit, fleet.motion.transit ? 1U : 0U, fleet.members.size()});
         for (const auto& member : fleet.members) result.fleets.push_back(member.type);
     }
-    if (income) result.reductions = production_reduction_sources(live_income_inputs(), sorted_planets());
+    if (income) result.reductions = production_reduction_sources(live_income_inputs(), owners);
     auto& bytes = result.admission;
     detail::put_u32(bytes, local);
     detail::put_u64(bytes, next_id);
@@ -1101,7 +1102,6 @@ GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_o
         detail::put_u8(bytes, found ? 1 : 0);
         if (found) detail::encode_population(bytes, std::span<const PopulationTotal>(&*total, 1));
     }
-    const auto owners = sorted_planets();
     for (auto planet : result.visible) {
         const auto owner = std::lower_bound(owners.begin(), owners.end(), planet,
             [](const auto& row, auto id) { return row.id < id; });

@@ -422,6 +422,8 @@ void GalacticMode::State::write_report_panels(std::ostringstream& output) const 
     write_corruption_report(output);
     output << ",\n  \"hero_action_hud\": ";
     write_hero_action_report(output);
+    output << ",\n  \"hero_map_bar\": ";
+    write_hero_map_report(output);
     output << ",\n  \"destruction_hud\": ";
     write_destruction_report(output);
     output << ",\n  \"weapon_action_hud\": ";

@@ -86,6 +86,14 @@ void EawrLanLobby::begin_hosting() {
     configure_staging();
     if (online) match_->set_public_invitation(impl.host_password.empty());
     match_->host(options_.game_port);
+    // The host owns the game mode: the Campaign game type opens a Galactic Conquest room (GCMP-07), anything else a skirmish room.
+    if (impl.host_options.game_type == galactic_game_type) {
+        if (const auto refusal = host_galactic_game()) {
+            match_->cancel();
+            show_failure(*refusal);
+            return;
+        }
+    }
     open_staging(true, *cleaned, {});
 }
 
@@ -98,6 +106,7 @@ bool EawrLanLobby::publish_staging_selection() {
 
 void EawrLanLobby::configure_staging() {
     const auto content = resources_->content;
+    configure_galactic_content();
     match_->configure_factions(scene::faction_order(*content->catalog));
     match_->configure_lobby(impl_->name, impl_->colour, resources_->maps,
         [content](const skirmish::FixtureOptions& options) -> core::Result<sim::tactical::TacticalSetup> {
@@ -298,7 +307,7 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST"); list != nullptr && host) {
         list->connect("item_selected", callable_mp(this, &EawrLanLobby::on_item_selected).bind(String("IDC_STAGING_MAP_LIST")));
     }
-    if (host) fill_map_list();
+    if (host && !match_->galactic_room()) fill_map_list();
     announce();
     refresh_staging();
 }

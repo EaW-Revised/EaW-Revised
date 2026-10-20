@@ -130,6 +130,33 @@ class AttachedGraphicalContract(unittest.TestCase):
             self.assertEqual(result["map_particles"]["empty_placements_at_capture"], 1)
             self.assertTrue(result["map_particles"]["evidence_verified"])
 
+    def test_delayed_static_effect_resumes_under_fog(self):
+        from test_map_fog import write_grid
+
+        with tempfile.TemporaryDirectory(prefix="eawr-map-attached-fog-resume-") as temporary:
+            directory = pathlib.Path(temporary)
+            root = fixture.write_fixture_root(directory, effect_start_delay=3.0)
+            grid = directory / "bright.grid"
+            digest = write_grid(grid, 2, bytes([255] * 6),
+                                origin=(100, 100), cell=(200, 180))
+            result = self.run_map(
+                root, directory / "resume-fog.json", "--eawr-map-effect-alt", "0",
+                "--eawr-map-effect-lod", "0", "--eawr-fog-grid", str(grid),
+                "--eawr-fog-sha256", digest, "--eawr-fog-team", "2",
+                "--eawr-fog-revision", "1", "--eawr-fog-tick", "1",
+                "--eawr-map-particle-frames", "240", "--eawr-map-timed-frames", "300")
+            particles = result["map_particles"]
+            placement = particles["placements"][0]
+            self.assertEqual(placement["status"], "drawn")
+            self.assertGreater(placement["particles"], 0)
+            self.assertTrue(particles["evidence_verified"])
+            self.assertEqual(particles["fog_consumers_at_capture"], 1)
+            self.assertTrue(all(emitter["fog_bound"] and emitter["fog_handle"] > 0
+                                for emitter in placement["emitters"]))
+            self.assertEqual(particles["fog_consumers_after_release"], 0)
+            self.assertEqual(particles["live_rids_after_release"], 0)
+            self.assertEqual(particles["live_resources_after_release"], 0)
+
     def test_fogged_static_effect_waiting_for_first_particle_is_accounted_empty(self):
         from test_map_fog import write_grid
 

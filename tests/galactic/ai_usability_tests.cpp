@@ -309,6 +309,59 @@ std::string expiry_only_replay(unsigned workers, bool fog) {
     // Not compared with a clean rebuild: retained site lists stay valid until their sourced expiry by design (GFS-A14).
     return trace(first) + trace(third);
 }
+// The incremental refresh (presence and island reads served again by remembered rows, retained reach rows, shared
+// flattened rows) must publish exactly what a provider that rebuilds everything from the live owners publishes, on
+// every tick, with identical provider and perception archive bytes (the perception record digest included).
+std::string incremental_equals_clean(unsigned workers, bool fog) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    auto config = fixture(); config.rules.fiscal_cycle_frames = 10000;
+    auto session = take(world_session(config));
+    auto setup = perception(fog); auto immutable = content(setup);
+    cp::GalacticAiUsabilityProvider incremental(immutable), clean(immutable); clean.set_incremental(false);
+    Host fast(setup), reference(setup);
+    for (auto* host : {&fast, &reference}) done(host->world.bind(session.snapshot(), {}, executor, 0, session.next_entity_id()));
+    std::string log;
+    std::size_t compared = 0;
+    const auto compare = [&](std::string_view when) {
+        const auto left = take(incremental.connectivity_publication(session, fast.world, fast.engine, executor));
+        const auto right = take(clean.connectivity_publication(session, reference.world, reference.engine, executor));
+        const std::string label = std::string(when) + ": ";
+        expect(trace(*left) == trace(*right), label + "incremental rows equal a clean rebuild");
+        expect(left->island_sizes.size() == right->island_sizes.size()
+            && std::equal(left->island_sizes.begin(), left->island_sizes.end(), right->island_sizes.begin(),
+                [](const auto& a, const auto& b) { return a.player == b.player && a.largest == b.largest && a.second == b.second; }),
+            label + "incremental component sizes equal a clean rebuild");
+        expect(take(incremental.capture()).components == take(clean.capture()).components, label + "provider archive bytes equal");
+        expect(take(incremental.state_hash()) == take(clean.state_hash())
+            && take(incremental.record_sync_hash()) == take(clean.record_sync_hash()), label + "provider hashes and record digest equal");
+        expect(take(fast.world.capture()).components == take(reference.world.capture()).components
+            && take(fast.world.state_hash()) == take(reference.world.state_hash()),
+            label + "perception archive bytes and record digest equal");
+        log += trace(*left); ++compared;
+    };
+    compare("initial");
+    for (unsigned tick = 1; tick <= 460; ++tick) {
+        (void)take(session.step(executor));
+        // Another viewer's observation change dirties the AI's cache without touching its own remembered rows; the AI's
+        // own change must not be replayed over.
+        if (tick % 3 == 0) for (auto* host : {&fast, &reference}) host->world.visibility_changed(2, 1 + tick % 5, (tick / 3) % 2 == 0, 0);
+        if (tick % 71 == 0) for (auto* host : {&fast, &reference}) host->world.visibility_changed(1, 1 + tick % 5, (tick / 71) % 2 == 0, 0);
+        if (tick == 130) (void)take(session.set_planet_access(2, true, true));
+        if (tick == 200) (void)take(session.set_planet_access(2, false, std::nullopt));
+        if (tick == 300) done(session.apply_actor_stealth(51, 0, f(1), true));
+        if (tick == 360) done(session.apply_actor_stealth(51, 51, {}, false));
+        // A second reader renews some remembered rows early or late.
+        if (tick % 53 == 0) for (auto* host : {&fast, &reference}) static_cast<void>(host->query("Variable_Target.EnemyForce.HasSpaceForce", 1, 1 + tick % 5));
+        compare("tick " + std::to_string(tick));
+    }
+    const auto work = incremental.work(); const auto base = clean.work();
+    expect(compared == 461 && work.generations == base.generations && work.searches == base.searches && work.edges == base.edges,
+        "both providers do the same searches");
+    expect(work.presence_reuses > 0 && work.island_read_reuses > 0 && work.row_reuses > 0 && work.block_row_reuses > 0,
+        "the incremental provider replays presence reads, island reads and flattened rows");
+    expect(base.presence_reuses == 0 && base.island_read_reuses == 0 && base.row_reuses == 0 && base.block_row_reuses == 0, "the clean provider replays nothing");
+    return log + take(incremental.state_hash()) + take(fast.world.state_hash());
+}
 std::string contracts(unsigned workers, bool fog) {
     eawr::platform::ThreadWorkerAdapter executor(workers);
     auto config = fixture();
@@ -953,7 +1006,7 @@ int case_galactic_ai_usability_tests() {
         connecting_heap_order();
         for (const bool fog : {false, true}) {
             std::string reference;
-            for (const unsigned workers : {1U, 2U, 4U, 8U}) { indigenous(workers); connecting_capacity(workers); const auto result = route_publications(workers, fog) + equal_connecting_routes(workers) + deadline_projection(workers, fog) + stealth_publication(workers, fog) + discovery_counter_reuse(workers, fog) + pending_access_restore(workers) + pending_site_restore(workers) + negative_connecting_hops(workers) + refreshed_force_clock(workers) + expired_connectivity(workers, fog) + reconstruction(workers, fog) + contracts(workers, fog) + expiry_only_replay(workers, fog) + partitioned_supplier(workers, fog); if (reference.empty()) reference = result; else expect(result == reference, "provider output and native/world hashes equal on 1/2/4/8"); }
+            for (const unsigned workers : {1U, 2U, 4U, 8U}) { indigenous(workers); connecting_capacity(workers); const auto result = route_publications(workers, fog) + equal_connecting_routes(workers) + deadline_projection(workers, fog) + stealth_publication(workers, fog) + discovery_counter_reuse(workers, fog) + pending_access_restore(workers) + pending_site_restore(workers) + negative_connecting_hops(workers) + refreshed_force_clock(workers) + expired_connectivity(workers, fog) + reconstruction(workers, fog) + contracts(workers, fog) + expiry_only_replay(workers, fog) + incremental_equals_clean(workers, fog) + partitioned_supplier(workers, fog); if (reference.empty()) reference = result; else expect(result == reference, "provider output and native/world hashes equal on 1/2/4/8"); }
         }
         for (const bool fog : {false, true}) expect(partitioned_supplier(16, fog) == partitioned_supplier(1, fog), "usability supplier contract 1/16 equality");
         eawr::sim::InlineExecutor executor; access_checkpoint(executor);

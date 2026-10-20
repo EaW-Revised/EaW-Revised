@@ -1157,7 +1157,7 @@ std::optional<int> GalacticMode::process(const double delta) {
                 const auto fleet = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == event.subject; });
                 if (fleet != fleets.end()) {
                     std::vector<std::string> types;
-                    for (const auto& member : fleet->members)
+                    for (const auto& member : audio::galactic_fleet_move_members(fleet->members, audio_snapshot->movement()))
                         if (const auto name = state.production_names.find(member.type); name != state.production_names.end())
                             types.push_back(name->second);
                     state.audio->fleet_move(types);
@@ -1526,13 +1526,16 @@ void GalacticMode::navigate(const galactic_view::Navigation direction) {
 }
 
 void GalacticMode::select_hero(const sim::galactic::TypeId type, const bool inactive, const bool twice) {
-    if (!type || inactive || state_->map_input.gates.selection_locked
-        || !state_->galaxy || state_->tactical || state_->loading) return;
-    const auto planets = state_->input_planets();
-    const auto containing_planet = state_->displayed_snapshot
-        ? galactic_view::first_hero_planet(*state_->displayed_snapshot, type) : 0;
-    state_->apply_selection(state_->map_input.hero(planets, type != 0, inactive, containing_planet,
-        state_->seat_flight().state(), twice));
+    state_->select_hero(type, inactive, twice);
+}
+
+void GalacticMode::State::select_hero(const sim::galactic::TypeId type, const bool inactive, const bool twice) {
+    if (!galaxy || tactical || loading) return;
+    const auto planets = input_planets();
+    const auto containing_planet = displayed_snapshot
+        ? galactic_view::first_hero_planet(*displayed_snapshot, type) : 0;
+    apply_selection(map_input.hero(planets, type != 0, inactive, containing_planet,
+        seat_flight().state(), twice));
 }
 
 bool GalacticMode::widget_drop(const galactic_view::DropIntent& intent) {

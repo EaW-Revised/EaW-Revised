@@ -622,9 +622,16 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
                 const auto prefix = ck::detail::read_session_prefix(context);
                 if (context.failed()) throw std::runtime_error("profile equality needs a valid session prefix");
                 const auto replay = must(galactic::parse_replay(prefix.replay));
-                auto imported = must(cp::GameSession::from_recording(cp::GameRecording{replay, {}, {}}, {}, {}));
-                must(imported.load_checkpoint_state(owner->bytes));
-                boundary_galaxy_sha = imported.galaxy().state_sha256();
+                // The campaign owner leads with its format version and the galactic owner; only the galactic part is read.
+                // The recording's window follows the history already dropped by earlier saves, so it is staged on that base.
+                ck::detail::Reader campaign_owner(owner->bytes);
+                (void)campaign_owner.u32();
+                const auto galactic_owner = campaign_owner.take(static_cast<std::size_t>(campaign_owner.u64()));
+                if (campaign_owner.failed()) throw std::runtime_error("profile equality needs a valid campaign owner");
+                auto imported = must(galactic::GalacticSession::create(replay.setup));
+                must(imported.stage_native_replay(replay.native_effects, replay.final_tick_count, prefix.base.native_dropped));
+                must(imported.load_checkpoint_state(galactic_owner));
+                boundary_galaxy_sha = imported.state_sha256();
             }
             return *ai.state;
         };

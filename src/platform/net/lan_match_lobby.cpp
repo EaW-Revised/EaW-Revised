@@ -1,4 +1,5 @@
 #include "lan_match_internal.hpp"
+#include "galactic_lobby_backend.hpp"
 #include "eawr/core/build_identity.hpp"
 #include <cctype>
 
@@ -16,7 +17,14 @@ bool TcpLanMatch::lobby_select(net::LobbySelection selection)  {
         if (!lobby_mutable()) return false;
         selection.name = net::sanitize_lobby_text(selection.name, selection.name.size());
         const auto local = std::find_if(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(), [&](const auto& seat) { return seat.peer == io_->transport.self(); });
-        if (local != lobby_->snapshot().seats.end() && selection.slot != local->selection.slot) {
+        if (local != lobby_->snapshot().seats.end() && selection.slot != local->selection.slot && galactic_room()) {
+            // GC: a seat's faction and side follow the faction row it picks.
+            auto options = net::decode_galactic_lobby_game(lobby_->snapshot().game); if (!options) return false;
+            const auto side = net::galactic_lobby_side(options.value(), selection.slot);
+            const auto row = std::find_if(options.value().rows.begin(), options.value().rows.end(), [&](const auto& value) { return value.player == selection.slot; });
+            if (!side || row == options.value().rows.end()) return false;
+            selection.faction = row->faction; selection.team = *side; selection.colour = 0;
+        } else if (local != lobby_->snapshot().seats.end() && selection.slot != local->selection.slot) {
             auto options = decode_lan_lobby_game(lobby_->snapshot()); if (!options) return false;
             const auto row = std::find_if(options.value().slots->begin(), options.value().slots->end(), [&](const auto& slot) { return slot.slot == selection.slot; });
             if (row == options.value().slots->end()) return false;
@@ -34,7 +42,7 @@ bool TcpLanMatch::lobby_assign(net::PeerIndex peer, net::LobbySelection selectio
     }
 
 bool TcpLanMatch::lobby_game(const skirmish::FixtureOptions& options)  {
-        if (!lobby_mutable() || !view().host) return false;
+        if (!lobby_mutable() || !view().host || galactic_room()) return false; // a GC room edits through lobby_galactic_game
         auto configured = options;
         const std::set<sim::tactical::PlayerId> planned(owners_.begin(), owners_.end());
         if (configured.slots) for (auto& row : *configured.slots) row.human = planned.contains(row.slot);
@@ -59,6 +67,11 @@ bool TcpLanMatch::lobby_ready(bool ready)  {
             ready_pending_ = false;
             return lobby_feedback(lobby_->request(net::LobbyAction::unready, lobby_->snapshot().revision));
         }
+        if (galactic_room()) {
+            // GC has nothing to prepare at Ready: the offer is built from the frozen revision at Start.
+            if (auto valid = validate_lobby(lobby_->snapshot(), true); !valid) return lobby_feedback(std::move(valid));
+            return lobby_feedback(lobby_->request(net::LobbyAction::ready, lobby_->snapshot().revision));
+        }
         auto options = decode_lan_lobby_game(lobby_->snapshot());
         if (!options) return lobby_feedback(core::Result<void>::failure(options.error()));
         if (auto valid = validate_lobby(lobby_->snapshot(), true); !valid) return lobby_feedback(std::move(valid));
@@ -80,6 +93,40 @@ bool TcpLanMatch::lobby_chat(std::string text)  {
 bool TcpLanMatch::lobby_kick(net::PeerIndex peer)  {
         return lobby_mutable() && lobby_feedback(lobby_->kick(peer, lobby_->snapshot().revision));
     }
+
+void TcpLanMatch::configure_galactic(std::shared_ptr<GalacticLobbyBackend> backend) { galactic_ = std::move(backend); }
+
+bool TcpLanMatch::set_galactic_game(net::GalacticLobbyOptions options) {
+        // The room's mode is fixed when it opens: only before the lobby exists, and only with content to check it against.
+        if (lobby_ || !galactic_ || !net::encode_galactic_lobby_game(options)) return false;
+        const auto human = std::find_if(options.rows.begin(), options.rows.end(), [](const auto& row) { return row.human; });
+        if (human == options.rows.end()) return false;
+        galactic_host_game_ = std::move(options);
+        return true;
+    }
+
+bool TcpLanMatch::lobby_galactic_game(const net::GalacticLobbyOptions& options) {
+        if (!lobby_mutable() || !view().host || !galactic_room() || !galactic_) return false;
+        auto encoded = net::encode_galactic_lobby_game(options);
+        if (!encoded) return lobby_feedback(core::Result<void>::failure(encoded.error()));
+        auto assignments = lobby_->snapshot().seats;
+        for (auto& seat : assignments) {
+            const auto side = net::galactic_lobby_side(options, seat.selection.slot);
+            const auto row = std::find_if(options.rows.begin(), options.rows.end(), [&](const auto& value) { return value.player == seat.selection.slot; });
+            // A row holding a human keeps its control; the host removes a guest with the kick action.
+            if (!side || row == options.rows.end())
+                return lobby_feedback(lobby_fail<void>(net::LobbyReason::invalid_choice, "A faction held by a player cannot be switched to AI; kick the player first."));
+            seat.selection.faction = row->faction; seat.selection.team = *side; seat.selection.colour = 0; seat.player = row->player;
+        }
+        return lobby_feedback(lobby_->configure_game(std::move(encoded).value(), std::move(assignments), lobby_->snapshot().revision));
+    }
+
+bool TcpLanMatch::galactic_room() const {
+        if (lobby_) return net::lobby_game_mode(lobby_->snapshot().game) == net::LobbyGameMode::galactic;
+        return galactic_host_game_.has_value();
+    }
+
+std::optional<GalacticLobbyStart> TcpLanMatch::galactic_start() const { return galactic_start_; }
 
 void TcpLanMatch::lobby_leave()  {
         if (!lobby_mutable()) return;
@@ -103,14 +150,18 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
         const bool all_ready = std::all_of(state.snapshot.seats.begin(), state.snapshot.seats.end(), [](const auto& seat) { return seat.ready; });
         state.connections_pending = hosting && online_options_.has_value() && !mesh_complete;
         state.start_reason = state.ready_reason;
-        if (state.start_reason.empty() && state.connections_pending)
+        // GC: Start needs the galactic lockstep driver (GCMP-03) to install its adapter; until then Start stays off with a reason.
+        const bool match_startable = net::lobby_game_mode(state.snapshot.game) != net::LobbyGameMode::galactic || (galactic_ && galactic_->can_start());
+        if (state.start_reason.empty() && !match_startable)
+            state.start_reason = "Starting a campaign match needs the galactic lockstep driver, which this build does not have yet.";
+        else if (state.start_reason.empty() && state.connections_pending)
             state.start_reason = "Waiting for connections between players. Every pair must connect before Start; My connections shows only your own links.";
         else if (state.start_reason.empty() && !all_ready) state.start_reason = "Waiting for every player to accept the current setup.";
         state.ready_enabled = !state.preparing && !state.identity_pending && local != state.snapshot.seats.end()
             && state.snapshot.phase == net::LobbyPhase::staging && (state.local_ready || valid);
         // An online room starts only complete: every seat present and every pair verified (docs/net-online-npeer.md, section 3).
         state.start_enabled = hosting && state.snapshot.seats.size() >= 2 && state.snapshot.phase == net::LobbyPhase::staging
-            && valid
+            && valid && match_startable
             && mesh_complete && all_ready;
         return state;
     }
@@ -134,7 +185,16 @@ bool TcpLanMatch::lobby_feedback(core::Result<void> result) {
         return static_cast<bool>(result);
     }
 
+core::Result<void> TcpLanMatch::validate_galactic_lobby(const net::LobbySnapshot& state, bool starting) const {
+        if (!galactic_) return lobby_fail<void>(net::LobbyReason::invalid_choice, "This build has no campaign content for this Galactic Conquest room.");
+        for (const auto& seat : state.seats)
+            if (seat.selection.name.size() > presentation::ui::lan_name_max)
+                return lobby_fail<void>(net::LobbyReason::invalid_choice, "Invalid or duplicate player choice.");
+        return galactic_->validate(state, starting);
+    }
+
 core::Result<void> TcpLanMatch::validate_lobby(const net::LobbySnapshot& state, bool starting) const {
+        if (net::lobby_game_mode(state.game) == net::LobbyGameMode::galactic) return validate_galactic_lobby(state, starting);
         auto options = decode_lan_lobby_game(state);
         if (!options) return core::Result<void>::failure(options.error());
         const auto map = std::find_if(lobby_maps_.begin(), lobby_maps_.end(), [&](const auto& value) { return value.path == state.game.map; });
@@ -226,6 +286,16 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
         net::LobbyHooks hooks;
         hooks.validate = [this](const net::LobbySnapshot& state, bool starting) { return validate_lobby(state, starting); };
         hooks.offer = [this](const net::LobbySnapshot& state, const std::vector<net::SetupSeat>& seats) -> core::Result<net::SetupOffer> {
+            if (net::lobby_game_mode(state.game) == net::LobbyGameMode::galactic) {
+                // GC: seal the roster from the agreed choices and local content, and publish the galactic-campaign-v1 offer.
+                if (!galactic_) return lobby_fail<net::SetupOffer>(net::LobbyReason::setup_failed, "This build has no campaign content for this room.");
+                auto built = galactic_->offer(state, seats);
+                if (!built) return built;
+                if (recovery_policy_.reconnect || recovery_policy_.resync) return lobby_fail<net::SetupOffer>(net::LobbyReason::recovery_unavailable, "Recovery provisioning for staging is unavailable.");
+                if (auto provisioned = provision_mesh_repair(built.value(), state.frozen_revision); !provisioned)
+                    return core::Result<net::SetupOffer>::failure(provisioned.error());
+                return built;
+            }
             std::uint64_t delay{};
             auto selected = decode_lan_lobby_game(state, &delay);
             auto canonical = selected ? encode_lan_lobby_game(selected.value()) : core::Result<net::LobbyGame>::failure(selected.error());
@@ -259,6 +329,17 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
                 context.providers.credentials_delivered = [this] { return credential_state_->delivered(); };
             }
             context.options.session.pending_input_epoch = [this] { return pending_input_epoch(); };
+            if (net::lobby_game_mode(staged.game) == net::LobbyGameMode::galactic) {
+                // GC: every peer derives the identities and the tick-zero session from its own content; the adapter is GCMP-03's.
+                context.providers.identify = [this](const net::SetupOffer& offer) -> core::Result<sim::MatchAgreement> {
+                    if (!galactic_) return lobby_fail<sim::MatchAgreement>(net::LobbyReason::setup_failed, "Local campaign content is unavailable.");
+                    return galactic_->identify(offer);
+                };
+                context.providers.build = [this](const net::SetupOffer& offer) -> core::Result<std::unique_ptr<net::SessionAdapter>> {
+                    if (!galactic_) return lobby_fail<std::unique_ptr<net::SessionAdapter>>(net::LobbyReason::setup_failed, "Local campaign content is unavailable.");
+                    return galactic_->build(offer);
+                };
+            } else {
             context.providers.identify = [this](const net::SetupOffer&) {
                 if (!prepared_setup_ || !prepared_setup_->match_identity) return lobby_fail<sim::MatchAgreement>(net::LobbyReason::setup_failed, "Local staging match identity is unavailable.");
                 return core::Result<sim::MatchAgreement>::success({std::string(core::build_identity()), *prepared_setup_->match_identity});
@@ -269,6 +350,7 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
                 adapter_ = adapter.get();
                 return core::Result<std::unique_ptr<net::SessionAdapter>>::success(std::move(adapter));
             };
+            }
             context.providers.monitor = &gate_;
             context.providers.tick_zero_agreed = [this] { return io_->monitor && io_->monitor->setup_agreed(); };
             context.providers.tick_zero_mismatch = [this]() -> std::optional<net::TickZeroMismatch> {
@@ -296,9 +378,31 @@ void TcpLanMatch::reset_lobby() {
         gate_.reset();
         lobby_.reset(); lobby_result_.reset(); lobby_stream_ = nullptr; prepared_setup_.reset(); ready_pending_ = false; lobby_setup_accepted_ = false; lobby_room_committed_ = false;
         removed_peers_.clear(); known_edges_.clear(); closing_peers_.clear(); lobby_notice_.reset(); last_lobby_state_.reset(); identity_retry_at_ms_ = 0;
+        galactic_host_game_.reset(); galactic_start_.reset();
+    }
+
+void TcpLanMatch::start_galactic_lobby() {
+        const auto state = lobby_state();
+        if (!state || !state->start_enabled || handed_over_ || !galactic_) return;
+        auto options = net::decode_galactic_lobby_game(state->snapshot.game);
+        if (!options) { (void)lobby_feedback(core::Result<void>::failure(options.error())); return; }
+        // The frozen revision builds the galactic-campaign-v1 offer in the offer hook (GalacticLobbyBackend::offer).
+        auto started = lobby_->start(state->snapshot.revision);
+        if (!started) {
+            if (online_options_) handle_online_start_failure(started.error(),
+                [this](const core::Diagnostic& error) { (void)lobby_feedback(core::Result<void>::failure(error)); },
+                [this](const core::Diagnostic& error) { set_failure(error); });
+            else (void)lobby_feedback(started);
+            return;
+        }
+        auto raw = io_->transport.tcp->poll();
+        if (raw) { io_->transport.pending_bytes += raw->frame.size(); io_->transport.pending.push_back(std::move(*raw)); }
+        last_lobby_state_ = lobby_state();
+        galactic_start_ = GalacticLobbyStart{std::move(options).value(), lobby_, galactic_};
     }
 
 void TcpLanMatch::start_lobby() {
+        if (galactic_room()) { start_galactic_lobby(); return; }
         const auto state = lobby_state();
         if (!state || !state->start_enabled || !prepared_setup_ || handed_over_) return;
         auto started = lobby_->start(state->snapshot.revision);
@@ -335,7 +439,24 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
             return; // No core pump or tick-zero publication before live bind.
         }
         if (!lobby_) {
-            if (view().host) {
+            if (view().host && galactic_host_game_) {
+                // GC room (GCMP-07): the host's faction row, its side and the campaign options open the room.
+                auto game = net::encode_galactic_lobby_game(*galactic_host_game_);
+                const auto& rows = galactic_host_game_->rows;
+                const auto row = std::find_if(rows.begin(), rows.end(), [](const auto& value) { return value.human; });
+                const auto side = row == rows.end() ? std::nullopt : net::galactic_lobby_side(*galactic_host_game_, row->player);
+                if (!galactic_ || !game || !side) {
+                    set_failure(game ? diagnostic("EAWR-NET-1535", "Galactic Conquest staging needs campaign content and a player faction.") : game.error());
+                    return;
+                }
+                const auto room_seed = lobby_name_ + std::to_string(lobby_clock_);
+                const Bytes room_bytes(room_seed.begin(), room_seed.end());
+                auto created = net::LobbySession::host(io_->transport, "lan-" + core::sha256_hex(room_bytes).substr(0, 60),
+                    static_cast<std::uint32_t>(owners_.size()), {lobby_name_, row->faction, 0, *side, row->player}, row->player,
+                    std::move(game).value(), lobby_hooks());
+                if (!created) { set_failure(created.error()); return; }
+                lobby_ = std::make_shared<net::LobbySession>(std::move(created).value()); io_->room_lifetime = lobby_; lobby_self_ = io_->transport.self();
+            } else if (view().host) {
                 auto game = encode_lan_lobby_game(selected, input_delay_);
                 if (!game || !selected.slots || selected.slots->empty()) {
                     if (online_options_) set_failure(diagnostic("EAWR-NET-1535", "Online staging requires valid game options and player slots."));
@@ -398,8 +519,17 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
             auto frame = io_->transport.tcp->poll();
             if (frame) { io_->transport.pending_bytes += frame->frame.size(); io_->transport.pending.push_back(std::move(*frame)); }
             const auto& snapshot = lobby_->snapshot();
-            auto options = decode_lan_lobby_game(snapshot);
-            if (!options) { set_failure(options.error()); return; }
+            const bool galactic = net::lobby_game_mode(snapshot.game) == net::LobbyGameMode::galactic;
+            std::optional<net::GalacticLobbyOptions> galactic_options;
+            core::Result<skirmish::FixtureOptions> options = core::Result<skirmish::FixtureOptions>::success({});
+            if (galactic) {
+                auto decoded = net::decode_galactic_lobby_game(snapshot.game);
+                if (!decoded) { set_failure(decoded.error()); return; }
+                galactic_options = std::move(decoded).value();
+            } else {
+                options = decode_lan_lobby_game(snapshot);
+                if (!options) { set_failure(options.error()); return; }
+            }
             for (net::PeerIndex peer = 1; peer < io_->transport.peer_count(); ++peer) {
                 if (io_->transport.link(peer) != net::LinkState::open) {
                     // A room slot keeps its roster identity when its occupant returns, so a removal cannot outlive the closed pair
@@ -415,6 +545,32 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
                     auto rejected = net::encode_lobby_frame(net::LobbyRejected{{lobby_->snapshot().room, lobby_->snapshot().revision, net::LobbyReason::denied, "This connection was removed from the room."}});
                     if (rejected) (void)io_->transport.send(peer, rejected.value());
                     closing_peers_.insert(peer); continue;
+                }
+                if (galactic_options) {
+                    // GC: a new peer joins the human row with the fewest seats (ties to the lowest faction); it edits its own pick after.
+                    const net::GalacticLobbyRow* best = nullptr;
+                    std::ptrdiff_t best_count = 0;
+                    for (const auto& candidate : galactic_options->rows) {
+                        if (!candidate.human) continue;
+                        const auto count = std::count_if(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(),
+                            [&](const auto& seat) { return seat.selection.slot == candidate.player; });
+                        if (!best || count < best_count) { best = &candidate; best_count = count; }
+                    }
+                    const auto side = best ? net::galactic_lobby_side(*galactic_options, best->player) : std::nullopt;
+                    if (!best || !side) {
+                        if (online_options_) { set_failure(diagnostic("EAWR-NET-1535", "Online staging has no player faction for this seat.")); return; }
+                        continue;
+                    }
+                    auto admitted = lobby_->admit(peer, admission_identity(peer, edge),
+                        {lan_admission_name(lobby_->snapshot(), peer), best->faction, 0, *side, best->player}, best->player, lobby_->snapshot().revision);
+                    if (!admitted) {
+                        const auto reason = lan_lobby_reason(admitted.error());
+                        auto rejected = net::encode_lobby_frame(net::LobbyRejected{{lobby_->snapshot().room, lobby_->snapshot().revision, reason, admitted.error().message}});
+                        if (rejected) (void)io_->transport.send(peer, rejected.value());
+                        closing_peers_.insert(peer); removed_peers_.insert(peer);
+                        (void)lobby_feedback(std::move(admitted));
+                    }
+                    continue;
                 }
                 auto row = options.value().slots->end();
                 for (auto candidate = options.value().slots->begin(); candidate != options.value().slots->end(); ++candidate) {
@@ -505,6 +661,11 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
             io_->transport.tcp->close(); (void)io_->transport.tcp->poll();
         }
         if (state->snapshot.phase == net::LobbyPhase::starting && !view().host && offered_) { accepted_ = true; pending_ = offered_; }
+        if (state->snapshot.phase == net::LobbyPhase::starting && !view().host && !galactic_start_ && galactic_room() && galactic_) {
+            // GC guest: the host started the room; the galactic driver (GCMP-03) finishes the barrier from here.
+            auto agreed = net::decode_galactic_lobby_game(state->snapshot.game);
+            if (agreed) galactic_start_ = GalacticLobbyStart{std::move(agreed).value(), lobby_, galactic_};
+        }
         if (io_->transport.tcp->diagnostic() && !view().connected) set_failure(*io_->transport.tcp->diagnostic());
     }
 

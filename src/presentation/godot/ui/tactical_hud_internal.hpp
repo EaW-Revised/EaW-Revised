@@ -18,6 +18,7 @@
 #include <godot_cpp/classes/canvas_item_material.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
+#include <godot_cpp/classes/label.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/input_event_mouse_motion.hpp>
@@ -380,6 +381,29 @@ struct TacticalHud::State final {
     std::size_t faceplates{};
     EawrUiHitMask* mask{};
     EawrTacticalHud* hud{};
+    model::TeamDockModel team_dock;
+    model::TeamDockPolicy team_dock_policy;
+    Control* team_dock_group{};
+    Vector2 team_dock_viewport;
+    std::size_t team_dock_drawn_rows{};
+    std::vector<model::TeamResearchType> team_dock_types;
+    std::array<Ref<Texture2D>, 4> team_dock_frames;
+    Ref<Texture2D> team_dock_build;
+    model::ResolvedFont team_dock_face;
+    KitTextStyle team_dock_text;
+    Vector2 team_dock_text_offset;
+    float team_dock_scale{1.0F};
+    float team_dock_icon_scale{0.8F};
+    bool team_dock_hover{};
+    bool team_dock_encyclopedia{};
+    std::optional<std::uint64_t> team_dock_hover_order;
+    void build_team_dock(const data::ui::CommandBarCatalog& catalog);
+    struct TeamDockCell {
+        EawrHudButton* button{};
+        Ref<Texture2D> icon;
+        std::optional<model::TeamDockRow> row;
+    };
+    std::vector<TeamDockCell> team_dock_cells;
     EawrHudButton* options_button{};
     EawrHudButton* movie_button{};
     EawrHudButton* beacon_button{};
@@ -415,6 +439,8 @@ struct TacticalHud::State final {
     // #425: the unit cards, and what they look up: object types (Icon_Name, Text_ID), the text DB
     // and the command bar's textures, each decoded once.
     EawrUnitCards* cards{};
+    // #944: the battle hero tray.
+    EawrHeroTray* heroes{};
     std::optional<std::pair<std::uint64_t, std::string>> world_hover;
     std::string ability_hover_type;
     std::uint32_t ability_hover_kind{};

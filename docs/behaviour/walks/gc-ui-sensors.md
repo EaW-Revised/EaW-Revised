@@ -651,8 +651,8 @@ orbit; an in-transit fleet, missing parent, dead/deleting container or cycle sup
 cached planet does not substitute for its current parent chain. Inactive, selection-lock and discovery gates
 remain in the input policy. Home uses the authored campaign home when available, otherwise resolves the local
 faction's authored `Faction_Leader` type through that same live chain and caches only a known planet. No owned
-planet or stock hero name is substituted. The WGUI-89 hero-bar collection/ranking/scheduled display remains its
-separate producer.
+planet or stock hero name is substituted. The WGUI-89 live hero-bar adapter is described below; ranking and scheduled display remain
+separate producer seams.
 
 WGUI-49/50 first-match qualification: the retail type query takes its first instance without an ownership
 filter, then ascends parents. The local HUD supplies the type; containment does not add an owner gate. Our
@@ -663,3 +663,33 @@ not a claim about retail object-list tie order. Home's fallback uses `Faction_Le
 UI queue policy: a submitted prepared map capability remains pending until its publication is retracted or
 replaced, preventing repeated gestures on the same preparation from inflating accepted submissions. The gate
 belongs to the live session lifetime, so replacing/loading an owner can reuse numeric preparation identities.
+
+
+### Live galaxy hero bar adapter
+
+WGUI-89's live viewer bar collects locally owned named heroes from the session's
+published actor census, with authored icons and resolvable containment. It deduplicates
+by current type, excludes direct children of another hero and shows at most six.
+Generic heroes and foreign heroes do not enter this bar. Dead/delete-pending records
+leave on the next publication. The existing hero-selection path (WGUI-49/50) resolves
+the planet again at click time and moves the camera; hovering names the hero and class.
+
+A retail debug-build capture (2026-10-20, 1280 by 720) places the local bar at the
+upper right, with circular portraits about 38 pixels wide at about 40-pixel pitch.
+A single click selects and centres the hero's planet. Three foreign heroes sharing
+the planet did not add cards. Placement at other resolutions is an adapter scaled
+from that capture, not an independently qualified retail layout.
+
+The adapter binds `g_hero_icon` because its authored group is `Hero Grab Bar`, using
+its scale, sounds and each hero's authored icon. Circular portrait framing reuses
+`hero_slot_good00`'s authored friendly ring. This exact GC component/ring mapping is
+**unverified**: `st_hero_icon` belongs to `Grab Bar`, while `g_hero`/`g_enemy_hero` are
+planet-marker components. The top header shell and rollover/glow styling remain
+unverified; the widget does not invent a shell model or a health/respawn meter.
+
+Hero-rank ordering and scheduled-spawn progress remain explicit unverified adapter
+seams (legacy EAWR-3899, EAWR-1155): this slice uses stable type order and live entries only.
+Transit entries with no resolvable parked planet are omitted; orbit/surface receive
+no distinct badge. Dead/respawning display and double-click remain unverified; a
+second click follows the same ordinary selection gesture without added zoom.
+The advanced map hides the bar as WGUI-89 requires.

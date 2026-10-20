@@ -165,6 +165,20 @@ func _process(delta):
         self.assertEqual(sounds.get("Unit_Fleet_Move_Star_Destroyer", 0), 1, data["galactic_audio"])
         self.assertEqual(data["galactic_audio"]["played_sounds"].get("Unit_Fleet_Move_Star_Destroyer", 0), 1, data["galactic_audio"])
 
+    def test_palpatine_fleet_move_uses_live_passenger_response(self):
+        from tests.presentation.renderer import test_viewer_galactic_fleet_drag_runtime as support
+        harness = support.GalacticFleetDragRuntime()
+        for fixture in ("fleet-drag-palpatine", "fleet-drag-palpatine-mixed"):
+            with self.subTest(fixture=fixture):
+                data = harness.native_drag("member-radar", fixture=fixture)
+                self.assertEqual(data["fleet_hud"]["drag"]["orders"], 1)
+                audio = data["galactic_audio"]
+                self.assertEqual(audio["resolved_type_audio"]["EMPEROR_PALPATINE"]["fleet_move"],
+                                 "Unit_Fleet_Move_Emperor")
+                self.assertEqual(audio["sounds"].get("Unit_Fleet_Move_Emperor", 0), 1, audio)
+                self.assertEqual(audio["played_sounds"].get("Unit_Fleet_Move_Emperor", 0), 1, audio)
+                self.assertEqual(audio["sounds"].get("Unit_Fleet_Move_Lamda_Shuttle", 0), 0, audio)
+
     def test_xwing_fleet_move_resolves_craft_and_ranks_mixed_fleet(self):
         from tests.presentation.renderer import test_viewer_galactic_fleet_drag_runtime as support
         harness = support.GalacticFleetDragRuntime()

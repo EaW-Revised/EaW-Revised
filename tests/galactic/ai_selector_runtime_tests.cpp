@@ -286,6 +286,9 @@ std::string indexed_selection_contract(const eawr::sim::PartitionExecutor& execu
         && after.garrison_trait_lookups - before.garrison_trait_lookups == 16
         && after.proposal_trait_lookups - before.proposal_trait_lookups == 3,
         "lookup work follows emitted garrisons and proposal types rather than catalog rows times requests");
+    expect(after.allowed_site_unowned == before.allowed_site_unowned, "the fixture planet is owned by the selecting player");
+    expect(after.allowed_site_reads - before.allowed_site_reads == 2 && after.allowed_site_reuses - before.allowed_site_reuses == 1,
+        "allowed-producer flags are read once per completed input and reused by a second provider on it; a new publication reads again");
     refuse_freestore = true;
     const auto free_failure = provider(1, 10, goal, plan);
     expect(!free_failure && free_failure.error().code == "TEST-FREESTORE-LIVE", "new freestore refusal remains live");
@@ -1173,9 +1176,38 @@ int main() {
                         && !staged.engine->galactic_freestore_selection_facts(1, 20, 32, staged.engine->plans().front()),
                         "single-actor wrapper and batch refuse identically");
                 }
+                {
+                    // The kept flags equal the direct producer read for every planet and player, owned or not.
+                    for (const unsigned who : {1U, 2U}) {
+                        const auto player_id = static_cast<gc::PlayerId>(who);
+                        const ai::AllowedProductionSites sites(input, player_id);
+                        for (std::size_t index = 0; index < input->targets.size(); ++index) {
+                            const auto kept = sites.at(index);
+                            expect(kept && kept.value() == ai::allowed_production_site(*input, player_id, input->targets[index].planet),
+                                "kept allowed-producer flag equals the direct producer read");
+                        }
+                    }
+                }
+                {
+                    // A goal proposed inside the pass is seen by the next read: no goal targets planet 10 yet, so the
+                    // stage type is unresolved. The allowed-producer flags of the same completed input stay kept.
+                    const auto targets = staged.world->copy_input()->targets.size();
+                    const auto kept = ai::galactic_selection_work();
+                    expect(!staged.engine->galactic_freestore_selection_facts(1, 10, 31, staged.engine->plans().front()),
+                        "stage type is unresolved before a goal of the plan targets the planet");
+                    must(staged.engine->allocate_galactic_goal(1, 0, staged.engine->target_of_object(10)->id));
+                    expect(static_cast<bool>(staged.engine->galactic_freestore_selection_facts(1, 10, 31, staged.engine->plans().front())),
+                        "a goal proposed inside the pass resolves the stage type at the next read");
+                    const auto reused = ai::galactic_selection_work();
+                    expect(reused.allowed_site_reads == kept.allowed_site_reads && reused.allowed_site_reuses - kept.allowed_site_reuses == targets,
+                        "the goal change re-resolved the stage list from the kept allowed-producer flags");
+                }
                 paths.execution_routes.front().threat = ai::real(5);
                 must(staged.world->bind(stage_session.snapshot(), paths, executor, 0, stage_session.next_entity_id()));
+                const auto before_rebind = ai::galactic_selection_work();
                 expect(must(staged.engine->galactic_freestore_selection_facts(1, 20, 31, staged.engine->plans().front())).first == ai::parse_real("12.5").value(), "failed helper still contributes XY when another stage helper succeeds");
+                expect(ai::galactic_selection_work().allowed_site_reads - before_rebind.allowed_site_reads == staged.world->copy_input()->targets.size(),
+                    "a rebound world publishes a new input, so its allowed-producer flags are read again");
                 usable = false; must(staged.actions->qualified_freestore().update(actor));
                 expect(must(staged.engine->galactic_freestore_selection_facts(1, 20, 31, staged.engine->plans().front())).first == ai::galactic_goals::rejected_estimate(), "unusable source rejects actor without a reachable helper");
                 combat_skip = true; must(staged.actions->qualified_freestore().update(actor));

@@ -275,6 +275,37 @@ void build_unit_cards(HudState& state, const vfs::Vfs& filesystem, const data::u
 }
 
 template <typename HudState>
+void build_hero_tray(HudState& state, const vfs::Vfs& filesystem, const data::ui::CommandBarCatalog& catalog, EawrTacticalHud* hud) {
+    // #944 (WHE-44, HCB-44): the hero tray over the world, in the two hero frame shells. A shell data set
+    // without the frames or their slots draws no tray.
+    EawrHeroTray::Setup tray;
+    bool any = false;
+    for (const model::HeroSide side : {model::HeroSide::good, model::HeroSide::evil}) {
+        auto anchors = data::ui::load_shell_anchors(filesystem, model::hero_frame_model(catalog, side));
+        if (!anchors) {
+            state.diagnostics.push_back(anchors.error());
+            continue;
+        }
+        for (const auto& diagnostic : anchors.value().diagnostics) state.diagnostics.push_back(diagnostic);
+        model::HudHeroFrame frame = model::hero_frame(anchors.value().shell, catalog, side);
+        for (const auto& diagnostic : frame.diagnostics) state.diagnostics.push_back(diagnostic);
+        any = any || !frame.slots.empty();
+        tray.frames[side == model::HeroSide::good ? 0 : 1] = std::move(frame);
+    }
+    if (!any) return;
+    // GC capture 10-20 (skirmish space, as Rebel and as Empire): the tray's side follows friendliness, not
+    // faction: the local team's is the good (green) frame, the opposing team's the evil (red) one.
+    tray.friendly_side = model::HeroSide::good;
+    tray.texture = [&state](const std::string& name) { return state.command_texture(name, "hero tray"); };
+    tray.icon = [&state](const std::string& type) { return state.card_type(type).first; };
+    tray.space = [hud] { return hud->space(); };
+    state.heroes = memnew(EawrHeroTray);
+    state.heroes->set_name("EawrHeroTray");
+    state.hud->add_child(state.heroes);
+    state.heroes->setup(std::move(tray));
+}
+
+template <typename HudState>
 void build_ability_buttons(HudState& state, EawrTacticalHud* hud) {
     // #454: the ability buttons and the cards' ability marks, over the cards.
     if (!state.shell.ability_buttons.empty()) {
@@ -674,7 +705,9 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
     state.hud->setup(std::move(setup), state.options_button);
 
     build_unit_cards(state, filesystem, catalog, hud);
+    state.build_team_dock(catalog);
     build_ability_buttons(state, hud);
+    build_hero_tray(state, filesystem, catalog, hud);
     build_production_panel(state, filesystem, catalog, hud, text_database);
     build_minimap(state, filesystem, catalog, hud);
     build_battle_overlay(state, filesystem, catalog, hud, layer, text_database);
@@ -688,6 +721,7 @@ void register_tactical_hud_classes() {
     GDREGISTER_CLASS(EawrHudButton);
     GDREGISTER_CLASS(EawrSpecialWeaponDial);
     GDREGISTER_CLASS(EawrUnitCards);
+    GDREGISTER_CLASS(EawrHeroTray);
     GDREGISTER_CLASS(EawrEncyclopediaPopup);
     GDREGISTER_CLASS(EawrProductionPanel);
     GDREGISTER_CLASS(EawrMinimap);

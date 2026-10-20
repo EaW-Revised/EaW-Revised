@@ -1,6 +1,7 @@
 #include "galactic/map_input.hpp"
 #include "galactic/fleet_panels.hpp"
 #include "galactic/fleet_traits.hpp"
+#include "galactic/hero_map_bar.hpp"
 #include "eawr/sim/galactic/session.hpp"
 
 #ifdef NDEBUG
@@ -648,7 +649,45 @@ void live_fleet_traits_follow_the_authored_art() {
     assert(traits[3].type == 5 && traits[3].hero && !traits[3].named_hero && !traits[3].force_sensitive);
     assert(eawr::viewer::galactic::live_fleet_display_traits(names, std::map<std::string, Row>{}).empty());
 }
+void hero_map_collection_is_local_stable_and_live() {
+    namespace gc = eawr::sim::galactic;
+    struct Look { bool named_hero{}; std::string icon; bool hero{named_hero}; };
+    const std::map<gc::TypeId, std::string> names{{7, "hero"}, {8, "ship"}, {9, "generic"},
+        {10, "no_icon"}, {11, "second_hero"}};
+    const std::map<std::string, Look> art{{"hero", {true, "hero.tga"}}, {"ship", {false, "ship.tga"}},
+        {"generic", {false, "generic.tga", true}}, {"no_icon", {true, ""}}, {"second_hero", {true, "second.tga"}}};
+    const auto base = std::make_shared<const gc::GalacticSnapshot>(0, gc::GalacticClock{},
+        std::vector<gc::GalacticPlayer>{}, std::vector<gc::Planet>{{1, {}, 1}, {3, {}, 2}},
+        std::vector<gc::Route>{}, std::vector<gc::Fleet>{{10, 1, 1, {{30, 8}}}}, std::vector<gc::GalacticEvent>{});
+    std::vector<gc::CensusObject> actors{{20, 7, 2, 3, 3, false, false, 7},
+        {21, 11, 1, 1, 1, false, false, 11}, {22, 7, 1, 1, 10, false, false, 7},
+        {23, 7, 1, 1, 1, false, false, 7}, {24, 9, 1, 1, 1, false, false, 9},
+        {25, 10, 1, 1, 1, false, false, 10}, {26, 11, 1, 1, 22, false, false, 11},
+        {27, 11, 1, 1, 0, false, false, 11}, {28, 11, 1, 1, 24, false, false, 11}, {30, 8, 1, 1, 10, false, false, 8}};
+    const auto snapshot = [&] {
+        gc::NativeSnapshotChanges changes;
+        changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(actors);
+        return gc::GalacticSnapshot::native_view(base, std::move(changes));
+    };
+    const auto collect = [&] { return collect_map_heroes(*snapshot(), 1, names, art); };
+    auto entries = collect();
+    assert((entries == std::vector<HeroMapEntry>{{7, 22, 1}, {11, 21, 1}}));
+    assert(collect() == entries); // Stable type order, independent of first-seen type.
+    assert(collect_map_heroes(*snapshot(), 3, names, art).empty());
+    actors[2].dead = true; actors[3].delete_pending = true;
+    assert((collect() == std::vector<HeroMapEntry>{{11, 21, 1}}));
+    actors[1].dead = true;
+    assert(collect().empty()); // Children of named or generic heroes never supply another card.
+    actors[2].dead = false; actors[3].delete_pending = false;
+    gc::NativeSnapshotChanges travelling;
+    travelling.actors = std::make_shared<const std::vector<gc::CensusObject>>(actors);
+    travelling.fleets = std::vector<gc::Fleet>{{10, 1, 1, {{30, 8}}}};
+    travelling.fleets->front().motion.transit.emplace();
+    const auto transit = collect_map_heroes(*gc::GalacticSnapshot::native_view(base, std::move(travelling)), 1, names, art);
+    assert((transit == std::vector<HeroMapEntry>{{7, 23, 1}})); // Parked duplicate remains; no transit destination invented.
+}
 int main() {
+    hero_map_collection_is_local_stable_and_live();
     selection_and_caller_gates(); deferred_revalidation(); navigation_and_heroes();
     rectangle_and_widget_drop_order(); wheel_radar_and_typed_commands();
     inward_refocus_immediately_focuses();

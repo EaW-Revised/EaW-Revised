@@ -173,8 +173,22 @@ std::string TacticalHud::report_json() const {
         << ", \"enabled\": " << (special.enabled() ? "true" : "false")
         << ", \"targeting\": " << (special.targeting ? "true" : "false") << '}';
     if (state.cards != nullptr) output << ", \"unit_cards\": " << state.cards->report_json();
+    if (state.heroes != nullptr) output << ", \"hero_tray\": " << state.heroes->report_json();
     if (state.production != nullptr) output << ", \"production\": " << state.production->report_json();
     if (state.abilities != nullptr) output << ", \"ability_buttons\": " << state.abilities->report_json();
+    output << ", \"team_dock\": {\"team_game\": " << (state.team_dock.team_game() ? "true" : "false")
+           << ", \"revision\": " << state.team_dock.revision() << ", \"rows\": [";
+    for (std::size_t index = 0; index < state.team_dock.rows().size(); ++index) {
+        const auto& row = state.team_dock.rows()[index];
+        const auto* button = index < state.team_dock_cells.size() ? state.team_dock_cells[index].button : nullptr;
+        output << (index == 0 ? "" : ", ") << "{\"owner\": " << row.owner << ", \"type\": " << row.type
+               << ", \"in_progress\": " << (row.in_progress ? "true" : "false")
+               << ", \"starbase\": " << (row.starbase ? "true" : "false") << ", \"percent\": " << row.percent
+               << ", \"icon_loaded\": " << (button && button->icon_shown() ? "true" : "false")
+               << ", \"shown\": " << (button && button->is_visible_in_tree() ? "true" : "false")
+               << ", \"rect\": " << rect_json(button ? button->get_global_rect() : Rect2()) << "}";
+    }
+    output << "]}";
     if (state.minimap != nullptr) {
         output << ", \"minimap\": " << state.minimap->report_json() << ", \"minimap_fog\": {\"fogged\": "
                << state.minimap_fog.fogged() << ", \"next_row\": " << state.minimap_fog.next_row()

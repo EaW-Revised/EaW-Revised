@@ -140,6 +140,7 @@ set(EAWR_VIEWER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/lan_lobby_screen.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_lobby_screen_refresh.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_lobby_screen_options.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/lan_lobby_screen_galactic.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_lobby_screen_staging.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_lobby_screen_chat.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_lobby_screen_list.cpp"

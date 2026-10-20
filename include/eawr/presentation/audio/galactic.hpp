@@ -52,6 +52,17 @@ struct GalacticBuildFeedback {
 [[nodiscard]] GalacticBuildFeedback galactic_build_feedback(GalacticBuildCue cue,
     std::span<const Field> type, bool local_builder);
 
+// WGP-181: rank live transported/flagship contents along with fleet members.
+// Squadron responses still belong to their leading authored craft (BA-24).
+[[nodiscard]] std::vector<sim::galactic::FleetMember> galactic_fleet_move_members(
+    std::span<const sim::galactic::FleetMember> members,
+    const sim::galactic::MovementSetup* movement);
+// Effective response fields, in member order, after squadron craft resolution.
+// Category masks come from the effective dynamic enum, including composite aliases.
+[[nodiscard]] std::string galactic_fleet_move_event(
+    std::span<const std::vector<Field>> members, std::span<const std::string> rankings,
+    std::span<const Field> category_masks);
+
 // WGP-25: source-order opposing-faction entries, including an authored blank.
 [[nodiscard]] std::string strategic_result_event(std::span<const Field> fields,
     bool won, std::string_view opposing_faction);

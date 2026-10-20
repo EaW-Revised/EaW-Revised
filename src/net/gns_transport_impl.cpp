@@ -126,6 +126,7 @@ bool GnsTransport::Impl::adopt(HSteamNetConnection connection) {
 }
 
 void GnsTransport::Impl::stop(unsigned reason, std::string message) {
+    link_watchdog.reset();
     stats.reset();
     forget_route();
     if (reason != 0 && !failure) {
@@ -222,6 +223,7 @@ void GnsTransport::Impl::message(std::span<const std::uint8_t> bytes, bool relia
         stop(number, diagnostic.message); return;
     }
     auto& decoded = result.value();
+    if (reliable) link_watchdog.received_reliable(Clock::now());
     if (decoded.kind == TcpMessage::hello) {
         hello_seen = true;
         if (hosting) {
@@ -401,15 +403,15 @@ void GnsTransport::Impl::pump() {
         SteamNetConnectionRealTimeStatus_t status{};
         if (sockets().GetConnectionRealTimeStatus(stream, &status, 0, nullptr) == k_EResultOK
             && status.m_eState == k_ESteamNetworkingConnectionState_Connected) {
-            // Any decrease or an empty window is an acknowledgement; steady traffic produces one every few samples.
-            if (status.m_cbSentUnackedReliable <= 0 || status.m_cbSentUnackedReliable < last_unacked) unacked_since.reset();
-            else if (!unacked_since) unacked_since = now;
-            last_unacked = status.m_cbSentUnackedReliable;
-            if (unacked_since && now - *unacked_since >= options.ack_silence_timeout) {
-                const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now - *unacked_since).count();
+            const auto silent = link_watchdog.observe(now, status.m_cbPendingReliable, status.m_cbSentUnackedReliable);
+            if (silent >= options.ack_silence_timeout) {
+                const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(silent).count();
                 stop(1507, "GNS link silent " + std::to_string(seconds) + " s while Connected ("
                     + (route == GnsRoute::relayed ? "relay" : route == GnsRoute::direct ? "direct" : "route unknown")
-                    + "): reliable data is not being acknowledged");
+                    + "): no reliable receive or send-window progress; last_receive_ms="
+                    + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(now - last_receive).count())
+                    + " pending_reliable=" + std::to_string(status.m_cbPendingReliable)
+                    + " unacked_reliable=" + std::to_string(status.m_cbSentUnackedReliable));
                 return;
             }
         }

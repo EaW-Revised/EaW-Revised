@@ -15,6 +15,7 @@
 #include <atomic>
 #include <deque>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -289,6 +290,10 @@ struct GalacticVisibility {
     std::uint32_t mask{}; // zero: explicit fixture visibility, otherwise qualified WGUI bit
 };
 [[nodiscard]] std::uint32_t galactic_visibility_mask(std::span<const std::string>);
+// Remembered rows the publication bind drops when the connectivity changes (the connecting-path getters).
+[[nodiscard]] bool galactic_connectivity_token(std::span<const std::string>);
+// Remembered strength rows that bound the force deadline (presence and the two strength totals of the target).
+[[nodiscard]] bool galactic_force_deadline_token(std::span<const std::string>);
 struct GalacticStoryFlag {
     tactical::PlayerId player{};
     galactic::PlanetId planet{}; // zero is an untargeted flag, never a wildcard
@@ -341,6 +346,52 @@ public:
     };
     [[nodiscard]] SequentialReads sequential_reads() const { return SequentialReads(*this); }
     [[nodiscard]] SequentialReads owner_reads() const { return SequentialReads(*this, true); }
+    // A serial run of ordinary perception reads of one player. The guard, the player check and the economy refresh that
+    // every read repeats are made once, before the first read; each read is otherwise exactly perception(). Nothing a
+    // read stores feeds the economy refresh, so the refreshed copy holds for the whole run.
+    class ReadBatch {
+    public:
+        ReadBatch(const GalacticWorld& world, tactical::PlayerId owner)
+            : world_(world), owner_(owner), reads_(world.sequential_reads()),
+              ready_(world.snapshot_ && world.player(owner) && world.refresh_economy_runtime()) {}
+        ReadBatch(const ReadBatch&) = delete;
+        ReadBatch& operator=(const ReadBatch&) = delete;
+        [[nodiscard]] std::optional<Real> perception(const Engine&, const Equation&, const Context&, AiRandom&) const;
+    private:
+        const GalacticWorld& world_;
+        tactical::PlayerId owner_;
+        SequentialReads reads_;
+        bool ready_;
+    };
+    // What a run of ordinary remembered reads of one player depended on. A read that a remembered row serves again
+    // (same value, no store) leaves this replayable; a read that evaluates, refuses or bypasses the remembered rows does
+    // not. `through` is the earliest expiry among the serving rows, so the run is served again from the same rows at
+    // every frame the expiry has not passed, provided the visibility revision below has not moved.
+    struct ReadTrace {
+        std::optional<Real> through;
+        bool replayable{true};
+        [[nodiscard]] bool serves(std::uint64_t frame) const;
+    };
+    class TracedReads {
+    public:
+        TracedReads(const TracedReads&) = delete;
+        TracedReads& operator=(const TracedReads&) = delete;
+        TracedReads(TracedReads&& other) noexcept : slot_(std::exchange(other.slot_, nullptr)), previous_(other.previous_) {}
+        ~TracedReads() { if (slot_) *slot_ = previous_; }
+    private:
+        friend class GalacticWorld;
+        TracedReads(ReadTrace*& slot, ReadTrace& trace) noexcept : slot_(&slot), previous_(slot) { slot = &trace; }
+        ReadTrace** slot_{};
+        ReadTrace* previous_{};
+    };
+    // Reads of `owner` made while the returned scope lives are recorded in `trace`. Serial owner reads only.
+    [[nodiscard]] TracedReads trace_reads(tactical::PlayerId owner, ReadTrace& trace) const;
+    // Moves with every visibility change of this player and every restore: the part of a remembered read's input that
+    // no read changes. A trace stays valid only while this and the clock against `through` are unchanged.
+    [[nodiscard]] std::uint64_t visibility_revision(tactical::PlayerId owner) const {
+        const auto lock = query_lock();
+        return shard(owner).visibility_stamp;
+    }
     // Production keeps stable perception/producer rows and publishes live motion
     // separately. The atomic binder remains the independent fixture oracle.
     void enable_live_deltas(std::uint64_t perception_period = 300,
@@ -588,6 +639,7 @@ private:
     [[nodiscard]] std::optional<GalacticBindingId> find_bindings(tactical::PlayerId, const std::vector<Binding>&) const;
     [[nodiscard]] GalacticBindingId intern_bindings(tactical::PlayerId, const std::vector<Binding>&, bool memo = false) const;
     void index_cache(Shard&) const;
+    void rebuild_row_index(Shard&) const;
     [[nodiscard]] std::unique_lock<std::recursive_mutex> query_lock() const {
         std::unique_lock<std::recursive_mutex> lock(query_mutex_, std::defer_lock);
         if (active_world_ != this) {
@@ -711,6 +763,13 @@ private:
         core::RecordDigest records;
         std::uint64_t revision{}, movement_revision{}, record_encodes{};
         bool refreshing_visibility{};
+        ReadTrace* trace{}; // set only while a serial owner pass records its reads (trace_reads)
+        // Positions in `cache` of the rows the deadline scan (force_rows) and the connectivity drop (first_connected)
+        // look at, so neither walks every remembered row. Rebuilt on demand when `index_dirty`.
+        std::vector<std::uint32_t> force_rows;
+        std::size_t first_connected{std::numeric_limits<std::size_t>::max()};
+        bool index_dirty{true};
+        std::uint64_t visibility_stamp{}; // moves with each visibility_changed of this player and each restore
     };
     mutable std::map<tactical::PlayerId, Shard> shards_;
     [[nodiscard]] Shard& shard(tactical::PlayerId) const;

@@ -241,8 +241,10 @@ struct MapMode::State final {
     presentation::ui::PoolLayoutCache production_pool_cache;
     std::size_t production_pool_pending{};
     presentation::ui::BuildMenuCache production_menu_cache;
+    // #944: the hero roster revision the HUD's tray last showed (none yet).
+    std::optional<std::uint64_t> hero_tray_revision;
     std::optional<std::pair<sim::EntityId, sim::tactical::TypeId>> encyclopedia_world_hover;
-    bool encyclopedia_ability_hover{};
+    bool encyclopedia_ui_hover{};
     std::array<std::vector<sim::tactical::QueueEntry>, sim::tactical::build_queue_count> production_queues;
     std::uint64_t minimap_syncs{};
     // #848 (docs/behaviour/foc-battle-selection.md V-5a to V-5g): the battle UI in the overview

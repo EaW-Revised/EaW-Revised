@@ -25,6 +25,7 @@ set(EAWR_NET_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/desync_monitor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/setup.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_setup.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_lobby.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_credentials.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lobby_session.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_directory.cpp"

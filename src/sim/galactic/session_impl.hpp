@@ -220,6 +220,15 @@ public:
     // Published production state: copied again only after the production section changed (its dirty flag is
     // counted before the hash consumes it, like the economy input generation).
     mutable std::shared_ptr<const std::optional<ProductionSetup>> published_production;
+    // Section copies shared by consecutive snapshots, rebuilt only when their section was counted dirty (see
+    // refresh_economy_input_generation). keys: fleets, planets, players, routes, fleet control, economy, control,
+    // observer, income, victory, economy corruption.
+    mutable std::array<std::uint64_t, state_section_count> section_generation{};
+    struct PublishedSections {
+        SharedSnapshotSections rows;
+        std::array<std::uint64_t, 11> keys{};
+    };
+    mutable PublishedSections published_sections;
     mutable std::uint64_t production_generation{1}, published_production_generation{};
     [[nodiscard]] std::span<const CensusObject> actor_inputs() const;
     void refresh_fleet_combat_skip(FleetId);
@@ -269,7 +278,8 @@ public:
     };
     mutable ProductionOfferInputs published_offer_inputs;
     [[nodiscard]] ProductionOfferInputs production_offer_inputs(
-        std::span<const ObservedPlanet> observations, std::span<const Fleet> fleet_inputs) const;
+        std::span<const ObservedPlanet> observations, std::span<const Fleet> fleet_inputs,
+        std::span<const Planet> planets) const;
     [[nodiscard]] std::vector<ObservedProductionOffer> observed_production_offers(const ProductionOfferInputs& inputs,
         std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor) const;
     [[nodiscard]] core::Result<void> service_production(const PartitionExecutor&, std::uint64_t,

@@ -33,10 +33,10 @@ struct GnsOptions : TcpOptions {
     // without them, because it reads only the relayed address from a TURN allocation. coturn answers STUN on its TURN
     // port, so the introduction service can hand out the same host (docs/gns-transport.md, "STUN").
     std::string stun_servers;
-    // A Connected link whose reliable data has gone unacknowledged, without a single acknowledgement, for this long ends
-    // with EAWR-NET-1507 naming the silent link. GNS acknowledges on its own thread, so a busy or loading peer does not
-    // trip it at lockstep volumes (it stops acknowledging only once the receiver buffers more than its 1 MiB reliable
-    // receive window); a dead relay path does (#3912). Keep it well below the lockstep completeness timeout.
+    // A Connected link with reliable bytes in flight and neither validated reliable inbound messages nor a shrinking
+    // total reliable send window for this long ends with EAWR-NET-1507. This is link liveness, not proof of individual
+    // ACKs: new sends can replace acknowledged bytes between samples. Native GNS ACKs still drain a busy/loading
+    // peer's window at lockstep volumes; a dead relay path does not. Keep below the lockstep completeness timeout.
     std::chrono::milliseconds ack_silence_timeout{15000};
 };
 

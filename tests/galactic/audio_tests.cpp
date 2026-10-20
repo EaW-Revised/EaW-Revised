@@ -204,5 +204,53 @@ int main() {
     assert(feedback.speech.empty() && feedback.sfx.empty());
     assert(galactic_build_speech_tag(Build::stopped) == "Build_Speech_Stopped");
     assert(galactic_build_sfx_tag(Build::underway) == "SFXEvent_Build_Started");
+    // WGP-181: a loaded transport contributes its actual live passenger,
+    // whose XML response participates in ordinary BA-20 ranking.
+    namespace gc = eawr::sim::galactic;
+    const std::vector<gc::FleetMember> fleet{{10, 100}, {20, 200}};
+    gc::MovementSetup movement;
+    movement.contents = {{10, {{11, 300}}}, {99, {{12, 400}}}};
+    auto members = galactic_fleet_move_members(fleet, &movement);
+    assert((members == std::vector<gc::FleetMember>{{10,100},{11,300},{20,200}}));
+    const std::vector<Field> transport{{"CategoryMask", "Transport"},
+        {"SFXEvent_Fleet_Move", "transport_response"}};
+    const std::vector<Field> hero{{"CategoryMask", "LandHero"}, {"Ranking_In_Category", "1"},
+        {"SFXEvent_Fleet_Move", "hero_response"}, {"SFXEvent_Move", "hero_move"}};
+    const std::vector<Field> ship{{"CategoryMask", "Frigate"}, {"SFXEvent_Move", "ship_move"}};
+    const std::vector<std::string> rankings{"Hero", "Frigate", "Transport"};
+    const std::vector<Field> masks{{"LandHero", "0x100000000"}, {"SpaceHero", "0x200000000"},
+        {"Hero", "0x300000000"}, {"Frigate", "2"}, {"Transport", "4"}};
+    const std::map<gc::TypeId, std::vector<Field>> fields{{100,transport},{200,ship},{300,hero}};
+    const auto response = [&](const auto& order) {
+        std::vector<std::vector<Field>> traits;
+        for (const auto& member : galactic_fleet_move_members(order, &movement)) traits.push_back(fields.at(member.type));
+        return galactic_fleet_move_event(traits, rankings, masks);
+    };
+    assert(response(fleet) == "hero_response");
+    const std::vector<gc::FleetMember> reversed{{20,200},{10,100}};
+    assert(response(reversed) == "hero_response");
+    movement.contents.clear(); // No template passenger is invented for an empty transport.
+    assert(response(fleet) == "ship_move");
+    const std::vector<gc::FleetMember> ordinary{{10,100}};
+    assert(response(ordinary) == "transport_response");
+    assert(galactic_fleet_move_event({}, rankings, masks).empty());
+    assert(galactic_fleet_move_members(fleet, nullptr) == fleet);
+    // The enum file, rather than a fixed Hero alias, controls mod categories.
+    const std::vector<std::vector<Field>> mod_members{
+        {{"CategoryMask", "customPassenger"}, {"SFXEvent_Fleet_Move", "mod_response"}}};
+    const std::vector<std::string> mod_rankings{"customLeader"};
+    assert(galactic_fleet_move_event(mod_members, mod_rankings,
+        std::vector<Field>{{"customPassenger", "0X8000000000000000"},
+                           {"customLeader", "9223372036854775808"}}) == "mod_response");
+    assert(galactic_fleet_move_event(mod_members, mod_rankings, {}).empty());
+    // Nested flagship/transport contents, with unrelated and repeated identities.
+    movement.contents = {{10,{{15,100}}},{15,{{11,300},{10,100}}},{99,{{12,400}}}};
+    assert(response(fleet) == "hero_response");
+    members = galactic_fleet_move_members(fleet, &movement);
+    assert(members.size() == 4 && members[2].type == 300);
+    // BA-24 remains on the squadron's leading authored craft, not every live craft.
+    gc::MovementType squadron; squadron.type = 100; squadron.squadron = true;
+    movement.types.push_back(squadron);
+    assert(galactic_fleet_move_members(fleet, &movement) == fleet);
     std::cout << "galactic audio contracts passed\n";
 }

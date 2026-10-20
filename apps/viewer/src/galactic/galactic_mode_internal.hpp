@@ -25,6 +25,7 @@
 #include "radar_hud.hpp"
 #include "corruption_hud.hpp"
 #include "hero_action_hud.hpp"
+#include "hero_map_bar.hpp"
 #include "destruction_hud.hpp"
 #include "weapon_action_hud.hpp"
 #include "black_market_hud.hpp"
@@ -405,6 +406,16 @@ struct GalacticMode::State final {
     void choose_weapon_action(std::size_t index);
     void close_weapon_action();
     void write_weapon_action_report(std::ostream&) const;
+    godot::Control* hero_map_bar{};
+    std::array<EawrHudButton*, 6> hero_map_buttons{};
+    std::vector<galactic_view::HeroMapEntry> hero_map_entries;
+    std::shared_ptr<const sim::galactic::GalacticSnapshot> hero_map_publication;
+    std::uint64_t hero_map_clicks{};
+    sim::galactic::TypeId hero_map_selected_type{};
+    [[nodiscard]] bool build_hero_map_bar();
+    void update_hero_map_bar();
+    void write_hero_map_report(std::ostream&) const;
+    void select_hero(sim::galactic::TypeId type, bool inactive, bool twice);
     HeroActionHudState hero_menu;
     [[nodiscard]] bool build_hero_action_hud();
     void update_hero_action_hud();

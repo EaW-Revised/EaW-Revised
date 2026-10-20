@@ -598,13 +598,13 @@ public:
         deactivate(emitter);
         ++suspensions_;
         Emitter dormant;
-        // Opaque equal-depth draws can sort by resource identity. A resumable
-        // owner keeps its three IDs but relinquishes every surface and packing
-        // buffer; terminal owners still release the complete draw resources.
-        if (detail::ParticleResidencyPolicy::keep_identity(terminal, emitter.plan.blend == particles::Blend::opaque)) {
+        // Opaque equal-depth draws can sort by resource identity. Fog-backed
+        // resumable owners also keep their material registration until terminal
+        // retirement. Both relinquish every surface and packing buffer.
+        if (detail::ParticleResidencyPolicy::keep_identity(terminal,
+            emitter.plan.blend == particles::Blend::opaque, emitter.fog_handle != 0)) {
             if (rendering != nullptr) rendering->mesh_clear(emitter.mesh);
-            if (emitter.fog_handle && fog_.unregister_material)
-                fog_.unregister_material(emitter.fog_handle);
+            dormant.fog_handle = emitter.fog_handle;
             dormant.material = emitter.material;
             dormant.mesh = emitter.mesh;
             dormant.instance = emitter.instance;
@@ -866,7 +866,7 @@ public:
             ++recreations_;
         }
         if (emitter.active_index == inactive_index) {
-            assert(emitter.plan.blend == particles::Blend::opaque);
+            assert(emitter.plan.blend == particles::Blend::opaque || emitter.fog_handle != 0);
             assert(emitter.shape.vertices == 0 && emitter.shape.indices == 0);
             const auto frame = current_frame();
             if (!emitter.retry.admits(frame)) return;
@@ -881,6 +881,8 @@ public:
                 }
                 emitter.fog_handle = registered.value();
             }
+            // Dormant bump materials missed any intervening lighting updates.
+            if (emitter.bump) apply_lighting(*rendering, emitter.material);
             emitter.retry.succeeded();
             assert(retained_identities_ != 0);
             --retained_identities_;

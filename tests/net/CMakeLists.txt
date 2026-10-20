@@ -42,6 +42,12 @@ add_executable(net_galactic_setup_tests galactic_setup_tests.cpp)
 target_link_libraries(net_galactic_setup_tests PRIVATE eawr::net eawr::platform eawr::campaign)
 eawr_target_project_warnings(net_galactic_setup_tests)
 add_test(NAME net_galactic_setup_contracts COMMAND net_galactic_setup_tests)
+# GCMP-07 (#4363): the lobby GC mode (gc1 options codec and versioning, campaign list, staging refusals, two-peer and nine-seat
+# rooms through the real lobby core and the galactic offer; the skirmish options bytes pinned).
+add_executable(net_galactic_lobby_tests galactic_lobby_tests.cpp)
+target_link_libraries(net_galactic_lobby_tests PRIVATE eawr::net eawr::platform eawr::campaign eawr::platform_net eawr::skirmish)
+eawr_target_project_warnings(net_galactic_lobby_tests)
+add_test(NAME net_galactic_lobby_contracts COMMAND net_galactic_lobby_tests)
 add_executable(net_viewer_lan_tests
     viewer_lan_tests.cpp
     viewer_lan_mesh_tests.cpp

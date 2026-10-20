@@ -83,6 +83,8 @@ public:
     // once, in caller order, before that same stream is made visible. Shared
     // texture and program references survive the empty span until owner release,
     // including terminal owners (one shared RID per unique texture/program).
+    // Resumable opaque/fog emitters keep empty identity RIDs; fog registration
+    // survives with the material. Surfaces and packing buffers still retire.
     void update_emitter(std::uint64_t resource, const particles::VertexStream& stream) override;
     void empty_emitter(std::uint64_t resource, bool terminal) override;
     void destroy_emitter(std::uint64_t resource) override;

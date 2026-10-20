@@ -3,6 +3,8 @@
 namespace eawr::presentation::godot_backend {
 void EawrLanLobby::refresh_staging() {
     if (page_ != Page::staging || !state_) return;
+    // A Galactic Conquest room (the host's choice, read from the room's options) has its own roster and campaign list.
+    if (match_->galactic_room()) { refresh_galactic_staging(); return; }
     Impl& impl = *impl_;
     PageState& state = *state_;
     Resources& resources = *resources_;
@@ -825,6 +827,12 @@ bool EawrLanLobby::action_staging_selection(const std::string& verb, const std::
 
 bool EawrLanLobby::action_start(Impl& impl) {
     refresh_staging();
+    if (match_->galactic_room()) {
+        // GC: the room's own validation gates Start (two humans, the human-seat limit, the campaign rules).
+        match_->start(skirmish::FixtureOptions{});
+        refresh_staging();
+        return match_->galactic_start().has_value();
+    }
     const auto room = match_->lobby_state();
     const auto humans = room ? room->snapshot.seats.size() : impl.human_owners.size();
     const model::StartVerdict verdict = model::check_host_start(impl.rows, impl.map_index >= 0, humans);

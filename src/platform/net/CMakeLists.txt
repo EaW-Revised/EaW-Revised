@@ -2,7 +2,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
 add_library(eawr_platform_net STATIC ${EAWR_PLATFORM_NET_SOURCES})
 add_library(eawr::platform_net ALIAS eawr_platform_net)
 target_include_directories(eawr_platform_net PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
-target_link_libraries(eawr_platform_net PUBLIC eawr::net eawr::platform eawr::skirmish eawr::ui_model eawr::scene)
+target_link_libraries(eawr_platform_net PUBLIC eawr::net eawr::platform eawr::skirmish eawr::ui_model eawr::scene eawr::campaign)
 target_compile_features(eawr_platform_net PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_platform_net)
 

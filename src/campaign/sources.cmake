@@ -18,6 +18,7 @@ set(EAWR_CAMPAIGN_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/setup.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_setup.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/mp_agreement.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/mp_lobby_catalog.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_conflict.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/story_plots.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/story_rewards_live.cpp"

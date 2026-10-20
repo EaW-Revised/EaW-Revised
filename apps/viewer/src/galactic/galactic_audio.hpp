@@ -83,7 +83,7 @@ private:
     std::vector<std::string> speech_log_;
     audio::SfxRegistry registry_;
     std::vector<audio::MusicEvent> music_events_;
-    std::vector<audio::Field> faction_fields_, audio_fields_;
+    std::vector<audio::Field> faction_fields_, audio_fields_, category_masks_;
     std::vector<std::string> rankings_; // GameConstants Unit_Command_Rankings_By_Category
     audio::GalacticMusicDirector director_;
     audio::EventQueue events_;

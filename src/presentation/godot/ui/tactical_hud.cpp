@@ -189,6 +189,12 @@ std::optional<std::array<float, 2>> TacticalHud::control_point(const std::string
 }
 
 EawrUnitCards* TacticalHud::unit_cards() const noexcept { return state_->cards; }
+
+EawrHeroTray* TacticalHud::hero_tray() const noexcept { return state_->heroes; }
+
+void TacticalHud::set_hero_tray(std::vector<EawrHeroTray::Icon> friendly, std::vector<EawrHeroTray::Icon> hostile) {
+    if (state_->heroes != nullptr) state_->heroes->show(std::move(friendly), std::move(hostile));
+}
 Ref<Font> TacticalHud::world_group_font(const bool squadron) const { return state_->world_group_fonts[squadron ? 0 : 1]; }
 
 EawrProductionPanel* TacticalHud::production() const noexcept { return state_->production; }

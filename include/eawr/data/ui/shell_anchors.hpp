@@ -60,6 +60,13 @@ struct ShellAnchor {
     std::vector<ShellTriangle> triangles; // transformed geometry, original wrap UVs
 };
 
+// A bone of the shell model with its model-space origin: components bound to a bone that carries no mesh
+// (the hero tray's health bars) are placed by it.
+struct ShellBone {
+    std::string name;
+    assets::Vec2f origin;
+};
+
 class ShellAnchors {
 public:
     [[nodiscard]] const std::string& model_path() const noexcept { return model_path_; }
@@ -71,10 +78,15 @@ public:
 
     void set_model_path(std::string path) { model_path_ = std::move(path); }
     void add(ShellAnchor anchor) { anchors_.push_back(std::move(anchor)); }
+    [[nodiscard]] const std::vector<ShellBone>& bones() const noexcept { return bones_; }
+    // ASCII case-insensitive; null for a bone the model lacks.
+    [[nodiscard]] const ShellBone* find_bone(std::string_view name) const noexcept;
+    void add_bone(ShellBone bone) { bones_.push_back(std::move(bone)); }
 
 private:
     std::string model_path_;
     std::vector<ShellAnchor> anchors_;
+    std::vector<ShellBone> bones_;
 };
 
 struct ShellAnchorLoad {

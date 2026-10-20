@@ -212,6 +212,14 @@ private:
     void draw_chat(class EawrUiList& list, const presentation::ui::ChatLog& log);
     void commit_name_from_edit();
     void refresh_staging();
+    // GCMP-07 (#4363): the Galactic Conquest mode of the staging; the room's mode comes from the lobby snapshot.
+    void configure_galactic_content();
+    [[nodiscard]] std::optional<std::string> host_galactic_game();
+    void refresh_galactic_staging();
+    void refresh_galactic_roster(Impl& impl, PageState& state, Resources& resources, const LanView& view,
+                                 const std::optional<LanLobbyState>& room,
+                                 std::vector<presentation::ui::StagingRow>& rows, std::size_t dialog_rows);
+    bool galactic_item_selected(int64_t index, const std::string& gadget);
     void refresh_staging_connections(Impl& impl, const LanView& view, bool online);
     void refresh_staging_status(Impl& impl, PageState& state, Resources& resources, const LanView& view,
                                 bool online, const std::optional<LanLobbyState>& room);

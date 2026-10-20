@@ -118,6 +118,12 @@ void shell_anchor_synthetic() {
     expect(count_code(load.diagnostics, codes::shell_bone_transform) == 0U, "rotation is supported without a warning");
     expect(count_code(load.diagnostics, codes::shell_mesh_duplicate) == 1U, "a repeated mesh name is reported");
 
+    // #944: a bone without a mesh (the hero tray's health bars) is found by its origin, ignoring case.
+    const auto* popup = shell.find_bone("POPUP_POINT");
+    expect(popup && popup->origin.x == 311.0F && popup->origin.y == -7.0F, "a bone-only point keeps its model-space origin");
+    expect(shell.find_bone("missing_popup_point") == nullptr && shell.bones().size() == model.bones.size(),
+           "every bone is recorded and an absent one is not guessed");
+
     const ShellAnchor* button = shell.find("B_Button");
     expect(button && button->rect == ReferenceRect{98.0F, 43.0F, 24.0F, 24.0F},
            "rect = bone translation summed up the parent chain plus vertex extents");

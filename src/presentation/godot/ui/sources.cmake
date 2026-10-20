@@ -1,5 +1,6 @@
 # Sources owned by this directory; included once by the viewer build.
 set(EAWR_GODOT_UI_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/tactical_hud_team_dock.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/font_provider.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/input_routing.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/kit.cpp"
@@ -16,6 +17,7 @@ set(EAWR_GODOT_UI_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/battle_overlay.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/production_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/perf_overlay_view.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/hero_tray_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/unit_cards_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/minimap_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ability_buttons_view.cpp"

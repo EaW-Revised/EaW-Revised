@@ -125,6 +125,43 @@ bool allowed_production_site(const galactic_ai::WorldInput& input, tactical::Pla
     auto result = read_allowed_production_site(input, player, planet);
     return result && result.value();
 }
+struct AllowedProductionSites::State { std::vector<std::int8_t> flags; };
+AllowedProductionSites::AllowedProductionSites(std::shared_ptr<const galactic_ai::WorldInput> input, tactical::PlayerId player)
+    : input_(std::move(input)), player_(player) {
+    if (!input_) return;
+    // The runtime asks for the same completed input many times per tick. Reuse by exact input identity, without
+    // keeping the input alive; expired entries are pruned.
+    struct Entry {
+        std::weak_ptr<const galactic_ai::WorldInput> owner;
+        tactical::PlayerId player{};
+        std::shared_ptr<State> state;
+    };
+    static std::mutex mutex;
+    static std::vector<Entry> entries;
+    std::scoped_lock lock(mutex);
+    for (auto at = entries.begin(); at != entries.end();) {
+        const auto owner = at->owner.lock();
+        if (!owner) { at = entries.erase(at); continue; }
+        if (owner == input_ && at->player == player_) state_ = at->state;
+        ++at;
+    }
+    if (state_) return;
+    state_ = std::make_shared<State>();
+    state_->flags.assign(input_->targets.size(), -1);
+    entries.push_back({input_, player_, state_});
+}
+core::Result<bool> AllowedProductionSites::at(std::size_t target) const {
+    auto& flag = state_->flags.at(target);
+    if (flag >= 0) { ++selection_work.allowed_site_reuses; return core::Result<bool>::success(flag != 0); }
+    // Ownership is the first gate of every production admission, and the target row carries the owner the producer
+    // catalog reads: a player has no allowed producer at a planet it does not own, so that read is not made.
+    if (input_->targets[target].owner != player_) { ++selection_work.allowed_site_unowned; flag = 0; return core::Result<bool>::success(false); }
+    auto read = read_allowed_production_site(*input_, player_, input_->targets[target].planet);
+    if (!read) return read;
+    ++selection_work.allowed_site_reads;
+    flag = read.value() ? 1 : 0;
+    return read;
+}
 core::Result<std::vector<GalacticSelectionContrast>> galactic_target_contrast(const GalacticWorld& world,
     const Context& context, std::span<const std::uint64_t> categories, Real classified_scale) {
     using Result = core::Result<std::vector<GalacticSelectionContrast>>;
@@ -272,8 +309,10 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
         if (population != state->population().end()) out->remaining_population = to_single(numeric::from_fixed(population->capacity) - numeric::from_fixed(population->used));
         const auto destination = std::find_if(input->targets.begin(), input->targets.end(), [&](const auto& row) { return row.planet == target; });
         if (target && destination == input->targets.end()) return Result::failure(unavailable("stock selection target absent"));
+        const AllowedProductionSites allowed_sites(input, player);
+        std::size_t site_index{};
         for (const auto& site : input->targets) {
-            const auto allowed = read_allowed_production_site(*input, player, site.planet);
+            const auto allowed = allowed_sites.at(site_index++);
             if (!allowed) return Result::failure(allowed.error());
             if (!allowed.value()) continue;
             const auto reach = target ? world->goal_reachable(player, target, site.planet, goal.reachability) : std::optional{true};

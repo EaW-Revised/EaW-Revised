@@ -95,7 +95,7 @@ bool GalacticMode::State::build_hud() {
     hud->set_z_index(1);
     hud->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
     hud->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
-    return build_command_bar() && build_fleet_hud() && build_radar_hud() && build_ground_hud() && build_orbit_hud() && build_corruption_hud() && build_battle_dialog() && build_campaign_score() && build_hero_action_hud() && build_weapon_action_hud() && build_destruction_hud() && build_black_market_hud();
+    return build_command_bar() && build_fleet_hud() && build_radar_hud() && build_ground_hud() && build_orbit_hud() && build_corruption_hud() && build_battle_dialog() && build_campaign_score() && build_hero_map_bar() && build_hero_action_hud() && build_weapon_action_hud() && build_destruction_hud() && build_black_market_hud();
 }
 
 void GalacticMode::State::update_hud() {
@@ -122,6 +122,7 @@ void GalacticMode::State::update_hud() {
     service_encyclopedia();
     { const auto measured = measure_frame(FramePhase::hud_radar); update_radar_hud(); }
     update_corruption_hud();
+    update_hero_map_bar();
     update_hero_action_hud();
     update_destruction_hud();
     update_weapon_action_hud();

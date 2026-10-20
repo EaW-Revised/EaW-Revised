@@ -150,6 +150,10 @@ void empty_residency_lifetime() {
     using Policy = ParticleResidencyPolicy;
     check(!Policy::immediate(false, false, false), "resumable emptiness receives the bounded dwell");
     check(Policy::keep_identity(false, true), "opaque dwell preserves sorting identities");
+    check(Policy::keep_identity(false, false, true),
+        "resumable fog owners preserve their material registration without geometry");
+    check(!Policy::keep_identity(true, false, true),
+        "terminal fog owners release their material registration and empty identities");
     check(Policy::live_rids(0, 0, 1, 2) == 5,
         "a suspended opaque owner still owns three identity RIDs plus two shared RIDs");
     check(Policy::immediate(true, false, false) && !Policy::keep_identity(true, true),

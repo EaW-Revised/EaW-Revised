@@ -515,6 +515,8 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
     bool queues_changed{};
     const auto same_production = [&](const auto& left, const auto& right) {
         gc_profile::Scope production_scope(gc_profile::Phase::compare_production);
+        // The session shares an unchanged published production state by pointer: the same object has no change.
+        if (&left == &right) return true;
         if (bool(left) != bool(right)) return false;
         if (!left) return true;
         if (left->maximum_human_queue != right->maximum_human_queue || left->players != right->players
@@ -552,6 +554,7 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
     };
     bool credits_changed{};
     const auto same_accounts = [&](const auto& left, const auto& right) {
+        if (&left == &right) return true; // one shared published ledger: no balance moved
         if (bool(left) != bool(right)) return false;
         if (!left) return true;
         if (left->players.size() != right->players.size()) return false;
@@ -583,7 +586,8 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
             && equal_optional_pointer(snapshot->economy_corruption(), old.economy_corruption())
             && equal_rows(snapshot->commissioned_originals(), old.commissioned_originals())
             && equal_rows(snapshot->actor_records(), old.actor_records())
-            && snapshot->observer() == old.observer() && equal_rows(snapshot->observations(), old.observations())
+            && (&snapshot->observer() == &old.observer() || snapshot->observer() == old.observer())
+            && equal_rows(snapshot->observations(), old.observations())
             && snapshot->maximum_movement_distance() == old.maximum_movement_distance()
             && std::equal(snapshot->fleets().begin(), snapshot->fleets().end(), old.fleets().begin(), old.fleets().end(),
                 [](const auto& a, const auto& b) {
@@ -1086,12 +1090,17 @@ void GalacticWorld::bind_connectivity(std::shared_ptr<const GalacticConnectivity
         mark_state_changed();
         for (auto& [who, mine] : shards_) {
             static_cast<void>(who);
+            // Rows before the first connecting-path row neither move nor go: a shard without one is untouched, and
+            // its lookup index stays valid.
+            rebuild_row_index(mine);
+            if (mine.first_connected == std::numeric_limits<std::size_t>::max()) continue;
             mine.cache_index.clear();
-            std::size_t kept{};
-            for (std::size_t index = 0; index < mine.cache.size(); ++index) {
+            std::size_t kept = mine.first_connected;
+            mine.force_rows.erase(std::lower_bound(mine.force_rows.begin(), mine.force_rows.end(), kept), mine.force_rows.end());
+            for (std::size_t index = mine.first_connected; index < mine.cache.size(); ++index) {
                 auto& row = mine.cache[index];
                 const auto& tokens = token_of(mine, row.key.token).tokens;
-                if (std::any_of(tokens.begin(), tokens.end(), [](const auto& token) { return token.starts_with("ISCONNECTED") || token.starts_with("CONNECTS"); })) {
+                if (galactic_connectivity_token(tokens)) {
                     if (records_ready_) mine.records.erase(row.key.player, 1, index);
                     continue;
                 }
@@ -1099,9 +1108,11 @@ void GalacticWorld::bind_connectivity(std::shared_ptr<const GalacticConnectivity
                     if (records_ready_) mine.records.relocate(row.key.player, 1, index, kept);
                     mine.cache[kept] = std::move(row);
                 }
+                if (galactic_force_deadline_token(tokens)) mine.force_rows.push_back(static_cast<std::uint32_t>(kept));
                 ++kept;
             }
             mine.cache.resize(kept);
+            mine.first_connected = std::numeric_limits<std::size_t>::max();
         }
     }
     if (!(connectivity->goal_reach == connectivity_->goal_reach))

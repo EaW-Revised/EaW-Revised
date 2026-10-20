@@ -25,6 +25,7 @@
 #include "ui/ability_buttons_view.hpp"
 #include "ui/battle_overlay.hpp"
 #include "ui/font_provider.hpp"
+#include "ui/hero_tray_view.hpp"
 #include "ui/input_routing.hpp"
 #include "ui/kit.hpp"
 #include "ui/minimap_view.hpp"
@@ -36,6 +37,7 @@
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
+#include "eawr/presentation/ui/team_dock.hpp"
 #include "eawr/presentation/ui/retreat_button.hpp"
 #include "eawr/presentation/ui/special_weapon.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -49,6 +51,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -181,6 +184,11 @@ public:
     void world_input(const godot::Ref<godot::InputEvent>& event);
     // #425: the command bar's unit cards; null before build() or when the shell has no card slots.
     [[nodiscard]] EawrUnitCards* unit_cards() const noexcept;
+    // #944 (WHE-44): the battle hero tray, drawn in the two hero frame shells; null before build() or when
+    // the shell data has no hero frame. It hides with the command bar. The icons are the model's roster
+    // (presentation::ui::collect_heroes) resolved for drawing; the HUD redraws only when they change.
+    [[nodiscard]] EawrHeroTray* hero_tray() const noexcept;
+    void set_hero_tray(std::vector<EawrHeroTray::Icon> friendly, std::vector<EawrHeroTray::Icon> hostile);
     // WSU-33, WSU-55: world group text shares the command bar's cached font provider.
     [[nodiscard]] godot::Ref<godot::Font> world_group_font(bool squadron) const;
     // #530: the build queue, the credits and the reinforcement pane; null before build() or when
@@ -195,6 +203,10 @@ public:
     // null before build() or when the shell has no ability buttons.
     [[nodiscard]] EawrAbilityButtons* ability_buttons() const noexcept;
     void set_ability_bar(const presentation::ui::AbilityBar& bar);
+    [[nodiscard]] bool team_dock_hovered() const;
+    void set_team_dock(const presentation::ui::TeamResearchView& view,
+        std::span<const sim::tactical::UpgradeProfile> upgrades,
+        const std::map<sim::tactical::TypeId, std::string>& names);
     void set_world_hover(const std::optional<std::pair<std::uint64_t, std::string>>& hovered);
     void set_ability_hover(const std::string& type, std::uint32_t ability, std::size_t component);
     // #455 (docs/behaviour/foc-minimap.md): the command bar's minimap; null before build() or when the

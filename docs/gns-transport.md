@@ -332,11 +332,15 @@ with a header as success, so one stale nonce ended the refresh chain and the all
 once, at most five times in a row; any other error reply on a Refresh re-arms it after 30 s. `net_gns_turn_nonce`
 rotates the server nonce every 2 s so every request is answered with 438 first, and requires the frames to keep flowing.
 
-**Loud failure.** `GnsOptions::ack_silence_timeout` (15 s): a Connected link whose reliable data stays unacknowledged
-without a single acknowledgement for that long stops with EAWR-NET-1507, "GNS link silent N s while Connected (relay)",
-sampled every 250 ms. GNS acknowledges on its own thread, so a peer that is busy loading does not trip it at lockstep
-volumes (it stops acknowledging once the receiver buffers more than 1 MiB of reliable data). The sampled in-flight byte
-count must fall or reach zero within the window; a level that stayed exactly constant for 15 s would count as silent.
+**Loud failure.** `GnsOptions::ack_silence_timeout` (15 s): a Connected link with reliable bytes in flight and neither
+validated reliable inbound messages nor send-window progress for that long stops with EAWR-NET-1507,
+"GNS link silent N s while Connected (relay)", sampled every 250 ms. This measures link liveness, not individual ACKs:
+ongoing sends can replace acknowledged bytes between samples, leaving a steady or growing window on a healthy link.
+The send window includes both pending and sent-unacknowledged reliable bytes, because retransmit scheduling moves
+bytes between them without an ACK. Validated reliable messages (including transport keepalives and fragments) restart
+the silence clock; native UDP traffic and out-of-band unreliable keepalives do not. GNS acknowledges on its own thread,
+so loading peers can also demonstrate progress by draining the send window. The stop log retains receive age and both
+native reliable counters before teardown.
 This names the link instead of the lockstep wait, well before the 30 s completeness timeout. `net_gns_turn_silent` covers it with a
 server that stops forwarding for good.
 

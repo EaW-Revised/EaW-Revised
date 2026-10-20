@@ -4,6 +4,7 @@
 include("${CMAKE_CURRENT_LIST_DIR}/../../platform/sources.cmake")
 
 set(EAWR_UI_MODEL_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/team_dock.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/layout.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/command_bar_placement.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/fonts.cpp"
@@ -31,6 +32,7 @@ set(EAWR_UI_MODEL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/skirmish_setup.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/time_controls.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/production.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/hero_tray.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/unit_cards.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/world_ui.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/cursors.cpp"

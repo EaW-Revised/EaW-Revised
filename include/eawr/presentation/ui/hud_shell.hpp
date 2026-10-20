@@ -310,6 +310,32 @@ struct HudReinforcePane {
 [[nodiscard]] HudReinforcePane reinforce_pane(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
                                               const data::ui::TextDatabase* text = nullptr);
 
+// #944 (WHE-44, HCB-44): a hero tray frame. Each side is its own centred manual shell
+// (`good_hero_frame`/`evil_hero_frame`, Hidden, Manual_Offset: the caller places it); its art has one
+// `_ALT<n>` variant per shown hero count, its bones are the hero slots `hero_slot_<side>NN` and their
+// health bars `hero_hb_<side>NN`. A slot is a TextButton: `blank` is the ring drawn over the portrait.
+enum class HeroSide : std::uint8_t { good, evil };
+[[nodiscard]] std::string_view to_string(HeroSide side) noexcept;
+struct HudHeroSlot {
+    HudShellButton button;
+    std::optional<HudBar> health;
+};
+struct HudHeroFrame {
+    std::string model;
+    HeroSide side{HeroSide::good};
+    CommandBarPlacement placement;
+    // The frame art per hero-count variant (index = the ALT index the model carries); at least one entry.
+    std::vector<std::vector<HudShellMesh>> meshes;
+    std::vector<HudHeroSlot> slots;
+    std::vector<core::Diagnostic> diagnostics;
+};
+inline constexpr std::size_t hero_slot_limit = 11; // hero_slot_<side>00 to 10 (WHE-44 code capacity)
+// The model of the frame component, else the retail model name of the side.
+[[nodiscard]] std::string hero_frame_model(const data::ui::CommandBarCatalog& catalog, HeroSide side);
+// Never fails: a missing part is left out with one EAWR-UI-0320 warning.
+[[nodiscard]] HudHeroFrame hero_frame(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
+                                      HeroSide side);
+
 // The time panel's buttons, in draw order.
 inline constexpr std::array<std::string_view, 4> tactical_panel_buttons{
     "b_droid_help_tactical", "b_story_arc_t", "b_play_pause_t", "b_fast_forward_t"};

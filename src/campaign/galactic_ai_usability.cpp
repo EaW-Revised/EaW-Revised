@@ -61,18 +61,21 @@ public:
     }
     TokenReader(const TokenReader&) = delete;
     TokenReader& operator=(const TokenReader&) = delete;
+    [[nodiscard]] const ai::Context& context() const noexcept { return context_; }
     [[nodiscard]] std::optional<Real> operator()(gc::PlanetId planet, Kind kind) {
         target_.object = planet; target_.name = "OBJECT_" + std::to_string(planet);
         ai::AiRandom random;
         const auto& equation = equations_[static_cast<std::size_t>(kind)];
-        return reconstruction_ ? world_.reconstruction_perception(*reconstruction_, engine_, equation, context_, random)
-            : world_.perception(engine_, equation, context_, random);
+        if (reconstruction_) return world_.reconstruction_perception(*reconstruction_, engine_, equation, context_, random);
+        if (!batch_) batch_.emplace(world_, context_.player);
+        return batch_->perception(engine_, equation, context_, random);
     }
 private:
     const GalacticAiUsabilityProvider::World& world_;
     const GalacticAiUsabilityProvider::Engine& engine_;
     const ai::DerivedExecutionRestore* reconstruction_;
     std::array<ai::Equation, 4> equations_;
+    std::optional<GalacticAiUsabilityProvider::World::ReadBatch> batch_; // opened by the first read
     ai::Target target_;   // the context points at it; every query rewrites it before use
     ai::Context context_;
 };
@@ -297,7 +300,23 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
     const auto serial_reads = world.sequential_reads();
     std::optional<TokenReader> tokens;
     if (selected->ai) tokens.emplace(world, engine, owner, reconstruction);
-    if (selected->ai) for (std::size_t index = 0; index < snapshot.planets().size(); ++index) {
+    // A presence read (the cached strength getter) that a remembered row served at the last pass and serves again now
+    // leaves that row, the player's record digest and the economy memo's expiries as they are, so its previous answer
+    // stands and the read is not repeated. The ownership getter is re-evaluated and re-remembered on every frame: it
+    // always runs. Any visibility change, restore, other context, planet set or starbase change repeats the read.
+    const auto planet_count = snapshot.planets().size();
+    const Cache* const prior = !reconstruction && old != caches_.end() ? &old->second : nullptr;
+    const bool record_presence = selected->ai && !reconstruction;
+    const auto visibility_revision = record_presence ? world.visibility_revision(owner) : std::uint64_t{};
+    const bool replay_presence = incremental_ && record_presence && prior
+        && prior->presence.size() == planet_count && prior->movement.access.size() == planet_count
+        && prior->presence_revision == visibility_revision
+        && prior->presence_enemy == tokens->context().enemy && prior->presence_human == tokens->context().human;
+    if (record_presence) {
+        next.presence.assign(planet_count, {}); next.presence_revision = visibility_revision;
+        next.presence_enemy = tokens->context().enemy; next.presence_human = tokens->context().human;
+    }
+    if (selected->ai) for (std::size_t index = 0; index < planet_count; ++index) {
         const auto id = snapshot.planets()[index].id;
         auto& row = next.movement.access[index];
         const auto classified = (*tokens)(id, TokenReader::Kind::target_player);
@@ -307,14 +326,30 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
             row.ai_relation = !player || player->neutral ? gc::PathRelation::neutral : gc::PathRelation::hostile;
         }
         if (!row.starbase_relation) {
-            const auto perceived_force = (*tokens)(id, TokenReader::Kind::space_presence);
+            if (replay_presence && classified) {
+                const auto& before = prior->movement.access[index];
+                const auto& memo = prior->presence[index];
+                if (before.id == id && !before.starbase_relation && before.ai_enemy_space_force.has_value()
+                    && memo.trace.serves(world.synchronized_frame())) {
+                    row.ai_enemy_space_force = before.ai_enemy_space_force; next.presence[index] = memo;
+                    ++work_.presence_reuses;
+                    continue;
+                }
+            }
+            World::ReadTrace trace;
+            std::optional<Real> perceived_force;
+            if (record_presence) {
+                const auto traced = world.trace_reads(owner, trace);
+                perceived_force = (*tokens)(id, TokenReader::Kind::space_presence);
+            } else perceived_force = (*tokens)(id, TokenReader::Kind::space_presence);
             if (perceived_force) row.ai_enemy_space_force = *perceived_force != Real{};
+            if (record_presence) { trace.replayable = trace.replayable && perceived_force.has_value(); next.presence[index].trace = trace; }
         }
     }
     if (snapshot.control()) for (const auto& at : snapshot.control()->state)
-        next.movement.orbital_occupants.emplace(at.planet, at.orbital_player);
+        next.movement.orbital_occupants.emplace_hint(next.movement.orbital_occupants.end(), at.planet, at.orbital_player);
     else if (snapshot.production()) for (const auto& at : snapshot.production()->planets)
-        next.movement.orbital_occupants.emplace(at.planet, at.orbit_occupier);
+        next.movement.orbital_occupants.emplace_hint(next.movement.orbital_occupants.end(), at.planet, at.orbit_occupier);
     if (next.movement.orbital_occupants.size() != snapshot.planets().size())
         return refuse<const Cache*>("WGM-66: complete live orbital occupant owner is absent");
     // Motion and observation generations can change while every flood input
@@ -340,7 +375,10 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
         // published goal-reach rows, which the rebuild below keeps whenever a row is unchanged. Past the last refusal.
         next.island_memo = old->second.island_memo;
         next.goal_reach = std::move(old->second.goal_reach);
-    }
+        next.force = std::move(old->second.force); next.islands = std::move(old->second.islands);
+        next.island_sizes = old->second.island_sizes; next.island_pass = std::move(old->second.island_pass);
+        next.output_version = old->second.output_version;
+    } else next.output_version = ++output_epoch_;
     next.site_memos.resize(snapshot.planets().size());
     next.perception_revision = world.movement_input_revision();
     next.valid_through = reconstruction ? prepared_through_.at(owner).through
@@ -433,6 +471,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         output.island_sizes.push_back({player.player, cache.island_sizes[0], cache.island_sizes[1]});
         }
         published_ = std::make_shared<const ai::GalacticConnectivity>(std::move(output)); reconstructed_ = false;
+        published_versions_.clear();
         return core::Result<ConnectivityPublication>::success(published_);
     }
     world.set_synchronized_frame(session.completed_tick());
@@ -455,14 +494,21 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
             || frame > at->second.connectivity_through || Real(frame) > at->second.valid_through;
     }
     if (!dirty) return core::Result<ConnectivityPublication>::success(published_);
+    // The retained rows change in place: a row keeps the value it had before its first change here, a created row is
+    // listed, and a refusal anywhere below puts every row back exactly as the old full copy of the map would have.
+    struct ReachUndo { std::pair<gc::PlayerId, gc::PlanetId> key; Reach* row; Reach before; };
+    std::vector<ReachUndo> undo;
+    std::vector<std::pair<gc::PlayerId, gc::PlanetId>> inserted;
     struct CacheTransaction {
         std::function<void()> discard;
         bool committed{};
         ~CacheTransaction() { if (!committed) discard(); }
-    } transaction{[this, prepared = prepared_through_]() mutable {
+    } transaction{[this, prepared = prepared_through_, &undo, &inserted]() mutable {
         caches_.clear(); prepared_through_ = std::move(prepared);
+        for (auto at = undo.rbegin(); at != undo.rend(); ++at) *at->row = std::move(at->before);
+        for (const auto& key : inserted) retained_.erase(key);
     }};
-    auto staged = retained_; ai::GalacticConnectivity output; output.stealth_fleets = stealth_fleets_;
+    ai::GalacticConnectivity output; output.stealth_fleets = stealth_fleets_;
     for (const auto& player : content_->players) if (player.ai) {
         const auto prior = caches_.find(player.player);
         const bool pending = prior != caches_.end() && prior->second.source_changed;
@@ -474,7 +520,22 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
             if (cache.site_graph != graph) {
                 cache.site_memos.assign(snapshot->planets().size(), {}); cache.site_graph = graph;
             }
-            std::vector<std::array<bool, 6>> searched(snapshot->planets().size());
+            const auto planet_total = snapshot->planets().size();
+            // The retained rows of this player by planet index (null: no row yet). Map nodes are stable, so these
+            // stay valid while the saved loop below adds missing rows.
+            std::vector<Reach*> held(planet_total, nullptr);
+            {
+                auto walker = retained_.lower_bound(std::pair<gc::PlayerId, gc::PlanetId>{player.player, 0});
+                gc::PlanetId previous{};
+                for (std::size_t index = 0; index < planet_total; ++index) {
+                    const std::pair<gc::PlayerId, gc::PlanetId> key{player.player, snapshot->planets()[index].id};
+                    if (!(previous < key.second)) walker = retained_.lower_bound(key); // unordered input: exact, just slower
+                    previous = key.second;
+                    while (walker != retained_.end() && walker->first < key) ++walker;
+                    if (walker != retained_.end() && walker->first == key) held[index] = &walker->second;
+                }
+            }
+            std::vector<std::array<bool, 6>> searched(planet_total);
             // Demand seam for one player/target/policy. The current caller keeps
             // GFS-A14's retained refresh cadence, including unread native rows.
             // Partitions own distinct target slots; representatives read after
@@ -488,28 +549,38 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
                 }
                 return ai::SharedPlanetList(memo);
             };
-            std::vector<std::array<ai::SharedPlanetList, 6>> sites(snapshot->planets().size());
-            std::vector<std::array<bool, 6>> updated(snapshot->planets().size());
-            auto phase = executor.execute_phase("galactic-ai-production-sites", sim::tick_partition_count, [&](std::size_t part) {
-                const auto range = sim::partition_range(part, snapshot->planets().size());
-                for (auto index = range.begin; index < range.end; ++index) {
-                    const auto id = snapshot->planets()[index].id;
-                    const auto saved = staged.find({player.player, id});
+            std::vector<std::array<ai::SharedPlanetList, 6>> sites(planet_total);
+            std::vector<std::array<bool, 6>> updated(planet_total);
+            const auto row_valid = [&](const Reach* saved, std::size_t policy) {
+                return saved && saved->frames[policy] && frame <= *saved->frames[policy] + std::uint64_t(content_->logical_fps) * 10;
+            };
+            const auto fill = [&](std::size_t first, std::size_t last) {
+                for (auto index = first; index < last; ++index)
                     for (std::size_t policy = 0; policy < policies.size(); ++policy) {
-                        const bool valid = saved != staged.end() && saved->second.frames[policy]
-                            && frame <= *saved->second.frames[policy] + std::uint64_t(content_->logical_fps) * 10;
-                        if (valid) sites[index][policy] = saved->second.sites[policy];
+                        if (row_valid(held[index], policy)) sites[index][policy] = held[index]->sites[policy];
                         else { sites[index][policy] = site_list(index, policy); updated[index][policy] = true; }
                     }
-                }
-            });
-            if (!phase) return core::Result<ConnectivityPublication>::failure(phase.error());
+            };
+            // Only a row past its expiry needs a search; when every row is retained there is nothing to fan out.
+            bool every_row_valid = true;
+            for (std::size_t index = 0; index < planet_total && every_row_valid; ++index)
+                for (std::size_t policy = 0; policy < policies.size(); ++policy)
+                    if (!row_valid(held[index], policy)) { every_row_valid = false; break; }
+            if (every_row_valid) fill(0, planet_total);
+            else {
+                auto phase = executor.execute_phase("galactic-ai-production-sites", sim::tick_partition_count, [&](std::size_t part) {
+                    const auto range = sim::partition_range(part, planet_total);
+                    fill(range.begin, range.end);
+                });
+                if (!phase) return core::Result<ConnectivityPublication>::failure(phase.error());
+            }
             const auto index_of = [&](gc::PlanetId id) {
                 return static_cast<std::size_t>(std::lower_bound(snapshot->planets().begin(), snapshot->planets().end(), id,
                     [](const auto& row, auto key) { return row.id < key; }) - snapshot->planets().begin());
             };
             const auto access = [&](gc::PlanetId id) -> const gc::PathPlanet& { return movement.access[index_of(id)]; };
             std::vector<gc::PlanetId> representatives;
+            const auto previous_sizes = cache.island_sizes;
             cache.island_sizes = {-1, -1};
             for (const auto id : content_->planet_order) {
                 const auto* facts = find(snapshot->observer()->planets, id, [](const auto& at) { return at.planet; });
@@ -527,13 +598,34 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
                     if (!reconstructed_) { sites[index_of(id)][1] = site_list(index_of(id), 1); updated[index_of(id)][1] = true; }
                 }
             }
+            // A row that keeps its value is not touched; the first change to a row lists its previous value.
+            std::vector<unsigned char> listed(planet_total, 0);
+            const auto touch = [&](std::size_t index) {
+                if (listed[index]) return;
+                listed[index] = 1;
+                undo.push_back({{player.player, snapshot->planets()[index].id}, held[index], *held[index]});
+            };
+            // Whether any retained site list differs from the one this player's reach rows were built from, and the
+            // earliest expiry of the retained rows (the rows below need both).
+            bool sites_changed = false, island_flags_changed = false;
+            auto through_min = std::numeric_limits<std::uint64_t>::max();
             for (std::size_t index = 0; index < sites.size(); ++index) {
-                auto& saved = staged[{player.player, snapshot->planets()[index].id}];
-                saved.shortest = false;
+                if (!held[index]) {
+                    const std::pair<gc::PlayerId, gc::PlanetId> key{player.player, snapshot->planets()[index].id};
+                    held[index] = &retained_[key]; inserted.push_back(key); listed[index] = 1;
+                }
+                auto& saved = *held[index];
+                if (saved.shortest) { touch(index); saved.shortest = false; }
                 for (std::size_t policy = 0; policy < policies.size(); ++policy) {
-                    saved.sites[policy] = sites[index][policy];
-                    if (updated[index][policy]) { saved.frames[policy] = frame; ++work_.searches; }
+                    if (!(saved.sites[policy] == sites[index][policy])) {
+                        touch(index); saved.sites[policy] = sites[index][policy]; sites_changed = true;
+                    }
+                    if (updated[index][policy]) {
+                        if (saved.frames[policy] != frame) { touch(index); saved.frames[policy] = frame; }
+                        ++work_.searches;
+                    }
                     if (searched[index][policy]) ++work_.site_searches;
+                    through_min = std::min(through_min, *saved.frames[policy] + std::uint64_t(content_->logical_fps) * 10);
                 }
             }
             // WGA-476: retail reads the two largest component sizes only when at least two disconnected components exist.
@@ -547,13 +639,33 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
             // ordinary world edges, and their own single-precision hop policy.
             if (representatives.size() > 1) {
                 TokenReader island_tokens(world, engine, player.player);
-                for (const auto& row : snapshot->planets()) if (access(row.id).relation != gc::PathRelation::allied) {
-                    auto space = island_tokens(row.id, TokenReader::Kind::space_total);
-                    auto ground = island_tokens(row.id, TokenReader::Kind::ground_total);
-                    if (!space || !ground) return refuse<ConnectivityPublication>("WGA-261: qualified island force perception is unavailable for player "
-                        + std::to_string(player.player) + " planet " + std::to_string(row.id)
-                        + (space ? " (ground; WGA-184/273 qualified authored force inputs)" : " (space; WGA-181..190 force owner)"));
-                    cache.force[row.id] = {single(*space), single(*ground)};
+                std::vector<gc::PlanetId> unallied;
+                for (const auto& row : snapshot->planets()) if (access(row.id).relation != gc::PathRelation::allied) unallied.push_back(row.id);
+                // The force reads are cached for several seconds. When the same planets are read again while every row
+                // that served them still serves them, nothing is stored and the values `force` holds stand.
+                const auto island_revision = world.visibility_revision(player.player);
+                auto& pass = cache.island_pass;
+                const bool replay_reads = incremental_ && pass.valid && pass.revision == island_revision
+                    && pass.enemy == island_tokens.context().enemy && pass.human == island_tokens.context().human
+                    && pass.planets == unallied && cache.force.size() == unallied.size() && pass.trace.serves(frame);
+                if (replay_reads) ++work_.island_read_reuses;
+                else {
+                    pass = {}; cache.force.clear();
+                    World::ReadTrace trace;
+                    {
+                        const auto traced = world.trace_reads(player.player, trace);
+                        for (const auto id : unallied) {
+                            auto space = island_tokens(id, TokenReader::Kind::space_total);
+                            auto ground = island_tokens(id, TokenReader::Kind::ground_total);
+                            if (!space || !ground) return refuse<ConnectivityPublication>("WGA-261: qualified island force perception is unavailable for player "
+                                + std::to_string(player.player) + " planet " + std::to_string(id)
+                                + (space ? " (ground; WGA-184/273 qualified authored force inputs)" : " (space; WGA-181..190 force owner)"));
+                            cache.force[id] = {single(*space), single(*ground)};
+                        }
+                    }
+                    pass.valid = trace.replayable; pass.trace = trace; pass.revision = island_revision;
+                    pass.enemy = island_tokens.context().enemy; pass.human = island_tokens.context().human;
+                    pass.planets = std::move(unallied);
                 }
                 const auto position = [&](gc::PlanetId id) -> const sim::math::Vec3& { return graph->node(id)->position; };
                 const auto connect = [&](const std::vector<gc::PlanetId>& reps, std::size_t target_index,
@@ -662,43 +774,88 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
                 inputs.shortest = shortest; inputs.least = least; inputs.largest = largest;
                 cache.island_memo = std::make_shared<const GalacticAiIslandMemo>(std::move(inputs));
                 }
-                for (const auto id : shortest) staged.at({player.player, id}).shortest = true;
-                for (const auto id : least) staged.at({player.player, id}).least_force = true;
-                for (const auto id : largest) staged.at({player.player, id}).largest = true;
+                const auto mark = [&](const std::set<gc::PlanetId>& ids, bool Reach::*flag) {
+                    for (const auto id : ids) {
+                        const auto index = index_of(id);
+                        if (index >= planet_total || snapshot->planets()[index].id != id) throw std::out_of_range("unknown connector planet");
+                        auto& saved = *held[index];
+                        if (!(saved.*flag)) {
+                            touch(index); saved.*flag = true;
+                            if (flag != &Reach::shortest) island_flags_changed = true;
+                        }
+                    }
+                };
+                mark(shortest, &Reach::shortest); mark(least, &Reach::least_force); mark(largest, &Reach::largest);
             }
             // A row of the previous generation that is unchanged (same player, planet, policy and site list) is kept in
             // place instead of being copied again; the rows and their order are exactly those of a clean rebuild.
-            const bool keep_rows = cache.goal_reach.size() == snapshot->planets().size() * policies.size();
-            if (!keep_rows) cache.goal_reach.clear();
-            cache.islands.clear(); cache.connectivity_through = std::numeric_limits<std::uint64_t>::max();
+            const bool keep_rows = cache.goal_reach.size() == planet_total * policies.size();
+            bool rows_changed = !keep_rows, islands_changed = false;
+            // The rows and islands this cache carries were built from the retained rows by this player's last block;
+            // when no site list and no connector flag moved since, they already describe them.
+            if (incremental_ && keep_rows && !sites_changed && !island_flags_changed && cache.islands.size() == planet_total) {
+                cache.connectivity_through = through_min;
+                ++work_.block_row_reuses;
+            } else {
+            cache.connectivity_through = std::numeric_limits<std::uint64_t>::max();
+            std::vector<ai::GalacticConnectivity::Island> islands;
+            islands.reserve(planet_total);
             std::size_t reach_at = 0;
-            for (const auto& row : snapshot->planets()) {
-                const auto& saved = staged.at({player.player, row.id});
+            static const std::array<std::string, 6> policy_names{policies[0], policies[1], policies[2], policies[3], policies[4], policies[5]};
+            for (std::size_t index = 0; index < planet_total; ++index) {
+                const auto row = snapshot->planets()[index].id;
+                const auto& saved = *held[index];
                 for (std::size_t policy = 0; policy < policies.size(); ++policy) {
                     if (keep_rows) {
                         auto& kept = cache.goal_reach[reach_at++];
-                        if (kept.player != player.player || kept.source != row.id || kept.policy != policies[policy]
-                            || kept.production_sites != saved.sites[policy])
-                            kept = {player.player, row.id, policies[policy], saved.sites[policy]};
-                    } else cache.goal_reach.push_back({player.player, row.id, policies[policy], saved.sites[policy]});
+                        if (kept.player != player.player || kept.source != row || kept.policy != policy_names[policy]
+                            || kept.production_sites != saved.sites[policy]) {
+                            kept = {player.player, row, policy_names[policy], saved.sites[policy]};
+                            rows_changed = true;
+                        }
+                    } else cache.goal_reach.push_back({player.player, row, policy_names[policy], saved.sites[policy]});
                     cache.connectivity_through = std::min(cache.connectivity_through, *saved.frames[policy] + std::uint64_t(content_->logical_fps) * 10);
                 }
-                cache.islands.push_back({player.player, row.id, saved.least_force, saved.largest});
+                islands.push_back({player.player, row, saved.least_force, saved.largest});
             }
+            islands_changed = !std::equal(islands.begin(), islands.end(), cache.islands.begin(), cache.islands.end(),
+                [](const auto& a, const auto& b) { return a.player == b.player && a.planet == b.planet && a.least_force == b.least_force && a.largest == b.largest; });
+            if (islands_changed) cache.islands = std::move(islands);
+            }
+            // The published rows of this player are the same as before unless one of the three changed.
+            if (rows_changed || islands_changed || previous_sizes != cache.island_sizes) cache.output_version = ++output_epoch_;
             cache.connectivity_ready = true; cache.perception_revision = world.movement_input_revision();
             cache.valid_through = world.force_cache_deadline(player.player, content_->logical_fps, content_->uses_fog);
             if (prepared_through_.at(player.player).through != cache.valid_through) {
                 prepared_through_[player.player].through = cache.valid_through; mark_state_changed();
             }
         }
+    }
+    // Every cache version is the one the published rows were flattened from: the flattened rows are those already
+    // published. A changed version flattens all players again.
+    std::vector<std::pair<gc::PlayerId, std::uint64_t>> versions;
+    for (const auto& player : content_->players) if (player.ai) versions.emplace_back(player.player, caches_.at(player.player).output_version);
+    if (incremental_ && versions == published_versions_) {
+        output.goal_reach = published_->goal_reach; output.island_paths = published_->island_paths;
+        output.island_sizes = published_->island_sizes; ++work_.row_reuses;
+    } else for (const auto& player : content_->players) if (player.ai) {
+        const auto& cache = caches_.at(player.player);
         output.goal_reach.append(cache.goal_reach.begin(), cache.goal_reach.end());
         output.island_paths.insert(output.island_paths.end(), cache.islands.begin(), cache.islands.end());
         output.island_sizes.push_back({player.player, cache.island_sizes[0], cache.island_sizes[1]});
     }
-    if (retained_ != staged || published_->stealth_fleets != output.stealth_fleets) {
+    bool reach_changed = !inserted.empty();
+    for (const auto& entry : undo) if (!reach_changed && *entry.row != entry.before) reach_changed = true;
+    if (reach_changed || published_->stealth_fleets != output.stealth_fleets) {
         if (publication_revision_ == std::numeric_limits<std::uint64_t>::max())
             return refuse<ConnectivityPublication>("B publication revision is exhausted");
-        update_reach_records(staged); retained_ = std::move(staged); ++publication_revision_; mark_state_changed();
+        {
+            gc_profile::Scope profile_scope(gc_profile::Phase::usability_record_maintenance);
+            for (const auto& entry : undo) if (*entry.row != entry.before)
+                records_.set(entry.key.first, 0, entry.key.second, reach_record(entry.key, *entry.row));
+            for (const auto& key : inserted) records_.set(key.first, 0, key.second, reach_record(key, retained_.at(key)));
+        }
+        ++publication_revision_; mark_state_changed();
     }
     reconstructed_ = false;
     // Each player's cache has now consumed this immutable boundary. Recording
@@ -715,6 +872,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
     // the world's rebind finds the same rows without walking them.
     if (published_->goal_reach == output.goal_reach) output.goal_reach = published_->goal_reach;
     published_ = std::make_shared<const ai::GalacticConnectivity>(std::move(output));
+    published_versions_ = std::move(versions);
     transaction.committed = true;
     return core::Result<ConnectivityPublication>::success(published_);
 }
@@ -883,6 +1041,7 @@ core::Result<void> GalacticAiUsabilityProvider::restore(const ga::NativeState& s
     if (bad || !bytes.empty()) return refuse<void>("malformed B native component");
     update_reach_records(staged); retained_ = std::move(staged); prepared_through_ = std::move(prepared);
     publication_revision_ = revision; caches_.clear(); published_ = std::make_shared<const ai::GalacticConnectivity>();
+    published_versions_.clear();
     stealth_generation_.reset(); stealth_fleets_.clear();
     observed_session_ = nullptr; observed_world_ = nullptr;
     reconstructed_ = true; mark_state_changed();

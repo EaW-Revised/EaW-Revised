@@ -563,6 +563,43 @@ and per-seat local presentation state (observer reveal, camera), which never ent
 GC AI on every peer (owner decision D2, recommended option); a passive controller would be another configuration value
 in the same field, not a format change.
 
+### Lobby game mode: Galactic Conquest (legacy EAWR-4363)
+
+The lobby core stays mode-agnostic (`LobbyGame` is a map string and opaque option bytes); the mode is the first bytes of
+those options, so every peer reads the same mode from the same room revision. A skirmish room's options are the text v1 that
+starts with a digit and are unchanged (`tests/net/galactic_lobby_tests.cpp` pins them). A Galactic Conquest room's options
+start with `gc1` (`include/eawr/net/galactic_lobby.hpp`): `gc1 <delay> <seed> <auto resolve> <custom> <credits> <start tech>
+<max tech> <heroes> "<difficulty>" <rows>` and per faction row `<player> <faction id> <flags> "<faction>" <human> <dropout>`;
+`LobbyGame::map` names the campaign. Decode accepts only bytes that re-encode to themselves and refuses an unknown version by
+name. The host owns the mode for the room's lifetime: it is chosen with the retail "Campaign" game type of the host options
+dialog before the room opens.
+
+- **Campaign list.** `campaign::list_mp_lobby_campaigns` applies the campaign menu's filter (WGP-65: `Is_Listed`, absent =
+  listed; `Is_Multiplayer`; no tutorial). Each campaign lists the factions its own records name plus every neutral faction, in
+  the data's faction order; player and faction IDs are the 1-based position in that list, so a mod that renames or adds
+  factions needs no code change. Every peer builds its own list and the rows in the options must equal it.
+- **Seats.** A seat's `slot` is the faction row it plays, `faction` that row's name and `team` the human side (the row's rank
+  among the host's human rows; at most two human rows, so at most two human sides). Several seats may share a row (up to eight
+  humans on one side against AI). A planned human row nobody takes is an AI faction; both players on one row is a co-op
+  game. A new peer is seated on the human row with the fewest seats and then edits its own pick.
+- **Options.** Custom credits, starting and maximum tech and heroes (WGS-13/14) travel in the options and the roster; custom
+  tech is checked against the campaign's `Minimum_Custom_Tech`/`Maximum_Custom_Tech`. `MP_Default_Allow_Auto_Resolve` (0
+  always, 1 never, 2 ask, 3 overwhelming odds; stock 2) is agreed in the options, but the setup offer does not carry it yet:
+  the arbitration slice (GCMP-06) applies it. Difficulty is `Normal_Default` until the lobby has a control for it.
+- **Validation.** `validate_galactic_lobby` runs on the lobby's validate hook on every peer: campaign not in the local
+  multiplayer list, rows that differ from local content, a human row on an unplayable or neutral faction, a third human side,
+  seats outside the planned rows, and (at Ready and Start) everything the setup offer refuses: `validate_mp_roster` (two to
+  eight human seats, a lead per side).
+- **Offer.** At Start the host seals the roster from the agreed choices (`campaign::seal_mp_roster`), derives its own
+  identities and publishes the `galactic-campaign-v1` offer (`GalacticLobbyBackend::offer`); every peer derives the agreement
+  again from the received offer.
+- **Seam.** The match itself is the galactic lockstep driver's (GCMP-03) and the galactic adapter (legacy EAWR-3769). `GalacticLobbyBackend::can_start()` is false
+  until a driver installs an adapter factory, and the lobby keeps Start off with that reason; `LanMatch::galactic_start()` is
+  where the driver picks the frozen room up. Not supplied until then: the stock placement services (so tick zero holds the
+  starting forces) and the selected AI player type per faction (the controller configuration is digest-bound).
+- **Open owner decisions (legacy EAWR-4358).** D5 (dropout: AI or passive) is a named constant (`galactic_lobby_default_dropout`, AI,
+  the plan's recommendation); D2 (non-player factions run GC AI) is what the roster does; D3, D4, D6-D9 do not touch the lobby.
+
 ### Lessons and acceptance
 
 The owner reports Galactic Conquest desyncs and worse online experience after the

@@ -125,6 +125,16 @@ constexpr std::string_view pane_close_component = "r_close";
 constexpr std::string_view pane_population_component = "r_pop_text";
 constexpr std::string_view pane_population_icon = "r_pop_icon";
 
+// #944: the hero tray frames, one shell per side.
+constexpr std::string_view good_hero_frame_component = "good_hero_frame";
+constexpr std::string_view evil_hero_frame_component = "evil_hero_frame";
+constexpr std::string_view good_hero_frame_fallback = "i_main_hero_frame_rebel.alo";
+constexpr std::string_view evil_hero_frame_fallback = "i_main_hero_frame_empire.alo";
+constexpr std::string_view hero_slot_good_stem = "hero_slot_good";
+constexpr std::string_view hero_slot_evil_stem = "hero_slot_evil";
+constexpr std::string_view hero_bar_good_stem = "hero_hb_good";
+constexpr std::string_view hero_bar_evil_stem = "hero_hb_evil";
+
 } // namespace
 
 std::uint32_t alt_variant(const HudFaction faction) noexcept {
@@ -635,6 +645,79 @@ HudReinforcePane reinforce_pane(const data::ui::ShellAnchors& shell, const data:
     }
     // FoC's own i_main_reinforce.alo has no r_pop_text bone, so the pane carries no population
     // text there; that is the game's content, not a gap to report (space-purchasing PU-G24).
+    return out;
+}
+
+std::string_view to_string(const HeroSide side) noexcept { return side == HeroSide::good ? "good" : "evil"; }
+
+std::string hero_frame_model(const data::ui::CommandBarCatalog& catalog, const HeroSide side) {
+    const bool good = side == HeroSide::good;
+    const auto* shell = catalog.find(good ? good_hero_frame_component : evil_hero_frame_component);
+    if (shell != nullptr && shell->type == data::ui::ComponentType::shell) {
+        const auto model = shell->text(data::ui::Field::model_name);
+        if (!model.empty()) return std::string(model);
+    }
+    return std::string(good ? good_hero_frame_fallback : evil_hero_frame_fallback);
+}
+
+HudHeroFrame hero_frame(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
+                        const HeroSide side) {
+    HudHeroFrame out;
+    out.side = side;
+    out.model = shell.model_path();
+    const bool good = side == HeroSide::good;
+    const auto missing = [&](const std::string_view part, const std::string_view why) {
+        out.diagnostics.push_back(warning(diagnostic_codes::hud_shell_part,
+            std::string(part) + " " + std::string(why) + "; the hero tray draws without it", out.model));
+    };
+    out.placement = command_bar_placement(catalog.find(good ? good_hero_frame_component : evil_hero_frame_component),
+                                          ShellOrigin::centre);
+    // The frame art has one `_ALT<n>` variant per shown hero count: variants 0 to the highest authored.
+    std::uint32_t variants = 1;
+    for (const auto& anchor : shell.anchors()) {
+        if (anchor.alt.variant) variants = std::max(variants, *anchor.alt.variant + 1U);
+    }
+    out.meshes.resize(variants);
+    for (std::uint32_t variant = 0; variant < variants; ++variant) {
+        for (const auto* anchor : shell.for_variant(variant)) {
+            const bool alpha = equal_name(anchor->shader, "MeshAlpha.fx");
+            const bool additive = equal_name(anchor->shader, "MeshAdditive.fx");
+            if ((!alpha && !additive) || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
+            if (catalog.find(anchor->name) != nullptr || !anchor->visible) continue;
+            out.meshes[variant].push_back({anchor->name, additive ? ShellBlend::additive : ShellBlend::alpha,
+                                           anchor->base_texture, anchor->z_min, anchor->triangles, std::nullopt});
+        }
+        std::stable_sort(out.meshes[variant].begin(), out.meshes[variant].end(),
+                         [](const HudShellMesh& a, const HudShellMesh& b) { return a.z < b.z; });
+    }
+    if (out.meshes.back().empty()) missing(good ? good_hero_frame_component : evil_hero_frame_component, "has no frame art");
+    const std::string_view slot_stem = good ? hero_slot_good_stem : hero_slot_evil_stem;
+    const std::string_view bar_stem = good ? hero_bar_good_stem : hero_bar_evil_stem;
+    for (std::size_t index = 0; index < hero_slot_limit; ++index) {
+        const std::string name = numbered(slot_stem, index);
+        const auto* anchor = shell.find(name);
+        const auto* component = catalog.find(name);
+        if (anchor == nullptr || component == nullptr) {
+            if (index == 0) missing(name, anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
+            break;
+        }
+        HudHeroSlot slot;
+        slot.button = shell_button(*anchor, *component);
+        const std::string bar_name = numbered(bar_stem, index);
+        const auto* bar_anchor = shell.find(bar_name);
+        const auto* bar_bone = shell.find_bone(bar_name);
+        const auto* bar_component = catalog.find(bar_name);
+        if ((bar_anchor != nullptr || bar_bone != nullptr) && bar_component != nullptr) {
+            // The health bars are bones without a mesh: the bone's origin places the bar.
+            data::ui::ShellAnchor placed;
+            if (bar_anchor != nullptr) placed = *bar_anchor;
+            else { placed.name = bar_name; placed.origin = bar_bone->origin; }
+            slot.health = shell_bar(placed, *bar_component, out.diagnostics);
+        } else {
+            missing(bar_name, bar_component == nullptr ? "is not in the catalogue" : "is not in the shell");
+        }
+        out.slots.push_back(std::move(slot));
+    }
     return out;
 }
 

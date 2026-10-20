@@ -99,6 +99,22 @@ struct NativeSnapshotChanges {
     std::shared_ptr<const EconomyInputGeneration> economy_generation{};
 };
 
+// Sections the session shares between consecutive publications while their inputs are unchanged. A set pointer
+// replaces the matching by-value constructor argument; contents are what that argument would have been.
+struct SharedSnapshotSections {
+    std::shared_ptr<const std::vector<GalacticPlayer>> players{};
+    std::shared_ptr<const std::vector<Planet>> planets{};
+    std::shared_ptr<const std::vector<Route>> routes{};
+    std::shared_ptr<const std::vector<Fleet>> fleets{};
+    std::shared_ptr<const std::optional<FleetControlSetup>> fleet_control{};
+    std::shared_ptr<const std::optional<PlayerEconomySetup>> player_economy{};
+    std::shared_ptr<const std::optional<PoliticalControlSetup>> control{};
+    std::shared_ptr<const std::optional<ObserverSetup>> observer{};
+    std::shared_ptr<const std::optional<IncomeState>> income{};
+    std::shared_ptr<const std::optional<VictoryState>> victory{};
+    std::shared_ptr<const std::optional<EconomyCorruptionState>> economy_corruption{};
+};
+
 class GalacticSnapshot final {
 public:
     using NativePlanetRevisions = std::map<PlanetId, std::shared_ptr<const std::vector<PlanetId>>>;
@@ -137,7 +153,9 @@ public:
         // `production_offers`, which the by-value path still serves for hand-built snapshots.
         std::shared_ptr<const std::vector<ObservedProductionOffer>> shared_production_offers = {},
         // The session's published production state, shared by pointer while unchanged; when set it replaces `production`.
-        std::shared_ptr<const std::optional<ProductionSetup>> shared_production = {});
+        std::shared_ptr<const std::optional<ProductionSetup>> shared_production = {},
+        // Sections shared with the previous publication; each replaces its by-value argument above.
+        SharedSnapshotSections shared_sections = {});
 
     [[nodiscard]] std::span<const CensusType> sale_types() const noexcept {
         if (native_base_) return native_base_->sale_types();
@@ -157,14 +175,14 @@ public:
             if (const auto* changes = native_column(NativeColumn::fleet_control)) return changes->fleet_control;
             return native_base_->fleet_control();
         }
-        return fleet_control_;
+        return *fleet_control_;
     }
     [[nodiscard]] const std::optional<PlayerEconomySetup>& player_economy() const noexcept {
         if (native_base_) {
             if (const auto* changes = native_column(NativeColumn::economy)) return changes->economy;
             return native_base_->player_economy();
         }
-        return player_economy_;
+        return *player_economy_;
     }
     [[nodiscard]] const MovementSetup* movement() const noexcept {
         if (native_base_) {
@@ -210,7 +228,7 @@ public:
             if (const auto* changes = native_column(NativeColumn::victory)) return changes->victory;
             return native_base_->victory();
         }
-        return victory_;
+        return *victory_;
     }
     [[nodiscard]] std::span<const PopulationTotal> population() const noexcept {
         if (native_base_) {
@@ -221,11 +239,11 @@ public:
     }
     [[nodiscard]] const IncomeState* income() const noexcept {
         if (native_base_) return native_base_->income();
-        return income_ ? &*income_ : nullptr;
+        return *income_ ? &**income_ : nullptr;
     }
     [[nodiscard]] const EconomyCorruptionState* economy_corruption() const noexcept {
         if (native_base_) return native_base_->economy_corruption();
-        return economy_corruption_ ? &*economy_corruption_ : nullptr;
+        return *economy_corruption_ ? &**economy_corruption_ : nullptr;
     }
     [[nodiscard]] std::span<const ObservedBlackMarketMenu> black_market_menus() const noexcept {
         if (native_base_) return native_base_->black_market_menus();
@@ -248,7 +266,7 @@ public:
             if (const auto* changes = native_column(NativeColumn::control)) return &*changes->control;
             return native_base_->control();
         }
-        return control_ ? &*control_ : nullptr;
+        return *control_ ? &**control_ : nullptr;
     }
     [[nodiscard]] std::span<const PoliticalControlEffect> control_effects() const noexcept {
         if (native_base_) return native_base_->control_effects();
@@ -259,7 +277,7 @@ public:
             if (const auto* changes = native_column(NativeColumn::observer)) return changes->observer;
             return native_base_->observer();
         }
-        return observer_;
+        return *observer_;
     }
     [[nodiscard]] std::span<const ObservedPlanet> observations() const noexcept {
         if (native_base_) {
@@ -335,32 +353,32 @@ private:
     std::shared_ptr<const std::vector<CensusType>> sale_types_;
     std::shared_ptr<const std::vector<CensusObject>> commissioned_originals_;
     std::shared_ptr<const std::vector<CensusObject>> actor_records_;
-    std::vector<GalacticPlayer> players_;
-    std::vector<Planet> planets_;
-    std::vector<Route> routes_;
-    std::vector<Fleet> fleets_;
+    std::shared_ptr<const std::vector<GalacticPlayer>> players_;
+    std::shared_ptr<const std::vector<Planet>> planets_;
+    std::shared_ptr<const std::vector<Route>> routes_;
+    std::shared_ptr<const std::vector<Fleet>> fleets_;
     std::vector<GalacticEvent> events_;
     std::optional<math::Fixed> maximum_movement_distance_;
-    std::optional<FleetControlSetup> fleet_control_;
+    std::shared_ptr<const std::optional<FleetControlSetup>> fleet_control_;
     std::shared_ptr<const MovementSetup> movement_;
     std::optional<SeatControlState> seat_control_;
     std::vector<Seat> seats_;
-    std::optional<PlayerEconomySetup> player_economy_;
+    std::shared_ptr<const std::optional<PlayerEconomySetup>> player_economy_;
     std::shared_ptr<const std::optional<ProductionSetup>> production_;
-    std::optional<PoliticalControlSetup> control_;
+    std::shared_ptr<const std::optional<PoliticalControlSetup>> control_;
     std::vector<PoliticalControlEffect> control_effects_;
     std::vector<PopulationTotal> population_;
-    std::optional<ObserverSetup> observer_;
+    std::shared_ptr<const std::optional<ObserverSetup>> observer_;
     std::shared_ptr<const std::vector<ObservedPlanet>> observations_;
-    std::optional<IncomeState> income_;
-    std::optional<VictoryState> victory_;
+    std::shared_ptr<const std::optional<IncomeState>> income_;
+    std::shared_ptr<const std::optional<VictoryState>> victory_;
     // Derived observer-local presentation data, excluded from canonical bytes.
     std::shared_ptr<const std::vector<ObservedProductionOffer>> production_offers_;
     std::optional<EconomyForecast> economy_forecast_;
     // Derived observer-local prepared facts; the campaign host remains a seam.
     std::optional<HeroActionMenus> hero_action_menus_;
     std::shared_ptr<const HeroActionMenus> live_hero_action_menus_;
-    std::optional<EconomyCorruptionState> economy_corruption_;
+    std::shared_ptr<const std::optional<EconomyCorruptionState>> economy_corruption_;
     std::shared_ptr<const std::vector<ObservedBlackMarketMenu>> black_market_menus_;
     std::optional<CorruptionMenu> corruption_menu_;
     std::shared_ptr<const CorruptionMenu> live_corruption_menu_;

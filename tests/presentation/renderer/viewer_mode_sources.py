@@ -104,7 +104,7 @@ SOURCE_BUNDLES = {
     "apps/viewer/src/galactic/orbit_hud.cpp": ("apps/viewer/src/galactic/orbit_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
     "apps/viewer/src/galactic/fleet_hud_fixture.hpp": ("tests/presentation/galactic/fleet_hud_fixture.hpp",),
     "apps/viewer/src/galactic/orbit_hud_fixture.hpp": ("tests/presentation/galactic/orbit_hud_fixture.hpp",),
-    "apps/viewer/src/lan_lobby_screen.cpp": ('apps/viewer/src/lan_lobby_screen.cpp', 'apps/viewer/src/lan_lobby_screen_internal.hpp', 'apps/viewer/src/lan_lobby_screen_list.cpp', 'apps/viewer/src/lan_lobby_screen_chat.cpp', 'apps/viewer/src/lan_lobby_screen_staging.cpp', 'apps/viewer/src/lan_lobby_screen_options.cpp', 'apps/viewer/src/lan_lobby_screen_refresh.cpp'),
+    "apps/viewer/src/lan_lobby_screen.cpp": ('apps/viewer/src/lan_lobby_screen.cpp', 'apps/viewer/src/lan_lobby_screen_internal.hpp', 'apps/viewer/src/lan_lobby_screen_list.cpp', 'apps/viewer/src/lan_lobby_screen_chat.cpp', 'apps/viewer/src/lan_lobby_screen_staging.cpp', 'apps/viewer/src/lan_lobby_screen_options.cpp', 'apps/viewer/src/lan_lobby_screen_refresh.cpp', 'apps/viewer/src/lan_lobby_screen_galactic.cpp'),
     "apps/viewer/src/world_ui_view.cpp": (
         "apps/viewer/src/world_ui_view.cpp",
         "apps/viewer/src/world_ui_prepare.cpp",
@@ -192,6 +192,7 @@ SOURCE_BUNDLES = {
     ),
     "src/presentation/godot/ui/tactical_hud.cpp": (
         "src/presentation/godot/ui/tactical_hud.cpp",
+        "src/presentation/godot/ui/tactical_hud_team_dock.cpp",
         "src/presentation/godot/ui/tactical_hud_shell.cpp",
         "src/presentation/godot/ui/tactical_hud_build.cpp",
         "src/presentation/godot/ui/tactical_hud_resources.cpp",

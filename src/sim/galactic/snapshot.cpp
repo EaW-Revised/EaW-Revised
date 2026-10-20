@@ -67,18 +67,37 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
     std::shared_ptr<const std::vector<CensusType>> sale_types,
     std::shared_ptr<const std::vector<LiveCorruptionTransition>> corruption_transitions,
     std::shared_ptr<const std::vector<ObservedProductionOffer>> shared_production_offers,
-    std::shared_ptr<const std::optional<ProductionSetup>> shared_production)
+    std::shared_ptr<const std::optional<ProductionSetup>> shared_production,
+    SharedSnapshotSections shared_sections)
     : completed_tick_(completed_tick),
       clock_(clock),
       commissioned_originals_(std::move(commissioned_originals)),
       actor_records_(std::move(actor_records)),
-      players_(std::move(players)),
-      planets_(std::move(planets)),
-      routes_(std::move(routes)),
-      fleets_(std::move(fleets)),
-      events_(std::move(events)), maximum_movement_distance_(maximum_movement_distance), fleet_control_(std::move(fleet_control)), movement_(std::move(movement)), seat_control_(std::move(seat_control)), seats_(std::move(seats)), player_economy_(std::move(player_economy)), control_(std::move(control)), control_effects_(std::move(control_effects)), population_(std::move(population)), observer_(std::move(observer)), income_(std::move(income)), victory_(std::move(victory)) {
-    if (observer_) observations_ = observations ? std::move(observations)
-        : std::make_shared<const std::vector<ObservedPlanet>>(observed_planets(*observer_, fleets_, movement_.get(), this->actor_records()));
+      players_(shared_sections.players ? std::move(shared_sections.players)
+          : std::make_shared<const std::vector<GalacticPlayer>>(std::move(players))),
+      planets_(shared_sections.planets ? std::move(shared_sections.planets)
+          : std::make_shared<const std::vector<Planet>>(std::move(planets))),
+      routes_(shared_sections.routes ? std::move(shared_sections.routes)
+          : std::make_shared<const std::vector<Route>>(std::move(routes))),
+      fleets_(shared_sections.fleets ? std::move(shared_sections.fleets)
+          : std::make_shared<const std::vector<Fleet>>(std::move(fleets))),
+      events_(std::move(events)), maximum_movement_distance_(maximum_movement_distance),
+      fleet_control_(shared_sections.fleet_control ? std::move(shared_sections.fleet_control)
+          : std::make_shared<const std::optional<FleetControlSetup>>(std::move(fleet_control))),
+      movement_(std::move(movement)), seat_control_(std::move(seat_control)), seats_(std::move(seats)),
+      player_economy_(shared_sections.player_economy ? std::move(shared_sections.player_economy)
+          : std::make_shared<const std::optional<PlayerEconomySetup>>(std::move(player_economy))),
+      control_(shared_sections.control ? std::move(shared_sections.control)
+          : std::make_shared<const std::optional<PoliticalControlSetup>>(std::move(control))),
+      control_effects_(std::move(control_effects)), population_(std::move(population)),
+      observer_(shared_sections.observer ? std::move(shared_sections.observer)
+          : std::make_shared<const std::optional<ObserverSetup>>(std::move(observer))),
+      income_(shared_sections.income ? std::move(shared_sections.income)
+          : std::make_shared<const std::optional<IncomeState>>(std::move(income))),
+      victory_(shared_sections.victory ? std::move(shared_sections.victory)
+          : std::make_shared<const std::optional<VictoryState>>(std::move(victory))) {
+    if (*observer_) observations_ = observations ? std::move(observations)
+        : std::make_shared<const std::vector<ObservedPlanet>>(observed_planets(**observer_, *fleets_, movement_.get(), this->actor_records()));
     production_ = shared_production ? std::move(shared_production)
         : std::make_shared<const std::optional<ProductionSetup>>(std::move(production));
     production_offers_ = shared_production_offers ? std::move(shared_production_offers)
@@ -86,25 +105,26 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
     planet_access_ = std::move(planet_access);
     observer_input_generation_ = observer_input_generation;
     economy_input_generation_ = std::move(economy_input_generation);
-    economy_corruption_ = std::move(economy_corruption);
+    economy_corruption_ = shared_sections.economy_corruption ? std::move(shared_sections.economy_corruption)
+        : std::make_shared<const std::optional<EconomyCorruptionState>>(std::move(economy_corruption));
     sale_types_ = std::move(sale_types);
     live_corruption_menu_ = std::move(live_corruption_menu);
     black_market_menus_ = std::move(black_market_menus);
     ability_results_ = std::move(ability_results);
     corruption_transitions_ = std::move(corruption_transitions);
     live_hero_action_menus_ = std::move(live_hero_action_menus);
-    if (!black_market_menus_ && economy_corruption_ && player_economy_ && observer_)
+    if (!black_market_menus_ && *economy_corruption_ && *player_economy_ && *observer_)
         black_market_menus_ = std::make_shared<const std::vector<ObservedBlackMarketMenu>>(
-            observed_black_market_menus(*economy_corruption_, *player_economy_, observer_->local_player, *observations_));
-    if (corruption_menu && observer_ && corruption_menu->player == observer_->local_player
+            observed_black_market_menus(**economy_corruption_, **player_economy_, (*observer_)->local_player, *observations_));
+    if (corruption_menu && *observer_ && corruption_menu->player == (*observer_)->local_player
         && std::any_of(observations_->begin(), observations_->end(), [&](const auto& row) {
             return row.player == corruption_menu->player && row.planet == corruption_menu->planet && row.discovered;
         })) corruption_menu_ = std::move(corruption_menu);
-    if (hero_action_menus && observer_ && hero_action_menus->player == observer_->local_player
+    if (hero_action_menus && *observer_ && hero_action_menus->player == (*observer_)->local_player
         && std::any_of(observations_->begin(), observations_->end(), [&](const auto& row) {
             return row.player == hero_action_menus->player && row.planet == hero_action_menus->planet && row.discovered;
         })) hero_action_menus_ = std::move(hero_action_menus);
-    if (economy_forecast && observer_ && economy_forecast->player == observer_->local_player) {
+    if (economy_forecast && *observer_ && economy_forecast->player == (*observer_)->local_player) {
         // WGUI-13: discovered planets expose basic income; actual income
         // requires its own knowledge predicate, independently of ownership.
         std::vector<PlanetIncomeForecast> admitted;
@@ -135,22 +155,22 @@ const GalacticClock& GalacticSnapshot::clock() const noexcept {
 }
 std::span<const GalacticPlayer> GalacticSnapshot::players() const noexcept {
     if (native_base_) return native_base_->players();
-    return players_;
+    return *players_;
 }
 std::span<const Planet> GalacticSnapshot::planets() const noexcept {
     if (native_base_) return native_base_->planets();
-    return planets_;
+    return *planets_;
 }
 std::span<const Route> GalacticSnapshot::routes() const noexcept {
     if (native_base_) return native_base_->routes();
-    return routes_;
+    return *routes_;
 }
 std::span<const Fleet> GalacticSnapshot::fleets() const noexcept {
     if (native_base_) {
         if (const auto* changes = native_column(NativeColumn::fleets)) return std::span<const Fleet>(*changes->fleets);
         return native_base_->fleets();
     }
-    return fleets_;
+    return *fleets_;
 }
 std::span<const GalacticEvent> GalacticSnapshot::events() const noexcept {
     if (native_base_) {

@@ -3,6 +3,7 @@
 #include "gns_transport_signalling.hpp"
 #include "gns_frame_codec.hpp"
 #include "gns_link_stats.hpp"
+#include "gns_link_watchdog.hpp"
 
 #include <array>
 #include <deque>
@@ -86,9 +87,7 @@ struct GnsTransport::Impl {
     std::string turn_users, turn_passwords;
     std::shared_ptr<SignallingState> signalling_state;
     Clock::time_point started{Clock::now()}, last_receive{started}, last_write{started};
-    // Reliable bytes outstanding since this point without one acknowledgement in between (GnsOptions::ack_silence_timeout).
-    std::optional<Clock::time_point> unacked_since;
-    std::int32_t last_unacked{};
+    GnsLinkWatchdog link_watchdog;
     Clock::time_point next_ack_sample{started};
     ISteamNetworkingSockets& sockets() const;
     ~Impl();

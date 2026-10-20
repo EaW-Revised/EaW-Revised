@@ -25,7 +25,8 @@ namespace tactical_hud_detail {
 void TacticalHud::set_world_hover(const std::optional<std::pair<std::uint64_t, std::string>>& hovered) {
     State& state = *state_;
     if (!state.cards) return;
-    if (hovered == state.world_hover && state.ability_hover_type.empty()) return;
+    if (hovered == state.world_hover && state.ability_hover_type.empty() && !state.team_dock_encyclopedia) return;
+    state.team_dock_encyclopedia = false;
     state.ability_hover_type.clear();
     state.world_hover = hovered;
     const bool admitted = hovered && model::world_encyclopedia_admitted(hovered->second, state.objects);
@@ -38,7 +39,8 @@ void TacticalHud::set_ability_hover(const std::string& type, const std::uint32_t
     State& state = *state_;
     if (!state.cards) return;
     if (type == state.ability_hover_type && ability == state.ability_hover_kind
-        && component == state.ability_hover_component) return;
+        && component == state.ability_hover_component && !state.team_dock_encyclopedia) return;
+    state.team_dock_encyclopedia = false;
     state.world_hover.reset();
     state.ability_hover_type = type;
     state.ability_hover_kind = ability;

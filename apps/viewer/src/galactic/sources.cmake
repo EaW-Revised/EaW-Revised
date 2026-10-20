@@ -29,6 +29,7 @@ set(EAWR_VIEWER_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/galactic_routes.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/planet_hud.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_hud.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/hero_map_bar.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/hero_action_hud.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/destruction_hud.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/weapon_action_hud.cpp"

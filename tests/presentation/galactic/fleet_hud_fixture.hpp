@@ -56,7 +56,7 @@ inline void configure_fleet_hud_fixture(sim::galactic::GalacticSetup& setup,
     }
     // #3188: fleet 601 is one loaded transport (troops carried, no ship of its own), the shape of a ground
     // force in orbit; its fleet qualifies for an explicit destination slot only through the cargo (WGM-83).
-    const bool loaded = fixture == "fleet-drag-load";
+    const bool loaded = fixture == "fleet-drag-load" || fixture.starts_with("fleet-drag-palpatine");
     if (loaded) {
         setup.fleet_control->types.push_back({1004,true,true,false});
         setup.fleets[0].members = {{7001,1004}};

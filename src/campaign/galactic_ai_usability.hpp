@@ -58,8 +58,12 @@ public:
     // Pending invalidation also depends on upstream writers after our last read.
     [[nodiscard]] std::optional<std::uint64_t> state_revision() const noexcept override { return std::nullopt; }
     struct Work { std::uint64_t generations{}, planets{}, searches{}, edges{}, stealth_preparations{}, site_searches{},
-        island_reuses{}, access_reuses{}; };
+        island_reuses{}, access_reuses{}, presence_reuses{}, island_read_reuses{}, row_reuses{}, block_row_reuses{}; };
     [[nodiscard]] Work work() const noexcept { return work_; }
+    // Diagnostic and test switch: false rebuilds every derived output from the live owners on each refresh instead of
+    // replaying remembered reads, unchanged reach rows and unchanged flattened rows. Outputs and archive bytes are equal
+    // either way; this only decides how much work a refresh does.
+    void set_incremental(bool enabled) noexcept { incremental_ = enabled; }
 private:
     [[nodiscard]] core::Result<void> prepare_stealth(const sim::galactic::GalacticSnapshot&);
     // Bound by connectivity to the same live owners that use this contributor.
@@ -83,6 +87,24 @@ private:
         bool connectivity_ready{};
         bool source_changed{};
         std::uint64_t connectivity_through{};
+        // Changes (to a value no earlier cache had) whenever the rows this player publishes change.
+        std::uint64_t output_version{};
+        // Per planet: a presence read that a remembered row serves again until its expiry (see refresh()).
+        struct Presence {
+            World::ReadTrace trace{{}, false}; // replayable only after a valued, row-served read
+        };
+        std::vector<Presence> presence;
+        std::uint64_t presence_revision{};
+        std::optional<sim::galactic::PlayerId> presence_enemy, presence_human;
+        // The island force reads of the last connecting-path pass, which `force` holds the values of.
+        struct IslandPass {
+            bool valid{};
+            World::ReadTrace trace;
+            std::uint64_t revision{};
+            std::optional<sim::galactic::PlayerId> enemy, human;
+            std::vector<sim::galactic::PlanetId> planets;
+        };
+        IslandPass island_pass;
     };
     [[nodiscard]] core::Result<const Cache*> refresh(sim::galactic::PlayerId,
         const sim::galactic::GalacticSnapshot&, const World&, const Engine&, const sim::PartitionExecutor&,
@@ -112,6 +134,10 @@ private:
     std::uint64_t publication_revision_{1};
     bool live_stealth_unavailable_{};
     bool story_path_unavailable_{};
+    bool incremental_{true};
+    // The versions of the players' rows that the published connectivity holds; equal versions mean equal flattened rows.
+    std::vector<std::pair<sim::galactic::PlayerId, std::uint64_t>> published_versions_;
+    std::uint64_t output_epoch_{};
     Work work_;
 };
 } // namespace eawr::campaign

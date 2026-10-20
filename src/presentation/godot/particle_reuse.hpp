@@ -14,8 +14,9 @@ namespace eawr::presentation::godot_backend::detail {
 struct ParticleResidencyPolicy final {
     [[nodiscard]] static constexpr bool immediate(const bool terminal, const bool reuse_enabled,
         const bool reuse_allowed) noexcept { return terminal && !(reuse_enabled && reuse_allowed); }
-    [[nodiscard]] static constexpr bool keep_identity(const bool terminal, const bool opaque) noexcept {
-        return !terminal && opaque;
+    [[nodiscard]] static constexpr bool keep_identity(const bool terminal, const bool opaque,
+        const bool fog = false) noexcept {
+        return !terminal && (opaque || fog);
     }
     [[nodiscard]] static constexpr std::size_t live_rids(const std::size_t active, const std::size_t pooled,
         const std::size_t retained, const std::size_t shared) noexcept { return (active + pooled + retained) * 3 + shared; }

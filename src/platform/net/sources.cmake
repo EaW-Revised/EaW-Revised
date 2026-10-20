@@ -16,4 +16,5 @@ set(EAWR_PLATFORM_NET_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/lan_match_fake.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/online_match.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/skirmish_prepare.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_lobby_backend.cpp"
 )

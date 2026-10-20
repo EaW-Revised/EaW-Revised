@@ -11,6 +11,7 @@
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
 #include "eawr/presentation/ui/production.hpp"
+#include "eawr/presentation/ui/hero_tray.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 #include "eawr/presentation/ui/overview_ui.hpp"
 #include "eawr/presentation/ui/selection.hpp"
@@ -104,6 +105,12 @@ public:
     }
     [[nodiscard]] std::span<const ui::CardUnit> card_units() const noexcept { return card_units_; }
     [[nodiscard]] const ui::CardLayout& card_layout() const noexcept { return card_layout_; }
+    // #944 (WHE-44): the heroes both sides show in the battle hero tray, recollected when the published
+    // snapshot or the tables change (presentation only). `hero_revision` moves only when the roster does,
+    // so the HUD rebuilds its icons only then.
+    void refresh_heroes(const LiveSessionView& live);
+    [[nodiscard]] const ui::HeroRoster& hero_roster() const noexcept { return hero_roster_; }
+    [[nodiscard]] std::uint64_t hero_revision() const noexcept { return hero_revision_; }
     // A left release on the card in `slot` (FoC's Component_Logic_Tactical_Select): Shift deselects.
     // True when the selection changed.
     bool card_click(std::size_t slot, bool shift, const LiveSessionView& live);
@@ -225,6 +232,14 @@ private:
     std::size_t cards_slots_{};
     ui::CardLayout card_layout_;
     std::uint64_t card_clicks_{};
+    // #944: the hero tray's collection and what it was collected from.
+    ui::HeroTypeTable hero_types_;
+    ui::HeroTrayPolicy hero_policy_;
+    ui::HeroRoster hero_roster_;
+    ui::HeroRoster hero_next_;
+    const units::UnitTables* heroes_tables_{};
+    std::shared_ptr<const sim::tactical::TacticalSnapshot> heroes_snapshot_;
+    std::uint64_t hero_revision_{};
     std::optional<sim::EntityId> production_station_;
     ui::PadPalette pad_palette_;
     std::vector<ui::BuildButton> build_buttons_;

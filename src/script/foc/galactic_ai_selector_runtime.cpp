@@ -786,9 +786,11 @@ Engine::GalacticFreestoreActorFacts Engine::galactic_freestore_selection_batch(
                 if (!b.stages) {
                     if (memo) ++memo->work.stage_preparations;
                     std::vector<gc::PlanetId> sites;
+                    const AllowedProductionSites allowed_sites(input, id);
+                    std::size_t site_index{};
                     for (const auto& site : input->targets) {
                         if (memo) ++memo->work.production_sites;
-                        if (!allowed_production_site(*input, id, site.planet)) continue;
+                        if (const auto allowed = allowed_sites.at(site_index++); !allowed || !allowed.value()) continue;
                         const auto reach = world->goal_reachable(id, target_id, site.planet, goal_type->reachability);
                         if (!reach) { b.stage_failure = detail::make_error(authoritative::codes::missing_api, "BTP-U04: stage production-site relation unavailable"); break; }
                         if (*reach) sites.push_back(site.planet);

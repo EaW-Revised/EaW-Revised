@@ -55,6 +55,13 @@ const ShellAnchor* ShellAnchors::find(const std::string_view name) const noexcep
     return match == anchors_.end() ? nullptr : &*match;
 }
 
+const ShellBone* ShellAnchors::find_bone(const std::string_view name) const noexcept {
+    for (const ShellBone& bone : bones_) {
+        if (detail::iequals(bone.name, name)) return &bone;
+    }
+    return nullptr;
+}
+
 std::vector<const ShellAnchor*> ShellAnchors::for_variant(const std::uint32_t variant) const {
     std::vector<const ShellAnchor*> result;
     for (const ShellAnchor& anchor : anchors_) {
@@ -101,6 +108,9 @@ ShellAnchorLoad shell_anchors(const assets::Model& model) {
 ShellAnchorLoad shell_anchors(const assets::Model& model, const std::span<const ShellTransform> model_transforms) {
     ShellAnchorLoad result;
     result.shell.set_model_path(model.source.logical_path);
+    for (std::size_t index = 0; index < model.bones.size() && index < model_transforms.size(); ++index) {
+        result.shell.add_bone({model.bones[index].name, {model_transforms[index][12], model_transforms[index][13]}});
+    }
     for (const assets::Mesh& mesh : model.meshes) {
         ShellTransform matrix = identity();
         std::string bone_name;

@@ -52,6 +52,12 @@ target_link_libraries(ui_unit_cards_tests PRIVATE eawr::ui_model eawr::sim)
 target_compile_features(ui_unit_cards_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_unit_cards_tests)
 add_test(NAME ui_unit_cards_contracts COMMAND ui_unit_cards_tests)
+# #944: the battle hero tray (collection per side, carried heroes, fog, capacity, the automatic highlight).
+add_executable(ui_hero_tray_tests hero_tray_tests.cpp)
+target_link_libraries(ui_hero_tray_tests PRIVATE eawr::ui_model eawr::sim)
+target_compile_features(ui_hero_tray_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_hero_tray_tests)
+add_test(NAME ui_hero_tray_contracts COMMAND ui_hero_tray_tests)
 # #530: the command bar's station production (build buttons, build queues, reinforcement pool).
 add_executable(ui_production_tests production_tests.cpp)
 target_link_libraries(ui_production_tests PRIVATE eawr::ui_model eawr::sim)
@@ -180,6 +186,12 @@ eawr_target_project_warnings(ui_skirmish_setup_tests)
 add_test(NAME ui_skirmish_setup_contracts COMMAND ui_skirmish_setup_tests)
 
 # Tier labels (cmake/EawrTestTiers.cmake).
+add_executable(ui_team_dock_tests team_dock_tests.cpp)
+target_link_libraries(ui_team_dock_tests PRIVATE eawr::ui_model eawr::sim)
+target_compile_features(ui_team_dock_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_team_dock_tests)
+add_test(NAME ui_team_dock_contracts COMMAND ui_team_dock_tests)
+
 add_executable(ui_cursor_tests cursor_tests.cpp)
 target_link_libraries(ui_cursor_tests PRIVATE eawr::ui_model)
 target_compile_features(ui_cursor_tests PRIVATE cxx_std_20)

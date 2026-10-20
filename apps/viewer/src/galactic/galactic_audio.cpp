@@ -79,6 +79,10 @@ GalacticAudio::GalacticAudio(godot::Node3D& host, const vfs::Vfs& filesystem,
     if (const auto document = data::load_document(filesystem, "data/xml/gameconstants.xml"))
         rankings_ = audio::split_list(value(fields(document.value().root), "Unit_Command_Rankings_By_Category"));
     else problems_.push_back("game constants could not be loaded");
+    if (const auto document = data::load_document(filesystem, "data/xml/enum/gameobjectcategorytype.xml")) {
+        category_masks_ = fields(document.value().root);
+        for (const auto& node : document.value().root.children) data::tag_trace::used(node);
+    } else problems_.push_back("object category masks could not be loaded");
     // SND-44: speech is a distinct registry, not a WAV event or a music playlist.
     if (const auto document = data::load_document(filesystem, "data/xml/speechevents.xml")) {
         for (const auto& node : document.value().root.children) {
@@ -282,33 +286,15 @@ const std::vector<audio::Field>& GalacticAudio::type_fields(const std::string_vi
 }
 
 void GalacticAudio::fleet_move(const std::span<const std::string> member_types) {
-    // WGP-181: the local fleet's best-ranked member speaks (BA-20 ranking), its type's
-    // fleet-move event first, then its ordinary move event.
-    std::vector<audio::RankedUnit> units;
-    std::vector<const std::vector<audio::Field>*> response_fields;
-    for (std::size_t index = 0; index < member_types.size(); ++index) {
-        // BA-24: a team responds through its leading craft. On the galaxy
-        // map the authored first craft supplies both ranking and response.
-        const auto& container = type_fields(member_types[index]);
+    // WGP-181: the caller supplies live fleet members and transported contents.
+    std::vector<std::vector<audio::Field>> response_fields;
+    for (const auto& type : member_types) {
+        // BA-24: a squadron responds through its first authored craft.
+        const auto& container = type_fields(type);
         const auto craft = audio::split_list(value(container, "Squadron_Units"));
-        const auto& traits = craft.empty() ? container : type_fields(craft.front());
-        response_fields.push_back(&traits);
-        audio::RankedUnit unit{index, {}, audio::leading_integer(value(traits, "Ranking_In_Category"))};
-        std::string token;
-        for (const char character : value(traits, "CategoryMask") + "|") {
-            if (character == '|' || character == ',' || std::isspace(static_cast<unsigned char>(character))) {
-                if (!token.empty()) unit.categories.push_back(std::move(token));
-                token.clear();
-            } else token += character;
-        }
-        units.push_back(std::move(unit));
+        response_fields.push_back(craft.empty() ? container : type_fields(craft.front()));
     }
-    const auto speaker = audio::speaker(units, rankings_);
-    if (!speaker) return;
-    const auto& traits = *response_fields[*speaker];
-    auto name = value(traits, "SFXEvent_Fleet_Move");
-    if (name.empty()) name = value(traits, "SFXEvent_Move");
-    play_event(name);
+    play_event(audio::galactic_fleet_move_event(response_fields, rankings_, category_masks_));
 }
 
 void GalacticAudio::build(const audio::GalacticBuildCue cue, const std::string_view type, const bool local_builder) {

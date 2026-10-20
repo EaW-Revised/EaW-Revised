@@ -52,6 +52,19 @@ using GalacticFreestoreSelectionProvider = std::function<core::Result<std::vecto
 // True when the player has an allowed producer at the planet. Reads only that player's rows at
 // that planet: the world input keeps producers in canonical (player, planet, domain, type) order.
 [[nodiscard]] bool allowed_production_site(const galactic_ai::WorldInput&, tactical::PlayerId, sim::galactic::PlanetId);
+// The allowed-producer flag of every planet of one completed input for one player, by position in input.targets.
+// The input is immutable, so the flags are kept by its identity and each planet is read once, in the order the
+// callers walk it; a read that fails is not kept and fails again at the same planet.
+class AllowedProductionSites {
+public:
+    AllowedProductionSites(std::shared_ptr<const galactic_ai::WorldInput>, tactical::PlayerId);
+    [[nodiscard]] core::Result<bool> at(std::size_t target) const;
+private:
+    struct State;
+    std::shared_ptr<const galactic_ai::WorldInput> input_;
+    tactical::PlayerId player_{};
+    std::shared_ptr<State> state_;
+};
 // WGA-442: main ground/space totals precede the ordered classified rows.
 // Only classified force is scaled; zero/nonpositive domain totals clear its
 // classified rows. Missing cached or actual defensive facts refuse.

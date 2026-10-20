@@ -30,6 +30,7 @@
 #include "eawr/presentation/ui/battle_results.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/production.hpp"
+#include "eawr/presentation/ui/team_dock.hpp"
 #include "eawr/presentation/ui/time_controls.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/sim/math/geometry.hpp"
@@ -396,6 +397,11 @@ public:
     [[nodiscard]] const space::SnapshotIndex& snapshot_index() const noexcept { return snapshot_index_; }
     void set_pose_workers(const particles::StepExecutor* workers) noexcept { pose_workers_ = workers; }
     [[nodiscard]] const BattleFrame& battle_frame() const noexcept { return battle_frame_; }
+    [[nodiscard]] ui::TeamResearchView team_research_view() const noexcept {
+        const auto& snapshot = battle_frame_.latest;
+        if (!snapshot) return {{}, {}, player_, 0};
+        return {snapshot->economy(), snapshot->players(), player_, snapshot->completed_tick()};
+    }
     [[nodiscard]] const RenderClock& render_clock() const noexcept { return render_clock_; }
     [[nodiscard]] std::optional<BattleEffects::UnitFrame> unit_frame(sim::EntityId entity) const;
     [[nodiscard]] std::optional<std::size_t> composed_ship(sim::EntityId entity) const noexcept {

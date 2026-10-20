@@ -150,6 +150,31 @@ class TacticalHudStructure(unittest.TestCase):
         for heading in ("## Layout", "## Clicks", "## Unverified"):
             self.assertIn(heading, note)
 
+    def test_the_hero_tray_follows_the_hero_frames(self):
+        # #944 (WHE-44..46, HCB-44): the tray is drawn in the two hero frame shells, fed from the snapshot's
+        # heroes, hides with the command bar and never reaches the simulation.
+        build = source_text("apps/viewer/CMakeLists.txt")
+        for source in ("src/presentation/ui/hero_tray.cpp", "src/presentation/godot/ui/hero_tray_view.cpp"):
+            self.assertIn(source, build)
+        hud = source_text("src/presentation/godot/ui/tactical_hud.cpp")
+        self.assertIn("GDREGISTER_CLASS(EawrHeroTray);", hud)
+        self.assertIn("model::hero_frame_model(catalog, side)", hud)
+        self.assertIn("state.hud->add_child(state.heroes);", hud)
+        self.assertIn('\\"hero_tray\\"', (UI / "tactical_hud_report.cpp").read_text(encoding="utf-8"))
+        wiring = (SRC / "map_mode_hud.cpp").read_text(encoding="utf-8")
+        for call in ("battle->refresh_heroes(*live_session);", "hero_tray_revision != battle->hero_revision()",
+                     "hud->set_hero_tray("):
+            self.assertIn(call, wiring)
+        view = (UI / "hero_tray_view.cpp").read_text(encoding="utf-8")
+        # Only an occupied icon takes the pointer; the frame art does not.
+        self.assertIn("bool EawrHeroTray::_has_point(const Vector2& point) const { return slot_at(point).has_value(); }", view)
+        # An unchanged roster costs no redraw.
+        self.assertIn("if (friendly == icons_[0] && hostile == icons_[1]) return;", view)
+        # Presentation only: the model reads the snapshot and nothing else.
+        model = (ROOT / "src/presentation/ui/hero_tray.cpp").read_text(encoding="utf-8")
+        self.assertNotIn("submit", model)
+        self.assertNotIn("command", model.lower().replace("command_bar", ""))
+
     def test_the_minimap_is_drawn_in_the_radar_mesh(self):
         # #455 (docs/behaviour/foc-minimap.md): the minimap model, its Godot control and the live
         # battle's per-frame hand-off.

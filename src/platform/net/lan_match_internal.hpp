@@ -441,6 +441,11 @@ public:
     bool lobby_kick(net::PeerIndex peer) override;
     void lobby_leave() override;
     std::optional<LanLobbyState> lobby_state() const override;
+    void configure_galactic(std::shared_ptr<GalacticLobbyBackend> backend) override;
+    bool set_galactic_game(net::GalacticLobbyOptions options) override;
+    bool lobby_galactic_game(const net::GalacticLobbyOptions& options) override;
+    bool galactic_room() const override;
+    std::optional<GalacticLobbyStart> galactic_start() const override;
 private:
     bool lobby_mutable() const;
     void flush_lobby_closes();
@@ -472,6 +477,12 @@ private:
     std::map<net::PeerIndex, std::uint64_t> known_edges_;
     std::optional<net::LobbyNotice> lobby_notice_;
     std::optional<LanLobbyState> last_lobby_state_;
+    // GCMP-07: the Galactic Conquest mode of the room (the host's first options; the Start seam once the room froze).
+    std::shared_ptr<GalacticLobbyBackend> galactic_;
+    std::optional<net::GalacticLobbyOptions> galactic_host_game_;
+    std::optional<GalacticLobbyStart> galactic_start_;
+    core::Result<void> validate_galactic_lobby(const net::LobbySnapshot& state, bool starting) const;
+    void start_galactic_lobby();
 public:
 
     void set_public_invitation(bool value) override;

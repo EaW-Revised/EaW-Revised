@@ -581,6 +581,41 @@ void owner_journal_refusal() {
         "direct owner restore refuses a journal length different from its recording");
 }
 
+void owner_journal_after_rebase() {
+    // A save after an earlier save's history rebase: the owner holds native_dropped = 1 and one applied entry in the
+    // window. The window's recording numbers its entries from 1, so a direct restore stages it on the dropped count (#4058).
+    auto config = setup();
+    config.rules.maximum_fleet_movement_distance = take(eawr::sim::math::Fixed::from_integer(10000));
+    config.fleet_control.emplace();
+    std::set<galactic::TypeId> types;
+    for (const auto& fleet : config.fleets) for (const auto& member : fleet.members) types.insert(member.type);
+    for (const auto type : types) config.fleet_control->types.push_back({type, false, true, false});
+    auto producer = take(galactic::GalacticSession::create(config));
+    const auto& fleet = config.fleets.front();
+    expect(take(producer.admit_native_fleet(fleet.owner,
+        galactic::RemoveFleetMembers{fleet.id, {fleet.members.front().id}})).admitted, "rebase fixture records a first native admission");
+    producer.rebase_history();
+    expect(producer.native_dropped() == 1 && producer.native_effects().empty(), "the rebase drops the first entry and counts it");
+    expect(take(producer.admit_native_fleet(fleet.owner,
+        galactic::RemoveFleetMembers{fleet.id, {fleet.members.back().id}})).admitted, "rebase fixture records a second native admission");
+    const auto owner = take(producer.save_checkpoint_state());
+    const auto recording = producer.record();
+    expect(recording.native_effects.size() == 1 && recording.native_effects.front().sequence == 1,
+        "the window recording numbers its entry from 1");
+    auto restored = take(galactic::GalacticSession::create(config));
+    check(restored.stage_native_replay(recording.native_effects, recording.final_tick_count, producer.native_dropped()));
+    check(restored.load_checkpoint_state(owner));
+    expect(take(restored.save_checkpoint_state()) == owner, "a boundary with a non-empty journal restores byte-equal");
+    expect(restored.native_dropped() == 1 && restored.native_effects().size() == 1 && restored.native_effects().front().sequence == 2,
+        "the restored window keeps its absolute sequence");
+    expect(restored.state_sha256() == producer.state_sha256(), "the restored galaxy digest equals the producer's");
+    auto unbased = take(galactic::GalacticSession::create(config));
+    check(unbased.stage_native_replay(recording.native_effects, recording.final_tick_count));
+    const auto refused = unbased.load_checkpoint_state(owner);
+    expect(!refused && refused.error().message.find("owner journal differs") != std::string::npos,
+        "a window staged without the dropped count is refused, never adopted");
+}
+
 void human_command_history_growth() {
     auto config = setup();
     for (auto& seat : config.seats) { seat.kind = galactic::SeatKind::human; seat.human_side_id = seat.seat_id.value; }
@@ -1570,7 +1605,7 @@ int case_galactic_game_checkpoint_tests(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--pending-conflict") {
             pending_conflict_resave(); return failures == 0 ? 0 : 1;
         }
-        nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
+        nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); owner_journal_after_rebase(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
         admission_and_fixups(); prebattle_autosave_admission(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();
         scripted_child_barriers(); child_casualty_return();
         if (argc != 2) throw std::runtime_error("expected corpus directory");

@@ -1,5 +1,10 @@
 #include "eawr/presentation/audio/galactic.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <charconv>
+#include <set>
+
 namespace eawr::presentation::audio {
 bool galactic_population_warning(std::uint32_t serviced, std::uint32_t local, bool strategic,
     sim::math::Fixed previous, sim::math::Fixed current, sim::math::Fixed capacity) noexcept {
@@ -111,6 +116,68 @@ GalacticBuildFeedback galactic_build_feedback(const GalacticBuildCue cue, std::s
     // WGEP-96/97: authored speech suppresses the SFX fallback.
     if (auto speech = field(type, galactic_build_speech_tag(cue)); !speech.empty()) return {std::move(speech), {}};
     return {{}, field(type, galactic_build_sfx_tag(cue))};
+}
+
+std::vector<sim::galactic::FleetMember> galactic_fleet_move_members(
+    std::span<const sim::galactic::FleetMember> members,
+    const sim::galactic::MovementSetup* movement) {
+    std::vector<sim::galactic::FleetMember> result;
+    std::vector<sim::galactic::FleetMember> pending(members.rbegin(), members.rend());
+    std::set<sim::EntityId> visited;
+    std::map<sim::EntityId, const sim::galactic::MovementContents*> contents;
+    if (movement) for (const auto& row : movement->contents) contents.emplace(row.container, &row);
+    while (!pending.empty()) {
+        const auto member = pending.back(); pending.pop_back();
+        if (!visited.insert(member.id).second) continue;
+        result.push_back(member);
+        if (!movement) continue;
+        const auto type = std::find_if(movement->types.begin(), movement->types.end(),
+            [&](const auto& row) { return row.type == member.type; });
+        if (type != movement->types.end() && type->squadron) continue;
+        const auto children = contents.find(member.id);
+        if (children != contents.end())
+            pending.insert(pending.end(), children->second->children.rbegin(), children->second->children.rend());
+    }
+    return result;
+}
+
+std::string galactic_fleet_move_event(std::span<const std::vector<Field>> members,
+    std::span<const std::string> rankings, std::span<const Field> category_masks) {
+    // BA-20: ranking categories are masks, including authored composite aliases.
+    std::map<std::string, std::uint64_t> masks;
+    for (const auto& [name, raw] : category_masks) {
+        auto text = std::string_view(raw);
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.remove_prefix(1);
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.remove_suffix(1);
+        const bool hex = text.starts_with("0x") || text.starts_with("0X");
+        if (hex) text.remove_prefix(2);
+        std::uint64_t bits{};
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), bits, hex ? 16 : 10);
+        if (!text.empty() && error == std::errc{} && end == text.data() + text.size())
+            masks.try_emplace(upper(name), bits);
+    }
+    std::vector<RankedUnit> units;
+    for (std::size_t index = 0; index < members.size(); ++index) {
+        const auto& traits = members[index];
+        RankedUnit unit{index, {}, leading_integer(field(traits, "Ranking_In_Category"))};
+        std::uint64_t bits{};
+        std::string token;
+        for (const char character : field(traits, "CategoryMask") + "|") {
+            if (character == '|' || character == ',' || std::isspace(static_cast<unsigned char>(character))) {
+                if (const auto mask = masks.find(upper(token)); mask != masks.end()) bits |= mask->second;
+                token.clear();
+            } else token += character;
+        }
+        for (const auto& category : rankings)
+            if (const auto mask = masks.find(upper(category)); mask != masks.end() && (mask->second & bits))
+                unit.categories.push_back(category);
+        units.push_back(std::move(unit));
+    }
+    const auto chosen = speaker(units, rankings);
+    if (!chosen) return {};
+    auto event = field(members[*chosen], "SFXEvent_Fleet_Move");
+    if (event.empty()) event = field(members[*chosen], "SFXEvent_Move");
+    return event;
 }
 
 std::string strategic_result_event(std::span<const Field> fields, const bool won,

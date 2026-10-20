@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -397,7 +398,23 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     gc_profile::Scope context_scope(gc_profile::Phase::snapshot_other, gc_profile::Phase::snapshot_ai);
     std::optional<gc_profile::Scope> part(std::in_place, gc_profile::Phase::snap_sorted);
     refresh_economy_input_generation();
-    auto live_fleets = sorted_fleets();
+    // A section copy is rebuilt only when its section changed since the last publication; otherwise the previous
+    // immutable copy is shared. Verification recomputes every reused copy and refuses a difference.
+    auto& rows = published_sections.rows;
+    auto& keys = published_sections.keys;
+    const auto generation = [&](StateSection section) { return section_generation[static_cast<std::size_t>(section)]; };
+    const auto share = [&](auto& slot, std::uint64_t& key, const std::uint64_t now, auto&& build) {
+        if (!slot || key != now) {
+            using Value = std::remove_cvref_t<decltype(build())>;
+            slot = std::make_shared<const Value>(build());
+            key = now;
+        } else if (verify_cached_hash && *slot != build())
+            throw std::runtime_error("galactic published section differs from the live state");
+    };
+    // Fleet rows are hashed by three sections (in-transit motion marks only the movement one).
+    share(rows.fleets, keys[0], generation(StateSection::fleets) + generation(StateSection::movement)
+        + generation(StateSection::fleet_control), [&] { return sorted_fleets(); });
+    const auto& live_fleets = *rows.fleets;
     part.emplace(gc_profile::Phase::snap_observer);
     if (observer && observer_projection_generation != observer_input_generation) {
         observer_projection = std::make_shared<const std::vector<ObservedPlanet>>(
@@ -517,7 +534,8 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     }
     published.session_tick = completed_tick;
     part.emplace(gc_profile::Phase::snap_economy_input);
-    const auto current_planets = sorted_planets();
+    share(rows.planets, keys[1], generation(StateSection::planets), [&] { return sorted_planets(); });
+    const auto& current_planets = *rows.planets;
     if (published_economy_input_generation != economy_input_generation) {
         auto input = *economy_input_generation; input.income.reset();
         if (setup.fiscal) {
@@ -617,7 +635,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     // Hash verification independently recomputes every reused result.
     InlineExecutor offer_inline_executor;
     const auto& offer_workers = executor ? *executor : static_cast<const PartitionExecutor&>(offer_inline_executor);
-    auto offer_inputs = production_offer_inputs(observations_for_offers, live_fleets);
+    auto offer_inputs = production_offer_inputs(observations_for_offers, live_fleets, current_planets);
     if (!published_production_offers || published_offer_inputs != offer_inputs) {
         published_production_offers = std::make_shared<const std::vector<ObservedProductionOffer>>(
             observed_production_offers(offer_inputs, live_fleets, offer_workers));
@@ -646,8 +664,19 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     } else if (verify_cached_hash && *published_production != production) {
         throw std::runtime_error("galactic published production differs from the live production state");
     }
+    // The setup's player table never changes after creation.
+    share(rows.players, keys[2], 1, [&] { return setup.players; });
+    share(rows.routes, keys[3], generation(StateSection::routes), [&] { return sorted_routes(); });
+    share(rows.fleet_control, keys[4], generation(StateSection::fleet_control),
+        [&] { return setup.fleet_control ? std::optional(fleet_control_state()) : std::nullopt; });
+    share(rows.player_economy, keys[5], generation(StateSection::players), [&] { return economy; });
+    share(rows.control, keys[6], generation(StateSection::control), [&] { return control; });
+    share(rows.observer, keys[7], generation(StateSection::observer), [&] { return observer; });
+    share(rows.income, keys[8], generation(StateSection::income), [&] { return income; });
+    share(rows.victory, keys[9], generation(StateSection::victory), [&] { return victory; });
+    share(rows.economy_corruption, keys[10], generation(StateSection::economy_corruption), [&] { return economy_corruption; });
     return std::make_shared<const GalacticSnapshot>(
-        completed_tick, published, setup.players, current_planets, sorted_routes(), std::move(live_fleets), std::move(events), setup.rules.maximum_fleet_movement_distance, setup.fleet_control ? std::optional(fleet_control_state()) : std::nullopt, movement_inputs, seat_control, seats, economy, std::nullopt, control, control_effects, population, observer, income, victory, std::vector<ObservedProductionOffer>{}, observer_projection, std::move(forecast), published_production_originals, std::nullopt, std::nullopt, economy_corruption, planet_access, observer_input_generation, economy_input_generation, published_actor_records, published_black_market_menus, published_ability_results, published_hero_action_menus, published_corruption_menu, published_sale_types, published_corruption_transitions, offers, published_production);
+        completed_tick, published, std::vector<GalacticPlayer>{}, std::vector<Planet>{}, std::vector<Route>{}, std::vector<Fleet>{}, std::move(events), setup.rules.maximum_fleet_movement_distance, std::nullopt, movement_inputs, seat_control, seats, std::nullopt, std::nullopt, std::nullopt, control_effects, population, std::nullopt, std::nullopt, std::nullopt, std::vector<ObservedProductionOffer>{}, observer_projection, std::move(forecast), published_production_originals, std::nullopt, std::nullopt, std::nullopt, planet_access, observer_input_generation, economy_input_generation, published_actor_records, published_black_market_menus, published_ability_results, published_hero_action_menus, published_corruption_menu, published_sale_types, published_corruption_transitions, offers, published_production, rows);
 }
 
 GalacticSession::GalacticSession(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -954,6 +983,23 @@ std::vector<std::uint8_t> GalacticSession::canonical_state_bytes() const {
 }
 
 void GalacticSession::Impl::refresh_economy_input_generation() const {
+    // Section copies shared by consecutive snapshots are keyed by these counts: a dirty flag is counted here
+    // (every hash and every publication) before the hash consumes it, so no write can escape a later publication.
+    // An optional section whose owner is absent keeps its initial dirty bit forever and is never counted.
+    const auto present = [&](const std::size_t section) {
+        switch (static_cast<StateSection>(section)) {
+        case StateSection::fleet_control: return setup.fleet_control.has_value();
+        case StateSection::movement: return setup.movement.has_value();
+        case StateSection::control: return control.has_value();
+        case StateSection::observer: return observer.has_value();
+        case StateSection::income: return income.has_value();
+        case StateSection::victory: return victory.has_value();
+        case StateSection::economy_corruption: return economy_corruption.has_value();
+        default: return true;
+        }
+    };
+    for (std::size_t section = 0; section < state_section_count; ++section)
+        if (dirty[section] && present(section)) ++section_generation[section];
     const auto changed = [&](StateSection section) { return dirty[static_cast<std::size_t>(section)]; };
     // Inactive optional sections retain their initial dirty bit: only present
     // native owners contribute inputs to this derived publication.

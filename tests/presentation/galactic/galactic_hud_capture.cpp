@@ -155,6 +155,13 @@ bool CaptureHudFixture::configure_setup(GalacticMode::State& state) {
         && !galactic_view::ground_fixture(options.hud_fixture)) {
         galactic_view::configure_fleet_hud_fixture(galaxy_setup, galaxy->local.player, options.hud_fixture,
             fleet_display_traits, fleet_visibility, production_names);
+        if (options.hud_fixture.starts_with("fleet-drag-palpatine")) {
+            production_names[1004] = "Shuttle_Tyderium";
+            production_names[1000] = "Emperor_Palpatine";
+            galaxy_setup.movement->contents = {{7001, {{7002,1000}}}};
+            if (options.hud_fixture == "fleet-drag-palpatine-mixed")
+                galaxy_setup.fleets[0].members.push_back({7003,1002});
+        }
         // Explicit synthetic audio witnesses; live type names come from the campaign.
         if (options.hud_fixture.starts_with("fleet-drag-xwing")) {
             production_names[1000] = "Rebel_X-Wing_Squadron";

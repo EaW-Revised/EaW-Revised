@@ -42,6 +42,9 @@ bool parameter_matches(const std::vector<Binding>& bindings, std::string_view na
         if (const auto* text = std::get_if<std::string>(&binding.value); text && upper_case(*text) == value) return true;
     return false;
 }
+void trace_through(GalacticWorld::ReadTrace* trace, Real expiry) {
+    if (!trace->through || expiry < *trace->through) trace->through = expiry;
+}
 bool key_less(const GalacticCacheKey& a, const GalacticCacheKey& b) {
     const auto left = std::tie(a.player, a.enemy, a.human, a.planet, a.tokens);
     const auto right = std::tie(b.player, b.enemy, b.human, b.planet, b.tokens);
@@ -57,6 +60,14 @@ bool key_less(const GalacticCacheKey& a, const GalacticCacheKey& b) {
     }
     return a.bindings.size() < b.bindings.size();
 }
+}
+
+bool GalacticWorld::ReadTrace::serves(std::uint64_t frame) const {
+    // The remembered rows serve a read while its expiry has not passed (equality at expiry passes).
+    return replayable && (!through || !(*through < real(static_cast<std::int64_t>(frame))));
+}
+GalacticWorld::TracedReads GalacticWorld::trace_reads(tactical::PlayerId owner, ReadTrace& trace) const {
+    return TracedReads(shard(owner).trace, trace);
 }
 
 bool operator==(const GalacticCacheKey& a, const GalacticCacheKey& b) {
@@ -130,6 +141,14 @@ std::optional<Real> GalacticWorld::perception(const Engine& engine, const Equati
     const auto reads = sequential_reads();
     if (!snapshot_ || !player(context.player) || !refresh_economy_runtime()) return {};
     Evaluator evaluator(*this, engine, context); return run(equation, evaluator, random);
+}
+
+std::optional<Real> GalacticWorld::ReadBatch::perception(const Engine& engine, const Equation& equation,
+    const Context& context, AiRandom& random) const {
+    if (context.player != owner_) return world_.perception(engine, equation, context, random);
+    gc_profile::Scope profile_scope(gc_profile::Phase::perception);
+    if (!ready_) return {};
+    Evaluator evaluator(world_, engine, context); return run(equation, evaluator, random);
 }
 
 std::optional<Real> GalacticWorld::perception_read_only(const Engine& engine, const Equation& equation,
@@ -208,6 +227,14 @@ std::optional<Real> GalacticWorld::reconstruction_perception(const DerivedExecut
     Evaluator evaluator(*this, engine, context, 0, ReadMode::archived); return run(equation, evaluator, random);
 }
 
+bool galactic_connectivity_token(std::span<const std::string> tokens) {
+    return std::any_of(tokens.begin(), tokens.end(),
+        [](const auto& token) { return token.starts_with("ISCONNECTED") || token.starts_with("CONNECTS"); });
+}
+bool galactic_force_deadline_token(std::span<const std::string> tokens) {
+    return tokens.size() == 3 && tokens[1] == "ENEMYFORCE"
+        && (tokens[2] == "HASSPACEFORCE" || tokens[2] == "SPACETOTALUNNORMALIZED" || tokens[2] == "GROUNDTOTALUNNORMALIZED");
+}
 std::uint32_t galactic_visibility_mask(std::span<const std::string> tokens) {
     if (tokens.size() < 2 || tokens[0] != "VARIABLE_TARGET") return 0;
     if (tokens[1] == "TARGETPLAYERID") return galactic::bit(galactic::Intelligence::ownership);
@@ -403,14 +430,23 @@ std::optional<Real> GalacticWorld::read(const GalacticQueryKey& key, ReadMode mo
         const auto binding = find_bindings(key.player, key.bindings);
         return binding ? cached_value({key.player, key.enemy, key.human, key.planet, key.token, *binding}) : nullptr;
     };
-    if (compiled.tokens.size() == 2 && token == "MARKUP") return uncached_value(); // WGA-461: retained literal, no remembered cache.
+    if (compiled.tokens.size() == 2 && token == "MARKUP") { // WGA-461: retained literal, no remembered cache.
+        if (owner.trace) owner.trace->replayable = false;
+        return uncached_value();
+    }
     if (mode == ReadMode::archived) {
+        if (owner.trace) owner.trace->replayable = false;
         if (const auto* cached = remembered()) return cached->value;
         return uncached_value();
     }
     const auto configured = setup_.cache_intervals.find(token);
     const auto* at = key.planet ? planet(key.planet) : nullptr;
-    if (!at || compiled.root != PerceptionToken::Root::target || configured == setup_.cache_intervals.end()) return uncached_value();
+    // A traced read replays only when a remembered row serves it again; every other route evaluates the live getter.
+    ReadTrace* const trace = owner.trace;
+    if (!at || compiled.root != PerceptionToken::Root::target || configured == setup_.cache_intervals.end()) {
+        if (trace) trace->replayable = false;
+        return uncached_value();
+    }
     const auto mask = snapshot_->observer() ? galactic_visibility_mask(compiled.tokens) : 0;
     auto* observed = visibility(key.player, key.planet, mask, mode == ReadMode::ordinary);
     GalacticVisibility unseen{key.player, key.planet, false, 0, mask};
@@ -429,10 +465,21 @@ std::optional<Real> GalacticWorld::read(const GalacticQueryKey& key, ReadMode mo
         // WGA-65: equality at expiry passes; hidden reads use indefinite lookup.
         if (!visible || interval == real(-1) || (interval != Real{} &&
             !(real(static_cast<std::int64_t>(cached->frame)) + interval * real(setup_.logical_fps)
-                < real(static_cast<std::int64_t>(synchronized_frame_))))) { retain_expiry(cached->frame); return cached->value; }
+                < real(static_cast<std::int64_t>(synchronized_frame_))))) {
+            // The row serves this read until its expiry; a hidden or indefinite row serves it at every frame.
+            if (trace && visible && interval != real(-1)) trace_through(trace, real(static_cast<std::int64_t>(cached->frame)) + interval * real(setup_.logical_fps));
+            retain_expiry(cached->frame); return cached->value;
+        }
     }
-    const auto value = uncached_value(); if (!value) return {};
-    if (mode != ReadMode::ordinary) return value;
+    const auto value = uncached_value();
+    if (!value) { if (trace) trace->replayable = false; return {}; }
+    if (mode != ReadMode::ordinary) { if (trace) trace->replayable = false; return value; }
+    if (trace) {
+        // The store below makes the next read a hit only if the row's frame is nonzero and, while visible, its interval
+        // is positive (zero re-evaluates every frame) or indefinite.
+        if (synchronized_frame_ == 0 || (visible && interval == Real{})) trace->replayable = false;
+        else if (visible && interval != real(-1)) trace_through(trace, real(static_cast<std::int64_t>(synchronized_frame_)) + interval * real(setup_.logical_fps));
+    }
     retain_expiry(synchronized_frame_);
     const GalacticInternedKey retained{key.player, key.enemy, key.human, key.planet, key.token, intern_bindings(key.player, key.bindings)};
     auto* found = cached_value(retained);
@@ -450,6 +497,11 @@ std::optional<Real> GalacticWorld::read(const GalacticQueryKey& key, ReadMode mo
     ++owner.revision;
     if (!found) {
         owner.cache.push_back(cached);
+        if (!owner.index_dirty) {
+            const auto position = owner.cache.size() - 1;
+            if (galactic_force_deadline_token(compiled.tokens)) owner.force_rows.push_back(static_cast<std::uint32_t>(position));
+            if (position < owner.first_connected && galactic_connectivity_token(compiled.tokens)) owner.first_connected = position;
+        }
         if (owner.cache.size() * 2 > owner.cache_index.size()) index_cache(owner);
         else {
             auto slot = static_cast<std::size_t>(key_hash(retained)) & (owner.cache_index.size() - 1);
@@ -570,8 +622,9 @@ std::optional<Real> GalacticWorld::uncached(const GalacticQueryKey& key, ReadMod
     if (token == "TARGETPLAYERID") {
         // WGA-258: ownership visibility controls caching; the live getter reads
         // the allegiance's target player, independently of political owner.
-        if (snapshot_->observer()) for (const auto& facts : snapshot_->observer()->planets)
-            if (facts.planet == key.planet) return real(facts.target_owner);
+        // Observer planet rows are strictly ascending by planet id (validated at setup).
+        if (snapshot_->observer()) if (const auto* facts = sorted_find(snapshot_->observer()->planets, key.planet,
+            [](const auto& row) { return row.planet; })) return real(facts->target_owner);
         return {};
     }
     if (token == "TYPE.TOKEN") return row->facts.type ? std::optional{real(static_cast<std::int64_t>(row->facts.type))} : std::nullopt;
@@ -763,17 +816,29 @@ GalacticPerceptionState GalacticWorld::state() const {
     std::sort(out.hints.begin(), out.hints.end(), [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.name) < std::tie(b.player, b.planet, b.name); });
     return out;
 }
+void GalacticWorld::rebuild_row_index(Shard& owner) const {
+    if (!owner.index_dirty) return;
+    owner.force_rows.clear(); owner.first_connected = std::numeric_limits<std::size_t>::max();
+    for (std::size_t position = 0; position < owner.cache.size(); ++position) {
+        const auto& tokens = token_of(owner, owner.cache[position].key.token).tokens;
+        if (galactic_force_deadline_token(tokens)) owner.force_rows.push_back(static_cast<std::uint32_t>(position));
+        if (position < owner.first_connected && galactic_connectivity_token(tokens)) owner.first_connected = position;
+    }
+    owner.index_dirty = false;
+}
 Real GalacticWorld::force_cache_deadline(tactical::PlayerId owner, std::uint32_t logical_fps, bool fog) const {
     const auto lock = query_lock();
     auto through = Real(std::numeric_limits<std::int64_t>::max());
-    const auto& mine = shard(owner);
-    for (const auto& cached : mine.cache) {
-        const auto& tokens = token_of(mine, cached.key.token).tokens;
-        if (cached.key.player != owner || tokens.size() != 3
-            || tokens[1] != "ENEMYFORCE"
-            || (tokens[2] != "HASSPACEFORCE" && tokens[2] != "SPACETOTALUNNORMALIZED"
-                && tokens[2] != "GROUNDTOTALUNNORMALIZED")) continue;
+    auto& mine = shard(owner);
+    rebuild_row_index(mine);
+    for (const auto position : mine.force_rows) {
+        const auto& cached = mine.cache[position];
+        // Indefinite and per-frame rows never bound the deadline: test the plain interval before the token lookup.
+        if (cached.interval == Real(-1) || cached.interval == Real{}) continue;
+        // The listed rows are exactly those of the three strength tokens, so only a fogged read needs the spelling.
+        if (cached.key.player != owner) continue;
         if (fog) {
+            const auto& tokens = token_of(mine, cached.key.token).tokens;
             const auto* seen = visibility(owner, cached.key.planet, galactic_visibility_mask(tokens), false);
             if (!seen) {
                 // state() orders visibility by mask. Its first legacy fallback
@@ -850,6 +915,7 @@ core::Result<void> GalacticWorld::restore(GalacticPerceptionState state) {
         owner.memo_bindings_frame.reset();
         owner.visibility.clear(); owner.flags.clear(); owner.hints.clear(); owner.visibility_index.clear();
         owner.economy = {}; owner.records = {};
+        ++owner.visibility_stamp; owner.index_dirty = true;
     }
     for (const auto& row : state.cache) {
         auto& owner = shard(row.key.player);
@@ -904,6 +970,7 @@ void GalacticWorld::visibility_changed(tactical::PlayerId owner, galactic::Plane
     ++movement_input_revision_;
     mark_state_changed();
     auto& mine = shard(owner);
+    ++mine.visibility_stamp;
     auto* observed = visibility(owner, id, mask);
     if (visible || observed->visible) {
         mine.refreshing_visibility = true;

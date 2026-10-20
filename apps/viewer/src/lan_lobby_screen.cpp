@@ -359,6 +359,7 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
         return;
     }
     if (page_ != Page::staging) return;
+    if (match_->galactic_room()) { (void)galactic_item_selected(index, gadget); return; }
     if (!impl_->host && match_->lobby_state()) {
         const auto room = *match_->lobby_state();
         auto local = std::find_if(room.snapshot.seats.begin(), room.snapshot.seats.end(), [&](const auto& seat) { return seat.peer == match_->view().seat; });

@@ -218,6 +218,33 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
     refresh_abilities(live);
 }
 
+void BattleInput::refresh_heroes(const LiveSessionView& live) {
+    const auto& latest = live.battle_frame().latest;
+    const units::UnitTables* tables = live.tables();
+    if (heroes_snapshot_ == latest && heroes_tables_ == tables) return;
+    heroes_snapshot_ = latest;
+    if (heroes_tables_ != tables) {
+        heroes_tables_ = tables;
+        hero_types_ = {};
+        if (tables != nullptr) {
+            for (const units::UnitType& type : tables->units) {
+                if (type.named_hero || type.generic_hero || type.display_contained_hero_bars)
+                    hero_types_.add({battle::type_id(type.id), type.named_hero, type.generic_hero, type.display_contained_hero_bars});
+            }
+        }
+        hero_types_.finish();
+    }
+    hero_next_.friendly.clear();
+    hero_next_.hostile.clear();
+    if (latest && tables != nullptr) {
+        ui::collect_heroes({latest->instances(), latest->players(), live.local_player(), live.snapshot_index().visible(),
+                            &hero_types_, live.durability()}, hero_policy_, hero_next_);
+    }
+    if (hero_next_ == hero_roster_) return;
+    std::swap(hero_roster_, hero_next_);
+    ++hero_revision_;
+}
+
 void BattleInput::refresh_abilities(const LiveSessionView& live) {
     ready_abilities_.set_units(card_units_);
     ability_demo_ = live.options().ability_demo;

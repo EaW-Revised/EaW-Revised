@@ -77,18 +77,21 @@ inline constexpr float lobby_width = 1920.0F;
 inline constexpr float lobby_height = 1080.0F;
 
 // The retail game types the host options list shows, with the text keys of the name and of the
-// description (debug build, MNU-27). Only the space game is playable in this build.
+// description (debug build, MNU-27). The space game and the campaign (Galactic Conquest, GCMP-07) are playable in this build.
 struct GameTypeEntry {
     const char* name;
     const char* description;
     bool available;
 };
 inline constexpr GameTypeEntry game_types[] = {
-    {"TEXT_GAME_TYPE_CAMPAIGN", "TEXT_GAME_DESCRIPTION_CAMPAIGN", false},
+    {"TEXT_GAME_TYPE_CAMPAIGN", "TEXT_GAME_DESCRIPTION_CAMPAIGN", true},
     {"TEXT_GAME_TYPE_TEAM_LAND", "TEXT_GAME_DESCRIPTION_TEAM_LAND", false},
     {"TEXT_GAME_TYPE_TEAM_SPACE", "TEXT_GAME_DESCRIPTION_TEAM_SPACE01", true},
     {"TEXT_GAME_TYPE_CAPTURE_CONTROL_POINTS", "TEXT_GAME_DESCRIPTION_CAPTURE_CONTROL_POINTS", false},
 };
+
+// The game type that opens a Galactic Conquest room (GCMP-07); every other type is a skirmish room.
+inline constexpr const char* galactic_game_type = "TEXT_GAME_TYPE_CAMPAIGN";
 
 inline constexpr const char* lobby_dialog = "IDD_LAN_LOBBY_DIALOG";
 inline constexpr const char* host_dialog = "IDD_INTERNET_HOST_OPTIONS_DIALOG";
@@ -430,6 +433,12 @@ struct EawrLanLobby::Impl final {
     std::string room_notice;
     std::vector<std::string> online_connections;
     bool linked{}; // the transport's link to the other player is open
+    // GCMP-07 (#4363): the Galactic Conquest mode of the staging (lan_lobby_screen_galactic.cpp).
+    std::shared_ptr<GalacticLobbyBackend> galactic_backend;
+    std::optional<net::GalacticLobbyOptions> galactic_options; // the room's agreed options as last read
+    std::vector<std::string> campaign_list;                    // the host's campaign list, in row order
+    std::string galactic_campaign;
+    bool galactic_seam_noted{};
 };
 
 namespace lan_lobby_detail {
